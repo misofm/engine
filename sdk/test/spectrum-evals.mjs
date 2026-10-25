@@ -31,9 +31,9 @@ function eqParameters() {
     });
 }
 
-function spectrumDocument() {
+function spectrumDocument(frames = 4_800) {
   return sessionDocument({
-    frames: 4_800,
+    frames,
     effects: {
       preInsert: [effectEntry("eq", "miso.parametric-eq", eqParameters())],
       inserts: [],
@@ -257,6 +257,81 @@ test("candidate Wasm spectrum query captures all graph targets through explicit 
     "the captured source must produce a measurable spectrum");
   assert.notDeepEqual(results[0].first.leftDb, results[1].first.leftDb,
     "the post-input and post-matrix taps must observe the EQ in the prepared graph");
+});
+
+/**
+ * The real asset with every export access recorded while `watch.on`: what reaches the engine
+ * through the old spectrum exports, and how many control frames reach it.
+ */
+function watchedAsset(asset) {
+  const watch = { on: false, spectrumExports: new Set(), controlCommands: 0 };
+  const fake = {
+    instantiate: async () => {
+      const instance = await asset.instantiate();
+      const exports = new Proxy(instance.exports, {
+        get(target, name, receiver) {
+          if (watch.on && typeof name === "string") {
+            if (name.startsWith("miso_engine_web_v1_spectrum_")) watch.spectrumExports.add(name);
+            if (name === "miso_engine_web_v1_control_command") watch.controlCommands += 1;
+          }
+          return Reflect.get(target, name, receiver);
+        },
+      });
+      return new Proxy(instance, {
+        get(target, name, receiver) {
+          return name === "exports" ? exports : Reflect.get(target, name, receiver);
+        },
+      });
+    },
+  };
+  return { fake, watch };
+}
+
+test("candidate Wasm headless spectrum runs on the frames alone: one-shot, stream and reconfiguration (#1596 gate 3)", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const { fake, watch } = watchedAsset(await candidateAsset());
+  const output = queryFor({ kind: "output", outputId: "out" });
+  const track = queryFor({ kind: "trackPostPan", trackId: "t" });
+  const engine = await createOfflineEngine(spectrumDocument(4 * WINDOW_FRAMES), { asset: fake, spectrum: output });
+  watch.on = true;
+  let subscription;
+  try {
+    const blocksPerWindow = WINDOW_FRAMES / engine.shape().quantumFrames;
+    let block = 0;
+    const renderWindow = () => {
+      for (let index = 0; index < blocksPerWindow; index += 1) feedAndRender(engine, block++);
+    };
+
+    // A one-shot query.
+    assert.equal(engine.armSpectrum().ok, true);
+    renderWindow();
+    assertSpectrumResult(engine.readSpectrum(), output, 0);
+
+    // A stream subscription.
+    subscription = await engine.subscribeSpectrum({ ...output, smoothingMs: 0, cadenceMs: 1 });
+    renderWindow();
+    const notification = await subscription.pump();
+    assert.equal(notification?.status, "ready");
+    await subscription.close();
+    subscription = undefined;
+
+    // A reconfiguration to the track's tap: a rebuild the next render adopts.
+    const configured = await engine.configureSpectrum(track);
+    assert.equal(configured.rebuild, true);
+    assert.ok(configured.configuredEpoch > configured.adoptedEpoch);
+    feedAndRender(engine, block++);
+    assert.equal(engine.armSpectrum().ok, true);
+    const armedAt = block * engine.shape().quantumFrames;
+    renderWindow();
+    assertSpectrumResult(engine.readSpectrum(), track, armedAt);
+  } finally {
+    await subscription?.close();
+    watch.on = false;
+    engine.dispose();
+  }
+  assert.ok(watch.controlCommands > 0, "the calls went through the control entry");
+  assert.deepEqual([...watch.spectrumExports], [], "an SDK path called an old spectrum export");
 });
 
 test("candidate Wasm spectrum arm, cancel, and dispose preserve lifecycle refusals", {

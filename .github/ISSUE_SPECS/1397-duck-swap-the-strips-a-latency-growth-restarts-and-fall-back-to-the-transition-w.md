@@ -331,3 +331,94 @@ warm edit would be `LeadBound`.
   through `PlanStateInventory::across_withdrawn`, with its source rows filtered to those the
   donor carried vacant. `committed` (the running epoch's kept model with #1325 D6's duck overlay)
   and the rest of that bullet are unchanged.
+
+## Decision record (slice 1397a, attempt 1, 2026-10-25)
+
+Scope note R1-R4 apply (root accepted them). This slice is D1 (both arms), D2, D3, D5, deliverable 3 (the injected refusal) and deliverable 5.
+
+- **D1 routing.** `rebuild` plans the transition over the ordinary successor's
+  `restarted_strips()`, classifies, and for any `Warm` answer prepares the warm successor with its
+  lead and plans the transition again over the warm successor's `restarted_strips()` (removed
+  strips plus every strip the warm successor restarts, the lead's whole restarts included). The
+  preparation already restarts each of them whole and arms it (#1324a). `lead_samples > 0`: the
+  reprepare peak, `publish_primed`, then `PrimedCandidate::hold_until(S)` (new, `warm.rs`) after
+  phase 1 reads `p`, so the adoption is `Primed { not_before: S, lead_blocks }`. `lead_samples ==
+  0`: the single peak and the ordinary duck-swap publication (`NoEarlierThan(S)`), `EXACT`.
+- **Inherited overlay (#1403 NIT-1).** The warm arm now skips only an inherited overlay that ducks
+  a strip (`duck.strips().is_empty()`): a superseding growth over a W whose overlay holds only a
+  removed source no strip read is warm. A growth while a phase 1 that ducks a strip is pending
+  takes the transition (attempt 2, below).
+- **Sidechain limit (R1).** `S` counts route lines only (#1324a's `C`). A `post_fader` or
+  `post_pan` sidechain line out of a ducked strip into a carried node is not in `C` until 1397b
+  (with 1324b), so such a line that W shortens can drop its last nonzero samples at the adoption.
+  Stated in `plan_strip_transition`'s doc. Gate 2's sidechain case and gate 6 are 1397b's.
+- **Gates (R4).** Gate 1 and gate 2's first case are one control-plane test at 48 kHz on both
+  bank widths, through host-core's width seam (#1272 D2, which attaches every live lane). `D` is
+  the limiter's 486 samples, so the fire block is `ceil_q(S + 486)`. Gate 5 is an extension of
+  #1403 gate 3's supersession row (the same edit: remove track 2 and its source over a pending
+  W): `not_before = S`, the removed source fed only up to `S`, adoption at `S`, A continued with
+  track 2 live-muted for 64 blocks. Deliverable 5 rewrites #1403 gate 2's test; its old
+  assertions are deleted.
+- **Zero lead (D1's second arm).** No edit of the control-plane gates' session family (no
+  submixes) gets `Warm` with `lead_samples == 0` from `warm_lead` (probed: a carried post-fader
+  stage of the edited strip always keeps a positive lead). The gate injects that answer through a
+  `test-support` seam (`WarmLead::test_only_zero_lead`, `test_set_next_zero_lead`) and checks
+  the routing: `NoEarlierThan(S)`, no record, the whole restart in `restarted_strips()` and
+  ducked, `EXACT`. Red with the zero lead published `Primed`, and red without the transition
+  planned again over the warm successor's restarts.
+- **D2 shape.** `host_core::fall_back_to_transition(base, next, ordinary, inventory, prepare)`
+  (`warm.rs`) is step 1: `grown_strips` over the ordinary compile (before it drops and before any
+  join), then `prepare` with `SuccessorBase::forced_restart`. Steps 2-5 (donation after the
+  preparation, the refusal, the publication with `S` and `TRANSITION_FALLBACK`) are the control
+  plane's one rebuild path (R3): the submit-time arm is `WarmDecision::Unavailable` in
+  `rebuild`; the donor arm is `Rebuild::Transition`, run by `fall_back_pending_warm` (the body
+  of #1358's deadline step: withdraw, re-prepare across the donor, publish; on a refusal
+  republish the donor whole, count `transition_reprepare_refusals`, debug-assert unless
+  injected). Until #1358 calls it, it is reached through `test_fall_back_to_transition`. The
+  record of W is never dropped on a refusal: the withdrawal of the epoch it names keeps it, so
+  "set again" is that it stays. The donor arm skips the admission, as D2 says.
+- **`grown_strips` limit (R1).** Route and output-path lines and arrivals only: no sidechain
+  line and no #1324 D1 closure (1397b, after 1324b).
+- **Counter.** `transition_reprepare_refusals` is served through the existing counter ID with a
+  new `SessionControlProvider::set_transition_reprepare_refusals` (`control_provider.rs`), and
+  `grown_strips` / `fall_back_to_transition` are re-exported from `host-core/src/lib.rs`: two
+  files outside the scope note's paths, each a one-item addition.
+- **Gates 3 and 4** are control-plane unit tests at 48 kHz on this build's width. Gate 4's
+  deadline steps are two `test_fall_back_to_transition` calls; its refused edit is a
+  supersession over the effect-state cap.
+
+Paths moving rendered bits: only a session that holds a `WarmConfig` (none in production). Class A
+for every other session.
+
+## Decision record (slice 1397a, attempt 2, 2026-10-25)
+
+- **MAJOR-1.** `grown_strips` gets a host-core unit test (`transition::tests`) with a line-only
+  arm (a limiter on `c` raises `r`'s input, so `b`'s send line into `r` grows: `[b, c, r]`) and
+  an output-only arm (`b` feeds only `r`; a second limiter on `a` raises the output: every strip
+  that reaches it, `[a, b, c, r]`). Each is red with its rule removed.
+- **MAJOR-2 (root ruling).** A growth (`warm_lead` answers `Warm` or `Unavailable`) submitted
+  while a phase 1 that ducks a strip is pending takes the transition: its duck joins the overlay,
+  it is published `NoEarlierThan(S' >= S)` with no record, and it reports `TRANSITION_FALLBACK`.
+  The control-plane row compares A continued (both tracks live-muted at the two edits' blocks) up
+  to `S'` and a fresh plan of the committed session from `S'` for 64 blocks. Red on attempt 1's
+  routing (outcome `EXACT`; with that assertion removed, the output differs before `S'`).
+- **MINOR-1.** `grown_strips` reads only nodes the predecessor's graph holds and lines of edges
+  both plans hold (a route of both models with the same ends, a strip's path into the output);
+  the output rule takes only strips that reach the output in the successor. One assertion each
+  (an added send, a removed route, an added node, a routeless track).
+- **MINOR-2. #1360 and #1361 are blocked by 1397b.** They make `WarmConfig` a production value.
+  Until 1397b counts `post_fader`/`post_pan` sidechain lines in `C` and runs the sidechain closure
+  in `grown_strips`, a production warm session could drop a shortened key line's last nonzero
+  samples at an adoption, so neither may ship before 1397b.
+- **NITs.** The duplicated #1325 D7 comment is gone; the test entry's doc names the private
+  method in plain text; the injected refusal is taken from its hook when the fallback starts and
+  travels on `Rebuild::Transition`.
+
+## Merge note (slice 1397a, merge of main with #1324b, 2026-10-25)
+
+- `C` now counts `post_fader`/`post_pan` sidechain lines out of a ducked strip (#1324b D4), so the
+  warm arm's sidechain limit (attempt 1, "Sidechain limit") is gone, and `plan_strip_transition`'s
+  doc no longer states it. `grown_strips`'s limit stays: no sidechain line and no closure (1397b).
+- In the successor preparation, D2's forced restarts join the restarted set before #1324b's
+  sidechain closure, so the closure also closes over them; the transition is planned again over
+  the prepared `restarted_strips()`, so each strip the closure adds is ducked.

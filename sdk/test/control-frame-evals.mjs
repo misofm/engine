@@ -19,11 +19,23 @@ import {
   encodeControlTransaction,
 } from "../src/core/control-frame.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
+import {
+  decodeSpectrumCaptureReply,
+  decodeSpectrumConfiguredReply,
+  decodeSpectrumStreamReply,
+  encodeSpectrumCommand,
+} from "../src/core/spectrum-frame.ts";
 
 const HEADER_BYTES = 48;
 
 const FIXTURE = JSON.parse(await readFile(
   new URL("../../crates/protocol/tests/fixtures/set-control-frames.json", import.meta.url),
+  "utf8",
+));
+
+/** #1596 gate 1: the Rust codec's spectrum frames (`crates/protocol/tests/spectrum_frames.rs`). */
+const SPECTRUM_FIXTURE = JSON.parse(await readFile(
+  new URL("../../crates/protocol/tests/fixtures/spectrum-frames.json", import.meta.url),
   "utf8",
 ));
 
@@ -236,4 +248,106 @@ describe("the encoder refuses only what it cannot encode, before any byte", () =
       assert.throws(() => encodeControlTransaction(bad), MisoUsageError, name);
     }
   });
+});
+
+/** A fixture plane, `offset + step * (index % modulo)` over 1025 bins, as binary32 words. */
+function planeOf(rule) {
+  if (rule === null) return undefined;
+  return Float32Array.from({ length: 1025 }, (_, index) => rule.offset + rule.step * (index % rule.modulo));
+}
+
+function spectrumRequestOf(request) {
+  if (request.op === "configure") {
+    return {
+      ...request,
+      maximumCaptureBytes: BigInt(request.maximumCaptureBytes),
+      hopFrames: request.hopFrames ?? undefined,
+    };
+  }
+  if (request.op === "stream" && request.stream === "select") {
+    return { ...request, smoothingMs: request.smoothingMs ?? undefined };
+  }
+  return request;
+}
+
+const SPECTRUM_DECODERS = {
+  configure: decodeSpectrumConfiguredReply,
+  capture: decodeSpectrumCaptureReply,
+  stream: decodeSpectrumStreamReply,
+};
+
+/** The decoded value with its planes and bigints as the fixture's `expect` spells them. */
+function spectrumValueOf(message, value) {
+  const big = (word) => word.toString();
+  if (message === "configure") {
+    return {
+      configuredEpoch: big(value.configuredEpoch),
+      adoptedEpoch: big(value.adoptedEpoch),
+      rebuild: value.rebuild,
+      planEpoch: value.planEpoch === undefined ? null : big(value.planEpoch),
+    };
+  }
+  if (message === "capture") {
+    const window = value.window;
+    return {
+      adoptedEpoch: big(value.adoptedEpoch),
+      selectionEpoch: big(value.selectionEpoch),
+      status: value.status,
+      window: window === undefined ? null : {
+        ...window,
+        capturedSample: big(window.capturedSample),
+        endSample: big(window.endSample),
+        snapshotToken: big(window.snapshotToken),
+      },
+    };
+  }
+  return {
+    ...value,
+    target: value.target ?? null,
+    channels: value.channels ?? null,
+    bins: value.bins ?? null,
+    ...Object.fromEntries([
+      "adoptedEpoch", "selectionEpoch", "captureEpoch", "sequence", "droppedCaptures", "windows",
+      "capturedSample", "endSample", "analysisEpoch", "historyStartSample",
+    ].map((key) => [key, big(value[key])])),
+  };
+}
+
+/** The fixture's `expect` with its plane rules made words. */
+function spectrumExpectOf(message, expect) {
+  const { message: _message, requestId: _id, revision: _revision, ok: _ok, ...value } = expect;
+  const planes = (row) => ({
+    ...row,
+    frequenciesHz: planeOf(row.frequenciesHz),
+    leftDb: planeOf(row.leftDb),
+    rightDb: planeOf(row.rightDb),
+  });
+  if (message === "capture" && value.window !== null) return { ...value, window: planes(value.window) };
+  if (message === "stream" && value.bins !== null) return { ...value, bins: planes(value.bins) };
+  return value;
+}
+
+describe("the spectrum codec equals the protocol codec's frames (#1596 gate 1)", () => {
+  for (const command of SPECTRUM_FIXTURE.commands) {
+    test(`encode ${command.name}`, () => {
+      const bytes = encodeSpectrumCommand(BigInt(command.requestId), spectrumRequestOf(command.request));
+      assert.equal(hexOf(bytes), command.hex);
+    });
+  }
+
+  for (const reply of SPECTRUM_FIXTURE.replies) {
+    test(`decode ${reply.name}`, () => {
+      const { expect } = reply;
+      const decoded = SPECTRUM_DECODERS[expect.message](bytesOf(reply.hex));
+      assert.equal(decoded.requestId, BigInt(expect.requestId));
+      assert.equal(decoded.revision, BigInt(expect.revision));
+      assert.equal(decoded.ok, expect.ok);
+      if (expect.ok) {
+        assert.deepEqual(spectrumValueOf(expect.message, decoded.value), spectrumExpectOf(expect.message, expect));
+      } else {
+        assert.equal(decoded.status, expect.status);
+        assert.equal(decoded.diagnostics[0]?.code, expect.code);
+      }
+    });
+  }
 });
