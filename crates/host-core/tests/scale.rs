@@ -412,8 +412,8 @@ fn prepares_a_65_537_track_kitchen_sink_session_live_attached() {
 /// per-strip domain preflight and resource plan, where the configured builtin cap
 /// (`maximum_builtin_retained_bytes = 1`) refuses it before the builtin and graph compile. The
 /// plain entry builds no meter or control requests; the source mapping is built but consumed only
-/// after the cap. Debug x86 with CI's unified `control-provider,test-support` features: about 4.5-6.6 s
-/// (2026-10-25, load about 10-11); AArch64 estimate 9-13 s. It runs per PR.
+/// after the cap. Debug x86 with CI's unified `control-provider,test-support` features: about
+/// 4.5-6.6 s (2026-10-25, load about 10-11); AArch64 estimate 9-13 s. It runs per PR.
 #[test]
 fn prepares_65_537_tracks_until_the_configured_builtin_cap() {
     let started = Instant::now();
