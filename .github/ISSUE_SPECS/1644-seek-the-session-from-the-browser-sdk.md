@@ -271,13 +271,32 @@ Scope note `scope/1644.md` (root accepts its decisions); the Worker arm of D1/D2
   `lastSessionSeekGeneration` is an instance field (undefined = none), set on OK before the reply
   and cleared on dispose (R4). The rule runs in `applySharedSeek`, so it covers the render drain
   and the `prepare-seek` port path alike.
+- **R4 amended (root, attempt 2 review).** D2's "consume without calling the per-source export"
+  is replaced: the drain always calls `source_seek`, and consumes the epoch as applied (seen,
+  `SEEKS_APPLIED` + 1, depth 0, `REFUSED` not counted) only when the source refuses it as
+  `source.generation.stale` and the requested generation equals `lastSessionSeekGeneration`.
+  Reason: a source the session seek did not move (one a later plan adds, at generation 1) gets
+  its own ring seek at the session generation, and consuming that without the export left every
+  chunk refused as stale for good. The stale code is the `invalidArgument` refusal's core
+  diagnostic; the worklet binds a fixed `diagnosticView` over the session diagnostic staging at
+  boot and the drain compares its first bytes (no allocation). Every other refusal, including
+  another `invalidArgument`, is handled as before.
+- **Result shapes differ by host (D4).** The browser `seek` rejects a refusal with
+  `MisoEngineError` (a second unsettled seek: code `backpressure`) and a producer failure after
+  the OK with `SessionSeekProducerError { generation, producerIndex, cause }`; the headless
+  `seek` returns `{ generation, ok, result, code }`. A closed browser engine refuses with
+  `MisoUsageError`.
 - **Table.** `render-thread-exports.json` rows `session_seek` and `session_seek_at`, `wrapped:
   false`, single-mode control work in `receiveSessionSeek`.
 - **Gate 4's home.** The pump case is in `sdk/test/browser-pcm-evals.mjs` (the scope note's
   authorized file), importing `hosts/host-web/web/stem-store/pcm-pump.js`.
 
-Evidence: every new case red on a mutant (14 mutants: drain seeks the applied epoch, drain
-swallows every epoch, anchored message calls the plain export, no export call, declaration first,
+Evidence (attempt 2): gate 1 runs on the real module (moved source, fresh source, another
+refusal at the session generation); 23 mutants red, among them the attempt-1 rule (consume
+without the export), no rule, any `invalidArgument` consumed, the consumed refusal counted as
+`REFUSED`, a wrong reply generation accepted, no diagnostic view bound, a bare producer error, a
+raw host refusal record and no closed guard. Attempt 1's 14 mutants, kept: drain seeks the
+applied epoch, drain swallows every epoch, anchored message calls the plain export, no export call, declaration first,
 two unsettled, malformed reaches the export, refusal records the generation, producers before the
 reply, producers on a refusal, stale default generation, unsafe frame posted, bigint frame to a
 producer, pump ignores the generation). No rendered bit moves: `process()` is untouched.
