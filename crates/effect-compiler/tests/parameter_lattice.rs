@@ -7,7 +7,7 @@
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     LatticePoint, ParameterDescriptor, ParameterDomain, ParameterMapping, StepSize, StepUnit,
-    decimal_to_f32, lattice_index_for_decimal, parameter_lattice_points, resolve_parameter_step,
+    decimal_to_f32, parameter_lattice_points, resolve_parameter_step,
 };
 
 fn rows() -> Vec<(&'static str, &'static ParameterDescriptor)> {
@@ -23,9 +23,11 @@ fn rows() -> Vec<(&'static str, &'static ParameterDescriptor)> {
         .collect()
 }
 
+/// Membership through the product path: a point's canonical rendering converts to exactly `value`.
 fn member(points: &[LatticePoint], value: f32) -> bool {
-    let text = format!("{value}");
-    lattice_index_for_decimal(points, &text).is_ok()
+    points
+        .iter()
+        .any(|point| decimal_to_f32(&point.canonical).map(f32::to_bits) == Some(value.to_bits()))
 }
 
 #[test]
@@ -102,54 +104,6 @@ fn every_declared_bound_and_default_is_a_lattice_member() {
             "{where_}: default {} is illegal",
             parameter.default_value
         );
-    }
-}
-
-#[test]
-fn the_prepared_word_of_a_default_is_bit_identical_to_the_descriptor() {
-    // Single-conversion authority: a document that spells the default reaches exactly the `f32`
-    // the descriptor declares, so admitting the lattice moves no prepared word.
-    for (effect, parameter) in rows() {
-        let where_ = format!("{effect}#{}", parameter.id.0);
-        let points = parameter_lattice_points(parameter).expect("lattice");
-        let text = format!("{}", parameter.default_value);
-        let index = lattice_index_for_decimal(&points, &text)
-            .unwrap_or_else(|_| panic!("{where_}: default {text} is off-lattice"));
-        let prepared = decimal_to_f32(&points[index as usize].canonical).expect("conversion");
-        assert_eq!(
-            prepared.to_bits(),
-            parameter.default_value.to_bits(),
-            "{where_}: default converts to a different word"
-        );
-    }
-}
-
-#[test]
-fn catalog_endpoints_and_an_interior_point_round_trip_to_their_indices() {
-    // #242 eval 2. Both endpoints and an interior point must match their own index, even with
-    // trailing zeros: a different spelling must not select a different prepared value.
-    for (effect, parameter) in rows() {
-        let where_ = format!("{effect}#{}", parameter.id.0);
-        let points = parameter_lattice_points(parameter).expect("lattice");
-        let interior = points.len() / 2;
-        for position in [0, interior, points.len() - 1] {
-            let point = &points[position];
-            let index = lattice_index_for_decimal(&points, &point.canonical)
-                .unwrap_or_else(|_| panic!("{where_}: {} is not its own point", point.canonical));
-            assert_eq!(
-                index as usize, position,
-                "{where_}: matched a different point"
-            );
-            // Trailing zeros are a different spelling of the same value and must not move it.
-            let padded = if point.canonical.contains('.') {
-                format!("{}0", point.canonical)
-            } else {
-                format!("{}.0", point.canonical)
-            };
-            let padded_index = lattice_index_for_decimal(&points, &padded)
-                .unwrap_or_else(|_| panic!("{where_}: {padded} is the same value"));
-            assert_eq!(padded_index, index, "{where_}: spelling changed the point");
-        }
     }
 }
 
@@ -247,8 +201,9 @@ fn every_builtin_row_declares_a_lawful_lattice_at_every_launch_rate() {
             // A declared disabled sentinel is an admitted extra value outside the ordered set,
             // never a point that stepping can wander onto.
             if let Some(disabled) = &lattice.disabled {
+                let disabled = decimal_to_f32(disabled).expect("the sentinel converts");
                 assert!(
-                    lattice_index_for_decimal(&lattice.points, disabled).is_err(),
+                    !member(&lattice.points, disabled),
                     "{where_}: the disabled sentinel must sit outside the ordered lattice"
                 );
             }
@@ -269,15 +224,12 @@ fn the_appended_pan_row_is_the_persisted_pan_authority() {
     assert_eq!(lattice.disabled, None);
     assert_eq!(lattice.points.first().expect("min").canonical, "-1.00");
     assert_eq!(lattice.points.last().expect("max").canonical, "1.00");
-    for exact in ["-1.0", "0.0", "1.0", "-0.5", "0.25"] {
+    for exact in [-1.0, 0.0, 1.0, -0.5, 0.25] {
         assert!(
-            lattice_index_for_decimal(&lattice.points, exact).is_ok(),
+            member(&lattice.points, exact),
             "{exact} is a legal pan position"
         );
     }
-    let refusal = lattice_index_for_decimal(&lattice.points, "0.005").expect_err("off-lattice");
-    assert_eq!(refusal.lower.as_deref(), Some("0.00"));
-    assert_eq!(refusal.upper.as_deref(), Some("0.01"));
 }
 
 #[test]
@@ -317,12 +269,11 @@ fn a_rate_keyed_cutoff_ceiling_is_a_clamp_and_never_a_lattice_member() {
         assert_eq!(bottom.canonical, "10.000");
         assert!(bottom.intrinsic, "{where_}: the minimum IS declared");
 
-        // The clamp is refused, and the refusal brackets it with the top point below and nothing
-        // above -- the out-of-domain diagnosis, not the off-lattice one.
-        let refusal = lattice_index_for_decimal(&lattice.points, "23999.434")
-            .expect_err("{where_}: the rate ceiling is not a legal value");
-        assert_eq!(refusal.lower.as_deref(), Some("23798.694"));
-        assert_eq!(refusal.upper, None);
+        // The clamp itself is not a legal value.
+        assert!(
+            !member(&lattice.points, 23_999.434),
+            "{where_}: the rate ceiling is not a legal value"
+        );
 
         // The same holds at every other launch rate; 44.1 kHz is the tightest ceiling.
         let at_44_1 =
@@ -332,10 +283,10 @@ fn a_rate_keyed_cutoff_ceiling_is_a_clamp_and_never_a_lattice_member() {
             !top_44_1.intrinsic,
             "{where_}: the 44.1 kHz top point is generated too"
         );
-        let refusal = lattice_index_for_decimal(&at_44_1.points, "22049.482")
-            .expect_err("{where_}: the 44.1 kHz ceiling is not a legal value");
-        assert_eq!(refusal.lower.as_deref(), Some(top_44_1.canonical.as_str()));
-        assert_eq!(refusal.upper, None);
+        assert!(
+            !member(&at_44_1.points, 22_049.482),
+            "{where_}: the 44.1 kHz ceiling is not a legal value"
+        );
         assert!(
             top_44_1.canonical.parse::<f64>().expect("decimal") < 22_049.482,
             "{where_}: the top point sits below the ceiling"

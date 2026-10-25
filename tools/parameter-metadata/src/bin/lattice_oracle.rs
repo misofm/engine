@@ -29,10 +29,7 @@
 //! Output is one tab-separated row per parameter, sorted by `(effect_id, parameter_id)`.
 
 use effect_compiler::launch_native_effect_registry;
-use effect_contract::{
-    LatticePoint, StepSize, lattice_index_for_decimal, parameter_lattice_points,
-    resolve_parameter_step,
-};
+use effect_contract::{LatticePoint, StepSize, parameter_lattice_points, resolve_parameter_step};
 use sha2::{Digest, Sha256};
 
 /// The digest the SDK reproduces: SHA-256 over `index\tcanonical\tintrinsic\n` per point.
@@ -123,14 +120,17 @@ fn main() {
                     .map_or_else(|| "none".to_owned(), |index| index.to_string())
             });
 
-            // A round trip through the decimal lookup, at both endpoints and the middle: the rank
-            // a canonical rendering maps back to must be the rank it came from.
+            // A round trip through an exact canonical match, at both endpoints and the middle: the
+            // rank a canonical rendering maps back to must be the rank it came from, which holds
+            // only while renderings are unique and each index is its rank.
             let lookups = [0, middle, last_index].map(|index| {
                 points.get(index as usize).map_or_else(
                     || "none".to_owned(),
                     |point| {
-                        lattice_index_for_decimal(&points, &point.canonical)
-                            .map_or_else(|_| "miss".to_owned(), |found| found.to_string())
+                        points
+                            .iter()
+                            .position(|candidate| candidate.canonical == point.canonical)
+                            .map_or_else(|| "miss".to_owned(), |at| points[at].index.to_string())
                     },
                 )
             });
