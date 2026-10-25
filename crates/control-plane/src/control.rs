@@ -2815,9 +2815,14 @@ where
                         retired: retired_providers,
                         pending: pending_providers,
                     };
-                    meters
-                        .batches
-                        .stage(frame, frame.plan_epoch, &epochs, master, controller, revision);
+                    meters.batches.stage(
+                        frame,
+                        frame.plan_epoch,
+                        &epochs,
+                        master,
+                        controller,
+                        revision,
+                    );
                 }
             }
             MeterSource::Rendered { .. } => {
@@ -6544,7 +6549,11 @@ where
         );
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
-        master_moved(&mut self.meters, previous_monitor.master(), self.monitor.master());
+        master_moved(
+            &mut self.meters,
+            previous_monitor.master(),
+            self.monitor.master(),
+        );
         fold_send_move(&mut self.send_moves, revision, send_ramp);
         for index in published {
             owners.effects[index]
