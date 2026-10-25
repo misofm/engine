@@ -56,3 +56,42 @@ Root accepted the scope note's R1-R6 (`scratchpad/opt/scope/1981.md`); where it 
 - Gate 3, native (`artifacts/steps/b14-1981/`, 78 records, validator PASS, Simd8, candidate `4637ba810`; main twin built at the base `889da4db1` in `artifacts/steps/b14-1981/main/`), one invocation each under the exclusive lock, one warmup and two rounds, uncontrolled (loadavg 4.5/3.8 at the starts), p50 us/block, rounds 1/2, candidate against twin: all-active 99.71/99.26 against 98.43/98.49 (+1.3 %/+0.8 %, inside 2 %); sparse 62.16/61.47 against 99.91/100.35; one-per-bank 28.41/28.50 against 99.11/99.39; toggle 100.71/100.54 against 98.69/98.49 (+2.1 %: its lanes never rest, so this is the facts' and the scan's cost alone). The other console rows read +0.7 % to +3.1 % (legacy 61.22/60.80 against 59.57/59.68, mono 62.46/61.66 against 60.61/60.59, mono_dual +2.4 %/+1.5 %, metered +2.1 %/+1.6 %); no gate holds them, recorded. Every one of the 78 output digests equals the twin's.
 - Gate 3, V8 (`web-mixing-automation.jsonl`, validator PASS, twin under `main/`), p50 us/block, rounds 1/2, candidate against twin: console 241.7/238.7 against 254.8/238.6; sparse 149.0/158.1 against 258.9/244.2; one-per-bank 97.5/107.4 against 257.9/243.8; toggle 244.5/243.5 against 257.4/240.9; every document digest and the quiet/automated digests equal.
 - The carry from a displaced predecessor (verifier ask; a one-off release measurement on gate 2's carried pair, not committed, cpu 31, one warmup and two rounds): `adopt_predecessor_plan` 405/411 us with two strips displaced against 369/368 us from the identity, adopt plus the successor's first block 470/476 us against 442/433 us (the walk home is the difference).
+- Correction (attempt 2): attempt 1's records moved to `artifacts/steps/b14-1981/attempt1/`. Its line above on "the other console rows" was wrong: it read only the 64-track console family. The verifier found idle +61.5 %, dispatch_only +18.8 %, gain_pan_live +15 %, gain_pan_ring +13 %, nine_track_baseline +6.5 % and builtins_only +6.4 % in the same records. Verdict: FAIL (cost and record).
+
+## Decision record (attempt 2, 2026-10-25)
+
+- Merged `origin/main` at `d47d78c88` (#1371's per-lane link cell); gates 1 and 3 re-run on the merged tree, green.
+- **Facts after the run (verifier MAJOR 1).** The fact is read after `chain.run`. If the chain skipped (its `silent_skips` rose), every populated lane is quiet with no scan. That is exact: a skip proved every active input `+0.0` and every lane at rest. Otherwise one `lanes_at_rest` query, and the head test only on the lanes at rest.
+- **No retry of a stable refusal (verifier MAJOR 2).** `PackGroup::dirty` is set when an idle count crosses `PACK_IDLE_BLOCKS` either way, by every move (`LaneMap::record_swap`), at bind, and when a step spends its whole budget; `pack_lanes` enters `pack_group` only while it is set. New test `a_refused_pack_is_not_retried`: the mono bank runs with packable lanes, `ch17` runs in the padded bank, no ride; 7 attempts by block 60 and none after, no move. Red on the mutant that ignores the bit (1288 attempts). Test value: red when the packer retries a refused move every block although nothing it decides on changed.
+- **Packing gate.** It now seeks: the render clock jumps 10 blocks at block 545, with strips displaced (asserted). It gives `ch09` and `ch17` a `maximum` compressor link (#1369); both are among the moved strips (checked once with a print, not committed). Bits equal, 38 moves, 474 skips against 335, displaced 0 at the end.
+- **Unverified:** a bound meter on a packed strip. This level binds observers (every strip's post-matrix words, compared), not meter streams.
+- The test value reads "a pack that skips no more than the unpacked twin" in place of "packs a lane not at rest", and gate_one's doc says the Processed twin packs too. Re-run red: the rest-ignoring mutant (skips 335 against 335).
+
+## Evidence (attempt 2): gate 3 FAILS
+
+- **Native.** Candidate `2cf72c64f`; twin of main at the merge base `d47d78c88`; records moved to `artifacts/steps/b14-1981/attempt2/` in attempt 3. One invocation each under one exclusive lock, one warmup and two rounds, uncontrolled (loadavg 6.8 and 6.7 at the starts). Validator PASS on both; every one of the 78 output digests equal.
+- **Native rows above +2 %**, p50 change, rounds 1/2:
+  - **all-active +3.1 %/+6.2 % (gate fails)**
+  - dispatch_only +21.0/+19.7
+  - nine, ten and thirteen-track ragged strips +16.8/+17.4, +14.9/+16.4, +14.7/+16.2
+  - gain_pan_live +15.2/+13.2, gain_pan_ring +15.1/+13.5
+  - idle +11.6/+2.1, nine_track_baseline +6.3/+5.4
+  - eq_comp_simd1 +5.0/+4.8, eq_only +5.3/+3.6, legacy +4.5/+4.5, mono +4.6/+3.4, compressor_only +3.6/+4.3, app_shape +3.6/+4.0
+  - toggle +3.1/+3.8, one_twenty_eight_track_stretch +2.8/+3.7, half_mono +2.5/+3.1, mono_dual +3.0/+3.1, metered +2.8/+3.0
+  - builtins_only +3.4/+1.9, sends +1.6/+2.3
+  - sixteen_track_strip -16.4/+3.2 (the twin's round 1 is an outlier)
+- **Native wins:** sparse -38.3/-38.3, one_per_bank -73.3/-74.5.
+- **Noise:** every plan with a pack group runs the facts, so no row is unaffected. The twin against itself: its two rounds agree within about 1 % on every row except sixteen_track_strip.
+- **V8.** Candidate `0d37b7471`, twin at `d47d78c88`; loadavg 4.7. Every document digest and the quiet/automated digests equal.
+- **V8 change**, p50, rounds 1/2:
+  - console +14.7/+3.3 (236.7/238.0 to 271.4/245.8 us)
+  - app_shape +18.8/+3.7, toggle +11.7/+3.6, sends +6.3/+0.5
+  - the quiet, restated and automated arms +3.2 to +4.1 in both rounds
+  - sparse -34/-39, one-per-bank -58/-62
+  - The candidate's round 1 is noisy (console p95 289 against 243 us); round 2 shows about +3.5 % on every running row.
+- **Diagnosis** (untimed against the record, not committed; one launch per variant of the bench binary on cpus 30-31 under the exclusive lock), p50 us for main / candidate / candidate with no facts block / and also no `pack_lanes`:
+  - dispatch_only 8.84 / 11.14 / 9.00 / 9.21
+  - nine_track_ragged_strip 24.80 / 28.95 / 24.80 / 24.68
+  - gain_pan_ring 9.06 / 11.03 / 8.76 / 8.83
+  - console 97.98 / 102.50 / 98.76 / 98.66
+- **Reading:** the regression is the per-block fact on a running grouped unit (the rest query over every slot plus the head tests through `gather_planes`, a few hundred ns per unit). The packer itself costs nothing measurable.
