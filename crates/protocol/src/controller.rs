@@ -1401,6 +1401,9 @@ struct StructuralCommandPlan {
     event_sequence: u64,
     required_events: usize,
     applied_operations: u32,
+    /// The reply's fields, with the edit path the host has not chosen yet ([`EditPath::ModelOnly`])
+    /// and the arm tags measured at preparation (#1585 D5).
+    applied: TransactionApplied,
     response_measure: crate::btlv::MessageMeasure,
 }
 
@@ -1435,6 +1438,9 @@ pub struct PreparedStructuralCommand {
     event_reservations: Option<crate::ReliableEventReservations>,
     event_sequence: u64,
     applied_operations: u32,
+    /// The reply's fields as prepared (#1585 D5): the commit sets the edit path, and the arm tags
+    /// fixed the frame's length.
+    applied: TransactionApplied,
     /// The one `OBSERVATION_ENDED` event this commit emits after its `SESSION_COMMITTED`, carrying
     /// every ended key, with its sequence (#1584 D6a fold). `None` unless the host attached keys.
     observation_ended: Option<ObservationEnded>,
@@ -2436,13 +2442,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: applied_payload(
-                plan.message_id,
-                TransactionApplied {
-                    applied_operations: plan.applied_operations,
-                    edit_path: EditPath::ModelOnly,
-                },
-            ),
+            payload: applied_payload(plan.message_id, plan.applied),
         };
         // The frame staging holds exactly the measured response: the final frame (the same fields
         // with the edit path the host reports) has the same length, so nothing larger is staged.
@@ -2476,6 +2476,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         if written != frame_len {
             return Err(CommandFrameProcessError::Internal);
         }
+        let applied = applied_of(response_frame.payload);
         let response = ControllerResponse::from_complete_frame(
             header.request_id,
             StatusCode::Ok,
@@ -2517,6 +2518,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             event_reservations: Some(event_reservations),
             event_sequence: plan.event_sequence,
             applied_operations: plan.applied_operations,
+            applied,
             observation_ended: None,
             ended_reservations: None,
             armed: true,
@@ -2590,10 +2592,10 @@ impl<P: ControlProvider> ProtocolController<P> {
                     Ok(DocumentDiff::Unchanged) => {
                         return Ok(StructuralCommandDisposition::Immediate {
                             replay_plan,
-                            outcome: self.ok(Body::TransactionApplied(TransactionApplied {
-                                applied_operations: 0,
-                                edit_path: EditPath::Unchanged,
-                            })),
+                            outcome: self.ok(Body::TransactionApplied(TransactionApplied::new(
+                                0,
+                                EditPath::Unchanged,
+                            ))),
                         });
                     }
                     Err(refusal) => {
@@ -2680,7 +2682,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 observe,
             ),
         };
-        let prospective_session = match prepared_transaction {
+        let mut prospective_session = match prepared_transaction {
             Ok(value) => value,
             Err(error) => {
                 return Ok(StructuralCommandDisposition::Immediate {
@@ -2689,17 +2691,19 @@ impl<P: ControlProvider> ProtocolController<P> {
                 });
             }
         };
+        // #1585 D5: the reply's arm tags are fixed here, before the frame is measured, so the
+        // host's room check covers them.
+        let removed_arm_tags = removed_arm_tags(&prospective_session, observe.bindings);
+        let applied = TransactionApplied {
+            observe_arm_tags: prospective_session.take_observe_arm_tags(),
+            removed_arm_tags,
+            ..TransactionApplied::new(applied_operations, EditPath::ModelOnly)
+        };
         let revision = prospective_session.revision();
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: applied_payload(
-                header.message_id,
-                TransactionApplied {
-                    applied_operations,
-                    edit_path: EditPath::ModelOnly,
-                },
-            ),
+            payload: applied_payload(header.message_id, applied),
         };
         let response_measure = match self.codec.measure_success_response_frame(&response_frame) {
             Ok(measure) => measure,
@@ -2736,6 +2740,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 event_sequence,
                 required_events,
                 applied_operations,
+                applied: applied_of(response_frame.payload),
                 response_measure,
             },
         ))
@@ -2752,13 +2757,7 @@ impl<P: ControlProvider> ProtocolController<P> {
         let response_frame = TypedSuccessResponseFrame {
             request_id: header.request_id,
             revision,
-            payload: applied_payload(
-                plan.message_id,
-                TransactionApplied {
-                    applied_operations: plan.applied_operations,
-                    edit_path: EditPath::ModelOnly,
-                },
-            ),
+            payload: applied_payload(plan.message_id, plan.applied),
         };
         let written = self
             .codec
@@ -3039,8 +3038,11 @@ impl<P: ControlProvider> ProtocolController<P> {
             payload: applied_payload(
                 prepared.message_id,
                 TransactionApplied {
-                    applied_operations: prepared.applied_operations,
                     edit_path: path,
+                    ..core::mem::replace(
+                        &mut prepared.applied,
+                        TransactionApplied::new(0, EditPath::ModelOnly),
+                    )
                 },
             ),
         };
@@ -3997,10 +3999,10 @@ impl<P: ControlProvider> ProtocolController<P> {
                         self.next_reliable_event_sequence = event_sequence.saturating_add(1);
                         self.ok_at_revision(
                             commit.revision,
-                            Body::TransactionApplied(TransactionApplied {
+                            Body::TransactionApplied(TransactionApplied::new(
                                 applied_operations,
-                                edit_path: EditPath::ModelOnly,
-                            }),
+                                EditPath::ModelOnly,
+                            )),
                         )
                     }
                     Err(error) => {
@@ -4668,6 +4670,7 @@ fn status_for_transaction(error: &SessionStoreError) -> StatusCode {
         }
         SessionStoreError::RevisionConflict { .. } => StatusCode::RevisionConflict,
         SessionStoreError::RevisionExhausted => StatusCode::RevisionExhausted,
+        SessionStoreError::ArmTagsExhausted => StatusCode::Internal,
         SessionStoreError::Edit { .. } | SessionStoreError::Validation { .. } => {
             StatusCode::ValidationFailed
         }
@@ -4724,7 +4727,8 @@ fn transaction_error_diagnostics(error: &SessionStoreError) -> Vec<Diagnostic> {
         SessionStoreError::ExactRevisionRequired
         | SessionStoreError::EmptyTransaction
         | SessionStoreError::RevisionConflict { .. }
-        | SessionStoreError::RevisionExhausted => Vec::new(),
+        | SessionStoreError::RevisionExhausted
+        | SessionStoreError::ArmTagsExhausted => Vec::new(),
     }
 }
 
@@ -4739,6 +4743,42 @@ fn applied_payload(
     } else {
         SuccessResponsePayload::SessionTransactionApplied(value)
     }
+}
+
+/// The transaction fields of a payload [`applied_payload`] built, handed back after the frame was
+/// measured or encoded.
+fn applied_of(payload: SuccessResponsePayload<'_>) -> TransactionApplied {
+    match payload {
+        SuccessResponsePayload::SessionTransactionApplied(value)
+        | SuccessResponsePayload::SessionReplaced(value) => value,
+        _ => unreachable!("`applied_payload` builds a transaction reply"),
+    }
+}
+
+/// The reply's `removed_arm_tags` (#1585 D5): the tags of the bindings a commit of `prepared`
+/// ends, in key order. The table is the one the transaction's `Observe` edits leave, or the host's
+/// own (`committed`), and a binding ends when the prospective model no longer has its target:
+/// the very rule the host's commit applies (`controls::ObservationBindings::after`). A
+/// transaction prepared in place, or of monitor writes only, keeps every effect, so it ends none.
+fn removed_arm_tags(
+    prepared: &crate::PreparedSessionTransaction,
+    committed: &controls::ObservationBindings,
+) -> Vec<u64> {
+    let Some(compiled) = prepared.compiled().filter(|_| !prepared.is_monitor_only()) else {
+        return Vec::new();
+    };
+    let next = compiled.normalized_model();
+    prepared
+        .observe_bindings()
+        .unwrap_or(committed)
+        .bindings()
+        .iter()
+        .filter(|binding| !controls::ObservationBindings::has_target(next, &binding.key))
+        .map(|binding| binding.arm_tag)
+        // A binding the transaction created on a target it also removes never had a published
+        // record (tag `0`): nothing ends for render.
+        .filter(|tag| *tag != 0)
+        .collect()
 }
 
 /// A session diagnostic on the wire; `operation_index` is `None` for a replace document's own

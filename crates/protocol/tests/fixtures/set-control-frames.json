@@ -150,17 +150,22 @@
     {
       "name": "applied_live",
       "hex": "4d49534f43544c00010000003000020003000000200000000100000000000000050000000000000002000000000000000100030104000000030000000000000002000101010000000100000000000000",
-      "expect": { "requestId": "1", "status": "ok", "revision": "5", "appliedOperations": 3, "editPath": "live", "editPathCode": 1, "diagnostics": [], "omittedDiagnostics": 0, "backpressure": false }
+      "expect": { "requestId": "1", "status": "ok", "revision": "5", "appliedOperations": 3, "editPath": "live", "editPathCode": 1, "observeArmTags": [], "removedArmTags": [], "diagnostics": [], "omittedDiagnostics": 0, "backpressure": false }
     },
     {
       "name": "applied_model_only",
       "hex": "4d49534f43544c00010000003000020003000000200000000200000000000000060000000000000002000000000000000100030104000000010000000000000002000101010000000200000000000000",
-      "expect": { "requestId": "2", "status": "ok", "revision": "6", "appliedOperations": 1, "editPath": "model_only", "editPathCode": 2, "diagnostics": [], "omittedDiagnostics": 0, "backpressure": false }
+      "expect": { "requestId": "2", "status": "ok", "revision": "6", "appliedOperations": 1, "editPath": "model_only", "editPathCode": 2, "observeArmTags": [], "removedArmTags": [], "diagnostics": [], "omittedDiagnostics": 0, "backpressure": false }
     },
     {
       "name": "applied_rebuild",
       "hex": "4d49534f43544c000100000030000200030000002000000003000000000000000100000000010000020000000000000001000301040000000c0000000000000002000101010000000300000000000000",
-      "expect": { "requestId": "3", "status": "ok", "revision": "1099511627777", "appliedOperations": 12, "editPath": "rebuild", "editPathCode": 3, "diagnostics": [], "omittedDiagnostics": 0, "backpressure": false }
+      "expect": { "requestId": "3", "status": "ok", "revision": "1099511627777", "appliedOperations": 12, "editPath": "rebuild", "editPathCode": 3, "observeArmTags": [], "removedArmTags": [], "diagnostics": [], "omittedDiagnostics": 0, "backpressure": false }
+    },
+    {
+      "name": "applied_with_arm_tags",
+      "hex": "4d49534f43544c0001000000300002000300000050000000080000000000000007000000000000000400000000000000010003010400000004000000000000000200010101000000030000000000000003000e001800000001000000000000000100000000000000010000000000200004000e00080000000500000000000000",
+      "expect": { "requestId": "8", "status": "ok", "revision": "7", "appliedOperations": 4, "editPath": "rebuild", "editPathCode": 3, "observeArmTags": ["1", "1", "9007199254740993"], "removedArmTags": ["5"], "diagnostics": [], "omittedDiagnostics": 0, "backpressure": false }
     },
     {
       "name": "control_domain",
