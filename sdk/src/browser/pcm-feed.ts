@@ -399,6 +399,11 @@ function yieldRunwayTurn(signal: AbortSignal | undefined): Promise<void> {
 export function attachEngineFeed<Context extends FeedContext>(options: FeedOptions<Context>): EngineFeed {
   if (!Number.isSafeInteger(options.quantumFrames) || options.quantumFrames <= 0) throw new MisoUsageError("quantumFrames must be a positive integer");
   const capacity = options.capacityChunks ?? 64;
+  const ids = new Set<string>();
+  for (const source of options.sources) {
+    if (ids.has(source.sourceId)) throw new MisoUsageError(`feed source IDs must be unique: ${source.sourceId}`);
+    ids.add(source.sourceId);
+  }
   const starts = options.sources.map((source) => source.start);
   if (starts.some((start) => start !== undefined && (typeof start?.frameAt !== "function" || typeof start.prime !== "function"))) {
     throw new MisoUsageError("a feed source start needs frameAt and prime functions");
@@ -507,7 +512,11 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       if (unstarted.length === 0) return;
       starting ??= (async () => {
         try {
-          for (const entry of unstarted) await startSource(link!.host, link!.reserveSeekGeneration, entry);
+          for (const entry of unstarted) {
+            // A source detached while an earlier start was in flight is not started.
+            if (live.get(entry.source.sourceId)?.ring !== entry.ring) continue;
+            await startSource(link!.host, link!.reserveSeekGeneration, entry);
+          }
           unstarted = [];
         } catch (error) {
           close();

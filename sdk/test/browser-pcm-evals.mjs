@@ -411,8 +411,8 @@ test("actual Wasm control-port preparation releases full stale SAB before exact 
   sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
   const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
   const attach = new (registrations.get("miso-sab-feed-attach"))();
-  const port = { onmessage: null, postMessage(data) { queueMicrotask(() => attach.port.onmessage({ data })); } };
-  attach.port.postMessage = (data) => queueMicrotask(() => port.onmessage?.({ data }));
+  const port = { onmessage: null, postMessage(data) { const cloned = structuredClone(data); queueMicrotask(() => attach.port.onmessage({ data: cloned })); } };
+  attach.port.postMessage = (data) => { const cloned = structuredClone(data); queueMicrotask(() => port.onmessage?.({ data: cloned })); };
   const suspended = { ...context, state: "suspended" };
   const feed = attachEngineFeed({ context: suspended, sources: [{ sourceId: "s", channels: 2 }], quantumFrames: 128, createNode: () => ({ port, disconnect() {} }) });
   try {
@@ -798,29 +798,51 @@ test("the prelude over the real engine worklet class: one miso.seek-at.v1, and t
 test("detachSource withdraws one ring: the drain never reads it after it resolves, and the others keep draining", async () => {
   // #1297b gate 4 (the feed half; the engine's timing is browser-evals'). Red if detachSource
   // resolves before the worklet withdrew the ring, names the ring by an identity a cloned message
-  // loses (the worklet then withdraws nothing and still confirms), withdraws another node's or
-  // every ring, or leaves the ring's writer engaged.
+  // loses (the worklet then withdraws nothing and still confirms), compacts the attach list (a
+  // later index then names another ring, or none), lets a withdrawn slot reach prepare-seek,
+  // withdraws another node's or every ring, or leaves the ring's writer engaged.
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
   const run = anchoredPrelude(source);
-  const feed = attachEngineFeed({ context, sources: [{ sourceId: "kept", channels: 1 }, { sourceId: "gone", channels: 1 }], quantumFrames: 4, capacityChunks: 4, createNode: () => run.node });
-  const [kept, gone] = feed.rings.map((ring) => new Msb1RingWriter(ring));
+  const suspended = { ...context, state: "suspended" };
+  const feed = attachEngineFeed({ context: suspended, sources: ["first", "middle", "last"].map((sourceId) => ({ sourceId, channels: 1 })), quantumFrames: 4, capacityChunks: 4, createNode: () => run.node });
+  const writers = feed.rings.map((ring) => new Msb1RingWriter(ring));
   const write = (writer, frame) => { writer.reserve(4); writer.commit({ generation: 1n, startFrame: frame, frames: 4, endOfRegion: false }); };
-  for (const writer of [kept, gone]) writer.engage(1n);
+  for (const writer of writers) writer.engage(1n);
   await feed.ready();
-  const [keptRing, goneRing] = feed.rings;
-  await feed.detachSource("gone");
-  assert.deepEqual(feed.rings, [keptRing]);
-  assert.equal(controls(goneRing)[MSB1_CONTROL.WRITER_STATE], 0, "released after the confirmation");
-  write(kept, 0n); write(gone, 0n);
+  const [firstRing, middleRing, lastRing] = feed.rings;
+  await feed.detachSource("first");
+  await feed.detachSource("last");
+  assert.deepEqual(feed.rings, [middleRing]);
+  assert.deepEqual([firstRing, lastRing].map((ring) => controls(ring)[MSB1_CONTROL.WRITER_STATE]), [0, 0], "released after the confirmation");
+  for (const writer of writers) write(writer, 0n);
   run.process();
-  assert.deepEqual(run.submissions.map(({ id }) => id), ["kept"]);
-  assert.equal(controls(goneRing)[MSB1_CONTROL.READ_INDEX], 0, "the withdrawn ring is never read");
-  await assert.rejects(feed.detachSource("gone"), /no source gone/);
+  assert.deepEqual(run.submissions.map(({ id }) => id), ["middle"]);
+  assert.deepEqual([firstRing, lastRing].map((ring) => controls(ring)[MSB1_CONTROL.READ_INDEX]), [0, 0], "the withdrawn rings are never read");
+  // The withdrawn slots stay out of a later prepare-seek over the remaining ring.
+  writers[1].seek(2n, 0n);
+  await feed.prepareSeek();
+  assert.deepEqual(run.seeks, [[2n, 0n]]);
+  await assert.rejects(feed.detachSource("last"), /no source last/);
   // A worklet that withdrew nothing says so; the SDK rejects and closes rather than leak the ring.
   const unconfirmed = { port: { onmessage: null, postMessage: (data) => { if (data.op === "detach-source") unconfirmed.port.onmessage?.({ data: { op: "source-detached", requestId: data.requestId, detached: false } }); } }, disconnect() {} };
   const refused = attachEngineFeed({ context, sources: [{ sourceId: "lost", channels: 1 }], quantumFrames: 4, createNode: () => unconfirmed });
   await assert.rejects(refused.detachSource("lost"), (error) => error instanceof PcmFeedError && error.operation === "detachRefused");
   assert.equal(refused.state, "closed");
+  // A source detached while ready() is starting an earlier one is never started.
+  const asked = [];
+  const linkedHost = { status: async () => ({ result: 0, nextAbsoluteSample: 0n }), seekSourceAt: async (request) => { asked.push(request.sourceId); return { result: 0 }; } };
+  linkFeedEngine(linkedHost, () => 2n);
+  const starting = attachEngineFeed({
+    context, quantumFrames: 4, createNode: () => anchoredPrelude(source).node, engine: { host: linkedHost },
+    sources: [
+      { sourceId: "one", channels: 1, start: { frameAt: () => 0n, prime: () => starting.detachSource("two") } },
+      { sourceId: "two", channels: 1, start: { frameAt: () => 0n, prime() {} } },
+    ],
+  });
+  await starting.ready();
+  assert.deepEqual(asked, ["one"]);
+  // One ring per source ID: a second ring of one ID would be detached by its first's index.
+  assert.throws(() => attachEngineFeed({ context, sources: [{ sourceId: "twice", channels: 1 }, { sourceId: "twice", channels: 2 }], quantumFrames: 4, createNode: () => attachNode() }), /unique: twice/);
 });
 
 test("the pump's writer publishes a plain seek in the SDK's ring layout", async () => {
