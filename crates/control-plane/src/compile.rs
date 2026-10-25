@@ -844,12 +844,15 @@ pub(crate) fn observation_handle_bytes(
     let arithmetic = || failure(ResourceFault::Arithmetic);
     handles
         .iter()
-        .try_fold(size_of_val(handles) + size_of_val(strips), |total, handle| {
-            total
-                .checked_add(handle.track_id.len())?
-                .checked_add(handle.effect_id.len())?
-                .checked_add(size_of_val(&*handle.readers))
-        })
+        .try_fold(
+            size_of_val(handles) + size_of_val(strips),
+            |total, handle| {
+                total
+                    .checked_add(handle.track_id.len())?
+                    .checked_add(handle.effect_id.len())?
+                    .checked_add(size_of_val(&*handle.readers))
+            },
+        )
         .ok_or_else(arithmetic)
         .and_then(|bytes| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform)))
 }

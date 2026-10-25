@@ -15,11 +15,11 @@ use protocol::{
     ControlScope, ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord,
     ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
     CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
-    EnumChoice, ParameterChannel, ParameterProviderError,
-    ParameterUnit as ProtocolUnit, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
-    ResponseGrid, ResponseProviderError, ResponseResult, ResponseTarget, SampleTime, StatusCode,
-    TelemetryConfiguration, TelemetryCounters, TelemetryRefusal, TelemetryRefusalPath,
-    TransportSetRequest, TransportSnapshot, TransportState,
+    EnumChoice, ParameterChannel, ParameterProviderError, ParameterUnit as ProtocolUnit,
+    ResponseConfiguration, ResponseCurves, ResponseGetRequest, ResponseGrid, ResponseProviderError,
+    ResponseResult, ResponseTarget, SampleTime, StatusCode, TelemetryConfiguration,
+    TelemetryCounters, TelemetryRefusal, TelemetryRefusalPath, TransportSetRequest,
+    TransportSnapshot, TransportState,
 };
 use session::{EffectIdentity, SessionModel, StripKind};
 
