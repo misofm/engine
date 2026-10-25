@@ -4807,8 +4807,11 @@ where
         let primed = warm_lead_blocks.map(|lead_blocks| {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();
+                // A superseding rebuild holds the withdrawn candidate as its newest pending
+                // epoch: the check at the top of `rebuild` refused anything else.
+                debug_assert!(len > 0, "a withdrawn candidate is pending");
                 let holder = match len {
-                    1 => &self.providers,
+                    0 | 1 => &self.providers,
                     _ => &self.pending_providers[len - 2],
                 };
                 (holder, self.pending_providers.last())
@@ -4943,12 +4946,19 @@ where
                     .render_clock();
                 next_duck.raise_not_before(transition.not_before(p, quantum));
             }
+            // #1403 D2 (root ruling, attempt 2): the duck set is the removed and restarted
+            // strips, so a warm candidate's transition removes at most sources no strip read; its
+            // overlay keeps them (their calls go to the running plan until the adoption) and its
+            // schedule stays `Primed`.
             if let Some(not_before) = next_duck.not_before() {
-                reservation
-                    .inner
-                    .as_mut()
-                    .expect("reservation is live")
-                    .set_adoption(PlanAdoption::NoEarlierThan(not_before));
+                debug_assert!(warm_lead_blocks.is_none() || not_before == 0);
+                if warm_lead_blocks.is_none() {
+                    reservation
+                        .inner
+                        .as_mut()
+                        .expect("reservation is live")
+                        .set_adoption(PlanAdoption::NoEarlierThan(not_before));
+                }
             }
             let held = self
                 .pending_providers
@@ -7051,6 +7061,7 @@ mod tests {
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
         const SOURCE: &str = "fixture-source";
         const AUX: &str = "aux-source";
+        const UNUSED: &str = "unused-source";
         const QUANTUM: u64 = 128;
         const RING: u32 = 7_296;
         /// `P` of the one-limiter growth.
@@ -7279,8 +7290,26 @@ mod tests {
             }
 
             fn with_limits(warm: Option<WarmConfig>, limits: ControlLimits) -> Self {
+                Self::boot(warm, limits, &session_a())
+            }
+
+            /// A with a third source, [`UNUSED`], that no track reads; it is fed as the others.
+            fn with_unused(warm: Option<WarmConfig>) -> Self {
+                let mut model = session_a();
+                let template = model.sources[0].clone();
+                model.sources.push(Source {
+                    id: sid(UNUSED),
+                    content: template.content.replace("7e94", "0b0b"),
+                    ..template
+                });
+                let mut rig = Self::boot(warm, limits(), &model);
+                rig.feeds.push((UNUSED, pcm(13), 0));
+                rig
+            }
+
+            fn boot(warm: Option<WarmConfig>, limits: ControlLimits, model: &SessionModel) -> Self {
                 super::super::test_reset_lifecycle_observer();
-                let document = session::canonical_session_json(&session_a()).expect("canonical");
+                let document = session::canonical_session_json(model).expect("canonical");
                 let children = compile_children_warm::<Adapter>(
                     &document,
                     limits,
@@ -7500,6 +7529,47 @@ mod tests {
                 "no growth"
             );
             assert_eq!(flat.primed(), None);
+
+            // The growth with the removal of a source no track reads ducks no strip (#1403 D2,
+            // attempt 2): it stays `Primed`, and the removed source's frames go to A until W is
+            // adopted.
+            let mut rig = Rig::with_unused(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.push(SessionEdit::RemoveSource {
+                source_id: sid(UNUSED),
+            });
+            let adoption = rig.rebuild(&edits);
+            let not_before = rig.children.session.test_render_clock();
+            assert_eq!(
+                adoption,
+                PlanAdoption::Primed {
+                    not_before,
+                    lead_blocks: 4
+                },
+                "a removed unused source"
+            );
+            assert_eq!(
+                rig.primed(),
+                Some(PrimedCandidate {
+                    epoch: rig.children.session.newest_plan_epoch(),
+                    not_before,
+                    lead_blocks: 4,
+                })
+            );
+            rig.render(3);
+            assert!(rig.swaps().is_empty(), "held while the prime is not fed");
+            rig.ahead = AHEAD;
+            rig.render(1);
+            assert_eq!(rig.swaps(), [BEFORE + 3]);
+            rig.feeds.truncate(2);
+            rig.render(5);
+            let mut continued = Rig::with_unused(None);
+            continued.render(BEFORE + 4);
+            continued.feeds.truncate(2);
+            continued.render(5);
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
         }
 
         /// Gate 1, the admission: a warm candidate C is admitted against the reprepare peak. With
@@ -7577,6 +7647,21 @@ mod tests {
             ));
             continued.render(s_block - BEFORE);
             assert_eq!(first_divergence(&rig, &continued), None);
+
+            // The growth while phase 1 of a removal is pending inherits the overlay's `S`: today's
+            // path, with no record (#1403 D2's empty inherited overlay).
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let PlanAdoption::NoEarlierThan(s) = rig.rebuild(&remove_track("eq1")) else {
+                panic!("a two-phase removal")
+            };
+            rig.render(1);
+            let adoption = rig.rebuild(&growth());
+            assert!(
+                matches!(adoption, PlanAdoption::NoEarlierThan(later) if later >= s),
+                "published {adoption:?}"
+            );
+            assert_eq!(rig.primed(), None);
         }
 
         /// Gate 3, edits while W is pending, frames withheld. A live fader edit on track 2 goes
@@ -7733,6 +7818,29 @@ mod tests {
                     "W superseded, B warm: {primed}"
                 );
             }
+            // The warm B's admission at the effect-state cap `max(R + W + B, R + 2B)`: its
+            // reprepare row is the running plan alone, never the withdrawn W.
+            let state = |rig: &Rig| -> Vec<u64> {
+                let held = rig.children.session.held_epochs().expect("held");
+                held.as_slice()
+                    .iter()
+                    .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                    .collect()
+            };
+            let (mut probe, _) = pending();
+            let [r, w] = state(&probe)[..] else {
+                panic!("R and W")
+            };
+            probe.rebuild(&plain_b);
+            let [_, b] = state(&probe)[..] else {
+                panic!("R and B")
+            };
+            let (mut rig, _) = pending();
+            rig.children.session.limits.maximum_effect_state_bytes = (r + w + b).max(r + 2 * b);
+            assert!(
+                matches!(rig.rebuild(&plain_b), PlanAdoption::Primed { .. }),
+                "B fits beside R and W, and twice beside R"
+            );
 
             // A declared stop.
             let (mut rig, _) = pending();
