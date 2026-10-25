@@ -113,3 +113,44 @@ Steps:
 * **The window splat relies on `lanes_uniform`.** Assert it (`debug_assert!`) at the top of the
   body.
 
+
+## Decision and evidence record (2026-10-25, attempt 1)
+
+* **Scope note wins** (root scope 2026-10-24): authorized paths are `lib.rs` and this spec only.
+  Gate 2 (a new pinned scenario) and the M2 mutation are dropped: the restored-ramp hole is closed
+  by `ramp_path_inside`, and the stationary scatter wrote back the exact bits it gathered on every
+  state (`remaining == 0` at rest is exact through `u16`/`f32`), so skipping it is equivalent.
+  No new test; the existing identity gates carry every claim.
+* **Link glide (#1370b) checked.** A block's glide frames render through `limiter_block_glide`
+  (per-lane body, `DISPATCH_RAMPING`); only the frames after the glide reach
+  `limiter_block_linkable`, whose `dual_stationary` test runs after the glide advanced the ramps.
+  The uniform bodies read no link weight. So no glide frame takes the lean load.
+* **Shipped shape.** `HotChannel::load_stationary` / `store_stationary`, called from both uniform
+  bodies under a `const` branch on `DISPATCH == DISPATCH_STATIONARY`; the linked copy of the right
+  ramps runs only in the advancing dispatches. `process_bank_inner`'s per-lane automation walk runs
+  only when the block carries spans (it shares the existing `silent_fixed_point` branch).
+
+### Measurement (2026-10-25, descriptive)
+
+One A/B, base `3730046f5` (origin/main) against candidate `3a409df87`, each one invocation of
+`scripts/operator/run-console-benchmark.sh` (one warmup, two rounds, validator PASS, cpu 31), back
+to back in one exclusive window; then one V8 A/B with `run-web-mixing-automation-benchmark.sh`.
+The host was shared: both runs are `uncontrolled` (loadavg 1-min 5.9 -> 1.9 over the native window,
+6.2 -> 3.7 over the V8 window). Every output digest agrees, base against candidate, on all 39
+native rows and both V8 records' six documents and seven arms.
+
+Noise: rows with no limiter (`console_legacy`, `eq_only`, `builtins_only`, `compressor_only`,
+`gain_pan_*`, `idle`, `dispatch_only`) moved -0.3 % to +1.0 %. Native Simd8 p50, mean of two rounds:
+
+| row | base us | candidate us | delta |
+|---|---|---|---|
+| `sixty_four_track_console` | 100.12 | 98.15 | -1.96 % |
+| `sixty_four_track_console_mono` | 61.05 | 60.30 | -1.23 % |
+| `sixty_four_track_console_mono_dual` | 101.36 | 99.05 | -2.28 % |
+| `sixty_four_track_console_metered` | 105.81 | 104.22 | -1.50 % |
+| `sixty_four_track_console_sends` | 171.40 | 168.53 | -1.68 % |
+| `one_twenty_eight_track_stretch` | 200.46 | 196.45 | -2.00 % |
+
+Every limiter row moved -1.2 % to -2.5 %, outside the non-limiter band. V8 (p50 ns): the six
+console documents -0.6 % to +0.1 %, the mixing-automation arms +0.1 % to +0.7 %: within noise.
+Close rule (more than 2 % slower) not met; recommendation: ship.

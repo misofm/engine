@@ -3590,6 +3590,11 @@ mod tests {
             fader: model.tracks[0].fader.clone(),
             members: vec![model.tracks[0].id.clone()],
         });
+        // One insert, so the inserts section's header appears beside own, builtins and console.
+        let mut insert = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        insert.id = session::StableId::parse("insert-a").expect("insert ID");
+        insert.params.clear();
+        model.tracks[0].inserts.effects.push(insert);
         let catalog =
             ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
         let expected = controls::list(&model, &MonitorOverlay::default(), RATE).collect::<Vec<_>>();
@@ -3604,6 +3609,7 @@ mod tests {
         let mut next_control = expected.iter();
         let mut owner: Option<&ControlAddress> = None;
         let mut section: Option<&ControlAddress> = None;
+        let mut sections = Vec::new();
         for (index, entry) in entries.iter().enumerate() {
             assert_eq!(entry.handle as usize, index + 1, "handles count from 1");
             match &entry.body {
@@ -3612,10 +3618,19 @@ mod tests {
                     owner = Some(&entry.address);
                     section = None;
                 }
-                ControlBody::SectionHeader(_) => {
+                ControlBody::SectionHeader(header) => {
                     let owner = owner.expect("a section header follows its owner header");
                     assert_eq!(entry.address.owner_kind, owner.owner_kind);
                     assert_eq!(entry.address.owner_id, owner.owner_id);
+                    let name = match entry.address.section {
+                        ControlSection::Own => "own",
+                        ControlSection::Builtins => "builtins",
+                        ControlSection::Console | ControlSection::Inserts => {
+                            entry.address.slot_id.as_deref().expect("a slot ID")
+                        }
+                    };
+                    assert_eq!(header.name, name);
+                    sections.push(entry.address.section);
                     section = Some(&entry.address);
                 }
                 ControlBody::Control(row) => {
@@ -3640,6 +3655,14 @@ mod tests {
             next_control.next().is_none(),
             "every listed control is held"
         );
+        for kind in [
+            ControlSection::Own,
+            ControlSection::Builtins,
+            ControlSection::Console,
+            ControlSection::Inserts,
+        ] {
+            assert!(sections.contains(&kind), "{kind:?}");
+        }
         // Every owner kind has a header: strips, the VCA, routes and the session.
         let kinds = entries
             .iter()

@@ -1433,14 +1433,32 @@ class MisoAudioWorkletHost {
   /// The frame is copied; the caller keeps its array. A frame over the engine's
   /// `maximum_control_frame_bytes` or one that is empty is refused locally with
   /// `RESULT_INVALID_ARGUMENT`, and more than 64 frames in flight with `RESULT_BACKPRESSURE`.
-  control(frame) {
+  ///
+  /// **The document** (issue #1697). A `SESSION_REPLACE` frame names a document by its length and
+  /// SHA-256; `document` carries those bytes beside the frame, up to the boot's 1 MiB document
+  /// bound, and the engine checks, parses and diffs them as the C ABI's
+  /// `miso_engine_v1_submit_document_command` does. It is copied too. A `document` that is not a
+  /// `Uint8Array` or is empty is refused locally with `RESULT_INVALID_ARGUMENT`; one the engine's
+  /// staging refuses (over the bound) answers `RESULT_INVALID_ARGUMENT` with an empty response.
+  control(frame, document) {
     if (!(frame instanceof Uint8Array) || frame.byteLength === 0
-        || frame.byteLength > MAXIMUM_CONTROL_FRAME_BYTES) {
+        || frame.byteLength > MAXIMUM_CONTROL_FRAME_BYTES
+        || (document !== undefined
+          && (!(document instanceof Uint8Array) || document.byteLength === 0))) {
       return Promise.reject(webError(1));
     }
     const copy = new Uint8Array(frame.byteLength);
     copy.set(frame);
-    return this.#request({ tag: "miso.control.v1", frame: copy }, [copy.buffer], "control");
+    if (document === undefined) {
+      return this.#request({ tag: "miso.control.v1", frame: copy }, [copy.buffer], "control");
+    }
+    const documentCopy = new Uint8Array(document.byteLength);
+    documentCopy.set(document);
+    return this.#request(
+      { tag: "miso.control.v1", frame: copy, document: documentCopy },
+      [copy.buffer, documentCopy.buffer],
+      "control",
+    );
   }
 
   /// Subscribe to, or unsubscribe from, declared observation taps (issue #143).

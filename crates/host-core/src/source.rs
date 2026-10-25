@@ -255,6 +255,18 @@ impl SourceControlSet {
         self.timeline.as_mut()
     }
 
+    /// The `prime_required` flag of source `id`'s ring (#1320 D4), for a gate that publishes a
+    /// warm successor directly (#1355 D3). `None` for an unknown or vacant source. The control
+    /// plane's publication sets it in production (#1403).
+    #[cfg(feature = "test-support")]
+    pub fn test_only_prime_flag(&self, id: &[u8]) -> Option<source::PcmSourcePrimeFlag> {
+        let index = self.index_of(id)?;
+        self.sources[index]
+            .provider
+            .as_ref()
+            .map(source::HostChunkProvider::prime_flag)
+    }
+
     fn id(&self, source: &ControlSource) -> &[u8] {
         &self.ids[source.id_offset..source.id_offset + source.id_bytes]
     }
@@ -338,7 +350,8 @@ impl SourceControlSet {
     /// in the block that reads source time from `anchor_sample` (issue #1274).
     ///
     /// `anchor_sample` is on the plan's source-read clock, which every plan swap continues and
-    /// which equals the absolute render clock a host renders with in this version (#1316 D1); it
+    /// which equals the absolute render clock a host renders with until a plan that reads ahead of
+    /// it, a warm successor (#1355 D1), is adopted; no host publishes one in this version (#1403). It
     /// names when `frame` enters the graph, and the output hears it the plan's latency later. It
     /// must be a multiple of the quantum, or the seek is refused with
     /// `source.seek.anchor_unaligned`. The region and generation rules are [`Self::seek`]'s.
