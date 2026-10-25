@@ -2815,8 +2815,7 @@ where
                             handle
                                 .readers
                                 .iter()
-                                .zip(handle.descriptor.observations)
-                                .map(|(reader, tap)| {
+                                .map(|reader| {
                                     reader.read().map(|window| {
                                         (
                                             window.sequence,
