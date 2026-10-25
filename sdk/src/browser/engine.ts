@@ -992,14 +992,26 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       spectrumCollection = collection;
       return spectrumConfiguredOf(reply.value);
     };
+    // The owner's select before a collection's first stream start: the capture is the stream's from
+    // here, so the hold is taken now and given back if the select fails (the start keeps it, or
+    // gives it back when it fails).
     const selectSpectrum = async (query: SpectrumQuery): Promise<EngineCallResult> => {
+      if (spectrumPending) throw new MisoUsageError("a one-shot spectrum query is in flight");
       const selected = spectrumSelection(query);
-      const reply = await awaitSpectrum(spectrumFrame({
-        op: "capture",
-        capture: "select",
-        target: selected.target,
-        channels: selected.channels ?? "both",
-      }, decodeSpectrumCaptureReply), Date.now(), queryDeadline(query), options.signal);
+      spectrumStreamHeld = true;
+      let reply: SpectrumFrameReply<unknown>;
+      try {
+        reply = await awaitSpectrum(spectrumFrame({
+          op: "capture",
+          capture: "select",
+          target: selected.target,
+          channels: selected.channels ?? "both",
+        }, decodeSpectrumCaptureReply), Date.now(), queryDeadline(query), options.signal);
+      } catch (error) {
+        spectrumStreamHeld = false;
+        throw error;
+      }
+      if (!reply.ok) spectrumStreamHeld = false;
       return spectrumCallResult(reply);
     };
     const selectSpectrumStream = async (

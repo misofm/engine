@@ -184,11 +184,24 @@ test("a run-time configure that adds a tap keeps the stream on the kept tap (#15
   }
 });
 
-test("a one-shot query on a collection selects its entry first", SKIP, async () => {
+test("a one-shot query on a collection selects its entry first", SKIP, async (t) => {
   // Red if `querySpectrum` arms without selecting the queried entry: the window would be the other
-  // tap's, or the core would refuse the arm with no entry selected.
-  const { engine, render } = await served({ spectrumCollection: BOTH });
+  // tap's, or the core would refuse the arm with no entry selected. Red too if a query is let onto
+  // the capture while a first subscription's select is in flight, before its stream starts.
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { engine, render, harness } = await served({ spectrumCollection: BOTH });
   try {
+    let release;
+    harness.hold = new Promise((resolve) => { release = resolve; });
+    const sent = harness.frames;
+    const subscribing = engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0 });
+    for (let turn = 0; turn < 100 && harness.frames === sent; turn += 1) await flush();
+    await assert.rejects(
+      engine.querySpectrum({ ...OUTPUT, spectrumLimits: { requestDeadlineMs: 200 } }),
+      /managed spectrum stream holds the capture/,
+    );
+    release();
+    await (await subscribing).close();
     for (const query of [TRACK, OUTPUT]) {
       const result = await rendering(engine.querySpectrum(query), render);
       assert.deepEqual(result.target, query.target);

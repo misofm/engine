@@ -252,7 +252,10 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   which a collection never takes (any change of a collection job is one `SPECTRUM_STREAM` select,
   because the capture key holds every job-key field but the smoothing, and a smoothing change also
   selects); in the single form the stop's reply and the restart's call are only microtask turns
-  apart, with no await between, so no caller can run a query in between. A boot configure past `requestDeadlineMs` rejects `createEngine` with a boot-phase
+  apart, with no await between, so no caller can run a query in between. A collection's first
+  subscription selects its entry before the start; the hold is taken at that select (root ruling)
+  and given back if the select or the start fails, and the select is refused while a query runs.
+  A boot configure past `requestDeadlineMs` rejects `createEngine` with a boot-phase
   `MisoEngineError` whose code is the new SDK timeout code `bootConfigureTimeout` (no `result`;
   `sdk/src/core/errors.ts` and `sdk/test/error-types.ts`, root-extended paths), not `MisoUsageError`. Root-added paths: `sdk/README.md` (the hop section now
   describes the boot configure and `configureSpectrum`) and `docs/CONTROL_PROTOCOL_REGISTRY.md`
