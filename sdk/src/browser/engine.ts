@@ -2,7 +2,7 @@ import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { WasmBoundary } from "../core/boundary.ts";
 import type { EngineCallResult, SessionShape } from "../core/boundary.ts";
-import { MisoEngineError, MisoUsageError, resultName } from "../core/errors.ts";
+import { MisoEngineError, MisoUsageError, SessionSeekProducerError, resultName } from "../core/errors.ts";
 import type { SdkTimeoutCode } from "../core/errors.ts";
 import { constantValue } from "../core/abi.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
@@ -213,24 +213,6 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
  */
 export interface SessionSeekProducer {
   seek(frame: number, generation: bigint): void | Promise<void>;
-}
-
-/**
- * A producer failed after the engine had accepted the session seek (issue #1644 D3): the engine's
- * timeline and every source are at `generation`, the producers before `producerIndex` were
- * repositioned, and that one and the ones after it were not. `cause` is the producer's error.
- * Reposition the rest under `generation`; the seek is not to be sent again.
- */
-export class SessionSeekProducerError extends Error {
-  readonly generation: bigint;
-  readonly producerIndex: number;
-
-  constructor(generation: bigint, producerIndex: number, cause: unknown) {
-    super(`the engine applied the session seek at generation ${generation}, but producer ${producerIndex} failed to reposition`, { cause });
-    this.name = "SessionSeekProducerError";
-    this.generation = generation;
-    this.producerIndex = producerIndex;
-  }
 }
 
 /** The options of `BrowserEngine.seek`. */
