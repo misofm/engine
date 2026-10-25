@@ -22,6 +22,7 @@ import type {
   MisoSpectrumStreamMetadata,
 } from "./shipped-host.d.ts";
 import { createMeasurementFeeds } from "./measurement.ts";
+import { linkFeedEngine } from "./pcm-feed.ts";
 import type {
   MeterListener,
   TelemetryListener,
@@ -811,6 +812,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     // Issue #1644 D3: the largest generation a session seek of this object has used; every source
     // and the timeline start at 1.
     let highestSeekGeneration = 1n;
+    // Issue #1297b: the PCM feeds whose `engine` is this one. A feed's anchored start takes its
+    // generation from the same sequence as `seek`, so a later session seek is always above it.
+    const feedRetirement = linkFeedEngine(host, () => {
+      highestSeekGeneration += 1n;
+      return highestSeekGeneration;
+    });
     // Issue #1296: the session edits. `liveSession` and `liveDocument` are what `liveControls()`
     // binds to: the booted document until a committed `replaceSession` names another.
     let liveSession: SessionBuilder | undefined = options.document instanceof SessionBuilder ? options.document : undefined;
@@ -1617,7 +1624,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       });
       return created;
     };
-    return Object.freeze({
+    const engine: BrowserEngine<AudioContextLike> = Object.freeze({
       shape,
       context,
       host,
@@ -1707,7 +1714,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       },
       apply: async (transaction: SessionTransaction) => {
         if (closed) throw new MisoUsageError("the browser engine is closed");
-        return (await protocolClient()).applyTransaction(transaction);
+        const outcome = await (await protocolClient()).applyTransaction(transaction);
+        // Issue #1297b D6: a removed source's ring keeps draining until the removal is in effect.
+        const removed = transaction.edits.flatMap((edit) => edit.kind === "removeSource" ? [edit.sourceId] : []);
+        if (removed.length !== 0) feedRetirement.retire(removed, () => engine.applied(outcome.revision));
+        return outcome;
       },
       replaceSession: async (replacement: CreateEngineOptions["document"]) => {
         if (closed) throw new MisoUsageError("the browser engine is closed");
@@ -1718,6 +1729,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         liveSession = replacement instanceof SessionBuilder ? replacement : undefined;
         liveDocument = bytes;
         semanticLiveControls = undefined;
+        // Issue #1297b D6 (root R4): the sources the replace removed are the fed ones the committed
+        // session map no longer lists; the SDK never parses the document for them.
+        if (outcome.path !== "unchanged") {
+          feedRetirement.retireAbsent(async () => {
+            const map = await host.sessionMap();
+            if (map.result !== constantValue("resultCodes", "ok")) throw new Error("session map refused");
+            return new Set(map.sources.map((source) => source.id));
+          }, () => engine.applied(outcome.revision));
+        }
         return outcome;
       },
       get revision(): bigint {
@@ -1801,6 +1821,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         return closePromise;
       },
     });
+    return engine;
   } catch (error) {
     // The boot error stays the answer; the bound only ends the wait for the context.
     try { await boundedContextClose(context); } catch { /* the worklet boot failure is the failure to report */ }

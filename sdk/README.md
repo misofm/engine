@@ -225,6 +225,33 @@ For shared-ring delivery, the browser entry exposes `prepareEngineFeed`, `attach
 decode media. The shared-ring path requires `SharedArrayBuffer` and a cross-origin-isolated page.
 The host also exposes bounded source submission. Source underruns produce silence and counters.
 
+Pass `engine` to `attachEngineFeed` to feed the sources that an edit adds or removes while audio
+plays:
+
+- **Add a stem.** After `engine.apply(tx)` (or `replaceSession`) resolves, attach a feed for the new
+  source with `start: { frameAt, prime }`. `feed.ready()` reads the engine's next render sample
+  once and sets the anchor `A` to that sample plus the ring's capacity in frames, rounded up to a
+  quantum. It calls `frameAt(A)` once (the engine has no playhead: the source frame at `A` is your
+  mapping), publishes the anchored seek in the ring, awaits `prime({ generation, frame,
+  anchorSample })`, and then sends the seek to the engine. Write the stem's PCM from `frame` at
+  `generation` in `prime`, and do not seek the ring there. The drain reads none of that ring's
+  chunks until the engine applied the seek. If the audio reaches `A` before that, the engine
+  starts the stem at the frame plus the lateness and reports it in the source's seek report; the
+  stem stays in time. The margin in `A` is one ring of audio, so write at most one ring's worth
+  in `prime` (the ring holds no more), and keep writing after `ready()` resolves. A refused seek
+  rejects `ready()` with a `MisoEngineError` and closes the feed. Do not publish an anchored seek
+  with `Msb1RingWriter.seek` yourself: without the SDK's message to the engine, that ring stalls.
+- **Remove a stem.** When a committed edit removes a source of the feed, keep feeding its ring. The
+  SDK detaches it with `feed.detachSource(sourceId)` after `engine.applied(revision)` resolves
+  (the strip's ramp-out has then played), and releases its writer.
+- `feed.detachSource(sourceId)` resolves after the worklet's drain stopped reading that ring; the
+  other rings keep draining. If the worklet withdrew no ring, it rejects with `detachRefused` and
+  closes the feed.
+
+The MSB1 ring keeps version 1 with an anchor word: the control block is 144 bytes (the anchor
+`i64` at 128, `-1` for a plain seek), the ID is at 144 and the slot headers at 272. The drain
+refuses a ring with another header offset.
+
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.
 The device/context must accept the session rate and quantum (normally 128 frames); mismatches are

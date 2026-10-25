@@ -3,8 +3,13 @@ import { StemStoreError } from "./opfs-store.js"
 const MSB1_MAGIC = 0x4d534231
 const MSB1_VERSION = 1
 const MSB1_WRAP = 1 << 30
-const CONTROL_BYTES = 128
+// Issue #1297b D2: the SDK's MSB1 V1 layout (`sdk/src/browser/pcm-ring.ts`), amended in place:
+// three i64 at 112 (seek generation, frame, anchor sample; -1 is a plain seek), the ID at 144 and
+// the slot headers at 272. The feed drain refuses a ring with any other header offset.
+const CONTROL_BYTES = 144
 const CONTROL_I64_OFFSET = 112
+const HEADER_OFFSET = 272
+const NO_ANCHOR = -1n
 const SLOT_HEADER_BYTES = 32
 const FLAG_END_OF_REGION = 1
 
@@ -25,7 +30,7 @@ const CONTROL = Object.freeze({
   OVERFLOW: 15,
 })
 
-/** The Worker-side writer for the unchanged MSB1 ring format. */
+/** The Worker-side writer for the MSB1 V1 ring format. It publishes plain seeks only. */
 export class Msb1RingWriter {
   #control
   #controlI64
@@ -38,10 +43,14 @@ export class Msb1RingWriter {
     if (!(shared instanceof SharedArrayBuffer)) {
       throw new TypeError("MSB1 ring must be a SharedArrayBuffer")
     }
+    if (shared.byteLength < HEADER_OFFSET) {
+      throw new TypeError("Shared buffer is not an MSB1 source ring")
+    }
     const control = new Int32Array(shared, 0, CONTROL_BYTES / 4)
     if (
       Atomics.load(control, CONTROL.MAGIC) !== MSB1_MAGIC ||
-      control[CONTROL.VERSION] !== MSB1_VERSION
+      control[CONTROL.VERSION] !== MSB1_VERSION ||
+      control[CONTROL.HEADER_OFFSET] !== HEADER_OFFSET
     ) {
       throw new TypeError("Shared buffer is not an MSB1 source ring")
     }
@@ -55,7 +64,7 @@ export class Msb1RingWriter {
     this.channels = channels
     this.frameCapacity = frameCapacity
     this.#control = control
-    this.#controlI64 = new BigInt64Array(shared, CONTROL_I64_OFFSET, 2)
+    this.#controlI64 = new BigInt64Array(shared, CONTROL_I64_OFFSET, 3)
     this.#headers = new Int32Array(
       shared,
       control[CONTROL.HEADER_OFFSET],
@@ -128,6 +137,7 @@ export class Msb1RingWriter {
   seek(generation, frame) {
     this.#controlI64[0] = generation
     this.#controlI64[1] = frame
+    this.#controlI64[2] = NO_ANCHOR
     Atomics.store(
       this.#control,
       CONTROL.GENERATION_TAG,
@@ -326,7 +336,7 @@ export function deinterleaveCanonicalPcm(
 /** Test/helper constructor for an MSB1 ring without app-owned plumbing. */
 export function createFixtureMsb1Ring({ channels, frameCapacity, capacity = 4 }) {
   if (!isPowerOfTwo(capacity)) throw new RangeError("MSB1 capacity must be a power of two")
-  const headerOffset = 256
+  const headerOffset = HEADER_OFFSET
   const pcmOffset = headerOffset + capacity * SLOT_HEADER_BYTES
   const shared = new SharedArrayBuffer(
     pcmOffset + capacity * channels * frameCapacity * 4
@@ -338,6 +348,7 @@ export function createFixtureMsb1Ring({ channels, frameCapacity, capacity = 4 })
   control[CONTROL.HEADER_OFFSET] = headerOffset
   control[CONTROL.PCM_OFFSET] = pcmOffset
   control[CONTROL.VERSION] = MSB1_VERSION
+  new BigInt64Array(shared, CONTROL_I64_OFFSET, 3)[2] = NO_ANCHOR
   Atomics.store(control, CONTROL.MAGIC, MSB1_MAGIC)
   return shared
 }

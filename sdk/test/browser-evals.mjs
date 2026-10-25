@@ -25,6 +25,7 @@ import {
   SessionSeekProducerError,
   assertQuantumMatch,
   assertWebDeliverableSources,
+  attachEngineFeed,
   bootOptionsAgree,
   createEngine,
   scratchBootInWorker,
@@ -297,7 +298,7 @@ describe("the browser open sequence", () => {
     });
     assert.equal(shape.sampleRateHz, 96_000);
     assert.equal(shape.quantumFrames, 127);
-    assert.equal(shape.sourceRingFrames, 9_906);
+    assert.equal(shape.sourceRingFrames, 14_097);
   });
 
   test("a context that comes back at the wrong rate is closed and retried", async () => {
@@ -947,6 +948,67 @@ describe("browser session edits", () => {
       tick();
       assert.equal((await unseen).revision, 3n);
     } finally {
+      await engine.close();
+    }
+  });
+
+  test("#1297b D6: a removed fed source drains until applied(revision) resolves, then its ring is detached", async () => {
+    // Red if the SDK detaches at the commit (the strip's ramp-out plays silence), never detaches (a
+    // ring leaks per removed stem), detaches a source the edit kept, or misses a removal that a
+    // replace made (the committed session map no longer lists it).
+    const fed = (ids) => {
+      let builder = session({ id: "browser.feed", sampleRateHz: 48_000, quantumFrames: QUANTUM });
+      for (const id of ids) builder = builder.source(id, { ...SOURCE, content: `blake3:${id.repeat(64)}` });
+      for (const id of ids) builder = builder.track(`t${id}`, { source: id });
+      builder = builder.output("out");
+      for (const id of ids) {
+        builder = builder.route({ id: `t${id}.main`, source: { kind: "track", trackId: `t${id}`, tap: "post_pan" }, destination: { kind: "output_input", outputId: "out" } });
+      }
+      return builder;
+    };
+    const { engine, tick } = await boot(fed(["a", "b", "c"]));
+    const detached = [];
+    const node = {
+      port: {
+        onmessage: null,
+        postMessage(data) {
+          // Cloned as a browser port does; the ring is named by its index in the attach list.
+          const message = structuredClone(data);
+          if (message.op !== "detach-source") return;
+          detached.push(message.index);
+          node.port.onmessage?.({ data: structuredClone({ op: "source-detached", requestId: message.requestId, detached: true }) });
+        },
+      },
+      disconnect() {},
+    };
+    const feed = attachEngineFeed({
+      context: { audioWorklet: { addModule: async () => {} } },
+      sources: ["a", "b", "c"].map((sourceId) => ({ sourceId, channels: 2 })),
+      quantumFrames: QUANTUM,
+      engine,
+      createNode: () => node,
+    });
+    const [a, b, c] = feed.rings;
+    const untilApplied = async (revision) => {
+      const applied = engine.applied(revision);
+      for (let block = 0; !(await settled(applied)); block += 1) {
+        assert.deepEqual(detached, [], `nothing is detached before revision ${revision} is applied (block ${block})`);
+        assert.ok(block < 1_000, "the removal is applied");
+        tick();
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+    try {
+      const removal = await engine.apply(transaction(fed(["a", "b", "c"])).removeRoute("tb.main").removeTrack("tb").removeSource("b").build());
+      await untilApplied(removal.revision);
+      assert.deepEqual(detached.splice(0), [1]);
+      assert.deepEqual(feed.rings, [a, c]);
+      const replaced = await engine.replaceSession(fed(["a"]));
+      await untilApplied(replaced.revision);
+      assert.deepEqual(detached.splice(0), [2]);
+      assert.deepEqual(feed.rings, [a]);
+    } finally {
+      feed.close();
       await engine.close();
     }
   });
