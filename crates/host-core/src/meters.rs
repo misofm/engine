@@ -21,7 +21,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::TryReserveError;
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
@@ -29,7 +29,7 @@ use builtins_compiler::MeterConsumer;
 use effect_contract::{BankWidth, ObservationDescriptor, ObservationKind, ParameterUnit};
 use engine::realtime::{
     Consumer, ObservationReader, ObservationWindow, Producer, QueueGeneration, SpscRetainedPayload,
-    bounded_spsc, bounded_spsc_retained_payload,
+    bounded_spsc, bounded_spsc_move, bounded_spsc_retained_payload,
 };
 use lane::{Backend, Lane, kernels::builtins::meter_sample_peak_block};
 use session::SessionModel;
@@ -433,6 +433,10 @@ pub struct MeterFrame {
     pub sequence: u64,
     /// The delivery generation: a level transition or a producer reset advances it.
     pub generation: u64,
+    /// The provider epoch of the plan whose strips the frame covers (#1588 D3): its
+    /// [`MeterTables`]' epoch ([`MeterTables::set_plan_epoch`]), `0` for the boot plan. A reader
+    /// that holds the strip list of one epoch resolves its strips again when a frame names another.
+    pub plan_epoch: u64,
     /// The frame's validity bits.
     pub validity: MeterValidity,
     /// The losses counted since the previous frame of the delivery generation, saturating.
@@ -460,6 +464,7 @@ impl MeterFrame {
             windows: 0,
             sequence: 0,
             generation: 0,
+            plan_epoch: 0,
             validity: MeterValidity::NONE,
             loss_count: 0,
             strip_peaks: filled(strip_count, [0.0; 2])?,
@@ -717,6 +722,7 @@ impl MeterTables {
                 windows: 0,
                 sequence: 0,
                 generation: 0,
+                plan_epoch: 0,
                 validity: MeterValidity::NONE,
                 loss_count: 0,
                 strip_peaks: Box::default(),
@@ -725,6 +731,13 @@ impl MeterTables {
                 strip_gain_reduction_present: Box::default(),
             },
         }
+    }
+
+    /// Name the plan the tables serve by its provider epoch (#1588 D3): every frame published
+    /// from them carries it in [`MeterFrame::plan_epoch`]. Set on a control thread, before the
+    /// tables reach [`MeterDelivery::adopt`]; an adoption keeps the successor's epoch.
+    pub fn set_plan_epoch(&mut self, epoch: u64) {
+        self.frame.plan_epoch = epoch;
     }
 
     /// The strip meters the tables serve.
@@ -933,6 +946,27 @@ impl MeterDelivery {
             return false;
         }
         self.level = on;
+        self.begin_generation(next_sample);
+        true
+    }
+
+    /// Restart the delivery epoch at `next_sample` while the level stays on (#1588 D1, R3): one
+    /// client of a shared [`MeterLevel`] changed while another kept the level on. The same as
+    /// [`Self::set_level`] off and on again at `next_sample`, with one gate move: the generation
+    /// advances, the pending state and the publication clear, the output windows queued under the
+    /// old generation pop unread, and the output gate opens at the grid's first boundary at or
+    /// after `next_sample`. A level that is off changes nothing and returns `false`.
+    /// Allocation-free.
+    pub fn restart(&mut self, next_sample: u64) -> bool {
+        if !self.level {
+            return false;
+        }
+        self.begin_generation(next_sample);
+        true
+    }
+
+    /// The new generation of a level transition or a restart, from `next_sample`.
+    fn begin_generation(&mut self, next_sample: u64) {
         self.activation = next_sample;
         self.generation = self.generation.saturating_add(1);
         self.reset(true);
@@ -940,9 +974,204 @@ impl MeterDelivery {
         self.pop_output_windows(discard);
         self.tables.frame.generation = self.generation;
         self.align(next_sample);
+    }
+}
+
+/// The one meter level word of a session whose meter delivery serves two clients (#1588 D1): the
+/// low-latency meter lease ([`Self::LEASE`]) and the protocol's meter table ([`Self::TELEMETRY`]).
+/// Each client sets or clears its own bit from its own thread; only the delivery's owner reads
+/// the word, once per poll, and the level is on while any bit is set. A clone shares the word.
+#[derive(Clone, Debug, Default)]
+pub struct MeterLevel(Arc<AtomicU32>);
+
+impl MeterLevel {
+    /// The bit of the low-latency meter lease.
+    pub const LEASE: u32 = 1;
+    /// The bit of a nonempty protocol meter table.
+    pub const TELEMETRY: u32 = 1 << 1;
+
+    /// A word with no client on. Allocates the shared word; call it on a control thread.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set `client`'s bit (`on`) or clear it, leaving the other client's bit as it is.
+    pub fn set(&self, client: u32, on: bool) {
+        if on {
+            self.0.fetch_or(client, Ordering::Release);
+        } else {
+            self.0.fetch_and(!client, Ordering::Release);
+        }
+    }
+
+    /// The clients that are on.
+    #[must_use]
+    pub fn load(&self) -> u32 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// The frames a [`MeterFrameRing`] holds (#1588 D2).
+pub const METER_FRAME_RING_DEPTH: usize = 8;
+
+/// A [`MeterFrameRing`] could not be built: a frame's tables or a queue could not be allocated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeterFrameRingSetupError;
+
+/// The ring that carries a render-half meter delivery's published frames to a control half that
+/// stages them (#1588 D2): [`METER_FRAME_RING_DEPTH`] preallocated frames that circulate between
+/// two bounded SPSC queues, the free frames (control to render) and the published ones (render to
+/// control), so a push copies a frame's elements into a free frame and nothing allocates or frees
+/// after [`Self::new`]. A push that finds no free frame drops the frame and counts it.
+pub struct MeterFrameRing {
+    /// The render half, which the delivery's owner pushes each published frame into.
+    pub producer: MeterFrameProducer,
+    /// The control half, which stages the frames in order.
+    pub consumer: MeterFrameConsumer,
+}
+
+/// The render half of a [`MeterFrameRing`].
+pub struct MeterFrameProducer {
+    /// The strips of every ring frame.
+    strips: usize,
+    free: Consumer<Box<MeterFrame>>,
+    published: Producer<Box<MeterFrame>>,
+    dropped: Arc<AtomicU64>,
+}
+
+/// The control half of a [`MeterFrameRing`].
+pub struct MeterFrameConsumer {
+    published: Consumer<Box<MeterFrame>>,
+    free: Producer<Box<MeterFrame>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl MeterFrameRing {
+    /// A ring of frames of `strip_count` strips: the most strips a plan of the delivery can have,
+    /// so no swap reallocates it. Allocates; call it on a control thread.
+    ///
+    /// # Errors
+    ///
+    /// [`MeterFrameRingSetupError`] when a frame or a queue cannot be allocated.
+    pub fn new(strip_count: usize) -> Result<Self, MeterFrameRingSetupError> {
+        let depth = NonZeroUsize::new(METER_FRAME_RING_DEPTH).unwrap_or(NonZeroUsize::MIN);
+        let (mut free_producer, free_consumer) =
+            bounded_spsc_move(depth, QueueGeneration(0)).map_err(|_| MeterFrameRingSetupError)?;
+        let (published_producer, published_consumer) =
+            bounded_spsc_move(depth, QueueGeneration(0)).map_err(|_| MeterFrameRingSetupError)?;
+        for _ in 0..METER_FRAME_RING_DEPTH {
+            let frame = MeterFrame::new(strip_count).map_err(|_| MeterFrameRingSetupError)?;
+            free_producer
+                .try_push(Box::new(frame))
+                .map_err(|_| MeterFrameRingSetupError)?;
+        }
+        let dropped = Arc::new(AtomicU64::new(0));
+        Ok(Self {
+            producer: MeterFrameProducer {
+                strips: strip_count,
+                free: free_consumer,
+                published: published_producer,
+                dropped: Arc::clone(&dropped),
+            },
+            consumer: MeterFrameConsumer {
+                published: published_consumer,
+                free: free_producer,
+                dropped,
+            },
+        })
+    }
+
+    /// The heap bytes [`Self::new`] allocates for `strip_count` strips, so an owner charges them:
+    /// the frames and their tables, the two queues' headers and slots, and the shared drop count.
+    /// `None` on overflow.
+    #[must_use]
+    pub fn heap_bytes(strip_count: usize) -> Option<usize> {
+        let depth = NonZeroUsize::new(METER_FRAME_RING_DEPTH)?;
+        let queue = bounded_spsc_retained_payload::<Box<MeterFrame>>(depth).ok()?;
+        let queue_bytes = queue
+            .ring_header_bytes
+            .checked_add(queue.slot_payload_bytes)?;
+        let strip_bytes = size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>();
+        let frame_bytes = strip_count
+            .checked_mul(strip_bytes)?
+            .checked_add(size_of::<MeterFrame>())?;
+        frame_bytes
+            .checked_mul(METER_FRAME_RING_DEPTH)?
+            .checked_add(queue_bytes.checked_mul(2)?)?
+            .checked_add(3 * size_of::<u64>())
+    }
+}
+
+impl MeterFrameConsumer {
+    /// The oldest published frame the control half has not released, if any.
+    #[must_use]
+    pub fn peek(&self) -> Option<&MeterFrame> {
+        self.published.peek(0).map(|frame| &**frame)
+    }
+
+    /// Release the oldest published frame back to the render half. Does nothing on an empty
+    /// ring. Allocation-free.
+    pub fn release(&mut self) {
+        if let Ok(frame) = self.published.try_pop() {
+            // The free queue holds every frame the published queue does not, so it has room.
+            let _ = self.free.try_push(frame);
+        }
+    }
+
+    /// The frames a push dropped because no frame was free: monotone, never reset.
+    #[must_use]
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped.load(Ordering::Acquire)
+    }
+}
+
+// REALTIME_POLICY_BEGIN: #1588 D2, the meter frame ring's render half.
+impl MeterFrameProducer {
+    /// Copy `frame` into a free frame and publish it (#1588 D2): every field and every strip
+    /// table element, by element. A ring frame has the ring's strip count; strips past `frame`'s
+    /// read as absent (zero peaks, no gain reduction). A frame with more strips than the ring's,
+    /// or a ring with no free frame, drops `frame` and counts it ([`MeterFrameConsumer::
+    /// dropped_frames`]); returns whether `frame` was published. Allocation-free, bounded by the
+    /// ring's strip count.
+    pub fn push(&mut self, frame: &MeterFrame) -> bool {
+        let fits = frame.strip_peaks.len() <= self.strips;
+        let slot = if fits { self.free.try_pop().ok() } else { None };
+        let Some(mut slot) = slot else {
+            self.dropped.fetch_add(1, Ordering::Release);
+            return false;
+        };
+        copy_frame(&mut slot, frame);
+        // The published queue holds every frame the free queue does not, so it has room.
+        let _ = self.published.try_push(slot);
         true
     }
 }
+
+fn copy_frame(into: &mut MeterFrame, from: &MeterFrame) {
+    into.first_sample = from.first_sample;
+    into.end_sample = from.end_sample;
+    into.windows = from.windows;
+    into.sequence = from.sequence;
+    into.generation = from.generation;
+    into.plan_epoch = from.plan_epoch;
+    into.validity = from.validity;
+    into.loss_count = from.loss_count;
+    into.output_peak = from.output_peak;
+    let mut peaks = from.strip_peaks.iter();
+    for slot in &mut into.strip_peaks {
+        *slot = peaks.next().copied().unwrap_or([0.0; 2]);
+    }
+    let mut reductions = from.strip_gain_reduction_db.iter();
+    for slot in &mut into.strip_gain_reduction_db {
+        *slot = reductions.next().copied().unwrap_or(0.0);
+    }
+    let mut present = from.strip_gain_reduction_present.iter();
+    for slot in &mut into.strip_gain_reduction_present {
+        *slot = present.next().copied().unwrap_or(false);
+    }
+}
+// REALTIME_POLICY_END
 
 /// The rendering plan's strip meter consumers, as [`MeterDelivery::poll`] borrows them. A field
 /// place, because the realtime policy's per-queue drain form names its queue collection as one.

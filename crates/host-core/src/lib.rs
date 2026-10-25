@@ -160,10 +160,11 @@ pub use live_delta::{
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use live_delta::{take_fast_classification_count, take_lowered_owner_count};
 pub use meters::{
-    GainReductionTaps, METER_QUEUE_DEPTH, MeterCarry, MeterDelivery, MeterFrame, MeterTables,
-    MeterValidity, OutputPeakGate, OutputPeakObserver, OutputPeakReader, OutputPeakWindow, TapView,
-    default_meter_window_blocks, fold_gain_reduction, meter_selection, output_peak_meter,
-    output_peak_queue_payload,
+    GainReductionTaps, METER_FRAME_RING_DEPTH, METER_QUEUE_DEPTH, MeterCarry, MeterDelivery,
+    MeterFrame, MeterFrameConsumer, MeterFrameProducer, MeterFrameRing, MeterFrameRingSetupError,
+    MeterLevel, MeterTables, MeterValidity, OutputPeakGate, OutputPeakObserver, OutputPeakReader,
+    OutputPeakWindow, TapView, default_meter_window_blocks, fold_gain_reduction, meter_selection,
+    output_peak_meter, output_peak_queue_payload,
 };
 pub use prepare::{
     GraphJumpLengthProducer, GraphJumpLengths, HostLiveControlHandles, HostLiveControlRequest,

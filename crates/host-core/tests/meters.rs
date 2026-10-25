@@ -445,3 +445,73 @@ fn a_level_off_shuts_the_output_gate() {
     observer.observe(&block, &block, QUANTUM, 2 * QUANTUM);
     assert_eq!(delivery.output_windows_queued(), 0, "the gate is shut");
 }
+
+/// #1588 gate 4. A ring with no free frame drops the newest frame and counts it, and the frames
+/// it kept come out in order, element for element as they were pushed.
+///
+/// Test value: red if a full ring drops a frame without counting it (the browser's lost-window
+/// counter would then miss windows that never reached a batch), or overwrites a frame the control
+/// half has not released.
+#[test]
+fn a_full_meter_frame_ring_drops_the_newest_frame_and_counts_it() {
+    const STRIPS: usize = 3;
+    let host_core::MeterFrameRing {
+        mut producer,
+        mut consumer,
+    } = host_core::MeterFrameRing::new(STRIPS).expect("ring");
+    let frame = |sequence: u64| {
+        let mut frame = host_core::MeterFrame::new(STRIPS).expect("frame");
+        frame.sequence = sequence;
+        frame.first_sample = sequence * 256;
+        frame.end_sample = (sequence + 1) * 256;
+        frame.plan_epoch = 4;
+        frame.validity = host_core::MeterValidity::COMPLETE;
+        frame.output_peak = [0.5, 0.25];
+        for (strip, peak) in frame.strip_peaks.iter_mut().enumerate() {
+            *peak = [sequence as f32, strip as f32];
+        }
+        frame.strip_gain_reduction_db[1] = 3.0;
+        frame.strip_gain_reduction_present[1] = true;
+        frame
+    };
+    let pushed: Vec<bool> = (1..=host_core::METER_FRAME_RING_DEPTH as u64 + 1)
+        .map(|sequence| producer.push(&frame(sequence)))
+        .collect();
+    assert_eq!(pushed.iter().filter(|kept| !**kept).count(), 1);
+    assert!(
+        !pushed[host_core::METER_FRAME_RING_DEPTH],
+        "the ninth frame is the one dropped"
+    );
+    assert_eq!(consumer.dropped_frames(), 1);
+    for sequence in 1..=host_core::METER_FRAME_RING_DEPTH as u64 {
+        assert_eq!(consumer.peek(), Some(&frame(sequence)), "frame {sequence}");
+        consumer.release();
+    }
+    assert_eq!(consumer.peek(), None);
+    assert!(producer.push(&frame(10)), "a released frame is free again");
+    assert_eq!(consumer.dropped_frames(), 1);
+}
+
+/// #1588 D1, R3. A restart while the level stays on begins a new generation and opens the output
+/// gate at the grid's first boundary at or after the restart; with the level off it does nothing.
+///
+/// Test value: red if a restart keeps the generation (the batch fold would then join windows
+/// across one client's change of the shared level) or leaves the gate on the old activation.
+#[test]
+fn a_restart_begins_a_new_generation_on_the_next_grid_boundary() {
+    const WINDOW: u64 = 256;
+    let (_observer, reader, gate) =
+        host_core::output_peak_meter(core::num::NonZeroU32::new(256).expect("window"))
+            .expect("output meter");
+    let tables = host_core::MeterTables::new(0, 0).expect("tables");
+    let mut delivery = host_core::MeterDelivery::new(reader, gate, WINDOW, tables);
+    assert!(!delivery.restart(0), "a level that is off does not restart");
+    assert_eq!(delivery.generation(), 0);
+    assert!(delivery.set_level(true, 0));
+    assert_eq!((delivery.generation(), delivery.output_gate_from()), (1, 0));
+    assert!(delivery.restart(300));
+    assert!(delivery.level());
+    assert_eq!(delivery.generation(), 2);
+    assert_eq!(delivery.frame().generation, 2);
+    assert_eq!(delivery.output_gate_from(), 2 * WINDOW);
+}
