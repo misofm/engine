@@ -3372,8 +3372,7 @@ where
     }
 
     /// Makes the next transition re-preparation across a donor refuse after its preparation, as
-    /// a defect would, and marks the refusal injected, so #1397 D2 step 3's debug assertion does
-    /// not fire for it (#1397 deliverable 3). Taken once, by that re-preparation on this thread.
+    /// a defect would (#1397 deliverable 3). Taken once, by that re-preparation on this thread.
     #[cfg(feature = "test-support")]
     pub fn test_refuse_next_reprepare(&mut self) {
         let _ = self;
@@ -5102,9 +5101,8 @@ where
     /// peak (#1398 D4, #1403).
     ///
     /// **A refused re-preparation is a defect (D2 step 3).** W is republished whole, its record is
-    /// set again unchanged, `transition_reprepare_refusals` rises, and a debug assertion fires
-    /// unless the refusal was injected (`test_refuse_next_reprepare`). W's revision stays pending
-    /// and the next step retries. **Acked-batch question (D4): can an ack ever precede a drop?
+    /// set again unchanged and `transition_reprepare_refusals` rises (counted, not asserted: root
+    /// ruling on #1358). W's revision stays pending and the next step retries. **Acked-batch question (D4): can an ack ever precede a drop?
     /// No:** W drops only after its replacement is prepared from the committed model, which holds
     /// every acked edit, and its rings move by a donation checked before anything is published.
     #[cfg_attr(
@@ -5151,8 +5149,6 @@ where
         }
         #[cfg(feature = "test-support")]
         let injected = TEST_REFUSE_REPREPARE.with(|state| state.replace(false));
-        #[cfg(not(feature = "test-support"))]
-        let injected = false;
         let result = self.rebuild(
             Rebuild::Transition {
                 model,
@@ -5166,7 +5162,7 @@ where
         );
         match result {
             Ok(_) => Ok(TransitionStep::Published),
-            Err(error) => {
+            Err(_) => {
                 if let Some(candidate) = withdrawn.take() {
                     self.publisher.republish(candidate);
                     #[cfg(feature = "test-support")]
@@ -5174,12 +5170,10 @@ where
                 }
                 // W's record stays: the withdrawal of the epoch it names keeps it.
                 debug_assert_eq!(self.primed, Some(record));
+                // Root ruling (#1358): a refusal is counted, never asserted, since a real one
+                // reaches this path once the deadline step is wired (#1360).
                 self.transition_reprepare_refusals =
                     self.transition_reprepare_refusals.saturating_add(1);
-                debug_assert!(
-                    injected,
-                    "#1397 D2 step 3: a transition re-preparation was refused: {error:?}"
-                );
                 Ok(TransitionStep::Refused)
             }
         }
@@ -9003,12 +8997,15 @@ mod tests {
                                 },
                             ) {
                                 Ok(_) => *next += QUANTUM,
-                                // A ring no plan reads yet (a pending candidate's added source)
-                                // fills: the chunk is refused, not taken, and offered again at
-                                // the next block.
+                                // A source added after boot (W's `c-source`) queues from its
+                                // frame 0 while W waits, so its ring fills before any plan reads
+                                // it and stays full once one does (its consumer starts at that
+                                // backlog, behind the shared read clock): the chunk is refused,
+                                // not taken, and offered again at the next block. A full ring of a
+                                // source every plan carries from boot is a defect.
                                 Err(SourceFailure::Control(SourceControlError::Chunk(
                                     ::source::HostChunkError::Full { .. },
-                                ))) => break,
+                                ))) if !matches!(*id, SOURCE | AUX | UNUSED) => break,
                                 Err(error) => panic!("{id} at {next}: {error:?}"),
                             }
                         }
@@ -9643,8 +9640,8 @@ mod tests {
         ///
         /// Test value: a deadline that never fires leaves the edit pending forever; one counted
         /// from publication instead of `not_before` (second arm), one quantum short, or one taken
-        /// as the stall ring (7,296) fires at the wrong call; one counted in control calls or wall
-        /// time falls back on a paused host.
+        /// as the stall ring (7,296) fires at the wrong call; one counted in control calls falls
+        /// back on a paused host (no wall-clock sleep: scope note R2 refuses one).
         #[test]
         fn a_warm_candidate_not_ready_by_its_deadline_takes_the_transition() {
             for ducks in [false, true] {
@@ -9761,9 +9758,9 @@ mod tests {
         /// withdraws W and publishes the transition, which completes W's revision as
         /// `TRANSITION_FALLBACK`.
         ///
-        /// Test value: an unkeyed step, or a record kept across the supersession, withdraws B at
-        /// W's deadline and loses its `S`; a record dropped on the refused supersession leaves W
-        /// pending forever, since the step runs only while a record exists.
+        /// Test value: an unkeyed step together with a record kept across the supersession
+        /// withdraws B at W's deadline and loses its `S`; a record dropped on the refused
+        /// supersession leaves W pending forever, since the step runs only while a record exists.
         #[test]
         fn a_superseded_candidates_deadline_is_not_used() {
             let mut slow = session_a();

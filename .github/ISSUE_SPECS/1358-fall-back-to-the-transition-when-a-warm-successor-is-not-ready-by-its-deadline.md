@@ -60,15 +60,19 @@ A latency-growing edit always completes, and the host always learns how.
 - **D2. Ring headroom.** Moved to *Grow the default source ring by the warm-prime headroom* (#1406)
   D2 in round 6, with every pin of the ring rule.
 - **D3. The deadline step.** A new host-core function
-  `check_prime_deadline(publisher, pending: &PrimedCandidate) -> DeadlineStep`. The control plane
-  runs it once per control call while it holds a #1403 record (#1360 D2 for the C ABI, #1361 for
-  the browser).
+  `check_prime_deadline(publisher, newest_epoch, pending: &PrimedCandidate, fs, q) ->
+  DeadlineStep { Pending, Stale, Due }` decides and acts on nothing. The control plane runs it
+  once per control call while it holds a #1403 record (#1360 D2 for the C ABI, #1361 for the
+  browser), and runs a `Due` step's one withdrawal through its own `withdraw_pending_candidate`,
+  which stays the only withdrawal path (it also promotes a candidate render took, batch 15a M1).
+  #1360 and #1361 call the control plane's step and never call a host-side `withdraw()`.
   - If `pending.epoch` is not the newest epoch the control plane has published, the record is
-    stale: the step drops it and does nothing else. #1403 D4 makes this unreachable; the check
+    stale (`Stale`): the step drops it and does nothing else. #1403 D4 makes this unreachable; the check
     keeps a stale record from ever withdrawing another candidate.
   - If `render_clock() < not_before + prime_deadline_samples`, it returns `Pending` and does
     nothing. A render clock that does not move never passes it.
-  - Otherwise it calls `withdraw()` (#1343 D5):
+  - Otherwise (`Due`) the control plane withdraws once (#1343 D5, through
+    `withdraw_pending_candidate`):
     - `Taken`: render adopted the candidate exactly. The step drops the record and returns
       `Adopted`, and the revision completes `EXACT` through the watermark.
     - `Nothing`: no candidate is pending. The step drops the record and does nothing else.
@@ -126,7 +130,8 @@ A latency-growing edit always completes, and the host always learns how.
    `not_before + prime_deadline_samples - q` publishes nothing. The first control call at or after
    `not_before + prime_deadline_samples` withdraws the candidate and publishes the transition.
    Its adoption reports `TRANSITION_FALLBACK`, and `transition_fallback_count` grows by 1. Until
-   that adoption, the output equals A continued.
+   the step that publishes the transition (which ducks from its publication, #1397), the output
+   equals A continued.
 2. **Render adopts first.** In gate 1's setup, the deadline passes with frames withheld. Then the
    frames are queued and render runs one block, which adopts the candidate, before the next
    control call. That call's `withdraw()` returns `Taken`. It publishes nothing, the revision
@@ -173,8 +178,9 @@ A latency-growing edit always completes, and the host always learns how.
   publication instead of `not_before`, or one quantum short, fires at the earlier call. Red.
 - Gate 2: a step that falls back without withdrawing, or that ignores `Taken`, publishes a second
   swap over an adopted plan. Red.
-- Gate 3: a deadline counted in wall time falls back on a paused host. Red.
-- Gate 4: an unkeyed step, or a record kept across the supersession, withdraws B with W's
+- Gate 3 (folded into gate 1): a deadline counted in control calls falls back on a paused host.
+  Red. A wall-time deadline is not tested: scope note R2 refuses a wall-clock sleep in a test.
+- Gate 4: an unkeyed step together with a record kept across the supersession withdraws B with W's
   deadline, reports it `TRANSITION_FALLBACK` and loses its `S`; a record dropped on the refused
   supersession leaves W pending forever, since the step runs only while a record exists. Red.
 - Gate 5: a refusal that keeps the donor outside the mailbox and drops the record leaves the
@@ -222,11 +228,16 @@ Attempt 1 (2026-10-25, on `main` 19697b5ff, after #1403 and 1397a).
   reaches it, and replaces 1397a's `test_fall_back_to_transition`.
 - Gates (scope note R2): four control-plane tests in `control::tests::warm_successor`. Gate 3
   folds into gate 1 (1,000 steps with render paused publish nothing; no wall-clock sleep). Gate 1
-  runs two arms: `not_before` at the publication clock, and at a duck's `S` past it. Its "output
-  equals A continued" holds up to the step that publishes the transition, which ducks from its
-  publication (#1397). Gate 4's refused supersession sets the effect-state cap one below the held
+  runs two arms: `not_before` at the publication clock, and at a duck's `S` past it. Gate 4's refused supersession sets the effect-state cap one below the held
   sum (B's own effect state is 0). #1397 gate 4's donor test is gate 5 run 1, now through the
-  deadline step. The rig treats a full ring (a pending candidate's added source) as backpressure
-  and offers the chunk again at the next block.
+  deadline step. The rig treats a full ring of a source added after boot (W's `c-source`) as
+  backpressure and offers the chunk again at the next block; a full ring of a boot source still
+  fails the test. The narrower "no running plan reads it" condition fails gate 5 run 1: the
+  transition reads `c-source` from its frame-0 backlog, behind the shared read clock the rig feeds
+  to, so that ring stays full after its adoption.
+- Root ruling (attempt 1 review): 1397a's `debug_assert!(injected)` on a refused transition
+  re-preparation is removed. Once the step is wired (#1360) a real refusal reaches that path, and
+  the assertion would panic a debug build; the refusal is counted
+  (`transition_reprepare_refusals`), and gate 5 asserts the counter.
 - Acked-batch question: no new queue; the step drops only a record, and every withdrawn candidate
   is the donor of a transition prepared from the committed model or republished whole.
