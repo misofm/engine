@@ -93,6 +93,17 @@ pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
 /// quantum returns zero; callers validate the document before using the answer.
 #[must_use]
 pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
+    stall_ring_frames(sample_rate_hz, quantum_frames)
+}
+
+/// The ring that hides one producer stall (#1354 D1): `ceil(100 ms * fs / quantum)` quanta plus
+/// one quantum held by the consumer and one in the recycle path, a whole number of quanta.
+///
+/// It is the fixed baseline a warm successor's ring headroom is measured against
+/// ([`warm_lead`], D2 step 7), so that check does not move when the default ring grows (#1406
+/// D2). A zero quantum returns zero, and so does a ring above `u32::MAX` frames.
+#[must_use]
+pub const fn stall_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
     if quantum_frames == 0 {
         return 0;
     }
@@ -104,6 +115,96 @@ pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32
     } else {
         frames as u32
     }
+}
+
+/// The largest source-read offset `ΣP` a warm successor may reach, in samples (#1406 D1, written
+/// by #1354a): `4 · ceil_q(L_max(fs))`, with `L_max(fs) = fs / 100 + 6`, the true-peak limiter's
+/// latency (`N + 6` with `N = fs / 100`, `crates/true-peak-limiter`), the largest latency a launch
+/// effect declares. *Record the swap block's cost on the 64-track console* (#1286) D3 item 1 is
+/// the derivation, and its record row measures the adoption block at this value. It is taken at
+/// the session's quantum, so it is a whole number of quanta. A zero quantum returns zero, and so
+/// does a value above `u32::MAX`.
+#[must_use]
+pub const fn p_max_samples(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
+    if quantum_frames == 0 {
+        return 0;
+    }
+    let latency = sample_rate_hz as u64 / 100 + 6;
+    let frames = 4 * latency.div_ceil(quantum_frames as u64) * quantum_frames as u64;
+    if frames > u32::MAX as u64 {
+        0
+    } else {
+        frames as u32
+    }
+}
+
+/// Why a structural edit that grows a carried node's arrival has no warm successor (#1354 D1).
+///
+/// A value, not a refusal: the edit still commits and takes the transition (D5). Distinct from
+/// [`PrepareDiagnostics`], which refuses an edit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WarmUnavailable {
+    /// Every predecessor strip that reaches the output would restart whole: that is the
+    /// transition's audio.
+    Misaligned,
+    /// `ΣP + P` exceeds [`WarmConfig::p_max`], or a carried source ring has fewer than `P + q`
+    /// frames above [`stall_ring_frames`].
+    LeadBound,
+    /// The adoption block's prime would move more than [`WarmConfig::prime_bytes_max`] bytes.
+    PrimeBudget,
+}
+
+/// A warm successor's lead (#1354 D1): every carried node of the successor arrives at exactly its
+/// predecessor arrival plus [`Self::lead_samples`].
+///
+/// Built only by [`warm_lead`]; a host prepares the successor with it through
+/// [`SuccessorBase::warm`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WarmLead {
+    /// `P`, a whole number of quanta. `0` is an ordinary rebuild that duck-swaps
+    /// [`Self::restart_whole`].
+    pub lead_samples: u64,
+    /// The strips the lead restarts whole (every node of the strip), sorted by ID. An added
+    /// strip is never listed.
+    pub restart_whole: Box<[String]>,
+    /// The strips the ordinary successor's carry join restarts (#1354a ruling 2): with
+    /// `restart_whole`, the set `R` the floors are derived from. Sorted.
+    restarted: Box<[Box<str>]>,
+    /// D3's exact byte count.
+    prime_bytes: u64,
+}
+
+impl WarmLead {
+    /// The bytes render writes and reads in the adoption block to prime this lead (#1354 D3):
+    /// `4 · (P · Σ channels(s)` over the carried sources `+ Σ 2 · λ'` over every source-claim
+    /// line of the successor`)`. Exact. No L3 line (an `input`-tap line from a restarted strip,
+    /// #1354b) exists in this slice, so that term is empty.
+    #[must_use]
+    pub const fn prime_bytes(&self) -> u64 {
+        self.prime_bytes
+    }
+}
+
+/// What [`warm_lead`] answers for a structural edit (#1354 D1).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WarmDecision {
+    /// No carried node's arrival grows and nothing restarts whole: today's rebuild.
+    Ordinary,
+    /// A warm successor (or, with `lead_samples == 0`, an ordinary rebuild that restarts the
+    /// listed strips whole).
+    Warm(WarmLead),
+    /// The edit takes the transition.
+    Unavailable(WarmUnavailable),
+}
+
+/// The bounds a warm successor is checked against (#1354 D1). It has no default: every caller
+/// passes both. #1360 builds the production value from [`p_max_samples`] and `PRIME_BYTES_MAX`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WarmConfig {
+    /// The largest `ΣP + P`, in samples.
+    pub p_max: u64,
+    /// The largest [`WarmLead::prime_bytes`].
+    pub prime_bytes_max: u64,
 }
 
 /// How strictly a host constrains the session's external render shape.
@@ -728,6 +829,21 @@ impl PreparedHost {
     pub fn restarted_strips(&self) -> &[Box<str>] {
         self.inventory.restarted_strips()
     }
+
+    /// `P`, how far this plan's carried nodes lead the plan it was prepared to displace (#1354
+    /// D4): its [`WarmLead::lead_samples`] for a warm successor, 0 for every other plan.
+    #[must_use]
+    pub const fn lead_samples(&self) -> u64 {
+        self.inventory.lead_samples
+    }
+
+    /// The bytes this plan's adoption block primes (#1354 D3, [`WarmLead::prime_bytes`]),
+    /// counted over this plan's own compiled lines and carried sources; 0 for a plan that is not
+    /// a warm successor with a lead.
+    #[must_use]
+    pub const fn prime_bytes(&self) -> u64 {
+        self.inventory.prime_bytes
+    }
 }
 
 impl PlanStateInventory {
@@ -911,6 +1027,10 @@ pub struct PlanStateInventory {
     /// first plan allocates it; a successor takes its predecessor's from this row, so every plan of
     /// one session, and every consumer it carries or creates, is fenced by the same object.
     published_generation: PublishedGeneration,
+    /// `P` of a warm successor (#1354 D4), 0 for every other plan. Not inherited.
+    lead_samples: u64,
+    /// The adoption block's prime bytes of a warm successor (#1354 D3), 0 for every other plan.
+    prime_bytes: u64,
 }
 
 /// One fade-in entry of a prepared plan's table (issue #1392 D1): the strip and the entry's index,
@@ -1136,6 +1256,12 @@ impl PlanStateInventory {
         self.delay_lines.len()
     }
 
+    /// Compensation line rows, sorted by edge ID (#1283; read for a strip transition's `C`, #1325).
+    #[must_use]
+    pub fn delay_lines(&self) -> &[graph::GraphDelayLine] {
+        &self.delay_lines
+    }
+
     /// Strip input alignment line rows, one per strip that declares a `delay_samples` (#1284).
     #[must_use]
     pub fn strip_delay_count(&self) -> usize {
@@ -1214,6 +1340,9 @@ impl PlanStateInventory {
             source_read_offset: 0,
             // #1642 B16-R2: the same session.
             published_generation: self.published_generation.clone(),
+
+            lead_samples: 0,
+            prime_bytes: 0,
         }
     }
 
@@ -1252,6 +1381,9 @@ impl PlanStateInventory {
             source_read_offset: 0,
             // A fresh reference: a session of its own.
             published_generation: PublishedGeneration::new(SourceGeneration(1)),
+
+            lead_samples: 0,
+            prime_bytes: 0,
         }
     }
 
@@ -1504,6 +1636,16 @@ pub struct SuccessorBase<'a> {
     /// (`0..=GATE_REVISION_MAX`). Such a successor has no carry retarget to stamp; a preparation
     /// that finds one refuses with `host.successor.monitor`. `false` is the neutral value.
     pub unchanged_revision: bool,
+    /// The lead [`warm_lead`] returned for this edit (#1354 D4): the successor is compiled with
+    /// its floors (every carried node at its predecessor arrival plus `P`, every restarted node at
+    /// its arrival, no floor on an added node), every strip of [`WarmLead::restart_whole`] starts
+    /// its nodes before the fader and its fader at rest and is listed in
+    /// [`PreparedHost::restarted_strips`], and a source-claim line that grew by exactly `P` keeps
+    /// its strip carried (its fill is #1355's). A lead that is not a whole number of quanta is
+    /// refused with `host.successor.warm_lead`; a successor whose join or arrivals differ from
+    /// the lead's is refused with `host.successor.warm_invariant`. `None` is the neutral value: an
+    /// ordinary successor.
+    pub warm: Option<&'a WarmLead>,
 }
 
 impl<'a> SuccessorBase<'a> {
@@ -1527,6 +1669,7 @@ impl<'a> SuccessorBase<'a> {
             observation: &NO_OBSERVATION,
             discontinuity: false,
             unchanged_revision: false,
+            warm: None,
         }
     }
 }
@@ -1565,6 +1708,618 @@ impl MonitorBase<'static> {
         next: &NO_OVERLAY,
         ramp: None,
     };
+}
+
+/// The strips a warm successor restarts, as preparation and [`warm_lead`] read them (#1354a
+/// rulings 1-2): `join`, the ordinary successor's carry join restarts (its nodes before the fader
+/// and its fader, and its routes from a tap before the fader), and `whole`, the strips the lead
+/// restarts whole (every node of the strip).
+struct WarmRestart<'a> {
+    join: BTreeSet<&'a str>,
+    whole: BTreeSet<&'a str>,
+    /// The successor's routes by ID: a route node belongs to its source strip.
+    routes: BTreeMap<&'a str, &'a session::Route>,
+}
+
+impl<'a> WarmRestart<'a> {
+    fn new(
+        model: &'a SessionModel,
+        join: impl IntoIterator<Item = &'a str>,
+        whole: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        Self {
+            join: join.into_iter().collect(),
+            whole: whole.into_iter().collect(),
+            routes: model
+                .routes
+                .iter()
+                .map(|route| (route.id.as_str(), route))
+                .collect(),
+        }
+    }
+
+    /// The strip `node` belongs to, and whether it sits before the strip's fader or is its fader
+    /// (a strip's `PostMatrix` stage and its routes from a `post_fader` or `post_pan` tap do not).
+    /// A route node belongs to its source strip; the output belongs to no strip.
+    fn owner<'n>(&'n self, node: &'n GraphNodeId) -> Option<(&'n str, bool)> {
+        match node {
+            GraphNodeId::TrackStage { track_id, stage } => {
+                Some((track_id.as_str(), *stage != TrackStage::PostMatrix))
+            }
+            GraphNodeId::Effect(effect) => Some((effect.track_id.as_str(), true)),
+            GraphNodeId::Route { route_id } => {
+                let route = self.routes.get(route_id.as_str())?;
+                let (strip, tap) = match &route.source {
+                    session::RouteSource::Track { track_id, tap } => (track_id, *tap),
+                    session::RouteSource::Submix { submix_id, tap } => (submix_id, *tap),
+                };
+                Some((strip.as_str(), tap_before_fader(tap)))
+            }
+            GraphNodeId::Submix { .. }
+            | GraphNodeId::Output { .. }
+            | GraphNodeId::CompensationDelay { .. } => None,
+        }
+    }
+
+    /// Whether `node` is in `R`: a node of a strip restarted whole, or a node before the fader
+    /// (or the fader) of a strip the join restarts.
+    fn restarts(&self, node: &GraphNodeId) -> bool {
+        self.owner(node).is_some_and(|(strip, before_fader)| {
+            self.whole.contains(strip) || (before_fader && self.join.contains(strip))
+        })
+    }
+
+    /// Whether the whole-strip restart filter drops this compensation line's carry (#1354a
+    /// decision 2): a line on a whole-restarted strip's chain before its matrix, into one of its
+    /// effects' sidechains, or on its routes from a tap before the fader. Matrix and post-fader
+    /// lines still carry.
+    fn drops_line(&self, line: &graph::GraphDelayLine) -> bool {
+        let named = |strip: &str| self.whole.contains(strip);
+        match &line.edge {
+            graph::GraphEdgeId::TrackMain { target } => self
+                .owner(target)
+                .is_some_and(|(strip, before_fader)| before_fader && named(strip)),
+            graph::GraphEdgeId::EffectSidechain { effect, .. } => named(effect.track_id.as_str()),
+            graph::GraphEdgeId::RouteSource { route_id }
+            | graph::GraphEdgeId::RouteDestination { route_id } => self
+                .owner(&GraphNodeId::Route {
+                    route_id: route_id.clone(),
+                })
+                .is_some_and(|(strip, before_fader)| before_fader && named(strip)),
+        }
+    }
+}
+
+/// Whether a send tap reads a strip before its fader.
+fn tap_before_fader(tap: session::SendTap) -> bool {
+    !matches!(tap, session::SendTap::PostFader | session::SendTap::PostPan)
+}
+
+/// The graph nodes a plan compiled from `model` has (#1354a): every strip's seven stages and
+/// its effects, every route and every output. The compiler emits no other node kind
+/// (`graph-compiler` `compile_graph`; a compensation line is not a node of the schedule).
+fn session_graph_nodes(model: &SessionModel) -> BTreeSet<GraphNodeId> {
+    const STAGES: [TrackStage; 7] = [
+        TrackStage::Input,
+        TrackStage::PostInputBuiltins,
+        TrackStage::PostSimd1,
+        TrackStage::PostDynamic,
+        TrackStage::PostSimd2PreFader,
+        TrackStage::PostFader,
+        TrackStage::PostMatrix,
+    ];
+    let mut nodes = BTreeSet::new();
+    for strip in model.strips() {
+        let Some(id) = StableGraphId::parse(strip.id.as_str()) else {
+            continue;
+        };
+        for stage in STAGES {
+            nodes.insert(GraphNodeId::TrackStage {
+                track_id: id.clone(),
+                stage,
+            });
+        }
+        let lowered = model.lower_strip(&strip);
+        let racks = [
+            graph::RackId::Simd1,
+            graph::RackId::Dynamic,
+            graph::RackId::Simd2,
+        ];
+        for (rack, effects) in racks.into_iter().zip(lowered.in_chain_order()) {
+            for effect in effects {
+                if let Some(effect_id) = StableGraphId::parse(effect.id.as_str()) {
+                    nodes.insert(GraphNodeId::Effect(graph::EffectNodeId {
+                        track_id: id.clone(),
+                        rack,
+                        effect_id,
+                    }));
+                }
+            }
+        }
+    }
+    for route in &model.routes {
+        if let Some(route_id) = StableGraphId::parse(route.id.as_str()) {
+            nodes.insert(GraphNodeId::Route { route_id });
+        }
+    }
+    for output in &model.outputs {
+        if let Some(output_id) = StableGraphId::parse(output.id.as_str()) {
+            nodes.insert(GraphNodeId::Output { output_id });
+        }
+    }
+    nodes
+}
+
+/// `node`'s row in `rows`, sorted by node ID, else 0: a node absent from an arrival list arrives
+/// at 0.
+fn arrival_in(rows: &[(GraphNodeId, u64)], node: &GraphNodeId) -> u64 {
+    rows.binary_search_by(|(row, _)| row.cmp(node))
+        .map_or(0, |index| rows[index].1)
+}
+
+/// D2 step 5's floors (#1354 D2, D4): `a(n) + lead` on every predecessor node outside `R`,
+/// `a(n)` on every node in `R`, and none on an added node. `a` is the predecessor's floors. A
+/// floor that names no node of the successor is ignored by the compiler.
+fn warm_floors(
+    a: &[(GraphNodeId, u64)],
+    predecessor: &BTreeSet<GraphNodeId>,
+    restart: &WarmRestart<'_>,
+    lead: u64,
+) -> Result<BTreeMap<GraphNodeId, effect_contract::LatencySamples>, PrepareDiagnostics> {
+    let mut floors = BTreeMap::new();
+    for node in predecessor {
+        let arrival = arrival_in(a, node);
+        let floor = if restart.restarts(node) {
+            arrival
+        } else {
+            arrival
+                .checked_add(lead)
+                .ok_or_else(|| resource("host.resource.arithmetic"))?
+        };
+        if floor > 0 {
+            floors.insert(node.clone(), effect_contract::LatencySamples(floor));
+        }
+    }
+    Ok(floors)
+}
+
+/// The builtin caps a preparation compiles with.
+fn builtin_compile_caps(caps: &HostPrepareCaps) -> BuiltinCompileCaps {
+    BuiltinCompileCaps {
+        maximum_total_state_bytes: caps.maximum_builtin_retained_bytes,
+        maximum_total_retained_payload_bytes: caps.maximum_builtin_retained_bytes,
+        maximum_total_meter_items: caps.maximum_meter_items,
+        maximum_total_meter_bytes: caps.maximum_meter_bytes,
+        maximum_single_allocation_bytes: caps.maximum_named_allocation_bytes,
+        maximum_meter_streams: caps.maximum_meter_streams,
+        maximum_period_frames: u32::MAX,
+        maximum_peak_hold_frames: u32::MAX,
+        maximum_smoothing_samples: u32::MAX,
+    }
+}
+
+/// The graph caps a preparation compiles with.
+fn graph_compile_caps(caps: &HostPrepareCaps) -> GraphCompileCaps {
+    GraphCompileCaps {
+        maximum_nodes: u64::MAX,
+        maximum_edges: u64::MAX,
+        maximum_schedule_items: u64::MAX,
+        maximum_dependency_levels: u64::MAX,
+        maximum_audio_buffer_samples: u64::MAX,
+        maximum_delay_samples_per_edge: u64::MAX,
+        maximum_total_delay_samples: u64::MAX,
+        maximum_graph_bytes: caps.maximum_graph_session_plus_plan_bytes,
+        maximum_plan_bytes: caps.maximum_graph_session_plus_plan_bytes,
+        maximum_single_allocation_bytes: caps.maximum_named_allocation_bytes,
+        maximum_finite_tail_samples: u64::MAX,
+    }
+}
+
+fn graph_compile_diagnostics(
+    failure: &graph_compiler::GraphBuiltinsCompileFailure,
+) -> PrepareDiagnostics {
+    PrepareDiagnostics::new(
+        PrepareRejection::Graph,
+        diagnostic_lines(
+            failure
+                .diagnostics
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
+        ),
+    )
+}
+
+/// A compile of `compiled` with `floors` for its arrivals and schedule only (#1354a ruling 1):
+/// no live control, no meter, fixed gains. A node's latency, the graph's edges and its schedule
+/// do not depend on them.
+fn compile_for_arrivals(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    overlay: &controls::MonitorOverlay,
+    floors: BTreeMap<GraphNodeId, effect_contract::LatencySamples>,
+) -> Result<graph_compiler::PreparedGraphBuiltinsArtifact, PrepareDiagnostics> {
+    let registry =
+        launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
+    let effects = prepare_native_session_effects(
+        compiled,
+        registry,
+        EffectCompileCaps {
+            maximum_total_state_bytes: caps.maximum_effect_state_bytes,
+            maximum_scratch_bytes: caps.maximum_effect_scratch_bytes,
+            maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
+        },
+    )
+    .map_err(effect_diagnostics)?;
+    let effective = {
+        let _canonical = lane::CanonicalFpEnv::enter();
+        controls::effective(compiled.normalized_model(), overlay)
+    };
+    let builtins = prepare_session_builtins_with_live_controls(
+        compiled,
+        &effective,
+        &[],
+        &[],
+        builtin_compile_caps(caps),
+    )
+    .map_err(|diagnostics| {
+        PrepareDiagnostics::new(
+            PrepareRejection::Builtin,
+            diagnostic_lines(
+                diagnostics
+                    .0
+                    .iter()
+                    .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
+            ),
+        )
+    })?;
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: Backend::current(),
+        plan_id: 1,
+        effects,
+        builtins,
+        input_floors: floors,
+        caps: graph_compile_caps(caps),
+        gain_liveness: graph_compiler::GainLiveness::FIXED,
+    })
+    .map_err(|failure| graph_compile_diagnostics(&failure))
+}
+
+/// The arrivals a compiled artifact reports, as `(node, samples)` rows sorted by node ID.
+fn artifact_arrivals(
+    artifact: &graph_compiler::PreparedGraphBuiltinsArtifact,
+) -> Vec<(GraphNodeId, u64)> {
+    artifact
+        .report()
+        .input_arrivals
+        .iter()
+        .map(|(node, arrival)| (node.clone(), arrival.0))
+        .collect()
+}
+
+/// The first carried node of `graph`, in its schedule order, whose arrival is not its
+/// predecessor arrival plus `lead` (C1, #1354 D2 step 6), with the arrival it has.
+fn first_late_node<'g>(
+    graph: &'g graph::PreparedGraphPlan,
+    arrivals: &[(GraphNodeId, u64)],
+    a: &[(GraphNodeId, u64)],
+    predecessor: &BTreeSet<GraphNodeId>,
+    restart: &WarmRestart<'_>,
+    lead: u64,
+) -> Option<&'g GraphNodeId> {
+    graph.sequential_schedule.iter().find(|node| {
+        predecessor.contains(*node)
+            && !restart.restarts(node)
+            && arrival_in(arrivals, node) != arrival_in(a, node).saturating_add(lead)
+    })
+}
+
+/// The invariant error of a warm successor (#1354 D2 step 6, D4).
+fn warm_invariant() -> PrepareDiagnostics {
+    PrepareDiagnostics::fixed(PrepareRejection::Graph, "host.successor.warm_invariant")
+}
+
+/// The source rings a successor of `base` carries under #1272 D3, with the channels of each: the
+/// ID is in both models, the declaration is unchanged and the ring the successor would allocate
+/// at `caps` is the one the predecessor renders from.
+fn carried_rings<'b>(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    base: &SuccessorBase<'b>,
+) -> Vec<(&'b SourceInventoryRow, u32)> {
+    compiled
+        .normalized_model()
+        .sources
+        .iter()
+        .filter_map(|source| {
+            let ring = source_ring_config(compiled, caps, source);
+            let row = base.inventory.source(source.id.as_str())?;
+            let committed = base
+                .committed
+                .sources
+                .iter()
+                .find(|committed| committed.id == source.id)?;
+            source_carries(row, committed, source, ring).then_some((row, ring.channel_count))
+        })
+        .collect()
+}
+
+/// The ring a preparation at `caps` allocates for `source`.
+fn source_ring_config(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    source: &session::Source,
+) -> PcmSourceRingConfig {
+    PcmSourceRingConfig {
+        channel_count: u32::from(source.channels),
+        quantum_frames: compiled.quantum(),
+        frame_capacity: u64::from(caps.source_ring_frames),
+        initial_generation: SourceGeneration(1),
+    }
+}
+
+/// The #1272 D3 carry rule for a source present in both models: its declaration is unchanged
+/// (`committed` against `source`) and `ring`, the ring the successor would allocate, is the one
+/// the predecessor's `row` renders from.
+fn source_carries(
+    row: &SourceInventoryRow,
+    committed: &session::Source,
+    source: &session::Source,
+    ring: PcmSourceRingConfig,
+) -> bool {
+    *committed == *source && row.ring == ring
+}
+
+/// D3's prime byte count: `4 · (lead · channels + Σ 2 · λ')` over `lines`, `None` on overflow.
+fn prime_bytes_of(lead: u64, channels: u64, lines: &[graph::SourceClaimLine]) -> Option<u64> {
+    let lines = lines.iter().try_fold(0_u64, |total, line| {
+        total.checked_add(line.samples.0.checked_mul(2)?)
+    })?;
+    lead.checked_mul(channels)?
+        .checked_add(lines)?
+        .checked_mul(4)
+}
+
+/// Whether `compiled`, a structural edit of the plan `base` describes, gets a warm successor
+/// (#1354 D2): the only place `P` is computed. Control thread only; it compiles the successor's
+/// graph once per pass and changes no queue (D5).
+///
+/// `ordinary` is the inventory of the ordinary successor of `base` prepared from `compiled` with
+/// the host's own entry (#1354a ruling 1): its [`PlanStateInventory::restarted_strips`] is `R`'s
+/// join part and its [`PlanStateInventory::input_floors`] are step 3's arrivals. A host prepares it
+/// anyway, as the answer to [`WarmDecision::Ordinary`].
+///
+/// At a declared discontinuity nothing leads, so the answer is [`WarmDecision::Ordinary`].
+///
+/// **Limits of this slice (#1354b).** Step 2's sidechain closure and step 6's submix
+/// `input`-tap rule are not applied: a consumer keyed from a restarted strip's `post_input`,
+/// `insert_send`, `insert_return` or `pre_fader` tap stays carried, and no L3 line is primed.
+///
+/// # Errors
+///
+/// A compile refusal of the successor, or an invariant error when the step-6 walk reaches no
+/// carried node (unreachable by the D2 proof; a debug assertion fires).
+pub fn warm_lead(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    base: SuccessorBase<'_>,
+    ordinary: &PlanStateInventory,
+    config: &WarmConfig,
+) -> Result<WarmDecision, PrepareDiagnostics> {
+    if base.discontinuity {
+        return Ok(WarmDecision::Ordinary);
+    }
+    caps.validate_shape(compiled)?;
+    let _canonical = lane::CanonicalFpEnv::enter();
+    let quantum = u64::from(compiled.quantum().0);
+    let model = compiled.normalized_model();
+    let predecessor = session_graph_nodes(base.committed);
+    let a = base.inventory.input_floors();
+    let ordinary_arrivals = ordinary.input_floors();
+    let predecessor_strips: BTreeSet<&str> = base
+        .committed
+        .strips()
+        .map(|strip| strip.id.as_str())
+        .collect();
+    let mut whole: BTreeSet<&str> = BTreeSet::new();
+    // Each pass adds a strip to `whole` or returns, so the loop ends within the strip count.
+    let passes = predecessor_strips.len() + 1;
+    let mut found = None;
+    for _ in 0..passes {
+        let restart = WarmRestart::new(
+            model,
+            ordinary.restarted_strips().iter().map(|id| &**id),
+            whole.iter().copied(),
+        );
+        // Step 3: `Δ` over C, from the ordinary successor's arrivals.
+        let delta = predecessor
+            .iter()
+            .filter(|node| !restart.restarts(node))
+            .map(|node| arrival_in(ordinary_arrivals, node).saturating_sub(arrival_in(a, node)))
+            .max()
+            .unwrap_or(0);
+        // Step 4.
+        if delta == 0 {
+            return Ok(if whole.is_empty() {
+                WarmDecision::Ordinary
+            } else {
+                WarmDecision::Warm(WarmLead {
+                    lead_samples: 0,
+                    restart_whole: whole.iter().map(|id| (*id).to_owned()).collect(),
+                    restarted: ordinary.restarted_strips().into(),
+                    prime_bytes: 0,
+                })
+            });
+        }
+        // Step 5.
+        let lead = delta
+            .div_ceil(quantum)
+            .checked_mul(quantum)
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
+        let floors = warm_floors(a, &predecessor, &restart, lead)?;
+        let artifact = compile_for_arrivals(compiled, caps, base.monitor.next, floors)?;
+        let arrivals = artifact_arrivals(&artifact);
+        let graph = artifact.graph();
+        // Step 6, C1.
+        let Some(late) = first_late_node(graph, &arrivals, a, &predecessor, &restart, lead) else {
+            found = Some((lead, artifact));
+            break;
+        };
+        let reached = walk_back(
+            graph,
+            &arrivals,
+            late,
+            arrival_in(a, late) + lead,
+            &predecessor,
+            &restart,
+        );
+        let added: Vec<&str> = reached
+            .into_iter()
+            .filter(|strip| !whole.contains(strip.as_str()))
+            .filter_map(|strip| predecessor_strips.get(strip.as_str()).copied())
+            .collect();
+        if added.is_empty() {
+            debug_assert!(
+                false,
+                "#1354 D2 step 6: the walk from {late:?} reaches no carried node"
+            );
+            return Err(warm_invariant());
+        }
+        whole.extend(added);
+        // Misaligned: every predecessor strip that reaches the output restarts whole.
+        let reaching = strips_reaching_output(graph, &restart);
+        let reaching: Vec<&str> = reaching
+            .into_iter()
+            .filter_map(|strip| predecessor_strips.get(strip).copied())
+            .collect();
+        if !reaching.is_empty() && reaching.iter().all(|strip| whole.contains(strip)) {
+            return Ok(WarmDecision::Unavailable(WarmUnavailable::Misaligned));
+        }
+    }
+    let Some((lead, artifact)) = found else {
+        debug_assert!(false, "#1354 D2: the walk ends within the strip count");
+        return Err(warm_invariant());
+    };
+    // Step 7, C3: the lead.
+    if base
+        .inventory
+        .source_read_offset()
+        .checked_add(lead)
+        .is_none_or(|total| total > config.p_max)
+    {
+        return Ok(WarmDecision::Unavailable(WarmUnavailable::LeadBound));
+    }
+    let stall = u64::from(stall_ring_frames(
+        compiled.sample_rate().0,
+        compiled.quantum().0,
+    ));
+    let rings = carried_rings(compiled, caps, &base);
+    if rings
+        .iter()
+        .any(|(row, _)| row.ring.frame_capacity.saturating_sub(stall) < lead + quantum)
+    {
+        return Ok(WarmDecision::Unavailable(WarmUnavailable::LeadBound));
+    }
+    // Step 8, C3: the prime.
+    let channels = rings.iter().map(|(_, channels)| u64::from(*channels)).sum();
+    let prime_bytes = prime_bytes_of(lead, channels, artifact.graph().source_claim_lines())
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    if prime_bytes > config.prime_bytes_max {
+        return Ok(WarmDecision::Unavailable(WarmUnavailable::PrimeBudget));
+    }
+    // Step 9.
+    Ok(WarmDecision::Warm(WarmLead {
+        lead_samples: lead,
+        restart_whole: whole.iter().map(|id| (*id).to_owned()).collect(),
+        restarted: ordinary.restarted_strips().into(),
+        prime_bytes,
+    }))
+}
+
+/// D2 step 6's walk from the late carried node `late`, whose lead arrival is `target`: back from
+/// each input of `late` that arrives after `target`, through restarted and added nodes only,
+/// along every edge kind (chain, route and sidechain), following from each such node the inputs
+/// that hold its arrival. Returns the strips of the carried nodes it reaches (a route node counts
+/// as its source strip).
+fn walk_back<'g>(
+    graph: &'g graph::PreparedGraphPlan,
+    arrivals: &[(GraphNodeId, u64)],
+    late: &'g GraphNodeId,
+    target: u64,
+    predecessor: &BTreeSet<GraphNodeId>,
+    restart: &WarmRestart<'_>,
+) -> BTreeSet<String> {
+    let latency: BTreeMap<&GraphNodeId, u64> = graph
+        .spec
+        .nodes
+        .iter()
+        .map(|node| (&node.id, node.latency.0))
+        .collect();
+    let leaves = |node: &GraphNodeId| {
+        arrival_in(arrivals, node).saturating_add(latency.get(node).copied().unwrap_or(0))
+    };
+    let mut incoming: BTreeMap<&GraphNodeId, Vec<&'g GraphNodeId>> = BTreeMap::new();
+    for edge in &graph.spec.edges {
+        incoming
+            .entry(&edge.destination.node)
+            .or_default()
+            .push(&edge.source.node);
+    }
+    let inputs = |node: &GraphNodeId| incoming.get(node).cloned().unwrap_or_default();
+    let mut reached = BTreeSet::new();
+    let mut visited: BTreeSet<&GraphNodeId> = BTreeSet::new();
+    let mut stack: Vec<&GraphNodeId> = Vec::new();
+    let mut visit = |node: &'g GraphNodeId, stack: &mut Vec<&'g GraphNodeId>| {
+        if predecessor.contains(node) && !restart.restarts(node) {
+            if let Some((strip, _)) = restart.owner(node) {
+                reached.insert(strip.to_owned());
+            }
+        } else if visited.insert(node) {
+            stack.push(node);
+        }
+    };
+    for input in inputs(late) {
+        if leaves(input) > target {
+            visit(input, &mut stack);
+        }
+    }
+    while let Some(node) = stack.pop() {
+        let arrival = arrival_in(arrivals, node);
+        for input in inputs(node) {
+            if leaves(input) == arrival {
+                visit(input, &mut stack);
+            }
+        }
+    }
+    reached
+}
+
+/// The strips with a node from which the output is reachable in `graph`.
+fn strips_reaching_output<'g>(
+    graph: &'g graph::PreparedGraphPlan,
+    restart: &'g WarmRestart<'_>,
+) -> BTreeSet<&'g str> {
+    let mut reaches: BTreeSet<&GraphNodeId> = graph
+        .spec
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.id, GraphNodeId::Output { .. }))
+        .map(|node| &node.id)
+        .collect();
+    for node in graph.sequential_schedule.iter().rev() {
+        if graph
+            .spec
+            .edges
+            .iter()
+            .any(|edge| edge.source.node == *node && reaches.contains(&edge.destination.node))
+        {
+            reaches.insert(node);
+        }
+    }
+    reaches
+        .into_iter()
+        .filter_map(|node| restart.owner(node).map(|(strip, _)| strip))
+        .collect()
 }
 
 impl core::fmt::Debug for PreparedHost {
@@ -2133,6 +2888,39 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         Some(inventory) => SuccessorBase { inventory, ..base },
         None => base,
     });
+    // #1354 D4: a warm successor's lead is a whole number of quanta, and a declared discontinuity
+    // has no lead. Checked before this preparation allocates anything.
+    let warm = successor.and_then(|base| base.warm);
+    if successor.is_some_and(|base| {
+        base.warm.is_some_and(|lead| {
+            base.discontinuity
+                || !lead
+                    .lead_samples
+                    .is_multiple_of(u64::from(compiled.quantum().0.max(1)))
+        })
+    }) {
+        return Err(PrepareDiagnostics::fixed(
+            PrepareRejection::Session,
+            "host.successor.warm_lead",
+        ));
+    }
+    // #1354a rulings 1-2: the restart set the lead's floors were derived from, and the nodes of
+    // the predecessor's graph.
+    let warm_restart = warm.map(|lead| {
+        WarmRestart::new(
+            compiled.normalized_model(),
+            lead.restarted.iter().map(|id| &**id),
+            lead.restart_whole.iter().map(String::as_str),
+        )
+    });
+    let warm_predecessor = successor
+        .filter(|_| warm.is_some())
+        .map(|base| session_graph_nodes(base.committed));
+    let restarts_whole = |id: &str| {
+        warm_restart
+            .as_ref()
+            .is_some_and(|restart| restart.whole.contains(id))
+    };
     // #1312 D2: the session's count when the host passed one, else this preparation's own, which
     // the handles hand back. Made before any observed allocation of the preparation.
     let live_superseded = superseded.cloned().unwrap_or_default();
@@ -2196,18 +2984,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let mut carried_largest_bytes = 0_u64;
     for (index, source) in model.sources.iter().enumerate() {
         let index = u32::try_from(index).map_err(|_| platform("host.count"))?;
-        let ring = PcmSourceRingConfig {
-            channel_count: u32::from(source.channels),
-            quantum_frames: compiled.quantum(),
-            frame_capacity: u64::from(caps.source_ring_frames),
-            initial_generation: SourceGeneration(1),
-        };
+        let ring = source_ring_config(compiled, caps, source);
         // Issue #1272 D3: carry when the ID is in both models, the declaration is unchanged and
         // the ring the successor would allocate is the one the predecessor renders from.
         let carried_from = successor.and_then(|base| {
             let row = base.inventory.source(source.id.as_str())?;
             let committed = committed_sources.get(source.id.as_str())?;
-            (**committed == *source && row.ring == ring).then_some(row.index)
+            source_carries(row, committed, source, ring).then_some(row.index)
         });
         if let Some(predecessor_index) = carried_from {
             // D4: no ring here; the single-plan caps below count the carried one.
@@ -2253,6 +3036,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             index,
         });
     }
+    // #1354 D3: the channels of the carried sources a warm successor's prime replays.
+    let carried_channels: u64 = carried_sources
+        .iter()
+        .map(|&(index, _)| u64::from(model.sources[index as usize].channels))
+        .sum();
     // Issue #1276 D1, #1630 D1: the strip input sections that carry, with the predecessor lane
     // each one copies from and the records that retarget it. Every strip of this plan attaches
     // the same control kind.
@@ -2313,6 +3101,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                         retarget,
                     })
                 })
+                // #1354a decision 2: a strip restarted whole starts its input section at rest.
+                .filter(|join| !restarts_whole(join.id))
                 .collect()
         }
     };
@@ -2371,7 +3161,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // bound.
     let chain_joins: Vec<ChainJoin<'_>> = match successor {
         None => Vec::new(),
-        Some(base) => join_chains(base.committed, model),
+        // #1354a decision 2: a strip restarted whole starts its effects at rest.
+        Some(base) => join_chains(base.committed, model)
+            .into_iter()
+            .filter(|join| !restarts_whole(join.id))
+            .collect(),
     };
     // The hand-over the successor runs at its swap block, built here so the plan charge below
     // counts it; installed after bind.
@@ -2588,6 +3382,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     effect_id: binding.key.section.id().as_str(),
                     tap_id: binding.key.tap_id,
                     window_blocks: binding.window_blocks,
+                    arm_tag: binding.arm_tag,
                 })
                 .collect();
             attach_effect_observation(&mut effects, taps, observation_window_blocks, &arms)
@@ -2685,17 +3480,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             })
         })
         .collect::<Result<Vec<_>, PrepareDiagnostics>>()?;
-    let builtin_caps = BuiltinCompileCaps {
-        maximum_total_state_bytes: caps.maximum_builtin_retained_bytes,
-        maximum_total_retained_payload_bytes: caps.maximum_builtin_retained_bytes,
-        maximum_total_meter_items: caps.maximum_meter_items,
-        maximum_total_meter_bytes: caps.maximum_meter_bytes,
-        maximum_single_allocation_bytes: caps.maximum_named_allocation_bytes,
-        maximum_meter_streams: caps.maximum_meter_streams,
-        maximum_period_frames: u32::MAX,
-        maximum_peak_hold_frames: u32::MAX,
-        maximum_smoothing_samples: u32::MAX,
-    };
+    let builtin_caps = builtin_compile_caps(caps);
     // Decision 17, C7: every effective value is computed once per preparation, here, under the
     // overlay the successor renders with (#1559 D9); a first plan has no solo.
     // #1646 D2: composed in the canonical floating-point environment, as the builtins
@@ -2798,28 +3583,27 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         builtins,
         // #1285 D2: a successor keeps every surviving node's input arrival; a first plan has no
         // floors. Across a withdrawn candidate the base is P0's inventory, so these are P0's.
-        input_floors: successor
-            .map(|base| {
-                base.inventory
-                    .input_floors
-                    .iter()
-                    .map(|(node, floor)| (node.clone(), effect_contract::LatencySamples(*floor)))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        caps: GraphCompileCaps {
-            maximum_nodes: u64::MAX,
-            maximum_edges: u64::MAX,
-            maximum_schedule_items: u64::MAX,
-            maximum_dependency_levels: u64::MAX,
-            maximum_audio_buffer_samples: u64::MAX,
-            maximum_delay_samples_per_edge: u64::MAX,
-            maximum_total_delay_samples: u64::MAX,
-            maximum_graph_bytes: caps.maximum_graph_session_plus_plan_bytes,
-            maximum_plan_bytes: caps.maximum_graph_session_plus_plan_bytes,
-            maximum_single_allocation_bytes: caps.maximum_named_allocation_bytes,
-            maximum_finite_tail_samples: u64::MAX,
+        // #1354 D4: a warm successor takes the lead's floors instead.
+        input_floors: match (successor, warm, &warm_restart, &warm_predecessor) {
+            (Some(base), Some(lead), Some(restart), Some(predecessor)) => warm_floors(
+                &base.inventory.input_floors,
+                predecessor,
+                restart,
+                lead.lead_samples,
+            )?,
+            _ => successor
+                .map(|base| {
+                    base.inventory
+                        .input_floors
+                        .iter()
+                        .map(|(node, floor)| {
+                            (node.clone(), effect_contract::LatencySamples(*floor))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
+        caps: graph_compile_caps(caps),
         // #1379 Amendment 1 H3: with a control queue every strip's fader, mute and matrix lanes
         // are attached; a route into a submix gets its lane after the compile, when asked.
         gain_liveness: graph_compiler::GainLiveness {
@@ -2827,18 +3611,37 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             routes: attach_live && lanes.routes,
         },
     })
-    .map_err(|failure| {
-        PrepareDiagnostics::new(
-            PrepareRejection::Graph,
-            diagnostic_lines(
-                failure
-                    .diagnostics
-                    .diagnostics()
-                    .iter()
-                    .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
-            ),
-        )
-    })?;
+    .map_err(|failure| graph_compile_diagnostics(&failure))?;
+    // #1354 D4: the warm successor re-checks C1 against its own compile, and counts its prime
+    // over its own source-claim lines (D3).
+    let warm_prime_bytes = match (successor, warm, &warm_restart, &warm_predecessor) {
+        (Some(base), Some(lead), Some(restart), Some(predecessor)) => {
+            let arrivals = artifact_arrivals(&artifact);
+            if first_late_node(
+                artifact.graph(),
+                &arrivals,
+                &base.inventory.input_floors,
+                predecessor,
+                restart,
+                lead.lead_samples,
+            )
+            .is_some()
+            {
+                return Err(warm_invariant());
+            }
+            if lead.lead_samples == 0 {
+                0
+            } else {
+                prime_bytes_of(
+                    lead.lead_samples,
+                    carried_channels,
+                    artifact.graph().source_claim_lines(),
+                )
+                .ok_or_else(|| resource("host.resource.arithmetic"))?
+            }
+        }
+        _ => 0,
+    };
     // Issue #1221 D1: one live lane per route into a submix, attached before bind and before the
     // caps below, so its charge is refused by the same checks as the effect channels. Without a
     // control channel no six-word lane is attached. #1652 D1 (#1652c): a following route gets
@@ -3378,7 +4181,13 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     strip_stages
         .sort_unstable_by(|left, right| left.id.cmp(&right.id).then(left.owner.cmp(&right.owner)));
     let strip_carry = match successor {
-        Some(base) => resolve_strip_carry(base.inventory, &strip_joins, &strip_stages, live_strips),
+        Some(base) => resolve_strip_carry(
+            base.inventory,
+            &strip_joins,
+            &strip_stages,
+            live_strips,
+            &restarts_whole,
+        ),
         None => StripCarry::default(),
     };
     // Issue #1288 D1: a strip the successor adds during playback fades in. Only a plan that
@@ -3523,9 +4332,24 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .ok_or_else(|| graph_failure("host.inventory.identity"))?;
     delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
     let delay_carry = match successor {
-        Some(base) => resolve_delay_carry(&base.inventory.delay_lines, &delay_lines, |id| {
-            same_strip_id_kind(base.committed, compiled.normalized_model(), id)
-        }),
+        Some(base) => {
+            // #1354a decision 2: a strip restarted whole carries no line before its matrix.
+            let kept: Vec<graph::GraphDelayLine>;
+            let own = match &warm_restart {
+                Some(restart) if !restart.whole.is_empty() => {
+                    kept = delay_lines
+                        .iter()
+                        .filter(|line| !restart.drops_line(line))
+                        .cloned()
+                        .collect();
+                    &kept[..]
+                }
+                _ => &delay_lines[..],
+            };
+            resolve_delay_carry(&base.inventory.delay_lines, own, |id| {
+                same_strip_id_kind(base.committed, compiled.normalized_model(), id)
+            })
+        }
         None => Vec::new(),
     };
     let delay_carry_bytes = graph::delay_carry_retained_bytes(delay_carry.len())
@@ -3539,9 +4363,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .ok_or_else(|| graph_failure("host.inventory.identity"))?;
     live_routes.sort_unstable_by(|left, right| left.route_id.cmp(&right.route_id));
     let strip_delay_carry = match successor {
-        Some(base) => {
-            resolve_strip_delay_carry(&base.inventory.strip_delays, &strip_delays, &delay_joins)
-        }
+        Some(base) => resolve_strip_delay_carry(
+            &base.inventory.strip_delays,
+            &strip_delays,
+            &delay_joins,
+            warm.map_or(0, |lead| lead.lead_samples),
+        ),
         None => StripDelayCarry::default(),
     };
     let route_carry = match successor {
@@ -3713,6 +4540,24 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     restarted.extend(strip_delay_carry.restarted);
     restarted.sort_unstable();
     restarted.dedup();
+    if let (Some(lead), Some(restart)) = (warm, &warm_restart) {
+        // #1354a ruling 2: the join restarts no strip outside the lead's `R`; a strip restarted
+        // whole is listed whatever its owners did.
+        if restarted
+            .iter()
+            .any(|id| !restart.whole.contains(&**id) && lead.restarted.binary_search(id).is_err())
+        {
+            return Err(warm_invariant());
+        }
+        restarted.extend(
+            lead.restart_whole
+                .iter()
+                .filter(|id| committed_has_strip(model, id))
+                .map(|id| Box::<str>::from(id.as_str())),
+        );
+        restarted.sort_unstable();
+        restarted.dedup();
+    }
     // #1396 D2: an ordinary successor reads its sources as far ahead of its render clock as its
     // predecessor does, so the source-read clock never moves backwards across a rebuild. A first
     // plan reads on its render clock, and so does a discontinuity successor, whose base inventory
@@ -3748,6 +4593,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         raised_arrivals,
         source_read_offset,
         published_generation: published_generation.clone(),
+        lead_samples: warm.map_or(0, |lead| lead.lead_samples),
+        prime_bytes: warm_prime_bytes,
     };
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
@@ -6432,10 +7279,16 @@ struct StripDelayCarry {
 /// rest and is listed in `restarted` (decision 15, D15-9): the duck-swap removes the click of the
 /// alignment that moves. A grown claim line, filled at adoption, is #1355's. Both slices are
 /// sorted by strip ID.
+///
+/// `lead` is a warm successor's `P` (#1354a ruling 3), 0 for every other successor: a needed lane
+/// whose declared delay is equal, whose source is unchanged and whose ring grew by exactly `lead`
+/// (from a lane the predecessor did not hold, too) keeps its strip carried and moves nothing; its
+/// fill and the program entry for it are #1355's (#1402 R-A).
 fn resolve_strip_delay_carry(
     predecessor: &[graph::GraphStripDelayLine],
     own: &[graph::GraphStripDelayLine],
     joins: &[StripDelayJoin<'_>],
+    lead: u64,
 ) -> StripDelayCarry {
     let row = |rows: &[graph::GraphStripDelayLine], id: &str| {
         rows.binary_search_by(|row| (*row.strip).cmp(id))
@@ -6456,6 +7309,19 @@ fn resolve_strip_delay_carry(
                 .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
                 .fold(0, |mask, (bit, _)| mask | bit)
         });
+        // The lanes of `after` that grew by exactly the lead from `before` lanes (0 for a line
+        // the predecessor did not hold): carried, with nothing to move (#1354a ruling 3).
+        let grown = |before: [u32; 2], after: &graph::GraphStripDelayLine| {
+            [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
+                .into_iter()
+                .enumerate()
+                .filter(|&(lane, bit)| {
+                    lead != 0
+                        && needed & bit != 0
+                        && u64::from(after.samples[lane]) == u64::from(before[lane]) + lead
+                })
+                .fold(0, |mask, (_, bit)| mask | bit)
+        };
         if needed != 0 {
             match (
                 row(predecessor, join.id).filter(|_| join.same_source),
@@ -6469,7 +7335,7 @@ fn resolve_strip_delay_carry(
                             needed & bit != 0 && before.samples[lane] == after.samples[lane]
                         })
                         .fold(0, |mask, (_, bit)| mask | bit);
-                    restarts |= lanes != needed;
+                    restarts |= lanes | grown(before.samples, &after) != needed;
                     if lanes != 0 {
                         carry.moves.push(graph::GraphStripDelayMove {
                             successor: after.line,
@@ -6477,6 +7343,9 @@ fn resolve_strip_delay_carry(
                             lanes,
                         });
                     }
+                }
+                (None, Some(after)) if join.same_source => {
+                    restarts |= grown([0; 2], &after) != needed;
                 }
                 _ => restarts = true,
             }
@@ -6687,11 +7556,15 @@ struct StripCarry<'a> {
 /// A stage carries when both plans have its lane in a bank of one kind, attach the same control
 /// kind, and no prepared value of it differs. A strip with a stage that does not carry starts that
 /// stage at rest and is listed in `restarted`.
+///
+/// `restarts_whole` names the strips a warm successor restarts whole (#1354a decision 2): their
+/// fader does not carry.
 fn resolve_strip_carry<'a>(
     predecessor: &PlanStateInventory,
     joins: &[StripJoin<'a>],
     own: &[StripStageInventoryRow],
     live: bool,
+    restarts_whole: &dyn Fn(&str) -> bool,
 ) -> StripCarry<'a> {
     use graph::BuiltinStripOwner::{Fader, Matrix};
     let mut carry = StripCarry::default();
@@ -6701,7 +7574,10 @@ fn resolve_strip_carry<'a>(
             let before = predecessor.strip_stage(join.id, owner)?;
             (own.stage == before.stage && before.live == live).then_some((own, before))
         });
-        let families = [!join.fader.is_prepared(), !join.matrix.is_prepared()];
+        let families = [
+            !join.fader.is_prepared() && !restarts_whole(join.id),
+            !join.matrix.is_prepared(),
+        ];
         let carries = [0, 1].map(|owner| rows[owner].is_some() && families[owner]);
         for ((owner, row), carries) in [Fader, Matrix].into_iter().zip(rows).zip(carries) {
             if let (true, Some((own, before))) = (carries, row) {
@@ -7244,6 +8120,91 @@ mod tests {
     use effect_compiler::{EffectDiagnostic, EffectDiagnosticSet};
     use session::{DiagnosticCode, parse_session_json};
 
+    /// #1354a decision 2: the whole-strip restart filter drops exactly a restarted strip's
+    /// compensation lines before its matrix (its chain, its effects' sidechains, its routes from a
+    /// tap before the fader), and keeps its matrix and post-fader lines and every other strip's.
+    #[test]
+    fn the_whole_strip_filter_drops_only_the_pre_fader_lines() {
+        let mut model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("fixture parses");
+        let mut pre = model.routes[0].clone();
+        pre.id = session::StableId::parse("eq0-pre").expect("ID");
+        pre.source = session::RouteSource::Track {
+            track_id: session::StableId::parse("eq0").expect("ID"),
+            tap: session::SendTap::PreFader,
+        };
+        model.routes.push(pre);
+        let restart = super::WarmRestart::new(&model, [], ["eq0"]);
+        let gid = |text: &str| graph::StableGraphId::parse(text).expect("graph ID");
+        let stage = |strip: &str, stage| graph::GraphNodeId::TrackStage {
+            track_id: gid(strip),
+            stage,
+        };
+        let line = |edge| graph::GraphDelayLine {
+            edge,
+            source: stage("eq0", graph::TrackStage::Input),
+            destination: stage("eq0", graph::TrackStage::Input),
+            line: 0,
+            samples: 1,
+        };
+        let main = |strip: &str, at| graph::GraphEdgeId::TrackMain {
+            target: stage(strip, at),
+        };
+        let effect = |strip: &str| graph::EffectNodeId {
+            track_id: gid(strip),
+            rack: graph::RackId::Simd1,
+            effect_id: gid("eq"),
+        };
+        let cases = [
+            (main("eq0", graph::TrackStage::PostFader), true),
+            (
+                graph::GraphEdgeId::TrackMain {
+                    target: graph::GraphNodeId::Effect(effect("eq0")),
+                },
+                true,
+            ),
+            (
+                graph::GraphEdgeId::EffectSidechain {
+                    effect: effect("eq0"),
+                    port: "sidechain-in".into(),
+                },
+                true,
+            ),
+            (
+                graph::GraphEdgeId::RouteDestination {
+                    route_id: gid("eq0-pre"),
+                },
+                true,
+            ),
+            (
+                graph::GraphEdgeId::RouteSource {
+                    route_id: gid("eq0-pre"),
+                },
+                true,
+            ),
+            (main("eq0", graph::TrackStage::PostMatrix), false),
+            (
+                graph::GraphEdgeId::RouteDestination {
+                    route_id: gid("eq0-main"),
+                },
+                false,
+            ),
+            (main("eq1", graph::TrackStage::PostFader), false),
+            (
+                graph::GraphEdgeId::EffectSidechain {
+                    effect: effect("eq1"),
+                    port: "sidechain-in".into(),
+                },
+                false,
+            ),
+        ];
+        for (edge, drops) in cases {
+            assert_eq!(restart.drops_line(&line(edge.clone())), drops, "{edge:?}");
+        }
+    }
+
     const SLOT: &str = "comp";
 
     fn layout() -> graph::EffectLaneLayout {
@@ -7379,7 +8340,7 @@ mod tests {
                 same_source: true,
             },
         ];
-        let carry = resolve_strip_delay_carry(&before, &own, &joins);
+        let carry = resolve_strip_delay_carry(&before, &own, &joins, 0);
         assert_eq!(
             carry.moves,
             vec![
@@ -7695,6 +8656,9 @@ mod tests {
             // #1396 D2: no read-ahead.
             source_read_offset: 0,
             published_generation: source::PublishedGeneration::new(source::SourceGeneration(1)),
+
+            lead_samples: 0,
+            prime_bytes: 0,
         }
     }
 

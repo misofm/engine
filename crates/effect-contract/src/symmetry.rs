@@ -434,6 +434,7 @@ mod tests {
             tap_index: 0,
             armed: true,
             window_blocks: 4,
+            arm_tag: 0,
         });
         assert!(witness.eligible());
     }

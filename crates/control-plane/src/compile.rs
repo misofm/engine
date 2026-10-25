@@ -378,6 +378,8 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         // the same row one commit ahead and is not charged twice. The edit ramps are not an epoch
         // row: see `CapiResources::edit_ramps`.
         monitor.overlay,
+        // #1325 D6: the duck overlay a kept base of this epoch holds, and its replacement.
+        monitor.duck,
     ];
     let ObservationReserve {
         ended_event,
@@ -490,6 +492,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         source_id_row,
         strip_table_bytes,
         monitor.overlay_vector,
+        monitor.duck_vector,
     ]
     .into_iter()
     .chain([
@@ -583,6 +586,14 @@ pub(crate) struct MonitorRows {
     /// and VCAs: the kept bases' ramp tables, pruned to this (the newest committed) model's owners
     /// whenever they are stored (#1696 root ruling).
     pub(crate) edit_ramps: u64,
+    /// [`KEPT_BASES`] times `host_core::DuckOverlay::retained_ceiling` of the model's strips,
+    /// routes and sources (#1325 D6): the duck overlay a kept base of this epoch holds and the
+    /// replacement a superseding rebuild builds while it lives. An epoch row, at the epoch model's
+    /// bounds, as the monitor overlay's is: an overlay names only the strips, routes and sources
+    /// of the plan it ducks, and a superseding commit never changes that plan.
+    pub(crate) duck: u64,
+    /// The overlay's longest ID vector alone, one allocation, for the largest-allocation check.
+    pub(crate) duck_vector: u64,
 }
 
 /// The summed text of `ids`.
@@ -605,6 +616,7 @@ pub(crate) fn monitor_rows(model: &session::SessionModel) -> Result<MonitorRows,
         .unwrap_or(0);
     let route_id_bytes = id_text_bytes(model.routes.iter().map(|route| &route.id))?;
     let vca_id_bytes = id_text_bytes(model.vcas.iter().map(|vca| &vca.id))?;
+    let source_id_bytes = id_text_bytes(model.sources.iter().map(|source| &source.id))?;
     let to_bytes =
         |bytes: usize| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform));
     Ok(MonitorRows {
@@ -625,7 +637,29 @@ pub(crate) fn monitor_rows(model: &session::SessionModel) -> Result<MonitorRows,
             .and_then(|table| table.checked_mul(KEPT_BASES))
             .ok_or_else(arithmetic)?,
         )?,
+        duck_vector: checked_layout::<Box<str>>(
+            strips.max(model.routes.len()).max(model.sources.len()),
+        )?,
+        duck: to_bytes(
+            host_core::DuckOverlay::retained_ceiling(
+                [strips, model.routes.len(), model.sources.len()],
+                [strip_id_bytes, route_id_bytes, source_id_bytes],
+            )
+            .and_then(|overlay| overlay.checked_mul(KEPT_BASES))
+            .ok_or_else(arithmetic)?,
+        )?,
     })
+}
+
+/// The duck-overlay epoch row of `model` (#1325 D6), so the C ABI's oracle can hold
+/// `capi_retained_bytes` to it.
+///
+/// # Errors
+///
+/// The arithmetic overflowed.
+#[cfg(feature = "test-support")]
+pub fn duck_overlay_bytes(model: &session::SessionModel) -> Result<u64, CompileFailure> {
+    Ok(monitor_rows(model)?.duck)
 }
 
 /// The monitor overlay's epoch row and the kept bases' edit-ramp row of `model` (#1696), so the
@@ -1845,7 +1879,7 @@ where
         observation_wire: observation_wire(limits.maximum_control_frame_bytes)?,
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
-        observation_forwarded: Vec::new(),
+        next_arm_tag: 1,
         send_moves: None,
         spectrum,
         output_meter,

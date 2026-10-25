@@ -318,3 +318,117 @@ every plan is prepared with an explicit `source_ring_frames = stall_ring_frames(
 - *Reset latency floors at a host-declared discontinuity* (#1323): `SuccessorBase::new` (D3).
 - *Carry source-claim lines across a plan swap and fill a grown line for a prime* (#1402): D4 keeps
   a `restart_whole` strip's claim lines carried (#1402 D1).
+
+## Decision record (1354a, attempt 1, 2026-10-24)
+
+Split (scope R1): 1354a ships D1, D2 steps 1 and 3-9 (the walk over every edge kind, sidechains
+included), D3 and D4, and gates 1-4 and 7-9. 1354b ships step 2's sidechain closure and step 6's
+submix `input`-tap rule (M1), gates 5, 6 and the second case of gate 7, and the L3 term of D3.
+**Known limit until 1354b:** a consumer keyed from a restarted strip's `post_input`,
+`insert_send`, `insert_return` or `pre_fader` tap stays carried (the limit 1324a states too).
+
+Root rulings (2026-10-24), each amending the frozen text above:
+
+- **Amends D2 (signature) and scope R4.** `warm_lead(compiled, caps, base, ordinary:
+  &PlanStateInventory, config)`. Reason: R is the ordinary successor's `restarted_strips()`, which
+  only a full preparation's joins produce, after bind, and the joins depend on the host's entry
+  (`resolve_strip_carry` carries a stage only when `before.live == live`). A probe through the plain
+  entry would restart every strip of a live predecessor and answer `Misaligned` for every product
+  edit. The caller prepares the ordinary successor anyway (the `Ordinary` answer); its
+  `restarted_strips()` is R's join part and its `input_floors()` are step 3's arrivals, so
+  `warm_lead` compiles once per pass (W, with the lead floors) through `compile_with_builtins`.
+  A declared discontinuity answers `Ordinary`.
+- **Amends D1 and D4 (`WarmLead`).** `WarmLead` keeps a private field with the ordinary restarted
+  set; with `restart_whole` it is the R the floors were derived from. Reason: preparation compiles
+  before bind, and the join's restarted set is known only after bind. Preparation builds its floors
+  from that field, then re-checks C1 against its own compile and that the join restarts no strip
+  outside R; either mismatch is `host.successor.warm_invariant`.
+- **Amends #1402 R-A for warm mode.** With a lead, the strip delay join keeps a lane carried, and
+  moves nothing, when its declared delay is equal, its source unchanged and its ring grew by
+  exactly `P` (from no line, too). Reason: every carried track's claim line grows by `P`, and R-A's
+  "a ring-length mismatch restarts" would restart every carried track (gate 1 could not hold). The
+  fill and its program entry stay #1355's. **Guard:** no production path requests warm mode before
+  #1403: `SuccessorBase::new` sets `warm: None`, every construction site outside host-core's tests
+  (`crates/control-plane/src/control.rs`, `hosts/host-web/src/tests.rs`) uses `..SuccessorBase::new`,
+  and nothing outside `crates/host-core/tests/warm_successor.rs` sets `warm`.
+- **R3 / decision 2, the whole-strip restart filter.** Written once: for each strip of
+  `restart_whole` it drops the input-section move, the effect moves (the chain join), the fader move
+  (`resolve_strip_carry`), and the compensation lines on its chain before the matrix, into its
+  effects' sidechains and on its routes from a tap before the fader; matrix and post-fader lines
+  and claim lines still carry; the strip joins `restarted`. For the floors, a `restart_whole` strip
+  is in R with every node (its matrix and all its routes), as D2 step 6 says; a join-restarted strip
+  is in R with its nodes before the fader, its fader and its routes from a tap before the fader.
+- **#1406 D1 is amended:** `p_max_samples` is written here, beside `stall_ring_frames`. Line for
+  root: #1406's own record needs the matching amendment (not edited here).
+- **Gates use the live-controls entry** (`HostLiveControlRequest::default()`), as the control plane
+  prepares: a per-node effect (the true-peak limiter) carries only with a control lane (#1281), so
+  through the plain entry the limiter's strip restarts on every edit.
+- **Node membership.** N is read from the committed model (strips' seven stages and effects,
+  routes, the output), the nodes the compiler emits; the inventory holds no node list.
+
+Evidence (48 kHz, quantum 128, `Backend::current()`):
+`crates/host-core/tests/warm_successor.rs`, 10 tests, and one unit test in `prepare.rs`, all
+green. Red first on mutants of
+`prepare.rs`, one run each:
+
+| mutant | red tests |
+|---|---|
+| `P = Δ` (no quantum rounding) | gate 1 and 7 others |
+| lead floor on R nodes too (round-4 B1) | gate 1 and every gate |
+| no quantum check on a lead | `a_lead_off_the_quantum_is_refused` |
+| walk restarts the late node's own strip | gates 2, 7, 8, 9 |
+| `>=` for `>` on `ΣP + P` | gate 3 |
+| ring headroom without the prime's block | gate 3 |
+| prime without the claim lines | gate 4 |
+| `>=` for `>` on the prime | gate 4 |
+| walk ignores sidechain edges | gate 8 |
+| walk follows every input, not the holding ones | gate 9 |
+| grown claim line restarts its strip (R-A) | gates 1, 2, 4, 7, 8, 9 |
+| whole strip's fader carries | gate 2 (R6) |
+| whole strip's effects carry | gate 2 (R6) |
+| no C1 re-check | `a_lead_that_misses_c1_is_the_invariant_error` |
+| no join re-check | `a_join_outside_the_leads_restart_set_is_the_invariant_error` |
+| `drops_line` always false | `prepare::tests::the_whole_strip_filter_drops_only_the_pre_fader_lines` |
+
+Verifier fold (attempt 1 PASS, minor findings):
+- The compensation-line part of the R3 filter is tested at the unit level
+  (`the_whole_strip_filter_drops_only_the_pre_fader_lines`: chain, effect, sidechain and
+  pre-fader route lines of a whole-restarted strip drop; its matrix and post-fader lines and other
+  strips' lines stay). **Known gap:** the preparation's call of the filter has no integration
+  count. `graph::test_only_carry_counts` exposes no delay-move count, and `crates/graph` is outside
+  this slice's paths. A follow-up that adds the count there can extend gate 2's R6 assertion.
+- The invariant test is split into one fixture per re-check, both reached through public API: a
+  lead too short for the edit (`P = 384` with gate 1's restart set) fails only C1; gate 1's lead
+  on an edit that also adds a latency-free insert to track 2 keeps C1 and fails only the join.
+- The #1272 D3 carry rule is one predicate (`source_carries`, with `source_ring_config`), read by
+  the preparation's source loop and by `warm_lead`'s ring check.
+
+Notes for later slices:
+- **1354b:** `warm_lead`'s pass bound is `strips + 1`, enough while each pass adds a strip to
+  `restart_whole`. When 1354b's M1 rule adds strips to R in a pass, the bound must grow to about
+  `2 · strips + 1` (D2: a strip can enter each set once).
+- **#1355:** `prime_bytes` counts every source-claim line of W, including an added track's line
+  whose source is not carried. #1355 must confirm which lines the fill writes and narrow D3's count
+  if the fill skips such lines.
+
+Test value (1354a):
+- Gate 1: a lead floor on every surviving node (round-4 B1) moves track 2 and the output off
+  `a + P`; a lead not rounded to whole quanta gives the wrong `P`; a grown claim line that restarts
+  its strip lists track 2 as restarted. The last case: a lead off the quantum prepares a successor
+  that misaligns by a sub-block offset.
+- Gate 2: an iteration that restarts the late node's own strip first restarts S and does not
+  return `[X]`; a restart filter that keeps X's fader or pre-fader owners carried imports a ducked
+  fader without a retarget at #1397 (R6).
+- Gate 3: a `<` for `<=`, or a ring headroom check that ignores the prime's extra block, fails the
+  exact cases; a baseline that grows with the default fails the exact `stall_ring_frames` values.
+- Gate 4: a prime count without the claim lines, or compared with `>=`, fails the threshold.
+- Gate 7: a walk that restarts only the late node's own strip leaves B's input late and answers
+  wrong.
+- Gate 8: a walk that ignores sidechain edges never finds K or T6.
+- Gate 9: a walk that also follows a restarted submix's inputs that do not hold it late restarts
+  T0 as well.
+- Invariant, C1: a preparation that trusts a lead's `P` prepares a successor whose output is late.
+- Invariant, join: a preparation that trusts a lead's restart set floors a restarted strip at
+  `a + P` and never reports it.
+- Filter unit test: a filter that keeps a whole-restarted strip's pre-fader lines carries their
+  pending audio into a strip that restarts at rest.
