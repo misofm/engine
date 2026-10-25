@@ -51,7 +51,7 @@ After #1370 (both slices). Before #1371 flips the link row to live for these two
   (`reset_lane_full` of one channel) leaves a glide alone (`set_lane_words` keeps the weights).
 - **D6 as built.** Each channel section gains the two weight quadruples at its end
   (`STATE_LINK_WORD = CHAN_WORDS + PARAMETER_COUNT`): de-esser 65 -> 73 words, dynamic EQ
-  318 -> 326. Restore refuses (`effect.state.link`) a weight off `[0, 1]` on its path, `-0.0`, a
+  350 -> 358. Restore refuses (`effect.state.link`) a weight off `[0, 1]` on its path, `-0.0`, a
   moving weight with a zero step, a settled weight off its target, targets that are no supported
   mode's, or channels at two modes; a payload of the lane's own mode commits the glide (and
   raises the clock with `max`), one of another mode leaves the lane's own mode at rest.
