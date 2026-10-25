@@ -6944,6 +6944,12 @@ fn carry_route(
             false
         }
         CarriedRoute::Six(into) => {
+            // #2011 (#1877 D6): a re-armed successor keeps its own arm, as a following one does
+            // ([`LiveFollowRoute::adopt`]): it waits silent at rest and fires to its own target,
+            // so it takes no ramp and leaves no comparison.
+            if into.armed.is_some() {
+                return false;
+            }
             // A six-word successor has rendered no block at the swap: its ramp is the settled
             // prepared target bind gave it, and its mute is the prepared gate's.
             let (prepared, prepared_mute) = (into.ramp.target, into.mute);
@@ -19986,8 +19992,10 @@ mod follow_route_op_tests {
         /// Test value: red if the carry copies the waiting route's silence into a successor
         /// without an arm, which then stays silent for good (no successor entry fires it), or if
         /// it fires the displaced arm into a successor that re-armed the route (the route enters
-        /// at the swap instead of at its carried fire), for either kind; or if a re-armed
-        /// following successor adopts a playing predecessor's ramps (it enters before its fire).
+        /// at the swap instead of at its carried fire), for either kind; if a re-armed
+        /// following successor adopts a playing predecessor's ramps (it enters before its fire);
+        /// or if a re-armed six-word successor of a following predecessor takes its silent ramp
+        /// and leaves a comparison (e) (the route is dead after its fire).
         #[test]
         fn an_armed_route_a_swap_displaces_fires_at_the_swap() {
             let fired = || {
@@ -20102,6 +20110,34 @@ mod follow_route_op_tests {
                 !into.block(FIRST, None, &mut left, &mut right),
                 "(d) the re-armed following successor waits silent"
             );
+            // (e) A following predecessor that waits armed under a muting curve, into a re-armed
+            // six-word successor: the successor keeps its own arm, takes no ramp and leaves no
+            // comparison, and its own fire ramps from rest to its prepared target.
+            let muted = steps(&[0], &[1.0], 1 << 20);
+            let mut from = Fixture::new([Some(&muted), None], 0, OPEN);
+            assert!(from.route.arm_fade_in(RECORD_RAMP));
+            let mut into = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(into.route.arm_fade_in(RECORD_RAMP));
+            let mut check = None;
+            let pending = carry_route(
+                CarriedRoute::Six(&mut into.route),
+                CarriedRoute::Seven(&mut from.route),
+                Some(&mut check),
+            );
+            assert!(!pending && check.is_none(), "(e) no comparison is left");
+            assert!(
+                from.route.armed.is_some(),
+                "(e) the displaced arm is not fired"
+            );
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !into.block(&mut left, &mut right),
+                "(e) the re-armed six-word successor waits silent"
+            );
+            into.route.fire_fade_in();
+            let (mut left, mut right) = input(AFTER);
+            assert!(into.block(&mut left, &mut right), "(e) its own fire mixes");
+            assert_eq!(bits((&left, &right)), fired(), "(e) from rest");
         }
 
         /// Gate 4 (six -> seven, the rebuild adds an automated mute to the source). (a) With the
