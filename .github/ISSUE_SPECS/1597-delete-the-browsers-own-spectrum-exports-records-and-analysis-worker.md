@@ -157,3 +157,9 @@ Commands: as #1596's, plus `python3 -B scripts/check-abi-layout-v1.py`,
   (`SPECTRUM_MAXIMUM_ID_BYTES` 127, `SPECTRUM_MAXIMUM_CAPTURE_BYTES` 1 MiB, the 88- and 64-byte
   result and window headers of `resultBytes`), so no public result changes. The schema hash does
   not move; `ABI_VERSION` is unchanged (R2).
+- #1597 gates, as the scope note restates them (R1): D3 adds no name list to
+  `check-sdk-deletions.py` (the #1050 ruling stands; it runs as the offset gate). That nothing
+  deleted ships is `check-web-audioworklet.sh`'s exact export list, `check-abi-layout-v1.py` on the
+  regenerated layout and the package smoke. The staging-read qualification row keeps its observation
+  and track-response reads; its spectrum reads and its stream instance went with the exports, so the
+  worker instances are 15, not 16.
