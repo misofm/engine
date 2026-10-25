@@ -455,6 +455,9 @@ pub struct MeterFrame {
     /// The provider epoch of the plan whose strips the frame covers (#1588 D3): its
     /// [`MeterTables`]' epoch ([`MeterTables::set_plan_epoch`]), `0` for the boot plan. A reader
     /// that holds the strip list of one epoch resolves its strips again when a frame names another.
+    /// The C ABI's delivery fills it at each adoption. The browser's render half does not fill it
+    /// yet: its frames reach the control plane through the plan's own ring, which names the epoch
+    /// (#1588b fills it and checks it against the ring's).
     pub plan_epoch: u64,
     /// The frame's validity bits.
     pub validity: MeterValidity,
@@ -1161,9 +1164,10 @@ impl MeterFrameConsumer {
         }
     }
 
-    /// The frames a push dropped because no frame was free: monotone, never reset.
+    /// The meter windows of the frames a push dropped (each frame's [`MeterFrame::windows`], at
+    /// least one): monotone, never reset.
     #[must_use]
-    pub fn dropped_frames(&self) -> u64 {
+    pub fn dropped_windows(&self) -> u64 {
         self.dropped.load(Ordering::Acquire)
     }
 }
@@ -1172,14 +1176,15 @@ impl MeterFrameProducer {
     /// Copy `frame` into a free frame and publish it (#1588 D2): every field and every strip
     /// table element, by element. A ring frame has the ring's strip count; strips past `frame`'s
     /// read as absent (zero peaks, no gain reduction). A frame with more strips than the ring's,
-    /// or a ring with no free frame, drops `frame` and counts it ([`MeterFrameConsumer::
-    /// dropped_frames`]); returns whether `frame` was published. Allocation-free, bounded by the
+    /// or a ring with no free frame, drops `frame` and counts its windows ([`MeterFrameConsumer::
+    /// dropped_windows`]); returns whether `frame` was published. Allocation-free, bounded by the
     /// ring's strip count.
     pub fn publish_frame(&mut self, frame: &MeterFrame) -> bool {
         let fits = frame.strip_peaks.len() <= self.strips;
         let slot = if fits { self.free.try_pop().ok() } else { None };
         let Some(mut slot) = slot else {
-            self.dropped.fetch_add(1, Ordering::Release);
+            self.dropped
+                .fetch_add(u64::from(frame.windows.max(1)), Ordering::Release);
             return false;
         };
         copy_frame(&mut slot, frame);

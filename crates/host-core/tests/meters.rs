@@ -446,12 +446,12 @@ fn a_level_off_shuts_the_output_gate() {
     assert_eq!(delivery.output_windows_queued(), 0, "the gate is shut");
 }
 
-/// #1588 gate 4. A ring with no free frame drops the newest frame and counts it, and the frames
-/// it kept come out in order, element for element as they were pushed.
+/// #1588 gate 4. A ring with no free frame drops the newest frame and counts its windows, and the
+/// frames it kept come out in order, element for element as they were pushed.
 ///
-/// Test value: red if a full ring drops a frame without counting it (the browser's lost-window
-/// counter would then miss windows that never reached a batch), or overwrites a frame the control
-/// half has not released.
+/// Test value: red if a full ring drops a frame without counting its windows (the browser's
+/// lost-window counter would then miss windows that never reached a batch, or count a two-window
+/// frame as one), or overwrites a frame the control half has not released.
 #[test]
 fn a_full_meter_frame_ring_drops_the_newest_frame_and_counts_it() {
     const STRIPS: usize = 3;
@@ -474,15 +474,19 @@ fn a_full_meter_frame_ring_drops_the_newest_frame_and_counts_it() {
         frame.strip_gain_reduction_present[1] = true;
         frame
     };
-    let pushed: Vec<bool> = (1..=host_core::METER_FRAME_RING_DEPTH as u64 + 1)
-        .map(|sequence| producer.publish_frame(&frame(sequence)))
-        .collect();
-    assert_eq!(pushed.iter().filter(|kept| !**kept).count(), 1);
+    for sequence in 1..=host_core::METER_FRAME_RING_DEPTH as u64 {
+        assert!(
+            producer.publish_frame(&frame(sequence)),
+            "frame {sequence} fits"
+        );
+    }
+    let mut two_windows = frame(9);
+    two_windows.windows = 2;
     assert!(
-        !pushed[host_core::METER_FRAME_RING_DEPTH],
-        "the ninth frame is the one dropped"
+        !producer.publish_frame(&two_windows),
+        "the ninth frame is dropped"
     );
-    assert_eq!(consumer.dropped_frames(), 1);
+    assert_eq!(consumer.dropped_windows(), 2, "with both its windows");
     for sequence in 1..=host_core::METER_FRAME_RING_DEPTH as u64 {
         assert_eq!(consumer.peek(), Some(&frame(sequence)), "frame {sequence}");
         consumer.release_frame();
@@ -492,7 +496,7 @@ fn a_full_meter_frame_ring_drops_the_newest_frame_and_counts_it() {
         producer.publish_frame(&frame(10)),
         "a released frame is free again"
     );
-    assert_eq!(consumer.dropped_frames(), 1);
+    assert_eq!(consumer.dropped_windows(), 2);
 }
 
 /// #1588 D1, R3. A restart while the level stays on begins a new generation and opens the output

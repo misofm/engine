@@ -128,7 +128,7 @@ and #1534 gate 3's worklet commands.
   elements into a free frame; strips past the frame's read as absent; no free frame drops and
   counts. `MeterFrameRing::heap_bytes` is the charge #1588b uses.
 - **R4 amended (implementer, for review).** A ring drop is counted in the ring
-  (`MeterFrameConsumer::dropped_frames`), not in the delivery's `loss_count`: the C ABI's
+  (`MeterFrameConsumer::dropped_windows`), not in the delivery's `loss_count`: the C ABI's
   `MeterWindowsLost` does not sum frames' `loss_count`, and adding ring drops to it would move the
   lease frame's `loss_count` bytes while both clients are on. The browser's lost-window sum is
   then the ring's drops plus the same fold, unstaged and output-drop terms as the C ABI's.
@@ -150,7 +150,9 @@ and #1534 gate 3's worklet commands.
   entries resolve lazily when a frame's epoch differs from the last resolved (a configure clears
   it), against the epoch's strip list (`strip_controls`, the meters' order). The C ABI passes
   `frame.plan_epoch`, which `adopt_meters` now fills (`MeterTables::set_plan_epoch`); a ring frame
-  passes its ring's epoch. The eager resolves at the configure and the adoption are gone.
+  passes its ring's epoch. The eager resolves at the configure and the adoption are gone. The
+  browser does not fill `plan_epoch` yet; #1588b fills it at its adoption and debug-asserts it
+  against the ring's epoch at the push.
 - **Mode.** `ControlAdapter::RENDER_METER_FOLD` (with `METER_DELIVERY`): the browser keeps the
   output reader and live gate (`take_output_meter`), the session holds a `MeterLevel` (one
   `Arc<AtomicU32>` row in place of the relay's word) and sets `TELEMETRY` at a configure
@@ -158,7 +160,7 @@ and #1534 gate 3's worklet commands.
   when the preparer binds one (`meter_window_blocks() != 0`): a browser booted with meter word 0
   still refuses meter tables `meter.unavailable`, as it refuses the lease.
 - **R4 visible.** Ring drops reach `CounterId::MeterWindowsLost` (`refresh_provider_counters`:
-  every held ring's `dropped_frames`, plus the reclaimed rings', plus the output queue's drops
+  every held ring's `dropped_windows`, plus the reclaimed rings', plus the output queue's drops
   through `OutputPeakReader::drop_count`).
 - **No acknowledged no-op (root, decision 15 E4).** Until the render push exists the browser
   sets `RENDER_METER_FOLD` only. `METER_DELIVERY` is the one constant #1588b turns on, in the

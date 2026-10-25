@@ -1212,6 +1212,16 @@ impl PlanStateInventory {
         self.meters.len()
     }
 
+    /// Each meter reader's index, strip ID, tap and metrics, in reader order (#1588 D3): meter
+    /// `i`'s window is strip `i` of a [`crate::MeterFrame`] the plan's delivery publishes, so a
+    /// reader of the frame resolves a strip to its meter here, whatever selection the plan was
+    /// prepared with.
+    pub fn meter_targets(&self) -> impl Iterator<Item = (usize, &str, MeterTap, MeterMetricSet)> {
+        self.meters
+            .iter()
+            .map(|row| (row.entry, &*row.id, row.tap, row.metrics))
+    }
+
     /// Observation rows, one per effect observation reader set (#1327).
     #[must_use]
     pub fn observation_count(&self) -> usize {

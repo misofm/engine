@@ -1247,7 +1247,7 @@ enum MeterSource {
         level: host_core::MeterLevel,
         /// The output meter's dropped-window count, whose reader the render half holds.
         output_drops: host_core::OutputPeakDrops,
-        /// The frames the rings of reclaimed epochs dropped.
+        /// The windows the rings of reclaimed epochs dropped.
         retired_drops: u64,
     },
 }
@@ -1306,7 +1306,7 @@ impl SessionMeters {
     }
 
     /// Every closed meter window that never reached a `METER_BATCH` (#1583 D5, #1588 R4): the
-    /// output windows render dropped at a full queue, the frames a full ring dropped (`rings`, the
+    /// output windows render dropped at a full queue, the windows a full ring dropped (`rings`, the
     /// live epochs' rings' count, plus the reclaimed ones'), the windows of partial batches the
     /// fold discarded (at a gap, or when a nonempty configuration replaced the one it folded
     /// for), and the windows of batches the lane refused. When a configure empties the table,
@@ -1357,23 +1357,31 @@ impl MeterBatches {
         })
     }
 
-    /// Resolve every entry of `table` against `strips`, the strips of the epoch whose frames are
-    /// folded (one per strip, in the frame's strip order; `None` when no epoch held is that one,
-    /// and then no entry has a strip), and size the folds to the table. The folds keep their
+    /// Resolve every entry of `table` against `meters`, the meter readers of the epoch whose
+    /// frames are folded (`PlanStateInventory::meter_targets`: meter `i` is the frame's strip `i`;
+    /// `None` when no epoch held is that one, and then no entry has a strip): a strip's peak entry
+    /// reads the first post-matrix sample-peak meter of its strip, so a caller selection (a
+    /// subset, another order, several taps on one strip) never reads another meter's peak. Then
+    /// size the folds to the table. The folds keep their
     /// values: they are indexed by table entry, so a batch an adoption interrupts goes on folding
     /// into them, and `push_with_strips` resets them at a batch's first frame. A table never
     /// holds more entries than were reserved, so this allocates nothing.
     fn resolve(
         &mut self,
         table: &[protocol::MeterEntry],
-        strips: Option<&[host_core::TrackControlProducer]>,
+        meters: Option<&host_core::PlanStateInventory>,
     ) {
         self.resolution.clear();
         self.resolution.extend(table.iter().map(|entry| {
             match (&entry.target, entry.metric) {
-                (protocol::MeterTarget::Strip(id), protocol::MeterMetric::Peak) => strips?
-                    .iter()
-                    .position(|strip| *strip.track_id == **id)
+                (protocol::MeterTarget::Strip(id), protocol::MeterMetric::Peak) => meters?
+                    .meter_targets()
+                    .find(|&(_, strip, tap, metrics)| {
+                        strip == &**id
+                            && tap == host_core::MeterTap::PostMatrix
+                            && metrics.contains(host_core::MeterMetricSet::SAMPLE_PEAK)
+                    })
+                    .map(|(index, ..)| index)
                     .and_then(|index| u32::try_from(index).ok()),
                 _ => None,
             }
@@ -1409,7 +1417,7 @@ impl MeterBatches {
         if self.resolved_epoch != Some(epoch) {
             self.resolve(
                 &controller.telemetry_configuration().meters,
-                epochs.strips(epoch),
+                epochs.meters(epoch),
             );
             self.resolved_epoch = Some(epoch);
         }
@@ -1495,13 +1503,12 @@ impl<'a> ProviderEpochs<'a> {
             .chain(self.pending)
     }
 
-    /// The strips of provider epoch `epoch`, one live-control producer per strip in strip order
-    /// (`host_core::HostLiveControlHandles::strip_controls`, the meters' order), or `None` when
-    /// no epoch held is `epoch`.
-    fn strips(&self, epoch: u64) -> Option<&'a [host_core::TrackControlProducer]> {
+    /// The plan inventory of provider epoch `epoch`, whose meter rows are its meter readers in
+    /// reader order, or `None` when no epoch held is `epoch`.
+    fn meters(&self, epoch: u64) -> Option<&'a host_core::PlanStateInventory> {
         self.all()
             .find(|provider| provider.epoch == epoch)
-            .map(|provider| &*provider.strips.controls)
+            .map(|provider| &provider.inventory)
     }
 }
 
@@ -2508,13 +2515,13 @@ where
         }
     }
 
-    /// The frames every held epoch's ring dropped (#1588 R4).
+    /// The windows every held epoch's ring dropped (#1588 R4).
     fn ring_drops(&self) -> u64 {
         core::iter::once(&self.providers)
             .chain(&self.retired_providers)
             .chain(&self.pending_providers)
             .filter_map(|provider| provider.meter_frames.as_ref())
-            .map(host_core::MeterFrameConsumer::dropped_frames)
+            .map(host_core::MeterFrameConsumer::dropped_windows)
             .fold(0, u64::saturating_add)
     }
 
@@ -3117,7 +3124,7 @@ where
                 }),
             ) = (reclaimed.meter_frames.as_ref(), self.meters.as_mut())
             {
-                *retired_drops = retired_drops.saturating_add(ring.dropped_frames());
+                *retired_drops = retired_drops.saturating_add(ring.dropped_windows());
             }
         }
 
@@ -6958,20 +6965,24 @@ mod tests {
     #[cfg(feature = "test-support")]
     mod rendered_meters {
         use crate::{
-            CompiledChildren, ControlAdapter, ControlLimits, PlanResources, RuntimePreparer,
-            compile_children,
+            CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources,
+            RuntimePreparer, compile_children,
         };
         use engine::realtime::PlanarBufferMut;
         use host_core::{
             CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
-            HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost, SuccessorBase,
-            prepare_host_runtime_with_live_lanes, prepare_host_runtime_with_live_lanes_successor,
+            HostMeterRequest, HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics,
+            PreparedHost, SuccessorBase, prepare_host_runtime_with_live_lanes,
+            prepare_host_runtime_with_live_lanes_successor,
+            prepare_host_runtime_with_selected_meters,
+            prepare_host_runtime_with_selected_meters_successor,
         };
         use protocol::{
             CommandPayload, CounterId, DiagnosticSeverity, ExpectedRevision, MeterEntry,
-            MeterMetric, MeterTarget, ProtocolCodec, RequestId, TelemetryConfiguration,
-            TypedCommandFrame,
+            MeterMetric, MeterTarget, ProtocolCodec, RequestId, SessionEdit,
+            TelemetryConfiguration, TypedCommandFrame,
         };
+        use session::{RouteSource, StableId, parse_session_json};
 
         const SESSION: &str =
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -6986,8 +6997,11 @@ mod tests {
             const RENDER_METER_FOLD: bool = true;
         }
 
-        /// host-core's live-lanes entries, with one-block meter windows.
-        struct Preparer;
+        /// host-core's live-lanes entries, with one-block meter windows: the default meters, or
+        /// the caller's `selection`.
+        struct Preparer {
+            selection: Option<Vec<HostMeterRequest>>,
+        }
 
         impl RuntimePreparer for Preparer {
             fn prepare(
@@ -7010,12 +7024,20 @@ mod tests {
                     meter_window_blocks: 1,
                     ..HostLiveControlRequest::default()
                 };
-                let (host, handles) = match successor {
-                    Some(base) => prepare_host_runtime_with_live_lanes_successor(
+                let (host, handles) = match (successor, &self.selection) {
+                    (Some(base), None) => prepare_host_runtime_with_live_lanes_successor(
                         compiled, caps, &live, lanes, base, superseded,
                     ),
-                    None => prepare_host_runtime_with_live_lanes(
+                    (None, None) => prepare_host_runtime_with_live_lanes(
                         compiled, caps, &live, lanes, superseded,
+                    ),
+                    (Some(base), Some(selection)) => {
+                        prepare_host_runtime_with_selected_meters_successor(
+                            compiled, caps, &live, selection, lanes, superseded, base,
+                        )
+                    }
+                    (None, Some(selection)) => prepare_host_runtime_with_selected_meters(
+                        compiled, caps, &live, selection, lanes, superseded,
                     ),
                 }?;
                 Ok((host, handles, None))
@@ -7057,6 +7079,43 @@ mod tests {
             }
         }
 
+        /// A session booted with `selection` (or the default meters) and the meter table `meters`
+        /// at one window per batch.
+        fn boot(
+            selection: Option<Vec<HostMeterRequest>>,
+            meters: Vec<MeterEntry>,
+        ) -> CompiledChildren<Adapter> {
+            let mut children = compile_children::<Adapter>(
+                SESSION,
+                limits(),
+                Box::new(Preparer { selection }),
+                None,
+            )
+            .expect("boot");
+            command(
+                &mut children,
+                1,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters,
+                    meter_period_blocks: 1,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            children.session.service().expect("service");
+            children
+        }
+
+        fn output_peak() -> MeterEntry {
+            MeterEntry {
+                target: MeterTarget::Output,
+                metric: MeterMetric::Peak,
+            }
+        }
+
         /// Run `payload` as request `request`; the response bytes.
         fn command(
             children: &mut CompiledChildren<Adapter>,
@@ -7082,6 +7141,64 @@ mod tests {
             children.session.command_response(response).to_vec()
         }
 
+        /// A complete one-window frame of `window` with output peak `[0.5, 0.25]` and `peaks` as
+        /// its strips' peaks.
+        fn frame(window: u64, peaks: &[[f32; 2]]) -> host_core::MeterFrame {
+            let mut frame = host_core::MeterFrame::new(peaks.len()).expect("frame");
+            frame.first_sample = window * QUANTUM;
+            frame.end_sample = (window + 1) * QUANTUM;
+            frame.windows = 1;
+            frame.sequence = window + 1;
+            frame.generation = 1;
+            frame.validity =
+                host_core::MeterValidity::COMPLETE.union(host_core::MeterValidity::OUTPUT);
+            frame.output_peak = [0.5, 0.25];
+            frame.strip_peaks.copy_from_slice(peaks);
+            frame
+        }
+
+        /// Render block `block` and observe it, then run the service step.
+        fn render(children: &mut CompiledChildren<Adapter>, block: u64) {
+            let mut samples = [0.0_f32; 2 * QUANTUM as usize];
+            let output =
+                PlanarBufferMut::try_new(&mut samples, 2, QUANTUM as usize, QUANTUM as usize)
+                    .expect("output");
+            children
+                .plan
+                .render(block * QUANTUM, output)
+                .expect("render");
+            let (left, right) = samples.split_at(QUANTUM as usize);
+            children.plan.observe_rendered_block(
+                [left, right],
+                block * QUANTUM,
+                (block + 1) * QUANTUM,
+            );
+            children.session.service().expect("service");
+        }
+
+        /// Every staged `METER_BATCH`, oldest first: its first sample and its records' values.
+        fn batches(children: &mut CompiledChildren<Adapter>) -> Vec<(u64, Vec<f32>)> {
+            let mut batches = Vec::new();
+            while let Some(length) = children
+                .session
+                .dequeue_event(EventLane::Lossy, 4_096)
+                .expect("an event")
+            {
+                let bytes = children.session.event_response(length).to_vec();
+                let mut fields = [0_u16; 64];
+                let decoded = ProtocolCodec::default()
+                    .decode_typed_event(&bytes, &mut protocol::DecodeScratch::new(&mut fields))
+                    .expect("a typed event");
+                if let protocol::DecodedEventPayload::MeterBatch(batch) = decoded.payload {
+                    let values = (0..usize::from(batch.count))
+                        .map(|index| batch.record(index).expect("a record").value)
+                        .collect();
+                    batches.push((batch.first_sample.0, values));
+                }
+            }
+            batches
+        }
+
         /// The `METER_WINDOWS_LOST` counter, through `COUNTERS_GET`.
         fn windows_lost(children: &mut CompiledChildren<Adapter>, request: u64) -> u64 {
             let response = command(
@@ -7105,32 +7222,37 @@ mod tests {
             snapshot.values[0].value
         }
 
+        /// A structural transaction: a muted copy of the first track and its route.
+        fn add_muted_track(children: &mut CompiledChildren<Adapter>, request: u64) {
+            let model = parse_session_json(SESSION).expect("fixture");
+            let mut track = model.tracks[0].clone();
+            track.id = StableId::parse("a-added").expect("track ID");
+            track.fader.left_mute = true;
+            track.fader.right_mute = true;
+            let mut route = model.routes[0].clone();
+            route.id = StableId::parse("a-added-main").expect("route ID");
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("track route")
+            };
+            *track_id = track.id.clone();
+            let edits = [
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ];
+            command(
+                children,
+                request,
+                CommandPayload::SessionTransactionApply(&edits),
+            );
+        }
+
         /// Test value: red if a frame the full ring dropped never reaches `METER_WINDOWS_LOST`
         /// (the browser's client would see a gap in the batches with no count), or if the
         /// control half stages no batch from a plan's ring (the browser would accept a meter
         /// table and serve nothing).
         #[test]
         fn a_full_ring_drop_reaches_meter_windows_lost_and_its_frames_become_batches() {
-            let mut children =
-                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer), None)
-                    .expect("boot");
-            command(
-                &mut children,
-                1,
-                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-                    meters: vec![MeterEntry {
-                        target: MeterTarget::Output,
-                        metric: MeterMetric::Peak,
-                    }],
-                    meter_period_blocks: 1,
-                    meter_window_blocks: None,
-                    counter_ids: Vec::new(),
-                    counter_period_blocks: 0,
-                    diagnostics_enabled: false,
-                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
-                }),
-            );
-            children.session.service().expect("service");
+            let mut children = boot(None, vec![output_peak()]);
             let level = children.session.meter_level().expect("a meter level");
             assert_eq!(level.load(), host_core::MeterLevel::TELEMETRY);
             let epoch = children.session.newest_plan_epoch();
@@ -7139,42 +7261,93 @@ mod tests {
                 .take_meter_frame_producer(epoch)
                 .expect("the boot plan's ring");
             let published = (0..=host_core::METER_FRAME_RING_DEPTH as u64)
-                .filter(|&window| {
-                    let mut frame = host_core::MeterFrame::new(0).expect("frame");
-                    frame.first_sample = window * QUANTUM;
-                    frame.end_sample = (window + 1) * QUANTUM;
-                    frame.windows = 1;
-                    frame.sequence = window + 1;
-                    frame.generation = 1;
-                    frame.validity =
-                        host_core::MeterValidity::COMPLETE.union(host_core::MeterValidity::OUTPUT);
-                    frame.output_peak = [0.5, 0.25];
-                    producer.publish_frame(&frame)
-                })
+                .filter(|&window| producer.publish_frame(&frame(window, &[])))
                 .count();
             assert_eq!(published, host_core::METER_FRAME_RING_DEPTH);
-            let mut samples = [0.0_f32; 2 * QUANTUM as usize];
-            let output =
-                PlanarBufferMut::try_new(&mut samples, 2, QUANTUM as usize, QUANTUM as usize)
-                    .expect("output");
-            children.plan.render(0, output).expect("render");
-            let (left, right) = samples.split_at(QUANTUM as usize);
-            children
-                .plan
-                .observe_rendered_block([left, right], 0, QUANTUM);
-            children.session.service().expect("service");
-            let staged = children
-                .session
-                .test_controller()
-                .queues()
-                .report(protocol::QueueKind::Telemetry)
-                .occupancy;
+            render(&mut children, 0);
             assert_eq!(
-                staged,
-                2 * host_core::METER_FRAME_RING_DEPTH as u64,
-                "two records a batch"
+                batches(&mut children).len(),
+                host_core::METER_FRAME_RING_DEPTH,
+                "one batch a frame"
             );
             assert_eq!(windows_lost(&mut children, 2), 1);
+        }
+
+        /// #1588 D2, D4: the frames of two epochs' rings are staged in window order, oldest
+        /// epoch first, and a reclaimed ring's drop stays counted.
+        ///
+        /// Test value: red if the rings are drained newest epoch first (the successor's windows
+        /// would reach the client before the predecessor's), or if a reclaimed ring's drops leave
+        /// `METER_WINDOWS_LOST` with its epoch.
+        #[test]
+        fn two_epochs_rings_are_staged_in_window_order_and_a_reclaimed_drop_stays_counted() {
+            let mut children = boot(None, vec![output_peak()]);
+            let first = children.session.newest_plan_epoch();
+            let mut older = children
+                .session
+                .take_meter_frame_producer(first)
+                .expect("the boot plan's ring");
+            add_muted_track(&mut children, 2);
+            let second = children.session.newest_plan_epoch();
+            assert!(second > first, "the transaction published a successor");
+            let mut newer = children
+                .session
+                .take_meter_frame_producer(second)
+                .expect("the successor's ring");
+            let depth = host_core::METER_FRAME_RING_DEPTH as u64;
+            for window in 0..=depth {
+                older.publish_frame(&frame(window, &[]));
+            }
+            for window in depth + 1..depth + 3 {
+                assert!(newer.publish_frame(&frame(window, &[])));
+            }
+            render(&mut children, 0);
+            render(&mut children, 1);
+            assert_eq!(
+                children.session.test_providers().epoch,
+                second,
+                "the boot epoch is reclaimed"
+            );
+            let starts: Vec<u64> = batches(&mut children)
+                .into_iter()
+                .map(|(first_sample, _)| first_sample)
+                .collect();
+            let expected: Vec<u64> = (0..depth)
+                .chain(depth + 1..depth + 3)
+                .map(|window| window * QUANTUM)
+                .collect();
+            assert_eq!(starts, expected);
+            assert_eq!(windows_lost(&mut children, 3), 1, "the boot ring's drop");
+        }
+
+        /// #1588 D3, MINOR-2: a strip entry reads its strip's own meter in a plan prepared with a
+        /// caller selection: here one meter, on the fourth track, so the frame's strip 0 is
+        /// `eq3`'s.
+        ///
+        /// Test value: red if an entry resolves against the plan's strip order instead of its
+        /// meters' (`eq3` would read the frame's strip 3, another meter's slot or none).
+        #[test]
+        fn a_strip_entry_reads_its_own_meter_under_a_caller_selection() {
+            let selection = vec![HostMeterRequest {
+                strip_id: "eq3".into(),
+                tap: host_core::MeterTap::PostMatrix,
+                metrics: host_core::MeterMetricSet::SAMPLE_PEAK,
+            }];
+            let mut children = boot(
+                Some(selection),
+                vec![MeterEntry {
+                    target: MeterTarget::Strip("eq3".into()),
+                    metric: MeterMetric::Peak,
+                }],
+            );
+            let epoch = children.session.newest_plan_epoch();
+            let mut producer = children
+                .session
+                .take_meter_frame_producer(epoch)
+                .expect("the boot plan's ring");
+            assert!(producer.publish_frame(&frame(0, &[[0.75, 0.5]])));
+            render(&mut children, 0);
+            assert_eq!(batches(&mut children), vec![(0, vec![0.75, 0.5])]);
         }
     }
 

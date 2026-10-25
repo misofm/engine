@@ -128,6 +128,8 @@ pub mod transition;
 #[cfg(test)]
 mod limiter_linked_session;
 
+/// The meter tap and metric set a plan's meter rows name (#1588 D3).
+pub use builtins::{MeterMetricSet, MeterTap};
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
     CatalogResources, ControlCatalog, MAXIMUM_METER_BATCH_RECORDS, PlanSampleSource,
