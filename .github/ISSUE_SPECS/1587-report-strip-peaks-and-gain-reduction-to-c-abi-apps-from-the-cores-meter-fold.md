@@ -241,8 +241,28 @@ Commands: `cargo test --locked -p host-core --all-features`,
   - `TestObservationWindows` gains each window's strip reduction word (bits), which gate 2 reads.
   - Attempt 2 (verifier): the gate 5 race row was removed (no render code path; it guarded
     nothing). Gate 2 now has two strips: red on mutant `strips.push(0)` for every handle (red at "armed": handle 1 flags 1 12.79 dB, handle 2 flags 0).
-  - Docs: peak readings continue across a carried swap; a strip's gain reduction restarts at a
-    rebuild's adoption and is absent until its taps' first window there closes, until #1674's
-    observation half pairs carried readers.
+- **Attempt 3: #1674's observation half joins this slice (root, option b).** After a carried
+  rebuild the promoted epoch read the successor's fresh slots, which nothing published to, so a
+  strip's gain reduction never came back. The swap record lives in the successor's executor, on
+  the render thread, so the C ABI plan now carries a host attachment (`CarriedTapsAttachment`,
+  set in `prepare_runtime` for a `METER_DELIVERY` adapter; the browser keeps its own) whose
+  `adopt_predecessor` copies the record's `Observation` entries into a preallocated
+  `CarriedTaps` (atomic pairs, one per handle, count stored last with `Release`; a marked
+  realtime region). `promote_pending_provider` pairs `next.observations` with the running
+  epoch's from those entries through `pair_carried_observations`, beside the meter pairing:
+  from what carried, never from a preparation-time list (#1674 R1's constraint). Charged in the
+  epoch's observation handle bytes: `capi_retained_bytes` 313,601 (+96 B; ceiling 344,192 stays).
+  - Gate 2 gains the carried-rebuild row: `add_muted_track` (ID sorting first), six windows each
+    `{2, Aggregate, VALID, reader's value}`, `test_plan_carry_counts == (1, 0)`. Red before the
+    fix (the promoted epoch's reader held no window: "a published window" panic at window 5).
+  - Uncarried effect (probe, not committed: the compressor's link mode changed, a rebuild whose
+    effect does not carry): the successor is prepared with the tap armed (#1584 D6a), its fresh
+    slot's sequence restarts at 1, so the strip's reading is absent until that tap's first window
+    in the new plan closes, then `VALID`. In the probe the first batch after the edit was already
+    `VALID` (12.29 dB from the fresh compressor), since the tap's window closed inside it.
+  - Docs: readings continue across a swap that carries the strip, and a tap's reading and arm
+    across one that carries its effect; an uncarried effect restarts its taps as above.
+  - NITs: `TapView::strip` is "the frame's strip index"; `fold_gain_reduction`'s doc says
+    `GAIN_REDUCTION` is set by an armed tap's fresh window even when its strip is outside the frame.
   - Note for #1674 (verifier nit): the fold reads each tap's slot twice per poll, `read_state`
     for the arm state and `read` for the window; the pair is not one publication.

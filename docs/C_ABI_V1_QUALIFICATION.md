@@ -482,11 +482,14 @@ has one, else flags 0 and value 0.0. A strip's reading is the deepest reduction 
 observation taps that an `Observe` edit armed (#1584), each from its newest window that opened at
 or after the tap's arm sample, which render publishes in the tap's slot (#1585); a tap never armed,
 or disarmed, gives none, and a window from before a re-arm is none. Entries resolve to strips at each configure and each adoption, against the plan whose
-frames the delivery folds, so a pending rebuild never relabels a record. Peak readings continue
-across a swap that carries the strip meters; a swap that carries none restarts the grid at its
-adoption block, where render restarts the gate and the control thread's adoption asks for the same
-value. A strip's gain reduction restarts at a rebuild's adoption: it is absent until its taps'
-first window in the new plan closes, until #1674's observation half pairs carried readers.
+frames the delivery folds, so a pending rebuild never relabels a record. Readings continue across
+a swap that carries the strip meters; a swap that carries none restarts the grid at its adoption
+block, where render restarts the gate and the control thread's adoption asks for the same value.
+A tap's reading and arm continue across a swap that carries its effect: the swap block copies its
+record's observation entries into the plan's attachment, and the promotion pairs the readers
+from them (#1674's observation half, #1587b), never from a list made at preparation. A swap that
+does not carry the effect restarts its taps: an armed tap is prepared armed (#1584), and the
+strip's gain reduction is absent until the tap's first window in the new plan closes.
 The control thread adopts each swap when it reclaims the displaced plan, whose clock gives the
 adoption sample. The lossy meter lane holds one batch whole (256 slots; the counter-snapshot lane keeps
 two). `METER_WINDOWS_LOST` counts every closed window that reached no batch: the windows render

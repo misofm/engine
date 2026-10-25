@@ -503,7 +503,8 @@ fn filled<T: Clone>(count: usize, value: T) -> Result<Box<[T]>, TryReserveError>
 /// One observation tap a host shows [`fold_gain_reduction`] (#1582 D3).
 #[derive(Clone, Copy)]
 pub struct TapView<'a> {
-    /// The strip the tap's effect sits on, in [`SessionModel::strips`] order.
+    /// The frame's strip index of the strip the tap's effect sits on: its position in
+    /// [`MeterFrame::strip_peaks`]. An index outside the frame is skipped.
     pub strip: u32,
     /// The tap's declaration.
     pub descriptor: &'static ObservationDescriptor,
@@ -530,7 +531,8 @@ pub trait GainReductionTaps {
 /// Clears every strip's word and presence, then, for each armed tap whose latest window opened at
 /// or after its arm sample ([`window_since_arm`]), acknowledges the window and folds its
 /// [`strip_reduction_db`] into the tap's strip word by maximum (from `0.0`). A strip outside the
-/// frame is skipped. [`MeterValidity::GAIN_REDUCTION`] is set exactly when some tap folded; the
+/// frame is skipped. [`MeterValidity::GAIN_REDUCTION`] is set exactly when some armed tap had a
+/// window since its arm, including a tap whose strip is outside the frame, which marks no strip; the
 /// master's reading is [`MeterFrame::master_gain_reduction`] of the folded frame.
 /// Allocation-free, no runtime-checked index, bounded by the visited taps.
 #[inline]
