@@ -422,3 +422,26 @@ for every other session.
 - In the successor preparation, D2's forced restarts join the restarted set before #1324b's
   sidechain closure, so the closure also closes over them; the transition is planned again over
   the prepared `restarted_strips()`, so each strip the closure adds is ducked.
+
+## Decision record (slice 1397b, attempt 1, 2026-10-25)
+
+- **Closure.** `grown_strips` runs #1324 D1's closure (`close_over_sidechains`, now `pub(crate)`,
+  the one rule) over its set, with the two compiles' lines and no strip delay restart (it runs
+  before any join). The 1397a limit is gone. The preparation still runs the closure again over the
+  whole `restarted_strips()` after the forced restarts join, so end to end the two closures overlap:
+  either one alone gives gate 6(b)'s duck set.
+- **`C` over sidechain lines** was already in place (#1324b D4, merge note above): the transition is
+  planned over the prepared `restarted_strips()`, so a `post_fader` key line out of a forced restart
+  counts. Gate 6(a) checks it. No code change.
+- **Gate 6** is one control-plane test (`a_sidechain_key_out_of_a_grown_strip_is_ducked`), on both
+  widths, with the spec's session (`P_MAX = 0`) and `k`'s compressor at threshold -80 dB. Both arms
+  are published `NoEarlierThan(S)` (`C` = 486 for (a), 62 for (b)), are adopted at `S` and report
+  `TRANSITION_FALLBACK`. The output matches the reference up to `t1`'s fire block. `grown_strips`'s
+  own closure is tested in `transition::tests` (an arm keyed from `pre_fader` and one from
+  `post_fader`).
+- **Finding (open question for root).** A carried line that gets shorter keeps its *oldest* samples
+  (`CompensationDelay::adopt`, head-aligned) and drops the newest `δ`. So in gate 6(a) an `S` that
+  counts only the route lines (62) also drops only `+0.0`. The output cannot see the spec's 6(a)
+  defect, and only the `S` assertion catches it. Counting the whole key line in `C` is conservative
+  (the drop needs only `δ` of silence before `S`). This slice does not change it, because that would
+  move `S` (class B).

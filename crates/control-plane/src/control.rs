@@ -9486,7 +9486,11 @@ mod tests {
                 track(
                     "t1",
                     SOURCE,
-                    if clipped { vec![soft_clip("clip-1")] } else { Vec::new() },
+                    if clipped {
+                        vec![soft_clip("clip-1")]
+                    } else {
+                        Vec::new()
+                    },
                 ),
                 track("t2", AUX, vec![soft_clip("clip-a"), soft_clip("clip-b")]),
             ];
@@ -9536,11 +9540,13 @@ mod tests {
         /// and every block before `t1`'s fire block (the first at or after `S + 31`) equals the
         /// session with no structural edit and the ducked strips live-muted at the edit's block.
         ///
-        /// Test value: (a) a `C` that counts sidechain lines only from strips the carry join
-        /// restarts (round-8 M1) misses `g`, so `S` counts 62 instead of 486 and the shortened key
-        /// line drops `g`'s fade tail from `k`'s detector; (b) a closure run before the
-        /// transition's forced restarts join the set leaves `k` carried and audible through the
-        /// duck, and its shortened key line drops `g`'s pre-fader signal at `S`.
+        /// Test value: (a) a transition whose `C` misses the key line out of the forced restart
+        /// `g` publishes at the route lines' `S` (62, not 486); (b) a duck set that is not closed
+        /// over sidechains after the forced restarts join it (neither `grown_strips` nor the
+        /// preparation) leaves `k` carried and audible through the duck, so the output differs
+        /// from the edit's block. (a)'s output part does not see that `S`: a shorter carried line
+        /// keeps its oldest samples (`CompensationDelay::adopt`), so the route lines' `S` drops
+        /// only `+0.0` here too.
         #[test]
         fn a_sidechain_key_out_of_a_grown_strip_is_ducked() {
             const CLIP: u64 = 31;
