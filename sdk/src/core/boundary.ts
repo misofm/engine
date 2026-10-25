@@ -15,15 +15,10 @@ import { readControlStripOrderSync } from "./control-list.ts";
 import type { ControlStripOrder } from "./control-list.ts";
 import { ControlRequestIds } from "./control-queue.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
-import { TrackResponseModule } from "./live-response.ts";
+import { TrackResponseRequester } from "./live-response.ts";
 import { watermarkSnapshot } from "./session-edit.ts";
 import type { WatermarkSnapshot } from "./session-edit.ts";
-import type {
-  TrackResponseObservedState,
-  TrackResponseQuery,
-  TrackResponseRead,
-  TrackResponseResult,
-} from "./live-response.ts";
+import type { TrackResponseQuery, TrackResponseResult } from "./live-response.ts";
 import { decodeCapabilitiesReply } from "./protocol-messages.ts";
 import {
   cloneSpectrumCollection,
@@ -328,6 +323,9 @@ export interface MeterFrame {
   readonly submixGrDb: Float32Array;
 }
 
+/** The error of a call on a disposed engine, and of a track response query it left pending. */
+const DISPOSED = "this engine was disposed; boot a new one";
+
 /** A staged-and-booted engine instance. */
 export class WasmBoundary {
   readonly #exports: ExportTable;
@@ -349,7 +347,7 @@ export class WasmBoundary {
   readonly #stripOrders = new Map<bigint, ControlStripOrder>();
   /** Meter windows dropped because no list named their structure epoch. */
   #unnamedMeterWindows = 0n;
-  #trackResponse: TrackResponseModule | undefined;
+  #trackResponse: TrackResponseRequester | undefined;
   #spectrumQuery: SpectrumQuery | undefined;
   #spectrumCollection: SpectrumCollection | undefined;
   #spectrumActiveQuery: SpectrumQuery | undefined;
@@ -492,7 +490,7 @@ export class WasmBoundary {
 
   #live(): number {
     if (this.#handle === 0) {
-      throw new MisoUsageError("this engine was disposed; boot a new one");
+      throw new MisoUsageError(DISPOSED);
     }
     return this.#handle;
   }
@@ -909,19 +907,26 @@ export class WasmBoundary {
     );
   }
 
-  /** Capture and evaluate one immutable selected-track response at the current render boundary. */
-  queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
-    this.#trackResponse ??= new TrackResponseModule(this.#exports);
-    return this.#trackResponse.queryActive(request, this.#live());
-  }
-
-  /** Internal managed read: capture state first and evaluate only after a semantic change. */
-  queryTrackResponseIfChanged(
-    request: TrackResponseQuery,
-    previousState?: TrackResponseObservedState,
-  ): TrackResponseRead {
-    this.#trackResponse ??= new TrackResponseModule(this.#exports);
-    return this.#trackResponse.queryActiveIfChanged(request, this.#live(), previousState);
+  /**
+   * The response of one track, as a C ABI host reads it (#1579a D1, D2): a strip `RESPONSE_GET`
+   * through the control entry, then the `RESPONSE_READY` with its tag from the event lane. The core
+   * captures in its render step, so the promise settles after the next `render()`, at the latest
+   * when the request deadline passes. Queries run one at a time, in call order.
+   * A query made from inside an event callback sends its frame there, which runs a nested event
+   * drain: the events still queued reach the other listeners before the callback returns.
+   */
+  queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult> {
+    try {
+      this.#live();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    this.#trackResponse ??= new TrackResponseRequester({
+      send: (frame) => this.controlFrame(frame),
+      onControlEvent: (listener) => this.onControlEvent(listener),
+      nextRequestId: () => this.#controlRequestIds.next(),
+    });
+    return this.#trackResponse.query(request);
   }
 
   /**
@@ -1557,7 +1562,8 @@ export class WasmBoundary {
    */
   dispose(): void {
     if (this.#handle === 0) return;
-    this.#trackResponse?.close();
+    // A pending query rejects now, with the error a call on a disposed engine gets.
+    this.#trackResponse?.close(new MisoUsageError(DISPOSED));
     this.#trackResponse = undefined;
     this.#spectrumQuery = undefined;
     this.#spectrumCollection = undefined;
