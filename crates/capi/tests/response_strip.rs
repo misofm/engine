@@ -454,15 +454,17 @@ fn add_insert(track: &str, name: &str, position: u32) -> SessionEdit {
 /// answers tag 1 and no event before a render; after one render and `service`, exactly one
 /// `RESPONSE_READY` with tag 1, outcome `OK`, four members in signal order (builtins, the console
 /// slot, the EQ insert, the compressor with kind 3) and curves bit-equal to the core's composition
-/// of a host prepared from the same document. A request armed before a rebuild that adds an insert
-/// gets one event, from the plan that holds it. A request on `eq1` armed on a pending rebuild that
+/// of a host prepared from the same document. Across a rebuild that adds an insert (a duck-swap,
+/// #1324), a request armed before its commit gets one event from the running plan, and one armed
+/// after it gets one event from the adopted plan, with the insert. A request on `eq1` armed on a
+/// pending rebuild that
 /// a removal of `eq1` then supersedes gets one event, `NOT_FOUND` `response.strip.removed`. No tag
 /// gets a second event.
 ///
 /// Test value: red if the C ABI's curve or owner list differs from the core's composition (the
 /// event's mapping of D5 included), if the event arrives before the plan has rendered, if a request
-/// whose strip a superseding edit removed is never answered, or if a rebuild leaves a tag without
-/// its event or with two.
+/// whose strip a superseding edit removed is never answered, if a rebuild leaves a tag without its
+/// event or with two, or if a capture is taken from another plan than the request's newest.
 #[test]
 fn end_to_end_then_removed_strip() {
     let (document, revision) = document();
@@ -549,7 +551,16 @@ fn end_to_end_then_removed_strip() {
     }
     assert_eq!(host.run(4), Vec::new(), "one event per tag");
 
-    // Armed before a rebuild that adds an insert: answered once, from the plan that holds it.
+    // Across a rebuild that adds an insert. A rebuild that restarts the strip duck-swaps
+    // (#1324): render adopts its plan at the end of the duck, not at the next block. Armed before
+    // the commit, the request's newest plan is the running one, which renders through the duck:
+    // answered once, from it, without the insert.
+    let has = |capture: &protocol::TrackResponseCapture, name: &str| {
+        capture
+            .members
+            .iter()
+            .any(|member| member.section == ResponseMemberSection::Inserts(name.into()))
+    };
     assert_eq!(host.ask("eq0").1, Reply::Tag(2));
     assert!(host.transact(&[add_insert("eq0", "comp-late", 2)]));
     let ready = host.run(BLOCKS);
@@ -559,16 +570,27 @@ fn end_to_end_then_removed_strip() {
     };
     assert_eq!(ready[0].request_tag, 2);
     assert!(
-        capture
-            .members
-            .iter()
-            .any(|member| member.section == ResponseMemberSection::Inserts("comp-late".into())),
-        "the capture is the rebuilt plan's"
+        !has(capture, "comp-late"),
+        "armed before the commit: the running plan's"
+    );
+    // Armed after the commit of a rebuild, on its pending plan: answered once, only from the
+    // adopted plan, with the insert.
+    assert!(host.transact(&[add_insert("eq0", "comp-later", 3)]));
+    assert_eq!(host.ask("eq0").1, Reply::Tag(3));
+    let ready = host.run(BLOCKS);
+    assert_eq!(ready.len(), 1, "one event across the adoption");
+    let ResponseReadyOutcome::Ready(capture) = &ready[0].outcome else {
+        panic!("a capture: {:?}", ready[0].outcome);
+    };
+    assert_eq!(ready[0].request_tag, 3);
+    assert!(
+        has(capture, "comp-later"),
+        "armed on the pending plan: the adopted plan's"
     );
 
     // Armed on a pending rebuild that a removal of the strip supersedes.
     assert!(host.transact(&[add_insert("eq1", "comp-1", 0)]));
-    assert_eq!(host.ask("eq1").1, Reply::Tag(3));
+    assert_eq!(host.ask("eq1").1, Reply::Tag(4));
     assert!(host.transact(&[
         SessionEdit::RemoveRoute {
             route_id: sid("eq1-main"),
@@ -582,7 +604,7 @@ fn end_to_end_then_removed_strip() {
     assert_eq!(
         (ready[0].request_tag, &*ready[0].strip_id, &ready[0].outcome),
         (
-            3,
+            4,
             "eq1",
             &ResponseReadyOutcome::Refused {
                 status: StatusCode::NotFound,
@@ -659,8 +681,10 @@ fn one_in_flight_none_lost_and_replay() {
 }
 
 /// The acked-batch lens on a rebuild that grows the strip: on a 4 KiB control frame limit a
-/// request whose event bound fits arms tag 1; two rebuilds then add twenty inserts, so the capture
-/// from the rebuilt plan no longer fits a frame. The tag still gets exactly one event, the refusal
+/// request armed on a pending rebuild of `eq1` (so its event bound is checked at `eq0`'s four
+/// owners) arms tag 1; two rebuilds then supersede that plan before it renders and add twenty
+/// inserts to `eq0`, so the capture, armed again from the plan render adopts, no longer fits a
+/// frame. The tag still gets exactly one event, the refusal
 /// `LIMIT_EXCEEDED` `response.reply_too_large`, and the next request arms again.
 ///
 /// Test value: red if an event the endpoint cannot encode is held for ever (the tag never
@@ -669,6 +693,7 @@ fn one_in_flight_none_lost_and_replay() {
 fn a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal() {
     let (document, revision) = document();
     let mut host = Host::with_frame_bytes(&document, revision, 4_096);
+    assert!(host.transact(&[add_insert("eq1", "comp-1", 0)]));
     assert_eq!(host.ask("eq0").1, Reply::Tag(1));
     // Two transactions of ten inserts each (one frame of twenty would not fit 4 KiB).
     for batch in 0..2_u32 {
@@ -679,6 +704,8 @@ fn a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal() {
             })
             .collect();
         assert!(host.transact(&edits));
+        // Read the commit's event (the queue holds two); nothing has rendered.
+        assert_eq!(host.drain().0, Vec::new());
     }
     let ready = host.run(BLOCKS);
     assert_eq!(ready.len(), 1, "one event for the grown capture");
