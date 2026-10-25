@@ -230,6 +230,18 @@ Anchors moved since the brief: the stable pin is 1.99.1 (not 1.97.1) everywhere;
   `test-ci-path-routing.py`, `check-release-shape.py --self-test`: pass. Gate 7 is CI's.
 - Gate 8: `cargo fmt --check`, `check-workspace-policy.sh`: pass; no Rust source changed.
 
+- **Sysroot remap form (deliberate).** The builder remaps the whole sysroot
+  (`$(rustc --print sysroot)=/rustc-sysroot`, D2's frozen form) rather than the #1331a-1 record's
+  `<sysroot>/lib/rustlib/src/rust=/rust-src`: `-Zbuild-std` compiles std from that `rust-src`,
+  which lies inside the sysroot, so the wider prefix covers it and any other sysroot path. Gate 4
+  evidence: a second `RUSTUP_HOME` (toolchain copy at another path, no wasm32 std), another
+  `CARGO_HOME` and another checkout gave the same digest `8643b810...` as the first build.
+- **Re-record after merging main (2026-10-25).** Main at the merge (#2038, #2048) moves the module
+  to `f8e2e594f8468f9da76d6a5714ca46b03e42c3b202ac90dff04e064e9e39b1c2` (5,697,370 B); one
+  `--browser all --record-matrix` run (candidate `f4a4f0da0`, chromium 151.0.7922.34, firefox
+  153.0, webkit 26.5, all gates passed) re-recorded `results.json` and
+  `BROWSER_DEPLOYMENT_MATRIX.md`, and `--check-matrix` accepts them.
+
 ### Stated limits (each with a successor)
 
 - **The sysroot remap has no committed gate.** The `artifact-identity` twin shares the runner's
