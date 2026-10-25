@@ -65,6 +65,9 @@ pub const DESIGN_WORDS: [usize; 9] = [C1, C1 + 1, C1 + 2, M1, KA2, DC1, DC1 + 1,
 /// Live words per channel.
 pub const RAMPS: usize = BANDS * BAND_RAMPS;
 
+/// The detector link glide weights per channel (issue #1969, #1370 D2): `w_link`, then `w_avg`.
+pub const LINK_COUNT: usize = 2;
+
 /// Per-channel words written only by the control plane.
 #[derive(Clone, Copy, Debug)]
 pub struct Coef<L: Lane> {
@@ -104,6 +107,11 @@ pub struct Chan<L: Lane> {
     pub side_run: L,
     /// The live words, band `b`'s at `b * BAND_RAMPS` plus the constants above.
     pub ramps: [WordRamp<L>; RAMPS],
+    /// The detector link glide weights (issue #1969, #1370 D2), `w_link` then `w_avg`, one pair
+    /// for every band of the channel: at rest each is exactly `effect_contract::link_glide_weights`
+    /// of the lane's mode, the mode [`Coef::link_max`] and [`Coef::link_avg`] select. Only a
+    /// `GLIDE` segment reads them.
+    pub links: [WordRamp<L>; LINK_COUNT],
 }
 
 impl<L: Lane> Default for Chan<L> {
@@ -122,6 +130,7 @@ impl<L: Lane> Default for Chan<L> {
             run: zero,
             side_run: zero,
             ramps: [WordRamp::zero(); RAMPS],
+            links: [WordRamp::zero(); LINK_COUNT],
         }
     }
 }
@@ -173,8 +182,15 @@ pub fn refresh_knees<L: Lane>(s: &mut Chan<L>) {
 /// The ramps of a frame and the frame's rest thresholds: the effect input's for every main SVF
 /// and the sidechain's for every detector SVF. An unarmable segment (`ARMABLE = false`) had its
 /// clocks advanced before the frame loop (`lane::kernels::silence_skip_block`) and reads none.
+/// `GLIDE` (issue #1969) also advances the link weights one frame, once for all the bands.
 #[inline(always)]
-fn open<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: bool>(
+fn open<
+    L: Lane,
+    const RAMPING: bool,
+    const CONNECTED: bool,
+    const ARMABLE: bool,
+    const GLIDE: bool,
+>(
     s: &mut Chan<L>,
     x: L,
     side: L,
@@ -183,6 +199,9 @@ fn open<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: bool
     if RAMPING {
         advance_word_ramps(&mut s.ramps);
         refresh_knees(s);
+    }
+    if GLIDE {
+        advance_word_ramps(&mut s.links);
     }
     if !ARMABLE {
         return (L::zero(), L::zero());
@@ -234,11 +253,48 @@ fn band_front<L: Lane, const CONNECTED: bool, const ARMABLE: bool>(
     (v1, detector)
 }
 
+/// One band's linked detector level in dB on one channel: the lane's prepared link law, as its
+/// masks select, and under `GLIDE` (issue #1969, #1370 D2-D3), on every lane whose link weights
+/// (already advanced this frame by `open`) are still in flight, the blend
+/// `combined = max + w_avg * (avg - max)`, `d = own + w_link * (combined - own)` of `|own|` and
+/// `|partner|`, each a separate `mul` and `add` (base Wasm SIMD has no fused multiply-add). A
+/// gliding lane's blend enters the shared level as a dual-mono word, so it takes the same dB
+/// conversion; a lane at rest, or arriving on this frame, keeps the prepared law's own operands,
+/// which its masks (already the target mode's) select, so its bits are the non-glide body's.
+#[inline(always)]
+pub(crate) fn detector_level<L: Lane, const GLIDE: bool>(
+    c: &Coef<L>,
+    links: &[WordRamp<L>; LINK_COUNT],
+    own: L,
+    partner: L,
+) -> L {
+    let link = LinkWords {
+        maximum: c.link_max,
+        average: c.link_avg,
+    };
+    if !GLIDE {
+        return detector_level_db(own, partner, &link);
+    }
+    let zero = L::zero();
+    let gliding = L::mask_or(links[0].remaining.gt(zero), links[1].remaining.gt(zero));
+    let (own_abs, partner_abs) = (own.abs(), partner.abs());
+    let maximum = own_abs.max(partner_abs);
+    let half = L::splat(0.5);
+    let average = half.mul(own_abs).add(half.mul(partner_abs));
+    let combined = maximum.add(links[1].current.mul(average.sub(maximum)));
+    let blend = own_abs.add(links[0].current.mul(combined.sub(own_abs)));
+    let link = LinkWords {
+        maximum: L::select(gliding, zero, link.maximum),
+        average: L::select(gliding, zero, link.average),
+    };
+    detector_level_db(L::select(gliding, blend, own), partner, &link)
+}
+
 /// One band's back half on one channel: the linked level, the gain law, and the modulated bell
 /// mix on the cascade word `u`. A zero mix word (an idle 0 dB band, a disabled band) selects `u`
 /// itself, so such a band is the identity bit for bit.
 #[inline(always)]
-fn band_back<L: Lane>(
+fn band_back<L: Lane, const GLIDE: bool>(
     band: usize,
     c: &Coef<L>,
     s: &mut Chan<L>,
@@ -248,11 +304,7 @@ fn band_back<L: Lane>(
     v1: L,
 ) -> L {
     let zero = L::zero();
-    let link = LinkWords {
-        maximum: c.link_max,
-        average: c.link_avg,
-    };
-    let level_db = detector_level_db(own, partner, &link);
+    let level_db = detector_level::<L, GLIDE>(c, &s.links, own, partner);
     let r = &s.ramps[band * BAND_RAMPS..(band + 1) * BAND_RAMPS];
     let state = &mut s.bands[band];
     let law = DynamicBandCoef {
@@ -282,6 +334,9 @@ fn band_back<L: Lane>(
 /// left plane holds both channels, the left word is its own partner, and only the left state
 /// moves, so the left plane and state are bit-identical to a dual segment whose right plane equals
 /// its left. A collapsed bank is never connected.
+///
+/// `GLIDE` (issue #1969) runs a detector link glide in flight ([`detector_level`]): only a
+/// `RAMPING` segment that has a glide to advance takes it; every other body is the one before.
 #[inline(always)]
 pub fn segment<
     L: Lane,
@@ -289,6 +344,7 @@ pub fn segment<
     const RAMPING: bool,
     const MONO: bool,
     const ARMABLE: bool,
+    const GLIDE: bool,
 >(
     args: Args<'_, L>,
 ) {
@@ -310,11 +366,12 @@ pub fn segment<
         let span = frame * width..frame * width + width;
         let x_left = L::load(&left[span.clone()]);
         if MONO {
-            let rest = open::<L, RAMPING, false, ARMABLE>(&mut l, x_left, x_left, armed_after);
+            let rest =
+                open::<L, RAMPING, false, ARMABLE, GLIDE>(&mut l, x_left, x_left, armed_after);
             let mut u = x_left;
             for (band, _) in live.iter().enumerate().filter(|(_, live)| **live) {
                 let (v1, det) = band_front::<L, false, ARMABLE>(band, &mut l, u, u, rest);
-                u = band_back(band, coef_left, &mut l, det, det, u, v1);
+                u = band_back::<L, GLIDE>(band, coef_left, &mut l, det, det, u, v1);
             }
             L::select(coef_left.bypass.gt(L::zero()), x_left, u).store(&mut left[span]);
             continue;
@@ -327,16 +384,18 @@ pub fn segment<
             ),
             _ => (L::zero(), L::zero()),
         };
-        let rest_l = open::<L, RAMPING, CONNECTED, ARMABLE>(&mut l, x_left, s_left, armed_after);
-        let rest_r = open::<L, RAMPING, CONNECTED, ARMABLE>(&mut r, x_right, s_right, armed_after);
+        let rest_l =
+            open::<L, RAMPING, CONNECTED, ARMABLE, GLIDE>(&mut l, x_left, s_left, armed_after);
+        let rest_r =
+            open::<L, RAMPING, CONNECTED, ARMABLE, GLIDE>(&mut r, x_right, s_right, armed_after);
         let (mut u_left, mut u_right) = (x_left, x_right);
         for (band, _) in live.iter().enumerate().filter(|(_, live)| **live) {
             let (v1_l, det_l) =
                 band_front::<L, CONNECTED, ARMABLE>(band, &mut l, u_left, s_left, rest_l);
             let (v1_r, det_r) =
                 band_front::<L, CONNECTED, ARMABLE>(band, &mut r, u_right, s_right, rest_r);
-            u_left = band_back(band, coef_left, &mut l, det_l, det_r, u_left, v1_l);
-            u_right = band_back(band, coef_right, &mut r, det_r, det_l, u_right, v1_r);
+            u_left = band_back::<L, GLIDE>(band, coef_left, &mut l, det_l, det_r, u_left, v1_l);
+            u_right = band_back::<L, GLIDE>(band, coef_right, &mut r, det_r, det_l, u_right, v1_r);
         }
         L::select(coef_left.bypass.gt(L::zero()), x_left, u_left).store(&mut left[span.clone()]);
         L::select(coef_right.bypass.gt(L::zero()), x_right, u_right).store(&mut right[span]);

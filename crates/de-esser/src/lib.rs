@@ -44,6 +44,7 @@ use effect_contract::{
 use effect_runtime::bank::{
     block_is_positive_zero, check_block, nonfinite_lane_mask, positive_zero_lanes,
 };
+use effect_runtime::dynamic_band::WordRamp;
 use effect_runtime::envelope::attack_release_coefficient;
 use effect_runtime::params::{
     ParameterKind, ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
@@ -54,7 +55,7 @@ use effect_runtime::svf::{RAMP_PATH_NORM_TOLERANCE, transition_norm};
 use lane::kernels::{SvfState, silence_advance, silence_skip_block, svf_state_held};
 use lane::{Backend, Lane, Simd4, silence_armable_holding};
 
-use kernel::{Args, C1, Chan, Coef, MAX_WIDTH, RAMPS, segment};
+use kernel::{Args, C1, Chan, Coef, LINK_COUNT, MAX_WIDTH, RAMPS, segment};
 
 const PARAMETER_COUNT: usize = 10;
 
@@ -66,8 +67,12 @@ const RAMP_SAMPLES: u32 = 64;
 const CHAN_WORDS: usize = 7 + RAMPS * 4;
 
 /// One channel section of the payload: the seven signal words, the ten committed values, the ramp
-/// words.
-const STATE_LANE_WORDS: usize = CHAN_WORDS + PARAMETER_COUNT;
+/// words, then the two link weight quadruples (issue #1969, #1370 D6). The lane's link mode is
+/// the weights' targets (`effect_contract::link_glide_mode`), so it takes no word of its own.
+const STATE_LANE_WORDS: usize = STATE_LINK_WORD + LINK_COUNT * 4;
+
+/// Word index of the first link weight quadruple (`w_link`, then `w_avg`) in a channel section.
+const STATE_LINK_WORD: usize = CHAN_WORDS + PARAMETER_COUNT;
 
 /// The saturated silence clock (`lane::kernels::silence_advance`).
 const RUN_MAX: f32 = 16_777_216.0;
@@ -526,13 +531,28 @@ fn lane_words<L: Lane>(s: &Chan<L>, lane: usize) -> [f32; CHAN_WORDS] {
     chan_words(s).map(|word| lane_get(word, lane))
 }
 
-/// Writes one lane of one channel's state words.
+/// Writes one lane of one channel's state words. The link weights are not among them and stay.
 fn set_lane_words<L: Lane>(s: &mut Chan<L>, lane: usize, values: &[f32; CHAN_WORDS]) {
     let mut words = chan_words(s);
     for (word, &value) in words.iter_mut().zip(values) {
         lane_set(word, lane, value);
     }
+    let links = s.links;
     *s = chan_from_words(&words);
+    s.links = links;
+}
+
+/// One lane of one link weight: `current`, `target`, `step`, `remaining`.
+fn link_lane<L: Lane>(ramp: &WordRamp<L>, lane: usize) -> [f32; 4] {
+    [ramp.current, ramp.target, ramp.step, ramp.remaining].map(|word| lane_get(word, lane))
+}
+
+/// Writes one lane of one link weight.
+fn set_link_lane<L: Lane>(ramp: &mut WordRamp<L>, lane: usize, words: [f32; 4]) {
+    lane_set(&mut ramp.current, lane, words[0]);
+    lane_set(&mut ramp.target, lane, words[1]);
+    lane_set(&mut ramp.step, lane, words[2]);
+    lane_set(&mut ramp.remaining, lane, words[3]);
 }
 
 const fn state_error(code: &'static str) -> StatePayloadError {
@@ -595,6 +615,9 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                 effect.reset_lane_full(channel, lane);
             }
         }
+        for lane in 0..L::WIDTH {
+            effect.rest_link(lane);
+        }
         Some(effect)
     }
 
@@ -602,9 +625,76 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     fn with_lane_links(mut self, links: &[LinkMode]) -> Self {
         for (lane, &link) in links.iter().enumerate().take(L::WIDTH) {
             self.set_lane_link(lane, link);
+            self.rest_link(lane);
         }
         self
     }
+
+    /// Seats lane `lane`'s link weights at rest at its mode on both channels (issue #1969, #1370
+    /// D2): preparation, a full reset and a lane whose mode a lane swap replaced. The D7 recovery
+    /// (`reset_lane_full` of one channel) leaves a glide in flight alone.
+    fn rest_link(&mut self, lane: usize) {
+        let weights = effect_contract::link_glide_weights(self.lane_link(lane));
+        for state in &mut self.state {
+            for (ramp, &value) in state.links.iter_mut().zip(&weights) {
+                set_link_lane(ramp, lane, [value, value, 0.0, 0.0]);
+            }
+        }
+    }
+
+    // REALTIME_POLICY_BEGIN: #1969, a link glide is retargeted at a block boundary.
+    /// Glides lane `lane`'s detector link to `mode` over `samples` samples (issue #1969, #1370
+    /// D1-D3).
+    ///
+    /// The lane's link words become `mode`'s at once, so a glide that arrives lands on `mode`'s
+    /// own law; the weights, retargeted from the words in force, carry the transition, and the
+    /// bank's ramp clock covers it. The mode is the one a full reset keeps and a lane swap moves.
+    /// `false`, changing nothing, for a lane past the width or padded, a mode the descriptor does
+    /// not support or a glide longer than `LINK_GLIDE_MAX_SAMPLES`.
+    fn retarget_link(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
+        if lane >= L::WIDTH
+            || !self.is_active(lane)
+            || !DE_ESSER_DESCRIPTOR.lane_link
+            || !DE_ESSER_DESCRIPTOR.supported_link_modes.contains(mode)
+            || samples > effect_contract::LINK_GLIDE_MAX_SAMPLES
+        {
+            return false;
+        }
+        self.set_lane_link(lane, mode);
+        let weights = effect_contract::link_glide_weights(mode);
+        for state in &mut self.state {
+            for (slot, &weight) in state.links.iter_mut().zip(&weights) {
+                let [current, target, step, remaining] = link_lane(slot, lane);
+                let mut ramp = LinearRamp {
+                    current,
+                    target,
+                    step,
+                    remaining: remaining as u32,
+                };
+                ramp.set_target(weight, samples);
+                set_link_lane(
+                    slot,
+                    lane,
+                    [ramp.current, ramp.target, ramp.step, ramp.remaining as f32],
+                );
+                self.ramp_frames_left = self.ramp_frames_left.max(ramp.remaining);
+            }
+        }
+        true
+    }
+
+    /// Whether a link glide is in flight on any lane of the channels the block renders: the
+    /// left alone on a collapsed block, whose right state is frozen.
+    fn gliding<const MONO: bool>(&self) -> bool {
+        let channels = if MONO { 1 } else { 2 };
+        self.state[..channels].iter().any(|state| {
+            state
+                .links
+                .iter()
+                .any(|ramp| positive_zero_lanes(ramp.remaining) != all_lanes(L::WIDTH))
+        })
+    }
+    // REALTIME_POLICY_END
 
     fn set_lane_link(&mut self, lane: usize, link: LinkMode) {
         for coef in &mut self.coef {
@@ -666,8 +756,18 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                     ResetKind::FullToDefaults => self.reset_lane_full(channel, lane),
                     ResetKind::DiscontinuityKeepParameters => {
                         self.reset_lane_discontinuity(channel, lane);
+                        // Issue #1969: a glide in flight snaps to its target, the lane's mode.
+                        for ramp in &mut self.state[channel].links {
+                            let target = lane_get(ramp.target, lane);
+                            set_link_lane(ramp, lane, [target, target, 0.0, 0.0]);
+                        }
                     }
                 }
+            }
+        }
+        if kind == ResetKind::FullToDefaults {
+            for lane in 0..L::WIDTH {
+                self.rest_link(lane);
             }
         }
         self.ramp_frames_left = 0;
@@ -756,7 +856,8 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             };
             ramp.set_target(design, RAMP_SAMPLES);
             chunk.copy_from_slice(&[ramp.current, ramp.target, ramp.step, ramp.remaining as f32]);
-            self.ramp_frames_left = RAMP_SAMPLES;
+            // Issue #1969: never below a link glide's remaining frames, which may be longer.
+            self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
         }
         set_lane_words(&mut self.state[channel], lane, &words);
     }
@@ -790,6 +891,8 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         }
         let (split, total) = (smoothed * L::WIDTH, left.len());
         let armed_after = L::splat(lane::silence_frames(self.sample_rate) as f32);
+        // Issue #1969: only the ramping prefix of a block with a glide in flight takes the blend.
+        let glide = self.gliding::<MONO>();
         let (first, rest) = self.state.split_at_mut(1);
         let mut run = |ramping: bool, range: core::ops::Range<usize>| {
             let (left, right) = (&mut left[range.clone()], &mut right[..]);
@@ -832,11 +935,13 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                 coef: (&self.coef[0], &self.coef[1]),
                 state: (state_left, state_right),
             };
-            match (ramping, armable) {
-                (true, true) => segment::<L, CONNECTED, true, MONO, true>(args),
-                (true, false) => segment::<L, CONNECTED, true, MONO, false>(args),
-                (false, true) => segment::<L, CONNECTED, false, MONO, true>(args),
-                (false, false) => segment::<L, CONNECTED, false, MONO, false>(args),
+            match (ramping, armable, ramping && glide) {
+                (true, true, true) => segment::<L, CONNECTED, true, MONO, true, true>(args),
+                (true, false, true) => segment::<L, CONNECTED, true, MONO, false, true>(args),
+                (true, true, false) => segment::<L, CONNECTED, true, MONO, true, false>(args),
+                (true, false, false) => segment::<L, CONNECTED, true, MONO, false, false>(args),
+                (false, true, _) => segment::<L, CONNECTED, false, MONO, true, false>(args),
+                (false, false, _) => segment::<L, CONNECTED, false, MONO, false, false>(args),
             }
         };
         if split > 0 {
@@ -878,7 +983,8 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     }
 
     /// The lanes of one channel at exact rest: both SVFs' integrators and the gain word `+0.0`
-    /// and every ramp settled. The silence clocks are clocks, not state (a `+0.0` block moves
+    /// and every ramp settled, the link weights included (issue #1969: a glide in flight moves
+    /// its detector every frame, so it is never at rest and never skipped). The silence clocks are clocks, not state (a `+0.0` block moves
     /// them to `min(run + frames, 2^24)` whatever the signal was).
     ///
     /// Why that is a fixed point of a `+0.0` frame that writes `+0.0`: with `+0.0` input and
@@ -893,7 +999,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         let s = &self.state[channel];
         [s.main.ic1, s.main.ic2, s.side.ic1, s.side.ic2, s.gain_db]
             .into_iter()
-            .chain(s.ramps.iter().map(|ramp| ramp.remaining))
+            .chain(s.ramps.iter().chain(&s.links).map(|ramp| ramp.remaining))
             .fold(all_lanes(L::WIDTH), |mask, word| {
                 mask & positive_zero_lanes(word)
             })
@@ -977,8 +1083,9 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
 
     /// The `DESIGNED` term of the channel-symmetry witness for `lane` (issue #973): every
     /// per-channel word the kernel reads that is not running state, compared by bits. That is the
-    /// three [`Coef`] words and every ramp's four fields; the integrators, clocks and gain word are
-    /// running state, and `defaults` and `values` are control-side words the kernel never loads.
+    /// three [`Coef`] words and every ramp's four fields, the link weights' included (#1969); the
+    /// integrators, clocks and gain word are running state, and `defaults` and `values` are
+    /// control-side words the kernel never loads.
     fn designed_channel_symmetry(&self, lane: usize) -> bool {
         if lane >= L::WIDTH {
             return false;
@@ -994,6 +1101,12 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                 .iter()
                 .zip(&designed(r)[7..])
                 .all(|(a, b)| a.to_bits() == b.to_bits())
+            && l.links.iter().zip(&r.links).all(|(a, b)| {
+                link_lane(a, lane)
+                    .iter()
+                    .zip(&link_lane(b, lane))
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            })
     }
 
     // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
@@ -1016,6 +1129,11 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             for (index, &word) in all.enumerate() {
                 payload::write_f32(bytes, index, word);
             }
+            for (index, ramp) in self.state[channel].links.iter().enumerate() {
+                for (offset, word) in link_lane(ramp, lane).into_iter().enumerate() {
+                    payload::write_f32(bytes, STATE_LINK_WORD + index * 4 + offset, word);
+                }
+            }
         }
         Ok(())
     }
@@ -1025,10 +1143,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     /// domains, finite integrators, whole clocks, a gain word in `[-40, 0]` dB, and each ramp
     /// aimed bit for bit at the design of the committed values, its path inside the word's
     /// interval ([`WORD_BOUNDS`]), settled at its target, and the SVF words contractive.
-    fn parse_lane(
-        &self,
-        bytes: &[u8],
-    ) -> Result<([f32; CHAN_WORDS], [f32; PARAMETER_COUNT]), StatePayloadError> {
+    fn parse_lane(&self, bytes: &[u8]) -> Result<LaneRestore, StatePayloadError> {
         let read = |index: usize| payload::read_f32(bytes, index);
         let mut values = [0.0_f32; PARAMETER_COUNT];
         for (index, value) in values.iter_mut().enumerate() {
@@ -1076,7 +1191,43 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         {
             return Err(state_error("effect.state.parameter"));
         }
-        Ok((words, values))
+        // Issue #1969 (#1370 D6): each weight lies in `[0, 1]` on its whole path, the engine never
+        // holds `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in
+        // `{0, 1}`, `c` a word of an earlier glide and `n <= 2^24`, never `0`), a settled weight
+        // holds its target, and the two targets are exactly one supported mode's rest weights.
+        let mut links = [[0.0_f32; 4]; LINK_COUNT];
+        for (index, link) in links.iter_mut().enumerate() {
+            let word = |offset: usize| read(STATE_LINK_WORD + index * 4 + offset);
+            let [current, target, step, remaining] = [word(0), word(1), word(2), word(3)];
+            let maximum = effect_contract::LINK_GLIDE_MAX_SAMPLES;
+            let valid = integral_within(remaining, maximum as f32)
+                && !is_negative_zero(current)
+                && (remaining == 0.0 || step != 0.0)
+                && (remaining != 0.0 || current.to_bits() == target.to_bits())
+                && payload::ramp_path_inside(
+                    LinearRamp {
+                        current,
+                        target,
+                        step,
+                        remaining: remaining as u32,
+                    },
+                    (0.0, 1.0),
+                    maximum,
+                );
+            if !valid {
+                return Err(state_error("effect.state.link"));
+            }
+            *link = [current, target, step, remaining];
+        }
+        let mode = effect_contract::link_glide_mode([links[0][1], links[1][1]])
+            .filter(|mode| DE_ESSER_DESCRIPTOR.supported_link_modes.contains(*mode))
+            .ok_or(state_error("effect.state.link"))?;
+        Ok(LaneRestore {
+            words,
+            values,
+            links,
+            mode,
+        })
     }
 
     fn restore_lane(
@@ -1093,10 +1244,20 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         payload::validate_lengths(&layout, lengths).map_err(codec_error)?;
         payload::read_header(&layout, input.common).map_err(codec_error)?;
         let parsed = [self.parse_lane(input.left)?, self.parse_lane(input.right)?];
-        for (channel, (words, values)) in parsed.iter().enumerate() {
-            set_lane_words(&mut self.state[channel], lane, words);
-            self.values[lane][channel] = *values;
-            if words[7..]
+        if parsed[0].mode != parsed[1].mode {
+            return Err(state_error("effect.state.link"));
+        }
+        // Issue #1969 (#1370 D6): the weights land only under the mode they glide to. A payload
+        // taken under another mode (the plan-swap carry into a successor prepared with a new
+        // mode) leaves the lane's own mode at rest, as before the glide existed.
+        let adopt = parsed[0].mode == self.lane_link(lane);
+        if !adopt {
+            self.rest_link(lane);
+        }
+        for (channel, restore) in parsed.iter().enumerate() {
+            set_lane_words(&mut self.state[channel], lane, &restore.words);
+            self.values[lane][channel] = restore.values;
+            if restore.words[7..]
                 .as_chunks::<4>()
                 .0
                 .iter()
@@ -1104,10 +1265,25 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             {
                 self.ramp_frames_left = self.ramp_frames_left.max(RAMP_SAMPLES);
             }
+            if adopt {
+                for (ramp, words) in self.state[channel].links.iter_mut().zip(restore.links) {
+                    set_link_lane(ramp, lane, words);
+                    self.ramp_frames_left = self.ramp_frames_left.max(words[3] as u32);
+                }
+            }
         }
         Ok(())
     }
     // REALTIME_POLICY_END
+}
+
+/// One channel section of a parsed, validated payload.
+struct LaneRestore {
+    words: [f32; CHAN_WORDS],
+    values: [f32; PARAMETER_COUNT],
+    links: [[f32; 4]; LINK_COUNT],
+    /// The mode the weights glide to, decoded from their targets.
+    mode: LinkMode,
 }
 
 impl<const CONNECTED: bool> PreparedNativeEffect for DeEsser<f32, CONNECTED> {
@@ -1131,6 +1307,10 @@ impl<const CONNECTED: bool> PreparedNativeEffect for DeEsser<f32, CONNECTED> {
 
     fn channel_symmetry(&self) -> bool {
         self.designed_channel_symmetry(0)
+    }
+
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        track == 0 && DeEsser::retarget_link(self, 0, mode, samples)
     }
 
     fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
@@ -1203,9 +1383,17 @@ impl<L: Lane> DeEsser<L, false> {
     fn channels_bit_equal(&self) -> bool {
         let words = |channel: usize| {
             let (c, s) = (&self.coef[channel], &self.state[channel]);
-            let mut all = [L::zero(); CHAN_WORDS + 3];
+            let mut all = [L::zero(); CHAN_WORDS + 3 + LINK_COUNT * 4];
             all[..CHAN_WORDS].copy_from_slice(&chan_words(s));
-            all[CHAN_WORDS..].copy_from_slice(&[c.bypass, c.link_max, c.link_avg]);
+            all[CHAN_WORDS..CHAN_WORDS + 3].copy_from_slice(&[c.bypass, c.link_max, c.link_avg]);
+            for (chunk, ramp) in all[CHAN_WORDS + 3..]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(&s.links)
+            {
+                chunk.copy_from_slice(&[ramp.current, ramp.target, ramp.step, ramp.remaining]);
+            }
             all
         };
         words(0).iter().zip(&words(1)).all(|(l, r)| {
@@ -1223,6 +1411,9 @@ impl<L: Lane> DeEsser<L, false> {
         let (values, link) = bytes.split_at_mut(2 * PARAMETER_COUNT * 4);
         let link = effect_contract::exchange_lane_link_word(self.lane_link(lane), link);
         self.set_lane_link(lane, link);
+        // The weights rest at the incoming mode; the swap's payload restore then brings a glide
+        // in flight with it (issue #1969, #1370 D6).
+        self.rest_link(lane);
         for (value, chunk) in self.defaults[lane]
             .iter_mut()
             .flatten()
@@ -1270,6 +1461,11 @@ macro_rules! bank_impl {
 
             fn lane_channel_symmetry(&self, lane: usize) -> bool {
                 self.designed_channel_symmetry(lane)
+            }
+
+            /// Issue #1969: `DeEsser::retarget_link`; a padded lane takes no glide.
+            fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+                DeEsser::retarget_link(self, track, mode, samples)
             }
 
             fn supports_mono_collapse(&self) -> bool {
@@ -1401,14 +1597,16 @@ impl NativeEffectFactory for DeEsserFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
-        bind_bank(request)
+        bind_bank::<true>(request)
     }
 }
 
 /// Binds a bank at a width this artifact executes (no runtime SIMD dispatch, master plan #83 D4),
 /// or declines. Each lane is prepared from its own request, so a padded lane (issue #1092) is a
 /// clone of a member's validated values; it takes no automation and is recovered unreported.
-fn bind_bank(
+/// `NATIVE_ONLY` is the width check as a switch: production passes `true`; the unit tests pass
+/// `false` to bind the other width's bank on this host through the same code.
+fn bind_bank<const NATIVE_ONLY: bool>(
     request: PrepareEffectBankRequest<'_>,
 ) -> Result<Option<PreparedEffectBank>, EffectPrepareError> {
     request.validate_shape()?;
@@ -1442,7 +1640,7 @@ fn bind_bank(
         .filter(|(_, active)| **active)
         .fold(0, |bits, (lane, _)| bits | (1 << lane));
     let processor = effect_contract::match_bank_width!(request.width, |L| {
-        if L::WIDTH != Backend::current().width() {
+        if NATIVE_ONLY && L::WIDTH != Backend::current().width() {
             return Ok(None);
         }
         let mut bank = DeEsser::<L, false>::new(&metadata, Some(request.width), defaults)
