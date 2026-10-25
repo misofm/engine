@@ -1855,7 +1855,7 @@ export async function runQualification() {
 }
 
 export const qualificationConstants = Object.freeze({
-  defaultRingFrames: DEFAULT_RING_FRAMES,
+  stallRingFrames: DEFAULT_RING_FRAMES,
   minimumStallMs: MINIMUM_STALL_MS,
   processorName: PROCESSOR_NAME,
   quantumFrames: QUANTUM_FRAMES,

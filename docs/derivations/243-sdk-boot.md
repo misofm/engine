@@ -92,6 +92,15 @@ frames   = 78 * 127 = 9_906
 `crates/host-core/tests/prepare.rs:419`. Both the arithmetic and the equality are
 asserted in `abi_layout.rs`, so the number in the brief has a witness that does not read the brief.
 
+**Note, 2026-10-25 (issue #1406).** The rule above is now the *stall ring*,
+`host_core::stall_ring_frames`. The default ring adds the largest warm-successor prime and one
+quantum: `default_source_ring_frames = stall_ring_frames + p_max_samples + q`, with
+`p_max_samples = 4 · ceil_q(fs / 100 + 6)`. The layout's `sourceRing` publishes the added terms
+too (`primeGrowths: 4`, `primeReserveQuanta: 1`, `primeLatencySamples` per launch rate), so no
+consumer holds a private `4`, `+ 1` or latency. Eval 2's number becomes
+`9_906 + 4 · ceil_127(966) + 127 = 9_906 + 4_064 + 127 = 14_097 = 111 × 127`. The history above
+stays as it was derived.
+
 ## 4. `bootResultAliases` is exactly three rows
 
 Adopted ruling finding 2 fixes the table as `{1: refusedDocument, 2: refusedOptions,

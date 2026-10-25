@@ -144,9 +144,12 @@
 // rejects locally with `RESULT_BACKPRESSURE` (6) before any transfer, so the caller keeps its planes
 // and can retry. Status is never refused for being in flight: see `status()`.
 //
-// The default ring covers a 100 ms main-thread stall: `(ceil(100ms * fs / quantum) + 2) * quantum`
-// frames, which is 5 120 frames (40 KiB for stereo `f32`) at 48 kHz with a 128-frame quantum. It is
-// a prefill ahead of the render position and adds no output latency.
+// The default ring (a zero `sourceRingFrames`) covers a 100 ms main-thread stall and then holds a
+// warm successor's largest prime (issue #1406): in quanta, `ceil(100ms * fs / quantum) + 2 +
+// 4 * ceil(L_max / quantum) + 1`, with `L_max` the true-peak limiter's `fs / 100 + 6`. That is
+// 7 296 frames (57 KiB for stereo `f32`) at 48 kHz with a 128-frame quantum. The ABI layout's
+// `sourceRing` publishes the rule. It is a prefill ahead of the render position and adds no output
+// latency.
 //
 // Two options deliberately not taken, recorded so they are not rediscovered as bugs:
 //
@@ -691,7 +694,8 @@ export interface MisoTelemetryFrame {
 }
 
 export interface MisoWebBootOptions {
-  /// Per-source ring override, or `0` for the engine's 100 ms plus two-quanta derivation.
+  /// Per-source ring override, or `0` for the engine's default ring (the 100 ms stall ring plus the
+  /// largest warm-successor prime plus one quantum, issue #1406).
   sourceRingFrames: number;
   /// Total boot memory budget, or `0n` for the engine-owned default ceiling.
   maximumMemoryBytes: bigint;
