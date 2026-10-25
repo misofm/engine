@@ -1416,10 +1416,6 @@ struct PlanShape {
     /// for a slot with no taps. Built once at compilation, so the poll's fold is arithmetic rather
     /// than a search.
     observation_tracks: Box<[u32]>,
-    /// The plan's effect instances by stable key, each with its reader set's position in the
-    /// plan's [`RenderCompanions`] (#1586 D3): what a selected read resolves through. A carried
-    /// swap exchanges reader sets at fixed positions, so the index stays right across it.
-    observation_index: host_core::observation::ObservationIndex,
     /// The dense effect slot of each producer of the plan, in the control plane's producer order:
     /// entry `p` is the slot whose [`EffectInstance::producer`] is `p`. The inverse of that field,
     /// built in the same preparation loop, so the key the control plane resolved to a producer
@@ -1583,14 +1579,27 @@ impl ReadyOwnership {
     ///
     /// The room for the tables is checked before the command runs, so a command is never
     /// acknowledged and then unable to keep what the host needs to read its plan.
+    ///
+    /// `plan` is the render half (#1589 R2): its active plan's companions hold the observation
+    /// readers, which the swap block pairs, so the command borrows them, with that plan's epoch,
+    /// for an `OBSERVATION_READ`.
     fn run_command(
         &mut self,
+        plan: &mut WebPlan,
         request: &[u8],
         document: &[u8],
         output_capacity: u64,
     ) -> Result<usize, control_plane::CommandError> {
+        let epoch = plan.owner().active_epoch().0;
+        let readers = observation_handles(plan);
         self.run_control(control_plane::CommandError::Backpressure, |control| {
-            control.command_with_document(request, document, output_capacity)
+            control.command_with_plan_observations(
+                request,
+                document,
+                output_capacity,
+                epoch,
+                readers,
+            )
         })
     }
 
@@ -1923,6 +1932,15 @@ impl ReadyOwnership {
         let admitted = admit(self);
         core::mem::swap(&mut self.shape, &mut self.pending_shapes[index].shape);
         Ok(admitted)
+    }
+
+    /// The session's `OBSERVATION_READ` index of the plan render runs (#1589 R2): the epoch of
+    /// [`Self::shape`], whose readers the active plan's [`RenderCompanions`] hold, so a read
+    /// resolves through one plan's index and readers whether or not the service step has
+    /// promoted that epoch yet. `None` only if the session dropped the epoch, which it never
+    /// does while the plan renders.
+    fn observation_index(&self) -> Option<&host_core::observation::ObservationIndex> {
+        self.control.observation_index(self.shape_epoch)
     }
 
     /// The dense index of one addressed effect instance in `effect_instances`.
@@ -2369,11 +2387,14 @@ impl AudioWorkletEngineHost {
         if len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
             return self.record(RESULT_INVALID_ARGUMENT);
         }
-        let Some((buffers, ready)) = self.buffers.as_mut().zip(self.ready.as_mut()) else {
+        let (Some((buffers, ready)), Some(plan)) = (
+            self.buffers.as_mut().zip(self.ready.as_mut()),
+            self.plan.as_mut(),
+        ) else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.run_command(request, document, CONTROL_FRAME_BYTES) {
+        match ready.run_command(plan, request, document, CONTROL_FRAME_BYTES) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -3113,9 +3134,10 @@ impl AudioWorkletEngineHost {
         // #1586 D3: host-core checks the whole batch (every selection resolves, no tap twice)
         // before it writes a row, so a refused batch allocates no result vector.
         let handles = observation_handles(plan);
+        let empty = host_core::observation::ObservationIndex::default();
         let mut results: Vec<ObservationReadResult> = Vec::new();
         host_core::observation::read_with(
-            &ready.shape.observation_index,
+            ready.observation_index().unwrap_or(&empty),
             handles,
             selections,
             |selection| Ok::<_, ObservationReadError>(core_selection(selection)),
@@ -3236,8 +3258,9 @@ impl AudioWorkletEngineHost {
         // and nothing is written before the whole batch passed.
         let handles = observation_handles(plan);
         let sample_rate_hz = self.status.sample_rate_hz;
+        let empty = host_core::observation::ObservationIndex::default();
         host_core::observation::read_with(
-            &ready.shape.observation_index,
+            ready.observation_index().unwrap_or(&empty),
             handles,
             addresses,
             |address| {
@@ -4948,6 +4971,13 @@ impl ControlAdapter for WebAdapter {
     // published frame into the plan's ring while the protocol's table is on (#1588b).
     const METER_DELIVERY: bool = true;
     const RENDER_METER_FOLD: bool = true;
+    /// #1589a: the session serves the `Observe` edit and `OBSERVATION_READ` (with capability bit
+    /// 15) for a boot whose observation taps bind every declared tap
+    /// ([`control_plane::RuntimePreparer::observation_queues`], R1). The edit's records ride the
+    /// same producers as kinds 7 and 8, through the one control plane, so each queue keeps one
+    /// writer (the control half); the read reads the readers the render half keeps, which the
+    /// control entry lends with their plan's epoch (R2).
+    const OBSERVE_EDIT: bool = true;
 }
 
 /// The control-protocol session the browser host owns (#1381a): the committed model at its boot
@@ -5249,6 +5279,22 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
     fn meter_window_blocks(&self) -> u32 {
         u32::try_from(self.options.live_control_meter_blocks).unwrap_or(0)
     }
+
+    /// The readers the plan's [`RenderCompanions`] keep (#1589 R2), for the session's one index.
+    fn kept_observations<'p>(&self, host: &'p mut PreparedHost) -> &'p [EffectObservationHandle] {
+        host.plan
+            .host_attachment_mut::<RenderCompanions>()
+            .map_or(&[], |companions| &companions.effect_observations)
+    }
+
+    /// #1589 R1: the boot word keeps its meaning until #1590 D5, so the session serves `Observe`
+    /// only for a nonzero word. Preparation refuses an effect that declares more taps than the
+    /// word (`effect.observation.taps`), so every plan binds a queue for every declared tap. With
+    /// `0` no plan has a queue, and the edit is refused `observation.unavailable` rather than
+    /// acknowledged and never applied.
+    fn observation_queues(&self) -> bool {
+        self.options.live_control_observation_taps != 0
+    }
 }
 
 impl WebRuntimePreparer {
@@ -5522,23 +5568,6 @@ fn build_plan_shape(
             u32::try_from(strip).map_err(|_| "web.live_controls.observation")?;
         instance.reader = Some(u32::try_from(reader).map_err(|_| "web.live_controls.observation")?);
     }
-    // #1586 D3: every instance by stable key, observed or not (an unobserved one reads as
-    // unbound), with its reader set's position.
-    let mut index_entries = Vec::new();
-    index_entries
-        .try_reserve_exact(effect_instances.iter().flatten().count())
-        .map_err(|_| "web.resource.allocation")?;
-    index_entries.extend(effect_instances.iter().flatten().map(|instance| {
-        host_core::observation::ObservationIndexEntry {
-            strip_id: instance.track_id.clone(),
-            section: instance.address.rack,
-            effect_id: instance.effect_id.clone(),
-            handle: instance.reader,
-            effect: instance.descriptor,
-        }
-    }));
-    let observation_index = host_core::observation::ObservationIndex::new(index_entries)
-        .map_err(|_| "web.live_controls.effects")?;
     Ok(PlanShape {
         tracks,
         submixes,
@@ -5546,7 +5575,6 @@ fn build_plan_shape(
         effect_base: effect_base.into_boxed_slice(),
         effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
-        observation_index,
         producer_slots: producer_slots.into_boxed_slice(),
         // #1689: no plan is prepared with a master; `ReadyOwnership::sync_master` points the
         // shape at the strip the core's `master` row designates after every control command.
@@ -5611,7 +5639,8 @@ fn zero_u32(count: usize) -> Result<Box<[u32]>, &'static str> {
 /// The bridge rows one plan's tables are charged (issue #1290a): the boot charges them to the
 /// bridge, a replacement plan charges them to its attachment, so the swap budget counts them.
 struct ShapeRows {
-    /// The dense instance tables' own bytes, with the observation index (#1586 D3).
+    /// The dense instance tables' own bytes. The observation index is the epoch's (#1589 R2),
+    /// charged with the plan's observation rows.
     instance_table_bytes: u64,
     /// The IDs the dense instance table copies out of the producers.
     instance_id_bytes: u64,
@@ -5645,9 +5674,7 @@ impl PlanShape {
                 u64::try_from(self.producer_slots.len())
                     .ok()?
                     .checked_mul(size_of::<u32>() as u64)?,
-            )?
-            // #1586 D3: the observation index, its table and the IDs it copies.
-            .checked_add(self.observation_index.retained_bytes()?)?;
+            )?;
         // #1582 R1: the delivery tables, held here from the plan's preparation to its adoption
         // and from its retirement on; the boot plan's are charged before the delivery takes them.
         let (meter_tables_bytes, meter_tables_largest) =

@@ -5,7 +5,9 @@
 //! the browser's control half was built with (D6). The browser leg is `AudioWorkletEngineHost`
 //! through the Rust functions the exports call: `control_command`, `control_event`, `service` and
 //! `render_next`. Both boot the browser fixture `browser-v1/session.json` with its source extended
-//! to 8,192 frames and are fed the same PCM.
+//! to 8,192 frames and are fed the same PCM; the one-script gate boots the observation fixture
+//! (`browser-v1/observation-session.json`, the same session with a compressor insert) instead,
+//! with its source extended to 16,384 frames, so its `Observe` step has a tap (#1589 D6).
 
 #![cfg(feature = "test-support")]
 #![allow(unsafe_code)]
@@ -557,13 +559,30 @@ struct Legs {
 }
 
 impl Legs {
+    /// Both legs on the observation fixture (#1589 D6), its source extended to 16,384 frames, the
+    /// browser booted with observation taps for every declared tap (#1589 R1), so both serve the
+    /// `Observe` edit and `OBSERVATION_READ`.
     fn new() -> Self {
-        let browser = Browser::new(16_384);
+        let mut model = parse_session_json(OBSERVATION_SESSION).expect("the fixture parses");
+        model.sources[0].frames = 16_384;
+        let document = canonical_session_json(&model).expect("canonical session");
+        let browser = Browser {
+            host: AudioWorkletEngineHost::boot(
+                document.as_bytes(),
+                WebBootOptions {
+                    live_control_observation_taps: u64::from(
+                        host_core::launch_maximum_observation_taps(),
+                    ),
+                    ..options()
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic()))),
+        };
         let limits = browser
             .host
             .control_limits_for_test()
             .expect("the control half's limits");
-        let c = CAbi::new(16_384, limits);
+        let c = CAbi::from_document(&document, limits);
         let revision = browser.host.committed_revision();
         Self {
             browser,
@@ -692,17 +711,18 @@ fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
 }
 
 /// Test value: red if any command or event takes a browser-only path, if the browser publishes no
-/// render activity (no telemetry events, a wrong `effective_sample`), or if the two hosts are built
-/// with different protocol limits.
+/// render activity (no telemetry events, a wrong `effective_sample`), if the two hosts are built
+/// with different protocol limits, or if the browser answers an `Observe` arm or an
+/// `OBSERVATION_READ` otherwise than the C ABI (#1589 D6: a reader render does not publish to, or
+/// an index that does not reach the browser's readers).
 #[test]
 fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let mut legs = Legs::new();
 
-    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697) and the three
-    // spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1596), and size their lossy meter
-    // lane to one whole meter batch (#1587a, #1588). #1589 removes the one remaining exception:
-    // until the browser's session serves `OBSERVATION_READ`, the C ABI also lists `0x000f` with
-    // flag bit 15 (#1586 R2). Every other step stays byte-equal.
+    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697), the three
+    // spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1596) and, since #1589a,
+    // `OBSERVATION_READ` (`0x000f`) with flag bit 15 (#1586 R2), and size their lossy meter lane
+    // to one whole meter batch (#1587a, #1588). The whole reply is byte-equal.
     let request = legs.next();
     let bytes = frame(
         request,
@@ -718,13 +738,8 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         "1 capabilities: the browser's reply re-encodes to itself"
     );
     assert_eq!(
-        capabilities_plus(
-            &browser_reply,
-            &[0x000f],
-            protocol::CapabilityFlags::OBSERVATION.0,
-        ),
-        c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f and bit 15"
+        browser_reply, c_reply,
+        "1 capabilities: the C ABI's reply is the browser's"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
@@ -901,13 +916,69 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         CommandPayload::TransportGet,
     );
     legs.both("15 request ID reuse", &reused);
+    legs.drain("after 15");
 
-    // 16. Spectrum through the frames (#1596 gate 6): one `SPECTRUM_CONFIGURE` for the track's
+    // 16. One `Observe` arm of the compressor insert's gain-reduction tap with a one-block window
+    // (#1589 D6): the same reply, its arm tag included, on both hosts.
+    let strip = StableId::parse(TRACK_ID).expect("track ID");
+    let comp = StableId::parse("comp").expect("insert ID");
+    let arm = [SessionEdit::Observe {
+        strip_id: strip.clone(),
+        section: controls::TapSection::Inserts(comp.clone()),
+        tap_id: 1,
+        armed: true,
+        window_blocks: 1,
+    }];
+    let response = legs.command("16 observe", CommandPayload::SessionTransactionApply(&arm));
+    let Verdict::Applied { revision, .. } = decode_verdict(&response) else {
+        panic!("the observe edit is refused")
+    };
+    legs.revision = revision;
+    legs.drain("after 16");
+
+    // 17. Two render blocks, after step 8's last: the first applies the arm, and its window
+    // closes with it.
+    let next = 3 * u64::from(METER_PERIOD_BLOCKS);
+    for block in next..next + 2 {
+        legs.block(block);
+    }
+
+    // 18. One OBSERVATION_READ of the tap: the same page on both hosts, and a ready row, so an
+    // armed reader that render publishes to answers it on both.
+    let read = protocol::ObservationReadRequest {
+        selections: vec![protocol::ObservationReadSelection {
+            strip_id: strip,
+            section: controls::TapSection::Inserts(comp),
+            tap_id: 1,
+            channels: protocol::ParameterChannel::Both,
+        }],
+    };
+    let response = legs.command(
+        "18 observation read",
+        CommandPayload::ObservationRead(&read),
+    );
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::ObservationRead(page),
+        ..
+    } = ProtocolCodec::default()
+        .decode_typed_response(&response, &mut protocol::DecodeScratch::new(&mut fields))
+        .expect("a response frame")
+    else {
+        panic!("18 observation read: an observation read page");
+    };
+    assert_eq!(
+        (page.rows[0].status, page.rows[0].armed),
+        (protocol::ObservationRowStatus::Ready, true),
+        "18 observation read: the armed tap's window is ready"
+    );
+
+    // 19. Spectrum through the frames (#1596 gate 6): one `SPECTRUM_CONFIGURE` for the track's
     // post-pan tap, two render blocks for the adoption and the promotion, a `SPECTRUM_CAPTURE`
     // arm, one 2,048-frame window of render blocks, then the read of both channels: the same
     // bytes on both legs, so the analyzed bins are equal word for word.
     legs.command(
-        "16 spectrum configure",
+        "19 spectrum configure",
         CommandPayload::SpectrumConfigure(&protocol::SpectrumConfigureRequest {
             form: protocol::SpectrumForm::Single,
             entries: vec![protocol::SpectrumEntry {
@@ -919,20 +990,19 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
             hop_frames: None,
         }),
     );
-    // The blocks continue from step 8's last.
-    let next = 3 * u64::from(METER_PERIOD_BLOCKS);
-    for block in next..next + 2 {
+    // The blocks continue from step 17's last.
+    for block in next + 2..next + 4 {
         legs.block(block);
     }
     legs.command(
-        "16 spectrum arm",
+        "19 spectrum arm",
         CommandPayload::SpectrumCapture(&protocol::SpectrumCaptureRequest::Arm),
     );
-    for block in next + 2..next + 18 {
+    for block in next + 4..next + 20 {
         legs.block(block);
     }
     let read = legs.command(
-        "16 spectrum read",
+        "19 spectrum read",
         CommandPayload::SpectrumCapture(&protocol::SpectrumCaptureRequest::Read {
             channels: protocol::ParameterChannel::Both,
             include_window: false,
@@ -944,14 +1014,14 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         ..
     } = ProtocolCodec::default()
         .decode_typed_response(&read, &mut protocol::DecodeScratch::new(&mut fields))
-        .expect("16 spectrum read: a response frame")
+        .expect("19 spectrum read: a response frame")
     else {
-        panic!("16 spectrum read: a capture reply")
+        panic!("19 spectrum read: a capture reply")
     };
     assert_eq!(
         reply.status,
         protocol::SpectrumCaptureStatus::Ready,
-        "16 spectrum read: vacuous without a ready window"
+        "19 spectrum read: vacuous without a ready window"
     );
 
     legs.drain("at the end");

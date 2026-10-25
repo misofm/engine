@@ -90,8 +90,9 @@ pub struct ProviderEpoch {
     pub(crate) observations_pending: Option<u64>,
     /// The plan's effect instances by stable key, with each one's position in
     /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
-    /// read resolves a stable address without allocating. Empty for a host whose preparer keeps
-    /// the readers itself (the browser's).
+    /// read resolves a stable address without allocating. For a host whose preparer keeps the
+    /// readers in its plan (the browser's), the positions are in that list
+    /// ([`crate::RuntimePreparer::kept_observations`], #1589 R2): the plan's one index.
     pub(crate) observation_index: host_core::observation::ObservationIndex,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
@@ -4056,6 +4057,50 @@ where
         document: &[u8],
         output_capacity: u64,
     ) -> Result<usize, CommandError> {
+        self.command_with_readers(request, document, output_capacity, None)
+    }
+
+    /// [`Self::command_with_document`] for an adapter whose preparer keeps its plans' observation
+    /// readers in the plan (the browser's, [`crate::RuntimePreparer::kept_observations`]):
+    /// `readers` is the reader list of the plan of epoch `epoch`, the one render runs, lent for
+    /// this call only. An `OBSERVATION_READ` reads them through the running plan's index (#1589
+    /// R2) and faults (`Internal`) when `epoch` is any other plan's, so the index and the readers
+    /// are always one plan's, and a tap the swap block carried reads the reader it publishes to.
+    /// Every other command ignores them.
+    pub fn command_with_plan_observations(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+        epoch: u64,
+        readers: &[host_core::EffectObservationHandle],
+    ) -> Result<usize, CommandError> {
+        self.command_with_readers(request, document, output_capacity, Some((epoch, readers)))
+    }
+
+    /// The `OBSERVATION_READ` index of the plan of epoch `epoch` (#1586 D6, #1589 R2): the
+    /// running plan's or a pending candidate's, `None` for an epoch the session does not hold. A
+    /// host that keeps the readers in its plan reads them through it, with the epoch of the plan
+    /// whose readers it reads.
+    #[must_use]
+    pub fn observation_index(
+        &self,
+        epoch: u64,
+    ) -> Option<&host_core::observation::ObservationIndex> {
+        core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .find(|provider| provider.epoch == epoch)
+            .map(|provider| &provider.observation_index)
+    }
+
+    /// The body of [`Self::command_with_document`], with the readers an adapter lends.
+    fn command_with_readers(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
+    ) -> Result<usize, CommandError> {
         let _canonical = lane::CanonicalFpEnv::enter();
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
@@ -4071,7 +4116,8 @@ where
         // them at all.
         let observe = protocol::ObserveContext {
             bindings: &self.observation,
-            enabled: A::OBSERVE_EDIT,
+            // #1589 R1: only a session whose plans bind every tap's queue serves the edit.
+            enabled: A::OBSERVE_EDIT && self.preparer.observation_queues(),
             // #1585 D4: the records are tagged from the session's one counter.
             next_arm_tag: self.next_arm_tag,
         };
@@ -4106,7 +4152,7 @@ where
             PreparedCommandFrame::Session(prepared) => self.session_command(*prepared),
             // #1586 D6: the read, which allocates nothing.
             PreparedCommandFrame::ObservationRead(prepared) => {
-                self.observation_read(prepared, request)
+                self.observation_read(prepared, request, readers)
             }
             PreparedCommandFrame::Structural(prepared) => {
                 let prepared = ObservedPreparedToken::new(prepared);
@@ -4401,6 +4447,7 @@ where
         &mut self,
         prepared: protocol::PreparedObservationRead,
         request: &[u8],
+        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<usize, CommandError> {
         let mut selections = [protocol::ObservationSelectionRef::EMPTY;
             protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS];
@@ -4428,7 +4475,7 @@ where
         }
         let mut rows = core::mem::take(&mut self.observation_rows);
         let outcome = match rows.get_mut(..count) {
-            Some(table) => self.read_observation_rows(&selections[..count], table),
+            Some(table) => self.read_observation_rows(&selections[..count], table, readers),
             None => Err(None),
         };
         let observed_sample = self.shared.render_sample.load(Ordering::Acquire);
@@ -4474,18 +4521,27 @@ where
         result
     }
 
-    /// Reads one row per selection into `rows` on the running plan's readers, with the whole
-    /// batch checked first (#1586 D4): the core read and the wire rows, no allocation. `Err(None)`
-    /// for a refusal the codec rules out (an internal fault).
+    /// Reads one row per selection into `rows` on the running plan's readers, or on the readers an
+    /// adapter lent with their plan's epoch (#1589 R2), with the whole batch checked first (#1586
+    /// D4): the core read and the wire rows, no allocation. `Err(None)` for a refusal the codec
+    /// rules out (an internal fault), and for lent readers whose epoch is not the running plan's:
+    /// the index and the readers are always one plan's.
     fn read_observation_rows(
         &self,
         selections: &[protocol::ObservationSelectionRef<'_>],
         rows: &mut [protocol::ObservationReadRow],
+        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<(), Option<host_core::observation::ObservationReadError>> {
-        let provider = &self.providers;
+        // One plan: the lent readers are the running plan's, since `command_with_readers` serviced
+        // first, so they read through the running plan's index; another epoch is a fault.
+        let handles = match readers {
+            Some((epoch, _)) if epoch != self.providers.epoch => return Err(None),
+            Some((_, handles)) => handles,
+            None => &*self.providers.observations,
+        };
         host_core::observation::read_with(
-            &provider.observation_index,
-            &provider.observations,
+            &self.providers.observation_index,
+            handles,
             selections,
             |selection| {
                 Ok::<_, host_core::observation::ObservationReadError>(core_selection(selection))
