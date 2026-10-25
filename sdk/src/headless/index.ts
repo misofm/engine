@@ -42,7 +42,9 @@ export type {
 export type {
   SpectrumCollection,
   SpectrumCollectionEntry,
+  SpectrumConfigureOptions,
   SpectrumConfigured,
+  SpectrumHopFrames,
   SpectrumLimits,
   SpectrumQuery,
   SpectrumResult,

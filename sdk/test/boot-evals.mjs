@@ -457,7 +457,7 @@ describe("issue #1596 D2 -- the spectrum capability and the boot configuration",
     }
   });
 
-  test("the boot's one SPECTRUM_CONFIGURE carries the hop copied before instantiate", async () => {
+  test("the boot's and the reboot's one SPECTRUM_CONFIGURE carries the hop copied before instantiate", async () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     const { fake, calls } = proxiedAsset();
@@ -472,12 +472,19 @@ describe("issue #1596 D2 -- the spectrum capability and the boot configuration",
     options.spectrumHopFrames = 256;
     release();
     const boundary = await pending;
+    const configureHops = () => calls.frames
+      .filter((frame) => new DataView(frame.buffer).getUint16(16, true) === 0x0010)
+      .map((frame) => {
+        const hop = topFields(frame).find(([id]) => id === 4);
+        assert.ok(hop, "the configuration carries the hop");
+        return new DataView(frame.buffer).getUint32(hop[1], true);
+      });
     try {
-      const configures = calls.frames.filter((frame) => new DataView(frame.buffer).getUint16(16, true) === 0x0010);
-      assert.equal(configures.length, 1);
-      const hop = topFields(configures[0]).find(([id]) => id === 4);
-      assert.ok(hop, "the configuration carries the hop");
-      assert.equal(new DataView(configures[0].buffer).getUint32(hop[1], true), 1024);
+      assert.deepEqual(configureHops(), [1024]);
+      // A reboot is the same boot: its one configuration carries the reboot's own hop.
+      calls.frames.length = 0;
+      boundary.reboot(document, { spectrum, spectrumHopFrames: 512 });
+      assert.deepEqual(configureHops(), [512]);
     } finally {
       boundary.dispose();
     }
