@@ -387,9 +387,9 @@ pub fn plan_strip_transition(
 ///
 /// A strip is in the set when a node of it that both plans hold arrives later in `ordinary` than
 /// in `predecessor` (each plan's [`crate::PlanStateInventory::input_floors`], the arrivals it
-/// renders), or when an outgoing edge of it that both plans hold (a route, or its path into the
-/// output) has a compensation line whose length changes: a line that changes length restarts
-/// with a gap. A node or an edge only one plan holds moves no timing of the other: an added send
+/// renders), or when an edge of it that both plans hold (a route out of it, or an edge of its own
+/// chain, `TrackMain`) has a compensation line whose length changes: a line that changes length
+/// restarts with a gap. A node or an edge only one plan holds moves no timing of the other: an added send
 /// or a removed route does not duck its source. When the output's arrival grows, every strip of
 /// both plans that reaches the output in `next` is in the set. An added strip never is: it is
 /// #1288's to arm.
@@ -442,8 +442,11 @@ pub fn grown_strips(
             }
         }
     }
-    // An edge both plans hold: a route of both models from the same source, or a strip's path
-    // into the output (`TrackMain`) of a strip of both.
+    // An edge both plans hold: a route of both models with the same ends, or an edge of a
+    // strip's own chain (`TrackMain`), whose source must be a node the predecessor holds (below)
+    // and whose strip must be in both plans. A `TrackMain` line into a node only the successor
+    // holds (an added insert) can only add that same strip, the one the edit changed, which its
+    // own restart already ducks: harmless.
     let edge_in_both = |edge: &GraphEdgeId| match edge {
         GraphEdgeId::RouteSource { route_id } | GraphEdgeId::RouteDestination { route_id } => {
             let find = |model: &'_ SessionModel| {

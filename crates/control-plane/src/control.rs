@@ -5297,9 +5297,10 @@ where
         };
         let quantum = prospective.normalized_model().quantum_frames;
         // #1403 D2, #1397 D1: with the session's warm bounds, the edit is classified against the
-        // plan it displaces, from the ordinary successor's inventory (#1354a ruling 1), unless a
-        // phase 1 of an earlier transaction still ducks a strip on that plan (that edit keeps
-        // today's path). A `Warm` answer is prepared with its lead (#1354 D4), so the lead's
+        // plan it displaces, from the ordinary successor's inventory (#1354a ruling 1). While a
+        // phase 1 of an earlier transaction still ducks a strip on that plan, a `Warm` or
+        // `Unavailable` answer takes the transition fallback (below). Otherwise a `Warm` answer
+        // is prepared with its lead (#1354 D4), so the lead's
         // whole restarts join the successor's `restarted_strips()`, and the transition is planned
         // again over that set: the duck set is the strips the edit removes plus every strip the
         // warm successor restarts (#1324 D4), and each restarted strip is restarted whole and
@@ -9475,6 +9476,29 @@ mod tests {
             ));
             continued.render(s_block - BEFORE);
             assert_eq!(first_divergence(&rig, &continued), None);
+
+            // A structural edit superseding a `Primed` W whose overlay ducks a strip (W is the
+            // growth with track 2's removal): B still grows over A, so it takes the transition,
+            // no earlier than W's `S`, with no record, and reports `TRANSITION_FALLBACK`. Red on
+            // attempt 1's routing, which published B as an ordinary successor (`EXACT`).
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.extend(remove_track("eq1"));
+            let PlanAdoption::Primed { not_before: s, .. } = rig.rebuild(&edits) else {
+                panic!("W is warm")
+            };
+            let adoption = rig.rebuild(&muted_track("t4", 0));
+            let PlanAdoption::NoEarlierThan(later) = adoption else {
+                panic!("published {adoption:?}")
+            };
+            assert!(later >= s);
+            assert_eq!(rig.primed(), None);
+            let s_block = usize::try_from(later / QUANTUM).expect("block");
+            rig.render(s_block + 1 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_ne!(watermark.outcome_flags & OUTCOME_TRANSITION_FALLBACK, 0);
 
             // The growth while phase 1 of a removal is pending (#1397a attempt 2, root ruling):
             // it takes the transition, which ducks track 1 too (the output's arrival grows) and
