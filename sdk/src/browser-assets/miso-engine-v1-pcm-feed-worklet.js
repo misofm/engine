@@ -54,7 +54,10 @@
  * on the steady path and no `Atomics.wait` ever:
  *
  *   - apply a pending seek (a generation and a frame published through the
- *     ring, so a seek can never overtake or trail the planes around it);
+ *     ring, so a seek can never overtake or trail the planes around it); an
+ *     anchored one (an anchor sample in the ring) is applied by the engine's
+ *     message handler instead, and the drain reads no slot of that ring until
+ *     the handler has applied it;
  *   - drain published chunks, dropping any whose generation tag is stale;
  *   - copy each chunk's planes into the engine's existing PCM staging buffer
  *     and call the existing `miso_engine_web_v1_source_submit` export — the
@@ -107,12 +110,18 @@ const CONTROL_FINISHED = 25
 const CONTROL_ERRORS = 26
 const CONTROL_SUBMITTED_GENERATION_TAG = 27
 
-const CONTROL_BYTES = 128
+// Issue #1297b D2 (MSB1 V1, amended in place): three i64 at 112 -- the seek's generation, frame
+// and anchor sample (at 128; -1 is a plain seek) -- the ID at 144 and the slot headers at 272. A
+// ring with any other header offset (the old 256) is refused at attach.
+const CONTROL_BYTES = 144
 const CONTROL_I64_OFFSET = 112
 const CONTROL_I64_SEEK_GENERATION = 0
 const CONTROL_I64_SEEK_FRAME = 1
+const CONTROL_I64_SEEK_ANCHOR = 2
+const NO_ANCHOR = -1n
 
-const ID_OFFSET = 128
+const ID_OFFSET = 144
+const HEADER_OFFSET = 272
 
 const SLOT_HEADER_BYTES = 32
 const SLOT_SEQUENCE = 0
@@ -155,6 +164,26 @@ function withdraw(rings) {
   registry.engine.detachSharedRings(rings)
 }
 
+/** Whether `bytes` is the UTF-8 encoding of `sourceId` (a lone surrogate as U+FFFD, as the
+ *  engine's staging writes it). Control path only: the worklet scope has no TextEncoder. */
+function sameSourceId(bytes, sourceId) {
+  if (typeof sourceId !== "string") return false
+  let offset = 0
+  for (const character of sourceId) {
+    let code = character.codePointAt(0)
+    if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd
+    const width = code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4
+    if (offset + width > bytes.length) return false
+    const lead = width === 1 ? 0 : width === 2 ? 0xc0 : width === 3 ? 0xe0 : 0xf0
+    if (bytes[offset] !== (lead | (code >>> (6 * (width - 1))))) return false
+    for (let at = 1; at < width; at += 1) {
+      if (bytes[offset + at] !== (0x80 | ((code >>> (6 * (width - 1 - at))) & 0x3f))) return false
+    }
+    offset += width
+  }
+  return offset === bytes.length
+}
+
 /** One bound ring: every view cut once, so the drain allocates nothing. */
 function bindRing(shared, quantumFrames, maximumChannels) {
   if (
@@ -163,7 +192,7 @@ function bindRing(shared, quantumFrames, maximumChannels) {
   ) {
     return null
   }
-  if (shared.byteLength < CONTROL_BYTES) return null
+  if (shared.byteLength < HEADER_OFFSET) return null
   const control = new Int32Array(shared, 0, CONTROL_BYTES / 4)
   if (
     Atomics.load(control, CONTROL_MAGIC) !== SAB_MAGIC ||
@@ -186,6 +215,7 @@ function bindRing(shared, quantumFrames, maximumChannels) {
     channels > maximumChannels ||
     frameCapacity !== quantumFrames ||
     idLength <= 0 ||
+    headerOffset !== HEADER_OFFSET ||
     headerOffset + capacity * SLOT_HEADER_BYTES !== pcmOffset ||
     pcmOffset + capacity * channels * frameCapacity * 4 > shared.byteLength
   ) {
@@ -208,7 +238,7 @@ function bindRing(shared, quantumFrames, maximumChannels) {
   return {
     shared,
     control,
-    controlI64: new BigInt64Array(shared, CONTROL_I64_OFFSET, 2),
+    controlI64: new BigInt64Array(shared, CONTROL_I64_OFFSET, 3),
     headers: new Int32Array(
       shared,
       headerOffset,
@@ -227,6 +257,12 @@ function bindRing(shared, quantumFrames, maximumChannels) {
     frameCapacity,
     /** The seek epoch this ring has already applied. */
     seenEpoch: Atomics.load(control, CONTROL_SEEK_EPOCH),
+    /** Issue #1297b: the anchored seek `(generation, frame, anchor)` the engine's message handler
+     *  applied for this ring's source (`source_seek_at` answered OK), not yet consumed by the
+     *  drain; `anchoredSample` -1 is none. Written only by the handler, between blocks. */
+    anchoredGeneration: 0n,
+    anchoredFrame: 0n,
+    anchoredSample: NO_ANCHOR,
     /** Chunks the engine holds for this source but has not yet rendered. */
     depth: 0,
     finished: false,
@@ -249,6 +285,8 @@ function wrapEngineProcessor(Base) {
     constructor(options) {
       super(options)
       this.sabRings = []
+      // The `miso.seek-at.v1` message the engine's handler is answering, or null (#1297b).
+      this.pendingSeekAt = null
       registry.engine = this
       if (registry.pending !== null) {
         const pending = registry.pending
@@ -472,12 +510,33 @@ function wrapEngineProcessor(Base) {
       const control = ring.control
       if (epoch !== ring.seenEpoch) {
         const requested = generation ?? ring.controlI64[CONTROL_I64_SEEK_GENERATION]
+        const requestedFrame = frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
+        const anchor = ring.controlI64[CONTROL_I64_SEEK_ANCHOR]
+        if (anchor !== NO_ANCHOR) {
+          // Issue #1297 amendment (review M4): an anchored seek is applied by the engine's message
+          // handler (`source_seek_at` runs the service step), never here. Until the handler
+          // recorded an OK for exactly this tuple, the epoch stays unseen and no slot of this ring
+          // is read: its chunks at the new generation wait for the seek they belong to. After it,
+          // the epoch is consumed without any export call. The #1644 stale-generation rule below
+          // is the plain seek's alone: an anchored epoch never reaches an export, so a refusal can
+          // never consume it, and a refused `seek-at` leaves it unseen until a newer ring seek
+          // supersedes it (the writer's reply names the refusal).
+          if (
+            ring.anchoredSample !== anchor ||
+            ring.anchoredGeneration !== requested ||
+            ring.anchoredFrame !== requestedFrame
+          ) {
+            return RESULT_BACKPRESSURE
+          }
+          ring.anchoredSample = NO_ANCHOR
+          return this.consumeSharedSeek(ring, epoch)
+        }
         ring.idTarget.set(ring.idBytes)
         let result = this.exports.miso_engine_web_v1_source_seek(
           this.handle,
           ring.idLength,
           requested,
-          frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
+          requestedFrame
         )
         // Issue #1644 D2 (R4 amended): a session seek the engine accepted at this generation
         // already moved this source, so its own seek at the same generation is refused as stale,
@@ -508,15 +567,52 @@ function wrapEngineProcessor(Base) {
           control[CONTROL_LAST_RESULT] = result
           return result
         }
-        ring.seenEpoch = epoch
-        control[CONTROL_SEEKS_APPLIED] += 1
-        // The engine dropped everything it held for this source.
-        ring.depth = 0
-        ring.finished = false
-        control[CONTROL_FINISHED] = 0
-        control[CONTROL_DEPTH] = 0
+        return this.consumeSharedSeek(ring, epoch)
       }
       return RESULT_OK
+    }
+
+    /** Mark a ring's seek epoch applied: the engine dropped everything it held for this source. */
+    consumeSharedSeek(ring, epoch) {
+      const control = ring.control
+      ring.seenEpoch = epoch
+      control[CONTROL_SEEKS_APPLIED] += 1
+      ring.depth = 0
+      ring.finished = false
+      control[CONTROL_FINISHED] = 0
+      control[CONTROL_DEPTH] = 0
+      return RESULT_OK
+    }
+
+    /**
+     * Issue #1297b: the engine handler's anchored source seek (#1297a), run between blocks. The
+     * engine's own handler validates the message and calls `source_seek_at` once; this override
+     * only watches its reply, and on an OK records the tuple on the ring of that source, which is
+     * what lets the drain consume the ring's anchored epoch without an export call.
+     */
+    receiveSeekAt(message) {
+      this.pendingSeekAt = message
+      try {
+        super.receiveSeekAt(message)
+      } finally {
+        this.pendingSeekAt = null
+      }
+    }
+
+    acknowledge(requestId, result, planes) {
+      const seekAt = this.pendingSeekAt
+      if (seekAt != null && seekAt.requestId === requestId && result === RESULT_OK) {
+        const rings = this.sabRings ?? []
+        for (let index = 0; index < rings.length; index += 1) {
+          const ring = rings[index]
+          if (!sameSourceId(ring.idBytes, seekAt.sourceId)) continue
+          // The ring holds the words as signed i64; the message's are u64 bigints.
+          ring.anchoredGeneration = BigInt.asIntN(64, seekAt.generation)
+          ring.anchoredFrame = BigInt.asIntN(64, seekAt.sourceFrame)
+          ring.anchoredSample = BigInt.asIntN(64, seekAt.anchorSample)
+        }
+      }
+      super.acknowledge(requestId, result, planes)
     }
 
     /** Whether the last refusal wrote `source.generation.stale` into the session diagnostic.
@@ -601,8 +697,27 @@ class MisoSabFeedAttachProcessor extends AudioWorkletProcessor {
       } else if (data.op === "detach") {
         withdraw(this.delivered)
         this.delivered = []
+      } else if (data.op === "detach-source") {
+        // Issue #1297b D5: withdraw one ring this node brought, named by its index in the attach
+        // list. A port clones every message, so a SharedArrayBuffer it carries is a new object
+        // each time and can never name a ring this node holds; the index survives the clone. The
+        // reply is posted after the engine stopped reading the ring (this handler runs between
+        // blocks, on the drain's thread) and says whether a ring was withdrawn.
+        const index = data.index
+        const ring = Number.isSafeInteger(index) && index >= 0 && index < this.delivered.length
+          ? this.delivered[index]
+          : null
+        if (ring != null) {
+          if (registry.engine === null) {
+            if (registry.pending !== null) registry.pending = registry.pending.filter((entry) => entry !== ring)
+          } else {
+            registry.engine.detachSharedRings([ring])
+          }
+          this.delivered = this.delivered.map((entry, at) => (at === index ? null : entry))
+        }
+        this.port.postMessage({ op: "source-detached", requestId: data.requestId, detached: ring != null })
       } else if (data.op === "prepare-seek") {
-        const result = registry.engine === null ? { kind: "refused", result: RESULT_WRONG_STATE } : registry.engine.prepareSharedSeeks(this.delivered, data.seeks)
+        const result = registry.engine === null ? { kind: "refused", result: RESULT_WRONG_STATE } : registry.engine.prepareSharedSeeks(this.delivered.filter((ring) => ring !== null), data.seeks)
         registry.engine?.rebindMemoryViews()
         this.port.postMessage({ op: "seek-prepared", requestId: data.requestId, ...result })
       }

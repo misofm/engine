@@ -224,3 +224,60 @@ realtime table (with `tools/realtime-policy/src/policy.rs`'s `UNWRAPPED_EXPORTS`
 - Wrapper: `seekSourceAt` (shares the per-source seek bound with `seekSource`) and
   `seekReport(sourceId)`, both `@internal`. Table rows `wrapped: false`, engine callers only; the
   feed drain is not a caller (R2).
+
+## Record: slice #1297b (2026-10-25)
+
+Scope note R3/R4 and the amendment rule. Paths: `sdk/src/browser/{pcm-ring.ts,pcm-feed.ts,engine.ts}`,
+the feed prelude, `hosts/host-web/web/stem-store/{pcm-pump.js,index.d.ts}`, the two eval files, the
+README.
+
+- D2: control block 144 bytes: three `i64` at 112 (generation, frame, anchor at 128; `-1` none),
+  eight reserved zero bytes at 136, the ID at 144, the headers at 272; version word 1. The SDK
+  writer, the prelude and the pump's writer copy refuse a header offset other than 272. The pump
+  publishes plain seeks only and writes the anchor `-1` with each.
+- Drain rule: an unseen epoch whose anchor is not `-1` calls no export and reads no slot until the
+  engine handler answered its `miso.seek-at.v1` OK for exactly that `(generation, frame, anchor)`;
+  then the drain consumes it as an applied seek. The prelude records the OK by overriding the
+  engine's `receiveSeekAt`/`acknowledge` (no engine-worklet edit). Composition with #1644 D2: the
+  stale-generation rule stays on the plain seek's path only; an anchored epoch never reaches an
+  export, so no refusal can consume it, and a refused `seek-at` leaves it unseen until a newer ring
+  seek supersedes it. Acked batch: an OK ack means the engine holds the seek (applied at its anchor
+  or reported late by the seek report); the drain then only feeds its PCM, and no ack precedes a
+  drop.
+- D4/D5 as `start: { frameAt, prime }` (decision of this slice: the SDK cannot write PCM, so the
+  app's `prime(seek)` writes the ring from the frame at the generation; it is called after the ring
+  seek is published and before the `seek-at` is sent, so the drain cannot count the prime as stale).
+  `A` = `nextAbsoluteSample` + capacity x quantum, rounded up to a quantum, read once. The generation
+  comes from the engine's session-seek sequence (`highestSeekGeneration + 1`, reserved), so a later
+  `engine.seek` is above it. A start needs `FeedOptions.engine` (what `createEngine` resolved with);
+  `linkFeedEngine` is the SDK's `@internal` seam. A refused start rejects `ready()` with a
+  `MisoEngineError` and closes the feed. `alignTo` stays #1297c's.
+- D5 `EngineFeed.detachSource(sourceId)`: op `detach-source`, reply `source-detached` from the
+  attach port's handler (between blocks, on the drain's thread); then the writer is released. Timeout
+  closes the feed. `EngineFeed.rings` is the delivered set.
+- D6: `engine.apply` retires the fed sources its `removeSource` edits name; `replaceSession` the
+  fed sources the committed session map no longer lists (R4). Each is detached after
+  `engine.applied(revision)` resolves.
+- Tests (red first on mutants, all 13 red): old header offset refused at attach; anchored start
+  (one status read, `A` rounded, `frameAt` once, handler `seek_at` once, no slot read and no plain
+  seek before it, a refused `seek-at` never consumed); `detachSource`; the pump's plain seek in the
+  new layout; D6 over the real core (apply and replace).
+
+Attempt 2 (verifier findings of attempt 1):
+- `detach-source` names the ring by its index in the attach list: a port clones a
+  SharedArrayBuffer into a new object, so object identity never matched in a browser. The worklet
+  clears that entry and replies `detached: true|false`; the SDK rejects `detachRefused` and closes
+  the feed on false. Both fake ports now `structuredClone`; the detach test was red on attempt 1's
+  code under the cloning port.
+- The browser barrel exports `pcm-feed.ts` by name, without `linkFeedEngine` and `FeedRetirement`
+  (`@ts-expect-error` pins in `sdk/test/barrel-surface.ts`; `sdk/src/browser/index.ts` and that
+  test file are outside the scope note's list, edited for this finding).
+- One test composes the prelude with the shipped engine worklet class (stub exports): one
+  `miso.seek-at.v1` through `receive`, then the drain consumes the epoch (red when the engine's
+  handler is renamed). `Msb1RingWriter.seek`'s anchor is documented as the SDK start's.
+
+Attempt 3 (test gap of attempt 2): the detach test runs three sources, detaches the first and then
+the last, checks that the middle ring keeps draining, and runs `prepareSeek` over the ring that
+remains. It is red when the worklet compacts its attach list or passes withdrawn slots to
+prepare-seek. `attachEngineFeed` refuses duplicate source IDs, and a start whose source was detached
+during `ready()` is skipped. Each was red first. The paused-seek test's port clones its messages.
