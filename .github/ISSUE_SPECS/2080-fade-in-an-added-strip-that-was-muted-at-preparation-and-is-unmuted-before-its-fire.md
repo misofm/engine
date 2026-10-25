@@ -41,3 +41,37 @@ reason in this spec. If the rule changes `mute_channel`'s unmute-keeps-arm seman
 ## Paths
 `crates/builtins/src/lib.rs`, `crates/graph/src/lib.rs`, `crates/host-core/src/prepare.rs`, their
 tests; this spec.
+
+## Decision record (attempt 1, 2026-10-25)
+- R1 (root): the arm persists through mute and unmute records until the fire, the rule #2069 gave
+  routes. It supersedes #1288 attempt 2's ruling "a user's mute wins over the fade" (a mute
+  disarmed). Reason: the model holds the final value and the fade is how an added strip reaches
+  it; a mute never needs the arm to protect it, as the armed lane is already held at `+0.0`.
+- Builtins (`FaderRampStage`): a new `opens` bit per channel lane. `arm_fade_in` arms both
+  channels; a muted one gets `opens = false`, and the call returns `true`. `mute_channel` on an
+  armed channel only sets `opens = !muted`. `fire_fade_in` disarms and unmutes over the ramp only
+  if `opens` is set; else it does nothing (no work on silence). `FaderChannelState` carries
+  `opens`; it is in memory only, not a wire format, and no digest pins it.
+- `is_armed` (public, bank and scalar) now means "armed and the fire opens it". Its only
+  consumers (`builtins-compiler`'s `FaderJumpStage::muted`, `bank_hold` and the scalar hold) read
+  `is_muted && !is_armed` as the model's mute. With this meaning that stays exact: an armed channel
+  whose fire stays muted reports muted, so a curve's unmute before the fire reaches the stage and
+  retargets the fire.
+- Graph: no logic change. The fader arm now returns `true`, so a muted strip gets a fade entry
+  and its carry pair. The `None` skip in host-core stays for an arm that armed nothing.
+- Bits move for an unmute before the fire that follows a mute record or a mute at preparation.
+  No fixture exercises this sequence. Evidence (PR evidence, not a
+  committed test): base 609ccf399 and branch 5adcce571 each ran the same `successor_swap.rs`
+  with the #2069 digest dump in `fade_run`, and the five arm-count assertions below changed into
+  a non-failing print. 125 passed in both; the 185 digests are identical (sha256 `11881beb...744d`).
+  The record is in `scratchpad/b2080/` (`METHOD.txt`, `base.txt`, `branch.txt`,
+  `successor_swap.dump.rs`).
+- Test (R2): `fader_ramp.rs` `an_armed_fade_in_is_a_held_mute_that_fires_as_an_unmute` adds the
+  case `(user_mute, user_unmute) = (true, true)` and a lane muted before the arm, on all four
+  record cases. Red on base 609ccf399: the case "mute then unmute" and the two cases "muted at
+  the arm, then unmute" fail on rendered bits; the other five pass unchanged.
+- Root allowed `crates/host-core/tests/successor_swap.rs` for its five arm-count assertions and
+  one stale comment only: they pinned #1288's old rule "a muted strip arms nothing", which R1
+  replaces. Each assertion now states the exact arm list or count, the muted strip's arm
+  included, and each is red when a muted lane does not arm (mutant run). No audio or digest
+  assertion changed.

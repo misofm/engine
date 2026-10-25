@@ -3966,10 +3966,18 @@ fn a_fired_fade_does_not_repeat(backend: Backend) {
         (10, Some(SWAP_BLOCK)),
     ] {
         let run = two_swap_run_prepared(&a, &b1, &b2, (second, prepared_at), None, &feeds, backend);
+        // #2080: `b2`'s added muted track arms too (its fire stays muted): one arm in every
+        // case. The fade track's re-arm is the second, only when prepared before the fire.
+        let muted_track_arm = (0, ramp);
+        let expected = if prepared_at.is_some() {
+            vec![muted_track_arm, (0, ramp)]
+        } else {
+            vec![muted_track_arm]
+        };
         assert_eq!(
-            run.arms[1].is_empty(),
-            prepared_at.is_none(),
-            "{backend:?}: only a successor prepared before the fire re-arms the strip"
+            run.arms[1], expected,
+            "{backend:?}: only a successor prepared before the fire re-arms the strip, and the \
+             added muted track arms"
         );
         assert_eq!(
             first_fade_difference(&run, &reference),
@@ -4311,10 +4319,12 @@ fn a_removed_or_repointed_lane_less_route_fades_out_through_its_line(backend: Ba
                 &[],
                 backend,
             );
+            // #2080: `b2`'s added muted track arms (`(0, ramp)`, first), then each kept copy.
             assert_eq!(
-                run.arms[1].len(),
-                copies,
-                "{backend:?} {} {claim}: the copies the second successor keeps",
+                run.arms[1],
+                vec![(0, ramp); 1 + copies],
+                "{backend:?} {} {claim}: the added muted track's arm and the copies the second \
+                 successor keeps",
                 case(limited)
             );
             assert_eq!(
@@ -4743,17 +4753,17 @@ fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
         six_word.arms[0],
         "{backend:?}: a muted send of a restarted strip is armed"
     );
-    // A curve that mutes `aux` at preparation leaves its fader unarmed (#1288: a muted lane
-    // arms nothing), and still arms its send (R2: the arm refuses on the route's own gate only).
-    for (case, curve, arms) in [
-        ("open throughout", (1, 0.0, 0.0), 2),
-        ("opening inside the wait", (500, 1.0, 0.0), 1),
+    // A curve that mutes `aux` at preparation arms its fader too (#2080: its fire goes to the
+    // curve's mute unless the curve opens it first), and arms its send (R2: the arm refuses on
+    // the route's own gate only).
+    for (case, curve) in [
+        ("open throughout", (1, 0.0, 0.0)),
+        ("opening inside the wait", (500, 1.0, 0.0)),
     ] {
         let run = swap_run(Some(curve));
         assert_eq!(
-            run.arms[0],
-            six_word.arms[0][..arms],
-            "{backend:?} (a) {case}: armed"
+            run.arms[0], six_word.arms[0],
+            "{backend:?} (a) {case}: the fader and the send are armed"
         );
         assert_eq!(
             first_fade_difference(&run, &six_word),
@@ -5044,12 +5054,12 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
             let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
                 .expect("a graph plan");
             // #2011: `late`'s following `pre_fader` send is armed with it.
+            // #2080: the muted `late` arms too (its fire stays muted).
             assert_eq!(
                 arms.len(),
-                restarted.len() - usize::from(restarted.contains(&"late"))
-                    + usize::from(*edit == Restart::Following),
-                "{what}: each audible restarted strip is armed, the muted `late` is not, and \
-                 `late`'s following send is"
+                restarted.len() + usize::from(*edit == Restart::Following),
+                "{what}: each restarted strip is armed, the muted `late` too, and `late`'s \
+                 following send is"
             );
         }
     }
@@ -11681,10 +11691,11 @@ fn a_repointed_send_fades_in_at_its_new_destination(backend: Backend) {
             Vec::<Box<str>>::new(),
             "{backend:?} {case}: the re-pointed send's source strip keeps its state"
         );
+        // #2080: the added muted output track's fader arm (first), then the send's.
         assert_eq!(
             run.arms[0],
-            vec![(0, ramp)],
-            "{backend:?} {case}: D and the ramp"
+            vec![(0, ramp), (0, ramp)],
+            "{backend:?} {case}: the muted track's and the send's D and ramp"
         );
         assert_eq!(
             run.allocator,

@@ -8265,6 +8265,8 @@ fn fade_arms_for<'a>(
                 .unwrap_or(0);
             delay = delay.saturating_add(into_submix);
         }
+        // #2080: a strip the session mutes is armed too; its fire goes to its prepared mute, so
+        // an unmute record before the fire opens it at the fire, over the fade.
         arms.push((
             id,
             graph::GraphFadeArm {

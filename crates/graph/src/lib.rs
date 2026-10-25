@@ -2406,9 +2406,10 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     }
     /// Arm the fade-in of fader lane `lane`, a strip a plan swap adds during playback (issue #1288
     /// D2): each channel the session does not mute becomes a settled mute that
-    /// [`Self::fire_fade_in`] unmutes. Called by [`install_fade_arms`], off the render thread,
-    /// before the plan is published. Returns whether any channel was armed; the default arms
-    /// nothing.
+    /// [`Self::fire_fade_in`] unmutes, and a channel the session mutes arms too, its fire going
+    /// to its prepared mute unless a record before the fire unmutes it (#2080 R1). Called by
+    /// [`install_fade_arms`], off the render thread, before the plan is published. Returns whether
+    /// the lane was armed; the default arms nothing.
     fn arm_fade_in(&mut self, lane: usize) -> bool {
         let _ = lane;
         false
@@ -4669,10 +4670,11 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
 /// Arm the fade-in of each strip in `arms` and install the table this plan fires them from
 /// (issue #1288 D2, D3), off the render thread, before publication; it replaces any earlier
 /// table. Each lane is armed now, so the plan's first block already renders it muted. A strip
-/// the session mutes on both channels arms nothing and gets no entry. Returns, for each arm in
-/// order, the index of its entry in the table, or `None` when it armed nothing: the index a
-/// successor's [`GraphFadeArmPair::predecessor`] names (#1392); and the watch render sets each
-/// entry's flag in when it fires.
+/// the session mutes, on one channel or both, arms too and gets an entry (#2080): its fire goes
+/// to its prepared mute and ramps nowhere unless a record before the fire unmutes it, as a
+/// muted route's (#2069). Returns, for each arm in order, the index of its entry in the table, or
+/// `None` when it armed nothing: the index a successor's [`GraphFadeArmPair::predecessor`] names
+/// (#1392); and the watch render sets each entry's flag in when it fires.
 ///
 /// A source node that is not one of the source set's claims, and every source of a driver that
 /// does not lend its played planes, waits for nothing: that fade fires at the first block.
