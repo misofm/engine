@@ -25,6 +25,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
     track.console = vec![session::ConsoleEntry {
         slot: StableId::parse("desk-eq").expect("literal stable ID"),
         bypass: true,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: effect.params.clone(),
     }];
     let route = session.routes[0].clone();
@@ -71,6 +72,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
     track_console.push(ConsoleEntry {
         slot: id("desk-limit"),
         bypass: false,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: Vec::new(),
     });
     vec![
@@ -303,6 +305,7 @@ pub fn console_session_fixture() -> SessionModel {
     session.tracks[0].console = vec![ConsoleEntry {
         slot,
         bypass: false,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: insert.params,
     }];
     session
@@ -968,11 +971,15 @@ pub enum ConformanceDecoder {
 /// `response.telemetry` the same table and the meter window (field 8), and `event.meter_batch` the
 /// window's span and sequence (fields 5 and 6). Only those three frames move; the 51 others are
 /// byte-equal. Re-pinned from `c146e8fad0b26299`; the frame count stays 54.
+/// #1369 appends the console entry's required `LINK_MODE` (field 4, `slot` 1 to `average` 4), so
+/// every console entry of the transaction carries it. Only `command.session_transaction_apply`
+/// moves; the 53 other frames are byte-equal. Re-pinned from `480ffcf546bea7fb`; the frame count
+/// stays 54.
 /// #1585 gives `TransactionApplied` its optional arm-tag lists (`observe_arm_tags` 3 and
 /// `removed_arm_tags` 4, packed `u64`), and `response.session_transaction` carries both. Only that
-/// frame moves; the 53 others are byte-equal. Re-pinned from `480ffcf546bea7fb`; the frame count
+/// frame moves; the 53 others are byte-equal. Re-pinned from `06bb3b6f65f39eec`; the frame count
 /// stays 54.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xfccf_6305_0a60_0b2f;
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x5b6c_bc15_7a1f_6154;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

@@ -24,8 +24,8 @@ fn console_document() -> Value {
         }]
     });
     value["tracks"][0]["console"] = json!([
-        { "slot": "desk-eq", "bypass": false, "params": [] },
-        { "slot": "desk-limit", "bypass": true, "params": [] }
+        { "slot": "desk-eq", "bypass": false, "link_mode": "slot", "params": [] },
+        { "slot": "desk-limit", "bypass": true, "link_mode": "slot", "params": [] }
     ]);
     value
 }
@@ -70,9 +70,9 @@ fn the_console_document_parses_and_lowers_in_slot_order() {
     assert_eq!(limiter.sidechain, session::SidechainDeclaration::None);
 }
 
-/// A per-track console entry carries only `slot`, `bypass` and `params`. Every effect field is
-/// refused at its key, so a document cannot give one track its own identity, quality, link mode or
-/// sidechain for a slot the session declares once.
+/// A per-track console entry carries only `slot`, `bypass`, `link_mode` and `params`. Every other
+/// effect field is refused at its key, so a document cannot give one track its own identity,
+/// quality or sidechain for a slot the session declares once.
 #[test]
 fn console_entries_refuse_every_effect_field() {
     for (key, value) in [
@@ -82,7 +82,6 @@ fn console_entries_refuse_every_effect_field() {
             json!({ "kind": "native", "effect_id": "miso.compressor" }),
         ),
         ("quality", json!("high")),
-        ("link_mode", json!("maximum")),
         ("sidechain", json!({ "kind": "none" })),
     ] {
         let mut document = console_document();
@@ -93,6 +92,64 @@ fn console_entries_refuse_every_effect_field() {
             &format!("$.tracks[0].console[0].{key}"),
         );
     }
+}
+
+/// #1369 gate 1: an entry's `link_mode` is required and closed (`slot`, `dual_mono`, `maximum`,
+/// `average`); `slot` lowers to the slot's declared mode and any other token overrides it on that
+/// strip; the canonical writer puts the key after `bypass` and round-trips the text byte-exact.
+#[test]
+fn console_entry_link_mode_is_a_required_closed_override() {
+    for (token, lowered) in [
+        ("slot", session::LinkMode::Maximum),
+        ("dual_mono", session::LinkMode::DualMono),
+        ("maximum", session::LinkMode::Maximum),
+        ("average", session::LinkMode::Average),
+    ] {
+        let mut document = console_document();
+        document["tracks"][0]["console"][1]["link_mode"] = json!(token);
+        let model = parse_session_json(&serde_json::to_string(&document).expect("JSON"))
+            .unwrap_or_else(|error| panic!("{token}: {error}"));
+        assert_eq!(
+            model.tracks[0].console[1].link_mode.token(),
+            token,
+            "{token}: parsed"
+        );
+        // `desk-limit` declares `maximum`: `slot` resolves to it, an override replaces it.
+        let lowered_mode = model.lower_track(&model.tracks[0]).post_insert[0].link_mode;
+        assert_eq!(lowered_mode, lowered, "{token}: lowered");
+        let canonical = session::canonical_session_json(&model).expect("canonical");
+        let entry = format!(
+            "\"slot\": \"desk-limit\",\n          \"bypass\": true,\n          \"link_mode\": \"{token}\",\n          \"params\""
+        );
+        assert!(
+            canonical.contains(&entry),
+            "{token}: key order\n{canonical}"
+        );
+        let reparsed = parse_session_json(&canonical).expect("canonical reparses");
+        assert_eq!(reparsed, model, "{token}: model round trip");
+        assert_eq!(
+            session::canonical_session_json(&reparsed).expect("canonical"),
+            canonical,
+            "{token}: canonical text round trip"
+        );
+    }
+    let mut unknown = console_document();
+    unknown["tracks"][0]["console"][0]["link_mode"] = json!("stereo");
+    refused(
+        &unknown,
+        DiagnosticCode::InvalidEnum,
+        "$.tracks[0].console[0].link_mode",
+    );
+    let mut missing = console_document();
+    missing["tracks"][0]["console"][0]
+        .as_object_mut()
+        .expect("entry")
+        .remove("link_mode");
+    refused(
+        &missing,
+        DiagnosticCode::MissingField,
+        "$.tracks[0].console[0].link_mode",
+    );
 }
 
 /// A console slot takes no sidechain (a keyed effect is an insert), and its per-track knobs are

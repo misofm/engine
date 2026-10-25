@@ -594,7 +594,7 @@ process.stdout.write = function () {
     const sidechain = { source: { kind: "track", trackId: "bass", tap: "post_fader" }, portId: "sidechain-in" };
     const cases = [
       ["a console slot sidechain", (body) => { body.console.preInsert[0].sidechain = sidechain; }],
-      ...["effectId", "quality", "linkMode", "sidechain", "id", "identity", "params"].map((field) => [
+      ...["effectId", "quality", "sidechain", "id", "identity", "params"].map((field) => [
         `${field} on a console entry`,
         (body) => { body.tracks[1].spec.console[0][field] = "x"; },
       ]),

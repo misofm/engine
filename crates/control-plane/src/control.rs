@@ -933,6 +933,10 @@ thread_local! {
     /// Whether the service step leaves displaced plans in the retirement queue (batch 15a review
     /// fold M1): a render preempted between claiming a candidate and retiring the plan it displaced.
     static TEST_HOLD_RECLAMATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// The key the newest epoch's gate had last published when this thread last queued an
+    /// observation record (#1968): a commit's records are queued before its publication.
+    static TEST_OBSERVE_PUSH_KEY: core::cell::Cell<Option<engine::realtime::GateKey>> =
+        const { core::cell::Cell::new(None) };
     /// `(commits made from an in-place token, in-place tokens materialized)` on this thread.
     static IN_PLACE_COUNTS: core::cell::Cell<(usize, usize)> = const { core::cell::Cell::new((0, 0)) };
     static TEST_OWNER_STATE: core::cell::Cell<TestOwnerCounters> =
@@ -2509,6 +2513,23 @@ where
     #[cfg(feature = "test-support")]
     pub fn test_providers(&self) -> &ProviderEpoch {
         &self.providers
+    }
+
+    /// The key the newest epoch's gate had last published when this thread last queued an
+    /// observation record, and resets it (#1968): `None` if no record was queued since.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_observe_push_key(&self) -> Option<engine::realtime::GateKey> {
+        TEST_OBSERVE_PUSH_KEY.with(core::cell::Cell::take)
+    }
+
+    /// The key the newest epoch's gate published last (#1968).
+    #[cfg(feature = "test-support")]
+    pub fn test_newest_gate_key(&self) -> engine::realtime::GateKey {
+        self.pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .revision_gate
+            .last_published_key()
     }
 
     /// The pending provider epochs, oldest first.
@@ -5291,17 +5312,6 @@ where
                 *row = A::Row::from(resources);
             }
         }
-        // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
-        // that carries its content, the newest epoch's (#1502 D6), which is the routing the
-        // producers were chosen by, so the cells a commit writes and the gate that reveals them
-        // are one plan's. Every record push, cell write, target publication and owner commit is
-        // before it, so render's `Acquire` snapshot of the gate sees them all and the watermark
-        // never reports the revision before its values can apply. The stamp's revision is
-        // published, read into a local, so the always-on bound of `stamp` covers the publication. A
-        // monitor publication carries the committed revision (#1603).
-        if let Some(key) = key {
-            revision_gate.publish_key(key);
-        }
         // #1310: the kept base's lengths, built above, now that the edit is committed.
         if let Some(kept) = self
             .kept_holder_mut()
@@ -5316,7 +5326,17 @@ where
         }
         // #1584 D4: the subscriptions' records, admitted above with no observation record queued
         // since, then the table the edits left, before the reply exists. A record cannot be refused
-        // here: the control thread is the queues' only producer.
+        // here: the control thread is the queues' only producer. #1968: they are pushed before the
+        // revision is published below, on the queues of the plan whose gate publishes it, so a
+        // block whose snapshot covers the revision drains them in the same block (the drain pops
+        // the queue after the snapshot), and a watermark that covers the revision means the tap
+        // is armed. Render drains the queues outside the gate, so a record may apply one block
+        // early: a subscription has no revision (CONTROL_PROTOCOL_SEMANTICS.md, "Observation
+        // subscriptions"), so it is not one of the transaction's live values, and it applies at
+        // whatever block drains next, as an `Observe`-only transaction's does. So the first window
+        // may open one block before the revision's values apply; its `first_sample` says so, and a
+        // reader that needs the changed audio takes the windows whose `first_sample` is at or
+        // after the watermark's.
         if !observe_changes.is_empty() {
             self.push_tagged_observation_batch(observe_changes.iter().copied());
         }
@@ -5325,6 +5345,23 @@ where
         }
         if let Some(next) = next_arm_tag_after {
             self.next_arm_tag = next;
+        }
+        // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
+        // that carries its content, the newest epoch's (#1502 D6), which is the routing the
+        // producers were chosen by, so the cells a commit writes and the gate that reveals them
+        // are one plan's. Every record push (the observation records above included, #1968), cell
+        // write, target publication and owner commit is before it, so render's `Acquire` snapshot
+        // of the gate sees them all and the watermark never reports the revision before its values
+        // can apply. The stamp's revision is published, read into a local, so the always-on bound
+        // of `stamp` covers the publication. A monitor publication carries the committed revision
+        // (#1603). The observation pushes borrowed the session, so the newest epoch's gate is
+        // borrowed again: the same epoch, since nothing in between adds or promotes one.
+        if let Some(key) = key {
+            self.pending_providers
+                .last_mut()
+                .unwrap_or(&mut self.providers)
+                .revision_gate
+                .publish_key(key);
         }
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
@@ -5984,6 +6021,12 @@ where
         let pushed = producer.try_push_observe(tap_index, armed, window_blocks, arm_tag);
         if pushed.is_ok() && fresh {
             self.next_arm_tag = arm_tag.saturating_add(1);
+        }
+        #[cfg(feature = "test-support")]
+        if pushed.is_ok() {
+            let newest = self.pending_providers.last().unwrap_or(&self.providers);
+            let key = newest.revision_gate.last_published_key();
+            TEST_OBSERVE_PUSH_KEY.with(|cell| cell.set(Some(key)));
         }
         // #1310 (root ruling B15-Q4): a record on a plan render has not adopted.
         let on_candidate = !self.pending_providers.is_empty();

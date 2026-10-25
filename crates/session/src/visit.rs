@@ -111,7 +111,7 @@ pub mod keys {
  (session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,SOURCES="sources":9,CONSOLE="console":15,TRACKS="tracks":10,SUBMIXES="submixes":11,VCAS="vcas":16,CONTROL_SMOOTHING="control_smoothing":17,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14)
  (console,"Session console fields (decision 12).";PRE_INSERT="pre_insert":1,POST_INSERT="post_insert":2)
  (console_slot,"Console slot declaration fields.";SLOT="slot":1,IDENTITY="identity":2,QUALITY="quality":3,LINK_MODE="link_mode":4)
- (console_entry,"Per-track console entry fields.";SLOT="slot":1,BYPASS="bypass":2,PARAMS="params":3)
+ (console_entry,"Per-track console entry fields.";SLOT="slot":1,BYPASS="bypass":2,LINK_MODE="link_mode":4,PARAMS="params":3)
  (render_profile,"Render-profile fields.";ID="id":1,MODE="mode":2)
  (output_profile,"Output-profile fields.";ID="id":1,CHANNELS="channels":2,SAMPLE_FORMAT="sample_format":3)
  (source,"Source fields.";ID="id":1,CONTENT="content":2,CHANNELS="channels":3,BIT_DEPTH="bit_depth":4,FRAMES="frames":5)
@@ -271,7 +271,7 @@ mod walk {
           v.id(f::SLOT,&s.slot),s.identity.record(Some(f::IDENTITY),o,v),v.token(f::QUALITY,token(s.quality.token(),s.quality.wire())),
           v.token(f::LINK_MODE,token(s.link_mode.token(),s.link_mode.wire()))
         }
-        ConsoleEntry=>console_entry |s,v,o,f| [2+s.params.len() as u32] {v.id(f::SLOT,&s.slot),v.bool(f::BYPASS,s.bypass),sorted_array(f::PARAMS,&s.params,o,v)}
+        ConsoleEntry=>console_entry |s,v,o,f| [3+s.params.len() as u32] {v.id(f::SLOT,&s.slot),v.bool(f::BYPASS,s.bypass),v.token(f::LINK_MODE,token(s.link_mode.token(),s.link_mode.wire())),sorted_array(f::PARAMS,&s.params,o,v)}
         Track=>track |s,v,o,f| [8+s.console.len() as u32; strip_arm(&s.matrix_or_pan)] {
           v.id(f::ID,&s.id),v.id(f::SOURCE_ID,&s.source_id),v.u8(f::LEFT_SOURCE_CHANNEL,s.left_source_channel),v.u8(f::RIGHT_SOURCE_CHANNEL,s.right_source_channel),
           s.builtins.record(Some(f::BUILTINS),o,v),array(f::CONSOLE,&s.console,o,v),s.inserts.record(Some(f::INSERTS),o,v),s.fader.record(Some(f::FADER),o,v),

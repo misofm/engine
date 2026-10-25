@@ -141,6 +141,7 @@ fn with_console(model: &mut session::SessionModel) {
             ConsoleEntry {
                 slot: id("desk-eq"),
                 bypass: true,
+                link_mode: session::ConsoleLinkMode::Slot,
                 // Deliberately out of `(parameter_id, channel)` order: canonical output sorts.
                 params: vec![
                     param(2, ParameterChannel::Right, -1.5),
@@ -150,6 +151,7 @@ fn with_console(model: &mut session::SessionModel) {
             ConsoleEntry {
                 slot: id("desk-limit"),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: Vec::new(),
             },
         ];

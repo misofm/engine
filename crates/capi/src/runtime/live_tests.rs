@@ -2584,6 +2584,7 @@ fn effect_session(track_count: usize, sample_rate_hz: u32) -> String {
             track.console.push(session::ConsoleEntry {
                 slot: clip.clone(),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: Vec::new(),
             });
         }
@@ -3374,6 +3375,7 @@ fn bypass_crossfade_documents(
         model.tracks[0].console.push(session::ConsoleEntry {
             slot: effect.id.clone(),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: Vec::new(),
         });
         model.console.post_insert.push(session::ConsoleSlot {
