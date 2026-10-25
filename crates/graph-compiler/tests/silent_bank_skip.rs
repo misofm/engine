@@ -551,9 +551,14 @@ fn a_skipped_bank_renders_the_bits_of_a_processed_one() {
 /// the others are not, and `ch11`'s stored ride keeps it running and its fader bank the only one
 /// with automation slots.
 ///
-/// Test value: red when a pack moves a strip's or the master's bits, packs a lane that is not at
-/// rest, never packs, or leaves a group displaced (paying the displaced fold) after activity
-/// returns, which no other test reaches: the #1782a gate moves lanes only by hand.
+/// The generator also seeks (the render clock jumps [`SEEK_JUMP`] blocks at [`SEEK`], strips
+/// displaced), and gives `ch09` and `ch17` a linked compressor detector (#1369), which their moves
+/// must carry (#1371).
+///
+/// Test value: red when a pack moves a strip's or the master's bits, makes a pack that skips no
+/// more than the unpacked twin, never packs, or leaves a group displaced (paying the displaced
+/// fold) after activity returns, which no other test reaches: the #1782a gate moves lanes only by
+/// hand.
 #[test]
 fn a_packing_plan_renders_the_bits_of_an_unpacked_one() {
     for (name, layout) in [
@@ -568,7 +573,8 @@ fn a_packing_plan_renders_the_bits_of_an_unpacked_one() {
     }
 }
 
-/// What gate 1's twin plan leaves out.
+/// What gate 1's twin plan leaves out. Both plans pack their lanes in [`Twin::Processed`], so the
+/// skip differential also runs over displaced groups.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Twin {
     /// The whole-bank skip (issue #1107): every block is processed.
