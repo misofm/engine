@@ -463,6 +463,11 @@ fn no_switch_puts_a_sample_over_the_ceiling() {
 /// where both channels take the attack arm on one frame: on stationary noise alone it stayed one
 /// lane apart for at least 1,920 frames past the countdown at `W8` (#1370b's decision record).
 /// The burst is that attack.
+///
+/// Mid-glide, a NaN on every lane fails the §4.4 check and resets the whole bank, which states
+/// the record from the cleared words and leaves the glide in flight (the D7 recovery keeps it):
+/// the glide's next frames must clear it again, or the frames after them would link over the
+/// words the glide pulled apart.
 #[test]
 fn the_linked_pair_returns_once_the_rings_are_rewritten() {
     fn check<L: Lane>() {
@@ -473,6 +478,8 @@ fn the_linked_pair_returns_once_the_rings_are_rewritten() {
         const BLOCKS: usize = 200;
         /// Frame 5,808: lane 0's glide ends at frame 5,280, and `2 Wb = 482` at 5 ms.
         const BURST: usize = 121;
+        /// Frame 1,440: its NaN leaves the delay line at about frame 1,926, inside lane 0's glide.
+        const POISON: usize = 30;
         let tracks = vec![values_with(CEILING, RELEASE, LOOKAHEAD); L::WIDTH];
         let label = format!("W{}", L::WIDTH);
         let mut pair = LinkedPair::<L>::new(&tracks, LinkMode::DualMono, false, RATE, label);
@@ -498,15 +505,17 @@ fn the_linked_pair_returns_once_the_rings_are_rewritten() {
             // required gain enters the window `N - Wb` frames later, and the attack it drives
             // spans the countdown's end.
             let gain = if block == BURST { 9.0 } else { 2.0 };
-            let left: Vec<f32> = (0..words).map(|_| noise.next() * gain).collect();
+            let mut left: Vec<f32> = (0..words).map(|_| noise.next() * gain).collect();
             let right: Vec<f32> = (0..words).map(|_| noise.next() * gain).collect();
+            if block == POISON {
+                left[..L::WIDTH].fill(f32::NAN);
+            }
             let engaged = pair.dual(
                 &left,
                 &right,
                 &no_spans(L::WIDTH),
                 &format!("block {block}"),
             );
-            let end = (block + 1) * BLOCK;
             if engaged {
                 assert!(
                     block * BLOCK >= rewritten,
@@ -519,9 +528,6 @@ fn the_linked_pair_returns_once_the_rings_are_rewritten() {
                     "W{} block {block}: the linked pair left again after block {first}",
                     L::WIDTH
                 );
-            }
-            if block >= SWITCH && end <= rewritten {
-                assert!(!pair.shipped.gain_linked, "block {block}: record set early");
             }
         }
         let first = first_engaged.expect("the linked pair never returned");
@@ -854,6 +860,52 @@ fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
                 "the glide arrived"
             );
         }
+    }
+    lane::each_lane!(|L| check::<L>());
+}
+
+/// **The collapsed body.** A core whose lane 0 glides renders collapsed blocks
+/// (`process_block_mono`) that are the left plane of a core fed `L == R`, bit for bit, and after
+/// the disengage copy the two cores render and hold the same words: a collapsed block advances
+/// the glide as the dual one does. At every width the build has.
+#[test]
+fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
+    fn check<L: Lane>() {
+        let tracks = vec![values_with(CEILING, RELEASE, LOOKAHEAD); L::WIDTH];
+        let core = || linked_core::<L>(&tracks, LinkMode::DualMono, false, RATE);
+        let (mut dual, mut collapsed) = (core(), core());
+        for core in [&mut dual, &mut collapsed] {
+            assert!(core.retarget_link(0, LinkMode::Maximum, 300));
+        }
+        let mut noise = Noise(0x1370_b005);
+        for block in 0..16 {
+            let plane: Vec<f32> = (0..BLOCK * L::WIDTH).map(|_| noise.next() * 2.0).collect();
+            let (mut dual_left, mut dual_right) = (plane.clone(), plane.clone());
+            dual.process_block(&mut dual_left, &mut dual_right, BLOCK);
+            let mut mono_left = plane.clone();
+            if block < 4 {
+                collapsed.process_block_mono(&mut mono_left, BLOCK);
+                assert_same_words(
+                    &mono_left,
+                    &dual_left,
+                    &format!("W{} block {block}: a collapsed glide block", L::WIDTH),
+                );
+                if block == 3 {
+                    collapsed.desymmetrize();
+                    assert_eq!(state_bits(&collapsed), state_bits(&dual), "disengaged");
+                }
+                continue;
+            }
+            let mut mono_right = plane;
+            collapsed.process_block(&mut mono_left, &mut mono_right, BLOCK);
+            assert_same_words(&mono_left, &dual_left, &format!("block {block}: left"));
+            assert_same_words(&mono_right, &dual_right, &format!("block {block}: right"));
+        }
+        assert_eq!(
+            state_bits(&collapsed),
+            state_bits(&dual),
+            "the glide arrived alike"
+        );
     }
     lane::each_lane!(|L| check::<L>());
 }
