@@ -6953,6 +6953,231 @@ mod tests {
         assert_eq!(EventError::Internal.diagnostic(), b"control.event.internal");
     }
 
+    /// #1588 D2, D4, R4: a render-half meter fold's frames reach the batches through the plan's
+    /// ring, and a frame the full ring dropped reaches `METER_WINDOWS_LOST`.
+    #[cfg(feature = "test-support")]
+    mod rendered_meters {
+        use crate::{
+            CompiledChildren, ControlAdapter, ControlLimits, PlanResources, RuntimePreparer,
+            compile_children,
+        };
+        use engine::realtime::PlanarBufferMut;
+        use host_core::{
+            CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+            HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost, SuccessorBase,
+            prepare_host_runtime_with_live_lanes, prepare_host_runtime_with_live_lanes_successor,
+        };
+        use protocol::{
+            CommandPayload, CounterId, DiagnosticSeverity, ExpectedRevision, MeterEntry,
+            MeterMetric, MeterTarget, ProtocolCodec, RequestId, TelemetryConfiguration,
+            TypedCommandFrame,
+        };
+
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        const QUANTUM: u64 = 128;
+
+        struct Adapter;
+
+        impl ControlAdapter for Adapter {
+            type Row = PlanResources;
+            const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+            const METER_DELIVERY: bool = true;
+            const RENDER_METER_FOLD: bool = true;
+        }
+
+        /// host-core's live-lanes entries, with one-block meter windows.
+        struct Preparer;
+
+        impl RuntimePreparer for Preparer {
+            fn prepare(
+                &self,
+                compiled: &CompiledSession,
+                caps: &HostPrepareCaps,
+                lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
+                successor: Option<SuccessorBase<'_>>,
+                superseded: &LiveValuesSuperseded,
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
+                let live = HostLiveControlRequest {
+                    meter_window_blocks: 1,
+                    ..HostLiveControlRequest::default()
+                };
+                let (host, handles) = match successor {
+                    Some(base) => prepare_host_runtime_with_live_lanes_successor(
+                        compiled, caps, &live, lanes, base, superseded,
+                    ),
+                    None => prepare_host_runtime_with_live_lanes(
+                        compiled, caps, &live, lanes, superseded,
+                    ),
+                }?;
+                Ok((host, handles, None))
+            }
+
+            fn meter_window_blocks(&self) -> u32 {
+                1
+            }
+        }
+
+        fn limits() -> ControlLimits {
+            ControlLimits {
+                source_ring_frames: 1_024,
+                maximum_automation_spans_per_block: 128,
+                maximum_document_bytes: 1_000_000,
+                maximum_diagnostic_bytes: 4_096,
+                maximum_tracks: 100,
+                maximum_sources: 100,
+                maximum_routes: 100,
+                maximum_effects: 100,
+                maximum_graph_session_plus_plan_bytes: 100_000_000,
+                maximum_source_total_bytes: 10_000_000,
+                maximum_source_overhead_bytes: 10_000_000,
+                maximum_effect_state_bytes: 100_000_000,
+                maximum_effect_scratch_bytes: 100_000_000,
+                maximum_builtin_retained_bytes: 100_000_000,
+                maximum_control_retained_bytes: 10_000_000,
+                maximum_named_allocation_bytes: 100_000_000,
+                maximum_meter_streams: 4_096,
+                maximum_meter_items: 1 << 20,
+                maximum_meter_bytes: 1 << 26,
+                maximum_control_frame_bytes: 4_096,
+                maximum_replay_bytes: 8_192,
+                maximum_replay_entries: 16,
+                maximum_submixes: 0,
+                maximum_vcas: 0,
+                maximum_vca_reach_pairs: u64::MAX,
+                maximum_replacement_peak_bytes: u64::MAX,
+            }
+        }
+
+        /// Run `payload` as request `request`; the response bytes.
+        fn command(
+            children: &mut CompiledChildren<Adapter>,
+            request: u64,
+            payload: CommandPayload<'_>,
+        ) -> Vec<u8> {
+            let codec = ProtocolCodec::default();
+            let frame = TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(
+                    children.session.test_controller().session().revision(),
+                ),
+                payload,
+            };
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(&frame, &mut bytes)
+                .expect("typed command");
+            let response = children
+                .session
+                .command(&bytes[..length], 4_096)
+                .expect("command");
+            children.session.command_response(response).to_vec()
+        }
+
+        /// The `METER_WINDOWS_LOST` counter, through `COUNTERS_GET`.
+        fn windows_lost(children: &mut CompiledChildren<Adapter>, request: u64) -> u64 {
+            let response = command(
+                children,
+                request,
+                CommandPayload::CountersGet(&protocol::CountersRequest {
+                    all: false,
+                    ids: vec![CounterId::MeterWindowsLost as u32],
+                }),
+            );
+            let mut fields = [0_u16; 64];
+            let protocol::DecodedTypedResponseFrame::Success {
+                payload: protocol::DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_response(&response, &mut protocol::DecodeScratch::new(&mut fields))
+                .expect("counters response")
+            else {
+                panic!("expected counters")
+            };
+            snapshot.values[0].value
+        }
+
+        /// Test value: red if a frame the full ring dropped never reaches `METER_WINDOWS_LOST`
+        /// (the browser's client would see a gap in the batches with no count), or if the
+        /// control half stages no batch from a plan's ring (the browser would accept a meter
+        /// table and serve nothing).
+        #[test]
+        fn a_full_ring_drop_reaches_meter_windows_lost_and_its_frames_become_batches() {
+            let mut children =
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer), None)
+                    .expect("boot");
+            command(
+                &mut children,
+                1,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters: vec![MeterEntry {
+                        target: MeterTarget::Output,
+                        metric: MeterMetric::Peak,
+                    }],
+                    meter_period_blocks: 1,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            children.session.service().expect("service");
+            let level = children.session.meter_level().expect("a meter level");
+            assert_eq!(level.load(), host_core::MeterLevel::TELEMETRY);
+            let epoch = children.session.newest_plan_epoch();
+            let mut producer = children
+                .session
+                .take_meter_frame_producer(epoch)
+                .expect("the boot plan's ring");
+            let published = (0..=host_core::METER_FRAME_RING_DEPTH as u64)
+                .filter(|&window| {
+                    let mut frame = host_core::MeterFrame::new(0).expect("frame");
+                    frame.first_sample = window * QUANTUM;
+                    frame.end_sample = (window + 1) * QUANTUM;
+                    frame.windows = 1;
+                    frame.sequence = window + 1;
+                    frame.generation = 1;
+                    frame.validity =
+                        host_core::MeterValidity::COMPLETE.union(host_core::MeterValidity::OUTPUT);
+                    frame.output_peak = [0.5, 0.25];
+                    producer.publish_frame(&frame)
+                })
+                .count();
+            assert_eq!(published, host_core::METER_FRAME_RING_DEPTH);
+            let mut samples = [0.0_f32; 2 * QUANTUM as usize];
+            let output =
+                PlanarBufferMut::try_new(&mut samples, 2, QUANTUM as usize, QUANTUM as usize)
+                    .expect("output");
+            children.plan.render(0, output).expect("render");
+            let (left, right) = samples.split_at(QUANTUM as usize);
+            children
+                .plan
+                .observe_rendered_block([left, right], 0, QUANTUM);
+            children.session.service().expect("service");
+            let staged = children
+                .session
+                .test_controller()
+                .queues()
+                .report(protocol::QueueKind::Telemetry)
+                .occupancy;
+            assert_eq!(
+                staged,
+                2 * host_core::METER_FRAME_RING_DEPTH as u64,
+                "two records a batch"
+            );
+            assert_eq!(windows_lost(&mut children, 2), 1);
+        }
+    }
+
     /// #1396 gate 5: a declaration resets a source-read offset that no raised floor goes with.
     #[cfg(feature = "test-support")]
     mod source_read_offset {
