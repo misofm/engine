@@ -189,7 +189,8 @@ Spec corrections (scope note of 2026-10-25, recorded here; they supersede the te
   `[insert ID, effect ID]` list, route and VCA IDs) instead of `session.ts`'s private `BuilderState`; the session
   builder and the transaction each build one from their own state (R1's intent, without a fake builder state).
   `normalizeAutomation` (a `verb` parameter), `normalizeAutomationSegments`, `automationTargetRecord`,
-  `requireSegments` and `normalizeVca` are exported `@internal`. VCA members are written in the model's sorted order.
+  `requireSegments` and `normalizeVca` are exported `@internal`. VCA members are written in declared order: the store
+  sorts them, so a sort in the SDK would be unobservable (a mutant that drops it stayed green).
 - **R4 corrected:** the engine refuses an empty span list (`SessionEditError::EmptyAutomationSegments` in
   `apply_session_edit`, and the validator's "automation must declare at least one segment"), so a 0-segment
   `setAutomationSegments` is not a clear. The builder refuses it with `SessionBuilder.automation`'s text; gate 1's span

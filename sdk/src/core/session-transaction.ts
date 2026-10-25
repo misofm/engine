@@ -142,8 +142,8 @@ import type {
  * inserts, console slots, routes and VCAs, exactly as `SessionBuilder.automation` resolves it, and
  * its spans are written in the unit of the row it names. Whether that row is automatable is the
  * engine's rule (#1566): the store refuses the transaction, as `validate()` refuses the built
- * session. A VCA's members must be in the working graph and are written in the model's sorted
- * order; a membership cycle, which only a replaced VCA can make, is the store's to refuse.
+ * session. A VCA's members must be in the working graph, written in declared order (the store keeps
+ * them sorted); a membership cycle, which only a replaced VCA can make, is the store's to refuse.
  *
  * `sdk/test/transaction-evals.mjs` compares these bytes to the codec's re-encoding of them and
  * the store's snapshot after them to a `SessionBuilder` declaring the result
@@ -1001,12 +1001,10 @@ export class TransactionBuilder {
     const { fader, members } = normalizeVca(spec, candidates, path);
     const vcas = new Set(this.#state.vcas);
     vcas.add(vcaId);
-    // The model's member order (`SessionBuilder.toJSON`): stable IDs are ASCII, so code-unit order.
-    const sorted = [...members].sort();
     return this.#next(
       { kind: "upsertVca", vcaId, vca: { ...spec, members: [...spec.members] } },
       OP_UPSERT_VCA,
-      [message(1, [utf8(1, vcaId), message(2, faderFields(fader)), ...sorted.map((member) => utf8(3, member))])],
+      [message(1, [utf8(1, vcaId), message(2, faderFields(fader)), ...members.map((member) => utf8(3, member))])],
       { vcas },
     );
   }
