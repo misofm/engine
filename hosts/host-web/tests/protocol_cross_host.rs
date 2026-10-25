@@ -673,15 +673,14 @@ fn capabilities_plus(
 fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let mut legs = Legs::new();
 
-    // 1. CAPABILITIES_GET. #1697 removes this exception: until the browser has a document
-    // transport, the C ABI's reply is the browser's plus exactly the `SESSION_REPLACE` (`0x0013`)
-    // entry of the command list (#1386, root decision), and every other step stays byte-equal.
-    // #1596 removes the second: until the browser reads spectrum through the frames, the C ABI
-    // also lists the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1595 R2).
-    // #1588 removes the third: until the browser serves meter batches through the frames, the C
-    // ABI's lossy meter lane holds one whole batch, 256 slots, and the browser's keeps two
-    // (#1587a, root ruling m2). #1589 removes the fourth: until the browser's session serves
-    // `OBSERVATION_READ`, the C ABI also lists `0x000f` with flag bit 15 (#1586 R2).
+    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697). #1596 removes
+    // the first remaining exception: until the browser reads spectrum through the frames, the C
+    // ABI's reply is the browser's plus exactly the three spectrum commands (`0x0010`-`0x0012`)
+    // with flag bit 16 (#1595 R2). #1588 removes the second: until the browser serves meter
+    // batches through the frames, the C ABI's lossy meter lane holds one whole batch, 256 slots,
+    // and the browser's keeps two (#1587a, root ruling m2). #1589 removes the third: until the
+    // browser's session serves `OBSERVATION_READ`, the C ABI also lists `0x000f` with flag bit 15
+    // (#1586 R2). Every other step stays byte-equal.
     let request = legs.next();
     let bytes = frame(
         request,
@@ -706,12 +705,12 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     assert_eq!(
         capabilities_plus(
             &browser_reply,
-            &[0x000f, 0x0010, 0x0011, 0x0012, 0x0013],
+            &[0x000f, 0x0010, 0x0011, 0x0012],
             protocol::CapabilityFlags::OBSERVATION.0 | protocol::CapabilityFlags::SPECTRUM.0,
             Some(host_core::MAXIMUM_METER_BATCH_RECORDS as u64)
         ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f-0x0013, bits 15 \
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f-0x0012, bits 15 \
          and 16 and its 256-slot meter lane"
     );
 

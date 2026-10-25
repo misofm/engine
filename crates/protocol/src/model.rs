@@ -825,10 +825,13 @@ pub fn apply_session_edit(
             effect_ids,
         } => {
             let effects = &mut rack_mut(session, track_id, *rack_name)?.effects;
+            // An exact permutation: as many IDs as effects, each naming exactly one effect and
+            // listed once. It is checked before the rack is taken, so a refusal changes nothing.
             if effect_ids.len() != effects.len()
-                || effect_ids
-                    .iter()
-                    .any(|id| effects.iter().filter(|effect| effect.id == *id).count() != 1)
+                || effect_ids.iter().any(|id| {
+                    effects.iter().filter(|effect| effect.id == *id).count() != 1
+                        || effect_ids.iter().filter(|other| *other == id).count() != 1
+                })
             {
                 return Err(SessionEditError::InvalidEffectOrder);
             }
