@@ -18,8 +18,7 @@
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
 | `tests::native_set_control_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runSetControlTimeline` (#1565A D6) | have `control_command` stage the committed frame's cells one block later (move the service step's publication after the render) | the native digest and the shipped module's digest move together and stop matching the pin |
 | `tests::set_control_frames_are_the_committed_fixtures` (#1565A D6) | change one byte of the encoder's request ID in `set_control_timeline_frames` | the committed frame fixture differs from the encoded frame |
-| `tests::every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell` (#1565A gate 1) | add one of kinds 1-6 or 9-17 back to the whitelist in `CommandRecord::decode` | the record is admitted (or refused as another reason) instead of `MALFORMED` at its index, or a valid observation record before it is armed |
-| `tests::the_boot_word_is_reserved_and_observation_staging_follows_the_taps` (#1565A gate 2) | drop the `reserved1 != 0` refusal in `validate_options`, or allocate the command staging for `live_control_observation_taps == 0` | the nonzero word boots, or the host with no taps accepts a record |
+| `tests::the_boot_words_at_offsets_32_and_56_are_reserved` (#1565A gate 2; the staging half deleted by #1589c) | drop the `reserved1 != 0` refusal in `validate_options` | the nonzero word boots |
 | `tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing` (#137 E5) | make `live_control_request` use `blocks` frames instead of `blocks * quantum_frames` for the meter period | a window closes mid-block, `poll_meters` reports more windows than blocks rendered, and the cadence assertion fails |
 | `tests/matrix.rs::explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted` (#137 D1) | drop `self.smoothing_samples[lane] = samples;` from `MatrixStage::set_target_over` | the second retarget runs over the prepared window of `0` instead of the requested `4` and settles on the first frame |
 | `builtins-compiler::live_control_requests_are_validated_sealed_and_charged_per_track` (#137 D1) | delete the `control_tracks.insert` / `known_tracks.contains` legs in `prepare_session_builtins_with_live_controls` | the duplicate and unknown-track requests are accepted instead of producing `builtin.control.duplicate` / `builtin.control.unknown_track` |
@@ -52,10 +51,8 @@ restored. Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), `-C target-feature=+avx2,+f
 | gate | mutation | observed red |
 |---|---|---|
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4) | publish the negative decibels raw instead of the declared `PeakMagnitude` fold | the app's `Math.max(0, -6)` is `0` and the frame reads dead; the "positive magnitude, not a negative decibel" assertion fires |
-| `tests::observation_misuse_is_typed_and_all_or_nothing` (E8) | drop the all-or-nothing free-room pre-check for the observe kinds | the oversized batch reaches a queue and returns `255` where `6` (backpressure) was required |
-| `tests::native_observation_timeline_digest_pins_the_wasm_parity` (E8) | an unknown tap answers `UnknownParameter` (5) instead of `UnknownTap` (10) | three tests fail; a caller could no longer tell which namespace it got wrong |
-| `tests::a_computed_tap_is_refused_with_unsupported_kind` (E9) | bind the computed tap instead of refusing it | `None` where `Some(7)` was required — a bound computed tap is a lane that never publishes |
-| `round_trip::every_metadata_observation_tap_resolves_through_a_command_acknowledgement` (E9) | offset the tap id by one in the lowering (equivalent to a hand-edited id in the document) | `miso.compressor tap 1 did not resolve`, reason `10` |
+| `tests::a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` (E9; renamed by #1589c) | bind the computed tap instead of refusing it | `Ok` where `Err(ComputedTap)` was required — a bound computed tap is a lane that never publishes |
+| `round_trip::every_metadata_observation_tap_resolves_through_an_observe_edit` (E9; through the core's `Observe` edit since #1589c) | offset the tap id by one in the lowering (equivalent to a hand-edited id in the document) | `miso.compressor tap 1 resolves and binds`: `Err(["observation.tap.unknown"])` |
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D6) | `master_gr_present = 1` unconditionally | `no designation means absent, never zero`: `Some(0.0)` where `None` was required |
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D5) | keep the pre-#143 `2T + 2` frame shape | the frame is 8 words where `3T + 3 = 12` was required |
 | `tests::native_observation_timeline_digest_pins_the_wasm_parity` (E8) | never clear an armed bit, so an unsubscribed tap keeps publishing its last window | `an unsubscribed tap publishes nothing`: `8.437999` where `0.0` was required |
@@ -266,25 +263,9 @@ Reverted in the same session; the recorded `results.json` and matrix are from th
 
 ## Issue #151 — the command-reason cap and the `observe()` typing gap
 
-The field defect, found in `misofm/app` PR #32: `#receive` bounded a command acknowledgement's
-`reason` at the literal `<= 9`, but #143 froze `UNKNOWN_TAP = 10` and `OBSERVATION_UNBOUND = 11`
-and those are the **only** two reasons the observation path ever returns. Either one therefore read
-as a malformed acknowledgement and tripped the host-wide sticky 255, so a single refused
-subscription failed every unsettled request and every later one. That is what kept the app's
-gain-reduction meters dead. The shipped metadata JSON's `commandReasons` vocabulary stopped at `9`
-for the same reason, and the `.d.ts` declared neither `observe()` nor the request-side subscription
-type at all.
-
-Every row below was applied, the named gate run, the red observed, and the tree restored. Host:
-`x86_64`, `-C target-feature=+avx2,+fma`, toolchain 1.97.1.
-
-| gate | mutation | observed red |
-|---|---|---|
-| `test-web-audioworklet.mjs` observation-refusal tests (the shipped defect) | restore `validU32(message.reason) && message.reason <= 9` in `#receive` | `{ tag: 'miso.error.v1', requestId: 250, result: 255 }` — the sticky signature, thrown out of the *first* refused `observe()` instead of settling as a typed `miso.observe.v1` ack. `test-web-audioworklet.sh` runs this mutation on disk and requires the suite red |
-| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 16;` after reason 11 (`OBSERVATION_UNBOUND`; reasons 12 to 14, `NOT_SOLOABLE`, `UNKNOWN_ROUTE` and `UNKNOWN_VCA`, were deleted with their value kinds in #1565 and their numbers are not reused; #1676 added 15, `OBSERVATION_LIMIT`) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
-| `check-command-reason-vocabulary.py --self-test` | thirty-one in-memory mutations in all (the typing mutations of the next row among them) across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 14`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself; and (#1676) the JS bound accepting a retired `null` entry, the JS table losing or gaining a hole, `observationLimit` moved onto a retired 12 or past a non-retired gap at 16, dropped from the `.d.ts`, the generator or the schema gate's list, or the schema gate's retired set losing 14; plus eight direct cases of the dense-except-retired rule | every one refused |
-| `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `windowBlocks` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
-| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 11 to `16` (to `12` before #1676 retired 12 to 14 in the gate; reason 14 to `15` before #1565 deleted reasons 12 to 14; reason 13 to `14` under issue #1222, reason 12 to `13` under issue #1212); and (#1676) `observationLimit` on a retired 12, a gap at 16, reason 15 missing, reason 11 missing | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
+Its gates (`check-command-reason-vocabulary.py`, the reason-cap mutation, `observe()`'s typing) were
+deleted with the command record, its reasons and `observe()` by #1589c: an observation tap is armed
+by the core's `Observe` edit and its refusal is a control reply, not an acknowledgement reason.
 
 ## Issue #241 — source introspection follows the declaration
 
@@ -505,6 +486,7 @@ Chromium leg of `qualification/run.mjs`.
 | `qualification/run.mjs --self-test-mutations` `staging-reads` | the observation read's result set to backpressure (6) (#1597, #1580: the staging reads have no spectrum or track-response read) | `<browser>: staging-reads` fails |
 | `qualification/run.mjs --self-test-mutations` `track-response-host-outcome` (#1580 D2) | the host-level `RESPONSE_READY`'s status set to `unavailable` | `<browser>: track-response-host` fails |
 | `qualification/run.mjs --self-test-mutations` `track-response-host-tag` (#1580 D2) | no `RESPONSE_READY` carries the reply's tag | `<browser>: track-response-host` fails |
+| `qualification/run.mjs --self-test-mutations` `observation-arm-refused` (#1589c) | the observation run's `Observe` arm reply status set to `not_found` | `<browser>: observation` fails |
 | `qualification/run.mjs` `sdk-render-allocations` (#1476) | `drop(Vec::<u8>::with_capacity(1))` planted in `EffectControlLane::stage`'s `EffectControlRecord::Bypass` arm (rebuilt module); no raw workload submits a bypass record | the four live-bypass SDK instances that submit one read 2 each and the gate fails naming them; `render-allocations` stays green (all ten raw rows 0) |
 | same | one SDK instance (`spectrum-query-closed`) closed with `browser.close()` instead of `closeSdkEngine` | `<browser>: sdk-render-allocations` fails: 16 rows for 17 instances |
 | `qualification/run.mjs --self-test-mutations` `sdk-render-allocations` (#1476) | one SDK instance's count set to 1 | `<browser>: sdk-render-allocations` fails naming `resident-observation=1` |

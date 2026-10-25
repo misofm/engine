@@ -281,15 +281,15 @@ export interface MisoMeterFrame {
   ///
   /// Every entry is finite. `0` deliberately conflates "not reducing" with "no observed effect on
   /// this track", because the array is positional and read without null checks; the distinction
-  /// lives in the `miso.observe.v1` acknowledgement's subscription map. Several armed taps on one
+  /// lives in the observation map and the `OBSERVATION_READ` rows. Several armed taps on one
   /// track fold max-magnitude into the one slot, on the control plane. Each value is the latest
   /// available independently aged effect fold; this frame carries no GR sequence or sample span.
   ///
-  /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
-  /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-  /// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an
-  /// armed tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame
-  /// leaves that tap out until a window that opens at or after that sample closes. A strip's slot
+  /// The gain-reduction section is recomputed from the taps armed when each frame is polled. A
+  /// disarm is in effect from the block render applies it, so every frame polled after that block
+  /// leaves that tap out. An arm, also one that re-arms an armed tap, restarts its tap's window at
+  /// the block render applies it, and the frame leaves that tap out until a window that opens at or
+  /// after that sample closes. A strip's slot
   /// (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at
   /// or after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is
   /// `null` when the designated strip has none.
