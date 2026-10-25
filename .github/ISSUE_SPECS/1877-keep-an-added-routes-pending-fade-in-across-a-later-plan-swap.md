@@ -24,3 +24,29 @@ their own arm, delay and fire.
 
 `crates/graph/src/lib.rs`, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`,
 the route op files #1363 touches, this spec.
+
+## Decision record (attempt 1, 2026-10-25)
+
+- Scope note `scope/1877.md` and root decisions bind: the successor's re-arm wins over the carried
+  arm; #1363 D3a's fire at the swap stays the fallback for a route with no successor arm; the
+  inventory row is kinded (`FadeArmInventoryRow.owner: FadeArmOwner::{Strip, Route}`), not a
+  parallel table.
+- D1, D2 (`prepare.rs`): every route arm takes a row; `added_route_fades` re-arms a route of an
+  unfired route row that the successor's model holds with the same source, tap and destination,
+  carrying its entry through `install_fade_arm_carry`. A re-pointed, muted or following route is
+  not re-armed.
+- D6 (`runtime.rs`): `carry_route` fires the displaced arm only when the successor holds no arm;
+  `LiveRoute::adopt` leaves the successor's own arm in place.
+- Found in implementation: a successor prepared before the predecessor's fire and adopted after it
+  re-arms a route whose pair then copies `Done`. Left alone, the route would wait for a fire its table
+  no longer holds (a transition route stays silent; a laned route swallows every later live
+  record). `carry_fade_arms` (`crates/graph/src/lib.rs`, a code change, not only a comment) therefore
+  fires a route entry that takes `Done`, and a re-armed transition route with unchanged values joins
+  the send carry (`RouteJoin { retarget: None }`), so its op takes the displaced op's mid-ramp state.
+- Scope note's defect 2 as worded (a lane-less output route with a source-edge line, displaced before
+  its fire) cannot occur: a source-edge line comes only from a raised floor on the route node, and an
+  added route's node has none, so a lane-less added route has `D = 0` and fires at the first block.
+  Gate 4 (d) tests the reachable form instead (prepared before the fire, adopted mid-ramp).
+- Gate 4's allocation claim is asserted inside the new test (`fade_run`'s allocator counters over
+  both hand-overs and every later block, as #1392 did), not by extending
+  `the_swap_block_allocates_and_frees_nothing`.
