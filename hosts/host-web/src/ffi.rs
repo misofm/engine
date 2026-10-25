@@ -6900,7 +6900,7 @@ mod observation_alias_tests {
                 .expect("a track's console entries")
                 .insert(
                     0,
-                    serde_json::json!({ "slot": "eq", "bypass": false, "params": [] }),
+                    serde_json::json!({ "slot": "eq", "bypass": false, "link_mode": "slot", "params": [] }),
                 );
         }
         let bytes = serde_json::to_vec(&document).expect("the moved fixture serializes");

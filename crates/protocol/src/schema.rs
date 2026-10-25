@@ -1367,9 +1367,12 @@ pub(crate) mod session {
         pub(crate) const SLOT: FieldSpec = FieldSpec::req(1, Wire::Utf8);
         pub(crate) const BYPASS: FieldSpec = FieldSpec::req(2, Wire::Bool);
         pub(crate) const PARAM: FieldSpec = FieldSpec::msg(3, true, true, &param::SPEC);
+        // #1369 D4: appended in place (decision 12/13 precedent); `slot` is code 1, then the
+        // three link tokens in `LinkMode` order.
+        pub(crate) const LINK_MODE: FieldSpec = FieldSpec::req(4, Wire::U8);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "ConsoleEntry",
-            fields: &[SLOT, BYPASS, PARAM],
+            fields: &[SLOT, BYPASS, PARAM, LINK_MODE],
         };
     }
     // Decision 12 (#1094): the session console declaration, with the session model's own field

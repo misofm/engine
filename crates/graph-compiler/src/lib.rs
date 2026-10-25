@@ -1073,6 +1073,7 @@ mod tests {
                 .map(|effect| session::ConsoleEntry {
                     slot: effect.id,
                     bypass: effect.bypass,
+                    link_mode: session::ConsoleLinkMode::Slot,
                     params: effect.params,
                 })
                 .collect();
@@ -1136,6 +1137,7 @@ mod tests {
         let entry = |effect: session::Effect| session::ConsoleEntry {
             slot: effect.id,
             bypass: effect.bypass,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: effect.params,
         };
         assert_eq!(

@@ -384,6 +384,7 @@ mod tests {
                 ConsoleEntry {
                     slot: id("desk-eq"),
                     bypass: false,
+                    link_mode: crate::ConsoleLinkMode::Slot,
                     params: vec![
                         EffectParam {
                             parameter_id: 4,
@@ -402,6 +403,7 @@ mod tests {
                 ConsoleEntry {
                     slot: id("desk-limit"),
                     bypass: true,
+                    link_mode: crate::ConsoleLinkMode::Slot,
                     params: Vec::new(),
                 },
             ],
@@ -474,6 +476,7 @@ mod tests {
             ConsoleEntry {
                 slot: id("desk-eq"),
                 bypass: true,
+                link_mode: crate::ConsoleLinkMode::Slot,
                 params: vec![EffectParam {
                     parameter_id: 2,
                     channel: ParameterChannel::Left,
@@ -484,6 +487,7 @@ mod tests {
             ConsoleEntry {
                 slot: id("desk-limit"),
                 bypass: false,
+                link_mode: crate::ConsoleLinkMode::Slot,
                 params: Vec::new(),
             },
         ];

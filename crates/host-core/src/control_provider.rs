@@ -3623,6 +3623,7 @@ mod tests {
                 let entry = session::ConsoleEntry {
                     slot: effect.id.clone(),
                     bypass: false,
+                    link_mode: session::ConsoleLinkMode::Slot,
                     params: effect.params.clone(),
                 };
                 if rack_index == 0 {

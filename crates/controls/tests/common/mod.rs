@@ -186,6 +186,7 @@ pub(crate) fn effects_fixture() -> SessionModel {
             .map(|slot| ConsoleEntry {
                 slot: id(slot),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: Vec::new(),
             })
             .to_vec()
