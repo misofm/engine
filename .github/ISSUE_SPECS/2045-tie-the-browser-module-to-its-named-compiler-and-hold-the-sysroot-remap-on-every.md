@@ -34,3 +34,18 @@ the shipped one only if the remap holds. Both are CI steps plus a hermetic self-
 ## Paths
 `.github/workflows/qualification.yml` (artifact and artifact-identity jobs), `scripts/build-web-audioworklet.sh`
 (only if the reader needs a mode), a new script under `scripts/` for the producers check, this spec.
+
+## Decision and evidence record (attempt 1, 2026-10-25)
+- Scope note wins: `check-wasm-producers.py MODULE --toolchain CHANNEL` runs `rustup run CHANNEL
+  rustc --version` itself and compares the whole version string (release, hash, date) with the one
+  `processed-by` `rustc` entry; it loads `strip-wasm-names.py`'s walker by path (one parser).
+  CI passes the build step's `toolchain` output. The step sits between build and upload.
+- The twin installs the channel into a fresh `RUSTUP_HOME="$RUNNER_TEMP/twin-rustup"` (not a copy).
+- `scripts/check-ci-path-routing.py` pins the identity twin step exactly, so its pin moved with it;
+  it now also pins the producers step (between build and upload). `test-ci-path-routing.py` gains
+  mutations for both. These two files are outside the scope note's paths: the pin forces them.
+- Local evidence (one machine, two RUSTUP_HOMEs): fresh install 8 s, 676 MB. Twin with another
+  checkout path, CARGO_HOME and RUSTUP_HOME: `478ca94c...` = the shipped module. With the `:169`
+  sysroot remap dropped, only RUSTUP_HOME differing: `bc5d3eeb...` vs `87ed775a...` (red).
+- Real module: `rustc 1.100.0-nightly (f7d782a3b 2026-08-19)` passes against `nightly-2026-08-20`
+  and fails against `nightly` (1.101.0-nightly).
