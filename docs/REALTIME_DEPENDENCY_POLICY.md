@@ -186,15 +186,14 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   borrowed, the disjointness of raw field projections, or the `Box::into_raw`/`Box::from_raw`
   ownership transfer between create and destroy.
 - `hosts/host-web/src/ffi.rs` (issue 024): the raw Wasm32 handle, pointer and slice boundary of the
-  `miso_engine_web_v1_*` exports. Its non-test unsafe sites are the bounds-checked record copies
-  `copy_live_record` (`:894`) and `read_live_record` (`:1805`), the result-header copy
-  `response_header_bytes` (`:878`), and the staging slices of `miso_engine_web_v1_source_submit`
-  (`:3929`, `:3936`, `:3939`) and `miso_engine_web_v1_source_seek` (`:3982`). Each carries a
+  `miso_engine_web_v1_*` exports. Its non-test unsafe sites are the staging slices of
+  `miso_engine_web_v1_source_submit` (`:825`, `:832`, `:835`), `miso_engine_web_v1_source_seek`
+  (`:879`) and `with_staged_source_id` (`:904`). Each carries a
   `SAFETY` comment that names the bounds check, `repr(C)` layout or staging liveness it relies
   on; the module carries no `catch_unwind`, because the target and the release profile abort on
   panic. The file
-  has a second, test-only unsafe owner: the `#[cfg(test)]` module `live_response_ffi_tests`
-  (`:4881`) registers `CountingAllocator` as the unit-test binary's `#[global_allocator]` (added by
+  has a second, test-only unsafe owner: the `#[cfg(test)]` module `allocation_counter`
+  (`:2102`) registers `CountingAllocator` as the unit-test binary's `#[global_allocator]` (added by
   `708036a76`). It forwards every operation unchanged to `System` and counts successful operations
   in thread-local counters, only while armed; its `SAFETY` comments state that forwarding.
 - `crates/capi/tests/plan_swap_race.rs` (#1042, #1273): races control calls against
@@ -290,12 +289,9 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
    message handler alone (`render_locked_source.rs` measures both exports after a render with
    counter telemetry configured: zero allocations).
 2. **The exports whose bodies run inside `render_locked`.** Every export of set 1 except
-   `dispose`, `render_allocation_count`, `service` and `control_allocation_count`, and also eleven staging accessors that the engine
+   `dispose`, `render_allocation_count`, `service` and `control_allocation_count`, and also five staging accessors that the engine
    worklet calls only during boot: `observation_id_ptr`, `observation_id_capacity`,
-   `observation_selection_ptr`, `observation_selection_bytes`, `observation_selection_capacity`,
-   `track_response_request_ptr`, `track_response_request_bytes`,
-   `track_response_snapshot_ptr`, `track_response_snapshot_capacity`,
-   `track_response_track_id_ptr` and `track_response_track_id_capacity`.
+   `observation_selection_ptr`, `observation_selection_bytes` and `observation_selection_capacity`.
 
 Since #1488 the two sets are equal for the worklets' post-boot calls, apart from the named
 exceptions, as the `ffi` module header (`hosts/host-web/src/ffi.rs:14-39`) and
@@ -376,11 +372,7 @@ Approved unsafe code that runs on a render thread, per entry:
 - `hosts/host-web/src/ffi.rs`: yes, on the AudioWorklet thread, and every such site runs inside a
   render-locked window. The body of `miso_engine_web_v1_render` holds no unsafe block. The staging
   slices of `source_submit` and `source_seek` run in the PCM-feed worklet's `process()` before
-  each render and in the engine worklet's source and seek handlers. The render-locked staging
-  read `track_response_capture` reaches only `copy_live_record`, through
-  `run_live_response_capture`, `live_response_failure` and `LiveResponseCaptureSink`.
-  `read_live_record` is reached only from the worker-side analysis export
-  `track_response_analysis`, which is not render-locked or called by either worklet. The five session-less `response_frame_*` exports
+  each render and in the engine worklet's source and seek handlers. The five session-less `response_frame_*` exports
   (#1574) are control work of the response-preview instance of the same kind: they stage one
   `RESPONSE_GET` frame and answer one frame through `host_core::serve_response_frame`, and no
   worklet calls them. Its

@@ -120,3 +120,96 @@ Commands: `cargo test --locked -p host-web`, `bash scripts/check-web-audioworkle
 ## Supersedes and shrinks
 
 - None.
+
+## Evidence and decision record (attempt 1, 2026-10-25)
+
+Base `f4d2b7862` (main with #1579a, #1579b and #1597). The spec's line anchors were stale; the
+symbol names held.
+
+### Deleted public surface
+
+- **Exports (12):** `miso_engine_web_v1_track_response_{request_ptr, request_bytes, snapshot_ptr,
+  snapshot_capacity, snapshot_set_bytes, track_id_ptr, track_id_capacity, capture, analysis,
+  result_ptr, result_bytes, close}`. `abi_layout::EXPORTS` goes from 77 to 65.
+- **host-web (Rust):** `WebLiveResponseRequest`, `WebLiveResponseOwner`, `WebLiveResponseSection`,
+  `WebLiveResponseResult`; `LIVE_RESPONSE_{MAXIMUM_OWNERS, MAXIMUM_SECTIONS, MAXIMUM_ID_BYTES,
+  MAXIMUM_POINTS, CAPTURE_BYTES, MODE_TARGET, MEANING_EQ_FILTER_SUBTOTAL, REQUEST_BYTES,
+  OWNER_BYTES, SECTION_BYTES, RESULT_BYTES, RACK_INPUT_FILTERS, RACK_INSERTS, RACK_CONSOLE}`;
+  `RESPONSE_GRID_{LINEAR, LOGARITHMIC}`, `RESPONSE_CHANNEL_{LEFT, RIGHT, BOTH}` (no reader was
+  left after #1574); `AudioWorkletEngineHost::copy_response_snapshot`;
+  `native_staging::track_response_request`. Internal: `ResponseStaging` and its accessors, the
+  two boot-budget terms, the capture sink, the rack maps, the snapshot parser, the analysis and
+  the record copier. The test-only `live_response_ffi_tests` module keeps only its counting
+  allocator, renamed `allocation_counter`.
+- **Worklet host (JS and both `.d.ts` twins):** `captureTrackResponse`, `MisoTrackResponseGrid`,
+  `MisoTrackResponseChannels`, `MisoTrackResponseCaptureRequest`,
+  `MisoTrackResponseCaptureReply`, the `trackResponse` pending kind. Worklet: the
+  `miso.trackresponse.v1` message, `receiveTrackResponse` and its boot views.
+- **ABI layout (regenerated):** structures `liveResponseRequest`, `liveResponseOwner`,
+  `liveResponseSection`, `liveResponseResult`; constants `liveResponseRacks`, `responseGrids`,
+  `responseChannels`, `liveResponseModes`, `liveResponseMeanings`, `maximumLiveResponseOwners`,
+  `maximumLiveResponseSections`, `maximumLiveResponseIdBytes`, `maximumLiveResponsePoints`,
+  `liveResponseCaptureBytes`. `sdk/src/generated/abi.ts` loses the same rows; the SDK's
+  `constantValue` group union loses `"liveResponseRacks"`. `maximumResponsePoints` stays (the
+  SDK's response bounds read it). No wire tag, schema hash, C ABI or `ABI_VERSION` moves.
+
+### D2: the replacement row
+
+`runStagingReadRun` sends one strip `RESPONSE_GET` for `track` through `host.control()` before the
+offline context renders (`requestTrackResponseThroughSdk` in `sdk-response-entry.ts`, the SDK's
+encoder, so `qualification.js` holds no encoder), and reads the reliable lane's `RESPONSE_READY`
+events after the render. New gate `track-response-host`: control result 0, reply `ok`, exactly
+one `RESPONSE_READY`, carrying the reply's tag, outcome 0 (`ok`). Mutations
+`track-response-host-outcome` and `track-response-host-tag` name it in run.mjs's #2040 table. The
+`staging-reads` gate keeps its observation half; its mutation is unchanged. Red first: with the
+request's strip set to `absent`, chromium fails `track-response-host` (`replyStatus:
+"not_found"`, no event). The render that answers the request is inside the run's
+`render-allocations` row (`staging-reads=0` in all three browsers).
+
+### D3: boot (PR evidence, not a committed count)
+
+The observation fixture session booted on the shipped module: `bridgeRetainedBytes` 1,662,971 on
+the base, 614,220 here (1,048,751 = `1 << 20` + 175 less); memory after boot 3,080,192 to
+2,031,616 bytes; `largestBridgeAllocationBytes` 1,048,576 to 29,274. The boot budget check
+passes.
+
+### Deleted tests and their holders
+
+| Deleted | Its claim now held by |
+|---|---|
+| `ffi::live_response_ffi_tests::ffi_live_capture_analysis_is_prewarmed_and_token_exhaustion_is_typed` | Feature gone (the staging, its token and the browser analysis). The core capture's allocation-free render step: `control-plane/tests/response_capture.rs::render_step_allocates_nothing`; in the browser, `track-response-host` with `render-allocations`. |
+| `ffi::live_response_ffi_tests::live_response_owners_name_console_slots_inserts_and_input_filters` | Feature gone (the owner record and its rack codes). The core names members by section: `host-core/tests/track_response.rs::the_composer_names_every_member_in_signal_order_and_keeps_the_curves`. |
+| `tests.rs` `gap_free_acceptance`: its last check (a capture after the swap is stamped with the continued clock) | `engine` `realtime::tests::synchronous_hand_over_continues_state_and_clock` (`captured_sample` after a carry). |
+| `tests/render_locked_staging.rs`: the six response accessor touches and the staged capture | Feature gone; the observation half stays. |
+| `check-abi-layout-v1.py --self-test` mutation "a retired owner-record rack code returns" | Feature gone (the table is deleted). 37 mutations remain. |
+| qualification `staging-reads` predicate `trackResponseResult === 0 && trackResponseBytes > 0` | `track-response-host` (D2). |
+
+Rewritten: `sdk/test/browser-evals.mjs` "generated u64 offsets preserve BigInt" reads
+`planWatermark.revision` and `firstSample` instead of the two deleted `liveResponseResult` words.
+
+### Paths outside the authorized list
+
+Mirrors that named the deleted code (as #1597's slice did): `hosts/host-web/src/render_lock.rs`
+(header export list), `docs/REALTIME_DEPENDENCY_POLICY.md` (unsafe-site and export lists),
+`hosts/host-web/MUTATIONS.md` (the new mutations), `scripts/test-web-audioworklet.mjs` (the fake
+module's deleted exports), `sdk/src/core/abi.ts` (the union member, needed to type-check),
+`sdk/test/browser-evals.mjs` (above), and `hosts/host-web/qualification/sdk-response-entry.ts`
+(the D2 helper).
+
+### Browser identity fixture rows (CI fix, after PR #2073's first run)
+
+`check-browser-expected-resources.py --artifacts` was red: the deletion moves the fixture's rows
+on purpose. Base `f4d2b7862` against this branch, both measured on the built module with the same
+script:
+
+- Exact rows `largestBridgeAllocationBytes` and `largestNamedAllocationBytes`: 1,048,576 to
+  24,576. The 1 MiB was `ResponseStaging`'s capture buffer; 24,576 is now the largest remaining
+  bridge row.
+- Retained rows `bridgeMetadataBytes` 1,600,745 to 551,994 and `bridgeRetainedBytes` 1,637,853 to
+  589,102: each is 1,048,751 less, the deleted staging (`1 << 20` + 127 + 48). Their ceilings
+  carried the 1 MiB on top of the 10 % rule; they are re-derived by the rule alone: 1,628,864 to
+  607,232 and 1,667,648 to 648,064.
+- `memoryBytes` peak 3,014,656 to 1,966,080 (16 pages less); `memoryBytesCeiling` 3,080,192 to
+  2,097,152, the peak plus two pages.
+- No other row moved: every other exact row, every other retained row, the transcripts and the four
+  PCM digests are equal on the base and here.

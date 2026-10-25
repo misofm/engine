@@ -97,6 +97,9 @@ const MUTATIONS = Object.freeze([
   // whose observation read was refused.
   ...caughtBy("render-allocations", "render-allocations"),
   ...caughtBy("staging-reads", "staging-reads"),
+  // Issue #1580 D2: the host-level track response through the core's frames: a `RESPONSE_READY`
+  // whose outcome is not 0, and a run whose one event does not carry the reply's tag.
+  ...caughtBy("track-response-host", "track-response-host-outcome", "track-response-host-tag"),
   // Issue #1476 D5: one SDK instance's allocator call, and one SDK instance closed without its read.
   ...caughtBy("sdk-render-allocations", "sdk-render-allocations", "sdk-render-allocations-missing"),
   // Batch-verdict 2, B2 (root 2026-10-12): a real AudioContext resumed outside a trusted click, and
@@ -503,13 +506,20 @@ function validate(browserName, result) {
     && stall?.noDesync === true
     && stall?.renderedDigest === stall?.expectedDigest,
     "100 ms fault did not preserve exact 5,120-frame output");
-  // Issue #1333 D3: the staging reads ran over real data -- an observation row and a track
-  // response -- so the render-allocation gate below covers each of them.
+  // Issue #1333 D3: the staging read ran over real data -- an observation row -- so the
+  // render-allocation gate below covers it.
   const stagingReads = result.stagingReads;
   gate(browserName, "staging-reads", stagingReads?.subscribeResult === 0
-    && stagingReads?.observationReadResult === 0 && stagingReads?.observationRows === 1
-    && stagingReads?.trackResponseResult === 0 && stagingReads?.trackResponseBytes > 0,
+    && stagingReads?.observationReadResult === 0 && stagingReads?.observationRows === 1,
   `the staging reads did not all complete: ${JSON.stringify(stagingReads)}`);
+  // Issue #1580 D2: the same run's strip `RESPONSE_GET`, sent through the host's `control` message,
+  // was answered by exactly one `RESPONSE_READY`, which carries the reply's tag and outcome 0. The
+  // render that answered it is inside the run's render-allocation count.
+  const hostResponse = stagingReads?.trackResponse;
+  gate(browserName, "track-response-host", hostResponse?.result === 0
+    && hostResponse?.replyStatus === "ok" && hostResponse?.events === 1
+    && hostResponse?.tagged === 1 && hostResponse?.status === "ok",
+  `the host-level track response was not one tagged RESPONSE_READY with outcome 0: ${JSON.stringify(hostResponse)}`);
   // Issue #1333 D3: every booted instance, read before its dispose, made no allocator call in any
   // export its processor calls on the render thread after boot -- including everything the plan
   // executor does behind its `call_indirect`, which the static gate cannot see.
@@ -1306,6 +1316,8 @@ function mutate(result, mutation) {
   }
   if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;
   if (mutation === "staging-reads") copy.stagingReads.observationReadResult = 6;
+  if (mutation === "track-response-host-outcome") copy.stagingReads.trackResponse.status = "unavailable";
+  if (mutation === "track-response-host-tag") copy.stagingReads.trackResponse.tagged = 0;
   const wait = copy.sdkResponse?.observations?.wait;
   if (mutation === "sdk-observation-wait-unbounded") wait.deadline.settled = false;
   if (mutation === "sdk-observation-wait-late") wait.deadline.elapsedMs = 5_000;

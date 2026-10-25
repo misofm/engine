@@ -18,13 +18,13 @@ an unintended change (#1060) -- and the native witness cost about 60 s of every 
 resource row belongs to exactly one class:
 
 * `EXACT_ROWS` are contract facts, not layout: the boot options and status structures, the staged
-  document, the configured diagnostic, ID and PCM staging capacities, the fixed 1 MiB largest
-  allocation, the four rows this identity fixture drives to zero (no delay, no scalar effect, no
+  document, the configured diagnostic, ID and PCM staging capacities, the two largest-allocation
+  rows (24,576 bytes since #1580 deleted the 1 MiB live-response capture), the four rows this identity fixture drives to zero (no delay, no scalar effect, no
   observation capacity), and the compile's shape and backend. They must equal `expected.json`.
 * `CEILING_ROWS` are retained production memory: `size_of` sums over pointer-bearing structures
   and AoSoA bank payloads. Each must be positive and at most its ceiling in `expected.json`'s
-  `directOracle.simd128.resourceCeilings`. A ceiling is the row's value plus 10 % (beyond the
-  fixed 1 MiB live-response capture for the two bridge rows), rounded up to 64 bytes; growth past
+  `directOracle.simd128.resourceCeilings`. A ceiling is the row's value plus 10 %, rounded up to
+  64 bytes; growth past
   it is red and raises the budget with its reason. The gate prints each row's headroom as a live
   report. A zero row is red too, because a row that stops being charged is a decrease a ceiling
   cannot see; that the rows charge every allocation is capi's allocator oracle
@@ -77,8 +77,8 @@ DIRECT_ORACLE_SCHEMA = "miso.web.browser.direct-oracle.v1"
 BACKEND_SIMD128 = 1
 
 # Contract facts, not layout: the boot options and status structure sizes, the staged document,
-# the configured diagnostic, ID and PCM staging capacities, the fixed 1 MiB live-response capture
-# that is both largest-allocation rows, the four rows this identity fixture drives to zero, and the
+# the configured diagnostic, ID and PCM staging capacities, the two largest-allocation rows, the
+# four rows this identity fixture drives to zero, and the
 # compile's shape and backend. Each must equal `expected.json` exactly.
 EXACT_ROWS = frozenset(
     {
