@@ -134,11 +134,10 @@ and #1534 gate 3's worklet commands.
   then the ring's drops plus the same fold, unstaged and output-drop terms as the C ABI's.
 - **Re-split (root, 2026-10-25).** #1588a ships both halves: root authorized
   `crates/control-plane/src/{compile.rs,control.rs,adapter.rs}`, `hosts/host-web/src/lib.rs`
-  (the adapter consts only, so far) and `hosts/host-web/tests/protocol_cross_host.rs` steps 1 and
-  5. #1588b keeps the rest of its list: the render half's level word, restart and ring push in
+  (the adapter consts only, so far) and `hosts/host-web/tests/protocol_cross_host.rs`. #1588b keeps the rest of its list: the render half's level word, restart and ring push in
   `poll_meters`, the lease bit, taking each plan's ring producer
-  (`SessionState::take_meter_frame_producer`) into its shape, D5's meter entry, and gates 1, 2,
-  3 and 5.
+  (`SessionState::take_meter_frame_producer`) into its shape, turning `METER_DELIVERY` on,
+  removing steps 1 and 5's exceptions, D5's meter entry, and gates 1, 2, 3 and 5.
 - **R2 amended (implementer).** The browser's strip counts are unbounded (its caps are
   `u64::MAX`), so no ring can be sized to "the largest strip count the delivery can hold". Each
   plan gets its own `MeterFrameRing` at its strip count, built in `compile.rs` with the plan and
@@ -160,7 +159,12 @@ and #1534 gate 3's worklet commands.
 - **R4 visible.** Ring drops reach `CounterId::MeterWindowsLost` (`refresh_provider_counters`:
   every held ring's `dropped_frames`, plus the reclaimed rings', plus the output queue's drops
   through `OutputPeakReader::drop_count`).
-- **Bytes.** The browser's capabilities now report the 256-slot lossy lane and its telemetry
-  echo carries the meter window (protocol_cross_host steps 1 and 5 lost their exceptions; the
-  script boots the browser with meter word 12, the C ABI's default window). No rendered bit, lease
-  frame byte or schema hash moved.
+- **No acknowledged no-op (root, decision 15 E4).** Until the render push exists the browser
+  sets `RENDER_METER_FOLD` only. `METER_DELIVERY` is the one constant #1588b turns on, in the
+  commit that lands the push. Until then the browser's capabilities (two-slot lane), its echo (no
+  meter window), its `meter.unavailable` refusal and its lease refusal are main's, and
+  `protocol_cross_host` steps 1 and 5 keep their exceptions; #1588b removes them.
+  `the_browser_refuses_a_meter_table_until_its_render_push_exists` pins the refusal for a browser
+  booted with a meter window (red with the constant flipped early). The render-half mode runs
+  today through the control plane's own test adapter (`rendered_meters`).
+- **Bytes.** No rendered bit, lease-frame byte, browser reply or schema hash moved.
