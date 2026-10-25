@@ -139,8 +139,8 @@ pub enum LiveEffectRack {
 ///
 /// This is the `(rack, effect_index)` the browser's numeric observation selection carries, and what
 /// a host looks a channel up by ([`EffectControlProducer::address`]); a `SET_CONTROL` edit or an
-/// `Observe` edit names the instance by its stable ID, which the core resolves to it. Internally it maps through the lowering
-/// ([`Self::lower`]).
+/// `Observe` edit names the instance by its stable ID, which the core resolves to it. Internally
+/// it maps through the lowering ([`Self::lower`]).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LiveEffectAddress {
     /// The session rack.

@@ -28,7 +28,7 @@
 | `check-web-audioworklet-callgraph.py --self-test` (b1) (#137; (b1b) and `--allocation-only` deleted by #1589c) | `--trap-owner` naming a different symbol | the case fails; the mode cannot admit an allocator |
 | `check-parameter-metadata-v1.py --self-test` (#137 D4) | fourteen document mutations, including "a prepared-only builtin claims to be live" and "an effect parameter claims to be live" | every one is refused by the schema gate |
 | `parameter_metadata -- --check` (#137 D4) | hand-edit one `liveUpdatable` in the shipped document | byte equality against a freshly generated document fails |
-| `qualification/run.mjs --self-test-mutations` control-path gates (#137 E8) | `exactRetargetedOutput = false`, `masterPeak = 0`, or `commandApplied = 0` | `<browser>: control-path` fails on the applied change, on the meter frame, and on the admission |
+| `qualification/run.mjs --self-test-mutations` control-path gates (#137 E8) | `exactRetargetedOutput = false`, `masterPeak = 0`, or `commandApplied = 0` | `<browser>: control-path` fails on the applied change, on the meter frame, and on the application |
 | `qualification/run.mjs --self-test-mutations` `stall-live-controls-load` (#137 E6) | `stall.liveControlMeterFrames = 0` | `<browser>: main-thread-stall` fails because the stall no longer carried a live command and meter load |
 
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
