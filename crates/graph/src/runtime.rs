@@ -19979,10 +19979,15 @@ mod follow_route_op_tests {
         /// successor that re-armed it keeps its own arm and waits silent, and the displaced arm
         /// is not fired: the successor's own fire ramps from rest.
         ///
+        /// The same rules hold for a following route (#2011), from a following or (d) a six-word
+        /// predecessor, and (c) a following successor that re-armed the route keeps waiting
+        /// silent when its predecessor plays.
+        ///
         /// Test value: red if the carry copies the waiting route's silence into a successor
         /// without an arm, which then stays silent for good (no successor entry fires it), or if
         /// it fires the displaced arm into a successor that re-armed the route (the route enters
-        /// at the swap instead of at its carried fire).
+        /// at the swap instead of at its carried fire), for either kind; or if a re-armed
+        /// following successor adopts a playing predecessor's ramps (it enters before its fire).
         #[test]
         fn an_armed_route_a_swap_displaces_fires_at_the_swap() {
             let fired = || {
@@ -20026,6 +20031,77 @@ mod follow_route_op_tests {
                     assert_eq!(bits((&left, &right)), fired(), "(a) from rest at the swap");
                 }
             }
+            // #2011: the same rules for a following route, whose fire composes with its open
+            // curve, and (c) a re-armed successor of a playing predecessor keeps its own arm.
+            let open = steps(&[0], &[0.0], 1 << 20);
+            for (case, from_armed, rearmed) in [
+                ("(a)", true, false),
+                ("(b)", true, true),
+                ("(c)", false, true),
+            ] {
+                let mut from = Fixture::new([Some(&open), None], 0, OPEN);
+                if from_armed {
+                    assert!(from.route.arm_fade_in(RECORD_RAMP));
+                }
+                let mut into = Fixture::new([Some(&open), None], 0, OPEN);
+                if rearmed {
+                    assert!(into.route.arm_fade_in(RECORD_RAMP));
+                }
+                carry_route(
+                    CarriedRoute::Seven(&mut into.route),
+                    CarriedRoute::Seven(&mut from.route),
+                    None,
+                );
+                let (mut left, mut right) = input(AFTER);
+                if rearmed {
+                    assert_eq!(
+                        from.route.armed.is_some(),
+                        from_armed,
+                        "{case} the displaced arm is not fired"
+                    );
+                    assert!(
+                        !into.block(FIRST, None, &mut left, &mut right),
+                        "{case} the re-armed following successor waits silent"
+                    );
+                    into.route.fire_fade_in();
+                    let (mut left, mut right) = input(AFTER);
+                    let next = FIRST + AFTER as u64;
+                    assert!(
+                        into.block(next, None, &mut left, &mut right),
+                        "{case} it mixes"
+                    );
+                    assert_eq!(bits((&left, &right)), fired(), "{case} from rest");
+                } else {
+                    assert!(
+                        into.block(FIRST, None, &mut left, &mut right),
+                        "{case} it mixes"
+                    );
+                    assert_eq!(
+                        bits((&left, &right)),
+                        fired(),
+                        "{case} from rest at the swap"
+                    );
+                }
+            }
+            // (d) A six-word predecessor's arm is not fired into a re-armed following successor.
+            let mut from = Six::new(gated(OPEN, [false; 2]), false);
+            assert!(from.route.arm_fade_in(RECORD_RAMP));
+            let mut into = Fixture::new([Some(&open), None], 0, OPEN);
+            assert!(into.route.arm_fade_in(RECORD_RAMP));
+            carry_route(
+                CarriedRoute::Seven(&mut into.route),
+                CarriedRoute::Six(&mut from.route),
+                None,
+            );
+            assert!(
+                from.route.armed.is_some(),
+                "(d) the displaced arm is not fired"
+            );
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !into.block(FIRST, None, &mut left, &mut right),
+                "(d) the re-armed following successor waits silent"
+            );
         }
 
         /// Gate 4 (six -> seven, the rebuild adds an automated mute to the source). (a) With the
