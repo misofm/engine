@@ -5334,8 +5334,8 @@ fn compile_ready(
     // prepared with `live_control_observation_taps == 0`.
     report.observation_retained_bytes = engine.observation_retained_bytes;
     // #1290a: the tables were built by the boot plan's own preparation (`build_plan_shape`), the
-    // same function every replacement plan's preparation runs. The boot plan's spectrum captures
-    // went to the session's spectrum monitor (#1596 D3).
+    // same function every replacement plan's preparation runs. The boot plan has no spectrum
+    // captures (#1597).
     plan.active_attachment_mut::<RenderCompanions>()
         .ok_or_else(|| fixed_diagnostic("web.internal.companions"))?;
     let rows = shape
