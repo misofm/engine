@@ -39,3 +39,83 @@ takes the result to the owner for the #1286 D3 ruling.
 
 ## Paths
 This spec only (evidence outside the repo).
+
+## Decision record
+
+### Slice 1 result (2026-10-25, worktree base `c4f7d530e`; modules at the #1331a-2 base `b0bc367af`)
+
+Evidence: `/home/bl/misofm/engine-work-evidence/2047/` (README, `FROZEN.txt`, one raw JSON per cell). The
+#1331a-2 workload and modules are reused unchanged (atomic `ff266dfc...`, plain `4a7dc7ee...`, workload
+`a2785943...`). New module: U/A `de663a63...`, the atomic shape's features (`+atomics`), linked as the
+plain shape. It has the same atomic instructions as S/A, on an exported unshared memory. The plain shape
+rebuilt at the same base reproduced `4a7dc7ee...`. Hashes were recorded before the first timed run. Each
+cell ran once under `flock -x`, with no retry. Worklet metric: process() calls in the measured window
+(`two`: while the Worker runs a span; `single-iso`: 10000 calls after the 350-block digest window),
+late = over 2 ms, calls of 1 ms or more, and max (`Date.now`, 1 ms resolution). `h` is given only where
+the memory is shared (the Worker leg). Digest = the first 350 worklet blocks.
+
+| Cell | Browser build | Memory / module / leg | h warmup / r1 / r2 | worklet calls, late > 2 ms, >= 1 ms, max | digest |
+|---|---|---|---|---|---|
+| 1 | Playwright Firefox 153.0 (rev 1538) | S/A, `two` | 1.12 / 1.12 / 1.13 | 9997, 4146 (41.5 %), 9997, 4 ms | `44ecef33` |
+| 1b | Playwright Firefox 153.0 | S/A, `single-iso` | - | 10000, 4009 (40.1 %), 10000, 5 ms | `44ecef33` |
+| 2 | stock Firefox **153.0** (Mozilla tarball, no Playwright) | S/A, `two` | 15.55 / 18.24 / 18.22 | 656, 0, 237, 1 ms | `44ecef33` |
+| 2b | Playwright Firefox 153.0 binary, launched **without** Playwright | S/A, `two` | 1.15 / 1.15 / 1.15 | 9794, 3529 (36.0 %), 9794, 5 ms | `44ecef33` |
+| 3 | Playwright Firefox 153.0 | U/A, `single-iso` | - | 10000, 3926 (39.3 %), 10000, 4 ms | `44ecef33` |
+| 4 | Playwright Firefox 153.0 | U/P, `single-iso` | - | 10000, 3567 (35.7 %), 10000, 5 ms | `44ecef33` |
+| 5 | Playwright Firefox 153.0, `wasm_optimizingjit=false` | S/A, `two` | 1.12 / 1.12 / 1.13 | 10013, 4141 (41.4 %), 10013, 5 ms | `44ecef33` |
+| 5b | stock Firefox 153.0, `wasm_optimizingjit=false` | S/A, `two` | 8.51 / 8.42 / 8.45 | 1326, 0, 708, 2 ms | `44ecef33` |
+| k1b | Chromium 151.0.7922.34 | S/A, `single-iso` | - | 10000, 0, 3349, 1 ms | `44ecef33` |
+| k3 | Chromium 151.0.7922.34 | U/A, `single-iso` | - | 10000, 0, 3461, 1 ms | `44ecef33` |
+| k4 | Chromium 151.0.7922.34 | U/P, `single-iso` | - | 10000, 0, 3966, 1 ms | `44ecef33` |
+
+All cells: 0 render errors, 0 non-finite words, 0 missed quanta, 0 worklet render allocations, no trap.
+The sum of the per-call `Date.now` deltas divided by the call count (in each raw record, `sumMs`) is
+2.36-2.38 ms in every Playwright Firefox `single-iso` and `two` cell. This agrees with 2.667 ms / h = 2.38 ms.
+
+**Run deviation (stated candidly).** The first stock install updated itself to 158.0.1 during its
+untimed preflight launch (`logs/auto-update/`). So the first "stock" pair ran Firefox 158.0, although
+`--version` printed 153.0: `c2` gave h 15.30 / 18.14 / 18.20 and `c5b` (optimizing tier off) gave 8.51 / 8.52 / 8.44.
+Those records are kept and labelled 158. Cells 2 and 5b in the table ran once each, on a fresh 153.0
+extraction with `distribution/policies.json` `DisableAppUpdate`. The page user agent reads `rv:153.0` and
+libxul is unchanged after the runs. Cells 1b, 2b, 5b and k1b are additions to the scope note's matrix
+(1b and k1b bridge the leg change between cells 1 and 3).
+
+**Conclusion per cause.**
+1. **The Playwright Firefox build: the cause.** Stock Firefox 153.0 renders the same page and module at
+   h = 18.2, which is more than Chromium's 16.1-16.4. The Playwright 153.0 build gives 1.12. The Playwright binary
+   launched without Playwright (cell 2b) is also slow (1.15), so the slowdown is in the build itself
+   (binary, bundled `playwright.cfg` prefs, or its juggler component), not in a connected Playwright
+   client. Juggler loads even without one: cell 2b's stderr shows `chrome://juggler/content/Helper.js`.
+2. **Shared memory: not the cause.** S/A and U/A in Playwright Firefox `single-iso` (cells 1b, 3) have
+   the same late share (40.1 %, 39.3 %) and mean (2.38 ms). Chromium shows no shared-memory cost (k1b, k3).
+3. **The `+atomics` codegen: not the cause.** U/A against U/P (cells 3, 4): 39.3 % against 35.7 % late,
+   mean 2.38 against 2.36 ms. The difference is small and the module is slow in both.
+4. **Tier-up: in the Playwright build only.** With the optimizing tier off, Playwright Firefox does not
+   move (cell 5 = cell 1). Stock Firefox drops from 18.2 to 8.4 (cell 5b). So the Playwright build never
+   runs this module on the optimizing tier. It is also about 7.5 times slower than stock Firefox's
+   baseline-only render. "Baseline only" therefore does not explain all of the slowdown.
+
+**Mechanism not identified.** No `javascript.options.*`, wasm or JIT pref is in `playwright.cfg`. Leading
+candidate (not tested): juggler makes the worker and worklet globals debuggees. SpiderMonkey then compiles
+Wasm in debug mode, which is baseline-only with debug instrumentation. This agrees with both facts in
+cause 4. Other candidates: a build-configuration difference, or a `playwright.cfg` pref with an indirect
+effect.
+
+**Recommendations (root decides).**
+- #1286 D3: the Firefox h = 1.10 that started the stop is an artefact of the test browser. Stock Firefox
+  153.0 gives h = 18.2 (with the m = 0.70 that gave m·h = 0.77 at h = 1.10, m·h is about 12.7). Recommendation: root asks the owner to lift the stop
+  and to take the Firefox value from stock Firefox. Playwright Firefox stays valid for bit identity: the
+  digest agrees in every cell. Do not use its timings as performance evidence. The #26 Firefox ceiling
+  failure was also measured on Playwright Firefox, so it must be measured again on stock Firefox.
+- Next slice (optional, owner's choice, untimed or one run each): find the mechanism in the Playwright
+  build. Run a scratch copy of the Playwright install without `playwright.cfg`, then one without the
+  juggler component, then stock 153.0 with that file's prefs added. A stock-Firefox runner (`harness/stock.mjs`: headless launch, autostart, POST,
+  updates blocked by policy) is the measurement tool for every Firefox timing.
+- No engine change follows from this slice.
+
+**Stated limits.** One run per cell. `Date.now` has 1 ms resolution, so the per-call mean is coarse
+for sub-millisecond calls (stock and Chromium cells). The k3/k4 means (0.35 vs 0.40 ms) are inside that
+coarseness and are not a finding. Stock Firefox ran headless on Linux with the content sandbox reduced
+(`unshare(CLONE_NEWPID): EPERM`). The Playwright binary prints the same message when it is launched
+without Playwright (cell 2b). macOS and Windows
+Firefox were not measured. `perf` is not available on this box, so no profile was made.
