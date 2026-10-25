@@ -436,10 +436,11 @@ macro_rules! control_code_table {
 mod response;
 pub use response::{
     RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseConfigurationKind, ResponseCurves,
-    ResponseGetRequest, ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget,
-    response_result_encoded_len,
+    ResponseGetRequest, ResponseGrid, ResponseMember, ResponseMemberKind, ResponseMemberSection,
+    ResponseOverride, ResponseReady, ResponseReadyOutcome, ResponseResult, ResponseTarget,
+    TrackResponseCapture, response_ready_encoded_bound, response_result_encoded_len,
 };
-pub(crate) use response::{write_response_request, write_response_result};
+pub(crate) use response::{write_response_ready, write_response_request, write_response_result};
 
 mod spectrum;
 pub use spectrum::{
@@ -1321,6 +1322,10 @@ pub enum BackpressureQueueKind {
     ReplayCache = 6,
     /// The spectrum capture's one-shot arm slot (#1944): capacity 1, no queue generation.
     SpectrumArm = 7,
+    /// The session's one track-response capture (#1578 D3): capacity 1, no queue generation. A
+    /// strip `RESPONSE_GET` is refused while a capture is in flight or its `RESPONSE_READY` is
+    /// unread.
+    ResponseCapture = 8,
 }
 
 impl BackpressureQueueKind {
@@ -1332,12 +1337,16 @@ impl BackpressureQueueKind {
             5 => Ok(Self::Telemetry),
             6 => Ok(Self::ReplayCache),
             7 => Ok(Self::SpectrumArm),
+            8 => Ok(Self::ResponseCapture),
             _ => Err(DecodeError::InvalidTlv),
         }
     }
 
     const fn has_generation(self) -> bool {
-        !matches!(self, Self::ReplayCache | Self::SpectrumArm)
+        !matches!(
+            self,
+            Self::ReplayCache | Self::SpectrumArm | Self::ResponseCapture
+        )
     }
 }
 
@@ -4554,7 +4563,9 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 11) != 0) != (has_command(0x000b) && has_event(0x8030)))
         || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
+        // Bit 14 means `RESPONSE_GET` and its `RESPONSE_READY` event together (#1578 D1).
         || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
+        || (has_command(0x000e) != has_event(0x8040))
         // `OBSERVATION_READ` and bit 15 together, and both ride the session family, since the
         // `Observe` edit that arms a tap is a transaction's (#1586 D6).
         || ((value.flags.0 & CapabilityFlags::OBSERVATION.0 != 0) != has_command(0x000f))
@@ -4580,9 +4591,12 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
 }
 fn allocated_id(id: u16, event: bool) -> bool {
     if event {
-        // `0x8002` is retired: never allocated again, never advertised (#1628).
-        matches!(id, 0x8001 | 0x8010 | 0x8011 | 0x8020 | 0x8021 | 0x8030)
-            && !crate::wire::is_retired_message_id(id)
+        // `0x8002` is retired: never allocated again, never advertised (#1628). `0x8040` is
+        // `RESPONSE_READY` (#1578).
+        matches!(
+            id,
+            0x8001 | 0x8010 | 0x8011 | 0x8020 | 0x8021 | 0x8030 | 0x8040
+        ) && !crate::wire::is_retired_message_id(id)
     } else {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
         // `0x000f` is `OBSERVATION_READ` (#1586), `0x0010` is `SPECTRUM_CONFIGURE` (#1594),

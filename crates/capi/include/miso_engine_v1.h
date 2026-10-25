@@ -191,8 +191,25 @@ extern "C" {
  * response.limit, response.target.unavailable); a reply that would not fit the control frame
  * limit, or the request's own maximum_reply_bytes, is refused whole as
  * response.reply_too_large before any curve is computed. An exact replay of the request returns
- * the same bytes and computes nothing. The address and strip targets are refused
- * response.target.unavailable until their slices.
+ * the same bytes and computes nothing.
+ *
+ * Track response (issue 1578). RESPONSE_GET with a strip target (a track or submix stable ID)
+ * through miso_engine_v1_submit_command answers a request tag at once; the curve of the strip's
+ * input filters and EQs, from the values its plan renders, with the list of the owners that make
+ * it, arrives later as one reliable RESPONSE_READY event (message ID 0x8040, listed with 0x000e
+ * under capability flag bit 14) through miso_engine_v1_dequeue_event, carrying the same tag. No
+ * C symbol or struct is added. The result comes from the first successful render block of the
+ * newest plan after the request, so a host that does not render and service the session does not
+ * get it. One capture is in flight per session: a strip request while one is in flight or its
+ * event is unread is BACKPRESSURE response.capture.pending. Every request answered with a tag
+ * gets exactly one RESPONSE_READY: OK with the curves, or a refusal (response.strip.removed when
+ * the strip left the session first, response.effect.unsupported, response.limit,
+ * response.capture, and LIMIT_EXCEEDED response.reply_too_large when a rebuild after the request
+ * grew the strip's event past the control frame limit); a full event queue delays it and never
+ * drops it. An unknown strip is
+ * NOT_FOUND control.address.unknown, and a request whose event could exceed the control frame
+ * limit or maximum_reply_bytes is response.reply_too_large; neither arms anything. A replayed
+ * request returns the same tag and arms nothing.
  *
  * Spectrum taps (issue 1594). SPECTRUM_CONFIGURE (message ID 0x0010) through
  * miso_engine_v1_submit_command sets, changes or removes the session's spectrum taps while it
@@ -404,16 +421,17 @@ extern "C" {
  * one of the strip's owners cannot carry its state -- ducks that strip as a removal does: its fader
  * and each of its routes whose tap precedes the fader are muted on the running plan over N, and the
  * replacement is adopted no earlier than S, with C the longest compensation delay of a route out of
- * a ducked strip. The replacement starts every owner of the strip before its fader, and its fader,
- * at rest, then fades the strip and those routes back in over N from the first block at or after
- * S + D, where D is the strip's own latency before its fader. The dip is N, the wait to S (from
- * q + C up to 2q + C), D, then N. Strips the edit does not restart play on, bit for bit, and a
- * re-pointed route never ducks its source strip. The watermark reports the revision first at S as
- * EXACT. A transaction before S that reverts the edit commits and is adopted at the same S; the
- * strip fades back in from S. Two limits remain: a carried effect whose sidechain reads a ducked
- * strip's tap before the fader does not duck with it and still steps at S (issue 1324b), and a
- * route before the fader that follows its source's automated mute is not faded back in: it
- * restarts at its prepared value at S.
+ * a ducked strip or of a sidechain line the replacement can shorten. A strip whose insert is keyed
+ * from a restarted strip's tap behind a restarted owner (post_input, insert_send, insert_return,
+ * pre_fader, or input when its delay line restarts) is restarted and ducks with it. The
+ * replacement starts every owner of the strip before its fader, and its fader, at rest, then fades
+ * the strip and those routes back in over N from the first block at or after S + D, where D is the
+ * strip's own latency before its fader. The dip is N, the wait to S (from q + C up to 2q + C), D,
+ * then N. Strips the edit does not restart play on, bit for bit, and a re-pointed route never
+ * ducks its source strip. The watermark reports the revision first at S as EXACT. A transaction
+ * before S that reverts the edit commits and is adopted at the same S; the strip fades back in from
+ * S. One limit remains: a route before the fader that follows its source's automated mute is not
+ * faded back in: it restarts at its prepared value at S.
  *
  * A transaction behind an unadopted replacement (issue 1310). A SESSION_TRANSACTION_APPLY that
  * needs a new plan while an earlier transaction's replacement plan has not been adopted by render

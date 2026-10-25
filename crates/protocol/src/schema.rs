@@ -655,6 +655,73 @@ pub(crate) mod response_result {
     };
 }
 
+/// One owner a `RESPONSE_READY` event names (#1578 D2): its section (builtins 4, console 5,
+/// inserts 2), its slot ID (present exactly for console and inserts), its native effect ID, its
+/// provider kind (parametric EQ 1, input filters 2, unavailable 3), its bypass, its two enabled
+/// masks and the number of valid mask bits.
+pub(crate) mod response_member {
+    use super::*;
+    pub(crate) const SECTION: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const SLOT_ID: FieldSpec = FieldSpec::opt(2, Wire::Utf8);
+    pub(crate) const EFFECT: FieldSpec = FieldSpec::req(3, Wire::Utf8);
+    pub(crate) const KIND: FieldSpec = FieldSpec::req(4, Wire::U8);
+    pub(crate) const BYPASSED: FieldSpec = FieldSpec::req(5, Wire::Bool);
+    pub(crate) const ENABLED_LEFT: FieldSpec = FieldSpec::req(6, Wire::U32);
+    pub(crate) const ENABLED_RIGHT: FieldSpec = FieldSpec::req(7, Wire::U32);
+    pub(crate) const SECTION_COUNT: FieldSpec = FieldSpec::req(8, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ResponseMember",
+        fields: &[
+            SECTION,
+            SLOT_ID,
+            EFFECT,
+            KIND,
+            BYPASSED,
+            ENABLED_LEFT,
+            ENABLED_RIGHT,
+            SECTION_COUNT,
+        ],
+    };
+}
+
+/// `RESPONSE_READY` (`0x8040`, #1578 D2): the result of one strip `RESPONSE_GET`, by its tag. The
+/// diagnostic is present exactly when `outcome` is not `OK`; the capture's fields (6 to 9, 12, the
+/// curves and the members) only when it is.
+pub(crate) mod response_ready {
+    use super::*;
+    pub(crate) const SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const REQUEST_TAG: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const STRIP_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
+    pub(crate) const OUTCOME: FieldSpec = FieldSpec::req(4, Wire::U16);
+    pub(crate) const DIAGNOSTIC: FieldSpec = FieldSpec::opt(5, Wire::Utf8);
+    pub(crate) const CAPTURED_SAMPLE: FieldSpec = FieldSpec::opt(6, Wire::U64);
+    pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::opt(7, Wire::U32);
+    pub(crate) const FLOOR_DB: FieldSpec = FieldSpec::opt(8, Wire::F32);
+    pub(crate) const FREQUENCIES_HZ: FieldSpec = FieldSpec::opt(9, Wire::PackedF32);
+    pub(crate) const LEFT_DB: FieldSpec = FieldSpec::opt(10, Wire::PackedF32);
+    pub(crate) const RIGHT_DB: FieldSpec = FieldSpec::opt(11, Wire::PackedF32);
+    pub(crate) const EXCLUDED_COUNT: FieldSpec = FieldSpec::opt(12, Wire::U32);
+    pub(crate) const MEMBER: FieldSpec = FieldSpec::msg(13, false, true, &response_member::SPEC);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ResponseReady",
+        fields: &[
+            SEQUENCE,
+            REQUEST_TAG,
+            STRIP_ID,
+            OUTCOME,
+            DIAGNOSTIC,
+            CAPTURED_SAMPLE,
+            SAMPLE_RATE_HZ,
+            FLOOR_DB,
+            FREQUENCIES_HZ,
+            LEFT_DB,
+            RIGHT_DB,
+            EXCLUDED_COUNT,
+            MEMBER,
+        ],
+    };
+}
+
 /// One selection of an `OBSERVATION_READ` request (#1586 D1): a tap by its stable address (the
 /// `Observe` edit's address shape: a strip owner, a console or inserts section with its slot ID,
 /// no `control` and no `lane`), its effect-local tap ID and the lanes to return.
@@ -2243,6 +2310,8 @@ mod tests {
             &response_override::SPEC,
             &response_request::SPEC,
             &response_result::SPEC,
+            &response_member::SPEC,
+            &response_ready::SPEC,
             &observation_selection::SPEC,
             &observation_read_request::SPEC,
             &observation_row::SPEC,

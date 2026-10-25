@@ -985,7 +985,14 @@ pub enum ConformanceDecoder {
 /// frame does not list `0x000f`, with bit 15 clear, which the bit-15 invariant allows. The 54
 /// earlier frames are byte-equal: their hash is the old pin. Re-pinned from `5b6cbc157a1f6154`;
 /// the frame count is 56.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xf4c2_fe33_3739_f44d;
+/// #1578 adds `RESPONSE_READY` (`0x8040`): the corpus gains `command.response_get_strip` (a strip
+/// target, the tag reply's request), `event.response_ready` (a ready event with one side and a
+/// member of each section) and `event.response_ready_refused` (`NOT_FOUND` with its diagnostic),
+/// and the static capabilities frame lists `0x8040` with `0x000e`, as bit 14 now requires. Only
+/// `response.capabilities` moves (its event list's one padded field gains `0x8040`); with it patched
+/// back and the three new frames filtered out, the 56 earlier frames hash to the old pin.
+/// Re-pinned from `f4c2fe333739f44d`; the frame count is 59.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xcb8d_b815_ed01_03a0;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1140,6 +1147,21 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         "command.response_get",
         CommandPayload::ResponseGet(&response_request)
     );
+    // #1578: a strip target (3), which answers a tag and later a `RESPONSE_READY`. A strip request
+    // carries no sections and no overrides.
+    let strip_request = ResponseGetRequest {
+        target: ResponseTarget::Strip("vocal".to_owned()),
+        channels: ParameterChannel::Left,
+        sections: false,
+        overrides: Vec::new(),
+        configuration_id: None,
+        maximum_reply_bytes: Some(1 << 16),
+        ..response_request.clone()
+    };
+    command!(
+        "command.response_get_strip",
+        CommandPayload::ResponseGet(&strip_request)
+    );
     command!("command.transport_get", CommandPayload::TransportGet);
     command!(
         "command.transport_set",
@@ -1240,7 +1262,8 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         maximum_telemetry_handles: 256,
         maximum_transaction_edits: 64,
         supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x0013],
-        supported_events: &[0x8001, 0x8010, 0x8011, 0x8020, 0x8021, 0x8030],
+        // `RESPONSE_READY` with `RESPONSE_GET`, under bit 14 (#1578 D1).
+        supported_events: &[0x8001, 0x8010, 0x8011, 0x8020, 0x8021, 0x8030, 0x8040],
         flags: CapabilityFlags::B4_BASE,
     };
     macro_rules! success {
@@ -1608,6 +1631,70 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         })
     );
     event!("event.diagnostic", EventPayload::Diagnostic(&diagnostic));
+    // #1578: a ready `RESPONSE_READY` with one side and a member of each section (the insert
+    // without a linear response), and a refused one with its diagnostic.
+    let member = |section, effect: &str, kind, enabled_left| ResponseMember {
+        section,
+        effect: effect.to_owned(),
+        kind,
+        bypassed: false,
+        enabled_left,
+        enabled_right: 0b01,
+        section_count: 2,
+    };
+    let ready = ResponseReady {
+        sequence: 3,
+        request_tag: 77,
+        strip_id: "vocal".to_owned(),
+        outcome: ResponseReadyOutcome::Ready(TrackResponseCapture {
+            captured_sample: 4_096,
+            sample_rate_hz: 48_000,
+            floor_db: -120.0,
+            frequencies_hz: vec![20.0, 632.455_5, 20_000.0],
+            left_db: Some(vec![0.0, 1.5, -3.0]),
+            right_db: None,
+            excluded_count: 1,
+            members: vec![
+                member(
+                    ResponseMemberSection::Builtins,
+                    "miso.input-filters",
+                    ResponseMemberKind::InputFilters,
+                    0b11,
+                ),
+                member(
+                    ResponseMemberSection::Console("bus_eq".to_owned()),
+                    "miso.parametric-eq",
+                    ResponseMemberKind::ParametricEq,
+                    0b10,
+                ),
+                ResponseMember {
+                    bypassed: true,
+                    section_count: 0,
+                    enabled_left: 0,
+                    enabled_right: 0,
+                    ..member(
+                        ResponseMemberSection::Inserts("comp".to_owned()),
+                        "miso.compressor",
+                        ResponseMemberKind::Unavailable,
+                        0,
+                    )
+                },
+            ],
+        }),
+    };
+    event!("event.response_ready", EventPayload::ResponseReady(&ready));
+    event!(
+        "event.response_ready_refused",
+        EventPayload::ResponseReady(&ResponseReady {
+            sequence: 4,
+            request_tag: 78,
+            strip_id: "drums".to_owned(),
+            outcome: ResponseReadyOutcome::Refused {
+                status: StatusCode::NotFound,
+                diagnostic: "response.strip.removed".to_owned(),
+            },
+        })
+    );
     frames
 }
 
