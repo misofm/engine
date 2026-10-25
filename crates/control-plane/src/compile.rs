@@ -231,7 +231,7 @@ pub(crate) fn checked_sum(rows: &[u64]) -> Result<u64, CompileFailure> {
     })
 }
 
-pub(crate) fn protocol_queue_config(
+pub(crate) fn protocol_queue_config<A: ControlAdapter>(
     limits: ControlLimits,
 ) -> Result<ProtocolQueueConfig, CompileFailure> {
     let one = NonZeroUsize::new(1).expect("one is nonzero");
@@ -244,16 +244,24 @@ pub(crate) fn protocol_queue_config(
         .ok_or_else(|| failure(ResourceFault::Limit))?,
         reliable_response_slots: one,
         reliable_event_slots: NonZeroUsize::new(RELIABLE_EVENT_SLOTS).expect("two is nonzero"),
-        telemetry_slots: NonZeroUsize::new(TELEMETRY_SLOTS).expect("256 is nonzero"),
+        telemetry_slots: NonZeroUsize::new(telemetry_slots::<A>()).expect("nonzero"),
         counter_telemetry_slots: NonZeroUsize::new(COUNTER_TELEMETRY_SLOTS)
             .expect("two is nonzero"),
     })
 }
 
-/// The lossy lane's slots (#1583 D5, #1587a): one meter batch whole, so a batch never reaches the
-/// caller split or half dropped. An accepted meter table needs at most
-/// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, the wire's bound on one batch.
-const TELEMETRY_SLOTS: usize = host_core::MAXIMUM_METER_BATCH_RECORDS;
+/// The lossy meter lane's slots (#1583 D5, #1587a): one meter batch whole, so a batch never
+/// reaches the caller split or half dropped. For an adapter whose control plane serves the meter
+/// batches (the C ABI) that is [`host_core::MAXIMUM_METER_BATCH_RECORDS`], the most records an
+/// accepted table needs; any other adapter keeps the two slots it had (#1588 sizes the browser's
+/// lane when it adds the browser's delivery).
+const fn telemetry_slots<A: ControlAdapter>() -> usize {
+    if A::METER_DELIVERY {
+        host_core::MAXIMUM_METER_BATCH_RECORDS
+    } else {
+        2
+    }
+}
 
 /// The counter-snapshot lane's slots (#1351, #1587a): two, as before the meter lane grew. A
 /// snapshot that does not fit coalesces or drops with a count.
@@ -308,7 +316,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     monitor: MonitorRows,
     meter_tables: MeterTableRows,
 ) -> Result<CapiResources, CompileFailure> {
-    let queue_config = protocol_queue_config(limits)?;
+    let queue_config = protocol_queue_config::<A>(limits)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
         .map_err(|_| failure(ResourceFault::Arithmetic))?;
     let replay_config = ReplayCacheConfig {
@@ -613,11 +621,17 @@ pub(crate) struct MeterTableRows {
 }
 
 /// The most entries a meter table holds under a control frame of `maximum_control_frame_bytes`.
+/// The most entries an accepted meter table holds under a control frame of
+/// `maximum_control_frame_bytes` (#1587a): every entry the provider serves is a peak entry of two
+/// records, and one batch carries at most [`host_core::MAXIMUM_METER_BATCH_RECORDS`], so the
+/// provider refuses the 129th (`meter.records`). The decoder's own bound is 256 entries.
 fn maximum_meter_entries(maximum_control_frame_bytes: u64) -> Result<usize, CompileFailure> {
     let items = usize::try_from(maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?
         / size_of::<u16>();
-    Ok(protocol::MAXIMUM_METER_ENTRIES.min(items))
+    Ok((host_core::MAXIMUM_METER_BATCH_RECORDS / 2)
+        .min(protocol::MAXIMUM_METER_ENTRIES)
+        .min(items))
 }
 
 /// The two per-entry vectors of a control-plane meter delivery (#1587a): each entry's strip
@@ -1802,7 +1816,7 @@ where
         max_string_bytes: control_bytes,
         max_nesting: 4,
     });
-    let queues = ProtocolQueues::prepare(protocol_queue_config(limits)?)
+    let queues = ProtocolQueues::prepare(protocol_queue_config::<A>(limits)?)
         .map_err(|_| failure(ResourceFault::ProtocolQueue))?;
     let replay = ReplayCache::try_new(ReplayCacheConfig {
         entries: NonZeroUsize::new(replay_entries).ok_or_else(|| failure(ResourceFault::Limit))?,

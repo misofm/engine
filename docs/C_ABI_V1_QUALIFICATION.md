@@ -478,13 +478,13 @@ frames the delivery folds, so a pending rebuild never relabels a record. Reading
 a swap that carries the strip meters; a swap that carries none restarts the grid at its adoption
 block, where render restarts the gate and the control thread's adoption asks for the same value.
 The control thread adopts each swap when it reclaims the displaced plan, whose clock gives the
-adoption sample. The lossy lane holds one batch whole (256 slots; the counter-snapshot lane keeps
+adoption sample. The lossy meter lane holds one batch whole (256 slots; the counter-snapshot lane keeps
 two). `METER_WINDOWS_LOST` counts every closed window that reached no batch: the windows render
 dropped at a full meter queue (eight), the windows of a partial batch a gap discarded or a later
 configure replaced, and the windows of a batch the lane refused to stage; the sequence never skips.
 A coalesced batch is counted by `TELEMETRY_COALESCED`, as any lossy record. The per-block render
 peak (#1570a) is gone (#1583 D6). The strip-ID text of the stored tables is charged to
-`capi_retained_bytes` at 256 entries of 127 bytes, twice.
+`capi_retained_bytes` at the 128 entries an accepted table can hold, 127 bytes each, twice.
 
 **Served counters and the counter snapshot (#1351).** The provider serves exactly those nine
 counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all nine and a read of
