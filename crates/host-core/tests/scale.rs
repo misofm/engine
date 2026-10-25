@@ -154,6 +154,8 @@ fn kitchen_sink_document(tracks: &[u32]) -> String {
         },
         members: model.tracks.iter().map(|track| track.id.clone()).collect(),
     }];
+    // ID order, so the member at index 65,536 is `track-9999`, the strip the render reads.
+    model.vcas[0].members.sort();
     model.routes = tracks
         .iter()
         .map(|&index| {
