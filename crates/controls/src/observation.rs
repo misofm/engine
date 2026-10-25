@@ -45,7 +45,8 @@ pub enum ObserveError {
     /// `observation.subscribers`: an arm of a tap that already has `u32::MAX` subscribers.
     Subscribers,
     /// `observation.unavailable`: the host does not serve the edit (its adapter's
-    /// `OBSERVE_EDIT` is off: the browser until #1589), or the endpoint has no host to apply it.
+    /// `OBSERVE_EDIT` is off, or a session whose plans bind no observation queue (#1589 R1)), or
+    /// the endpoint has no host to apply it.
     Unavailable,
 }
 

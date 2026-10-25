@@ -1732,8 +1732,9 @@ pub trait RuntimePreparer: Send {
     /// Whether every plan this preparer prepares binds an observation queue slot for every declared
     /// tap of every effect (#1584 D7), which an `Observe` edit needs: `true`, the default, for a
     /// preparer that asks for [`host_core::launch_maximum_observation_taps`]. The browser's asks
-    /// for its boot word's taps (#1589 R1), so it binds them only for a word that covers every
-    /// launch effect's menu. A session whose preparer binds none serves neither the edit nor the
+    /// for its boot word's taps (#1589 R1), and preparation refuses an effect that declares more
+    /// taps than the word, so a nonzero word binds every declared tap of every plan it prepares.
+    /// A session whose preparer binds none serves neither the edit nor the
     /// read: it refuses `Observe` with `observation.unavailable` and does not advertise
     /// `OBSERVATION_READ` or capability bit 15, never an edit acknowledged and never applied.
     fn observation_queues(&self) -> bool {

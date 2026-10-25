@@ -161,8 +161,9 @@ Commands: `cargo test --locked -p host-web --all-features`, `cargo test --locked
 - **R1 (root).** The boot word `live_control_observation_taps` keeps its meaning until #1590 D5;
   D1's "capacity for every declared tap" is #1590's. #1589a: the session serves the edit and the
   read only when the browser's preparer binds a queue for every declared tap
-  (`RuntimePreparer::observation_queues`: a nonzero word at or above
-  `launch_maximum_observation_taps()`). Otherwise `Observe` is refused `observation.unavailable` and
+  (`RuntimePreparer::observation_queues`: a nonzero word). Preparation refuses an effect that
+  declares more taps than the word (`effect.observation.taps`), so a nonzero word binds every
+  declared tap of every plan. Otherwise `Observe` is refused `observation.unavailable` and
   neither `0x000f` nor bit 15 is advertised: with the word `0` the live path would have answered an
   internal fault and the rebuild path would have acknowledged a subscription no queue holds.
 - **R2 (root).** One `ObservationIndex` per plan, the epoch's; #1586a's `PlanShape` copy is deleted,

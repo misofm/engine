@@ -5188,12 +5188,12 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
     }
 
     /// #1589 R1: the boot word keeps its meaning until #1590 D5, so the session serves `Observe`
-    /// only when the word binds every declared tap of every launch effect: a nonzero word at or
-    /// above [`host_core::launch_maximum_observation_taps`]. With `0` no plan has a queue, and the
-    /// edit is refused `observation.unavailable` rather than acknowledged and never applied.
+    /// only for a nonzero word. Preparation refuses an effect that declares more taps than the
+    /// word (`effect.observation.taps`), so every plan binds a queue for every declared tap. With
+    /// `0` no plan has a queue, and the edit is refused `observation.unavailable` rather than
+    /// acknowledged and never applied.
     fn observation_queues(&self) -> bool {
-        let taps = self.options.live_control_observation_taps;
-        taps != 0 && taps >= u64::from(host_core::launch_maximum_observation_taps())
+        self.options.live_control_observation_taps != 0
     }
 }
 

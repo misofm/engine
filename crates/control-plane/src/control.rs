@@ -4347,25 +4347,23 @@ where
     /// Reads one row per selection into `rows` on the running plan's readers, or on the readers an
     /// adapter lent with their plan's epoch (#1589 R2), with the whole batch checked first (#1586
     /// D4): the core read and the wire rows, no allocation. `Err(None)` for a refusal the codec
-    /// rules out (an internal fault).
+    /// rules out (an internal fault), and for lent readers whose epoch is not the running plan's:
+    /// the index and the readers are always one plan's.
     fn read_observation_rows(
         &self,
         selections: &[protocol::ObservationSelectionRef<'_>],
         rows: &mut [protocol::ObservationReadRow],
         readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<(), Option<host_core::observation::ObservationReadError>> {
-        // A lent list is read through its own plan's index. An epoch the session no longer holds
-        // reads through an empty index: every selection is then an unknown address.
-        let empty = host_core::observation::ObservationIndex::default();
-        let (index, handles) = match readers {
-            Some((epoch, handles)) => (self.observation_index(epoch).unwrap_or(&empty), handles),
-            None => (
-                &self.providers.observation_index,
-                &*self.providers.observations,
-            ),
+        // One plan: the lent readers are the running plan's, since `command_with_readers` serviced
+        // first, so they read through the running plan's index; another epoch is a fault.
+        let handles = match readers {
+            Some((epoch, _)) if epoch != self.providers.epoch => return Err(None),
+            Some((_, handles)) => handles,
+            None => &*self.providers.observations,
         };
         host_core::observation::read_with(
-            index,
+            &self.providers.observation_index,
             handles,
             selections,
             |selection| {
