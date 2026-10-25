@@ -145,6 +145,9 @@ async function testMainRealm() {
   let sessionMapMutation = null;
   let planeMutation = null;
   let commandResult = 0;
+  // Issue #1644: every session seek message the fake port received, and the result it answers.
+  const sessionSeekMessages = [];
+  let sessionSeekResult = 0;
   let mixedSuccess = false;
   let commandMutation = null;
   let compileGate = null;
@@ -236,6 +239,12 @@ async function testMainRealm() {
             metersAttached: true,
           };
           if (sessionMapMutation !== null) response = sessionMapMutation(response);
+        } else if (received.tag === "miso.session-seek.v1") {
+          sessionSeekMessages.push(received);
+          response = {
+            tag: "miso.session-seek.v1", requestId: received.requestId,
+            result: sessionSeekResult, generation: received.generation,
+          };
         } else {
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
         }
@@ -1870,6 +1879,31 @@ async function testMainRealm() {
     const again = chunk("source", 9);
     assert.equal(again.buffer.byteLength, 0);
     assert.equal((await again.request).requestId, 7, "source saturation does not burn an ID");
+
+    // Issue #1644 gate 2, the host half: one session seek message per call, with the plain form's
+    // `-1n` anchor, and one unsettled at a time; a second is refused locally and posts nothing.
+    holdAll = true;
+    const firstSessionSeek = pipelineHost.seekSession({ generation: 2n, frame: 480n });
+    const beforeSessionSeekOverflow = events.length;
+    await localErrorResult(pipelineHost.seekSession({
+      generation: 3n, frame: 0n, anchorSample: 128n,
+    }), 6);
+    assert.equal(events.length, beforeSessionSeekOverflow, "a second session seek posts nothing");
+    holdAll = false;
+    for (const respond of heldAll) respond();
+    heldAll.length = 0;
+    assert.deepEqual(await firstSessionSeek, {
+      tag: "miso.session-seek.v1", requestId: 8, result: 0, generation: 2n,
+    });
+    sessionSeekResult = 1;
+    assert.equal((await pipelineHost.seekSession({
+      generation: 3n, frame: 0n, anchorSample: 128n,
+    })).result, 1, "a refused session seek resolves with the engine's result");
+    sessionSeekResult = 0;
+    assert.deepEqual(sessionSeekMessages, [
+      { tag: "miso.session-seek.v1", generation: 2n, sourceFrame: 480n, anchorSample: -1n, requestId: 8 },
+      { tag: "miso.session-seek.v1", generation: 3n, sourceFrame: 0n, anchorSample: 128n, requestId: 9 },
+    ]);
     await pipelineHost.dispose();
 
     // W4-D1: a browser that cannot validate simd128 is refused with the typed record, before any
@@ -2621,6 +2655,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   for (let index = 0; index < 21; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
   const calls = {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
+    sessionSeek: [], sessionSeekResult: 0,
     sourceResult: 0, bootResult: 0, boot: [], bootWithSpectrumHop: [], spectrumHopCapability: 0,
     spectrumHopCapabilityResult: 1,
     // Issue #1381a: the service step's handles and result, and the control counter's value.
@@ -2790,6 +2825,19 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       calls.source.push(args);
       calls.sourceIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return calls.sourceResult;
+    },
+    // Issue #1644: both session seek exports and the declaration record into one list, in order.
+    miso_engine_web_v1_session_seek: (...args) => {
+      calls.sessionSeek.push(["session_seek", ...args]);
+      return calls.sessionSeekResult;
+    },
+    miso_engine_web_v1_session_seek_at: (...args) => {
+      calls.sessionSeek.push(["session_seek_at", ...args]);
+      return calls.sessionSeekResult;
+    },
+    miso_engine_web_v1_declare_discontinuity: (...args) => {
+      calls.sessionSeek.push(["declare_discontinuity", ...args]);
+      return 0;
     },
     miso_engine_web_v1_source_seek: (...args) => {
       calls.seek.push(args);
@@ -4224,6 +4272,40 @@ async function testProcessor() {
       processor.receive({ tag: "miso.dispose.v1", requestId: 3 });
       assert.equal(fake.calls.dispose, 1);
       assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
+    }
+
+    {
+      // Issue #1644 gate 2, the worklet half: a plain session seek calls `session_seek` once and an
+      // anchored one `session_seek_at` once, never the declaration; an OK records the generation
+      // for the feed drain before the reply, a refusal is the reply's result, records nothing and
+      // is not sticky, and a malformed message calls no export.
+      const { processor, fake } = makeProcessor();
+      const handle = processor.handle;
+      const seek = (requestId, generation, sourceFrame, anchorSample) => {
+        processor.receive({
+          tag: "miso.session-seek.v1", requestId, generation, sourceFrame, anchorSample,
+        });
+        return processor.port.posts.at(-1).message;
+      };
+      assert.deepEqual(seek(1, 2n, 480n, -1n), {
+        tag: "miso.session-seek.v1", requestId: 1, result: 0, generation: 2n,
+      });
+      assert.equal(processor.lastSessionSeekGeneration, 2n);
+      assert.deepEqual(seek(2, 3n, 0n, 128n).result, 0);
+      fake.calls.sessionSeekResult = 1;
+      assert.deepEqual(seek(3, 4n, 0n, -1n), {
+        tag: "miso.session-seek.v1", requestId: 3, result: 1, generation: 4n,
+      });
+      assert.equal(processor.lastSessionSeekGeneration, 3n, "a refused seek records nothing");
+      assert.deepEqual(fake.calls.sessionSeek, [
+        ["session_seek", handle, 2n, 480n],
+        ["session_seek_at", handle, 3n, 0n, 128n],
+        ["session_seek", handle, 4n, 0n],
+      ]);
+      assert.equal(processor.stickyResult, 0, "a refused session seek is not sticky");
+      seek(4, 0n, 0n, -1n);
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+      assert.equal(fake.calls.sessionSeek.length, 3, "a malformed session seek calls no export");
     }
 
     {
