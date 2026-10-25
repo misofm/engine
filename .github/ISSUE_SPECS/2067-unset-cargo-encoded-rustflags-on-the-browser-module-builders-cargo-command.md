@@ -52,3 +52,9 @@ that says why. No other change.
     the variable.
   - `run-wasm-gates.sh --without-v8-spill --without-native` before: exit 101 (same `lane` refusal);
     after: exit 0, `wasm gates: ok`.
+- Stated limit: this PR does not change `fuzz.yml:106,111`, `nightly.yml:123`, `run-protocol-fuzz.sh:28`,
+  `check-protocol-wasm-parity.sh:90,116`, `check-cross-targets.sh:184-221`, `qualification.yml:1097,1124`
+  (job-env `-D warnings`) or the parameter-metadata subshell in `build-web-audioworklet.sh`. Each one
+  fails loudly when the flags are lost or builds nothing that ships, and CI never sets the variable.
+- The C ABI release build (`build-capi-release.sh:239`) takes the caller's flag environment; root
+  tracks that as a separate successor.
