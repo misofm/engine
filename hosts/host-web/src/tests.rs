@@ -8875,9 +8875,11 @@ mod structural_apply {
     ///
     /// Test value: red if the swap block's hook does not pair the observation readers (the tap
     /// would read as unarmed and the page's subscription would silently stop after every swap), or
-    /// if it maps the readers to the wrong effect slot after the added strip shifts them, or if
+    /// if it maps the readers to the wrong effect slot after the added strip shifts them, if
     /// the selected read reads readers it took at preparation and not the active plan's (#1586a:
-    /// after the carry those are the successor's fresh slots, which nothing publishes to).
+    /// after the carry those are the successor's fresh slots, which nothing publishes to), or if
+    /// it resolves them through another plan's index than the one that renders (#1589 R2: the
+    /// newest committed plan's, between a rebuild's commit and its adoption).
     #[test]
     fn an_armed_tap_and_its_windows_follow_the_effect_through_a_swap() {
         let mut model =
@@ -8917,6 +8919,15 @@ mod structural_apply {
                 revision
             } if revision == base + 1
         ));
+        // The successor waits for its block: the read resolves through the rendering plan's index.
+        assert!(
+            rig.host
+                .read_observation_addresses(&[address(0)])
+                .expect("a read before the adoption")[0]
+                .window
+                .is_some(),
+            "the rendering plan's tap reads its window before the adoption"
+        );
         rig.step();
         assert_eq!(rig.epoch(), 1);
         assert_eq!(
@@ -8936,6 +8947,70 @@ mod structural_apply {
             .expect("the carried tap kept publishing")
             .sequence;
         assert!(after > before, "the windows continue ({before} to {after})");
+    }
+
+    /// #1589 R1: a boot word that binds no observation queue (`0`) leaves the browser serving
+    /// neither the `Observe` edit nor its read: the edit is refused `observation.unavailable`
+    /// before anything commits, and `CAPABILITIES_GET` lists neither `OBSERVATION_READ` nor bit 15.
+    ///
+    /// Test value: red if the session serves the edit on plans with no queue for the tap (an
+    /// acknowledged subscription no render ever applies, or an internal fault in place of the
+    /// typed refusal), or if it advertises a read that could answer only `observation.unbound`.
+    #[test]
+    fn a_boot_with_no_observation_taps_serves_neither_observe_nor_its_read() {
+        let model = observed_model();
+        let mut rig = Rig::boot(
+            &model,
+            WebBootOptions {
+                live_control_observation_taps: 0,
+                ..options()
+            },
+            None,
+        );
+        let base = rig.host.committed_revision();
+        let arm = SessionEdit::Observe {
+            strip_id: model.tracks[0].id.clone(),
+            section: controls::TapSection::Inserts(StableId::parse("comp").expect("insert ID")),
+            tap_id: 1,
+            armed: true,
+            window_blocks: 1,
+        };
+        let Outcome::Refused(_, codes) = rig.apply(&[arm], 1) else {
+            panic!("an Observe edit on a plan with no observation queue is accepted")
+        };
+        assert_eq!(codes, ["observation.unavailable"]);
+        assert_eq!(rig.host.committed_revision(), base, "nothing committed");
+
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(2).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::CapabilitiesGet,
+                },
+                &mut bytes,
+            )
+            .expect("a capabilities frame");
+        let (result, reply) = rig.entry(&bytes[..length]);
+        assert_eq!(result, RESULT_OK);
+        let mut fields = [0_u16; 256];
+        let DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
+            ..
+        } = codec
+            .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+            .expect("a capabilities reply")
+        else {
+            panic!("a capabilities reply")
+        };
+        assert!(!capabilities.supported_commands.contains(&0x000f));
+        assert_eq!(
+            capabilities.flags.0 & protocol::CapabilityFlags::OBSERVATION.0,
+            0,
+            "no capability bit 15"
+        );
     }
 
     fn meter_loss(rig: &Rig) -> u64 {
