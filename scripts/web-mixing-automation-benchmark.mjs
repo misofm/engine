@@ -108,8 +108,8 @@ const BUFFER_OUTPUT = constant("bufferKinds", "outputPcm");
 // most `control_event` calls one drain makes on a lane (`MAXIMUM_CONTROL_EVENTS_PER_LANE`).
 const CONTROL_EVENT_LANES = [0, 1];
 const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
-// The SDK's default ring (`defaultSourceRingFrames`): the stall tolerance in quanta plus the
-// reserve.
+// The stall ring: the stall tolerance in quanta plus the reserve. It is the body of the SDK's
+// default ring (`defaultSourceRingFrames`), without the warm-prime terms of issue #1406.
 const SOURCE_RING_FRAMES = (() => {
   const { stallToleranceMs, reserveQuanta } = ABI_LAYOUT.constants.sourceRing;
   return (Math.ceil(Math.floor((RATE * stallToleranceMs) / 1000) / Q) + reserveQuanta) * Q;

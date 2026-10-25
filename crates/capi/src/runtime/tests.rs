@@ -6143,6 +6143,163 @@ fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
     crate::ffi::test_session_destroy(c_session);
 }
 
+/// #1690b gate 3: one `{master, gain reduction}` entry, configured once while no strip is the
+/// master (accepted), follows the core's `master` row. Two tracks share a source above the
+/// compressor's threshold; only the second (`comp`) has the compressor, its tap armed. One batch
+/// per window: no master reads `{1, Aggregate, 0, 0.0}`; the master on the compressor's track
+/// reads its tap's window; moved to the quiet track it reads absent; moved back it reads the tap
+/// again; a rebuild that adds a track sorting first (every strip's index shifts; the new track's
+/// compressor is unarmed) still reads the master's tap; and from the master's removal it reads
+/// absent. The handle is `1` throughout.
+///
+/// Test value: red if the entry is bound to a strip index (it reads the unarmed copy after the
+/// rebuild) or to the strip that was master when the entry resolved (it reads the compressor after
+/// the move to the quiet track, or after the removal).
+#[test]
+fn a_master_entry_follows_the_master_row_across_moves_a_rebuild_and_a_removal() {
+    let model = compressor_pair_session();
+    let quiet = model.tracks[0].id.clone();
+    let comp = model.tracks[1].id.clone();
+    let comp_route = model
+        .routes
+        .iter()
+        .find(|route| {
+            matches!(&route.source, session::RouteSource::Track { track_id, .. } if *track_id == comp)
+        })
+        .expect("the compressor track's route")
+        .id
+        .clone();
+    let document = session::canonical_session_json(&model).expect("compressor session");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let window = fixture_window_blocks();
+    assert_eq!(
+        configure_meters_c(
+            c_session,
+            1,
+            vec![protocol::MeterEntry {
+                target: protocol::MeterTarget::Master,
+                metric: protocol::MeterMetric::GainReduction,
+            }],
+            window
+        ),
+        (StatusCode::Ok, None),
+        "a master entry with no master is accepted"
+    );
+    let mut request = 2;
+    let mut monitor = |edit: protocol::SessionEdit| {
+        let (result, response) = command_c(c_session, &transaction_at(request, 42, &[edit]));
+        assert_eq!(
+            (result, response_status(&response)),
+            (crate::RESULT_OK, StatusCode::Ok),
+            "request {request}"
+        );
+        request += 1;
+    };
+    let master = |strip: &session::StableId| protocol::SessionEdit::SetControl {
+        address: protocol::control_core::ControlAddress {
+            owner: protocol::control_core::Owner::Strip(strip.clone()),
+            section: protocol::control_core::Section::Own,
+            control: 4,
+            lane: protocol::control_core::Lane::Both,
+        },
+        value: 1.0,
+        ramp_samples: None,
+        expected_effect: None,
+    };
+    monitor(observe_compressor(
+        &comp,
+        true,
+        u32::try_from(window).expect("window"),
+    ));
+    // A full-scale square wave, far above the compressor's default threshold. The last batch of
+    // each run.
+    let render_until = |end: u64, block: &mut u64| {
+        while *block < end {
+            let left: Vec<f32> = (0..128)
+                .map(|i| if i % 2 == 0 { 0.9 } else { -0.9 })
+                .collect();
+            submit_c(c_session, 1, *block * 128, 48_000, &left, &left, false);
+            render_c(c_plan, *block);
+            *block += 1;
+        }
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+        let (_, _, _, records) = meter_batches_c(c_session).pop().expect("a batch");
+        <[protocol::MeterRecord; 1]>::try_from(records).expect("one record")
+    };
+    // The reduction of the newest window the compressor's reader holds in the running epoch.
+    let held = || {
+        let snapshot = crate::ffi::test_transaction_snapshot(c_session);
+        let (_, _, _, taps) = snapshot
+            .observation_windows
+            .iter()
+            .find(|(epoch, strip, _, _)| {
+                *epoch == snapshot.provider_epoch && **strip == *comp.as_str()
+            })
+            .expect("the compressor's readers");
+        let (_, _, _, [left, right]) = taps[0].expect("a published window");
+        f32::from_bits(left).max(f32::from_bits(right))
+    };
+    let record = |flags, value| protocol::MeterRecord {
+        handle: 1,
+        component: protocol::MeterComponent::Aggregate,
+        flags,
+        value,
+    };
+    let absent = [record(0, 0.0)];
+    let mut block = 0;
+    assert_eq!(render_until(2 * window, &mut block), absent, "no master");
+    monitor(master(&comp));
+    let reading = render_until(3 * window, &mut block);
+    assert_eq!(reading, [record(1, held())], "the compressor's track");
+    assert!(reading[0].value > 1.0, "the compressor reduces");
+    monitor(master(&quiet));
+    assert_eq!(
+        render_until(4 * window, &mut block),
+        absent,
+        "the quiet track"
+    );
+    monitor(master(&comp));
+    assert_eq!(
+        render_until(5 * window, &mut block),
+        [record(1, held())],
+        "the compressor's track again"
+    );
+    assert_eq!(
+        transact_c(c_session, 100, 42, &add_muted_copy(&model, 1, "a-muted")),
+        protocol::EditPath::Rebuild
+    );
+    assert_eq!(
+        render_until(8 * window, &mut block),
+        [record(1, held())],
+        "after a rebuild that shifts every strip"
+    );
+    // The commits' `SESSION_COMMITTED` events, so the reliable lane has room for the next one.
+    while !event_c(c_session, crate::EVENT_LANE_RELIABLE).1.is_empty() {}
+    assert_eq!(
+        transact_c(
+            c_session,
+            101,
+            43,
+            &[
+                protocol::SessionEdit::RemoveRoute {
+                    route_id: comp_route
+                },
+                protocol::SessionEdit::RemoveTrack {
+                    track_id: comp.clone()
+                },
+            ]
+        ),
+        protocol::EditPath::Rebuild
+    );
+    assert_eq!(
+        render_until(11 * window, &mut block),
+        absent,
+        "the master removed"
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
 /// #1583 gate 5: nine windows rendered with no service call overflow the output meter's queue of
 /// eight. With three windows per batch, the first service stages batches 1 and 2 (windows 1-6),
 /// render dropped window 9, and the next window's gap discards the partial batch of windows 7

@@ -8,7 +8,7 @@ refused forms). Optional/boundary values are represented by the transaction's ne
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`cb8db815ed0103a0`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`dea650f7e506833e`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -144,3 +144,8 @@ and a member of each section) and `event.response_ready_refused` (`NOT_FOUND` wi
 diagnostic), and the static capabilities frame lists `8040` with `000e`, as bit 14 now requires.
 Only `response.capabilities` moves; with its event list patched back and the three new frames
 filtered out, the 56 earlier frames hash to the old pin. The frame count is 59.
+
+Issue #1690 re-pinned it from `cb8db815ed0103a0`: the meter table gains the master target (`3`,
+no strip ID, gain reduction only), so `command.telemetry_configure` and `response.telemetry`
+carry a third entry, the master's gain reduction. Only those two frames move; the 57 others are
+byte-equal. The frame count stays 59.

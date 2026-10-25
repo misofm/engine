@@ -1040,8 +1040,9 @@ pub struct PlanStateInventory {
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
     restarted: Box<[Box<str>]>,
-    /// The strips whose fade-in this plan's table holds, sorted by strip ID (issue #1392 D1):
-    /// "this plan armed the strip", not "the fade still waits", which only render knows.
+    /// The strips and routes whose fade-in this plan's table holds, sorted by ID, then owner
+    /// (issues #1392 D1, #1877 D1): "this plan armed it", not "the fade still waits", which only
+    /// render knows.
     fade_arms: Box<[FadeArmInventoryRow]>,
     /// Which entries of this plan's fade table render has fired (issue #1392, root ruling of
     /// attempt 2): a successor drops the row of a fired entry, so rows never accumulate and a
@@ -1072,14 +1073,25 @@ pub struct PlanStateInventory {
     prime_bytes: u64,
 }
 
-/// One fade-in entry of a prepared plan's table (issue #1392 D1): the strip and the entry's index,
-/// the index a successor's carry pair names.
+/// One fade-in entry of a prepared plan's table (issues #1392 D1, #1877 D1): the strip or route
+/// and the entry's index, the index a successor's carry pair names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FadeArmInventoryRow {
-    /// The strip ID: a track's or a submix's.
+    /// The strip ID (a track's or a submix's) or the route ID, as `owner` says.
     pub(crate) id: Box<str>,
     /// The entry's index in the plan's fade table.
     pub(crate) entry: u32,
+    /// What the entry fades in: a strip's fader or a route.
+    pub(crate) owner: FadeArmOwner,
+}
+
+/// What a fade-in entry of [`FadeArmInventoryRow`] fades in (#1877 D1).
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum FadeArmOwner {
+    /// A strip's fader lane (#1288, #1392).
+    Strip,
+    /// A route's six-word live op (#1363).
+    Route,
 }
 
 /// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
@@ -4055,16 +4067,51 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         Some(base) if attach_live && !base.discontinuity => {
             let added = added_strips(base.committed, model);
             let watch = &base.inventory.fade_watch;
-            let waiting: Vec<&str> = base
-                .inventory
-                .fade_arms
-                .iter()
-                .filter(|row| !watch.fired(row.entry))
-                .map(|row| &*row.id)
+            let unfired = |owner: FadeArmOwner| {
+                base.inventory
+                    .fade_arms
+                    .iter()
+                    .filter(move |row| row.owner == owner && !watch.fired(row.entry))
+            };
+            let waiting: Vec<&str> = unfired(FadeArmOwner::Strip).map(|row| &*row.id).collect();
+            // #1877 D2: the routes whose predecessor entry has not fired, re-armed here.
+            let waiting_routes: Vec<(&str, u32)> = unfired(FadeArmOwner::Route)
+                .map(|row| (&*row.id, row.entry))
                 .collect();
-            added_route_fades(base.committed, model, view, &added, &waiting)
+            added_route_fades(
+                base.committed,
+                model,
+                view,
+                &added,
+                &waiting,
+                &waiting_routes,
+            )
         }
         _ => Vec::new(),
+    };
+    // #1877 D6: a re-armed route the send join does not list (a transition route, which has no
+    // lane) joins too when its values are unchanged, so its op carries the displaced op's state:
+    // a fire the predecessor ran after this preparation read its watch then continues mid-ramp.
+    let route_joins: Vec<RouteJoin<'_>> = match successor {
+        Some(base) => {
+            let mut joins = route_joins;
+            for fade in route_fades
+                .iter()
+                .filter(|fade| fade.carried.is_some() && !controls::route_rows_live(fade.route))
+            {
+                let id = fade.route.id.as_str();
+                let unchanged = base
+                    .committed
+                    .routes
+                    .iter()
+                    .any(|before| before == fade.route);
+                if unchanged && !joins.iter().any(|join| join.id == id) {
+                    joins.push(RouteJoin { id, retarget: None });
+                }
+            }
+            joins
+        }
+        None => route_joins,
     };
     let transition: Vec<StableGraphId> = route_fades
         .iter()
@@ -4838,6 +4885,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     .find(|fade| fade.route.id.as_str() == route.id.as_str())
                 {
                     fade.strip = Some(source);
+                    // #1877, #1392 D2: a restarted strip's pending entry is replaced by the fresh
+                    // arm, never carried beside it; the send's entry goes with the fader's.
+                    fade.carried = None;
                     continue;
                 }
                 let into_added = matches!(&route.destination,
@@ -4852,6 +4902,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 fades.push(RouteFade {
                     route,
                     strip: Some(source),
+                    carried: None,
                 });
             }
             fades
@@ -4880,7 +4931,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             // false`, so the successor needs no entry and never fades it again.
             let watch = &base.inventory.fade_watch;
             strips.extend(base.inventory.fade_arms.iter().filter_map(|row| {
-                if watch.fired(row.entry) {
+                if row.owner != FadeArmOwner::Strip || watch.fired(row.entry) {
                     return None;
                 }
                 let lane =
@@ -4903,7 +4954,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let carried_arms = fade_strips
         .iter()
         .filter(|(_, from)| from.is_some())
-        .count();
+        .count()
+        + route_fades
+            .iter()
+            .filter(|fade| fade.carried.is_some())
+            .count();
     // #1363 D3: the route arms join the strips' table after them, one entry each.
     let fade_arm_bytes =
         graph::fade_arm_table_bytes(fade_arms.len() + route_fades.len(), carried_arms)
@@ -5030,8 +5085,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_builtin_strip_carry(&mut plan, strip_carry.moves)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
-    // Issue #1363 D3: each added route's arm, on its live route op; the routes take no inventory
-    // row, so a later successor neither carries nor re-arms them.
+    // Issue #1363 D3: each added route's arm, on its live route op. #1877 D1: each takes an
+    // inventory row, so a later successor re-arms it and carries its entry, as a strip's.
     let route_arms = route_fade_arms(
         model,
         &route_fades,
@@ -5049,8 +5104,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(|_| graph_failure("host.fade.install"))?;
         fade_watch = watch;
         let mut pairs = Vec::new();
-        for (id, entry) in strips.into_iter().zip(entries) {
-            let Some(entry) = entry else {
+        let strip_count = strips.len();
+        for (id, entry) in strips.into_iter().zip(&entries) {
+            let Some(entry) = *entry else {
                 continue;
             };
             if let Some(&(_, Some(predecessor))) =
@@ -5064,13 +5120,32 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             fade_arm_rows.push(FadeArmInventoryRow {
                 id: id.into(),
                 entry,
+                owner: FadeArmOwner::Strip,
+            });
+        }
+        // #1877 D1, D2: the route arms follow the strips' in `route_fades` order.
+        for (fade, entry) in route_fades.iter().zip(entries.iter().skip(strip_count)) {
+            let Some(entry) = *entry else {
+                continue;
+            };
+            if let Some(predecessor) = fade.carried {
+                pairs.push(graph::GraphFadeArmPair {
+                    successor: entry,
+                    predecessor,
+                });
+            }
+            fade_arm_rows.push(FadeArmInventoryRow {
+                id: fade.route.id.as_str().into(),
+                entry,
+                owner: FadeArmOwner::Route,
             });
         }
         if !pairs.is_empty() {
             graph::install_fade_arm_carry(&mut plan, pairs)
                 .map_err(|_| graph_failure("host.carry.install"))?;
         }
-        fade_arm_rows.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        fade_arm_rows
+            .sort_unstable_by(|left, right| (&left.id, left.owner).cmp(&(&right.id, right.owner)));
     }
     // #1674 R1: the meter readers the control side pairs at promotion, in the swap block's record
     // order, read before the moves go to the plan.
@@ -7523,6 +7598,9 @@ fn added_strips<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<&'
 struct RouteFade<'a> {
     route: &'a session::Route,
     strip: Option<&'a str>,
+    /// The predecessor's unfired entry for the route, whose render state this arm takes at the
+    /// swap block (#1877 D2); `None` for a route armed afresh.
+    carried: Option<u32>,
 }
 
 /// The routes of `model` a successor arms to fade in (#1363 D1 (a), (c)), in `model`'s route
@@ -7533,12 +7611,18 @@ struct RouteFade<'a> {
 /// route whose destination strip is added (its fader's fade does), a route the session mutes
 /// (it arms nothing), or a following route ([`follows_automated_mute`], which binds no six-word
 /// op). A tap before an armed fader waits for that strip's fade.
+///
+/// #1877 D2: a route of `waiting_routes` (one whose predecessor entry has not fired, with that
+/// entry) that `committed` holds with the same source, tap and destination is armed again on the
+/// terms of (a), carrying the entry; one this model re-points, mutes or makes following is not
+/// (the displaced arm then fires at the swap, #1363 D3a).
 fn added_route_fades<'a>(
     committed: &SessionModel,
     model: &'a SessionModel,
     view: controls::ModelView<'_>,
     added: &[&str],
     waiting: &[&str],
+    waiting_routes: &[(&str, u32)],
 ) -> Vec<RouteFade<'a>> {
     let known: BTreeSet<&str> = committed
         .routes
@@ -7567,7 +7651,21 @@ fn added_route_fades<'a>(
                 .any(|output| output.id.as_str() == output_id.as_str()),
         };
         let armed_source = added.contains(&source) || waiting.contains(&source);
-        let fade = if added.contains(&source) {
+        let carried = waiting_routes
+            .iter()
+            .find(|(id, _)| *id == route.id.as_str())
+            .filter(|_| {
+                committed.routes.iter().any(|before| {
+                    before.id == route.id
+                        && before.source == route.source
+                        && before.destination == route.destination
+                })
+            })
+            .map(|&(_, entry)| entry);
+        let fade = if carried.is_some() {
+            // #1877 D2: an armed route that keeps its endpoints, armed again.
+            destination_known && (!armed_source || tap.precedes_fader())
+        } else if added.contains(&source) {
             // (c): a send of an added strip, from a tap before its fader.
             tap.precedes_fader()
         } else {
@@ -7580,6 +7678,7 @@ fn added_route_fades<'a>(
             fades.push(RouteFade {
                 route,
                 strip: armed_source.then_some(source),
+                carried,
             });
         }
     }
