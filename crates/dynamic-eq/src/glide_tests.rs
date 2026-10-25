@@ -590,8 +590,9 @@ fn a_glide_moves_no_bank_mates_bit_and_allocates_nothing() {
 
 /// **Gate 5.** A lane snapshotted mid-glide and restored into an instance prepared with the
 /// glide's target mode renders bit for bit as the uninterrupted one. A payload restored under
-/// another mode leaves that mode at rest, and a forged weight outside `[0, 1]`, a settled weight
-/// off its target, a target that is no mode's, or channels at two modes are refused and change
+/// another mode leaves that mode at rest, every reset and a lane swap leave no glide in flight,
+/// and a forged weight outside `[0, 1]`, `-0.0`, a moving weight with a zero step, a settled
+/// weight off its target, a target that is no mode's, or channels at two modes are refused and change
 /// nothing.
 #[test]
 fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_refused() {
@@ -658,14 +659,69 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
         "a payload of another mode must leave the lane's own mode at rest"
     );
 
+    // Resets leave no glide in flight: a discontinuity reset snaps it to its target, a full reset
+    // seats the weights at rest at the lane's mode (the retargeted one), and a lane swap's
+    // defaults exchange rests them at the incoming mode.
+    for kind in [
+        ResetKind::DiscontinuityKeepParameters,
+        ResetKind::FullToDefaults,
+    ] {
+        let mut lane = prepare(LinkMode::DualMono);
+        assert!(lane.retarget(0, LinkMode::Average, 96));
+        render(&mut lane, 0..20);
+        let Under::Scalar(effect) = &mut lane else {
+            unreachable!("a scalar instance")
+        };
+        effect.reset(kind);
+        assert_eq!(
+            lane.link_words(0),
+            rest_words(LinkMode::Average),
+            "{kind:?} left a glide in flight"
+        );
+    }
+    let width = BankWidth::ALL[0];
+    let lanes = width.lanes() as usize;
+    let mut bank = Under::new(
+        Some(width),
+        &vec![request(&values, LinkMode::DualMono); lanes],
+    );
+    assert!(bank.retarget(0, LinkMode::Average, 96));
+    let offsets = vec![0_u32; lanes + 1];
+    let (mut left, mut right) = (vec![0.1_f32; 20 * lanes], vec![0.01_f32; 20 * lanes]);
+    bank.process(&mut left, &mut right, 0, (&[], &offsets), false);
+    let mut incoming: Vec<u8> = values
+        .iter()
+        .step_by(2)
+        .chain(values.iter().skip(1).step_by(2))
+        .flat_map(|value| value.value.to_le_bytes())
+        .chain([0; 4])
+        .collect();
+    assert_eq!(incoming.len(), LANE_DEFAULT_BYTES);
+    let _ = effect_contract::exchange_lane_link_word(
+        LinkMode::Maximum,
+        &mut incoming[LANE_DEFAULT_BYTES - 4..],
+    );
+    let Under::Bank(processor, _) = &mut bank else {
+        unreachable!("a bank")
+    };
+    assert!(processor.exchange_lane_defaults(0, &mut incoming));
+    assert_eq!(
+        bank.link_words(0),
+        rest_words(LinkMode::Maximum),
+        "a lane swap left a glide in flight"
+    );
+
     let mut target = prepare(LinkMode::Average);
     let before = target.snapshot(0);
     let first = STATE_LINK_WORD * 4;
-    // (word, value): a current outside `[0, 1]` either way, a target that is no mode's (the
-    // `w_link` and the `w_avg` one), and a settled `w_avg` weight off its target.
-    let forgeries: [&[(usize, f32)]; 5] = [
+    // (word, value): a current outside `[0, 1]` either way, a `-0.0` current, a moving `w_link`
+    // with a zero step, a target that is no mode's (the `w_link` and the `w_avg` one), and a
+    // settled `w_avg` weight off its target.
+    let forgeries: [&[(usize, f32)]; 7] = [
         &[(0, 1.5)],
         &[(0, -0.25)],
+        &[(0, -0.0)],
+        &[(2, 0.0)],
         &[(1, 0.5)],
         &[(5, 0.5)],
         &[(4, 0.5), (5, 1.0), (6, 0.0), (7, 0.0)],
