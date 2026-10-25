@@ -155,13 +155,32 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
         )
         .expect_err("final right-channel word must be validated")
         .code,
-        "effect.state.parameter"
+        // The final word is the `w_avg` glide's countdown (issue #1370 D6).
+        "effect.state.link"
     );
     assert_eq!(
         snapshot_track(bank.as_ref(), 0),
         bank_saved,
         "bank restore must be transactional across both channels"
     );
+    // The release coefficient ramp's countdown, the last right-channel word before #1370 grew
+    // the section, is still held to the 64-sample smoothing bound.
+    let mut corrupt_release = bank_saved.1.clone();
+    write_u32(&mut corrupt_release, ramp_word(8, REMAINING), 65);
+    assert_eq!(
+        restore_track(
+            bank.as_mut(),
+            0,
+            STATE_VERSION,
+            &bank_left,
+            &corrupt_release,
+            bank_scalar.as_ref(),
+        )
+        .expect_err("the release ramp's countdown must be validated")
+        .code,
+        "effect.state.parameter"
+    );
+    assert_eq!(snapshot_track(bank.as_ref(), 0), bank_saved);
 
     let mut bank_short = bank_saved.1.clone();
     bank_short.pop();

@@ -69,6 +69,12 @@ impl ReferencePeakCompressor {
         })
     }
 
+    /// Sets the makeup gain for the next sample, as a caller that models a ramped makeup does
+    /// frame by frame (issue #1370). The caller keeps it in the launch domain.
+    pub fn set_makeup_db(&mut self, makeup_db: f64) {
+        self.parameters.makeup_db = makeup_db;
+    }
+
     /// Processes one already-sanitized current main and detector sample.
     pub fn process_sample(&mut self, main: f64, detector: f64) -> f64 {
         let level = (20.0 * detector.abs().max(1.0e-8).log10()).clamp(-160.0, 24.0);

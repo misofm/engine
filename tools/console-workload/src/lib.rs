@@ -444,6 +444,28 @@ pub enum Workload {
     ///
     /// Not in [`WORKLOADS`]: see [`CONSOLE_STRIP_WORKLOADS`].
     SixtyFourTrackConsoleSparse,
+    /// Toggling activity (issue #1783): the standing console with every odd track flipping between
+    /// exact zeros and the tone every [`TOGGLE_HALF_PERIOD_BLOCKS`] blocks
+    /// ([`InputSignal::OddTracksToggle`]).
+    ///
+    /// The plan is the unmodified standing console, as on the sparse row; only the input differs.
+    /// Read against [`Self::SixtyFourTrackConsoleSparse`] (the odd tracks always silent, the floor)
+    /// and [`Self::SixtyFourTrackConsole`] (always active, the ceiling). A lane that has carried
+    /// the tone needs about 620 blocks to rest (#1784), so no toggling lane rests within a half
+    /// period: the row measures the activity test under flipping input, not a lane cycling
+    /// through rest, and it cannot thrash a packer (#1782).
+    ///
+    /// Not in [`WORKLOADS`]: see [`PACKING_WORKLOADS`].
+    SixtyFourTrackConsoleToggle,
+    /// One active lane per bank (issue #1783): the standing console with one track per bank fed
+    /// the tone and every other track exact zeros ([`InputSignal::OneTrackPerBank`]).
+    ///
+    /// The best case for packing (#1782): every bank pays a whole bank's work for one lane. Read
+    /// against [`Self::SixtyFourTrackConsole`] and [`Self::SixtyFourTrackIdle`]. Like the sparse
+    /// row it needs no settling: a silent lane starts at zero state and stays there.
+    ///
+    /// Not in [`WORKLOADS`]: see [`PACKING_WORKLOADS`].
+    SixtyFourTrackConsoleOnePerBank,
 }
 
 impl Workload {
@@ -497,7 +519,33 @@ pub enum InputSignal {
     /// Even-indexed tracks read the tone and odd-indexed tracks exact zeros, so every bank of the
     /// standing console holds both at either lane width.
     OddTracksSilent,
+    /// One track per bank reads the tone and every other track exact zeros (issue #1783): the
+    /// track whose index is a multiple of this build's lane width ([`Backend::current`]), so every
+    /// bank of the standing console holds exactly one active lane.
+    ///
+    /// Keyed on the lane width because "one lane per bank" cannot be width-independent: a frozen
+    /// `% 8` pattern leaves every second four-lane bank wholly silent, which is the whole-bank skip
+    /// (#1107), not the packing case (#1782) this row is for. The record names the backend it ran
+    /// at, so the pattern it fed is stated. A plan dispatched at a width other than the build's
+    /// (`SessionRuntime::build_with_dispatch`) is not fed this pattern by any row.
+    OneTrackPerBank,
+    /// Even tracks read the tone; odd tracks alternate between exact zeros and the tone every
+    /// [`TOGGLE_HALF_PERIOD_BLOCKS`] blocks, starting silent (issue #1783).
+    ///
+    /// Odd tracks only, so no bank flips as a whole (that is the whole-bank skip's entry and exit,
+    /// #1107) and every bank always holds an active lane.
+    OddTracksToggle,
 }
+
+/// The toggle row's half period, in blocks (issue #1783): odd tracks hold silence for this many
+/// blocks, then the tone for this many, and so on.
+///
+/// "A few blocks": longer than any per-block activity scan, and far shorter than every rest bound
+/// on the standing console -- a compressor that has carried the tone needs about 620 blocks to
+/// rest (#1784: 79,200 samples). So no toggling lane ever rests, and the row measures the activity
+/// test under flipping input; it cannot cycle a lane through rest, and so cannot thrash a packer.
+/// The period is in the row's input name, so a changed period cannot share a record name.
+pub const TOGGLE_HALF_PERIOD_BLOCKS: u64 = 8;
 
 impl InputSignal {
     /// The record-side name of this input.
@@ -507,17 +555,37 @@ impl InputSignal {
             Self::Tone => "tone",
             Self::Silence => "silence",
             Self::OddTracksSilent => "odd_tracks_silent",
+            Self::OneTrackPerBank => "one_track_per_bank",
+            Self::OddTracksToggle => "odd_tracks_toggle_8_blocks",
         }
     }
 
-    /// Whether the track at `track` (its index in the model's track order) reads exact zeros.
+    /// Whether the track at `track` (its index in the model's track order) reads exact zeros in
+    /// the first block.
     #[must_use]
     pub const fn silent(self, track: usize) -> bool {
+        self.silent_in_block(track, 0)
+    }
+
+    /// Whether the track at `track` reads exact zeros in block `block` (counted in quanta of
+    /// source time). Only [`Self::OddTracksToggle`] depends on the block.
+    #[must_use]
+    pub const fn silent_in_block(self, track: usize, block: u64) -> bool {
         match self {
             Self::Tone => false,
             Self::Silence => true,
             Self::OddTracksSilent => track % 2 == 1,
+            Self::OneTrackPerBank => !track.is_multiple_of(Backend::current().width()),
+            Self::OddTracksToggle => {
+                track % 2 == 1 && (block / TOGGLE_HALF_PERIOD_BLOCKS).is_multiple_of(2)
+            }
         }
+    }
+
+    /// Whether any track's input changes from block to block.
+    #[must_use]
+    pub const fn toggles(self) -> bool {
+        matches!(self, Self::OddTracksToggle)
     }
 }
 
@@ -620,9 +688,20 @@ pub const CONSOLE_STRIP_WORKLOADS: [Workload; 5] = [
     Workload::SixtyFourTrackConsoleSparse,
 ];
 
+/// The packing rows the native bench emits after [`CONSOLE_STRIP_WORKLOADS`] (issue #1783): the
+/// standing console with toggling activity and with one active lane per bank, the two inputs
+/// packing (#1782) is read on.
+///
+/// A separate array, so the console-strip rows #1085 froze for before/after reads stay as they
+/// were.
+pub const PACKING_WORKLOADS: [Workload; 2] = [
+    Workload::SixtyFourTrackConsoleToggle,
+    Workload::SixtyFourTrackConsoleOnePerBank,
+];
+
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
 /// [`DRIVER_FED_WORKLOADS`], then [`LIVE_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then
-/// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`].
+/// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`].
 pub fn native_session_rows() -> impl Iterator<Item = Workload> {
     WORKLOADS
         .into_iter()
@@ -631,6 +710,7 @@ pub fn native_session_rows() -> impl Iterator<Item = Workload> {
         .chain(METERED_WORKLOADS)
         .chain(BUS_SEND_WORKLOADS)
         .chain(CONSOLE_STRIP_WORKLOADS)
+        .chain(PACKING_WORKLOADS)
 }
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
@@ -735,6 +815,8 @@ impl Workload {
             Self::SixteenTrackStrip => "sixteen_track_strip",
             Self::SixtyFourTrackAppShape => "sixty_four_track_app_shape",
             Self::SixtyFourTrackConsoleSparse => "sixty_four_track_console_sparse",
+            Self::SixtyFourTrackConsoleToggle => "sixty_four_track_console_toggle",
+            Self::SixtyFourTrackConsoleOnePerBank => "sixty_four_track_console_one_per_bank",
         }
     }
     /// How many console tracks this workload renders.
@@ -876,6 +958,8 @@ impl Workload {
         match self {
             Self::SixtyFourTrackIdle => InputSignal::Silence,
             Self::SixtyFourTrackConsoleSparse => InputSignal::OddTracksSilent,
+            Self::SixtyFourTrackConsoleToggle => InputSignal::OddTracksToggle,
+            Self::SixtyFourTrackConsoleOnePerBank => InputSignal::OneTrackPerBank,
             _ => InputSignal::Tone,
         }
     }
@@ -2545,26 +2629,29 @@ fn channel_mappings(model: &SessionModel) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// One track input's frozen block, from its track id: the words the source set serves for that
-/// track.
+/// One track input's frozen block in source block `at`, from its track id: the words the source
+/// set serves for that track.
 ///
 /// The one place a track id becomes samples; [`FrozenSourceDriver`] builds every claim with it.
 fn frozen_track_source(
     track_id: &str,
     input: InputSignal,
+    at: u64,
     source: &SourceSignal,
     mappings: &[(usize, usize)],
 ) -> FrozenGraphSource {
-    let (block, mapping) = track_block(track_id, input, source, mappings);
+    let (block, mapping) = track_block(track_id, input, at, source, mappings);
     FrozenGraphSource::from_block(&block, mapping)
 }
 
-/// One track input's unmapped stereo block (left plane, then right) and its declared channel
-/// mapping, from its track id: what [`frozen_track_source`] maps into planes and what the live
-/// producer submits into the track's ring (issue #938), whose set applies the mapping.
+/// One track input's unmapped stereo block (left plane, then right) in source block `at` and its
+/// declared channel mapping, from its track id: what [`frozen_track_source`] maps into planes and
+/// what the live producer submits into the track's ring (issue #938), whose set applies the
+/// mapping.
 fn track_block<'a>(
     track_id: &str,
     input: InputSignal,
+    at: u64,
     source: &'a SourceSignal,
     mappings: &[(usize, usize)],
 ) -> (Cow<'a, [f32]>, (usize, usize)) {
@@ -2573,7 +2660,7 @@ fn track_block<'a>(
         .parse()
         .unwrap_or(0);
     let block = source
-        .block(track, input.silent(track))
+        .block(track, input.silent_in_block(track, at))
         .unwrap_or_else(|| panic!("the injected source table must cover track {track}"));
     let mapping = mappings
         .get(track)
@@ -2605,9 +2692,17 @@ fn is_track_input(node: &GraphNodeId) -> bool {
 /// the arena buffer the executor hands it, and `played_planes` lends the same words in place.
 /// Which one a claim takes is decided by the graph at bind (the lent-claims path of issue #918),
 /// not by this driver.
+///
+/// A toggling input (issue #1783, [`InputSignal::OddTracksToggle`]) holds a second block per claim,
+/// its input in the other phase, built here too; `begin_block` picks the phase from the block's
+/// first sample, so the render thread only selects between two preallocated slices.
 struct FrozenSourceDriver {
-    /// Claim `i`'s `(left, right)` block, one allocation for the whole set.
+    /// Claim `i`'s `(left, right)` block in the first phase, one allocation for the whole set.
     claims: Box<[FrozenGraphSource]>,
+    /// Claim `i`'s block in the second phase, or empty when the input never toggles.
+    toggled: Box<[FrozenGraphSource]>,
+    /// Whether this block serves [`Self::toggled`].
+    in_toggled_phase: bool,
 }
 
 impl FrozenSourceDriver {
@@ -2623,25 +2718,46 @@ impl FrozenSourceDriver {
         source: &SourceSignal,
         mappings: &[(usize, usize)],
     ) -> Self {
-        let claims = claims
-            .iter()
-            .map(|claim| match &claim.node {
-                GraphNodeId::TrackStage {
-                    track_id,
-                    stage: TrackStage::Input,
-                } => frozen_track_source(track_id.as_str(), input, source, mappings),
-                node => panic!("a source claim must name a track input, not {node:?}"),
-            })
-            .collect();
-        Self { claims }
+        let phase = |at: u64| -> Box<[FrozenGraphSource]> {
+            claims
+                .iter()
+                .map(|claim| match &claim.node {
+                    GraphNodeId::TrackStage {
+                        track_id,
+                        stage: TrackStage::Input,
+                    } => frozen_track_source(track_id.as_str(), input, at, source, mappings),
+                    node => panic!("a source claim must name a track input, not {node:?}"),
+                })
+                .collect()
+        };
+        let toggled = if input.toggles() {
+            phase(TOGGLE_HALF_PERIOD_BLOCKS)
+        } else {
+            Box::default()
+        };
+        Self {
+            claims: phase(0),
+            toggled,
+            in_toggled_phase: false,
+        }
     }
 
-    /// The set's engine-owned bytes: the one boxed slice of frozen planes.
+    /// The blocks this block serves: the first phase's, or the second's on a toggling input.
+    fn served(&self) -> &[FrozenGraphSource] {
+        if self.in_toggled_phase {
+            &self.toggled
+        } else {
+            &self.claims
+        }
+    }
+
+    /// The set's engine-owned bytes: the boxed slices of frozen planes.
     ///
     /// Charged as overhead (source-plane storage) and not as PCM already charged by the session
     /// declaration, because no session declaration charges the benchmark's frozen tone.
     fn resource_report(&self) -> GraphSourceSetResourceReport {
-        let bytes = core::mem::size_of_val(&*self.claims) as u64;
+        let bytes =
+            (core::mem::size_of_val(&*self.claims) + core::mem::size_of_val(&*self.toggled)) as u64;
         GraphSourceSetResourceReport {
             pcm_payload_already_charged_bytes: 0,
             overhead_bytes: bytes,
@@ -2656,20 +2772,23 @@ impl FrozenSourceDriver {
 impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
     fn retained_bytes(&self) -> u64 {
         effect_contract::retained::slice(&self.claims)
+            + effect_contract::retained::slice(&self.toggled)
     }
 
     fn claim_count(&self) -> usize {
         self.claims.len()
     }
 
-    /// Nothing to play: the block is frozen. A frame count other than the quantum the planes
-    /// were built at is refused rather than served short.
-    fn begin_block(&mut self, _first_sample: u64, frames: u32) -> Result<(), RenderError> {
-        if usize::try_from(frames) == Ok(QUANTUM) {
-            Ok(())
-        } else {
-            Err(RenderError::InvalidEnvelope)
+    /// Nothing to play: the block is frozen, or on a toggling input one of two frozen blocks,
+    /// picked by the block's source time. A frame count other than the quantum the planes were
+    /// built at is refused rather than served short.
+    fn begin_block(&mut self, first_sample: u64, frames: u32) -> Result<(), RenderError> {
+        if usize::try_from(frames) != Ok(QUANTUM) {
+            return Err(RenderError::InvalidEnvelope);
         }
+        self.in_toggled_phase = !self.toggled.is_empty()
+            && (first_sample / QUANTUM as u64 / TOGGLE_HALF_PERIOD_BLOCKS) % 2 == 1;
+        Ok(())
     }
 
     /// Copies claim `claim_index`'s frozen block into the destinations the executor hands it.
@@ -2679,7 +2798,7 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
         left: &mut [f32],
         right: &mut [f32],
     ) -> Result<(), RenderError> {
-        let Some(claim) = self.claims.get(claim_index) else {
+        let Some(claim) = self.served().get(claim_index) else {
             return Err(RenderError::InvalidEnvelope);
         };
         if left.len() != QUANTUM || right.len() != QUANTUM {
@@ -2696,7 +2815,7 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
 
     /// Lends claim `claim_index`'s frozen block in place: the words `copy_track_input` copies.
     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
-        self.claims
+        self.served()
             .get(claim_index)
             .map(|claim| (&claim.left[..], &claim.right[..]))
     }
@@ -2827,8 +2946,9 @@ impl LiveFeed {
     ///
     /// # Panics
     ///
-    /// Panics if a claim names anything but a track input, or if a preparation step refuses: both
-    /// are defects in the subject.
+    /// Panics if a claim names anything but a track input, if `input` toggles (the producer submits
+    /// one frozen block per track), or if a preparation step refuses: all are defects in the
+    /// subject.
     fn prepare(
         envelope: engine::realtime::RenderEnvelope,
         claims: &[GraphSourceInputClaim],
@@ -2837,6 +2957,10 @@ impl LiveFeed {
         mappings: &[(usize, usize)],
         largest_arrival: u64,
     ) -> (GraphPreparedSourceSet, Self) {
+        assert!(
+            !input.toggles(),
+            "the live feed submits one frozen block per track"
+        );
         let published = PublishedGeneration::new(SourceGeneration(1));
         let config = PcmSourceRingConfig {
             channel_count: 2,
@@ -2859,7 +2983,7 @@ impl LiveFeed {
                     claim.node
                 );
             };
-            let (block, (left, right)) = track_block(track_id.as_str(), input, source, mappings);
+            let (block, (left, right)) = track_block(track_id.as_str(), input, 0, source, mappings);
             let (producer, consumer, resources) =
                 PcmSourceRing::prepare_host_region(config, SourceFrame(0), published.clone())
                     .expect("a live source ring");
@@ -3314,6 +3438,7 @@ mod tests {
             .chain(LIVE_FED_WORKLOADS)
             .chain(BUS_SEND_WORKLOADS)
             .chain(CONSOLE_STRIP_WORKLOADS)
+            .chain(PACKING_WORKLOADS)
         {
             assert!(!workload.web_meters(), "{}", workload.kind());
         }
@@ -3326,6 +3451,7 @@ mod tests {
                 + METERED_WORKLOADS.len()
                 + BUS_SEND_WORKLOADS.len()
                 + CONSOLE_STRIP_WORKLOADS.len()
+                + PACKING_WORKLOADS.len()
         );
         assert!(
             rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + LIVE_FED_WORKLOADS.len())
@@ -3748,9 +3874,11 @@ mod tests {
             );
         }
         let rows: Vec<Workload> = native_session_rows().collect();
+        let strip_end = rows.len() - PACKING_WORKLOADS.len();
         assert!(
-            rows[rows.len() - STRIP_ROWS.len()..] == STRIP_ROWS,
-            "the console-strip rows are emitted last"
+            rows[strip_end - STRIP_ROWS.len()..strip_end] == STRIP_ROWS
+                && rows[strip_end..] == PACKING_WORKLOADS,
+            "the console-strip rows are emitted last but for the packing rows (#1783)"
         );
         let mut kinds: Vec<&str> = rows.iter().map(|row| row.kind()).collect();
         kinds.sort_unstable();
@@ -3959,6 +4087,7 @@ mod tests {
             let block = frozen_track_source(
                 track.id.as_str(),
                 row.input(),
+                0,
                 &SourceSignal::Local,
                 &mappings,
             );

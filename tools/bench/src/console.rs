@@ -269,6 +269,15 @@ const SPARSE_TRIPLE: [Workload; 3] = [
     Workload::SixtyFourTrackConsoleSparse,
 ];
 
+/// The toggle row (issue #1783): the standing console with its odd tracks toggling between
+/// silence and the tone, read against the same session with every track active and with the odd
+/// tracks always silent.
+const TOGGLE_TRIPLE: [Workload; 3] = [
+    Workload::SixtyFourTrackConsole,
+    Workload::SixtyFourTrackConsoleSparse,
+    Workload::SixtyFourTrackConsoleToggle,
+];
+
 /// The bus-and-send row and the standing console row whose tracks it carries (issue #1227): one
 /// set of tracks, feeding the output directly on one row and through buses and sends on the other.
 /// Their digests must differ, and the run asserts it before it emits either record: an equality
@@ -310,8 +319,9 @@ pub(crate) fn main() {
     // its order is unchanged.
     let clock = CoreClock::from_runner(metadata);
     // Every `native_session_rows()` row: the standing rows, then the gain/pan row (issue #956),
-    // the metered row (issue #881), the bus-and-send row (issue #1227) and the console-strip rows
-    // (issue #1085). One list, so the floor subtraction below finds a control wherever it sits.
+    // the metered row (issue #881), the bus-and-send row (issue #1227), the console-strip rows
+    // (issue #1085) and the packing rows (issue #1783). One list, so the floor subtraction below
+    // finds a control wherever it sits.
     let rows: Vec<Workload> = native_session_rows().collect();
     let sessions: Vec<SessionMeasurement> = rows
         .iter()
@@ -352,6 +362,14 @@ pub(crate) fn main() {
     assert!(
         sparse != active && sparse != idle,
         "the sparse-activity row rendered the all-active or the idle row's output"
+    );
+    // And the toggle row's (issue #1783): its odd tracks spend half the run silent and half on
+    // the tone, so it renders neither the all-active row's bits nor the sparse row's. An equality
+    // with the sparse row means the driver never toggled.
+    let [active, sparse, toggle] = TOGGLE_TRIPLE.map(digest_of);
+    assert!(
+        toggle != active && toggle != sparse,
+        "the toggle row rendered the all-active or the sparse row's output"
     );
     // And the bus-and-send row's (issue #1227): its tracks feed buses and sends, so it does not
     // render the standing console's bits. An equality means its fixture never reached the plan.
@@ -3855,7 +3873,8 @@ mod tests {
     /// Issue #1085: the five console-strip rows, run short through the real subject, render with
     /// no forbidden operation, print the facts they are pinned on, and the record validator pins
     /// them: each row's layout in the console vocabulary, the app shape's bypass group (on that row
-    /// alone), and the sparse row's input.
+    /// alone), and the sparse row's input. Issue #1783: the two packing rows likewise, each pinned
+    /// on the input its driver fed.
     ///
     /// The same `SessionMeasurement` the runner's run takes, over eight timed blocks instead of a
     /// thousand (`cargo test -p bench the_console_strip_rows -- --nocapture` prints the records).
@@ -3864,12 +3883,16 @@ mod tests {
     /// Red mutations: print the app shape's census from a row other than the app shape, or drop
     /// `BYPASS_ROWS` -- the bypass-group assertions fail; drop `bypass_session_keys` from the
     /// validator -- the app record is refused; print the rack-token layout -- every record is
-    /// refused.
+    /// refused; name the toggle row's input `tone` or drop a packing row's kind from the validator
+    /// -- the packing assertions fail.
     #[test]
     fn the_console_strip_rows_print_their_facts_and_the_validator_pins_them() {
         let frozen = ".observations = 1000";
         let mut records = Vec::new();
-        for workload in console_workload::CONSOLE_STRIP_WORKLOADS {
+        for workload in console_workload::CONSOLE_STRIP_WORKLOADS
+            .into_iter()
+            .chain(console_workload::PACKING_WORKLOADS)
+        {
             let measured = SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS);
             assert_eq!(measured.render_errors, 0, "{}", workload.kind());
             assert_eq!(
@@ -3978,6 +4001,35 @@ mod tests {
             ),
             "the bypass group on another row"
         );
+        // #1783: each packing row states the input its driver fed, and the validator refuses it
+        // under another row's input.
+        for (workload, signal, foreign) in [
+            (
+                Workload::SixtyFourTrackConsoleToggle,
+                "odd_tracks_toggle_8_blocks",
+                "tone",
+            ),
+            (
+                Workload::SixtyFourTrackConsoleOnePerBank,
+                "one_track_per_bank",
+                "odd_tracks_silent",
+            ),
+        ] {
+            let record = record_of(workload);
+            assert!(
+                record.contains(&format!("\"input_signal\":\"{signal}\",")),
+                "{}: the row states its input",
+                workload.kind()
+            );
+            assert!(
+                !record_validator_accepts(
+                    record,
+                    &format!("{frozen} | .input_signal = \"{foreign}\"")
+                ),
+                "{}: a packing row claiming another row's input",
+                workload.kind()
+            );
+        }
         for (workload, tracks) in [
             (Workload::TenTrackRaggedStrip, 10),
             (Workload::ThirteenTrackRaggedStrip, 13),

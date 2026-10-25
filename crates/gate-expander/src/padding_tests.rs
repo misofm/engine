@@ -80,7 +80,7 @@ fn backend(width: BankWidth) -> Backend {
 }
 
 /// Binds through the public factory at the native width, and through `bind_bank` otherwise.
-fn bind(
+pub(super) fn bind(
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],
@@ -346,11 +346,13 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
         .state_sizes;
     // Gate 3's padded-lane clause (P2a verdict, L4): fed `+0.0`, a padded lane keeps its state
     // finite and at rest, block after block. "At rest" is an idle track's state: the state of a
-    // scalar instance of the member the lane clones, fed `+0.0` and no automation.
+    // scalar instance of the member the lane clones, fed `+0.0` and no automation, under the
+    // first member's link mode, which a padded lane takes (#1368 D5) and its payload's link
+    // weights show (#1370 D6).
     let idle_request = request(
         &padded.members[padded.clone_of],
         padded.rate,
-        padded.links[padded.clone_of],
+        padded.links[0],
     );
     let mut idle: Vec<Option<Box<dyn PreparedNativeEffect>>> = lanes
         .iter()
