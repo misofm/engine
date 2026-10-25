@@ -9,10 +9,22 @@ kind of change must do from now on.
 | change | what CI does with the shipped module |
 | --- | --- |
 | any PR on the `sdk` or `full` route, and every `main` push on them | `artifact` builds the module once (`scripts/build-web-audioworklet.sh`), with its named twin (below); `sdk`, `artifact-gates` and the three browser legs download it and check it against that job's digest, so every artifact gate reads exactly those bytes. `artifact-identity` builds the same commit again from another checkout path and `CARGO_HOME` and fails if the bytes differ, then compares the module with **the digest the base commit's own CI run recorded**, and prints `ARTIFACT CHANGED`, `ARTIFACT UNCHANGED` or `ARTIFACT CANNOT TELL` (with the reason) in its job summary. Nothing is compared with the committed pin and nothing is re-pinned. |
-| a `main` push on those routes | also records the module it built: `artifact-record`, a job that runs only on a push to `main`, checks out nothing, and is the workflow's only job with a write permission (so no pull request can forge a record), posts the commit status `audioworklet-sha256` (`<sha256> rustc <release>`, linking the run) on the pushed commit. That record is what later changes compare against. |
+| a `main` push on those routes | also records the module it built: `artifact-record`, a job that runs only on a push to `main`, checks out nothing, and is the workflow's only job with a write permission (so no pull request can forge a record), posts the commit status `audioworklet-sha256` (`<sha256> rustc <toolchain>`, linking the run; the toolchain is the browser artifact's dated nightly channel, below) on the pushed commit. That record is what later changes compare against. |
 | a PR on the `evidence` route (documentation only) | no module is built; the verdict's summary says `ARTIFACT UNCHANGED`, because no build reads those paths. |
-| a **release change**: a PR, or the `main` push that merges it, that edits the pin file or `npm-publish.yml`'s `PACKAGE_VERSION` or `EXPECTED_WORKLET_SHA256` | all of the above, and `artifact-identity` also requires the pin to be the built digest, `EXPECTED_WORKLET_SHA256` to be the pin, `npm-publish.yml`'s `RUSTUP_TOOLCHAIN` to be the rustc release the `artifact` job built with, and `hosts/host-web/qualification/results.json` to record a three-browser qualification of the built digest (`wasmSha256`) with a canonical `candidateCommit`. |
+| a **release change**: a PR, or the `main` push that merges it, that edits the pin file or `npm-publish.yml`'s `PACKAGE_VERSION` or `EXPECTED_WORKLET_SHA256` | all of the above, and `artifact-identity` also requires the pin to be the built digest, `EXPECTED_WORKLET_SHA256` to be the pin, `npm-publish.yml`'s `BROWSER_ARTIFACT_TOOLCHAIN` to be the toolchain the `artifact` job built with, and `hosts/host-web/qualification/results.json` to record a three-browser qualification of the built digest (`wasmSha256`) with a canonical `candidateCommit`. |
+| a **browser artifact toolchain change**: a PR that moves `rust-toolchain.toml`'s `[browser-artifact] channel` | all of the first row, and `artifact-identity` also requires `hosts/host-web/qualification/results.json` to record a three-browser qualification of the built digest with a canonical `candidateCommit` (its `TOOLCHAIN:` line). A `rust-toolchain.toml` change routes `full`, so the AArch64 and native parity gates run too. It is not a release: the pin and `npm-publish.yml`'s release identity stay. |
 | `npm-publish.yml` (unchanged by #1061) | refuses to start unless `EXPECTED_WORKLET_SHA256` is the pin file; `qualify` rebuilds the module and refuses bytes other than `EXPECTED_WORKLET_SHA256`; `publish` and `verify` send or recheck only the archive `qualify` produced. |
+
+## The browser artifact toolchain
+
+Decision 15, D15-10 (issue #1334): the shipped module alone builds on a pinned, dated nightly with
+`-Zbuild-std`, named once, in `rust-toolchain.toml`'s `[browser-artifact] channel` (rustup ignores
+that table; every other build stays on the stable `[toolchain]` channel).
+`bash scripts/build-web-audioworklet.sh --print-toolchain` prints it, and every job that runs the
+builder installs exactly that, with `rust-src`. Bump it only together with a re-recorded
+three-browser matrix of the module it builds (step 3 below, in the same PR) and green AArch64 and
+native parity gates; `artifact-identity` refuses the bump without the record. A release that also
+moves it sets `npm-publish.yml`'s `BROWSER_ARTIFACT_TOOLCHAIN` to the new channel (step 4).
 
 An issue gate that claims "shipped artifact unchanged" cites its PR's `ARTIFACT UNCHANGED` line;
 one that expects a change cites the `ARTIFACT CHANGED` line and says why the bytes moved.
@@ -126,8 +138,10 @@ builds once it merges.
 4. **Set the release identity.**
    - `.github/workflows/npm-publish.yml`: `PACKAGE_VERSION`, the version in the job name and in the
      three other literals that carry it (five in all), and `EXPECTED_WORKLET_SHA256: "<digest>"`.
-     Its `RUSTUP_TOOLCHAIN` must be the rustc release `qualification.yml`'s `artifact` job builds
-     with. The release report checks that. Any other difference between the two workflows' build
+     Its `BROWSER_ARTIFACT_TOOLCHAIN` must be the toolchain `qualification.yml`'s `artifact` job
+     builds with (`rust-toolchain.toml`'s `[browser-artifact] channel`); `qualify` refuses any
+     other, and the release report checks it. `RUSTUP_TOOLCHAIN` is the stable release the SDK
+     gates' other cargo runs use. Any other difference between the two workflows' build
      environments cannot publish other bytes: `qualify` rebuilds and refuses anything but
      `EXPECTED_WORKLET_SHA256`. So it fails there, safely, and the release PR must first align
      the workflows.

@@ -172,7 +172,68 @@ shape (no atomics, unshared memory), so its risk is reviewed apart from threadin
 
 ## Dependencies
 
-- *Prove two Wasm instances on one shared memory in three browser engines and on iOS* (#1331):
-  it chooses the dated nightly, records the build flags, and runs the parity gates on it. A second
-  toolchain is only justified if that spike passes, including iOS.
+- *Prove two Wasm instances on one shared memory in three browser engines and on iOS* (#1331a):
+  it chooses the dated nightly, records the build flags, and runs the parity gates on it. Root
+  ruling 2026-10-24: this slice starts on #1331a-1's desktop record alone and does not wait for the
+  iOS leg (#1331b); the module shape it ships (no atomics, unshared memory) is today's.
 - Not dependent on *Gate AudioWorklet render against allocation statically and at runtime* (#1333).
+
+## Decision record (attempt 1, 2026-10-25, base `b0bc367af`)
+
+Anchors moved since the brief: the stable pin is 1.99.1 (not 1.97.1) everywhere; D4's step name is
+"Install the browser artifact toolchain and Rust 1.99.1".
+
+- **Inputs from #1331a-1 (PR #1962).** Channel `nightly-2026-08-20` passed (rustc `1.100.0-nightly
+  (f7d782a3b 2026-08-19)`, LLVM 23.1.0). Its non-atomic flag set adds `+bulk-memory,+mutable-globals`
+  to `+simd128`; both are already default target features of `wasm32-unknown-unknown` on this
+  nightly (`rustc --print cfg`), so the builder keeps `-C target-feature=+simd128` alone. The record
+  answered the RUSTUP_HOME hazard: without a sysroot remap the digest depends on the toolchain path.
+- **D2 as built.** The builder remaps the whole sysroot (`$(rustc --print sysroot)=/rustc-sysroot`,
+  the brief's form; the record remapped its `lib/rustlib/src/rust` subdirectory, which the whole
+  sysroot covers). `-Zbuild-std=std,panic_abort` sits before `--target ... -p host-web`, so the cargo
+  line keeps the tail `scripts/test-artifact-evidence-leak.sh` edits. `--render-lock-probe` shares
+  the cargo line and so builds on the nightly too.
+- **D3 as built.** Install sites: `artifact`, `artifact-identity`, `wasm-guests` (in their toolchain
+  step) and `sdk`, `artifact-gates` (a step of its own after the download is verified:
+  `check-ci-path-routing.py` refuses a repository script before that verification in a reader job;
+  `artifact-gates` needs it for the render-lock probe, which the brief did not list). `npm-publish`'s
+  qualify step installs the channel after refusing a `BROWSER_ARTIFACT_TOOLCHAIN` other than the
+  builder's. Only `rust-src` is installed: gate 4 built the module from a toolchain copy with no
+  wasm32 `rust-std`.
+- **D4 as built.** The `artifact` job's output `rustc` is now `toolchain`; `artifact-record`
+  accepts only a dated nightly; `--toolchain` likewise (the builder accepts nothing else), and a
+  record from before (`<sha256> rustc 1.99.1`) parses and reads as a toolchain change.
+  `release_checks` compares `BROWSER_ARTIFACT_TOOLCHAIN` with the built channel in place of
+  `RUSTUP_TOOLCHAIN`, which no longer reaches the module's bytes.
+- **D5 as built.** A change of the channel between base and HEAD adds a `TOOLCHAIN:` line and runs
+  the `results.json` lineage checks (digest and canonical `candidateCommit`), as a release does.
+
+### Evidence
+
+- Digest before (stable 1.99.1, `b0bc367af`, matches main's `audioworklet-sha256` record):
+  `95ee32630f43ff1008c85d4f1dae37258c2785fe892c6676826060ab5f06d0e6`, 5,628,337 B. After (nightly,
+  build-std): `8643b810a7396683ff2d4f5788ac3b8e52c082d2475efd385cb131ac3498c255`, 5,625,493 B; named
+  twin `4f3b48cf...6ce6`. The pin and `EXPECTED_WORKLET_SHA256` stay (D6). Cargo time for the module:
+  31 s stable, 51 s nightly with build-std (one run each, a shared machine).
+- Gate 1: `rustup show active-toolchain` = 1.99.1; `--print-toolchain` = `nightly-2026-08-20`.
+- Gate 2: `check-web-audioworklet.sh <out> <twin>`, `check-browser-expected-resources.py
+  --artifacts` (expected.json digests and rows agree), `test-web-audioworklet.sh`,
+  `test-sdk-artifact-builder-output-contract.sh`: pass.
+- Gate 3: `run-wasm-gates.sh` (native + guest on the nightly + V8 spill): pass, 0 mismatches.
+- Gate 4: a build from a second `RUSTUP_HOME` (toolchain copy without the wasm32 std), another
+  `CARGO_HOME` and another checkout path gave `8643b810...` again.
+- Gate 5: each of chromium 151.0.7922.34, firefox 153.0, webkit 26.5 passed
+  `--self-test-mutations` once (native corpus digest included); one `--browser all
+  --record-matrix` run re-recorded `results.json` and `BROWSER_DEPLOYMENT_MATRIX.md`, and
+  `--check-matrix` accepts them.
+- Gate 6: identity `--self-test`, `test-npm-publish-modes.py`, `check-ci-path-routing.py`,
+  `test-ci-path-routing.py`, `check-release-shape.py --self-test`: pass. Gate 7 is CI's.
+- Gate 8: `cargo fmt --check`, `check-workspace-policy.sh`: pass; no Rust source changed.
+
+### Open
+
+- No committed gate holds the sysroot remap: the `artifact-identity` twin shares the runner's
+  `RUSTUP_HOME`, so dropping the remap would stay green until a build on another toolchain path
+  (gate 4 is PR evidence). Holding it would need the twin to copy the toolchain elsewhere.
+- `check-browser-expected-resources.py` without `--artifacts` builds its own module on stable;
+  CI passes `--artifacts`, so the shipped bytes are what it reads there.
