@@ -2393,6 +2393,9 @@ impl AudioWorkletEngineHost {
     /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
     /// stream (see [`Self::service`]); a plan this command's reclaim promotes ends it when the
     /// stream is not kept.
+    ///
+    /// It is [`Self::control_command_with_document`] with an empty document, so a
+    /// `SESSION_REPLACE` frame sent here is refused `session.replace.document_length`.
     pub fn control_command(&mut self, len: u32, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
         self.control_command_with_document(len, &[], analysis)
     }
@@ -4937,7 +4940,8 @@ impl ControlAdapter for WebAdapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
     /// #1697: `miso_engine_web_v1_replace_document_ptr` stages the document a `SESSION_REPLACE`
-    /// names, and [`AudioWorkletEngineHost::control_command`] passes it beside the frame.
+    /// names, and [`AudioWorkletEngineHost::control_command_with_document`] passes it beside the
+    /// frame.
     const DOCUMENT_TRANSPORT: bool = true;
 }
 

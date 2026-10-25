@@ -3578,8 +3578,8 @@ pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) 
 /// and `miso_engine_v1_submit_document_command` run (issue #1562a D1, #1697). The document
 /// [`miso_engine_web_v1_replace_document_ptr`] staged, if any, goes beside the frame (a
 /// `SESSION_REPLACE` reads it, every other command ignores it); after the command, whatever its
-/// frame or result, the staging is freed, so a document serves exactly one command and the first
-/// command after boot frees the boot's copy. In `single` mode it runs in the worklet's message
+/// frame or result (a wrong handle's refusal too, while a host is live), the staging is freed, so
+/// a document serves exactly one command and the first command after boot frees the boot's copy. In `single` mode it runs in the worklet's message
 /// handler, never in `process()`; it is not render-locked, so its allocations are counted as the
 /// instance's control allocations.
 ///
@@ -3591,7 +3591,9 @@ pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) 
 /// [`RESULT_INTERNAL`]. After any failure the response is the refusal's diagnostic.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+    let mut ran = false;
+    let result = with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        ran = true;
         BOOT_STAGING.with(|staging| {
             let Ok(mut staging) = staging.try_borrow_mut() else {
                 return RESULT_INTERNAL;
@@ -3610,7 +3612,20 @@ pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u
             staging.document_valid = false;
             result
         })
-    })
+    });
+    // A wrong handle runs no command, yet a document `replace_document_ptr` staged must not
+    // survive it either. Only while a host is live: before boot the staging is the boot's document
+    // or a refused boot's diagnostic, which no control call may free.
+    let live = LIVE_HOST.with(|slot| slot.try_borrow().is_ok_and(|slot| slot.is_some()));
+    if !ran && live {
+        BOOT_STAGING.with(|staging| {
+            if let Ok(mut staging) = staging.try_borrow_mut() {
+                *staging.document = Vec::new();
+                staging.document_valid = false;
+            }
+        });
+    }
+    result
 }
 
 /// Dequeue the next event of `lane` through the control plane's `SessionState::dequeue_event`, the

@@ -512,6 +512,13 @@ fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_comman
         );
     }
 
+    // A staged document and a command with a wrong handle: the refusal frees it too.
+    assert!(crate::ffi::test_replace_document(handle, b"{}"));
+    assert_eq!(
+        crate::ffi::miso_engine_web_v1_control_command(handle.wrapping_add(1), 2),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(crate::ffi::test_document_staging(), (false, 0, 0));
     // A staged document, then a refused staging: nothing is left for the next command.
     assert!(crate::ffi::test_replace_document(handle, b"{}"));
     for refused in [maximum + 1, 0] {
