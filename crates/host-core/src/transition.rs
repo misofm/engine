@@ -461,14 +461,13 @@ pub fn plan_strip_transition(
 /// both plans that reaches the output in `next` is in the set. An added strip never is: it is
 /// #1288's to arm.
 ///
-/// #1324 D1's sidechain closure (`close_over_sidechains`, the rule the preparation runs after its
-/// joins) then runs over the set with the sidechain lines of both compiles, until no strip is
-/// added (#1397b): a carried effect keyed from a `post_input`, `insert_send`, `insert_return` or
-/// `pre_fader` tap of a strip in the set joins it. A sidechain line from a `post_fader` or
-/// `post_pan` tap adds no strip: the transition's `C` counts it
-/// ([`plan_strip_transition`], #1324 D4), so it holds only exact `+0.0` at `S`. The closure runs
-/// before any carry join, so no strip delay line restarts yet; the preparation runs it again over
-/// the whole `restarted_strips()`.
+/// The set is not closed over sidechains here. The host passes it as
+/// [`crate::SuccessorBase::forced_restart`], which the preparation adds to its restarted set
+/// before it runs #1324 D1's sidechain closure, the one closure rule (#1397b, root ruling). So a
+/// carried effect keyed from a `post_input`, `insert_send`, `insert_return` or `pre_fader` tap of
+/// a strip in the set joins the prepared `restarted_strips()`, the set the transition ducks. A
+/// sidechain line from a `post_fader` or `post_pan` tap adds no strip: the transition's `C` counts
+/// it ([`plan_strip_transition`], #1324 D4).
 ///
 /// Control thread only; it allocates the set.
 #[must_use]
@@ -554,20 +553,7 @@ pub fn grown_strips(
     if output_grew {
         grown.extend(reaching_output(next));
     }
-    let mut set: Vec<Box<str>> = grown
-        .into_iter()
-        .filter(|id| in_both(id))
-        .map(Box::from)
-        .collect();
-    crate::prepare::close_over_sidechains(
-        committed,
-        next,
-        predecessor.delay_lines(),
-        ordinary.delay_lines(),
-        &[],
-        &mut set,
-    );
-    set.into_iter().map(String::from).collect()
+    grown.into_iter().filter(|id| in_both(id)).collect()
 }
 
 /// The strips of `model` that reach its output through their routes, directly or through
@@ -921,16 +907,11 @@ mod tests {
     /// - the output alone: with `b` feeding only `r` and a routeless track `d`, a second limiter
     ///   on `a` raises the output's arrival, which neither `b`'s nodes nor its line show: every
     ///   strip that reaches the output, `[a, b, c, r]`, and not `d`;
-    /// - an added send, a removed route, and a node only the successor holds, move nothing: `[]`;
-    /// - the sidechain closure (#1397b): with a compressor on `a` keyed from `b`'s `pre_fader`
-    ///   tap, the line arm's set closes over `a`, `[a, b, c, r]`; keyed from `b`'s `post_fader`
-    ///   tap (`C` counts that line instead), it stays `[b, c, r]`.
+    /// - an added send, a removed route, and a node only the successor holds, move nothing: `[]`.
     ///
     /// Test value: without the line rule `b` drops from the first set; without the output rule
     /// `b` drops from the second; an output rule over every strip adds `d`; a line or node read
-    /// from one plan alone ducks `b` (the added send, the removed route) or `a` (the node); a set
-    /// not closed over sidechains leaves `a` out, and a closure over every keyed tap adds it to the
-    /// `post_fader` arm.
+    /// from one plan alone ducks `b` (the added send, the removed route) or `a` (the node).
     #[test]
     fn grown_strips_reads_lines_nodes_and_the_output() {
         let base = model();
@@ -1008,29 +989,6 @@ mod tests {
             Vec::<String>::new(),
             "an added node"
         );
-
-        for (tap, expected) in [
-            (SendTap::PreFader, &["a", "b", "c", "r"][..]),
-            (SendTap::PostFader, &["b", "c", "r"][..]),
-        ] {
-            let keyed = with(&|next| {
-                let mut key = compressor("key-a");
-                key.link_mode = session::LinkMode::DualMono;
-                key.sidechain = session::SidechainDeclaration::Routed(session::Sidechain {
-                    source: RouteSource::Track {
-                        track_id: id("b"),
-                        tap,
-                    },
-                    port_id: id("sidechain-in"),
-                });
-                let a = track(next, "a");
-                next.tracks[a].inserts.effects.push(key);
-            });
-            let mut limited = keyed.clone();
-            let c = track(&mut limited, "c");
-            limited.tracks[c].inserts.effects.push(limiter("lim-c"));
-            assert_eq!(grown(&keyed, &limited), expected, "keyed from {tap:?}");
-        }
     }
 
     /// #1324 D4: `C` counts a sidechain line from a ducked strip's `post_fader` tap into a carried

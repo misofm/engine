@@ -9542,11 +9542,12 @@ mod tests {
         ///
         /// Test value: (a) a transition whose `C` misses the key line out of the forced restart
         /// `g` publishes at the route lines' `S` (62, not 486); (b) a duck set that is not closed
-        /// over sidechains after the forced restarts join it (neither `grown_strips` nor the
-        /// preparation) leaves `k` carried and audible through the duck, so the output differs
+        /// over sidechains after the forced restarts join it (the preparation's closure run
+        /// before them) leaves `k` carried and audible through the duck, so the output differs
         /// from the edit's block. (a)'s output part does not see that `S`: a shorter carried line
-        /// keeps its oldest samples (`CompensationDelay::adopt`), so the route lines' `S` drops
-        /// only `+0.0` here too.
+        /// keeps its oldest samples and drops the newest δ (`CompensationDelay::adopt`), so the
+        /// route lines' `S` also drops only `+0.0`, and any drop would show only after the
+        /// comparison window, which ends at `t1`'s fire block.
         #[test]
         fn a_sidechain_key_out_of_a_grown_strip_is_ducked() {
             const CLIP: u64 = 31;
