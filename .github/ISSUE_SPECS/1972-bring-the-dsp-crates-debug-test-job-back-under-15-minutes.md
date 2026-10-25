@@ -81,8 +81,10 @@ whole command ran in 5 min 45 s wall. Every binary passed both times (187 `test 
 **CI estimate.** Three green `main` runs of 2026-10-24 spent 436 s, 703 s and 832 s in their test
 binaries (the same sum) against this machine's 496 s: a factor of 0.9 to 1.68, the runner's noise.
 At the worst observed factor, 1.68, the binaries take 561 s (on CPU: 708 x 0.77 = 545 s), and the
-step's cached build adds about 54 s: about 10 minutes at worst, about 8.5 minutes at the middle
-factor (1.4). The old worst case was 14.8 minutes, at the 15-minute limit. The remaining slow
-tests are listed above with the reason each stays.
+step's cached build adds about 54 s. So the slowest runner class is estimated at about 10.5
+minutes for the step and about 11 minutes for the job: slightly over this slice's 10-minute
+target, and about 27 % under the 15-minute limit. The middle class is about 8.9 minutes and the
+fast class about 6. The old worst case was 14.8 minutes, at the limit. The batch's first CI run
+confirms the estimate. The remaining slow tests are listed above with the reason each stays.
 
 `timeout-minutes` is back to 15 (root authorized that line and its comment).

@@ -835,7 +835,9 @@ fn a_banked_lane_ramps_exactly_as_the_same_track_alone() {
 /// filter-retarget bodies (a filter retarget issued while the clamped word already holds its
 /// target, so its 64 frames run the filter body's trim update). The word read back at every block
 /// end must stay inside `[-g, g]`, and the uncommanded members must hold `g`. (The identity dual
-/// leg replaced a 22,137,669-frame copy of the long flip on a bank member, #1972.)
+/// leg replaced a 22,137,669-frame copy of the long flip on a bank member, #1972. The upward flip
+/// and the +24 dB scale stay with the single-input reproducer above, which runs the same generic
+/// `identity_chain_ramp_block` and `ramp_toward`.)
 ///
 /// The word is read only at block ends, so each leg also walks the unclamped law (`current + step`
 /// per frame, the target assigned on the window's last frame) in scalar `f32` beside the bank and
