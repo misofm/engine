@@ -315,3 +315,16 @@ Attempt 2 (verifier findings of attempt 1, root rulings):
   frames stay a refusal (an anchored seek of the reference is waiting).
 - A stem whose region starts after its frame at `A` is refused by the engine's `seek_at` (outside
   the region), not clamped: `ready()` rejects with that `MisoEngineError`.
+
+Attempt 3 (verifier finding of attempt 2, root ruling: an aligned source listed before its
+reference in one feed played 50,000 frames off):
+- One feed starts its sources in a stable dependency order: a source whose `alignTo` names another
+  started source of the feed starts after it. A self-alignment or an `alignTo` cycle throws a
+  `MisoUsageError` at attach.
+- Across feeds: each linked feed reports the sources whose start it has not published yet (from
+  attach until the record exists, or the source is detached or the feed closed). Aligning to one
+  refuses `feed.align.unstarted`; there is no waiting across feeds.
+- On the record path, the record is read again after the status read; another record refuses
+  `feed.align.reseeked`.
+- A reference whose own `seek-at` the engine later refuses leaves the aligned stem at the frame the
+  reference's `frameAt` mapping gave (README).
