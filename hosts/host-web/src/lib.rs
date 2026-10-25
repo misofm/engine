@@ -4365,7 +4365,6 @@ impl GainReductionTaps for WebGainReductionTaps<'_> {
     }
 }
 
-// REALTIME_POLICY_BEGIN: #1582 D4, #1588 D2, the render half's meter fold.
 /// Fold at most one closed meter window through the session's delivery (#1582 D4) at
 /// `next_sample`, the next block's first sample, and hand the frame it publishes to the clients
 /// the applied level word names (#1588 D1, D2): to the rendering plan's frame ring while the
@@ -4426,7 +4425,6 @@ fn poll_meter_delivery(ready: &mut ReadyOwnership, plan: &mut WebPlan, next_samp
     }
     frame.windows
 }
-// REALTIME_POLICY_END
 
 /// Copy the core frame into the page's frame words and header (#1582 D4), the layout of
 /// [`PlanShape::meter_frame`]: every strip's peak pair, tracks then submixes (issue #1209 D1, so
