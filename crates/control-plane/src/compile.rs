@@ -260,9 +260,8 @@ pub(crate) fn protocol_queue_config<A: ControlAdapter>(
 
 /// The lossy meter lane's slots (#1583 D5, #1587a): one meter batch whole, so a batch never
 /// reaches the caller split or half dropped. For an adapter whose control plane serves the meter
-/// batches (the C ABI) that is [`host_core::MAXIMUM_METER_BATCH_RECORDS`], the most records an
-/// accepted table needs; any other adapter keeps the two slots it had (#1588 sizes the browser's
-/// lane when it adds the browser's delivery).
+/// batches (the C ABI and the browser, #1588) that is [`host_core::MAXIMUM_METER_BATCH_RECORDS`],
+/// the most records an accepted table needs; any other adapter keeps two slots.
 const fn telemetry_slots<A: ControlAdapter>() -> usize {
     if A::METER_DELIVERY {
         host_core::MAXIMUM_METER_BATCH_RECORDS

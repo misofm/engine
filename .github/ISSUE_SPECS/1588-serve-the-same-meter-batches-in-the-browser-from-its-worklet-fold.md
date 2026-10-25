@@ -132,12 +132,35 @@ and #1534 gate 3's worklet commands.
   `MeterWindowsLost` does not sum frames' `loss_count`, and adding ring drops to it would move the
   lease frame's `loss_count` bytes while both clients are on. The browser's lost-window sum is
   then the ring's drops plus the same fold, unstaged and output-drop terms as the C ABI's.
-- **Blocked: the control half (D4, the web `METER_DELIVERY` flip, the provider window, the
-  `meter.unavailable` deletion).** `ControlAdapter::METER_DELIVERY` drives
-  `crates/control-plane/src/compile.rs`: with it on, boot builds a control-thread `MeterDelivery`
-  over the output meter's reader (the browser's render half then has none, and `take_output_meter`
-  fails its boot), sizes the lossy lane, charges the resolution vectors and the strip-ID text, and
-  sets the provider's window. A browser with a ring source needs compile.rs to build a
-  `SessionMeters` over a `MeterFrameConsumer` and a `MeterLevel` instead, so compile.rs must be
-  authorized; and the flip changes `protocol_cross_host` steps 1 and 5 (the browser's lane and
-  echo), which are #1588b's paths. Not edited.
+- **Re-split (root, 2026-10-25).** #1588a ships both halves: root authorized
+  `crates/control-plane/src/{compile.rs,control.rs,adapter.rs}`, `hosts/host-web/src/lib.rs`
+  (the adapter consts only, so far) and `hosts/host-web/tests/protocol_cross_host.rs` steps 1 and
+  5. #1588b keeps the rest of its list: the render half's level word, restart and ring push in
+  `poll_meters`, the lease bit, taking each plan's ring producer
+  (`SessionState::take_meter_frame_producer`) into its shape, D5's meter entry, and gates 1, 2,
+  3 and 5.
+- **R2 amended (implementer).** The browser's strip counts are unbounded (its caps are
+  `u64::MAX`), so no ring can be sized to "the largest strip count the delivery can hold". Each
+  plan gets its own `MeterFrameRing` at its strip count, built in `compile.rs` with the plan and
+  charged in the plan's meter rows (`meter_table_rows`); the consumer stays in the plan's
+  `ProviderEpoch`, the producer waits there for the render half. The control half stages the rings
+  in epoch order (counts loaded newest first, drained oldest first), and stages a reclaimed plan's
+  ring before its epoch drops, so its strips are still held.
+- **D3 as built.** One staging, `MeterBatches::stage(frame, epoch, ..)`, for both sources:
+  entries resolve lazily when a frame's epoch differs from the last resolved (a configure clears
+  it), against the epoch's strip list (`strip_controls`, the meters' order). The C ABI passes
+  `frame.plan_epoch`, which `adopt_meters` now fills (`MeterTables::set_plan_epoch`); a ring frame
+  passes its ring's epoch. The eager resolves at the configure and the adoption are gone.
+- **Mode.** `ControlAdapter::RENDER_METER_FOLD` (with `METER_DELIVERY`): the browser keeps the
+  output reader and live gate (`take_output_meter`), the session holds a `MeterLevel` (one
+  `Arc<AtomicU32>` row in place of the relay's word) and sets `TELEMETRY` at a configure
+  (`SessionState::meter_level` hands the render half a handle). The provider gets the window only
+  when the preparer binds one (`meter_window_blocks() != 0`): a browser booted with meter word 0
+  still refuses meter tables `meter.unavailable`, as it refuses the lease.
+- **R4 visible.** Ring drops reach `CounterId::MeterWindowsLost` (`refresh_provider_counters`:
+  every held ring's `dropped_frames`, plus the reclaimed rings', plus the output queue's drops
+  through `OutputPeakReader::drop_count`).
+- **Bytes.** The browser's capabilities now report the 256-slot lossy lane and its telemetry
+  echo carries the meter window (protocol_cross_host steps 1 and 5 lost their exceptions; the
+  script boots the browser with meter word 12, the C ABI's default window). No rendered bit, lease
+  frame byte or schema hash moved.
