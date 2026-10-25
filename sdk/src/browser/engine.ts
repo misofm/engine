@@ -1603,7 +1603,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           committedRevision: async () => {
             const revision = await queue.readCommittedRevision();
             if (revision === undefined) throw new MisoEngineError("the browser queue cannot read the committed revision", { phase: "lifecycle", code: "internal" });
-            noteRevision(revision);
             return revision;
           },
         });

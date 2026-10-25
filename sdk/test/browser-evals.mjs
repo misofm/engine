@@ -14,6 +14,7 @@ import { before, describe, test } from "node:test";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { StructView } from "../src/core/abi.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
+import { ControlTransactionQueue } from "../src/core/control-queue.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { effect, session } from "../src/core/session.ts";
 import { transaction } from "../src/core/session-transaction.ts";
@@ -844,7 +845,7 @@ describe("browser session edits", () => {
       }),
       createHost: async () => host,
     });
-    return { engine, core, sent, tick, post };
+    return { engine, host, sent, tick, post };
   }
 
   /** Whether `promise` has settled, after every queued reaction ran. */
@@ -913,6 +914,30 @@ describe("browser session edits", () => {
       const pending = engine.applied(3n);
       await engine.close();
       await assert.rejects(pending, MisoUsageError);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("another sender's commit is seen through a decoded event and the watermark", async () => {
+    // Red if `revision` ignores the `sessionCommitted` events the engine decodes for `onEvent`, or
+    // the watermark's revision: a commit another sender made on the same host is then never seen.
+    const { engine, host, tick } = await boot(base());
+    try {
+      // The other sender shares the host's one request-ID allocator, as every sender must.
+      const { requestIds } = (await engine.liveControls()).queue;
+      const other = new ControlTransactionQueue(async (frame) => (await host.control(frame)).response, { initialRevision: 0n, requestIds });
+      const row = (await engine.controls()).controls.find((entry) => entry.address.owner.kind === "strip"
+        && entry.address.owner.id === "t1" && entry.name === "fader_db" && entry.address.lane === "left");
+      const fader = (value) => [{ address: row.address, value }];
+      const stop = engine.onEvent(() => {});
+      await other.submit(fader(-1));
+      assert.equal(engine.revision, 1n, "seen through the event");
+      stop();
+      await other.submit(fader(-2));
+      assert.equal(engine.revision, 1n, "no listener: no event read");
+      tick();
+      assert.equal(engine.revision, 2n, "seen through the watermark");
     } finally {
       await engine.close();
     }
