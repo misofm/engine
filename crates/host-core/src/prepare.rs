@@ -1090,7 +1090,7 @@ pub(crate) struct FadeArmInventoryRow {
 pub(crate) enum FadeArmOwner {
     /// A strip's fader lane (#1288, #1392).
     Strip,
-    /// A route's six-word live op (#1363).
+    /// A route's live op, of either kind (#1363, #2011).
     Route,
 }
 
@@ -4081,7 +4081,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             added_route_fades(
                 base.committed,
                 model,
-                view,
                 &added,
                 &waiting,
                 &waiting_routes,
@@ -4859,7 +4858,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     // Issue #1324 D3, #1363 D1 (c): a duck-swapped strip's routes from a tap before its fader
     // are armed with it and wait for its fade, as an added strip's are. Only a route with a
-    // six-word live op can arm (the route lanes of #1391), and phase 1 can duck only such a route.
+    // live op can arm, a six-word one (the route lanes of #1391) or one that follows an
+    // automated source mute (#2011).
     // The duck-swapped strips the successor arms, on the terms of an added strip's arm (#1288
     // D1, D2): a plan that attaches live lanes, never at a declared discontinuity.
     let armed_restarts: BTreeSet<&str> = match successor {
@@ -4895,8 +4895,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                         if added.contains(&submix_id.as_str()));
                 let has_op = live_routes
                     .binary_search_by(|row| (*row.route_id).cmp(route.id.as_str()))
-                    .is_ok_and(|index| !live_routes[index].following);
-                if route.mute || into_added || follows_automated_mute(view, route) || !has_op {
+                    .is_ok();
+                if route.mute || into_added || !has_op {
                     continue;
                 }
                 fades.push(RouteFade {
@@ -7610,18 +7610,18 @@ struct RouteFade<'a> {
 /// of an added strip whose tap precedes the fader. A route from a
 /// strip whose fader is armed (`added`, or `waiting`: a strip with an unfired predecessor entry)
 /// and whose tap follows the fader takes none (the fader's fade shapes it), and neither does a
-/// route whose destination strip is added (its fader's fade does), a route the session mutes
-/// (it arms nothing), or a following route ([`follows_automated_mute`], which binds no six-word
-/// op). A tap before an armed fader waits for that strip's fade.
+/// route whose destination strip is added (its fader's fade does) or a route the session mutes
+/// (it arms nothing). A route that follows an automated source mute ([`follows_automated_mute`])
+/// arms as any other (#2011): its fire composes with the curve it hears. A tap before an armed
+/// fader waits for that strip's fade.
 ///
 /// #1877 D2: a route of `waiting_routes` (one whose predecessor entry has not fired, with that
 /// entry) that `committed` holds with the same source, tap and destination is armed again on the
-/// terms of (a), carrying the entry; one this model re-points, mutes or makes following is not
-/// (the displaced arm then fires at the swap, #1363 D3a).
+/// terms of (a), carrying the entry, whatever its live op's kind in either plan; one this model
+/// re-points or mutes is not (the displaced arm then fires at the swap, #1363 D3a).
 fn added_route_fades<'a>(
     committed: &SessionModel,
     model: &'a SessionModel,
-    view: controls::ModelView<'_>,
     added: &[&str],
     waiting: &[&str],
     waiting_routes: &[(&str, u32)],
@@ -7646,7 +7646,7 @@ fn added_route_fades<'a>(
     };
     let mut fades = Vec::new();
     for route in &model.routes {
-        if route.mute || follows_automated_mute(view, route) {
+        if route.mute {
             continue;
         }
         let (source, tap) = match &route.source {
@@ -7692,9 +7692,9 @@ fn added_route_fades<'a>(
     fades
 }
 
-/// The fade arm of each route of `fades` (#1363 D3, D6): its target is its six-word live route's
-/// unit in `live_routes` (sorted by route ID); `None` when one has no such row (preparation then
-/// fails: every route of `fades` binds one).
+/// The fade arm of each route of `fades` (#1363 D3, D6): its target is its live route's unit in
+/// `live_routes` (sorted by route ID), of either kind (#2011); `None` when one has no such row
+/// (preparation then fails: every route of `fades` binds one).
 ///
 /// `D` is the samples before the route's own op that start at rest: for a route out of a strip
 /// whose fader is armed, the route's input arrival minus the strip's `Input` arrival (every node
@@ -7722,8 +7722,7 @@ fn route_fade_arms(
         let row = live_routes
             .binary_search_by(|row| (*row.route_id).cmp(fade.route.id.as_str()))
             .ok()
-            .map(|index| &live_routes[index])
-            .filter(|row| !row.following)?;
+            .map(|index| &live_routes[index])?;
         let route_id = StableGraphId::parse(fade.route.id.as_str())?;
         let route_node = GraphNodeId::Route {
             route_id: route_id.clone(),
@@ -7898,9 +7897,8 @@ pub(crate) fn sidechain_line_samples(
 /// #1324 D1's exemption of a submix's `input` tap whatever its arrival: every line into submix
 /// `submix`'s `Input` stage, in `committed` and in `model`, comes from a ducked strip (`ducked`,
 /// which holds the removed strips) or, in `model`, from an added one. Its input then holds exact
-/// `+0.0` from the end of the duck until the fire. A route of `model` from a tap before the fader
-/// that follows an automated source mute cannot be armed (#2011) and restarts at its prepared
-/// value at `S`, so a stage it feeds is not quiet.
+/// `+0.0` from the end of the duck until the fire: a route of `model` from a ducked or added
+/// strip's tap before its fader is armed, a following one too (#2011).
 pub(crate) fn submix_input_is_quiet(
     committed: &SessionModel,
     model: &SessionModel,
@@ -7917,10 +7915,8 @@ pub(crate) fn submix_input_is_quiet(
         .filter(into)
         .all(|route| ducked(source_strip(&route.source).0))
         && model.routes.iter().filter(into).all(|route| {
-            let (source, tap, _) = source_strip(&route.source);
-            (!committed_has_strip(committed, source) || ducked(source))
-                && !(tap.precedes_fader()
-                    && follows_automated_mute(controls::ModelView::whole(model), route))
+            let source = source_strip(&route.source).0;
+            !committed_has_strip(committed, source) || ducked(source)
         })
 }
 

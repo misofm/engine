@@ -1270,6 +1270,16 @@ pub(crate) struct LiveFollowRoute {
     /// This block's node spans and jump lengths, set by [`Self::begin_block`] and read by
     /// [`Self::mix`].
     block: FollowBlock,
+    /// The fade-in a plan swap armed (#2011, #1363 D3), until it fires: the route then waits
+    /// silent, its ramps held at `[+0.0; 4]`, while records and curve events retarget the fire.
+    armed: Option<FollowRouteArm>,
+}
+
+/// An armed following route's fade-in (#2011): the fade's length. Unlike a six-word arm it keeps
+/// no target: the fire composes each column with the curve heard at the fire block (R1).
+#[derive(Clone, Copy, Debug)]
+struct FollowRouteArm {
+    ramp_samples: u32,
 }
 
 /// A following route's ramps, one [`IndexedRamp`] per source column (#1652, root ruling R18-5):
@@ -1683,7 +1693,23 @@ impl LiveFollowRoute {
             control,
             follow,
             block: FollowBlock::IDLE,
+            armed: None,
         }
+    }
+
+    /// Arm the fade-in of a following route a plan swap restarts or adds during playback (#2011,
+    /// #1363 D3), off the render thread, before the plan is published: both column ramps wait
+    /// settled at `[+0.0; 4]`, muted. A route its prepared gate mutes (`flags.mute`) arms nothing;
+    /// a curve that silences it now does not refuse the arm (R2: a curve that opens during the
+    /// wait must not let the route through before the fire). Returns whether it armed.
+    pub(crate) fn arm_fade_in(&mut self, ramp_samples: u32) -> bool {
+        if self.flags.mute || self.armed.is_some() {
+            return false;
+        }
+        self.armed = Some(FollowRouteArm { ramp_samples });
+        self.ramps = ColumnRamps::settled([0.0; 4]);
+        self.mute = true;
+        true
     }
 }
 
@@ -1941,20 +1967,25 @@ impl LiveFollowRoute {
                 transform,
                 flags,
                 follow,
+                armed,
                 ..
             } = self;
             let composition = Composition {
                 transform,
                 flags: *flags,
             };
+            // #2011 (R3): an armed route keeps waiting silent; the record retargets its fire.
+            let armed = armed.is_some();
             for column in 0..COLUMNS.len() {
                 let target = follow.heard_target(column, composition);
-                let moves = !same_entries(column_entries(ramps.target(), column), target.0);
-                ramps.retarget_column(
-                    column,
-                    with_column(ramps.target(), column, target.0),
-                    length,
-                );
+                let moves = !armed && !same_entries(column_entries(ramps.target(), column), target.0);
+                if !armed {
+                    ramps.retarget_column(
+                        column,
+                        with_column(ramps.target(), column, target.0),
+                        length,
+                    );
+                }
                 if let Some(silent) = follow.silent.get_mut(column) {
                     *silent = target.1;
                 }
@@ -1965,7 +1996,7 @@ impl LiveFollowRoute {
                     }
                 }
             }
-            *mute = follow.silent[0] && follow.silent[1];
+            *mute = armed || (follow.silent[0] && follow.silent[1]);
             applied = 1;
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -1983,9 +2014,14 @@ impl LiveFollowRoute {
     /// ([`crate::GraphFollowRouteSource::with_continued_vca_mutes`]) and `a(tap)` did not move;
     /// else they start fresh and are placed at the first block. The follow curves heard (own and
     /// VCA mutes ORed) are kept for the first block's comparison.
+    ///
+    /// #2011 (#1877 D6): an armed route keeps its own arm, its ramps at `[+0.0; 4]` and muted; its
+    /// cursors and heard values still adopt, so its fire composes with the curve heard.
     fn adopt(&mut self, ramps: ColumnRamps, mute: bool, from: Option<&Self>) {
-        self.ramps = ramps;
-        self.mute = mute;
+        if self.armed.is_none() {
+            self.ramps = ramps;
+            self.mute = mute;
+        }
         self.follow.silent = from.map_or([mute; 2], |from| from.follow.silent);
         // #1655 D6: a lane's VCA mute cursors continue verbatim only when their tables do and
         // the tap's arrival did not move (their node time is the tap's).
@@ -2084,6 +2120,9 @@ impl LiveFollowRoute {
     /// may ramp, a conservative over-report (#1718). Any other move lands at once over the
     /// mute length. No landing state survives the carry. A column with no curve compares its
     /// cell's target the same way.
+    ///
+    /// #2011 (R3): an armed route only takes the composed targets and silences; its ramps stay
+    /// at `[+0.0; 4]` and it stays muted until the fire.
     fn place_carried(&mut self, at: i64) {
         let Self {
             ramps,
@@ -2092,8 +2131,10 @@ impl LiveFollowRoute {
             flags,
             follow,
             block,
+            armed,
             ..
         } = self;
+        let armed = armed.is_some();
         let composition = Composition {
             transform,
             flags: *flags,
@@ -2114,11 +2155,13 @@ impl LiveFollowRoute {
             let landing = if has_dropped { dropped } else { jump };
             let Some(walk) = follow.columns.get_mut(column).and_then(Option::as_mut) else {
                 let target = column_target(column, ColumnRoles::default(), composition, |_| 0.0);
-                ramps.retarget_column(
-                    column,
-                    with_column(ramps.target(), column, target.0),
-                    landing,
-                );
+                if !armed {
+                    ramps.retarget_column(
+                        column,
+                        with_column(ramps.target(), column, target.0),
+                        landing,
+                    );
+                }
                 if let Some(silent) = follow.silent.get_mut(column) {
                     *silent = target.1;
                 }
@@ -2177,7 +2220,7 @@ impl LiveFollowRoute {
             let target = walk.walk.compose_heard(|heard| {
                 column_target(column, roles, composition, |index| heard.value(index))
             });
-            if same_entries(adopted, target.0) {
+            if armed || same_entries(adopted, target.0) {
                 walk.walk.seed_target(target);
             } else {
                 // A gate move coincident with a removed curve's landing takes the longer length
@@ -2194,6 +2237,45 @@ impl LiveFollowRoute {
             }
             if let Some(silent) = follow.silent.get_mut(column) {
                 *silent = target.1;
+            }
+        }
+        *mute = armed || (follow.silent[0] && follow.silent[1]);
+    }
+
+    /// Fire the armed fade-in at this block boundary (#2011, #1363 D3): each column from the
+    /// coefficients it is at (`[+0.0; 4]`) to its target composed with the curve heard now, over
+    /// the armed length (R1: never the prepared target, so a column the curve silences stays at
+    /// `+0.0` and a later curve event opens it over its own ramp). The executor calls it before
+    /// the route's op runs, so the block's own record and curve events follow it. A route not
+    /// armed is left alone. Render-thread code: allocation-, lock- and syscall-free.
+    pub(crate) fn fire_fade_in(&mut self) {
+        let Some(arm) = self.armed.take() else {
+            return;
+        };
+        let Self {
+            ramps,
+            mute,
+            transform,
+            flags,
+            follow,
+            ..
+        } = self;
+        let composition = Composition {
+            transform,
+            flags: *flags,
+        };
+        for column in 0..COLUMNS.len() {
+            let target = follow.heard_target(column, composition);
+            ramps.retarget_column(
+                column,
+                with_column(ramps.target(), column, target.0),
+                arm.ramp_samples,
+            );
+            if let Some(silent) = follow.silent.get_mut(column) {
+                *silent = target.1;
+            }
+            if let Some(walk) = follow.columns.get_mut(column).and_then(Option::as_mut) {
+                walk.walk.seed_target(target);
             }
         }
         *mute = follow.silent[0] && follow.silent[1];
@@ -2237,8 +2319,12 @@ impl LiveFollowRoute {
             flags,
             follow,
             block,
+            armed,
             ..
         } = self;
+        // #2011 (R3): an armed route stays inactive until its fire; the block's curve events only
+        // move its cursors and silences, which the probe commits.
+        let armed = armed.is_some();
         let FollowCursors {
             program,
             columns,
@@ -2278,7 +2364,7 @@ impl LiveFollowRoute {
                 let settled =
                     next == target || event.kind == automation::EventKind::Set || event.ramp == 0;
                 target = next;
-                if from.is_none() && !(muted && settled) {
+                if !armed && from.is_none() && !(muted && settled) {
                     from = Some(event.offset);
                 }
             },
@@ -2296,6 +2382,9 @@ impl LiveFollowRoute {
     /// `[0, o)`, retarget that column from the coefficients it is at over the event's ramp (`0`
     /// for a seek's `Set`), mix `[o, q)`. The indexed law makes the split exact: the result is the
     /// same block split at `o` with the retarget at the second part's entry, bit for bit.
+    ///
+    /// #2011 (R3): an armed route (delayed, so mixed while it waits) holds its ramps at
+    /// `[+0.0; 4]`; an event moves only its silences, which its fire composes with.
     #[inline]
     fn mix(&mut self, left: &mut [f32], right: &mut [f32]) {
         let frames = core::cmp::min(left.len(), right.len());
@@ -2307,8 +2396,10 @@ impl LiveFollowRoute {
             flags,
             follow,
             block,
+            armed,
             ..
         } = self;
+        let armed = armed.is_some();
         let FollowCursors {
             program,
             columns,
@@ -2335,8 +2426,8 @@ impl LiveFollowRoute {
                 if let Some(slot) = silent.get_mut(column) {
                     *slot = event.value.1;
                 }
-                *mute = silent[0] && silent[1];
-                if same_entries(column_entries(ramps.target(), column), event.value.0) {
+                *mute = armed || (silent[0] && silent[1]);
+                if armed || same_entries(column_entries(ramps.target(), column), event.value.0) {
                     return;
                 }
                 let at = core::cmp::min(event.offset as usize, frames);
@@ -6663,6 +6754,24 @@ enum CarriedRoute<'a> {
     Seven(&'a mut LiveFollowRoute),
 }
 
+impl CarriedRoute<'_> {
+    /// Whether the route holds a fade-in arm not fired yet (#1877 D6, #2011), of either kind.
+    const fn armed(&self) -> bool {
+        match self {
+            Self::Six(live) => live.armed.is_some(),
+            Self::Seven(live) => live.armed.is_some(),
+        }
+    }
+
+    /// Fire the route's armed fade-in, of either kind (#1363 D3, #2011). Allocation-free.
+    fn fire_fade_in(&mut self) {
+        match self {
+            Self::Six(live) => live.fire_fade_in(),
+            Self::Seven(live) => live.fire_fade_in(),
+        }
+    }
+}
+
 /// The live route whose op sits in runtime unit `unit`, of either kind (#1284 D2, #1652 D3).
 /// Allocation-free: a bounds-checked unit borrow and a match.
 fn carried_route_mut(units: &mut [RuntimeUnit], unit: u32) -> Option<CarriedRoute<'_>> {
@@ -6805,8 +6914,7 @@ fn carry_route(
             // #1363 D3a stays the fallback: a fade-in armed in the displaced plan and not fired
             // yet fires at the swap when the successor holds no arm for the route, so the
             // successor never takes a route that waits for a fire it does not hold.
-            let rearmed = matches!(&into, CarriedRoute::Six(into) if into.armed.is_some());
-            if !rearmed {
+            if !into.armed() {
                 from.fire_fade_in();
             }
             if let CarriedRoute::Six(into) = into {
@@ -6821,6 +6929,10 @@ fn carry_route(
         }
         CarriedRoute::Seven(from) => {
             from.apply_cell(LiveSnapshot::ALL, None);
+            // #2011: the #1877 D6 rule for a following predecessor's own unfired arm.
+            if !into.armed() {
+                from.fire_fade_in();
+            }
             let from: &LiveFollowRoute = from;
             (from.ramps, from.mute, Some(from))
         }
@@ -7397,25 +7509,28 @@ impl crate::runtime::Runtime {
         }) && slots.next().is_none()
     }
 
-    /// Whether runtime unit `unit` holds a six-word live route's op (#1363 D3), the one kind a
-    /// route fade arm targets. Allocation-free.
-    pub(crate) fn has_six_word_route(&self, unit: u32) -> bool {
-        matches!(
-            self.units.get(unit as usize),
-            Some(RuntimeUnit::Op(op)) if matches!(op.kind, NodeKind::LiveRoute(_))
-        )
+    /// Whether runtime unit `unit` holds a live route's op of either kind (#1363 D3, #2011), the
+    /// ops a route fade arm targets. Allocation-free.
+    pub(crate) fn has_live_route(&self, unit: u32) -> bool {
+        is_live_route_unit(&self.units, unit)
     }
 
-    /// Arm the fade-in of the six-word live route in unit `unit` (#1363 D3,
-    /// [`LiveRoute::arm_fade_in`]), off the render thread. Returns whether it armed.
+    /// Arm the fade-in of the live route in unit `unit`, of either kind (#1363 D3,
+    /// [`LiveRoute::arm_fade_in`]; #2011, [`LiveFollowRoute::arm_fade_in`]), off the render
+    /// thread. Returns whether it armed.
     pub(crate) fn arm_route_fade_in(&mut self, unit: u32, ramp_samples: u32) -> bool {
-        live_route_mut(&mut self.units, unit).is_some_and(|live| live.arm_fade_in(ramp_samples))
+        match carried_route_mut(&mut self.units, unit) {
+            Some(CarriedRoute::Six(live)) => live.arm_fade_in(ramp_samples),
+            Some(CarriedRoute::Seven(live)) => live.arm_fade_in(ramp_samples),
+            None => false,
+        }
     }
 
-    /// Fire the armed fade-in of the six-word live route in unit `unit` (#1363 D3,
-    /// [`LiveRoute::fire_fade_in`]). Render-thread code: allocation-, lock- and syscall-free.
+    /// Fire the armed fade-in of the live route in unit `unit`, of either kind (#1363 D3,
+    /// [`LiveRoute::fire_fade_in`]; #2011, [`LiveFollowRoute::fire_fade_in`]). Render-thread
+    /// code: allocation-, lock- and syscall-free.
     pub(crate) fn fire_route_fade_in(&mut self, unit: u32) {
-        if let Some(live) = live_route_mut(&mut self.units, unit) {
+        if let Some(mut live) = carried_route_mut(&mut self.units, unit) {
             live.fire_fade_in();
         }
     }

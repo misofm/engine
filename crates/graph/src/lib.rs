@@ -4601,8 +4601,9 @@ pub struct GraphFadeArm {
 pub enum GraphFadeTarget {
     /// A strip's fader lane, a populated lane of a fader bank.
     Fader(GraphLaneLocation),
-    /// A route's op, the runtime unit of a six-word live route (with a lane or a transition route,
-    /// #1363 D2), as [`GraphLiveRoute::unit`] names it.
+    /// A route's op, the runtime unit of a live route of either kind (a six-word one with a lane
+    /// or a transition route, #1363 D2; a following one, #2011), as [`GraphLiveRoute::unit`]
+    /// names it.
     Route(u32),
 }
 
@@ -4657,13 +4658,14 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
 /// A source node that is not one of the source set's claims, and every source of a driver that
 /// does not lend its played planes, waits for nothing: that fade fires at the first block.
 ///
-/// A route target (#1363 D3) arms its six-word live route op: it waits settled at `[+0.0; 4]`,
-/// muted, and fires to its prepared target over `ramp_samples`; a record it reads before the
-/// fire retargets the fire only. A route the session mutes arms nothing.
+/// A route target (#1363 D3) arms its live route op, of either kind: it waits settled at
+/// `[+0.0; 4]`, muted, and fires over `ramp_samples`, a six-word route to its prepared target and
+/// a following route (#2011) to each column's target composed with the curve it hears at the
+/// fire; a record (or a curve event) it reads before the fire retargets the fire only. A route
+/// the session mutes arms nothing.
 ///
 /// Refused, arming nothing, when the plan is not a graph plan, a fader location is not a
-/// populated lane of a fader bank, a route unit is not a six-word live route's, or a target
-/// repeats.
+/// populated lane of a fader bank, a route unit is not a live route's, or a target repeats.
 pub fn install_fade_arms(
     plan: &mut PreparedRenderPlan,
     arms: Vec<GraphFadeArm>,
@@ -4685,7 +4687,7 @@ impl GraphExecutor {
                 GraphFadeTarget::Fader(fader) => {
                     self.runtime.has_strip_lane(BuiltinStripOwner::Fader, fader)
                 }
-                GraphFadeTarget::Route(unit) => self.runtime.has_six_word_route(unit),
+                GraphFadeTarget::Route(unit) => self.runtime.has_live_route(unit),
             };
             if !exists {
                 return Err(GraphCarryInstallError::StripLaneOutOfRange);

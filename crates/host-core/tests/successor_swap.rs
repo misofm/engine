@@ -4386,8 +4386,8 @@ enum Restart {
     /// shrinks from the limiter's latency to 0.
     BusLater,
     /// [`Self::BusLater`] with no `aux` route: the bus's only input is `late`'s `pre_fader` route,
-    /// which follows `late`'s stored mute automation, so it cannot be armed (#2011) and the bus
-    /// input is not quiet.
+    /// which follows `late`'s stored mute automation; it is armed with the restarted `late`
+    /// (#2011), so the bus input is quiet.
     Following,
     /// The bus's `delay_samples` changed (its delay line restarts).
     BusDelay,
@@ -4400,7 +4400,8 @@ enum Restart {
 /// round, does a strip keyed from that one; a `post_fader` tap adds nothing, and an `input` tap
 /// (a track's or the bus's) adds nothing unless its delay line restarts. A submix's `input` tap
 /// adds nothing while its line keeps its length, and adds its consumer when the line changes and
-/// a carried strip or an unarmable following route feeds the submix. Each strip in the set is armed. Red if the closure ignores sidechains or a tap kind,
+/// a carried strip feeds the submix (a following route of a restarted strip is armed, #2011).
+/// Each strip in the set is armed. Red if the closure ignores sidechains or a tap kind,
 /// stops after one round, adds a `post_fader` or a plain `input`-tap consumer, misses a restarted
 /// delay line, or gets either submix rule wrong.
 #[test]
@@ -4474,7 +4475,7 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
             "a following pre-fader route into the bus",
             Restart::Following,
             vec![("eq1", bus())],
-            &[ROUTE_BUS, "eq1", "late"],
+            &[ROUTE_BUS, "late"],
         ),
         (
             "the bus input behind a restarted delay line",
@@ -4557,10 +4558,13 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
             assert_eq!(set, *restarted, "{what}");
             let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
                 .expect("a graph plan");
+            // #2011: `late`'s following `pre_fader` send is armed with it.
             assert_eq!(
                 arms.len(),
-                restarted.len() - usize::from(restarted.contains(&"late")),
-                "{what}: each audible restarted strip is armed, the muted `late` is not"
+                restarted.len() - usize::from(restarted.contains(&"late"))
+                    + usize::from(*edit == Restart::Following),
+                "{what}: each audible restarted strip is armed, the muted `late` is not, and \
+                 `late`'s following send is"
             );
         }
     }
