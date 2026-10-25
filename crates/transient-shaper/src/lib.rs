@@ -2130,6 +2130,8 @@ impl<L: Lane, const W: usize> PreparedTransientShaperBank<L, W> {
 // REALTIME_POLICY_END
 
 #[cfg(test)]
+mod glide_tests;
+#[cfg(test)]
 mod padding_tests;
 #[cfg(test)]
 mod rest_tests;

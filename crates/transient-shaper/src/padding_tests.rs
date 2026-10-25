@@ -80,7 +80,7 @@ pub(super) fn backend(width: BankWidth) -> Backend {
 }
 
 /// Binds through the public factory at the native width, and through `bind_bank` otherwise.
-fn bind(
+pub(super) fn bind(
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],
@@ -106,7 +106,7 @@ fn scalar(request: PrepareEffectRequest<'_>) -> PreparedEffect {
 }
 
 /// Initial values from one `(left, right)` pair per parameter.
-fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
+pub(super) fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
     (0..PARAMETER_COUNT * 2)
         .map(|index| InitialParameterValue {
             parameter_index: (index / 2) as u32,
