@@ -449,7 +449,38 @@ assertion in `a_chain_restarted_strip_still_fades`; gates 1 (with 8),
 `every_restarting_edit_ducks_and_a_send_or_value_edit_does_not`,
 `a_revert_during_the_duck_fades_back_in_at_s`.
 
-**Outside the authorized paths, not done.** A restarting rebuild now waits for `S`, so tests that
-expect such a rebuild adopted at the next block fail until they render through `S`: capi lib (8),
-control-plane `observation_bindings` (5), `response_capture` (2), `runtime_preparer` (1), host-web
-lib (5) and `control_parity` (2). See the hand-back for the list.
+**A declared discontinuity ducks nothing** (found by the fallout below): a successor prepared at
+a declared discontinuity restarts every owner, so its `restarted_strips()` lists every strip;
+`plan_strip_transition` ignores `restarted` when `base.discontinuity` (#1323 D2), and such an edit
+is adopted at the next block as before. Pinned by capi's
+`an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it`, red without the guard.
+
+**Test fallout (root authorization, 2026-10-25).** A restarting rebuild now waits for `S`. Each
+edit moves only the adoption point (render through `S`, or wait on the applied-revision watermark);
+no equality, count or bit comparison was loosened. Shared helpers: control-plane
+`tests/support/adoption.rs`, capi `feed_and_render_until_direct` (existing) and
+`render_owner_until_swap`, host-web `Rig::step_through_adoption` and control_parity's
+`step_both_until_applied`. Claims changed to the duck-swap expectation (the old claim was
+next-block adoption of a strip-restarting rebuild):
+- control-plane `capture_follows_newest_plan`: a capture armed before an insert-adding rebuild is
+  now answered by the running plan without the insert (as for a removal, #1325); the stale branch
+  keeps its claim with a rebuild that restarts no strip (a muted track added).
+- capi `assert_rebuilds` (`a_set_control_on_a_rebuild_value_is_a_rebuild`): a `delay_samples`
+  rebuild leaves exactly the duck's two mute writes on the restarted strip, no other cell write.
+- capi `in_place_commands_equal_full_commands_through_the_c_abi`: compares every watermark word of
+  the two sessions (supersessions now occur, alike on both paths) instead of requiring none.
+- capi `edits_after_render_took_two_candidates_unretired_each_commit` and
+  `two_taken_candidates_and_a_published_adoption_never_wedge_the_session`: their edits are now
+  structural edits that restart no strip (tracks added), so render still takes each candidate at
+  the next block, which those claims are about.
+
+**Still red, not fixed.** (1) capi `in_place_commands_equal_full_commands_through_the_c_abi`: at
+step 352 of its 500-step stream a source submission returns `source.backpressure`. The stream's
+restarting rebuilds keep candidates pending and superseded for many blocks; from about step 238
+two retired provider epochs (18 and 20) are never reclaimed, a plain seek at step 284 never shows
+in the seek report, and the ring then fills. The same stream with the duck disabled passes, so it
+is the long phase 1, not the filter; the defect looks latent in the supersession and source
+producer path (#1310, #1344, #1325) and needs its own diagnosis. (2) SDK `structure-evals.mjs`
+(headless check, 6 failures: lines 347, 394, 497, 534, browser and headless): fixed block counts
+after a restarting rebuild; SDK files are outside this slice's authorization.
+
