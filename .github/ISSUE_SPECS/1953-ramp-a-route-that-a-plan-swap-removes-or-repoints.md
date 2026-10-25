@@ -24,6 +24,15 @@ watermark) predates #1325's two-phase machinery. The issue is split:
 - D15-9: a re-point (same ID, another source, tap or destination) is a removal plus an addition:
   `added_route_fades` case (a) arms it as added. #1877's re-arm keeps its own rule (same
   endpoints), so a re-pointed route is never re-armed with the displaced entry; it arms afresh.
+- Attempt 2 ruling 1: a route whose old instance has no lane is still *known* in
+  `added_route_fades` when re-pointed: its removal half cannot ramp in phase 1, so a re-point from
+  a lane-less route keeps main's behaviour (a step on both sides, no fresh arm) until 1953b, which
+  takes both halves. A half-state (step out, fade in) is refused. #1877's carried filter keeps the
+  strict same-endpoints rule.
+- `control.rs:5655` (a warm growth is refused only while `duck.strips()` is non-empty): a pending
+  phase 1 that ducks only routes now exists. The verifier found it harmless: such an overlay ducks
+  no strip, so no carried node of the growth's strips is ducked, and a warm candidate is still held
+  `Primed` until the inherited `S` (`hold_until`). No control-plane edit.
 - R2: an added following route with automated source mute steps (the #1953 comment) is #2011's;
   following routes stay excluded from the arm set and the duck set.
 - Class A: no rendered bit moves on existing fixtures except
@@ -43,7 +52,10 @@ watermark) predates #1325's two-phase machinery. The issue is split:
    removed lane-less route ducks nothing.
 2. `successor_swap`'s `a_repointed_send_fades_in_at_its_new_destination_on_every_width`: the
    re-pointed send arms (`D = 0`, `N`), restarts nothing, and equals a fresh plan with the send
-   muted and live-unmuted at the swap block; an in-flight gain ramp does not carry.
+   muted and live-unmuted at the swap block, (a) re-pointed to another bus and (b) to the same bus
+   from another tap; an in-flight gain ramp does not carry; (c) a re-point from a lane-less route
+   arms nothing.
+   Row 1 also: a removed `pre_fader` route into the output ducks alone, `C` its line.
 3. `capi`'s `a_removed_or_repointed_send_ramps_out_then_in_at_s`: (a) removal equals the live
    mute reference, adopted at `S` with `C = L`; (b) re-point equals a plan that live-mutes the old
    send and live-unmutes a copy into the new bus at `S`.
@@ -54,3 +66,5 @@ watermark) predates #1325's two-phase machinery. The issue is split:
   test.
 - Mutants, each red: no route duck; `C` without the route's line; `ducks()` on strips only; a
   re-point not ducked; a re-point not armed.
+- Attempt 2 mutants, each red: `known` without the source check (gate 2 (b)); the duck set's
+  `OutputInput => false` (gate 1); `known` without the lane-less rule (gate 2 (c)).
