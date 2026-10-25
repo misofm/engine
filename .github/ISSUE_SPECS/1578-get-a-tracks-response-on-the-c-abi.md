@@ -277,8 +277,8 @@ issued tag ends in exactly one `RESPONSE_READY`, across a rebuild, a supersessio
   red if the event path holds more than the result's charge. Mutant: a delivery that keeps the
   result beside its event. Red. The conversion's own member table is not separately observable at
   launch identities: the charge's 127-byte identities leave more slack than the table takes.
-  Measured `capi_retained_bytes`: 335,822 (x86-64, merged tree), under the unchanged 344,192
-  ceiling.
+  Measured `capi_retained_bytes`: 335,878 (x86-64, on the tree merged with main `bd6f53a31`),
+  under the unchanged 344,192 ceiling.
 - N1: the protocol test sets an odd structural generation; the event comes back unchanged and the
   cell stays empty. Mutant: no structural check. Red.
 - N2: the header names `LIMIT_EXCEEDED` `response.reply_too_large` after a rebuild among the event
