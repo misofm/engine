@@ -481,7 +481,12 @@ pass unchanged).
 - **Gate 6.** In the `g < P` case T3's `Input` stage keeps `a(n)`; its compressor and the stages
   after it wait for B's `Input` stage, as in A, so they are not at `a(n)`.
 - **Misaligned** has a gate now (1354a verify): gate 9's last case.
-- **Known, unchanged:** `warm_lead` reads `base.committed` without the duck overlay (as 1354a).
+- **Duck overlay:** `warm_lead` reads `base.committed` without the duck overlay (as 1354a). The
+  overlay changes only mutes, which `warm_lead` does not read; a later reader of mutes must use
+  the overlaid model (doc line at `warm_lead`).
+- **Verify fold (PASS, 2026-10-25):** gate 5 gains a row with a limiter before Y's compressor in
+  A, so the L3 line has predecessor words (`e = L`); its expected count is read from the prepared
+  line (`2 · λ'`), not a literal.
 
 Red on `main` (`66b5e0566`) before the change: gate 5 (`y` `Input` at 512, not 0), gate 6 `g < P`
 (`t3` `Input` at 512), the re-pointed row (`host.successor.warm_invariant`). Mutants of
@@ -493,6 +498,7 @@ Red on `main` (`66b5e0566`) before the change: gate 5 (`y` `Input` at 512, not 0
 | closure does not count `whole` as restarted | gates 5, 7 (second case) |
 | lead delay join adds nothing | re-pointed row |
 | no L3 words; L3 on one channel | gate 5 |
+| L3 charges `P` words a channel (verify MINOR) | gate 5, the row with a limiter before Y's `comp` (`e = L`) |
 | preparation omits L3 | gate 5 |
 | no `Misaligned` | gate 9 |
 | preparation ignores `R`'s join part | gate 6, re-pointed row |
