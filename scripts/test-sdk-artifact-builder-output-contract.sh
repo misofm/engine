@@ -14,7 +14,8 @@ mkdir "$mock_bin"
 cat >"$mock_bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'RUSTFLAGS=%s %s\n' "${RUSTFLAGS-}" "$*" >>"$(dirname "$0")/cargo.log"
+printf 'RUSTUP_TOOLCHAIN=%s RUSTFLAGS=%s %s\n' "${RUSTUP_TOOLCHAIN-}" "${RUSTFLAGS-}" "$*" \
+  >>"$(dirname "$0")/cargo.log"
 if [[ $1 == build ]]; then
   case " $* " in
     *" -p host-web "*) artifact=host_web ;;
@@ -334,6 +335,12 @@ rm -f "$mock_bin/cargo.log"
   $(PATH="$mock_bin:$PATH" bash "$repo_root/scripts/build-web-audioworklet.sh" --print-toolchain) == "$channel" &&
   ! -e $mock_bin/cargo.log ]] || {
   echo "--print-toolchain did not print the [browser-artifact] dated nightly, or built" >&2
+  exit 1
+}
+# The delivery build's cargo line (logged by the mock above) runs on that channel, with std rebuilt.
+grep ' build ' "$scratch/module-full.log" | grep -q -- \
+  "^RUSTUP_TOOLCHAIN=$channel RUSTFLAGS=.* build --locked --release -Zbuild-std=std,panic_abort " || {
+  echo "the shipped cargo line does not run on the [browser-artifact] channel with -Zbuild-std" >&2
   exit 1
 }
 toolchain_copy="$scratch/toolchain-copy"

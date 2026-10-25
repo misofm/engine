@@ -8,7 +8,7 @@ Code anchors verified on `main` at `6fb211594`.
 The shipped AudioWorklet module is built by one pinned, dated nightly with `-Zbuild-std`, named in
 one place in the repo. Every build path (CI, the release workflow, a developer's machine) uses it,
 the release identity names it, and changing it is held to a re-recorded three-browser qualification
-and the parity gates. Every other build in the repo stays on stable 1.97.1. This is the toolchain
+and the parity gates. Every other build in the repo stays on stable 1.99.1. This is the toolchain
 that #1332's Wasm threads need; this slice ships the toolchain change alone, with today's module
 shape (no atomics, unshared memory), so its risk is reviewed apart from threading.
 
@@ -230,10 +230,29 @@ Anchors moved since the brief: the stable pin is 1.99.1 (not 1.97.1) everywhere;
   `test-ci-path-routing.py`, `check-release-shape.py --self-test`: pass. Gate 7 is CI's.
 - Gate 8: `cargo fmt --check`, `check-workspace-policy.sh`: pass; no Rust source changed.
 
-### Open
+### Stated limits (each with a successor)
 
-- No committed gate holds the sysroot remap: the `artifact-identity` twin shares the runner's
-  `RUSTUP_HOME`, so dropping the remap would stay green until a build on another toolchain path
-  (gate 4 is PR evidence). Holding it would need the twin to copy the toolchain elsewhere.
-- `check-browser-expected-resources.py` without `--artifacts` builds its own module on stable;
-  CI passes `--artifacts`, so the shipped bytes are what it reads there.
+- **The sysroot remap has no committed gate.** The `artifact-identity` twin shares the runner's
+  `RUSTUP_HOME`, so a dropped remap stays green on a PR; gate 4 above is PR evidence only. It fails
+  closed: the module would then embed the toolchain path, and the next bump or release, built from
+  another toolchain path (`npm-publish.yml`'s rebuild) or re-recorded against a moved digest, refuses
+  the bytes rather than shipping them. Successor: build the twin from a toolchain copy at another
+  path, so the remap is held on every PR.
+- **`check-browser-expected-resources.py` without `--artifacts` builds its own module on stable.**
+  CI always passes `--artifacts`, so CI reads the shipped bytes; a local run without it reads a
+  stable build. Successor: have that path call `build-web-audioworklet.sh --module-only`, the one
+  home of the shipped cargo line.
+
+### Verifier finding M1 (folded in)
+
+The builder contract test's mock cargo logs `RUSTUP_TOOLCHAIN`, and the test asserts that the
+delivery build's cargo line runs on the `[browser-artifact]` channel with
+`-Zbuild-std=std,panic_abort`. It is red on each mutant: dropping `RUSTUP_TOOLCHAIN="$channel"`,
+dropping `-Zbuild-std`, and dropping both.
+
+### Merge order (root, 2026-10-25)
+
+The recorded `results.json` describes `8643b810...` built on `b0bc367af`. #1334 merges alone after
+the current wave of module-moving PRs; just before it merges, the branch merges `origin/main` and
+re-records the matrix (one `--browser all --record-matrix`, then `--check-matrix`), with nothing
+in between.
