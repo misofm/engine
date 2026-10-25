@@ -205,7 +205,8 @@ tracks, input filters, an EQ insert and an EQ console slot:
   displaced (deferred adoption, a full retirement queue, a render finishing an older block) stays
   charged. `ResponseCaptureCeiling` is split into `job_bytes` and `result_bytes`; the result
   charges two strip IDs (`ResponseReady::strip_id` and `TrackResponse::strip_id`), and
-  `compose_track_response` reserves its member table exactly. The nine-track fixture's row is
+  `compose_track_response` reserves its member table exactly. Attempt 4: `CapiResources::response_capture` stores the row
+  `capi_resources` charges, and the shrinking test reads it on the pending successor. The nine-track fixture's row is
   52,203 bytes; capi's reference row measures 248,532 against its 275,584 ceiling after the merge
   of `main` at attempt 3, so the ceiling stays.
 - **Browser call-graph gate.** `scripts/check-web-audioworklet.sh` fails on two pins, outside this
@@ -262,5 +263,7 @@ delivered at sample 128, before the adoption at 640); `Pending` checked before `
 (follows red); a stale job armed again at its old epoch (follows and allocates red); the curves
 left out of the charge (bound red: delivered 49,455 bytes against a 4,199-byte charge).
 Attempt 3: the high-water ignored (shrinking red: a held job of 5,072 bytes against a 2,177-byte
-job charge); the member table, the member identities and the collector's 3 x 127 identities left
+job charge); attempt 4: the high-water replaced by 0 at the `prepared_capi_resources` call
+(shrinking red: the pending successor's stored `CapiResources::response_capture` 52,203 against
+the five-owner ceiling 56,028); the member table, the member identities and the collector's 3 x 127 identities left
 out (bound red: a 3,142-byte job against 1,999; shrinking red: 5,072 against 3,167).
