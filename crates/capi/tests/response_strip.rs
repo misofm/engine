@@ -28,6 +28,10 @@ const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-n
 const FRAME_BYTES: u64 = 1 << 20;
 const QUANTUM: usize = 128;
 const POINTS: u32 = 64;
+/// The control plane's reliable event slots: one drain returns at most these frames and two more
+/// (one held behind the queue, one pending), so a defect that delivers without end fails instead of
+/// growing.
+const RELIABLE_EVENT_SLOTS: usize = 2;
 /// More blocks than any adoption of these edits takes.
 const BLOCKS: usize = 256;
 
@@ -284,12 +288,12 @@ impl Host {
     }
 
     /// Drain the reliable lane: the `RESPONSE_READY` events it held, in order, and the number of
-    /// other events.
+    /// other events. Panics past `RELIABLE_EVENT_SLOTS + 2` frames.
     fn drain(&mut self) -> (Vec<ResponseReady>, usize) {
         let mut storage = vec![0_u8; FRAME_BYTES as usize];
         let mut ready = Vec::new();
         let mut others = 0;
-        loop {
+        for _ in 0..=RELIABLE_EVENT_SLOTS + 2 {
             let mut event = BytesOut {
                 struct_size: BYTES_OUT_SIZE,
                 reserved0: 0,
@@ -317,6 +321,10 @@ impl Host {
                 _ => others += 1,
             }
         }
+        panic!(
+            "more than {} reliable frames in one drain",
+            RELIABLE_EVENT_SLOTS + 2
+        );
     }
 
     /// Render and service up to `blocks` blocks, draining after each; every `RESPONSE_READY`.
