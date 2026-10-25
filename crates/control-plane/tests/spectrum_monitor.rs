@@ -262,6 +262,22 @@ impl Rig {
         &mut self,
         request: &SpectrumConfigureRequest,
     ) -> Result<SpectrumConfigured, (StatusCode, String)> {
+        self.configure_with(request, false)
+    }
+
+    /// [`Self::configure`] with the plan lent to the command (#1597), as the browser sends it.
+    fn configure_lent(
+        &mut self,
+        request: &SpectrumConfigureRequest,
+    ) -> Result<SpectrumConfigured, (StatusCode, String)> {
+        self.configure_with(request, true)
+    }
+
+    fn configure_with(
+        &mut self,
+        request: &SpectrumConfigureRequest,
+        lend: bool,
+    ) -> Result<SpectrumConfigured, (StatusCode, String)> {
         self.request += 1;
         let codec = ProtocolCodec::default();
         let frame = TypedCommandFrame {
@@ -273,10 +289,13 @@ impl Rig {
         let length = codec
             .encode_command_frame_into(&frame, &mut bytes)
             .expect("configure command");
-        let length = self
-            .session
-            .command(&bytes[..length], 65_536)
-            .expect("a configure answers a frame");
+        let length = if lend {
+            self.session
+                .command_with_plan(&bytes[..length], &[], 65_536, &mut self.plan, |_| &[])
+        } else {
+            self.session.command(&bytes[..length], 65_536)
+        }
+        .expect("a configure answers a frame");
         let mut fields = [0_u16; 64];
         match codec
             .decode_typed_response(
@@ -660,6 +679,45 @@ fn the_first_plan_reads_the_reference_window() {
             "the planes equal the reference's bit for bit"
         );
     }
+}
+
+/// #1597. Turns red if a configure before the first block does not reach the plan that renders
+/// sample 0: on a session booted with no taps, a configure through the lent plan answers `rebuild`
+/// with the adopted epoch already the configured one and no candidate pending; a window armed
+/// then, before any block, equals bit for bit the reference's window armed at frame 0; and every
+/// block renders the bits of a session booted with no taps and never configured.
+#[test]
+fn a_configure_before_the_first_block_reaches_sample_zero() {
+    let mut rig = Rig::new(None);
+    let reply = rig.configure_lent(&single_request()).expect("configure");
+    assert!(reply.rebuild);
+    assert_eq!((reply.configured_epoch, reply.adopted_epoch), (1, 1));
+    assert!(rig.session.test_pending_providers().is_empty());
+    let mut plain = Rig::new(None);
+    let mut reference = Reference::new();
+    rig.service().arm().expect("arm before the first block");
+    reference.service.arm().expect("arm the reference");
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+        plain.block();
+        reference.block();
+        assert_eq!(rig.output, plain.output, "a block of other bits");
+    }
+    let got = rig
+        .service()
+        .read(SpectrumChannels::Stereo)
+        .expect("read")
+        .expect("a complete window");
+    let want = reference
+        .service
+        .read(SpectrumChannels::Stereo)
+        .expect("read")
+        .expect("a complete window");
+    assert_eq!(got.window.first_sample, 0);
+    assert_eq!(got.window.first_sample, want.window.first_sample);
+    assert!(got.window.left.iter().any(|sample| *sample != 0.0));
+    assert!(same_words(&got.window.left, &want.window.left));
+    assert!(same_words(&got.window.right, &want.window.right));
 }
 
 /// Gate 5. Turns red if spectrum state leaks into the model, the revision or the snapshot: a

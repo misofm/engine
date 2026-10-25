@@ -1582,7 +1582,8 @@ impl ReadyOwnership {
     ///
     /// `plan` is the render half (#1589 R2): its active plan's companions hold the observation
     /// readers, which the swap block pairs, so the command borrows them, with that plan's epoch,
-    /// for an `OBSERVATION_READ`.
+    /// for an `OBSERVATION_READ`; and before the first block a `SPECTRUM_CONFIGURE` has it adopt
+    /// its successor in place (#1597), which the first block then renders with no swap.
     fn run_command(
         &mut self,
         plan: &mut WebPlan,
@@ -1590,15 +1591,13 @@ impl ReadyOwnership {
         document: &[u8],
         output_capacity: u64,
     ) -> Result<usize, control_plane::CommandError> {
-        let epoch = plan.owner().active_epoch().0;
-        let readers = observation_handles(plan);
         self.run_control(control_plane::CommandError::Backpressure, |control| {
-            control.command_with_plan_observations(
+            control.command_with_plan(
                 request,
                 document,
                 output_capacity,
-                epoch,
-                readers,
+                plan,
+                observation_handles,
             )
         })
     }
