@@ -198,11 +198,13 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
         # what the swap block's attachment hook paired, which it reads from the active plan's
         # companions.
         "_RNvMs0_Cs_8host_webNtB5_22AudioWorkletEngineHost11render_next": (
-            2,
+            4,
             "`PlanState::active_attachment_mut::<RenderCompanions>()` at the adoption block "
             "(#1381b): the active plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the "
             "downcast asks its `type_id`, one `call_indirect` each, neither of which allocates or "
-            "drops",
+            "drops; and the same pair in the meter fold that runs after the block while the "
+            "protocol's meter table is on without the lease (#1588b, `poll_meter_delivery`, "
+            "inlined)",
         ),
         # Issue #1381a D4: the browser renders through the plan owner, so the block boundary's
         # swap decision is in the closure. The plan's own `render` entry is not: the owner calls

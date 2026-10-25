@@ -1255,9 +1255,9 @@ pub struct SessionState<A: ControlAdapter> {
     /// render half does. `None` from boot when the session serves the meter batches itself
     /// ([`Self::meters`]).
     pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
-    /// The response capture's delivered result (#1577 D5), kept by `service` until a host takes
-    /// it; #1578 turns it into an event.
-    pub(crate) response_ready: Option<host_core::ResponseReady>,
+    /// The response capture's delivered result, as its `RESPONSE_READY` event, while the
+    /// controller's one cell cannot take it yet (#1578 D4): `service` retries until it is queued.
+    pub(crate) response_ready: Option<PendingResponse>,
     /// The session's meter delivery when its control plane serves the meter batches (#1583 D5,
     /// R2: the C ABI's), built at boot over the output meter's reader and a requested gate.
     pub(crate) meters: Option<SessionMeters>,
@@ -1271,6 +1271,19 @@ pub struct SessionState<A: ControlAdapter> {
     /// (`withdraw_pending_candidate`), and when a supersession or a declared stop drops the
     /// candidate (#1310 D5 step 6). A refused supersession republishes the candidate and keeps it.
     pub(crate) primed: Option<host_core::PrimedCandidate>,
+}
+
+/// A delivered response capture that `service` has not yet queued (#1578 D4).
+pub(crate) enum PendingResponse {
+    /// The `RESPONSE_READY` event of a strip `RESPONSE_GET`, waiting for the controller's cell.
+    Event(protocol::ResponseReady),
+    /// Test seam (#1577): a capture armed by [`SessionState::test_arm_track_response`], which
+    /// issued no protocol tag and so owes no event.
+    #[cfg(feature = "test-support")]
+    SeamArmed,
+    /// Test seam (#1577): the seam-armed capture's result, until the test takes it.
+    #[cfg(feature = "test-support")]
+    SeamResult(host_core::ResponseReady),
 }
 
 /// The meter batches a control plane serves (#1583 D5, #1587a, #1588 D4): where its frames come
@@ -2666,10 +2679,13 @@ pub(crate) fn map_event_egress_error(error: EventEgressError) -> EventError {
                 required: u64::try_from(required).unwrap_or(u64::MAX),
             }
         }
-        EventEgressError::ReliableQueueFull(_) => EventError::Backpressure,
+        EventEgressError::ReliableQueueFull(_) | EventEgressError::ResponseReadyOccupied => {
+            EventError::Backpressure
+        }
         EventEgressError::Disabled
         | EventEgressError::DiagnosticStorageFull
         | EventEgressError::ObservationEndedCellMissing
+        | EventEgressError::ResponseReadyMissing
         | EventEgressError::Encode(_) => EventError::Internal,
     }
 }
@@ -3772,13 +3788,91 @@ where
         Ok(())
     }
 
-    /// Takes the response capture's reply, if one is there and no result is waiting (#1577 D5).
+    /// Delivers the response capture (#1578 D4, R1): releases the capture once its event has
+    /// left the controller's cell, takes the render step's reply (#1577 D5) as its
+    /// `RESPONSE_READY` event, and moves the event into the controller.
+    ///
+    /// **Acked-batch question: can an ack precede a drop? No.** Every strip `RESPONSE_GET` that
+    /// was answered a tag armed one capture, and the client delivers each capture's result once
+    /// (a rebuild or a supersession re-arms it from the newest plan, and a strip the newest model
+    /// no longer has is `NOT_FOUND`). The result becomes one event, held here until the controller
+    /// queues it: a full queue, a held cell or an outstanding structural transaction keeps it for
+    /// the next call, and an event the endpoint cannot encode is replaced by its refusal, never
+    /// dropped. The capture is released, so a new request can arm, only after the event's frame
+    /// reached the host.
     fn poll_response_capture(&mut self) {
-        if self.response_ready.is_some() {
-            return;
+        match &self.response_ready {
+            #[cfg(feature = "test-support")]
+            Some(PendingResponse::SeamArmed) => {
+                let (provider, store) = self.controller.provider_and_session_mut();
+                if let Some(ready) =
+                    provider.poll_response_capture(store.compiled().normalized_model())
+                {
+                    self.response_ready = Some(PendingResponse::SeamResult(ready));
+                }
+                return;
+            }
+            #[cfg(feature = "test-support")]
+            Some(PendingResponse::SeamResult(_)) => return,
+            Some(PendingResponse::Event(_)) => {}
+            None => {
+                if !self.controller.response_ready_pending() {
+                    // A no-op unless a delivered event has reached the host.
+                    self.controller.provider_mut().release_response_capture();
+                }
+                let (provider, store) = self.controller.provider_and_session_mut();
+                if let Some(ready) =
+                    provider.poll_response_capture(store.compiled().normalized_model())
+                {
+                    self.response_ready = Some(PendingResponse::Event(
+                        host_core::response_ready_event(ready),
+                    ));
+                }
+            }
         }
-        let (provider, store) = self.controller.provider_and_session_mut();
-        self.response_ready = provider.poll_response_capture(store.compiled().normalized_model());
+        self.queue_response_event();
+    }
+
+    /// Moves a held `RESPONSE_READY` into the controller's cell (#1578 D4). A refusal keeps the
+    /// event for the next `service`; an event the endpoint cannot encode becomes its refusal
+    /// (`LIMIT_EXCEEDED` `response.reply_too_large` for one over the frame limit, `INTERNAL`
+    /// `response.capture` otherwise), which is queued in its place.
+    fn queue_response_event(&mut self) {
+        for _ in 0..2 {
+            let Some(PendingResponse::Event(event)) = self.response_ready.take() else {
+                return;
+            };
+            let revision = self.controller.session().revision();
+            let Err(refused) = self
+                .controller
+                .enqueue_response_ready_event(revision, event)
+            else {
+                return;
+            };
+            let mut event = refused.event;
+            let retry = if let EventEgressError::Encode(error) = refused.reason {
+                event.outcome = protocol::ResponseReadyOutcome::Refused {
+                    status: if error == EncodeError::LimitExceeded {
+                        protocol::StatusCode::LimitExceeded
+                    } else {
+                        protocol::StatusCode::Internal
+                    },
+                    diagnostic: if error == EncodeError::LimitExceeded {
+                        "response.reply_too_large"
+                    } else {
+                        "response.capture"
+                    }
+                    .to_owned(),
+                };
+                true
+            } else {
+                false
+            };
+            self.response_ready = Some(PendingResponse::Event(event));
+            if !retry {
+                return;
+            }
+        }
     }
 
     /// Test seam (#1577 D5): arm one capture of `strip_id`'s response owners from the newest plan.
@@ -3794,12 +3888,14 @@ where
         channels: host_core::ResponseChannels,
     ) -> Result<u64, host_core::ResponseCaptureRefusal> {
         let (provider, store) = self.controller.provider_and_session_mut();
-        provider.arm_response_capture(
+        let tag = provider.arm_response_capture(
             store.compiled().normalized_model(),
             strip_id,
             grid,
             channels,
-        )
+        )?;
+        self.response_ready = Some(PendingResponse::SeamArmed);
+        Ok(tag)
     }
 
     /// Test seam (#1577): the response capture row the newest epoch's plan was charged
@@ -3817,7 +3913,12 @@ where
     /// does when the host dequeues its event.
     #[cfg(feature = "test-support")]
     pub fn test_take_track_response(&mut self) -> Option<host_core::ResponseReady> {
-        let ready = self.response_ready.take()?;
+        let Some(PendingResponse::SeamResult(_)) = &self.response_ready else {
+            return None;
+        };
+        let Some(PendingResponse::SeamResult(ready)) = self.response_ready.take() else {
+            return None;
+        };
         self.controller.provider_mut().release_response_capture();
         Some(ready)
     }

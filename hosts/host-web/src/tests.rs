@@ -3773,6 +3773,155 @@ fn meter_reacquisition_rejects_a_full_stale_queue_then_recovers() {
     assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
 }
 
+/// One `METER_BATCH`: its span, its window sequence and its records' values in order.
+type MeterBatchRow = (u64, u64, u64, Vec<f32>);
+
+/// Run one service step and dequeue every lossy event, keeping the `METER_BATCH`es.
+fn served_meter_batches(host: &mut AudioWorkletEngineHost) -> Vec<MeterBatchRow> {
+    use protocol::{DecodeScratch, DecodedEventPayload, DecodedTypedEventFrame, ProtocolCodec};
+    assert_eq!(host.service(), RESULT_OK);
+    let mut batches = Vec::new();
+    loop {
+        assert_eq!(host.control_event(EVENT_LANE_LOSSY), RESULT_OK);
+        let event = host.control_response();
+        if event.is_empty() {
+            return batches;
+        }
+        let mut fields = [0_u16; 64];
+        if let DecodedTypedEventFrame {
+            payload: DecodedEventPayload::MeterBatch(batch),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_event(event, &mut DecodeScratch::new(&mut fields))
+            .expect("a lossy event")
+        {
+            batches.push((
+                batch.first_sample.0,
+                batch.observed_sample.0,
+                batch.window_sequence,
+                (0..usize::from(batch.count))
+                    .map(|index| batch.record(index).expect("a meter record").value)
+                    .collect(),
+            ));
+        }
+    }
+}
+
+/// #1588 gate 2: the lease and a protocol meter table at once. Under the lease every batch of
+/// `k = 2` covers exactly two consecutive lease frames' spans, and its output and track peaks are
+/// the two frames' maxima. Releasing the lease restarts the delivery epoch once: the partial
+/// batch it cuts is counted in `METER_WINDOWS_LOST`, the batches continue on the new epoch, and
+/// with the table alone the lease frame and its header stay as the release left them.
+///
+/// Test value: red if the two clients fold different windows (a batch that is not the two lease
+/// frames' span or maxima), if one client's change moves the other's data without a counted
+/// restart, or if the table alone writes the lease frame.
+#[test]
+fn the_lease_and_a_meter_table_fold_one_window_grid_and_a_release_restarts_it_once() {
+    use protocol::{
+        CommandPayload, CounterId, DiagnosticSeverity, ExpectedRevision, MeterEntry, MeterMetric,
+        MeterTarget, ProtocolCodec, RequestId, SessionRevision, TelemetryConfiguration,
+        TypedCommandFrame,
+    };
+    const QUANTUM: u64 = 128;
+    let mut host = live_control_host(QUANTUM as u32, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(
+                    host.committed_revision(),
+                )),
+                payload: CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters: vec![
+                        MeterEntry {
+                            target: MeterTarget::Output,
+                            metric: MeterMetric::Peak,
+                        },
+                        MeterEntry {
+                            target: MeterTarget::Strip("track".into()),
+                            metric: MeterMetric::Peak,
+                        },
+                    ],
+                    meter_period_blocks: 2,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            },
+            &mut bytes,
+        )
+        .expect("a telemetry frame");
+    let staged = u32::try_from(length).expect("frame length");
+    host.control_request_mut(staged)
+        .expect("the control request staging")[..length]
+        .copy_from_slice(&bytes[..length]);
+    assert_eq!(host.control_command(staged), RESULT_OK);
+
+    // Seven lease frames: three whole batches and one frame of a fourth.
+    let values = [0.25_f32, 0.5, 0.125, 1.0, 0.0625, 0.75, 0.375];
+    let mut leased = Vec::new();
+    let mut batches = Vec::new();
+    for (block, value) in values.into_iter().enumerate() {
+        feed_and_render(&mut host, 1, block as u64, value);
+        assert_eq!(host.poll_meters(), 1, "block {block}: one lease frame");
+        let header = *host.meter_header();
+        let frame = host.meter_frame();
+        leased.push((header.first_sample, header.end_sample, frame[0], frame[2]));
+        batches.extend(served_meter_batches(&mut host));
+    }
+    assert_eq!(batches.len(), 3, "a batch every two lease frames");
+    for (index, (first, end, sequence, records)) in batches.iter().enumerate() {
+        let (one, two) = (leased[2 * index], leased[2 * index + 1]);
+        assert_eq!(two.0, one.1, "batch {index}: two consecutive lease frames");
+        assert_eq!((*first, *end), (one.0, two.1), "batch {index}: their span");
+        assert_eq!(*sequence, index as u64 + 1);
+        let (output, track) = (one.3.max(two.3), one.2.max(two.2));
+        assert_eq!(
+            records,
+            &vec![output, output, track, track],
+            "batch {index}: their maxima"
+        );
+    }
+    let lost = served_counter(&mut host, 2, CounterId::MeterWindowsLost);
+
+    // The release restarts the epoch at the next block; the table alone then folds in render.
+    assert_eq!(host.set_meter_lease(false), RESULT_OK);
+    let released = (host.meter_frame().to_vec(), *host.meter_header());
+    let restart = values.len() as u64;
+    let mut after = Vec::new();
+    for block in restart..restart + 4 {
+        feed_and_render(&mut host, 1, block, 0.5);
+        after.extend(served_meter_batches(&mut host));
+    }
+    assert_eq!(
+        after
+            .iter()
+            .map(|(first, end, sequence, _)| (*first, *end, *sequence))
+            .collect::<Vec<_>>(),
+        [
+            (restart * QUANTUM, (restart + 2) * QUANTUM, 4),
+            ((restart + 2) * QUANTUM, (restart + 4) * QUANTUM, 5),
+        ],
+        "the batches continue from the restart"
+    );
+    assert_eq!(
+        served_counter(&mut host, 3, CounterId::MeterWindowsLost),
+        lost + 1,
+        "the restart's one counted window: the partial batch it cut"
+    );
+    assert_eq!(
+        (host.meter_frame().to_vec(), *host.meter_header()),
+        released,
+        "the table alone leaves the lease frame as the release left it"
+    );
+}
+
 /// A three-track observation host over the #143 E4 fixture: compressor, EQ (no tap), gate.
 fn observation_host(
     quantum: u32,
