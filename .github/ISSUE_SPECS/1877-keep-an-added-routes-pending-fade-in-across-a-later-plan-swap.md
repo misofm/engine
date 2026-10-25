@@ -50,3 +50,15 @@ the route op files #1363 touches, this spec.
 - Gate 4's allocation claim is asserted inside the new test (`fade_run`'s allocator counters over
   both hand-overs and every later block, as #1392 did), not by extending
   `the_swap_block_allocates_and_frees_nothing`.
+
+## Decision record (attempt 2, 2026-10-25)
+
+- Verifier MAJOR fixed: in the `armed_restarts` path a route already in `route_fades` now takes
+  `carried = None`, so a restarted strip's send is armed only afresh with its fader (#1392 D2).
+  Gate 4 (e) checks a restart at block 8, the successor prepared then or a block earlier, against
+  the run whose second transaction adds the send. A restart after the fire is not observable in the
+  12-block harness: the restarted limiter line holds the strip silent past the run's end.
+- The injected `RouteJoin { retarget: None }` is limited to lane-less routes
+  (`!controls::route_rows_live`).
+- A lane-less transition route that has fired and is in flight across a later swap (the successor
+  binds no op for it) existed before this issue; root moves it to #1953b's scope.
