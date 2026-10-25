@@ -351,8 +351,10 @@ extern "C" {
  * "source.id.unknown", and PCM accepted for it that render has not read is discarded with the
  * running plan. A later transaction before S writes no second fade for a strip already fading,
  * and its replacement is adopted no earlier than the same S. A transaction before S that restores
- * a removed strip or source is refused as BACKPRESSURE; retry it once the watermark reports the
- * removal. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
+ * a removed strip commits too, and its replacement is adopted no earlier than the same S: the strip
+ * fades back in from S over the session's mute_ms ramp, and so does each of its routes whose tap
+ * precedes the fader. A restored source declared as before keeps its ring: the PCM accepted for it
+ * in phase 1 plays, and the host keeps feeding it without a seek. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
  * A source whose declaration the transaction changed restarts like an added one: in a new ring at
  * generation 1, frame 0, with the PCM accepted for it before the command discarded with its plan;
  * the host restarts its feed.
