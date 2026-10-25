@@ -280,22 +280,22 @@ SCALAR_SLACK = 8
 # ## Derivation of the ceilings (issue #163 phase 0e; re-derived at mono-collapse M2, re-measured at #1970)
 #
 # Measured with this analyser on the named twin of `miso-engine-v1-audio-worklet.simd128.wasm`
-# (`build-web-audioworklet.sh --module-only --named-twin`) built from `019194414`, issue #1970
-# (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`; the M2-era count is in
-# brackets where it moved):
+# (`build-web-audioworklet.sh --named-twin`) built from `15f37828f`, issue #1970
+# (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`; the count this table
+# gave before #1970 is in brackets where it moved):
 #
 #   (multiband-compressor f32x8 was 2560 / 20; #1110 removed eight lanes from the browser build)
 #   multiband-compressor f32x4   3464 /  0   ratio 0        (dual; 2527 / 0 before #1367a's mixed arm)
 #   multiband-compressor f32x4   1862 /  0   ratio 0        (collapsed; 1389 / 0 before #1367a)
-#   transient-shaper     f32x4    700 /  0   ratio 0        (dual; 786 / 72 at M2, codegen)
-#   transient-shaper     f32x4    352 /  0   ratio 0        (collapsed, #1873)
-#   true-peak-limiter    f32x4    913 /  0   ratio 0        (dual; [448 / 0])
-#   compressor           f32x4    949 /  0   ratio 0        (dual; [267 / 0])
-#   true-peak-limiter    f32x4    424 /  0   ratio 0        (collapsed; [224 / 0])
-#   gate-expander        f32x4    162 /  0   ratio 0        (dual; 180 / 8 before #973, codegen)
+#   transient-shaper     f32x4    808 /  0   ratio 0        (dual; 786 / 72 at M2, codegen; [700 / 0])
+#   transient-shaper     f32x4    407 /  0   ratio 0        (collapsed, #1873; [352 / 0])
+#   true-peak-limiter    f32x4   1139 /  0   ratio 0        (dual; [448 / 0])
+#   compressor           f32x4   1359 /  0   ratio 0        (dual; [267 / 0])
+#   true-peak-limiter    f32x4    537 /  0   ratio 0        (collapsed; [224 / 0])
+#   gate-expander        f32x4    265 /  0   ratio 0        (dual; 180 / 8 before #973, codegen; [162 / 0])
 #   parametric-eq        f32x4   1352 /  1   ratio 0.0007   (dual; [168 / 0])
-#   compressor           f32x4    524 /  0   ratio 0        (collapsed; [138 / 0])
-#   gate-expander        f32x4     82 /  0   ratio 0        (collapsed, #973)
+#   compressor           f32x4    733 /  0   ratio 0        (collapsed; [138 / 0])
+#   gate-expander        f32x4    134 /  0   ratio 0        (collapsed, #973; [82 / 0])
 #   parametric-eq        f32x4    748 /  1   ratio 0.0013   (collapsed; [84 / 0])
 #   soft-clip            f32x4     55 /  0   ratio 0        ([25 / 0])
 #   route-mix-ramp       f32x4     22 /  0   ratio 0        (#1220; row added by its verdict NIT-1)
@@ -351,8 +351,8 @@ SCALAR_SLACK = 8
 # the healthy state, and a future change that merges them back would show up here as a row that
 # vanished, not as a row that grew.
 #
-# Each collapsed body carries about **half** its dual sibling's vector arithmetic (524 against 949,
-# 424 against 913, 748 against 1352, 82 against 162, 1862 against 3464, 352 against 700, 316
+# Each collapsed body carries about **half** its dual sibling's vector arithmetic (733 against 1359,
+# 537 against 1139, 748 against 1352, 134 against 265, 1862 against 3464, 407 against 808, 316
 # against 626, 283 against 561) and no more scalar arithmetic than its sibling, which is what a
 # correct one-plane variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (

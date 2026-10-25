@@ -520,16 +520,16 @@ fi
 #   * **Weaker.** It no longer asserts any absolute instruction count. That is the point: phases 1
 #     to 4 of #163 exist to lower those counts.
 #
-# Re-measured on the named twin at issue #1970 (built from `019194414`), for the record (vector /
+# Re-measured on the named twin at issue #1970 (built from `15f37828f`), for the record (vector /
 # scalar; the M2-era count in brackets where it moved). These are the derivation's *input* and are
 # deliberately not asserted. (The eight-lane multiband body, 2560/20, left the browser build with
 # #1110.)
 #
 #   multiband dual          3464/0     multiband mono           1862/0
-#   transient-shaper dual    700/0     transient-shaper mono     352/0   [786/72 at M2]
-#   gate-expander dual       162/0     gate-expander mono         82/0   [180/8 at M2]
-#   true-peak-limiter dual   913/0     true-peak-limiter mono    424/0   [448/0, 224/0]
-#   compressor dual          949/0     compressor mono           524/0   [267/0, 138/0]
+#   transient-shaper dual    808/0     transient-shaper mono     407/0   [786/72 at M2]
+#   gate-expander dual       265/0     gate-expander mono        134/0   [180/8 at M2]
+#   true-peak-limiter dual  1139/0     true-peak-limiter mono    537/0   [448/0, 224/0]
+#   compressor dual         1359/0     compressor mono           733/0   [267/0, 138/0]
 #   parametric-eq dual      1352/1     parametric-eq mono        748/1   [168/0, 84/0]
 #   dynamic-eq dual          626/0     dynamic-eq mono           316/0
 #   de-esser dual            561/0     de-esser mono             283/0
