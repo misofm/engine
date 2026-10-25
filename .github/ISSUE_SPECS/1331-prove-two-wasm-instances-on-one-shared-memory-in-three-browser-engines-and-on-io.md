@@ -316,9 +316,12 @@ trap. In all three engines, the worklet's first 350 blocks gave the #1331a-1 nat
 `44ecef33...` (the longer source does not change them). In the Worker, Firefox renders this
 session about 15 times slower than Chromium. The Firefox Worker uses about 0.91 of real time per
 block (1/h). About 43 % of the worklet's calls during the spans read over 2 ms (4381/10219), and
-#1331a-1 saw 44 % in `two` and 47-48 % in both single legs on unshared memory, so the slowdown is
-not specific to the Worker or to the second instance. The cause is not investigated, and the slowdown
-can be a property of the Playwright Firefox build only. Firefox h = 1.10 gives m·h = 0.77 ≤ 1,
+#1331a-1 saw 44 % in `two` and 47-48 % in both single legs, with one instance and no Worker (the
+memory is still shared), so the slowdown is not specific to the Worker or to the second instance.
+Every #1331a-1 and #1331a-2 browser leg that recorded a late-call share ran the atomic module on a
+shared memory, so shared memory itself is not ruled out as the cause; the diagnosis issue checks
+it. The cause is not investigated, and the slowdown can be a property of the Playwright Firefox
+build only. Firefox h = 1.10 gives m·h = 0.77 ≤ 1,
 which triggers #1286 D3's stop: #1286 D3 derives no browser value and its slice stops for an
 owner ruling. These
 rows are the browser input to #1286 D3; this spike sizes nothing.
@@ -363,8 +366,8 @@ named twin.
 **Outcome.** Gates 3 and 5 pass; gate 4 passes for the plain shape and is not passed for the
 atomic shape as written (runner; green under the shim). The nightly keeps every committed native,
 G5 and browser pin on the plain shape, so #1334 may adopt the plain D2 command as recorded. Open:
-(1) the cause of Firefox's slow render (every mode, unshared memory too; maybe the Playwright
-build only). Owner: root routes it as an owner question and a successor diagnosis issue; until
+(1) the cause of Firefox's slow render (every mode, also with one instance and no Worker (the
+memory is still shared); shared memory itself not ruled out; maybe the Playwright build only). Owner: root routes it as an owner question and a successor diagnosis issue; until
 then #1286 D3 derives no browser value and its slice stops for an owner ruling. (2) G5 for the atomic shape needs the runner change, in #1380.
 #1331b (iPhone) stays owner-gated, and D7 on iOS is part of it.
 
