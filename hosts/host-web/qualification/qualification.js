@@ -716,9 +716,10 @@ async function runEmptyBootQualification(createHost, emptyDocument, frameFixture
 /// Issue #1295 D1: the structural-edit capture, the swap block and 32 quanta after it.
 const STRUCTURAL_EDIT_BLOCKS = 33;
 const STRUCTURAL_EDIT_FRAMES = STRUCTURAL_EDIT_BLOCKS * QUANTUM_FRAMES;
-/// Issue #1295 (#1697 gate 3): the quanta the 1 MiB replacement renders after its commit, enough
-/// for the swap block to adopt it.
-const STRUCTURAL_REPLACE_LARGE_BLOCKS = 4;
+/// Issue #1295 (#1697 gate 3): the quanta the 1 MiB replacement renders after its commit. It
+/// replaces the track's source, so the old track ramps out before the swap: the module under Node
+/// adopts it at sample 640 (block 5). Sixteen leaves room and gates nothing on the block.
+const STRUCTURAL_REPLACE_LARGE_BLOCKS = 16;
 
 /// Issue #1295: a structural edit by `SESSION_REPLACE` in a real browser, on this page (no
 /// cross-origin isolation, so the module runs in `single` mode and every control call runs in the

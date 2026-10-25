@@ -149,7 +149,7 @@ instance, whose structural edit is the blocking rebuild, reported and counted, D
 - **One function, two boots** (`runStructuralReplaceQualification`, `qualification.js`): the exact
   case boots A (`tests/browser-v1/session.json`), prefills `source.json`'s two blocks, sends B
   (`tests/browser-v1/structural-edit-session.json`) and renders 33 quanta (the swap block plus 32);
-  the measurement case boots A and sends the 1 MiB document, then renders 4 quanta.
+  the measurement case boots A and sends the 1 MiB document, then renders 16 quanta (it replaces the track's source, so the old track ramps out before the swap: under Node it is adopted at sample 640).
 - **The frame** is built in `sdk-response-entry.ts` (`replaceSessionThroughSdk`) with the SDK's
   own frame encoder (`commandFrame`, `field`) and decoded with its envelope decoder, its request ID
   from the host's one allocator (the transaction queue's) and its digest by `crypto.subtle`. This

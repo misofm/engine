@@ -1661,6 +1661,7 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
         memoryBytesBefore: replace.large.before.memoryBytes,
         memoryBytesCommitted: replace.large.committed.memoryBytes,
         memoryBytesAfter: replace.large.after.memoryBytes,
+        appliedSample: replace.large.after.appliedSample,
         growth,
         projection,
         aboveProjection: growth > projection,
