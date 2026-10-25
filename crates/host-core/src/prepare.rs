@@ -7772,8 +7772,8 @@ struct RouteFade<'a> {
 
 /// The routes of `model` a successor arms to fade in (#1363 D1 (a), (c)), in `model`'s route
 /// order: (a) a route `committed` does not hold, or holds under its ID with another source, tap
-/// or destination and a lane (a re-point, #1953a: a re-point from a lane-less route still steps on
-/// both sides until 1953b), whose source strip and destination it does hold, and (c) a route out
+/// or destination (a re-point, #1953a; from a lane-less route too, #1953b, whose old half fades
+/// out as a fading copy), whose source strip and destination it does hold, and (c) a route out
 /// of an added strip whose tap precedes the fader. A route from a
 /// strip whose fader is armed (`added`, or `waiting`: a strip with an unfired predecessor entry)
 /// and whose tap follows the fader takes none (the fader's fade shapes it), and neither does a
@@ -7794,9 +7794,9 @@ fn added_route_fades<'a>(
     waiting_routes: &[(&str, u32)],
 ) -> Vec<RouteFade<'a>> {
     // #1953a (D15-9): a route `committed` holds under the same ID with another source, tap or
-    // destination is a removal plus an addition, so it is not known: it arms as added. One whose
-    // old route has no lane is still known: its removal half cannot ramp in phase 1, so both
-    // halves keep stepping until 1953b, never a fade in after a step out.
+    // destination is a removal plus an addition, so it is not known: it arms as added. #1953b:
+    // so is one whose old route has no lane; its removal half fades out as a fading copy
+    // ([`route_copies`]).
     let same_endpoints = |route: &session::Route| {
         committed.routes.iter().any(|before| {
             before.id == route.id
@@ -7804,13 +7804,7 @@ fn added_route_fades<'a>(
                 && before.destination == route.destination
         })
     };
-    let known = |route: &session::Route| {
-        committed.routes.iter().any(|before| {
-            before.id == route.id
-                && (!controls::route_rows_live(before)
-                    || (before.source == route.source && before.destination == route.destination))
-        })
-    };
+    let known = same_endpoints;
     let mut fades = Vec::new();
     for route in &model.routes {
         if route.mute {
@@ -7905,7 +7899,8 @@ fn copy_route_id(original: &str, taken: impl Fn(&str) -> bool) -> Option<session
 /// added route's arm (a plan that attaches live lanes, never at a declared discontinuity, which
 /// the caller checks): first each copy of the predecessor whose fade entry has not settled and
 /// whose source strip `model` keeps, then a fresh copy of each lane-less route of `committed` that
-/// `model` lacks, that the session does not mute, from a strip `model` keeps and that
+/// `model` lacks, or holds under its ID with another source, tap or destination (a re-point,
+/// D15-9: the removal half), that the session does not mute, from a strip `model` keeps and that
 /// no duck of the transaction already silences (the duck overlay's strips and the transition
 /// fallback's). Each copy ID is free in both models and among the copies before it.
 fn route_copies(base: &SuccessorBase<'_>, model: &SessionModel) -> Vec<RouteCopy> {
@@ -7961,7 +7956,11 @@ fn route_copies(base: &SuccessorBase<'_>, model: &SessionModel) -> Vec<RouteCopy
         if base.duck.has_strip(strip) || base.forced_restart.iter().any(|id| id == strip) {
             continue;
         }
-        let kept = model.routes.iter().any(|after| after.id == before.id);
+        let kept = model.routes.iter().any(|after| {
+            after.id == before.id
+                && after.source == before.source
+                && after.destination == before.destination
+        });
         let destination_kept = match &before.destination {
             session::RouteDestination::OutputInput { output_id } => model
                 .outputs

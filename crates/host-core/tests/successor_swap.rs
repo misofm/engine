@@ -4197,8 +4197,8 @@ fn a_pending_route_fade_survives_a_second_swap_on_every_width() {
     }
 }
 
-/// Issue #1953b gate (b1) at one width. A holds `aux-out`, a `post_fader` route from the playing
-/// track `aux` into the output, which has no lane (decision 14's fold); B removes it. The successor
+/// Issue #1953b gates (b1, b2) at one width. A holds `aux-out`, a `post_fader` route from the
+/// playing track `aux` into the output, which has no lane (decision 14's fold); B removes it. The successor
 /// compiles a fading copy of it that fades out from the swap block (`D = 0`, the session mute
 /// ramp), its destination line (486 samples when `late` is limited) carried from the removed
 /// route's. Every block equals A with the route from `pre_fader` (a unity fader moves no bit,
@@ -4209,8 +4209,9 @@ fn a_pending_route_fade_survives_a_second_swap_on_every_width() {
 ///   ramp and its fade entry;
 /// * (c) a second swap at block 11 drops the copy once it has settled (without the line: its ramp
 ///   ended at 1248) and keeps it while its line still delivers the fade (with the 486-sample line,
-///   it settles at 1734): either way every block equals the reference.
-fn a_removed_lane_less_route_fades_out_through_its_line(backend: Backend) {
+///   it settles at 1734): either way every block equals the reference;
+/// * (d) a re-point into the bus ramps both halves (D15-9: a removal plus an addition).
+fn a_removed_or_repointed_lane_less_route_fades_out_through_its_line(backend: Backend) {
     let (kept, aux) = (Feed::new(SOURCE, 1), Feed::new(AUX_SOURCE, 2));
     let feeds = [&kept, &aux];
     for limited in [true, false] {
@@ -4303,17 +4304,68 @@ fn a_removed_lane_less_route_fades_out_through_its_line(backend: Backend) {
                 "{backend:?} {claim}: allocator calls"
             );
         }
+        // (d) B re-points `aux-out` into the bus, where it has a lane: both halves ramp. The
+        // successor arms the re-pointed route (`D = 0`: the bus line sits after its op) and the
+        // old route's copy (`aux-out-`), and every block equals A with the old route under the
+        // copy's ID from `pre_fader` and the new one muted, given a live mute of the old and a
+        // live unmute of the new at the swap block.
+        let mut repointed = with(&base, session::SendTap::PostFader);
+        route_mut(&mut repointed, "aux-out").destination = into_bus();
+        let repointed = Session::compile(repointed);
+        let run = fade_run(
+            &a,
+            &[swap(SWAP_BLOCK, &repointed, &a.model, None)],
+            &feeds,
+            None,
+            &[],
+            backend,
+        );
+        assert_eq!(
+            run.arms[0],
+            vec![(0, ramp), (0, ramp)],
+            "{backend:?} {} (d): the re-pointed route's arm, then its copy's",
+            case(limited)
+        );
+        let old = with_route(
+            base.clone(),
+            "aux-out-",
+            "aux",
+            session::SendTap::PreFader,
+            into_output(),
+            false,
+        );
+        let both = with_route(
+            old,
+            "aux-out",
+            "aux",
+            session::SendTap::PostFader,
+            into_bus(),
+            true,
+        );
+        let writes = [
+            route_mute_write(&both, "aux-out-", SWAP_BLOCK, ramp, true),
+            route_mute_write(&both, "aux-out", SWAP_BLOCK, ramp, false),
+        ];
+        let reference = fade_run(&Session::compile(both), &[], &feeds, None, &writes, backend);
+        assert_eq!(
+            first_fade_difference(&run, &reference),
+            None,
+            "{backend:?} {} (d): the old route fades out and the new one in at the swap",
+            case(limited)
+        );
+        assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (d): allocator calls");
     }
 }
 
-/// Issue #1953b gate (b1) on every width. Red if a removed lane-less route still steps out at the
-/// swap, if its copy does not take the removed route's line (the 486 samples the line held are
+/// Issue #1953b gates (b1, b2) on every width. Red if a removed lane-less route still steps out at
+/// the swap, if its copy does not take the removed route's line (the 486 samples the line held are
 /// lost), if a later swap restarts the copy's ramp or drops it before its line has delivered the
-/// fade, or if a settled copy is never dropped.
+/// fade, if a settled copy is never dropped, or if a re-point from a lane-less route steps on
+/// either side (its old half not copied, or its new half not armed).
 #[test]
-fn a_removed_lane_less_route_fades_out_through_its_line_on_every_width() {
+fn a_removed_or_repointed_lane_less_route_fades_out_through_its_line_on_every_width() {
     for backend in backends() {
-        a_removed_lane_less_route_fades_out_through_its_line(backend);
+        a_removed_or_repointed_lane_less_route_fades_out_through_its_line(backend);
     }
 }
 
@@ -5046,8 +5098,14 @@ fn an_added_submix_delays_its_fade_by_its_longest_route_line() {
         backend,
     );
     let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan).expect("a graph plan");
-    assert_eq!(arms.len(), 1, "one added strip, the bus");
+    // #1953b: then the fading copies of the two lane-less routes re-pointed into it, `D = 0`.
+    assert_eq!(arms.len(), 3, "one added strip, the bus, then two copies");
     assert_eq!(arms[0].0, 486, "D is the bus's longest route line");
+    assert_eq!(
+        (arms[1].0, arms[2].0),
+        (0, 0),
+        "the copies wait for nothing"
+    );
 }
 
 /// Issue #1288 D4 (gate 4(d) on the control thread): an added track whose compressor is keyed
@@ -11434,8 +11492,8 @@ fn a_changed_lane_delay_restarts_only_its_lane_on_every_width() {
 /// the swap block on equals B with the send muted, rendered fresh from frame 0, given a live unmute
 /// at the swap block: the new destination hears a fade from the fire block and A's ramp does not
 /// carry. The oracle can fail: the unmute one block late differs, and the control, which keeps the
-/// send where it was, carries the ramp in flight. (c) A re-point from a lane-less route arms
-/// nothing: it steps on both sides until 1953b.
+/// send where it was, carries the ramp in flight. A re-point from a lane-less route is #1953b's
+/// (`a_removed_or_repointed_lane_less_route_fades_out_through_its_line`).
 fn a_repointed_send_fades_in_at_its_new_destination(backend: Backend) {
     let feed = Feed::new(SOURCE, 1);
     let a_model = send_session(false);
@@ -11557,20 +11615,6 @@ fn a_repointed_send_fades_in_at_its_new_destination(backend: Backend) {
             "{backend:?} {case}: the fire block is observable"
         );
     }
-    // (c) A re-point from a lane-less route (`eq0-main`, `post_pan` into the output) still steps
-    // on both sides until 1953b: its removal cannot ramp, so its addition arms nothing.
-    let mut lane_less = with_muted_output_track(a_model.clone());
-    let route = route_mut(&mut lane_less, "eq0-main");
-    assert!(!controls::route_rows_live(route), "eq0-main has no lane");
-    route.destination = session::RouteDestination::SubmixInput {
-        submix_id: id("bus2"),
-    };
-    let stepped = swap_to(&Session::compile(lane_less));
-    assert_eq!(
-        stepped.arms[0],
-        Vec::<(u32, u32)>::new(),
-        "{backend:?} (c): a re-point from a lane-less route arms nothing"
-    );
     let carried = swap_to(&kept);
     let unmoved = fade_run(&kept, &[], &[&feed], None, &[], backend);
     assert_ne!(
