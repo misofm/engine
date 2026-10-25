@@ -1154,7 +1154,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             }
         }
         if kind == ResetKind::FullToDefaults {
-            // Issue #1367: the lane keeps its mode, its weights at rest.
+            // Issue #1367: the lane keeps its mode, its weights at rest. An explicit invariant:
+            // `discontinuity_reset`, which `full_reset` runs, already snaps them there.
             for lane in 0..W {
                 self.rest_links(lane);
             }

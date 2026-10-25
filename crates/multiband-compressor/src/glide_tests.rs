@@ -78,6 +78,13 @@ impl Under {
         [&payload.1, &payload.2].map(|section| link_section(section))
     }
 
+    fn reset(&mut self, kind: ResetKind) {
+        match self {
+            Self::Scalar(effect) => effect.reset(kind),
+            Self::Bank(bank, _) => bank.reset(kind),
+        }
+    }
+
     fn retarget(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
         match self {
             Self::Scalar(effect) => effect.retarget_link(lane, mode, samples),
@@ -591,6 +598,23 @@ fn a_lane_snapshotted_mid_glide_continues_bit_for_bit_and_forged_weights_are_ref
             render(&mut source, lanes, 11 * BLOCK..20 * BLOCK),
             "{width:?}: the restored glide parted from the uninterrupted one"
         );
+
+        // A reset mid-glide lands the lane at rest at its mode, the glide's target: a
+        // discontinuity reset snaps the glide, a full reset keeps the mode.
+        for kind in [
+            ResetKind::DiscontinuityKeepParameters,
+            ResetKind::FullToDefaults,
+        ] {
+            let mut reset = prepare(LinkMode::DualMono);
+            assert!(reset.retarget(0, LinkMode::Average, 96));
+            render(&mut reset, lanes, 0..BLOCK);
+            reset.reset(kind);
+            assert_eq!(
+                reset.link_words(0),
+                [rest_words(LinkMode::Average); 2],
+                "{width:?} {kind:?}: a reset mid-glide"
+            );
+        }
 
         // Under another mode the lane keeps its own, at rest.
         let mut other = prepare(LinkMode::Maximum);
