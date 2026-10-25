@@ -92,6 +92,11 @@ const SEEK_FIELDS = ["sourceId", "generation", "sourceFrame"];
 // Issue #1644 D1: a session seek names its generation and frame, and optionally its anchor.
 const SESSION_SEEK_FIELDS = ["generation", "frame"];
 const ANCHORED_SESSION_SEEK_FIELDS = ["generation", "frame", "anchorSample"];
+// Issue #1297a: an anchored source seek, a seek report request, and the report's words.
+const SEEK_AT_FIELDS = ["sourceId", "generation", "sourceFrame", "anchorSample"];
+const SEEK_REPORT_FIELDS = [
+  "generation", "firstSample", "sourceFrame", "cumulativeUnderrunFrames", "cumulativeHeldFrames",
+];
 // Issue #137 D1, #1677: the frozen 272-byte little-endian command record. It names its tap by
 // stable key: a one-byte length and a 128-byte zero-padded field for each of the strip's and the
 // effect's ID. The IDs are at most 127 UTF-8 bytes (`session::STABLE_ID_MAXIMUM_BYTES`).
@@ -745,6 +750,8 @@ class MisoAudioWorkletHost {
   #inFlightSeeks = new Map();
   /// Issue #1644 D1: one session seek may be unsettled at a time.
   #inFlightSessionSeeks = 0;
+  /// Issue #1297a: the sources with a seek report request unsettled (one each).
+  #inFlightSeekReports = new Set();
   /// The one status request on the port, `{ requestId, promise }`, or null. A `status()` call joins
   /// it only while no later request was sent; otherwise it joins `#statusFollow`, the one pending
   /// read the host sends when this one settles.
@@ -868,6 +875,8 @@ class MisoAudioWorkletHost {
       this.#inFlightSeeks.delete(pending.sourceId);
     } else if (pending.response === "sessionSeek") {
       this.#inFlightSessionSeeks -= 1;
+    } else if (pending.response === "seekReport") {
+      this.#inFlightSeekReports.delete(pending.sourceId);
     } else if (pending.response === "status") {
       if (this.#statusRead?.requestId === pending.requestId) {
         this.#statusRead = null;
@@ -1066,6 +1075,8 @@ class MisoAudioWorkletHost {
           ? ["tag", "requestId", "result", "count"]
         : pending.response === "sessionSeek"
           ? ["tag", "requestId", "result", "generation"]
+        : pending.response === "seekReport"
+          ? ["tag", "requestId", "result", "report"]
         : ["tag", "requestId", "result"];
     const expectedTag = pending.response === "status"
       ? "miso.status.v1"
@@ -1085,6 +1096,8 @@ class MisoAudioWorkletHost {
                 ? "miso.spectrum.v1"
                 : pending.response === "sessionSeek"
                   ? "miso.session-seek.v1"
+                : pending.response === "seekReport"
+                  ? "miso.seek-report.v1"
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
@@ -1185,11 +1198,17 @@ class MisoAudioWorkletHost {
       || (message.result === RESULT_OK && validU32(message.count));
     const validSessionSeek = pending.response !== "sessionSeek"
       || message.generation === pending.generation;
+    // Issue #1297a: an OK carries every report word, a refusal none.
+    const validSeekReport = pending.response !== "seekReport"
+      || (message.result === RESULT_OK
+        ? hasExactFields(message.report, SEEK_REPORT_FIELDS)
+          && SEEK_REPORT_FIELDS.every((field) => validU64(message.report[field]))
+        : message.report === null);
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validControl || !validSessionMap
         || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum
-        || !validSessionSeek) {
+        || !validSessionSeek || !validSeekReport) {
       this.#fail(webError(255, message.requestId));
       return;
     }
@@ -1211,6 +1230,7 @@ class MisoAudioWorkletHost {
     this.#inFlightSources.clear();
     this.#inFlightSeeks.clear();
     this.#inFlightSessionSeeks = 0;
+    this.#inFlightSeekReports.clear();
     this.#statusRead = null;
     const follow = this.#statusFollow;
     this.#statusFollow = null;
@@ -1231,6 +1251,7 @@ class MisoAudioWorkletHost {
     }
     if (response === "seek") return this.#inFlightSeeks.has(sourceId);
     if (response === "sessionSeek") return this.#inFlightSessionSeeks >= 1;
+    if (response === "seekReport") return this.#inFlightSeekReports.has(sourceId);
     if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
     // Issue #137 D1: the local bound is the worklet-side queue depth, so a flood is refused here,
     // before any transfer, and the caller keeps its record block. The engine-side bound is the
@@ -1255,6 +1276,8 @@ class MisoAudioWorkletHost {
       this.#inFlightSeeks.set(sourceId, true);
     } else if (response === "sessionSeek") {
       this.#inFlightSessionSeeks += 1;
+    } else if (response === "seekReport") {
+      this.#inFlightSeekReports.add(sourceId);
     } else if (response === "renderAllocations") {
       this.#inFlightRenderAllocations += 1;
     } else if (response === "command") {
@@ -1360,6 +1383,43 @@ class MisoAudioWorkletHost {
       false,
       undefined,
       request.sourceId,
+    );
+  }
+
+  /// @internal Seek one source so that `sourceFrame` enters the graph in the block that starts at
+  /// absolute render sample `anchorSample`, a quantum multiple (issue #1297a). The worklet's
+  /// message handler applies it, never `process()`. It resolves with the engine's result; a refusal
+  /// changes nothing. It shares the per-source bound with `seekSource`: one seek of a source may be
+  /// unsettled at a time, and a second is refused locally with `RESULT_BACKPRESSURE`.
+  seekSourceAt(request) {
+    if (!hasExactFields(request, SEEK_AT_FIELDS) || typeof request.sourceId !== "string"
+        || !validU64(request.generation, true) || !validU64(request.sourceFrame)
+        || !validU64(request.anchorSample)) {
+      return Promise.reject(webError(1));
+    }
+    return this.#request(
+      { tag: "miso.seek-at.v1", ...request },
+      [],
+      "seek",
+      false,
+      undefined,
+      request.sourceId,
+    );
+  }
+
+  /// @internal Read where one source landed after its newest seek (issue #1297a): the engine's
+  /// result and, for an OK, the record's words as the C ABI reports them; `null` otherwise. The
+  /// reserved ID `$timeline` reads the session timeline's report. One read of a source may be
+  /// unsettled at a time; a second is refused locally with `RESULT_BACKPRESSURE`.
+  seekReport(sourceId) {
+    if (typeof sourceId !== "string") return Promise.reject(webError(1));
+    return this.#request(
+      { tag: "miso.seek-report.v1", sourceId },
+      [],
+      "seekReport",
+      false,
+      undefined,
+      sourceId,
     );
   }
 
