@@ -269,7 +269,8 @@ test("a tag reply after the deadline is held, and the next query waits for its e
 // browser engine answers the fixture's question with other members or other curve bits than the
 // C ABI did for the same document (the browser keeping a path of its own, or reading other
 // frames), if `onEvent` hands the answering `RESPONSE_READY` to the protocol event decoder (which
-// refuses it), or if a browser engine's close leaves a pending query to its deadline.
+// refuses it), or if a browser engine's close, or its host's failure, leaves a pending query to its
+// deadline.
 test("candidate Wasm answers the C ABI fixture's question with the C ABI's result", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
@@ -286,29 +287,51 @@ test("candidate Wasm answers the C ABI fixture's question with the C ABI's resul
   }
 
   // The browser engine sends the same frame through its host's `control` message and reads the
-  // event from the host's event lane: here a stand-in over a second core of the same document.
+  // event from the host's event lane: here a stand-in over another core of the same document.
   const served = await createOfflineEngine(FIXTURE.document, { asset });
-  const browser = await createEngine({
+  const failingCore = await createOfflineEngine(FIXTURE.document, { asset });
+  // `2` ready, `3` failed: the shipped host's status states.
+  let hostState = 2;
+  const boot = (core) => createEngine({
     document: new Uint8Array([1]),
-    scratchBoot: async () => served.shape(),
+    scratchBoot: async () => core.shape(),
     createContext: () => ({
       sampleRate: 48_000, renderQuantumSize: 128, state: "running",
       audioWorklet: { async addModule() {} }, async close() {},
     }),
-    createHost: async () => ({ ...engineHost(served), async dispose() {} }),
+    createHost: async () => ({
+      ...engineHost(core),
+      async status() { return { result: 0, state: hostState, lastResult: 0 }; },
+      async dispose() {},
+    }),
   });
+  const ticks = async () => {
+    for (let tick = 0; tick < 8; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
+  const browser = await boot(served);
+  const failing = await boot(failingCore);
   try {
     const result = await renderUntil(served, browser.queryTrackResponse(FIXTURE.request), 32);
     assert.deepEqual(comparable(result), expectedResult(FIXTURE.expect));
     const pending = browser.queryTrackResponse(FIXTURE.request);
-    for (let tick = 0; tick < 8; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+    await ticks();
     const closedAt = Date.now();
     await browser.close();
     await assert.rejects(pending, (error) => error instanceof MisoUsageError && /closed/.test(error.message));
     assert.ok(Date.now() - closedAt < 1_000, "rejected at close, not at the deadline");
+
+    // A host that fails while a query waits rejects it at once with a lifecycle error.
+    const lost = failing.queryTrackResponse(FIXTURE.request);
+    await ticks();
+    const failedAt = Date.now();
+    hostState = 3;
+    await assert.rejects(lost, (error) => error instanceof MisoEngineError && error.phase === "lifecycle");
+    assert.ok(Date.now() - failedAt < 1_000, "rejected at the host failure, not at the deadline");
   } finally {
     await browser.close();
+    await failing.close();
     served.dispose();
+    failingCore.dispose();
   }
 });
 

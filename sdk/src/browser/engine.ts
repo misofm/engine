@@ -241,9 +241,19 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * at once.
    */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription>;
-  /** Subscribe to one selected track response; browser delivery is off-render. */
+  /**
+   * Subscribe to one selected track response; browser delivery is off-render. Each read is a
+   * `queryTrackResponse`, so it settles only when the context renders.
+   */
   subscribeTrackResponse(request: TrackResponseSubscriptionRequest): Promise<TrackResponseSubscription>;
-  /** Capture and evaluate one immutable selected-track response at the current render boundary. */
+  /**
+   * The response of one track, as a C ABI host reads it (#1579 D1, D4): a strip `RESPONSE_GET`
+   * through the host's `control` message, answered by the `RESPONSE_READY` of the block that
+   * captured it. It settles after the next rendered block, so a suspended context rejects it at
+   * `responseLimits.requestDeadlineMs` (default 5 s). Queries run one at a time, in call order. A
+   * failed or disposed host rejects every pending and queued query at once with a lifecycle
+   * `MisoEngineError`; `close()` rejects them with `MisoUsageError`.
+   */
   queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult>;
   /** Subscribe to one prepared continuous spectrum boundary; browser delivery is off-render. */
   subscribeSpectrum(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscription>;
@@ -391,6 +401,9 @@ function reportListenerError(error: unknown): void {
       throw error;
     });
 }
+
+/** How often a browser engine reads its host's status while a track response query is pending. */
+const TRACK_RESPONSE_HOST_POLL_MS = 20;
 
 function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<ArrayBuffer> {
   if (typeof document === "string") return new TextEncoder().encode(document);
@@ -1312,6 +1325,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       });
       spectrumCleanup = held;
     };
+    /**
+     * One track response, as a C ABI host reads it: a strip `RESPONSE_GET` through the host's
+     * `control` message, then the `RESPONSE_READY` with its tag from the event lane. The capture
+     * runs in the render step, so the query settles after the next rendered block.
+     */
     const trackResponseClosed = (): MisoUsageError => new MisoUsageError("the browser engine is closed");
     const requesterOf = (): Promise<TrackResponseRequester> => {
       if (trackResponses !== undefined) return trackResponses;
@@ -1338,6 +1356,46 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       });
       return created;
     };
+    // While a query is pending, the host's status is read every few milliseconds: a failed or
+    // disposed host rejects every pending and queued query at once with a lifecycle error (and so
+    // every later one), instead of at the deadline. The host has no failure event to subscribe to.
+    let trackResponsesInFlight = 0;
+    let trackResponseWatch: Promise<void> | undefined;
+    const trackResponseHostLost = (result: number): MisoEngineError =>
+      new MisoEngineError("the browser host no longer owns a ready live response boundary", {
+        phase: "lifecycle",
+        code: resultName(result, "call"),
+        result,
+      });
+    const watchTrackResponseHost = (requester: TrackResponseRequester): void => {
+      if (trackResponseWatch !== undefined) return;
+      trackResponseWatch = (async () => {
+        try {
+          while (trackResponsesInFlight > 0 && !closed) {
+            let lost: MisoEngineError | undefined;
+            try {
+              const current = await host.status();
+              if (current.result !== constantValue("resultCodes", "ok")) {
+                lost = trackResponseHostLost(current.result);
+              } else if (current.state !== constantValue("states", "ready")) {
+                lost = trackResponseHostLost(constantValue("resultCodes", "wrongState"));
+              }
+            } catch (error) {
+              const result = (error as { readonly result?: unknown } | null)?.result;
+              lost = trackResponseHostLost(typeof result === "number"
+                ? result : constantValue("resultCodes", "wrongState"));
+            }
+            if (lost !== undefined) {
+              if (!closed) requester.close(lost);
+              return;
+            }
+            await new Promise<void>((resolve) => { setTimeout(resolve, TRACK_RESPONSE_HOST_POLL_MS); });
+          }
+        } finally {
+          trackResponseWatch = undefined;
+        }
+      })();
+    };
     /**
      * One track response, as a C ABI host reads it: a strip `RESPONSE_GET` through the host's
      * `control` message, then the `RESPONSE_READY` with its tag from the event lane. The capture
@@ -1345,7 +1403,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
      */
     const queryTrackResponse = async (request: TrackResponseQuery): Promise<TrackResponseResult> => {
       if (closed) throw trackResponseClosed();
-      return (await requesterOf()).query(request);
+      trackResponsesInFlight += 1;
+      try {
+        const requester = await requesterOf();
+        const query = requester.query(request);
+        watchTrackResponseHost(requester);
+        return await query;
+      } finally {
+        trackResponsesInFlight -= 1;
+      }
     };
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
