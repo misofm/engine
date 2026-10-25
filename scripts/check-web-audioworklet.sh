@@ -526,7 +526,7 @@ fi
 # deliberately not asserted. (The eight-lane multiband body, 2560/20, left the browser build with
 # #1110.)
 #
-#   multiband dual          3464/0     multiband mono           1862/0
+#   multiband dual          3993/0     multiband mono           2131/0   [3464/0, 1862/0 before #1367b]
 #   transient-shaper dual    808/0     transient-shaper mono     407/0   [786/72 at M2]
 #   gate-expander dual       265/0     gate-expander mono        134/0   [180/8 at M2]
 #   true-peak-limiter dual  1139/0     true-peak-limiter mono    537/0   [448/0, 224/0]
@@ -537,7 +537,8 @@ fi
 #   soft-clip f32x4           55/0     route-mix-ramp f32x4       22/0   [25/0 soft-clip]
 #
 # The dynamic-eq and de-esser rows were re-measured after #1969 (its detector link glide), on the
-# named twin built from `e3e7cdab3`; the other rows are the #1970 build's.
+# named twin built from `e3e7cdab3`, and the multiband rows re-measured after #1367b (its detector
+# link glide); the other rows are the #1970 build's.
 #
 # The parametric EQ's one scalar operation per body is a once-per-block `f32.sub` of two splats in
 # `lane::silence_armable_holding`, inside the 0.10 ceiling's budget; the derivation table in the

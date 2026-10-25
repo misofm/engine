@@ -242,8 +242,9 @@ extern "C" {
  * per row; 21 rows fit 4096 bytes) is LIMIT_EXCEEDED (observation.frame), and the first bad
  * selection is refused at selection[i] (observation.address.unknown, observation.tap.unknown,
  * observation.tap.unsupported, observation.unbound, observation.selection.duplicate), with no
- * row. Until issue 1674 pairs carried readers, a tap whose effect a rebuild carried is read from
- * the new plan's own slot, which the carried tap does not publish to: no window, never a wrong one.
+ * row. A tap whose effect a rebuild carried keeps its reader, window and arm across the swap: the
+ * session pairs the carried readers from the swap block's record when it promotes the new plan
+ * (issue 1674's observation half, issue 1587).
  *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its
@@ -285,12 +286,19 @@ extern "C" {
  * record per peak entry: for the output, its two planes' maxima over the batch, and for a strip,
  * that strip's post-matrix maxima. A record is VALID, and CLIPPED above 1.0; an entry whose strip
  * the rendering plan does not have (removed, not yet added) has flags 0 and value 0.0, and is
- * VALID again under the same handle once a commit brings the strip back. Readings continue across
- * a plan swap that carries the strip; a swap that carries no strip meter restarts the window grid
- * at its first block. A configure is all or nothing: an unknown strip is NOT_FOUND
- * (meter.strip.unknown), a period that is not a whole number of windows INVALID_FIELD
- * (meter.period), a table needing more than one batch's 256 records INVALID_FIELD (meter.records,
- * at its 129th entry), and a gain-reduction entry UNAVAILABLE until a later issue serves it. Each
+ * VALID again under the same handle once a commit brings the strip back. A strip's gain-reduction
+ * entry gives one AGGREGATE record in non-negative dB: the strip's reading from the batch's last
+ * window that has one, VALID when any window has one, else flags 0 and value 0.0. A strip's
+ * reading is the deepest reduction among its observation taps that an Observe edit armed, each
+ * from its newest window that opened at or after the tap's arm; a tap not armed, or disarmed,
+ * gives none. Readings continue across a plan swap that carries the strip, and a tap's reading
+ * and arm continue across a swap that carries its effect; a swap that carries no strip meter
+ * restarts the window grid at its first block. A swap that does not carry the effect (one whose
+ * state cannot continue) restarts its taps: an armed tap stays armed, and the strip's gain
+ * reduction is absent until the tap's first window in the new plan closes. A configure is all or nothing: an
+ * unknown strip is NOT_FOUND (meter.strip.unknown), a period that is not a whole number of windows
+ * INVALID_FIELD (meter.period), and a table of more than 128 entries INVALID_FIELD (meter.records,
+ * at its 129th entry), so a batch never needs more than its 256 records. Each
  * meter queues eight windows; a window that reaches no batch (dropped while the host did not call
  * into the session, or in a partial batch a gap or a swap discarded) is counted by
  * METER_WINDOWS_LOST (protocol counter 22), and the sequence never skips.
@@ -385,6 +393,23 @@ extern "C" {
  * until the host seeks it. A source whose declaration the transaction changed restarts like an
  * added one: in a new ring at generation 1, frame 0, with the PCM accepted for it before the
  * command discarded with its plan; the host restarts its feed.
+ *
+ * Duck-swapping a strip whose state cannot continue (issue 1324). A transaction whose
+ * replacement restarts a strip it keeps -- an insert added, removed or reordered, delay_samples, a
+ * value the plan keeps prepared (such as the true-peak limiter's lookahead), any edit after which
+ * one of the strip's owners cannot carry its state -- ducks that strip as a removal does: its fader
+ * and each of its routes whose tap precedes the fader are muted on the running plan over N, and the
+ * replacement is adopted no earlier than S, with C the longest compensation delay of a route out of
+ * a ducked strip. The replacement starts every owner of the strip before its fader, and its fader,
+ * at rest, then fades the strip and those routes back in over N from the first block at or after
+ * S + D, where D is the strip's own latency before its fader. The dip is N, the wait to S (from
+ * q + C up to 2q + C), D, then N. Strips the edit does not restart play on, bit for bit, and a
+ * re-pointed route never ducks its source strip. The watermark reports the revision first at S as
+ * EXACT. A transaction before S that reverts the edit commits and is adopted at the same S; the
+ * strip fades back in from S. Two limits remain: a carried effect whose sidechain reads a ducked
+ * strip's tap before the fader does not duck with it and still steps at S (issue 1324b), and a
+ * route before the fader that follows its source's automated mute is not faded back in: it
+ * restarts at its prepared value at S.
  *
  * A transaction behind an unadopted replacement (issue 1310). A SESSION_TRANSACTION_APPLY that
  * needs a new plan while an earlier transaction's replacement plan has not been adopted by render

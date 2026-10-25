@@ -180,6 +180,7 @@ export class Msb1RingWriter {
     frames: number
     endOfRegion: boolean
   }): void
+  /** Publish a plain seek (anchor word `-1`, MSB1 V1 as amended by issue 1297b). */
   seek(generation: bigint, frame: bigint): void
   release(): void
 }

@@ -225,6 +225,33 @@ For shared-ring delivery, the browser entry exposes `prepareEngineFeed`, `attach
 decode media. The shared-ring path requires `SharedArrayBuffer` and a cross-origin-isolated page.
 The host also exposes bounded source submission. Source underruns produce silence and counters.
 
+Pass `engine` to `attachEngineFeed` to feed the sources that an edit adds or removes while audio
+plays:
+
+- **Add a stem.** After `engine.apply(tx)` (or `replaceSession`) resolves, attach a feed for the new
+  source with `start: { frameAt, prime }`. `feed.ready()` reads the engine's next render sample
+  once and sets the anchor `A` to that sample plus the ring's capacity in frames, rounded up to a
+  quantum. It calls `frameAt(A)` once (the engine has no playhead: the source frame at `A` is your
+  mapping), publishes the anchored seek in the ring, awaits `prime({ generation, frame,
+  anchorSample })`, and then sends the seek to the engine. Write the stem's PCM from `frame` at
+  `generation` in `prime`, and do not seek the ring there. The drain reads none of that ring's
+  chunks until the engine applied the seek. If the audio reaches `A` before that, the engine
+  starts the stem at the frame plus the lateness and reports it in the source's seek report; the
+  stem stays in time. The margin in `A` is one ring of audio, so write at most one ring's worth
+  in `prime` (the ring holds no more), and keep writing after `ready()` resolves. A refused seek
+  rejects `ready()` with a `MisoEngineError` and closes the feed. Do not publish an anchored seek
+  with `Msb1RingWriter.seek` yourself: without the SDK's message to the engine, that ring stalls.
+- **Remove a stem.** When a committed edit removes a source of the feed, keep feeding its ring. The
+  SDK detaches it with `feed.detachSource(sourceId)` after `engine.applied(revision)` resolves
+  (the strip's ramp-out has then played), and releases its writer.
+- `feed.detachSource(sourceId)` resolves after the worklet's drain stopped reading that ring; the
+  other rings keep draining. If the worklet withdrew no ring, it rejects with `detachRefused` and
+  closes the feed.
+
+The MSB1 ring keeps version 1 with an anchor word: the control block is 144 bytes (the anchor
+`i64` at 128, `-1` for a plain seek), the ID is at 144 and the slot headers at 272. The drain
+refuses a ring with another header offset.
+
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.
 The device/context must accept the session rate and quantum (normally 128 frames); mismatches are
@@ -235,6 +262,66 @@ must enforce that restriction at their ingest boundary.
 The npm hosts both execute Wasm. Native and mobile applications must integrate the separate
 Rust/C-ABI host layer and platform audio callbacks; this package supplies no native binaries or
 mobile audio-device adapter.
+
+### Edit a playing session
+
+The browser engine edits a playing session with the same calls as the headless engine.
+`engine.apply(tx)` sends one structural transaction built with `transaction(base)...build()`.
+`engine.replaceSession(document)` is a convenience: it sends a full document, and the engine
+compares it with the committed session to make one transaction. Each call resolves with
+`{ revision, path }` when the control plane commits:
+
+- `live`: the running plan ramps to the new values from the next block.
+- `model_only`: the committed session changed, but render has nothing different to do.
+- `rebuild`: a new plan replaces the running plan at a later block boundary.
+- `unchanged` (`replaceSession` only): the document is the committed session. Nothing is
+  committed, and the revision stays the same.
+
+A refusal rejects, and nothing is committed. The SDK does not send a refused edit again: if
+another commit came first, the core refuses the edit with `revision_conflict`, and you build the
+edit again on the new session. `engine.revision` is the newest committed revision that the engine
+saw.
+
+A committed revision is pending until the audio has it. `engine.applied(revision)` resolves with
+the watermark `{ revision, sample, outcome }` that the worklet posts when the revision is in
+effect. `sample` is the first render sample of that block. `outcome.exact` is set when the
+revisions completed as committed, `outcome.transitionFallback` when a new plan could not start
+warm and the swap used the transition, and `outcome.superseded` when a newer commit replaced a
+plan before render adopted it. `applied` stays pending while the context does not render (for
+example, while it is suspended), and it rejects at `engine.close()`. `engine.watermark()` returns
+the newest watermark immediately.
+
+Across a `rebuild`, every source keeps playing and every unchanged node keeps its state. A node
+that the edit adds or changes starts from rest; `engine.counters(["stripsRestarted"])` counts each
+strip that a swap started at rest. After a committed `replaceSession`, `engine.liveControls()`
+binds to the new document.
+
+On a page without cross-origin isolation, the worklet's message handler prepares a `rebuild` on
+the audio thread. The audio thread is blocked while it prepares, and
+`(await engine.host.status()).blockingRebuilds` counts each blocking rebuild.
+
+```ts
+import { transaction } from "@misofm/engine/browser";
+import type { BrowserEngine, TransactionBuilder } from "@misofm/engine/browser";
+import type { SessionBuilder } from "@misofm/engine";
+
+type TrackSpec = Parameters<TransactionBuilder["upsertTrack"]>[1];
+
+// Pass the track's full spec from `base` and change only its fader, so that the edit stays live.
+export async function lowerTrack(
+  engine: BrowserEngine,
+  base: SessionBuilder,
+  trackId: string,
+  spec: TrackSpec,
+) {
+  const edit = transaction(base)
+    .upsertTrack(trackId, { ...spec, fader: { ...spec.fader, leftDb: -6, rightDb: -6 } })
+    .build();
+  const { revision, path } = await engine.apply(edit);
+  const { sample } = await engine.applied(revision);
+  return { path, firstSample: sample };
+}
+```
 
 ## Change a mix and read the core's answer
 

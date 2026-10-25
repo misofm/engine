@@ -1898,7 +1898,27 @@ export const ABI_LAYOUT = deepFreeze(
     "defaultMaximumMemoryBytes": 536870912,
     "sourceRing": {
       "stallToleranceMs": 100,
-      "reserveQuanta": 2
+      "reserveQuanta": 2,
+      "primeGrowths": 4,
+      "primeReserveQuanta": 1,
+      "primeLatencySamples": [
+        {
+          "sampleRateHz": 44100,
+          "samples": 447
+        },
+        {
+          "sampleRateHz": 48000,
+          "samples": 486
+        },
+        {
+          "sampleRateHz": 88200,
+          "samples": 888
+        },
+        {
+          "sampleRateHz": 96000,
+          "samples": 966
+        }
+      ]
     }
   }
 } as const,

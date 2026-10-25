@@ -64,12 +64,30 @@ pub struct ProviderEpoch {
     /// (its promotion exchanges them by pointer, `MeterDelivery::adopt`), and here again once it
     /// is parked. The running epoch holds empty tables, which allocate nothing.
     pub(crate) meter_tables: host_core::MeterTables,
+    /// The control half of this epoch's plan's meter frame ring (#1588 D2), for a render-half
+    /// meter fold: the frames the render half published while the plan rendered, staged in epoch
+    /// order (`stage_meter_batches`). `None` for any other adapter.
+    pub(crate) meter_frames: Option<host_core::MeterFrameConsumer>,
+    /// The render half of the same ring until the adapter takes it for the plan's render half
+    /// ([`SessionState::take_meter_frame_producer`]).
+    pub(crate) meter_frame_producer: Option<host_core::MeterFrameProducer>,
     /// The readers of this epoch's plan's effect observation taps (#1584 D7), one per observed
     /// effect instance in `HostLiveControlHandles::effect_observations` order: the windows a tap an
     /// `Observe` edit armed publishes. Empty for a host whose preparer keeps them itself (the
     /// browser's). Their slots are `Arc`s shared with the plan's lanes, as the meters' rings are.
     /// `OBSERVATION_READ` reads them through [`Self::observation_index`] (#1586 D6).
+    /// The meter delivery's gain reduction reads them too (#1587b).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
+    /// Each observation handle's strip (#1587b), in `observations` order: its frame strip by
+    /// [`strip_meter_index`], the rule a meter entry's strip resolves by, `u32::MAX` for none;
+    /// built with the plan.
+    pub(crate) observation_strips: Box<[u32]>,
+    /// The observation readers the swap block that adopted this epoch's plan carried (#1587b),
+    /// shared with the plan's attachment; `None` for a host whose preparer keeps its readers.
+    pub(crate) carried_taps: Option<std::sync::Arc<CarriedTaps>>,
+    /// The epoch this one displaced, while their observation readers wait to be paired: this
+    /// epoch was promoted before render wrote `carried_taps` ([`CarriedTaps`]'s three states).
+    pub(crate) observations_pending: Option<u64>,
     /// The plan's effect instances by stable key, with each one's position in
     /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
     /// read resolves a stable address without allocating. Empty for a host whose preparer keeps
@@ -702,7 +720,12 @@ impl ProviderEpoch {
             effects,
             meters,
             meter_tables: host_core::MeterTables::empty(),
+            meter_frames: None,
+            meter_frame_producer: None,
             observations: Box::default(),
+            observation_strips: Box::default(),
+            carried_taps: None,
+            observations_pending: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -717,14 +740,28 @@ impl ProviderEpoch {
         owner
     }
 
-    /// This epoch with its plan's observation readers (#1584 D7) and their index (#1586 D6).
+    /// This epoch with its plan's meter frame ring (#1588 D2), if it has one.
+    pub(crate) fn with_meter_frames(mut self, ring: Option<host_core::MeterFrameRing>) -> Self {
+        if let Some(ring) = ring {
+            self.meter_frames = Some(ring.consumer);
+            self.meter_frame_producer = Some(ring.producer);
+        }
+        self
+    }
+
+    /// This epoch with its plan's observation readers (#1584 D7), their index (#1586 D6), their
+    /// strips and the record of the ones its swap block carries (#1587b).
     pub(crate) fn with_observations(
         mut self,
         observations: Box<[host_core::EffectObservationHandle]>,
         observation_index: host_core::observation::ObservationIndex,
+        observation_strips: Box<[u32]>,
+        carried_taps: Option<std::sync::Arc<CarriedTaps>>,
     ) -> Self {
         self.observations = observations;
         self.observation_index = observation_index;
+        self.observation_strips = observation_strips;
+        self.carried_taps = carried_taps;
         self
     }
 
@@ -747,7 +784,12 @@ impl ProviderEpoch {
             effects,
             meters,
             meter_tables: host_core::MeterTables::empty(),
+            meter_frames: None,
+            meter_frame_producer: None,
             observations: Box::default(),
+            observation_strips: Box::default(),
+            carried_taps: None,
+            observations_pending: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -944,6 +986,8 @@ pub type TestOwnerState = (u64, Box<str>, Box<str>, u64, String, Vec<u32>, Vec<u
 thread_local! {
     static TEST_FAULT_STATE: core::cell::Cell<([Option<TestStructuralFaultPhase>; 2], usize)> =
         const { core::cell::Cell::new(([None; 2], 0)) };
+    static TEST_PUBLISHED_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
+        const { core::cell::Cell::new(None) };
     static TEST_NEXT_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
         const { core::cell::Cell::new(None) };
     /// The source-read offset the next plan this thread prepares is given (#1396 deliverable 3).
@@ -1015,6 +1059,7 @@ pub fn test_reset_lifecycle_observer() {
     TEST_FAULT_STATE.with(|state| state.set(([None; 2], 0)));
     TEST_OWNER_STATE.with(|state| state.set(TestOwnerCounters::default()));
     TEST_NEXT_ADOPTION.with(|state| state.set(None));
+    TEST_PUBLISHED_ADOPTION.with(|state| state.set(None));
     TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(None));
     TEST_HOLD_RECLAMATION.with(|state| state.set(false));
 }
@@ -1215,28 +1260,67 @@ pub struct SessionState<A: ControlAdapter> {
     /// The session's meter delivery when its control plane serves the meter batches (#1583 D5,
     /// R2: the C ABI's), built at boot over the output meter's reader and a requested gate.
     pub(crate) meters: Option<SessionMeters>,
+    /// The session's warm-successor bounds (#1403 D1), set when the session is created: with
+    /// `None`, no rebuild is classified and every rebuild takes today's path. Every product
+    /// session holds `None` until #1360 and #1361 build the production bounds.
+    pub(crate) warm: Option<host_core::WarmConfig>,
+    /// The record of the pending candidate published `Primed` (#1403 D4), at most one because at
+    /// most one candidate is pending. Set by the publication; dropped when render adopts it
+    /// (`synchronize_plan_epochs`), by a withdrawal that does not return its candidate
+    /// (`withdraw_pending_candidate`), and when a supersession or a declared stop drops the
+    /// candidate (#1310 D5 step 6). A refused supersession republishes the candidate and keeps it.
+    pub(crate) primed: Option<host_core::PrimedCandidate>,
 }
 
-/// The meter delivery a control plane serves (#1583 D5, #1587a): the delivery over the output
-/// meter and the strip meters of the epoch whose tables it holds, the fold of its frames into
-/// batches, each table entry's strip in that epoch, and the configuration they were last set for.
+/// The meter batches a control plane serves (#1583 D5, #1587a, #1588 D4): where its frames come
+/// from, and the one fold of them into batches that both sources share.
 pub(crate) struct SessionMeters {
-    delivery: host_core::MeterDelivery,
+    source: MeterSource,
+    batches: MeterBatches,
+}
+
+/// Where a control plane's meter frames come from (#1588 R1). One per session, inline in the
+/// session as the delivery was before, so the variants' size difference costs no allocation.
+#[allow(clippy::large_enum_variant)]
+enum MeterSource {
+    /// The C ABI's: the session's own delivery over the output meter and the strip meters of the
+    /// epoch whose tables it holds.
+    Delivery {
+        delivery: host_core::MeterDelivery,
+        /// The provider epoch whose meter tables the delivery holds (#1587a): the plan whose
+        /// frames it folds. It follows render one reclaimed plan at a time (`adopt_meters`), and
+        /// the poll runs only while it is the running epoch.
+        epoch: u64,
+    },
+    /// The browser's: the render half folds and pushes the frames the table needs into each
+    /// plan's frame ring, which its provider epoch holds; the session sets the level word's
+    /// [`host_core::MeterLevel::TELEMETRY`] bit.
+    Rendered {
+        level: host_core::MeterLevel,
+        /// The output meter's dropped-window count, whose reader the render half holds.
+        output_drops: host_core::OutputPeakDrops,
+        /// The windows the rings of reclaimed epochs dropped.
+        retired_drops: u64,
+    },
+}
+
+/// The fold of a control plane's meter frames into `METER_BATCH` events (#1583 D5, #1587a), the
+/// same for both sources.
+struct MeterBatches {
     fold: host_core::meters::MeterBatchFold,
-    /// The provider epoch whose meter tables the delivery holds (#1587a): the plan whose frames it
-    /// folds. It follows render one reclaimed plan at a time (`adopt_meters`), and the poll runs
-    /// only while it is the running epoch.
-    epoch: u64,
-    /// Each table entry's strip in `epoch`'s plan (#1587a D2, R4): its index in the frame's strip
-    /// peaks, or `None` for an absent strip and for every entry that reads no strip peak. Rebuilt
-    /// at each accepted configure and each meter adoption, never searched by a batch. Reserved at
-    /// boot for the most entries a table holds, so neither rebuild allocates.
+    /// The provider epoch `resolution` was resolved against (#1588 D3), `None` after a configure:
+    /// a frame of another epoch resolves the entries again first.
+    resolved_epoch: Option<u64>,
+    /// Each table entry's strip in `resolved_epoch`'s plan (#1587a D2, R4): its index in the
+    /// frame's strip peaks, or `None` for an absent strip and for every entry that reads no strip
+    /// peak. Rebuilt at a frame of another epoch, never searched by a batch. Reserved at boot for
+    /// the most entries a table holds, so no rebuild allocates.
     resolution: Vec<Option<u32>>,
     /// Each table entry's peak fold over the open batch, as long as `resolution`.
     folds: Vec<host_core::meters::StripPeakFold>,
     /// The meter window in blocks, which the provider echoes and the period divides.
     window_blocks: core::num::NonZeroU32,
-    /// The controller's telemetry generation the delivery's level and the fold were set for.
+    /// The controller's telemetry generation the level and the fold were set for.
     generation: u64,
     /// The windows of completed batches the lossy lane refused to stage.
     unstaged: u64,
@@ -1249,14 +1333,74 @@ impl SessionMeters {
         window_blocks: core::num::NonZeroU32,
         entries: usize,
     ) -> Result<Self, std::collections::TryReserveError> {
+        Ok(Self {
+            source: MeterSource::Delivery { delivery, epoch: 0 },
+            batches: MeterBatches::new(window_blocks, entries)?,
+        })
+    }
+
+    /// The batches of a render-half fold (#1588 R1) under `level`, reporting `output_drops`, with
+    /// room for `entries` table entries.
+    pub(crate) fn rendered(
+        level: host_core::MeterLevel,
+        output_drops: host_core::OutputPeakDrops,
+        window_blocks: core::num::NonZeroU32,
+        entries: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        Ok(Self {
+            source: MeterSource::Rendered {
+                level,
+                output_drops,
+                retired_drops: 0,
+            },
+            batches: MeterBatches::new(window_blocks, entries)?,
+        })
+    }
+
+    /// Every closed meter window that never reached a `METER_BATCH` (#1583 D5, #1588 R4): the
+    /// output windows render dropped at a full queue, the windows a full ring dropped (`rings`, the
+    /// live epochs' rings' count, plus the reclaimed ones'), the windows of partial batches the
+    /// fold discarded (at a gap, or when a nonempty configuration replaced the one it folded
+    /// for), and the windows of batches the lane refused. When a configure empties the table,
+    /// neither the windows the delivery pops unread nor the open partial batch are counted: the
+    /// client turned the meters off.
+    ///
+    /// `unstaged` is defensive: no service step can see a refusal. The step runs at the start of
+    /// every session call, before a structural token exists (none outlives its call), so
+    /// `stage_meter_batch_event` is never refused as structural-outstanding; the level is on only
+    /// with a nonempty table, which is not `Disabled`; and an accepted table's batch encodes,
+    /// because the provider checks the 256-record bound at the configure (`meter.records`,
+    /// #1587a). A stage that is refused all the same counts its batch's windows here.
+    fn windows_lost(&self, rings: u64) -> u64 {
+        let render = match &self.source {
+            MeterSource::Delivery { delivery, .. } => delivery.output_dropped_windows(),
+            MeterSource::Rendered {
+                output_drops,
+                retired_drops,
+                ..
+            } => output_drops
+                .get()
+                .saturating_add(*retired_drops)
+                .saturating_add(rings),
+        };
+        render
+            .saturating_add(self.batches.fold.discarded_windows())
+            .saturating_add(self.batches.unstaged)
+    }
+}
+
+impl MeterBatches {
+    fn new(
+        window_blocks: core::num::NonZeroU32,
+        entries: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
         let mut resolution = Vec::new();
         resolution.try_reserve_exact(entries)?;
         let mut folds = Vec::new();
         folds.try_reserve_exact(entries)?;
         Ok(Self {
-            delivery,
             fold: host_core::meters::MeterBatchFold::new(core::num::NonZeroU32::MIN),
-            epoch: 0,
+            resolved_epoch: None,
             resolution,
             folds,
             window_blocks,
@@ -1265,69 +1409,356 @@ impl SessionMeters {
         })
     }
 
-    /// Resolve every entry of `table` against `consumers`, the strip meters of the epoch whose
-    /// tables the delivery holds (one per strip, in the frame's strip order), and size the folds
-    /// to the table. The folds keep their values: they are indexed by table entry, so a batch an
-    /// adoption interrupts goes on folding into them, and `push_with_strips` resets them at a
-    /// batch's first frame. A table never holds more entries than were reserved, so this
-    /// allocates nothing.
-    fn resolve(&mut self, table: &[protocol::MeterEntry], consumers: &[host_core::MeterConsumer]) {
+    /// Resolve every entry of `table` against `meters`, the meter readers of the epoch whose
+    /// frames are folded (`PlanStateInventory::meter_targets`: meter `i` is the frame's strip `i`;
+    /// `None` when no epoch held is that one, and then no entry has a strip): a strip's peak or gain
+    /// reduction entry (#1587b) reads the first post-matrix sample-peak meter of its strip, so a caller selection (a
+    /// subset, another order, several taps on one strip) never reads another meter's peak. Then
+    /// size the folds to the table. The folds keep their
+    /// values: they are indexed by table entry, so a batch an adoption interrupts goes on folding
+    /// into them, and `push_with_strips` resets them at a batch's first frame. A table never
+    /// holds more entries than were reserved, so this allocates nothing.
+    fn resolve(
+        &mut self,
+        table: &[protocol::MeterEntry],
+        meters: Option<&host_core::PlanStateInventory>,
+    ) {
         self.resolution.clear();
-        self.resolution.extend(table.iter().map(|entry| {
-            match (&entry.target, entry.metric) {
-                (protocol::MeterTarget::Strip(id), protocol::MeterMetric::Peak) => consumers
-                    .iter()
-                    .position(|meter| *meter.track_id == **id)
-                    .and_then(|index| u32::try_from(index).ok()),
-                _ => None,
-            }
-        }));
+        self.resolution.extend(
+            table
+                .iter()
+                .map(|entry| match (&entry.target, entry.metric) {
+                    (protocol::MeterTarget::Strip(id), _) => strip_meter_index(meters?, id),
+                    _ => None,
+                }),
+        );
         self.folds.resize(
             self.resolution.len(),
             host_core::meters::StripPeakFold::START,
         );
     }
 
-    /// Every closed meter window that never reached a `METER_BATCH` (#1583 D5): the output
-    /// windows render dropped at a full queue, the windows of partial batches the fold discarded
-    /// (at a gap, or when a nonempty configuration replaced the one it folded for), and the
-    /// windows of batches the lane refused. When a configure empties the table, neither the
-    /// windows the delivery pops unread nor the open partial batch are counted: the client turned
-    /// the meters off.
+    /// Fold one published `frame` of provider epoch `epoch` and stage the `METER_BATCH` it
+    /// completes (#1583 D5, #1587a, #1588 D4), the one staging both sources share. A frame of
+    /// another epoch than the last one resolved resolves the entries against `epochs`' strips of
+    /// its epoch first (#1588 D3).
     ///
-    /// `unstaged` is defensive: on the C ABI no service step can see a refusal. The step runs at
-    /// the start of every session call, before a structural token exists (none outlives its
-    /// call), so `stage_meter_batch_event` is never refused as structural-outstanding; the level
-    /// is on only with a nonempty table, which is not `Disabled`; and an accepted table's batch
-    /// encodes, because the provider checks the 256-record bound at the configure
-    /// (`meter.records`, #1587a). A stage that is refused all the same counts its batch's windows
-    /// here.
-    fn windows_lost(&self) -> u64 {
-        self.delivery
-            .output_dropped_windows()
-            .saturating_add(self.fold.discarded_windows())
-            .saturating_add(self.unstaged)
+    /// Records follow the table (D3): the output's peak entry gives the batch's left and right
+    /// output peak, `VALID` when the output peak covered the batch's span; a strip's peak entry
+    /// gives its strip's left and right peak, the maxima over the batch's frames, `VALID` when
+    /// every frame had the strip; `CLIPPED` marks a valid peak above `1.0`. A strip's gain
+    /// reduction entry gives one `Aggregate` record (#1587b), the last frame's reading that is
+    /// present, `VALID` when any frame's is: only an armed tap's window from at or after its arm
+    /// sample is a reading. A value that is not valid is `0.0` with flags `0`. An accepted table needs at most
+    /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, so the records stay on the stack.
+    fn stage(
+        &mut self,
+        frame: &host_core::MeterFrame,
+        epoch: u64,
+        epochs: &ProviderEpochs<'_>,
+        controller: &mut ObservedController,
+        revision: protocol::SessionRevision,
+    ) {
+        /// `METER_BATCH` record flags (registry): valid and clipped.
+        const VALID: u16 = 1;
+        const CLIPPED: u16 = 1 << 1;
+        if self.resolved_epoch != Some(epoch) {
+            self.resolve(
+                &controller.telemetry_configuration().meters,
+                epochs.meters(epoch),
+            );
+            self.resolved_epoch = Some(epoch);
+        }
+        let Some(batch) = self
+            .fold
+            .push_with_strips(frame, &self.resolution, &mut self.folds)
+        else {
+            return;
+        };
+        let blank = protocol::MeterRecord {
+            handle: 0,
+            component: protocol::MeterComponent::Left,
+            flags: 0,
+            value: 0.0,
+        };
+        let mut records = [blank; host_core::MAXIMUM_METER_BATCH_RECORDS];
+        let table = &controller.telemetry_configuration().meters;
+        let mut count = 0;
+        for ((entry, fold), handle) in table.iter().zip(&self.folds).zip(1_u32..) {
+            let (valid, peak) = match (&entry.target, entry.metric) {
+                (protocol::MeterTarget::Output, protocol::MeterMetric::Peak) => {
+                    (batch.output_valid, batch.output_peak)
+                }
+                (protocol::MeterTarget::Strip(_), protocol::MeterMetric::Peak) => {
+                    (fold.present, fold.peak)
+                }
+                // #1587b D3: one aggregate record, never clipped. The wire refuses an output
+                // gain-reduction entry.
+                (_, protocol::MeterMetric::GainReduction) => {
+                    if let Some(slot) = records.get_mut(count) {
+                        let valid = fold.gain_reduction_present;
+                        *slot = protocol::MeterRecord {
+                            handle,
+                            component: protocol::MeterComponent::Aggregate,
+                            flags: if valid { VALID } else { 0 },
+                            value: if valid { fold.gain_reduction_db } else { 0.0 },
+                        };
+                        count += 1;
+                    }
+                    continue;
+                }
+            };
+            for (component, value) in [
+                (protocol::MeterComponent::Left, peak[0]),
+                (protocol::MeterComponent::Right, peak[1]),
+            ] {
+                let Some(slot) = records.get_mut(count) else {
+                    continue;
+                };
+                let mut flags = 0;
+                if valid {
+                    flags |= VALID;
+                    if value > 1.0 {
+                        flags |= CLIPPED;
+                    }
+                }
+                *slot = protocol::MeterRecord {
+                    handle,
+                    component,
+                    flags,
+                    value: if valid { value } else { 0.0 },
+                };
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return;
+        }
+        let span = protocol::MeterWindowSpan {
+            first_sample: protocol::SampleTime(batch.first_sample),
+            end_sample: protocol::SampleTime(batch.end_sample),
+            window_sequence: batch.sequence,
+        };
+        if controller
+            .stage_meter_batch_event(revision, span, &records[..count])
+            .is_err()
+        {
+            self.unstaged = self
+                .unstaged
+                .saturating_add(u64::from(self.fold.windows_per_batch()));
+        }
     }
 }
 
-/// The strip meter consumers of provider epoch `epoch`: the running one's or a parked one's, or
-/// `None` when neither is `epoch`.
-fn epoch_meters<'a>(
-    current: &'a ProviderEpoch,
-    retired: &'a [ProviderEpoch],
-    epoch: u64,
-) -> Option<&'a [host_core::MeterConsumer]> {
-    core::iter::once(current)
-        .chain(retired)
-        .find(|provider| provider.epoch == epoch)
-        .map(|provider| &*provider.meters)
+/// The frame strip of strip `id` in a plan whose inventory is `meters`: the index of its first
+/// post-matrix sample-peak meter (`PlanStateInventory::meter_targets`), or `None`. The one rule
+/// for a meter entry's strip (#1588 D3) and an observation tap's (#1587b), so both read the same
+/// frame strip.
+pub(crate) fn strip_meter_index(meters: &host_core::PlanStateInventory, id: &str) -> Option<u32> {
+    meters
+        .meter_targets()
+        .find(|&(_, strip, tap, metrics)| {
+            strip == id
+                && tap == host_core::MeterTap::PostMatrix
+                && metrics.contains(host_core::MeterMetricSet::SAMPLE_PEAK)
+        })
+        .and_then(|(index, ..)| u32::try_from(index).ok())
 }
 
-/// The C ABI's delivery reads no gain-reduction tap until #1587b.
-struct NoGainReductionTaps;
+/// The provider epochs a session holds: the running one, the parked ones and the pending ones.
+struct ProviderEpochs<'a> {
+    current: &'a ProviderEpoch,
+    retired: &'a [ProviderEpoch],
+    pending: &'a [ProviderEpoch],
+}
 
-impl host_core::GainReductionTaps for NoGainReductionTaps {
-    fn for_each_tap(&mut self, _visit: &mut impl FnMut(host_core::TapView<'_>)) {}
+impl<'a> ProviderEpochs<'a> {
+    fn all(&self) -> impl Iterator<Item = &'a ProviderEpoch> {
+        core::iter::once(self.current)
+            .chain(self.retired)
+            .chain(self.pending)
+    }
+
+    /// The plan inventory of provider epoch `epoch`, whose meter rows are its meter readers in
+    /// reader order, or `None` when no epoch held is `epoch`.
+    fn meters(&self, epoch: u64) -> Option<&'a host_core::PlanStateInventory> {
+        self.all()
+            .find(|provider| provider.epoch == epoch)
+            .map(|provider| &provider.inventory)
+    }
+}
+
+/// The observation reader pairs the swap block that adopted a plan carried (#1674's observation
+/// half, #1587b): the swap record's [`engine::realtime::ObserverKind::Observation`] entries,
+/// which render copies here in that block ([`CarriedTapsAttachment`]) and the control thread
+/// reads when it promotes the plan's epoch. The record is what actually carried: a tap enters it
+/// only when its effect's restore succeeded at the swap, which preparation cannot know (#1674 R1).
+///
+/// Sized at preparation, one pair per observation handle of the plan (a successor handle is
+/// paired at most once), so render writes into storage it never grows. A plan is adopted at most
+/// once, so the pairs are written once; `count` is stored last, with `Release`.
+///
+/// **Three states (#1587b attempt 4).** `count` starts at [`Self::UNWRITTEN`]: render has not run
+/// the plan's swap block. Render claims a candidate a little before it carries into it
+/// (`plan_exchange`'s claim, then `carry_from`), and the control thread promotes a claimed
+/// candidate (`withdraw_pending_candidate`) without waiting, so a promotion can find the record
+/// unwritten. It then marks the epoch's pairing pending (`ProviderEpoch::observations_pending`),
+/// and later steps settle it:
+/// - **Early read.** Each service step reads `count` with `Acquire`; once it is written, that
+///   load synchronizes with render's `Release` store, after the pairs, so the pairs read whole.
+/// - **Reclaim fallback.** Render retires the displaced plan into the retirement queue only after
+///   the carry returned (or after a swap whose hook never ran: a plan with no attachment), and the
+///   control thread's reclaim takes it from the queue, which orders the hook before the reclaim.
+///   A record still unwritten there means nothing carried, and the mark clears.
+///
+/// While the mark stands the epoch's readers are the successor's own, which no carried tap
+/// publishes to: the strip shows no reading, never a wrong one.
+pub(crate) struct CarriedTaps {
+    pairs: Box<[[core::sync::atomic::AtomicU32; 2]]>,
+    count: core::sync::atomic::AtomicU32,
+}
+
+impl CarriedTaps {
+    /// Room for `handles` pairs. Allocates; control thread.
+    pub(crate) fn new(handles: usize) -> Result<Self, std::collections::TryReserveError> {
+        let mut pairs = Vec::new();
+        pairs.try_reserve_exact(handles)?;
+        pairs.resize_with(handles, || {
+            [
+                core::sync::atomic::AtomicU32::new(0),
+                core::sync::atomic::AtomicU32::new(0),
+            ]
+        });
+        Ok(Self {
+            pairs: pairs.into_boxed_slice(),
+            count: core::sync::atomic::AtomicU32::new(Self::UNWRITTEN),
+        })
+    }
+
+    /// The heap a record of `handles` pairs holds with its attachment: the attachment's box, the
+    /// shared allocation (its two counts and the record) and the pairs.
+    pub(crate) fn retained_bytes(handles: usize) -> Option<usize> {
+        handles
+            .checked_mul(size_of::<[core::sync::atomic::AtomicU32; 2]>())?
+            .checked_add(size_of::<CarriedTapsAttachment>())?
+            .checked_add(2 * size_of::<usize>() + size_of::<Self>())
+    }
+
+    /// `count` before render ran the plan's swap block.
+    const UNWRITTEN: u32 = u32::MAX;
+
+    /// The carried pairs, as carry records, or `None` while render has not written the record.
+    /// Allocates nothing.
+    fn carries(&self) -> Option<impl Iterator<Item = engine::realtime::ObserverCarry> + '_> {
+        let count = self.count.load(Ordering::Acquire);
+        if count == Self::UNWRITTEN {
+            return None;
+        }
+        Some(
+            self.pairs
+                .iter()
+                .take(count as usize)
+                .map(|[successor, predecessor]| engine::realtime::ObserverCarry {
+                    kind: engine::realtime::ObserverKind::Observation,
+                    successor: successor.load(Ordering::Relaxed) as usize,
+                    predecessor: predecessor.load(Ordering::Relaxed) as usize,
+                }),
+        )
+    }
+}
+
+/// Pair `successor`'s observation readers with `predecessor`'s from `successor`'s carry record
+/// (#1587b), if render has written it; returns whether the pairing is settled. An unwritten
+/// record leaves it pending: [`SessionState::settle_observation_pairings`] settles it once the
+/// record is written, or as nothing carried once the predecessor's epoch is gone.
+fn pair_observations(successor: &mut ProviderEpoch, predecessor: &mut ProviderEpoch) -> bool {
+    let Some(record) = successor.carried_taps.as_deref() else {
+        return true;
+    };
+    let Some(carries) = record.carries() else {
+        return false;
+    };
+    // One record at a time: `pair_carried_observations` takes a slice, and the record's pairs
+    // are atomics, so collecting them would allocate; a one-element slice per pair does not.
+    for carry in carries {
+        host_core::pair_carried_observations(
+            &mut successor.observations,
+            &mut predecessor.observations,
+            core::slice::from_ref(&carry),
+        );
+    }
+    true
+}
+
+/// The C ABI plan's host attachment (#1587b): the plan's [`CarriedTaps`], shared with its
+/// provider epoch.
+pub(crate) struct CarriedTapsAttachment(pub(crate) std::sync::Arc<CarriedTaps>);
+
+impl engine::realtime::HostAttachment for CarriedTapsAttachment {
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+
+    // REALTIME_POLICY_BEGIN: #1587b, the swap block's carried observation readers.
+    /// Copy the swap record's observation entries into the plan's [`CarriedTaps`]. Render thread,
+    /// in the swap block: atomic stores into storage sized at preparation; an entry past it, or
+    /// whose index does not fit a `u32`, is skipped.
+    fn adopt_predecessor(
+        &mut self,
+        _predecessor: &mut dyn engine::realtime::HostAttachment,
+        carries: &[engine::realtime::ObserverCarry],
+    ) {
+        let record = &*self.0;
+        let mut written = 0_u32;
+        let mut slots = record.pairs.iter();
+        for carry in carries {
+            if carry.kind != engine::realtime::ObserverKind::Observation {
+                continue;
+            }
+            let (Ok(successor), Ok(predecessor)) = (
+                u32::try_from(carry.successor),
+                u32::try_from(carry.predecessor),
+            ) else {
+                continue;
+            };
+            let Some([into, from]) = slots.next() else {
+                break;
+            };
+            into.store(successor, Ordering::Relaxed);
+            from.store(predecessor, Ordering::Relaxed);
+            written += 1;
+        }
+        record.count.store(written, Ordering::Release);
+    }
+    // REALTIME_POLICY_END
+}
+
+/// The observation taps of a provider epoch, as the meter delivery's gain reduction reads them
+/// (#1587b): every declared tap of every observed instance, on its instance's strip, with the arm
+/// state render publishes in the tap's slot (#1585 D2). A torn read is an unarmed tap for this
+/// poll.
+struct CapiGainReductionTaps<'a> {
+    observations: &'a [host_core::EffectObservationHandle],
+    strips: &'a [u32],
+}
+
+impl host_core::GainReductionTaps for CapiGainReductionTaps<'_> {
+    fn for_each_tap(&mut self, visit: &mut impl FnMut(host_core::TapView<'_>)) {
+        for (handle, &strip) in self.observations.iter().zip(self.strips) {
+            for (descriptor, reader) in handle.descriptor.observations.iter().zip(&handle.readers) {
+                let (armed, arm_sample) = reader
+                    .read_state()
+                    .map_or((false, 0), |state| (state.armed, state.arm_sample));
+                visit(host_core::TapView {
+                    strip,
+                    descriptor,
+                    reader,
+                    armed,
+                    arm_sample,
+                });
+            }
+        }
+    }
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -2266,140 +2697,167 @@ where
         take_test_fault_state(phase)
     }
 
-    /// Set the meter delivery's level and the batch fold for the accepted telemetry configuration
-    /// once per accepted `TELEMETRY_CONFIGURE` (#1583 D5): a nonempty table turns the level on
+    /// Set the meter level and the batch fold for the accepted telemetry configuration once per
+    /// accepted `TELEMETRY_CONFIGURE` (#1583 D5, #1588 D1): a nonempty table turns the level on
     /// from the next block, an empty one off, and the fold restarts with
     /// `meter_period_blocks / meter_window_blocks` windows per batch and sequence `1` next. The
-    /// level writes the requested gate, which render applies before its next block. An exact
+    /// entries resolve again at the next frame (#1588 D3). The C ABI's level writes the requested
+    /// gate, which render applies before its next block; a render-half fold's sets or clears the
+    /// level word's telemetry bit, which the render half applies at its next poll. An exact
     /// replay answers from the cache and changes nothing here.
     pub(crate) fn sync_meter_configuration(&mut self) {
         let generation = self.controller.telemetry_configuration_generation();
         let Some(meters) = self.meters.as_mut() else {
             return;
         };
-        if meters.generation == generation {
+        let batches = &mut meters.batches;
+        if batches.generation == generation {
             return;
         }
-        meters.generation = generation;
+        batches.generation = generation;
         let telemetry = self.controller.telemetry_configuration();
         let on = !telemetry.meters.is_empty() && telemetry.meter_period_blocks != 0;
         let windows =
-            core::num::NonZeroU32::new(telemetry.meter_period_blocks / meters.window_blocks.get())
+            core::num::NonZeroU32::new(telemetry.meter_period_blocks / batches.window_blocks.get())
                 .unwrap_or(core::num::NonZeroU32::MIN);
         // One turn-off rule: an empty table owes the client nothing, so neither the open partial
         // batch nor the windows the delivery pops unread are counted lost.
         if !on {
-            meters.fold.drop_partial();
+            batches.fold.drop_partial();
         }
-        meters.fold.restart(windows);
-        // #1587a D2: the entries' strips in the plan whose frames the delivery folds.
-        if let Some(consumers) =
-            epoch_meters(&self.providers, &self.retired_providers, meters.epoch)
-        {
-            meters.resolve(&telemetry.meters, consumers);
+        batches.fold.restart(windows);
+        batches.resolved_epoch = None;
+        match &mut meters.source {
+            MeterSource::Delivery { delivery, .. } => {
+                let next_sample = self.shared.render_sample.load(Ordering::Acquire);
+                delivery.set_level(on, next_sample);
+            }
+            MeterSource::Rendered { level, .. } => {
+                level.set(host_core::MeterLevel::TELEMETRY, on);
+            }
         }
-        let next_sample = self.shared.render_sample.load(Ordering::Acquire);
-        meters.delivery.set_level(on, next_sample);
     }
 
-    /// Stage one `METER_BATCH` per batch the delivery's closed windows complete (#1583 D5,
-    /// #1587a): the delivery publishes at most one frame per poll, so the loop polls until it
+    /// Stage one `METER_BATCH` per batch the closed windows complete (#1583 D5, #1587a, #1588
+    /// D4), from either source through [`MeterBatches::stage`].
+    ///
+    /// The C ABI's delivery publishes at most one frame per poll, so the loop polls until it
     /// publishes none, bounded by the window queue's depth and one more. It polls only while the
     /// delivery holds the running epoch's tables, with that epoch's strip meters.
     ///
-    /// Records follow the table (D3), two per entry: the output's peak entry gives the batch's
-    /// left and right output peak, `VALID` when the output peak covered the batch's span; a strip's
-    /// peak entry gives its strip's left and right peak, the maxima over the batch's frames,
-    /// `VALID` when every frame had the strip; `CLIPPED` marks a valid value above `1.0`, and a
-    /// value that is not valid is `0.0` with flags `0`. An accepted table needs at most
-    /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, so the records stay on the stack.
+    /// A render-half fold's frames are in the rings of the epochs render has run. Render fills a
+    /// plan's ring only before it adopts the next plan, so the frames are staged in epoch order:
+    /// every ring's count is loaded newest epoch first (whatever a newer ring holds, the older
+    /// rings' frames before it are then seen), and each ring is drained oldest epoch first up to
+    /// its count. With an empty table the frames are released unstaged. Bounded by the rings'
+    /// depths.
     fn stage_meter_batches(&mut self, revision: protocol::SessionRevision) {
-        /// `METER_BATCH` record flags (registry): valid and clipped.
-        const VALID: u16 = 1;
-        const CLIPPED: u16 = 1 << 1;
-        let Some(meters) = self.meters.as_mut() else {
+        let SessionState {
+            meters,
+            controller,
+            providers,
+            retired_providers,
+            pending_providers,
+            shared,
+            ..
+        } = self;
+        let Some(meters) = meters.as_mut() else {
             return;
         };
-        if meters.epoch != self.providers.epoch {
-            return;
-        }
-        let next_sample = self.shared.render_sample.load(Ordering::Acquire);
-        let blank = protocol::MeterRecord {
-            handle: 0,
-            component: protocol::MeterComponent::Left,
-            flags: 0,
-            value: 0.0,
-        };
-        let mut records = [blank; host_core::MAXIMUM_METER_BATCH_RECORDS];
-        for _ in 0..=host_core::METER_QUEUE_DEPTH {
-            let Some(frame) = meters.delivery.poll(
-                &mut self.providers.meters,
-                &mut NoGainReductionTaps,
-                next_sample,
-            ) else {
-                break;
-            };
-            let Some(batch) =
-                meters
-                    .fold
-                    .push_with_strips(frame, &meters.resolution, &mut meters.folds)
-            else {
-                continue;
-            };
-            let table = &self.controller.telemetry_configuration().meters;
-            let mut count = 0;
-            for ((entry, fold), handle) in table.iter().zip(&meters.folds).zip(1_u32..) {
-                let (valid, peak) = match (&entry.target, entry.metric) {
-                    (protocol::MeterTarget::Output, protocol::MeterMetric::Peak) => {
-                        (batch.output_valid, batch.output_peak)
-                    }
-                    (protocol::MeterTarget::Strip(_), protocol::MeterMetric::Peak) => {
-                        (fold.present, fold.peak)
-                    }
-                    // Refused at the configure until #1587b.
-                    (_, protocol::MeterMetric::GainReduction) => continue,
-                };
-                for (component, value) in [
-                    (protocol::MeterComponent::Left, peak[0]),
-                    (protocol::MeterComponent::Right, peak[1]),
-                ] {
-                    let Some(slot) = records.get_mut(count) else {
-                        continue;
+        match &mut meters.source {
+            MeterSource::Delivery { delivery, epoch } => {
+                if *epoch != providers.epoch {
+                    return;
+                }
+                let next_sample = shared.render_sample.load(Ordering::Acquire);
+                for _ in 0..=host_core::METER_QUEUE_DEPTH {
+                    let mut taps = CapiGainReductionTaps {
+                        observations: &providers.observations,
+                        strips: &providers.observation_strips,
                     };
-                    let mut flags = 0;
-                    if valid {
-                        flags |= VALID;
-                        if value > 1.0 {
-                            flags |= CLIPPED;
-                        }
-                    }
-                    *slot = protocol::MeterRecord {
-                        handle,
-                        component,
-                        flags,
-                        value: if valid { value } else { 0.0 },
+                    let Some(frame) = delivery.poll(&mut providers.meters, &mut taps, next_sample)
+                    else {
+                        break;
                     };
-                    count += 1;
+                    let epochs = ProviderEpochs {
+                        current: providers,
+                        retired: retired_providers,
+                        pending: pending_providers,
+                    };
+                    meters
+                        .batches
+                        .stage(frame, frame.plan_epoch, &epochs, controller, revision);
                 }
             }
-            if count == 0 {
-                continue;
-            }
-            let span = protocol::MeterWindowSpan {
-                first_sample: protocol::SampleTime(batch.first_sample),
-                end_sample: protocol::SampleTime(batch.end_sample),
-                window_sequence: batch.sequence,
-            };
-            if self
-                .controller
-                .stage_meter_batch_event(revision, span, &records[..count])
-                .is_err()
-            {
-                meters.unstaged = meters
-                    .unstaged
-                    .saturating_add(u64::from(meters.fold.windows_per_batch()));
+            MeterSource::Rendered { .. } => {
+                let on = {
+                    let telemetry = controller.telemetry_configuration();
+                    !telemetry.meters.is_empty() && telemetry.meter_period_blocks != 0
+                };
+                let mut counts = [(0_u64, 0_usize); 1 + RETIRED_PROVIDERS + PENDING_PROVIDERS];
+                let mut held = 0;
+                let mut below = None;
+                while let Some(provider) = (ProviderEpochs {
+                    current: providers,
+                    retired: retired_providers,
+                    pending: pending_providers,
+                })
+                .all()
+                .filter(|provider| below.is_none_or(|below| provider.epoch < below))
+                .max_by_key(|provider| provider.epoch)
+                {
+                    below = Some(provider.epoch);
+                    let available = provider
+                        .meter_frames
+                        .as_ref()
+                        .map_or(0, host_core::MeterFrameConsumer::available);
+                    if let Some(slot) = counts.get_mut(held) {
+                        *slot = (provider.epoch, available);
+                        held += 1;
+                    }
+                }
+                for &(epoch, available) in counts[..held].iter().rev() {
+                    for _ in 0..available {
+                        let epochs = ProviderEpochs {
+                            current: providers,
+                            retired: retired_providers,
+                            pending: pending_providers,
+                        };
+                        let Some(frame) = epochs
+                            .all()
+                            .find(|provider| provider.epoch == epoch)
+                            .and_then(|provider| provider.meter_frames.as_ref())
+                            .and_then(host_core::MeterFrameConsumer::peek)
+                        else {
+                            break;
+                        };
+                        if on {
+                            meters
+                                .batches
+                                .stage(frame, epoch, &epochs, controller, revision);
+                        }
+                        if let Some(ring) = core::iter::once(&mut *providers)
+                            .chain(retired_providers.iter_mut())
+                            .chain(pending_providers.iter_mut())
+                            .find(|provider| provider.epoch == epoch)
+                            .and_then(|provider| provider.meter_frames.as_mut())
+                        {
+                            ring.release_frame();
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// The windows every held epoch's ring dropped (#1588 R4).
+    fn ring_drops(&self) -> u64 {
+        core::iter::once(&self.providers)
+            .chain(&self.retired_providers)
+            .chain(&self.pending_providers)
+            .filter_map(|provider| provider.meter_frames.as_ref())
+            .map(host_core::MeterFrameConsumer::dropped_windows)
+            .fold(0, u64::saturating_add)
     }
 
     /// Stages the `COUNTER_SNAPSHOT` event once render has completed at least the configured
@@ -2437,6 +2895,24 @@ where
                 values: snapshot.values,
             },
         );
+    }
+
+    /// Stage a render-half fold's ring frames at a reclaim (#1588 D4), with the configuration the
+    /// next render activity would stage them under. Nothing for the C ABI's delivery, whose
+    /// adoption carries its frames.
+    fn stage_reclaimed_frames(&mut self) {
+        if !matches!(
+            self.meters,
+            Some(SessionMeters {
+                source: MeterSource::Rendered { .. },
+                ..
+            })
+        ) {
+            return;
+        }
+        self.sync_meter_configuration();
+        let revision = self.controller.session().revision();
+        self.stage_meter_batches(revision);
     }
 
     pub(crate) fn collect_render_activity(&mut self) {
@@ -2728,6 +3204,43 @@ where
         self.output_meter.take()
     }
 
+    /// Promote the oldest pending candidate now, before render has run its swap block (#1587b):
+    /// what `withdraw_pending_candidate` does for a candidate render has claimed but not yet
+    /// carried into, so a test can render the carry after the promotion.
+    #[cfg(feature = "test-support")]
+    pub fn test_promote_pending_before_carry(&mut self) -> Result<(), CommandError> {
+        let epoch = self
+            .pending_providers
+            .first()
+            .ok_or(CommandError::Internal)?
+            .epoch;
+        self.promote_pending_provider(epoch)
+    }
+
+    /// The render half of provider epoch `epoch`'s meter frame ring (#1588 D2), handed out once
+    /// for the plan's render half: `None` for an epoch held no more or not yet, and on every later
+    /// call. Only a render-half meter fold's plans have one. The running or a pending epoch.
+    pub fn take_meter_frame_producer(
+        &mut self,
+        epoch: u64,
+    ) -> Option<host_core::MeterFrameProducer> {
+        core::iter::once(&mut self.providers)
+            .chain(self.pending_providers.iter_mut())
+            .find(|provider| provider.epoch == epoch)
+            .and_then(|provider| provider.meter_frame_producer.take())
+    }
+
+    /// The meter level word of a render-half meter fold (#1588 D1), which the render half reads
+    /// at each poll and its lease sets: a second handle on the session's word. `None` for any
+    /// other adapter.
+    #[must_use]
+    pub fn meter_level(&self) -> Option<host_core::MeterLevel> {
+        match &self.meters.as_ref()?.source {
+            MeterSource::Rendered { level, .. } => Some(level.clone()),
+            MeterSource::Delivery { .. } => None,
+        }
+    }
+
     /// The current provider epoch.
     #[cfg(feature = "test-support")]
     pub fn test_providers(&self) -> &ProviderEpoch {
@@ -2801,6 +3314,20 @@ where
     pub fn test_set_next_adoption(&mut self, adoption: PlanAdoption) {
         let _ = self;
         TEST_NEXT_ADOPTION.with(|state| state.set(Some(adoption)));
+    }
+
+    /// The adoption the last structural publication on this thread was committed with (#1403
+    /// gates), taken once: `None` when nothing was published since the last call.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_published_adoption(&mut self) -> Option<PlanAdoption> {
+        let _ = self;
+        TEST_PUBLISHED_ADOPTION.with(core::cell::Cell::take)
+    }
+
+    /// The record of the pending warm candidate (#1403 D4), if one is pending.
+    #[cfg(feature = "test-support")]
+    pub fn test_primed(&self) -> Option<host_core::PrimedCandidate> {
+        self.primed
     }
 
     /// The provider's counter snapshot, every counter, as `COUNTERS_GET` would read it now, without
@@ -2948,16 +3475,38 @@ where
                 self.promote_pending_provider(replacement)?;
             }
             self.adopt_meters(retired_epoch.0, adoption_sample);
+            self.settle_observation_pairings();
+            // #1588 D4: render filled the reclaimed plan's ring before it retired the plan, so
+            // its frames are staged now, while their epoch's strips are still held.
+            self.stage_reclaimed_frames();
             let index = self
                 .retired_providers
                 .iter()
                 .position(|provider| provider.epoch == retired_epoch.0)
                 .ok_or(CommandError::Internal)?;
-            self.retired_providers.remove(index);
+            let reclaimed = self.retired_providers.remove(index);
+            if let (
+                Some(ring),
+                Some(SessionMeters {
+                    source: MeterSource::Rendered { retired_drops, .. },
+                    ..
+                }),
+            ) = (reclaimed.meter_frames.as_ref(), self.meters.as_mut())
+            {
+                *retired_drops = retired_drops.saturating_add(ring.dropped_windows());
+            }
         }
 
         if active_epoch > self.providers.epoch {
             self.promote_pending_provider(active_epoch)?;
+        }
+        self.settle_observation_pairings();
+        // #1403 D4: render adopted the warm candidate, or a candidate published after it.
+        if self
+            .primed
+            .is_some_and(|record| self.providers.epoch >= record.epoch)
+        {
+            self.primed = None;
         }
 
         // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
@@ -2979,6 +3528,44 @@ where
         Ok(())
     }
 
+    /// Settle the pending observation pairings ([`CarriedTaps`]'s three states), oldest epoch
+    /// first: one whose record render has written pairs as at promotion, and one whose displaced
+    /// epoch is gone (its plan was reclaimed, so the hook has run or never will) settles as
+    /// nothing carried. An epoch whose displaced epoch is itself still pending waits, so the
+    /// readers always pair in adoption order. Run at each reclaim before the parked epoch drops
+    /// (a record written by then pairs), at the end of each service step (after the drop, an
+    /// unwritten one clears) and before each promotion. Bounded by the parked list; allocates
+    /// nothing.
+    fn settle_observation_pairings(&mut self) {
+        for index in 0..=self.retired_providers.len() {
+            let (successor, older) = if index == self.retired_providers.len() {
+                (&mut self.providers, &mut self.retired_providers[..])
+            } else {
+                let (older, rest) = self.retired_providers.split_at_mut(index);
+                let Some(successor) = rest.first_mut() else {
+                    continue;
+                };
+                (successor, older)
+            };
+            let Some(displaced) = successor.observations_pending else {
+                continue;
+            };
+            let settled = match older
+                .iter_mut()
+                .find(|provider| provider.epoch == displaced)
+            {
+                // Its own readers are not paired yet: pairing now would take the wrong ones.
+                Some(predecessor) if predecessor.observations_pending.is_some() => false,
+                Some(predecessor) => pair_observations(successor, predecessor),
+                // The displaced epoch is gone: nothing is left to pair with.
+                None => true,
+            };
+            if settled {
+                successor.observations_pending = None;
+            }
+        }
+    }
+
     /// Hand the meter delivery from the plan of `displaced`, whose reclaim this is, to its
     /// successor, adopted at `adoption_sample` (#1587a D1, R1', R3). Nothing happens unless the
     /// delivery holds `displaced`'s tables; the successor is the oldest promoted epoch after it,
@@ -2994,10 +3581,14 @@ where
     /// Run once per reclaimed plan, in reclaim order, so after a test hold's lagging promotions
     /// the delivery catches up one epoch per reclaim. Allocates nothing.
     fn adopt_meters(&mut self, displaced: u64, adoption_sample: u64) {
-        let Some(meters) = self.meters.as_mut() else {
+        let Some(SessionMeters {
+            source: MeterSource::Delivery { delivery, epoch },
+            ..
+        }) = self.meters.as_mut()
+        else {
             return;
         };
-        if meters.epoch != displaced {
+        if *epoch != displaced {
             return;
         }
         let Some(successor) = core::iter::once(&mut self.providers)
@@ -3034,14 +3625,10 @@ where
                 predecessor_handle: previous.meters.get(carry.predecessor)?.handle.0.get(),
             })
         });
-        meters
-            .delivery
-            .adopt(&mut tables, carries, carried, adoption_sample);
-        meters.epoch = successor_epoch;
-        meters.resolve(
-            &self.controller.telemetry_configuration().meters,
-            &next.meters,
-        );
+        // #1588 D3: the frames the successor's tables publish name its epoch.
+        tables.set_plan_epoch(successor_epoch);
+        delivery.adopt(&mut tables, carries, carried, adoption_sample);
+        *epoch = successor_epoch;
         if let Some(previous) = core::iter::once(&mut self.providers)
             .chain(self.retired_providers.iter_mut())
             .find(|provider| provider.epoch == displaced)
@@ -3122,6 +3709,20 @@ where
                 &mut self.providers.meters,
                 next.inventory.meter_pairing(),
             );
+            // #1674's observation half (#1587b): likewise the observation readers of the taps the
+            // swap block carried, from its record (what actually carried), so a carried tap's
+            // reader, and its arm state, follow the tap that renders on. A record render has not
+            // written yet leaves the pairing pending, which a later step settles. The pending
+            // pairings settle first, and `next` waits while the running epoch's own still stands:
+            // the narrow race is render carrying into B's plan and then claiming C's between an
+            // edit's service step and its `withdraw_pending_candidate`, which promotes B and C in
+            // one call. So the readers pair in adoption order without relying on claim order.
+            self.settle_observation_pairings();
+            if self.providers.observations_pending.is_some()
+                || !pair_observations(&mut next, &mut self.providers)
+            {
+                next.observations_pending = Some(self.providers.epoch);
+            }
             let mut previous = core::mem::replace(&mut self.providers, next);
             // Dropped with the parked epoch, when its plan is reclaimed.
             previous.spectrum = displaced;
@@ -3233,7 +3834,11 @@ where
         let errors = self.shared.live_block_errors.load(Ordering::Acquire);
         let underruns = self.shared.source_underrun_blocks.load(Ordering::Acquire);
         let discarded = self.source_frames_discarded;
-        let meter_windows_lost = self.meters.as_ref().map_or(0, SessionMeters::windows_lost);
+        let rings = self.ring_drops();
+        let meter_windows_lost = self
+            .meters
+            .as_ref()
+            .map_or(0, |meters| meters.windows_lost(rings));
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
@@ -4290,16 +4895,26 @@ where
             engine::realtime::Withdrawal::Withdrawn(candidate) => {
                 #[cfg(feature = "test-support")]
                 update_test_owners(|owners| owners.candidate_withdrawn += 1);
+                // #1403 D4: the record goes with its candidate to the path that withdrew it; a
+                // record of another epoch is stale.
+                if self
+                    .primed
+                    .is_some_and(|record| record.epoch != candidate.epoch().0)
+                {
+                    self.primed = None;
+                }
                 Ok(Some(candidate))
             }
             engine::realtime::Withdrawal::Taken => {
                 #[cfg(feature = "test-support")]
                 update_test_owners(|owners| owners.candidate_taken += 1);
+                self.primed = None;
                 self.promote_pending_provider(newest)?;
                 Ok(None)
             }
             // An earlier withdrawal found it taken: render runs it.
             engine::realtime::Withdrawal::Nothing => {
+                self.primed = None;
                 self.promote_pending_provider(newest)?;
                 Ok(None)
             }
@@ -4479,19 +5094,22 @@ where
                 .spectrum
                 .successor_configuration(prospective.normalized_model()),
         };
-        let prepared_runtime = prepare_runtime::<A>(
-            &*self.preparer,
-            prospective,
-            self.limits,
-            spectrum_configuration
-                .as_ref()
-                .map(|configuration| &configuration.preparation),
-            Some(base),
-            &self.live_values_superseded,
-            self.observation_slots_high_water,
-            self.capture_owners_high_water,
-        )
-        .map_err(spectrum_invariant)?;
+        let prepare = |base: SuccessorBase<'_>| {
+            prepare_runtime::<A>(
+                &*self.preparer,
+                prospective,
+                self.limits,
+                spectrum_configuration
+                    .as_ref()
+                    .map(|configuration| &configuration.preparation),
+                Some(base),
+                &self.live_values_superseded,
+                self.observation_slots_high_water,
+                self.capture_owners_high_water,
+            )
+            .map_err(spectrum_invariant)
+        };
+        let mut prepared_runtime = prepare(base)?;
         // #1325 D7: after preparation, the pure transition step against the plan the successor
         // displaces. A declared discontinuity need not continue the running plan's output
         // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
@@ -4500,21 +5118,68 @@ where
             None
         } else {
             Some(
-                host_core::plan_strip_transition(&base, duck, prospective.normalized_model())
-                    .map_err(|_| CommandError::Internal)?,
+                host_core::plan_strip_transition(
+                    &base,
+                    duck,
+                    prospective.normalized_model(),
+                    // #1324 D4: the strips the successor restarts duck-swap.
+                    prepared_runtime.inventory.restarted_strips(),
+                )
+                .map_err(|_| CommandError::Internal)?,
             )
         };
+        let quantum = prospective.normalized_model().quantum_frames;
+        // #1403 D2: with the session's warm bounds, the edit is classified against the plan it
+        // displaces, from the ordinary successor's inventory (#1354a ruling 1). A growth whose
+        // duck set is empty -- it removes no strip, no phase 1 is pending, and nothing restarts
+        // (the ordinary join's restarts and the lead's whole restarts are the warm successor's
+        // `restarted_strips()`, #1354 D4) -- is prepared warm, admitted with the reprepare peak
+        // and published `Primed`. Every other answer takes today's path until #1397.
+        let mut warm_lead_blocks = None;
+        if let (Some(config), Some(transition)) = (self.warm, transition.as_ref())
+            && !transition.ducks()
+            && duck.is_empty()
+            && prepared_runtime.inventory.restarted_strips().is_empty()
+        {
+            let decision = host_core::warm_lead(
+                prospective,
+                &prepare_caps(self.limits),
+                base,
+                &prepared_runtime.inventory,
+                &config,
+            )
+            .map_err(|diagnostics| spectrum_invariant(prepare_failure(diagnostics)))?;
+            if let host_core::WarmDecision::Warm(lead) = decision
+                && lead.lead_samples > 0
+                && lead.restart_whole.is_empty()
+            {
+                let lead_blocks = u32::try_from(lead.lead_samples / u64::from(quantum))
+                    .map_err(|_| CommandError::Internal)?;
+                drop(prepared_runtime);
+                prepared_runtime = prepare(SuccessorBase {
+                    warm: Some(&lead),
+                    ..base
+                })?;
+                if !prepared_runtime.inventory.restarted_strips().is_empty() {
+                    debug_assert!(false, "#1354 D4: a warm successor restarts exactly R");
+                    return Err(CommandError::Internal);
+                }
+                warm_lead_blocks = Some(lead_blocks);
+            }
+        }
         let next_duck = transition
             .as_ref()
             .map(|transition| duck.joined(transition));
-        let quantum = prospective.normalized_model().quantum_frames;
         let PreparedRuntime {
             sources,
             strips,
             effects,
             meters,
             meter_tables,
+            meter_frames,
             observations,
+            observation_strips,
+            carried_taps,
             observation_index,
             plan: candidate_plan,
             resources,
@@ -4547,8 +5212,11 @@ where
         );
         candidate_provider.discontinuity = discontinuity;
         candidate_provider.observations = observations;
+        candidate_provider.observation_strips = observation_strips;
+        candidate_provider.carried_taps = carried_taps;
         candidate_provider.observation_index = observation_index;
         candidate_provider.meter_tables = meter_tables;
+        candidate_provider = candidate_provider.with_meter_frames(meter_frames);
         // The configuration epoch is set beside the push, after the commit.
         candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {
             captures: candidate_captures,
@@ -4573,7 +5241,18 @@ where
         let held = self.held_epochs()?;
         let models = self.held_models()?;
         let limits = self.limits;
-        let admit = |held: &[LiveEpochResources], models: &[session::ResourceEstimate]| {
+        // #1403 D2: a warm candidate is admitted with the reprepare peak too, beside the held
+        // plans that are not candidates (every parked epoch and the running plan).
+        let peak = |running: usize| {
+            if warm_lead_blocks.is_some() {
+                AdmissionPeak::WithReprepare { running }
+            } else {
+                AdmissionPeak::Single
+            }
+        };
+        let admit = |held: &[LiveEpochResources],
+                     models: &[session::ResourceEstimate],
+                     admission: AdmissionPeak| {
             validate_replacement_peak(
                 held,
                 ProspectivePlan {
@@ -4583,9 +5262,15 @@ where
                 },
                 compiled_model_admission_over(models, prospective.resource_estimate())?,
                 limits,
+                admission,
             )
         };
-        if let Err(failure) = admit(held.as_slice(), models.as_slice()) {
+        let running = held
+            .as_slice()
+            .len()
+            .checked_sub(self.pending_providers.len())
+            .ok_or(CommandError::Internal)?;
+        if let Err(failure) = admit(held.as_slice(), models.as_slice(), peak(running)) {
             // Batch 15a review fold, item 2: a refusal is permanent only if the edit cannot fit
             // even beside the newest plan alone and the committed model, which is all a retry
             // meets once render has adopted every pending candidate (the plans before it are
@@ -4598,8 +5283,12 @@ where
             return Err(
                 match held.split_last().filter(|(_, older)| !older.is_empty()) {
                     Some((newest, _))
-                        if admit(core::slice::from_ref(newest), &models.as_slice()[..1])
-                            .is_ok() =>
+                        if admit(
+                            core::slice::from_ref(newest),
+                            &models.as_slice()[..1],
+                            peak(1),
+                        )
+                        .is_ok() =>
                     {
                         CommandError::Backpressure
                     }
@@ -4935,6 +5624,35 @@ where
             // withdrawn candidate, drops below as a commit's displaced model does.
             Rebuild::Discontinuity(model) | Rebuild::Monitor { model, .. } => (None, Some(*model)),
         };
+        // #1403 D3: a warm candidate's flags and `Primed` schedule, after the last fallible step
+        // and before its set takes any producer or donated ring: each entry it holds vacant is
+        // then a ring it carries from the plan it displaces, whose producer is still in that
+        // plan's set, or, across a withdrawn candidate, in the withdrawn candidate's.
+        let primed = warm_lead_blocks.map(|lead_blocks| {
+            let (running, withdrawn_sources) = if superseding {
+                let len = self.pending_providers.len();
+                // A superseding rebuild holds the withdrawn candidate as its newest pending
+                // epoch: the check at the top of `rebuild` refused anything else.
+                debug_assert!(len > 0, "a withdrawn candidate is pending");
+                let holder = match len {
+                    0 | 1 => &self.providers,
+                    _ => &self.pending_providers[len - 2],
+                };
+                (holder, self.pending_providers.last())
+            } else {
+                (
+                    self.pending_providers.last().unwrap_or(&self.providers),
+                    None,
+                )
+            };
+            host_core::publish_primed(
+                reservation.inner.as_mut().expect("reservation is live"),
+                &running.sources,
+                &candidate_provider.sources,
+                withdrawn_sources.map(|withdrawn| &withdrawn.sources),
+                lead_blocks,
+            )
+        });
         // B19-R7: the rebuild's own send moves ramp from its successor's first block.
         fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
@@ -5052,12 +5770,19 @@ where
                     .render_clock();
                 next_duck.raise_not_before(transition.not_before(p, quantum));
             }
+            // #1403 D2 (root ruling, attempt 2): the duck set is the removed and restarted
+            // strips, so a warm candidate's transition removes at most sources no strip read; its
+            // overlay keeps them (their calls go to the running plan until the adoption) and its
+            // schedule stays `Primed`.
             if let Some(not_before) = next_duck.not_before() {
-                reservation
-                    .inner
-                    .as_mut()
-                    .expect("reservation is live")
-                    .set_adoption(PlanAdoption::NoEarlierThan(not_before));
+                debug_assert!(warm_lead_blocks.is_none() || not_before == 0);
+                if warm_lead_blocks.is_none() {
+                    reservation
+                        .inner
+                        .as_mut()
+                        .expect("reservation is live")
+                        .set_adoption(PlanAdoption::NoEarlierThan(not_before));
+                }
             }
             let held = self
                 .pending_providers
@@ -5166,10 +5891,28 @@ where
             reports.retain(|(row, _)| *row != donor_epoch);
         }
         reports.push((epoch, A::Row::from(resources)));
+        #[cfg(feature = "test-support")]
+        TEST_PUBLISHED_ADOPTION.with(|state| {
+            state.set(
+                reservation
+                    .inner
+                    .as_ref()
+                    .map(PlanReplacementReservation::adoption),
+            );
+        });
         // #1310 D5 step 4: B is published only now, owning every donated ring and record. Its
         // payload carries the revision its gate carries, for the watermark's claim settle (#1482
         // R1).
         reservation.commit(revision);
+        // #1403 D4: B is the one pending candidate now. A record that named a candidate B
+        // superseded drops with it (#1310 D5 step 6, #1323's stop); B's own replaces it.
+        debug_assert!(
+            self.primed.is_none_or(|record| superseded
+                .as_ref()
+                .is_some_and(|(_, donor)| donor.epoch == record.epoch)),
+            "a record names the one pending candidate"
+        );
+        self.primed = primed;
         drop(reports);
         #[cfg(feature = "test-support")]
         {
@@ -6912,6 +7655,397 @@ mod tests {
         assert_eq!(EventError::Internal.diagnostic(), b"control.event.internal");
     }
 
+    /// #1588 D2, D4, R4: a render-half meter fold's frames reach the batches through the plan's
+    /// ring, and a frame the full ring dropped reaches `METER_WINDOWS_LOST`.
+    #[cfg(feature = "test-support")]
+    mod rendered_meters {
+        use crate::{
+            CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources,
+            RuntimePreparer, compile_children,
+        };
+        use engine::realtime::PlanarBufferMut;
+        use host_core::{
+            CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+            HostMeterRequest, HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics,
+            PreparedHost, SuccessorBase, prepare_host_runtime_with_live_lanes,
+            prepare_host_runtime_with_live_lanes_successor,
+            prepare_host_runtime_with_selected_meters,
+            prepare_host_runtime_with_selected_meters_successor,
+        };
+        use protocol::{
+            CommandPayload, CounterId, DiagnosticSeverity, ExpectedRevision, MeterEntry,
+            MeterMetric, MeterTarget, ProtocolCodec, RequestId, SessionEdit,
+            TelemetryConfiguration, TypedCommandFrame,
+        };
+        use session::{RouteSource, StableId, parse_session_json};
+
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        const QUANTUM: u64 = 128;
+
+        struct Adapter;
+
+        impl ControlAdapter for Adapter {
+            type Row = PlanResources;
+            const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+            const METER_DELIVERY: bool = true;
+            const RENDER_METER_FOLD: bool = true;
+        }
+
+        /// host-core's live-lanes entries, with one-block meter windows: the default meters, or
+        /// the caller's `selection`.
+        struct Preparer {
+            selection: Option<Vec<HostMeterRequest>>,
+        }
+
+        impl RuntimePreparer for Preparer {
+            fn prepare(
+                &self,
+                compiled: &CompiledSession,
+                caps: &HostPrepareCaps,
+                lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
+                successor: Option<SuccessorBase<'_>>,
+                superseded: &LiveValuesSuperseded,
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
+                let live = HostLiveControlRequest {
+                    meter_window_blocks: 1,
+                    ..HostLiveControlRequest::default()
+                };
+                let (host, handles) = match (successor, &self.selection) {
+                    (Some(base), None) => prepare_host_runtime_with_live_lanes_successor(
+                        compiled, caps, &live, lanes, base, superseded,
+                    ),
+                    (None, None) => prepare_host_runtime_with_live_lanes(
+                        compiled, caps, &live, lanes, superseded,
+                    ),
+                    (Some(base), Some(selection)) => {
+                        prepare_host_runtime_with_selected_meters_successor(
+                            compiled, caps, &live, selection, lanes, superseded, base,
+                        )
+                    }
+                    (None, Some(selection)) => prepare_host_runtime_with_selected_meters(
+                        compiled, caps, &live, selection, lanes, superseded,
+                    ),
+                }?;
+                Ok((host, handles, None))
+            }
+
+            fn meter_window_blocks(&self) -> u32 {
+                1
+            }
+        }
+
+        fn limits() -> ControlLimits {
+            ControlLimits {
+                source_ring_frames: 1_024,
+                maximum_automation_spans_per_block: 128,
+                maximum_document_bytes: 1_000_000,
+                maximum_diagnostic_bytes: 4_096,
+                maximum_tracks: 100,
+                maximum_sources: 100,
+                maximum_routes: 100,
+                maximum_effects: 100,
+                maximum_graph_session_plus_plan_bytes: 100_000_000,
+                maximum_source_total_bytes: 10_000_000,
+                maximum_source_overhead_bytes: 10_000_000,
+                maximum_effect_state_bytes: 100_000_000,
+                maximum_effect_scratch_bytes: 100_000_000,
+                maximum_builtin_retained_bytes: 100_000_000,
+                maximum_control_retained_bytes: 10_000_000,
+                maximum_named_allocation_bytes: 100_000_000,
+                maximum_meter_streams: 4_096,
+                maximum_meter_items: 1 << 20,
+                maximum_meter_bytes: 1 << 26,
+                maximum_control_frame_bytes: 4_096,
+                maximum_replay_bytes: 8_192,
+                maximum_replay_entries: 16,
+                maximum_submixes: 0,
+                maximum_vcas: 0,
+                maximum_vca_reach_pairs: u64::MAX,
+                maximum_replacement_peak_bytes: u64::MAX,
+            }
+        }
+
+        /// A session booted with `selection` (or the default meters) and the meter table `meters`
+        /// at one window per batch.
+        fn boot(
+            selection: Option<Vec<HostMeterRequest>>,
+            meters: Vec<MeterEntry>,
+        ) -> CompiledChildren<Adapter> {
+            let mut children = compile_children::<Adapter>(
+                SESSION,
+                limits(),
+                Box::new(Preparer { selection }),
+                None,
+            )
+            .expect("boot");
+            command(
+                &mut children,
+                1,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters,
+                    meter_period_blocks: 1,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            children.session.service().expect("service");
+            children
+        }
+
+        fn output_peak() -> MeterEntry {
+            MeterEntry {
+                target: MeterTarget::Output,
+                metric: MeterMetric::Peak,
+            }
+        }
+
+        /// Run `payload` as request `request`; the response bytes.
+        fn command(
+            children: &mut CompiledChildren<Adapter>,
+            request: u64,
+            payload: CommandPayload<'_>,
+        ) -> Vec<u8> {
+            let codec = ProtocolCodec::default();
+            let frame = TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(
+                    children.session.test_controller().session().revision(),
+                ),
+                payload,
+            };
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(&frame, &mut bytes)
+                .expect("typed command");
+            let response = children
+                .session
+                .command(&bytes[..length], 4_096)
+                .expect("command");
+            children.session.command_response(response).to_vec()
+        }
+
+        /// A complete one-window frame of `window` with output peak `[0.5, 0.25]` and `peaks` as
+        /// its strips' peaks.
+        fn frame(window: u64, peaks: &[[f32; 2]]) -> host_core::MeterFrame {
+            let mut frame = host_core::MeterFrame::new(peaks.len()).expect("frame");
+            frame.first_sample = window * QUANTUM;
+            frame.end_sample = (window + 1) * QUANTUM;
+            frame.windows = 1;
+            frame.sequence = window + 1;
+            frame.generation = 1;
+            frame.validity =
+                host_core::MeterValidity::COMPLETE.union(host_core::MeterValidity::OUTPUT);
+            frame.output_peak = [0.5, 0.25];
+            frame.strip_peaks.copy_from_slice(peaks);
+            frame
+        }
+
+        /// Render block `block` and observe it, then run the service step.
+        fn render(children: &mut CompiledChildren<Adapter>, block: u64) {
+            let mut samples = [0.0_f32; 2 * QUANTUM as usize];
+            let output =
+                PlanarBufferMut::try_new(&mut samples, 2, QUANTUM as usize, QUANTUM as usize)
+                    .expect("output");
+            children
+                .plan
+                .render(block * QUANTUM, output)
+                .expect("render");
+            let (left, right) = samples.split_at(QUANTUM as usize);
+            children.plan.observe_rendered_block(
+                [left, right],
+                block * QUANTUM,
+                (block + 1) * QUANTUM,
+            );
+            children.session.service().expect("service");
+        }
+
+        /// Every staged `METER_BATCH`, oldest first: its first sample and its records' values.
+        fn batches(children: &mut CompiledChildren<Adapter>) -> Vec<(u64, Vec<f32>)> {
+            let mut batches = Vec::new();
+            while let Some(length) = children
+                .session
+                .dequeue_event(EventLane::Lossy, 4_096)
+                .expect("an event")
+            {
+                let bytes = children.session.event_response(length).to_vec();
+                let mut fields = [0_u16; 64];
+                let decoded = ProtocolCodec::default()
+                    .decode_typed_event(&bytes, &mut protocol::DecodeScratch::new(&mut fields))
+                    .expect("a typed event");
+                if let protocol::DecodedEventPayload::MeterBatch(batch) = decoded.payload {
+                    let values = (0..usize::from(batch.count))
+                        .map(|index| batch.record(index).expect("a record").value)
+                        .collect();
+                    batches.push((batch.first_sample.0, values));
+                }
+            }
+            batches
+        }
+
+        /// The `METER_WINDOWS_LOST` counter, through `COUNTERS_GET`.
+        fn windows_lost(children: &mut CompiledChildren<Adapter>, request: u64) -> u64 {
+            let response = command(
+                children,
+                request,
+                CommandPayload::CountersGet(&protocol::CountersRequest {
+                    all: false,
+                    ids: vec![CounterId::MeterWindowsLost as u32],
+                }),
+            );
+            let mut fields = [0_u16; 64];
+            let protocol::DecodedTypedResponseFrame::Success {
+                payload: protocol::DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_response(&response, &mut protocol::DecodeScratch::new(&mut fields))
+                .expect("counters response")
+            else {
+                panic!("expected counters")
+            };
+            snapshot.values[0].value
+        }
+
+        /// A structural transaction: a muted copy of the first track and its route.
+        fn add_muted_track(children: &mut CompiledChildren<Adapter>, request: u64) {
+            let model = parse_session_json(SESSION).expect("fixture");
+            let mut track = model.tracks[0].clone();
+            track.id = StableId::parse("a-added").expect("track ID");
+            track.fader.left_mute = true;
+            track.fader.right_mute = true;
+            let mut route = model.routes[0].clone();
+            route.id = StableId::parse("a-added-main").expect("route ID");
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("track route")
+            };
+            *track_id = track.id.clone();
+            let edits = [
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ];
+            command(
+                children,
+                request,
+                CommandPayload::SessionTransactionApply(&edits),
+            );
+        }
+
+        /// Test value: red if a frame the full ring dropped never reaches `METER_WINDOWS_LOST`
+        /// (the browser's client would see a gap in the batches with no count), or if the
+        /// control half stages no batch from a plan's ring (the browser would accept a meter
+        /// table and serve nothing).
+        #[test]
+        fn a_full_ring_drop_reaches_meter_windows_lost_and_its_frames_become_batches() {
+            let mut children = boot(None, vec![output_peak()]);
+            let level = children.session.meter_level().expect("a meter level");
+            assert_eq!(level.load(), host_core::MeterLevel::TELEMETRY);
+            let epoch = children.session.newest_plan_epoch();
+            let mut producer = children
+                .session
+                .take_meter_frame_producer(epoch)
+                .expect("the boot plan's ring");
+            let published = (0..=host_core::METER_FRAME_RING_DEPTH as u64)
+                .filter(|&window| producer.publish_frame(&frame(window, &[])))
+                .count();
+            assert_eq!(published, host_core::METER_FRAME_RING_DEPTH);
+            render(&mut children, 0);
+            assert_eq!(
+                batches(&mut children).len(),
+                host_core::METER_FRAME_RING_DEPTH,
+                "one batch a frame"
+            );
+            assert_eq!(windows_lost(&mut children, 2), 1);
+        }
+
+        /// #1588 D2, D4: the frames of two epochs' rings are staged in window order, oldest
+        /// epoch first, and a reclaimed ring's drop stays counted.
+        ///
+        /// Test value: red if the rings are drained newest epoch first (the successor's windows
+        /// would reach the client before the predecessor's), or if a reclaimed ring's drops leave
+        /// `METER_WINDOWS_LOST` with its epoch.
+        #[test]
+        fn two_epochs_rings_are_staged_in_window_order_and_a_reclaimed_drop_stays_counted() {
+            let mut children = boot(None, vec![output_peak()]);
+            let first = children.session.newest_plan_epoch();
+            let mut older = children
+                .session
+                .take_meter_frame_producer(first)
+                .expect("the boot plan's ring");
+            add_muted_track(&mut children, 2);
+            let second = children.session.newest_plan_epoch();
+            assert!(second > first, "the transaction published a successor");
+            let mut newer = children
+                .session
+                .take_meter_frame_producer(second)
+                .expect("the successor's ring");
+            let depth = host_core::METER_FRAME_RING_DEPTH as u64;
+            for window in 0..=depth {
+                older.publish_frame(&frame(window, &[]));
+            }
+            for window in depth + 1..depth + 3 {
+                assert!(newer.publish_frame(&frame(window, &[])));
+            }
+            render(&mut children, 0);
+            render(&mut children, 1);
+            assert_eq!(
+                children.session.test_providers().epoch,
+                second,
+                "the boot epoch is reclaimed"
+            );
+            let starts: Vec<u64> = batches(&mut children)
+                .into_iter()
+                .map(|(first_sample, _)| first_sample)
+                .collect();
+            let expected: Vec<u64> = (0..depth)
+                .chain(depth + 1..depth + 3)
+                .map(|window| window * QUANTUM)
+                .collect();
+            assert_eq!(starts, expected);
+            assert_eq!(windows_lost(&mut children, 3), 1, "the boot ring's drop");
+        }
+
+        /// #1588 D3, MINOR-2: a strip entry reads its strip's own meter in a plan prepared with a
+        /// caller selection: here one meter, on the fourth track, so the frame's strip 0 is
+        /// `eq3`'s.
+        ///
+        /// Test value: red if an entry resolves against the plan's strip order instead of its
+        /// meters' (`eq3` would read the frame's strip 3, another meter's slot or none).
+        #[test]
+        fn a_strip_entry_reads_its_own_meter_under_a_caller_selection() {
+            let selection = vec![HostMeterRequest {
+                strip_id: "eq3".into(),
+                tap: host_core::MeterTap::PostMatrix,
+                metrics: host_core::MeterMetricSet::SAMPLE_PEAK,
+            }];
+            let mut children = boot(
+                Some(selection),
+                vec![MeterEntry {
+                    target: MeterTarget::Strip("eq3".into()),
+                    metric: MeterMetric::Peak,
+                }],
+            );
+            let epoch = children.session.newest_plan_epoch();
+            let mut producer = children
+                .session
+                .take_meter_frame_producer(epoch)
+                .expect("the boot plan's ring");
+            assert!(producer.publish_frame(&frame(0, &[[0.75, 0.5]])));
+            render(&mut children, 0);
+            assert_eq!(batches(&mut children), vec![(0, vec![0.75, 0.5])]);
+        }
+    }
+
     /// #1396 gate 5: a declaration resets a source-read offset that no raised floor goes with.
     #[cfg(feature = "test-support")]
     mod source_read_offset {
@@ -7103,6 +8237,879 @@ mod tests {
         fn a_declaration_resets_an_offset_with_no_raised_floor() {
             assert_eq!(declare_after(OFFSET), 1, "the offset alone rebuilds");
             assert_eq!(declare_after(0), 0, "nothing to reset (#1323 gate 3)");
+        }
+    }
+
+    /// #1403 gates: a latency growth classified and published `Primed` through the control
+    /// plane, at 48 kHz, quantum 128, on this build's backend. A is two tracks, `eq0` on
+    /// [`SOURCE`] and `eq1` on [`AUX`], every console section and insert empty; every ring is
+    /// 7,296 frames (`stall_ring_frames` 5,120, plus `p_max_samples` 2,048, plus one quantum).
+    /// The growth W adds a muted track with a true-peak limiter (`P = 512`, four blocks). "A
+    /// continued" is A rendered on with no growth and the same live commands, bit for bit.
+    #[cfg(feature = "test-support")]
+    mod warm_successor {
+        use super::super::CommandError;
+        use crate::EventLane;
+        use crate::{
+            CompiledChildren, ControlAdapter, ControlLimits, PlanResources, RuntimePreparer,
+            compile_children_warm,
+        };
+        use engine::realtime::{
+            OUTCOME_EXACT, OUTCOME_SUPERSEDED, PlanAdoption, PlanarBufferMut, RenderError,
+        };
+        use host_core::{
+            CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+            HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost,
+            PrimedCandidate, SourceSubmission, SuccessorBase, WarmConfig,
+            prepare_host_runtime_with_live_lanes, prepare_host_runtime_with_live_lanes_successor,
+        };
+        use protocol::{
+            CommandPayload, DecodeScratch, DecodedSuccessResponsePayload,
+            DecodedTypedResponseFrame, EditPath, ExpectedRevision, ProtocolCodec, RequestId,
+            SessionEdit, TypedCommandFrame,
+        };
+        use session::{
+            ControlAddress, Effect, EffectIdentity, EffectQuality, LinkMode, Owner,
+            ParameterChannel, RouteSource, Section, SessionModel, SidechainDeclaration, Source,
+            StableId, Track, parse_session_json,
+        };
+
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        const SOURCE: &str = "fixture-source";
+        const AUX: &str = "aux-source";
+        const UNUSED: &str = "unused-source";
+        const QUANTUM: u64 = 128;
+        const RING: u32 = 7_296;
+        /// `P` of the one-limiter growth.
+        const LEAD: u64 = 512;
+        /// Blocks rendered before an edit.
+        const BEFORE: usize = 6;
+        /// How far ahead a ready host feeds: `P / q + 1` blocks, and one more.
+        const AHEAD: u64 = LEAD / QUANTUM + 2;
+        const CONFIG: WarmConfig = WarmConfig {
+            p_max: 2_048,
+            prime_bytes_max: u64::MAX,
+        };
+
+        struct Adapter;
+
+        impl ControlAdapter for Adapter {
+            type Row = PlanResources;
+            const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+        }
+
+        /// The C ABI's own preparation: host-core's live-lanes entries.
+        struct Preparer;
+
+        impl RuntimePreparer for Preparer {
+            fn prepare(
+                &self,
+                compiled: &CompiledSession,
+                caps: &HostPrepareCaps,
+                lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
+                successor: Option<SuccessorBase<'_>>,
+                superseded: &LiveValuesSuperseded,
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
+                let live = HostLiveControlRequest::default();
+                let (host, handles) = match successor {
+                    Some(base) => prepare_host_runtime_with_live_lanes_successor(
+                        compiled, caps, &live, lanes, base, superseded,
+                    ),
+                    None => prepare_host_runtime_with_live_lanes(
+                        compiled, caps, &live, lanes, superseded,
+                    ),
+                }?;
+                Ok((host, handles, None))
+            }
+        }
+
+        fn limits() -> ControlLimits {
+            ControlLimits {
+                source_ring_frames: RING,
+                maximum_automation_spans_per_block: 128,
+                maximum_document_bytes: 1_000_000,
+                maximum_diagnostic_bytes: 4_096,
+                maximum_tracks: 100,
+                maximum_sources: 100,
+                maximum_routes: 100,
+                maximum_effects: 100,
+                maximum_graph_session_plus_plan_bytes: 1_000_000_000,
+                maximum_source_total_bytes: 100_000_000,
+                maximum_source_overhead_bytes: 100_000_000,
+                maximum_effect_state_bytes: 1_000_000_000,
+                maximum_effect_scratch_bytes: 1_000_000_000,
+                maximum_builtin_retained_bytes: 1_000_000_000,
+                maximum_control_retained_bytes: 100_000_000,
+                maximum_named_allocation_bytes: 1_000_000_000,
+                maximum_meter_streams: 4_096,
+                maximum_meter_items: 1 << 20,
+                maximum_meter_bytes: 1 << 26,
+                maximum_control_frame_bytes: 65_536,
+                maximum_replay_bytes: 262_144,
+                maximum_replay_entries: 16,
+                maximum_submixes: 0,
+                maximum_vcas: 0,
+                maximum_vca_reach_pairs: u64::MAX,
+                maximum_replacement_peak_bytes: u64::MAX,
+            }
+        }
+
+        fn sid(text: &str) -> StableId {
+            StableId::parse(text).expect("stable ID")
+        }
+
+        /// Session A.
+        fn session_a() -> SessionModel {
+            let mut model = parse_session_json(SESSION).expect("fixture");
+            assert_eq!(model.sample_rate_hz, 48_000);
+            model.console.pre_insert.clear();
+            model.console.post_insert.clear();
+            model
+                .tracks
+                .retain(|track| matches!(track.id.as_str(), "eq0" | "eq1"));
+            for track in &mut model.tracks {
+                track.console.clear();
+                track.inserts.effects.clear();
+                for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+                    channel.hpf_hz = 0.0;
+                    channel.lpf_hz = 0.0;
+                }
+            }
+            model
+                .routes
+                .retain(|route| matches!(route.id.as_str(), "eq0-main" | "eq1-main"));
+            let template = model.sources[0].clone();
+            model.sources.push(Source {
+                id: sid(AUX),
+                content: template.content.replace("7e94", "0a0a"),
+                ..template
+            });
+            model
+                .tracks
+                .iter_mut()
+                .find(|track| track.id.as_str() == "eq1")
+                .expect("eq1")
+                .source_id = sid(AUX);
+            model
+        }
+
+        fn limiter(id: &str) -> Effect {
+            Effect {
+                id: sid(id),
+                identity: EffectIdentity::Native {
+                    effect_id: sid("miso.true-peak-limiter"),
+                },
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::Maximum,
+                params: Vec::new(),
+                sidechain: SidechainDeclaration::None,
+            }
+        }
+
+        /// A muted copy of `eq0` named `id`, with `limiters` true-peak limiters in series, and
+        /// its route to the output: a growth of `P` for one limiter, `2P` for two.
+        fn muted_track(id: &str, limiters: usize) -> [SessionEdit; 2] {
+            let model = session_a();
+            let mut track: Track = model.tracks[0].clone();
+            track.id = sid(id);
+            track.fader.left_mute = true;
+            track.fader.right_mute = true;
+            track.inserts.effects = (0..limiters)
+                .map(|index| limiter(&format!("limiter-{index}")))
+                .collect();
+            let mut route = model.routes[0].clone();
+            route.id = sid(&format!("{id}-main"));
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("a track route")
+            };
+            *track_id = track.id.clone();
+            [
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ]
+        }
+
+        /// The growth W: a muted limiter track `t3`.
+        fn growth() -> Vec<SessionEdit> {
+            muted_track("t3", 1).into()
+        }
+
+        fn remove_track(id: &str) -> [SessionEdit; 2] {
+            [
+                SessionEdit::RemoveRoute {
+                    route_id: sid(&format!("{id}-main")),
+                },
+                SessionEdit::RemoveTrack { track_id: sid(id) },
+            ]
+        }
+
+        fn builtin(track: &str, control: u32, value: f32) -> SessionEdit {
+            SessionEdit::SetControl {
+                expected_effect: None,
+                address: ControlAddress {
+                    owner: Owner::Strip(sid(track)),
+                    section: Section::Builtins,
+                    control,
+                    lane: ParameterChannel::Both,
+                },
+                value,
+                ramp_samples: None,
+            }
+        }
+
+        /// A source's PCM: two planes, no exact-zero sample, distinct per `seed`.
+        fn pcm(seed: u32) -> [Vec<f32>; 2] {
+            let plane = |channel: u32| {
+                (0..48_000_u32)
+                    .map(|frame| {
+                        let step = frame
+                            .wrapping_mul(7_919)
+                            .wrapping_add(seed.wrapping_mul(104_729))
+                            .wrapping_add(channel * 31)
+                            % 1_999;
+                        (step as f32 - 999.5) / 2_000.0
+                    })
+                    .collect::<Vec<f32>>()
+            };
+            [plane(0), plane(1)]
+        }
+
+        /// One session as a host drives it: feed, command, render one block at a time.
+        struct Rig {
+            children: CompiledChildren<Adapter>,
+            request: u64,
+            /// The next block's render sample.
+            at: u64,
+            /// Each fed source: its ID, PCM and next frame.
+            feeds: Vec<(&'static str, [Vec<f32>; 2], u64)>,
+            /// Blocks the feed keeps past the next block's source-read sample.
+            ahead: u64,
+            /// Each rendered block's output bits, and the epoch render published after it.
+            blocks: Vec<Vec<u32>>,
+            epochs: Vec<u64>,
+            /// The boot plan's epoch.
+            boot: u64,
+        }
+
+        impl Rig {
+            fn new(warm: Option<WarmConfig>) -> Self {
+                Self::with_limits(warm, limits())
+            }
+
+            fn with_limits(warm: Option<WarmConfig>, limits: ControlLimits) -> Self {
+                Self::boot(warm, limits, &session_a())
+            }
+
+            /// A with a third source, [`UNUSED`], that no track reads; it is fed as the others.
+            fn with_unused(warm: Option<WarmConfig>) -> Self {
+                let mut model = session_a();
+                let template = model.sources[0].clone();
+                model.sources.push(Source {
+                    id: sid(UNUSED),
+                    content: template.content.replace("7e94", "0b0b"),
+                    ..template
+                });
+                let mut rig = Self::boot(warm, limits(), &model);
+                rig.feeds.push((UNUSED, pcm(13), 0));
+                rig
+            }
+
+            fn boot(warm: Option<WarmConfig>, limits: ControlLimits, model: &SessionModel) -> Self {
+                super::super::test_reset_lifecycle_observer();
+                let document = session::canonical_session_json(model).expect("canonical");
+                let children = compile_children_warm::<Adapter>(
+                    &document,
+                    limits,
+                    Box::new(Preparer),
+                    None,
+                    warm,
+                )
+                .expect("boot");
+                let boot = children
+                    .plan
+                    .test_active_epoch()
+                    .load(std::sync::atomic::Ordering::Acquire);
+                Self {
+                    boot,
+                    children,
+                    request: 0,
+                    at: 0,
+                    feeds: vec![(SOURCE, pcm(7), 0), (AUX, pcm(11), 0)],
+                    ahead: AHEAD,
+                    blocks: Vec::new(),
+                    epochs: Vec::new(),
+                }
+            }
+
+            /// Feed whole blocks until every source holds `ahead` blocks past the frame the next
+            /// block reads, then render it and run the service step.
+            fn render(&mut self, count: usize) {
+                for _ in 0..count {
+                    let read = self.children.session.test_source_read_clock();
+                    let until = read + (self.ahead + 1) * QUANTUM;
+                    for (id, planes, next) in &mut self.feeds {
+                        while *next < until {
+                            let range = *next as usize..(*next + QUANTUM) as usize;
+                            self.children
+                                .session
+                                .submit(
+                                    id.as_bytes(),
+                                    SourceSubmission {
+                                        generation: 1,
+                                        start_frame: *next,
+                                        sample_rate_hz: 48_000,
+                                        planes: &[&planes[0][range.clone()], &planes[1][range]],
+                                        frames: QUANTUM as u32,
+                                        end_of_region: false,
+                                    },
+                                )
+                                .unwrap_or_else(|error| panic!("{id} at {next}: {error:?}"));
+                            *next += QUANTUM;
+                        }
+                    }
+                    let mut samples = [f32::NAN; 2 * QUANTUM as usize];
+                    let output = PlanarBufferMut::try_new(
+                        &mut samples,
+                        2,
+                        QUANTUM as usize,
+                        QUANTUM as usize,
+                    )
+                    .expect("output");
+                    self.children.plan.render(self.at, output).expect("render");
+                    self.at += QUANTUM;
+                    self.blocks
+                        .push(samples.iter().map(|sample| sample.to_bits()).collect());
+                    self.epochs.push(
+                        self.children
+                            .plan
+                            .test_active_epoch()
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    );
+                    self.children.session.service().expect("service");
+                }
+            }
+
+            /// A render call at the wrong sample: render adopts a due, ready candidate at the
+            /// block boundary, then refuses the call, so the adopted plan renders nothing.
+            fn refused_call(&mut self) {
+                let mut samples = [f32::NAN; 2 * QUANTUM as usize];
+                let output =
+                    PlanarBufferMut::try_new(&mut samples, 2, QUANTUM as usize, QUANTUM as usize)
+                        .expect("output");
+                let refused = self.children.plan.render(self.at + 1, output);
+                assert!(
+                    matches!(refused, Err(RenderError::TimeDiscontinuity { .. })),
+                    "the call is refused: {refused:?}"
+                );
+            }
+
+            /// Commit `edits` as one transaction: its edit path, or the refusal.
+            fn transact(&mut self, edits: &[SessionEdit]) -> Result<EditPath, CommandError> {
+                self.request += 1;
+                let codec = ProtocolCodec::default();
+                let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+                let length = codec
+                    .encode_command_frame_into(
+                        &TypedCommandFrame {
+                            request_id: RequestId::new(self.request).expect("request"),
+                            expected_revision: ExpectedRevision::Exact(
+                                self.children.session.test_controller().session().revision(),
+                            ),
+                            payload: CommandPayload::SessionTransactionApply(edits),
+                        },
+                        &mut bytes,
+                    )
+                    .expect("a transaction frame");
+                let length = self.children.session.command(&bytes[..length], 65_536)?;
+                let mut fields = [0_u16; 64];
+                let path = match codec
+                    .decode_typed_response(
+                        self.children.session.command_response(length),
+                        &mut DecodeScratch::new(&mut fields),
+                    )
+                    .expect("a transaction response")
+                {
+                    DecodedTypedResponseFrame::Success {
+                        payload: DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+                        ..
+                    } => applied.edit_path,
+                    _ => panic!("not applied"),
+                };
+                while self
+                    .children
+                    .session
+                    .dequeue_event(EventLane::Reliable, 65_536)
+                    .expect("an event")
+                    .is_some()
+                {}
+                Ok(path)
+            }
+
+            /// [`Self::transact`], which must commit as a rebuild; the adoption it published.
+            fn rebuild(&mut self, edits: &[SessionEdit]) -> PlanAdoption {
+                assert!(matches!(self.transact(edits), Ok(EditPath::Rebuild)));
+                self.children
+                    .session
+                    .test_take_published_adoption()
+                    .expect("a publication")
+            }
+
+            fn primed(&self) -> Option<PrimedCandidate> {
+                self.children.session.test_primed()
+            }
+
+            /// The blocks render adopted a new plan at.
+            fn swaps(&self) -> Vec<usize> {
+                let boot = self.boot;
+                (0..self.epochs.len())
+                    .filter(|&index| {
+                        self.epochs[index] != index.checked_sub(1).map_or(boot, |i| self.epochs[i])
+                    })
+                    .collect()
+            }
+
+            fn underruns(&self) -> u64 {
+                self.children.plan.queries().source_underrun_blocks()
+            }
+        }
+
+        /// The first block whose bits differ between two runs, if any.
+        fn first_divergence(left: &Rig, right: &Rig) -> Option<usize> {
+            assert_eq!(left.blocks.len(), right.blocks.len());
+            left.blocks
+                .iter()
+                .zip(&right.blocks)
+                .position(|(left, right)| left != right)
+        }
+
+        /// Gate 1, classification and publication. With the bounds, the growth is published
+        /// `Primed { not_before: render_clock(), lead_blocks: 4 }` and recorded as such; it waits
+        /// while the carried rings hold less than its prime (every ring A renders is flagged), is
+        /// adopted once fed, and renders A continued. Without the bounds the same growth is
+        /// published `Next` with no record; with them, an edit that grows nothing is too.
+        ///
+        /// Test value: a classifier that publishes the warm candidate `Next` (or with no flags
+        /// written) adopts it before render is ready -- its prime underruns or it repeats `P`
+        /// frames; a session with no bounds that classifies changes today's path.
+        #[test]
+        fn a_growth_is_published_primed_and_recorded() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let adoption = rig.rebuild(&growth());
+            let not_before = rig.children.session.test_render_clock();
+            assert_eq!(not_before, BEFORE as u64 * QUANTUM);
+            assert_eq!(
+                adoption,
+                PlanAdoption::Primed {
+                    not_before,
+                    lead_blocks: 4
+                }
+            );
+            assert_eq!(
+                rig.primed(),
+                Some(PrimedCandidate {
+                    epoch: rig.children.session.newest_plan_epoch(),
+                    not_before,
+                    lead_blocks: 4,
+                })
+            );
+            rig.render(3);
+            assert!(rig.swaps().is_empty(), "held while the prime is not fed");
+            rig.ahead = AHEAD;
+            rig.render(6);
+            assert_eq!(rig.swaps(), [BEFORE + 3], "adopted once fed");
+            assert_eq!(rig.primed(), None, "the adoption drops the record");
+            let mut continued = Rig::new(None);
+            continued.render(rig.blocks.len());
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
+
+            let mut plain = Rig::new(None);
+            plain.render(BEFORE);
+            assert_eq!(plain.rebuild(&growth()), PlanAdoption::Next, "no bounds");
+            assert_eq!(plain.primed(), None);
+            let mut flat = Rig::new(Some(CONFIG));
+            flat.render(BEFORE);
+            assert_eq!(
+                flat.rebuild(&muted_track("t4", 0)),
+                PlanAdoption::Next,
+                "no growth"
+            );
+            assert_eq!(flat.primed(), None);
+
+            // The growth with the removal of a source no track reads ducks no strip (#1403 D2,
+            // attempt 2): it stays `Primed`, and the removed source's frames go to A until W is
+            // adopted.
+            let mut rig = Rig::with_unused(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.push(SessionEdit::RemoveSource {
+                source_id: sid(UNUSED),
+            });
+            let adoption = rig.rebuild(&edits);
+            let not_before = rig.children.session.test_render_clock();
+            assert_eq!(
+                adoption,
+                PlanAdoption::Primed {
+                    not_before,
+                    lead_blocks: 4
+                },
+                "a removed unused source"
+            );
+            assert_eq!(
+                rig.primed(),
+                Some(PrimedCandidate {
+                    epoch: rig.children.session.newest_plan_epoch(),
+                    not_before,
+                    lead_blocks: 4,
+                })
+            );
+            rig.render(3);
+            assert!(rig.swaps().is_empty(), "held while the prime is not fed");
+            rig.ahead = AHEAD;
+            rig.render(1);
+            assert_eq!(rig.swaps(), [BEFORE + 3]);
+            rig.feeds.truncate(2);
+            rig.render(5);
+            let mut continued = Rig::with_unused(None);
+            continued.render(BEFORE + 4);
+            continued.feeds.truncate(2);
+            continued.render(5);
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
+        }
+
+        /// Gate 1, the admission: a warm candidate C is admitted against the reprepare peak. With
+        /// the effect-state cap at `R + 2C - 1` the growth is refused before commit with that
+        /// cap's diagnostic, and nothing is published; at `R + 2C` it is published `Primed`.
+        /// Test value: a warm candidate admitted at the single peak passes one byte below.
+        #[test]
+        fn a_warm_candidate_is_admitted_with_the_reprepare_peak() {
+            let mut probe = Rig::new(Some(CONFIG));
+            probe.render(BEFORE);
+            probe.rebuild(&growth());
+            let held = probe.children.session.held_epochs().expect("held");
+            let [running, candidate] = held.as_slice() else {
+                panic!("the running plan and the candidate")
+            };
+            let (r, c) = (
+                running.report.effect_scalar_state_bytes,
+                candidate.report.effect_scalar_state_bytes,
+            );
+            assert!(c > 0, "the limiter holds state");
+            for (cap, expected) in [(r + 2 * c - 1, false), (r + 2 * c, true)] {
+                let mut rig = Rig::with_limits(
+                    Some(CONFIG),
+                    ControlLimits {
+                        maximum_effect_state_bytes: cap,
+                        ..limits()
+                    },
+                );
+                rig.render(BEFORE);
+                let epoch = rig.children.session.newest_plan_epoch();
+                match rig.transact(&growth()) {
+                    Ok(path) => {
+                        assert!(expected, "admitted at {cap}");
+                        assert_eq!(path, EditPath::Rebuild);
+                        assert!(matches!(
+                            rig.children.session.test_take_published_adoption(),
+                            Some(PlanAdoption::Primed { .. })
+                        ));
+                    }
+                    Err(CommandError::CompileRejected(failure)) => {
+                        assert!(!expected, "refused at {cap}");
+                        assert_eq!(&*failure.diagnostic(), b"effect.resource.limit\t$\n");
+                        assert_eq!(rig.children.session.newest_plan_epoch(), epoch);
+                        assert_eq!(rig.primed(), None);
+                    }
+                    Err(other) => panic!("{other:?}"),
+                }
+            }
+        }
+
+        /// Gate 2, routing on the duck set: the growth with track 2's removal ducks track 2, so
+        /// it takes today's two-phase removal, published `NoEarlierThan(S)` with no record, and
+        /// no block before `S` differs from A continued with track 2 live-muted at the same
+        /// block. Test value: a classifier that routes on `restarted_strips()` alone publishes
+        /// it `Primed` at the render clock, and track 2 stops dead at the adoption block.
+        #[test]
+        fn a_growth_that_removes_a_strip_takes_the_two_phase_removal() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.extend(remove_track("eq1"));
+            let adoption = rig.rebuild(&edits);
+            let PlanAdoption::NoEarlierThan(s) = adoption else {
+                panic!("published {adoption:?}")
+            };
+            assert_eq!(rig.primed(), None);
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            assert!(s_block > BEFORE);
+            rig.render(s_block - BEFORE);
+            let mut continued = Rig::new(None);
+            continued.render(BEFORE);
+            assert!(matches!(
+                continued.transact(&[builtin("eq1", 6, 1.0)]),
+                Ok(EditPath::Live)
+            ));
+            continued.render(s_block - BEFORE);
+            assert_eq!(first_divergence(&rig, &continued), None);
+
+            // The growth while phase 1 of a removal is pending inherits the overlay's `S`: today's
+            // path, with no record (#1403 D2's empty inherited overlay).
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let PlanAdoption::NoEarlierThan(s) = rig.rebuild(&remove_track("eq1")) else {
+                panic!("a two-phase removal")
+            };
+            rig.render(1);
+            let adoption = rig.rebuild(&growth());
+            assert!(
+                matches!(adoption, PlanAdoption::NoEarlierThan(later) if later >= s),
+                "published {adoption:?}"
+            );
+            assert_eq!(rig.primed(), None);
+        }
+
+        /// Gate 3, edits while W is pending, frames withheld. A live fader edit on track 2 goes
+        /// to W's cells and applies at `S`, as the same value written to A's cell just before
+        /// block `S`. A structural edit that removes track 2's source supersedes W: the source's
+        /// producer is back in the running epoch, its submits are accepted and A plays them with
+        /// no underrun, and the adoption reports `EXACT | SUPERSEDED`. A declared stop supersedes
+        /// W, which folded in nothing: its revision completes `EXACT` alone.
+        ///
+        /// Test value: a supersession that drops W's producers with W leaves the removed source
+        /// with no producer, so its submits are refused and A underruns; a stop reported
+        /// `SUPERSEDED` for a candidate that folded in nothing miscounts it.
+        #[test]
+        fn edits_while_the_warm_candidate_waits() {
+            // A live edit.
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            rig.rebuild(&growth());
+            rig.render(1);
+            assert!(matches!(
+                rig.transact(&[builtin("eq1", 5, -6.0)]),
+                Ok(EditPath::Live)
+            ));
+            rig.render(2);
+            rig.ahead = AHEAD;
+            rig.render(8);
+            let s = BEFORE + 3;
+            assert_eq!(rig.swaps(), [s]);
+            let mut continued = Rig::new(None);
+            continued.render(s);
+            assert!(matches!(
+                continued.transact(&[builtin("eq1", 5, -6.0)]),
+                Ok(EditPath::Live)
+            ));
+            continued.render(8);
+            assert_eq!(first_divergence(&rig, &continued), None, "applied at S");
+
+            // A structural edit that removes the carried source `aux-source`.
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            rig.rebuild(&growth());
+            rig.render(1);
+            let mut edits: Vec<SessionEdit> = remove_track("eq1").into();
+            edits.push(SessionEdit::RemoveSource {
+                source_id: sid(AUX),
+            });
+            let PlanAdoption::NoEarlierThan(s) = rig.rebuild(&edits) else {
+                panic!("a two-phase removal")
+            };
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.render(s_block - rig.blocks.len());
+            assert!(rig.swaps().is_empty(), "A renders until S");
+            assert_eq!(rig.underruns(), 0, "A plays the removed source's frames");
+            rig.feeds.truncate(1);
+            rig.render(1);
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.outcome_flags, watermark.superseded),
+                (OUTCOME_EXACT | OUTCOME_SUPERSEDED, 1)
+            );
+            assert_eq!(rig.underruns(), 0);
+
+            // A declared stop.
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            rig.rebuild(&growth());
+            rig.render(1);
+            let revision = rig
+                .children
+                .session
+                .test_controller()
+                .session()
+                .revision()
+                .0;
+            rig.children
+                .session
+                .declare_discontinuity()
+                .expect("declaration");
+            rig.render(1);
+            assert_eq!(rig.swaps(), [BEFORE + 1]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (
+                    watermark.revision,
+                    watermark.outcome_flags,
+                    watermark.superseded
+                ),
+                (revision, OUTCOME_EXACT, 0)
+            );
+        }
+
+        /// Gate 4, the record's lifecycle: each step that ends W's pendency drops W's record,
+        /// and a warm successor's publication records its own epoch; a refused supersession
+        /// republishes W and keeps W's record unchanged, and W is then adopted.
+        ///
+        /// Test value: a record kept after W's adoption or supersession names W's epoch (#1358's
+        /// deadline step would then act on B); a record dropped on a refused supersession leaves
+        /// W pending with no record; a `not_before` read from the source-read clock is `P` late
+        /// once a warm plan runs.
+        #[test]
+        fn the_record_names_the_one_pending_warm_candidate() {
+            /// W published and pending, frames withheld; its record.
+            fn pending() -> (Rig, PrimedCandidate) {
+                let mut rig = Rig::new(Some(CONFIG));
+                rig.ahead = 1;
+                rig.render(BEFORE);
+                rig.rebuild(&growth());
+                rig.render(1);
+                let record = rig.primed().expect("W's record");
+                (rig, record)
+            }
+            let warm_b: Vec<SessionEdit> = muted_track("t4", 2).into();
+            let plain_b: Vec<SessionEdit> = muted_track("t4", 0).into();
+
+            // Adopted, then a `Next` B or a warm B.
+            for (b, primed) in [(&plain_b, false), (&warm_b, true)] {
+                let (mut rig, _) = pending();
+                rig.ahead = AHEAD;
+                rig.render(1);
+                assert_eq!(rig.swaps(), [BEFORE + 1]);
+                assert_eq!(rig.primed(), None, "adopted");
+                let adoption = rig.rebuild(b);
+                assert_eq!(matches!(adoption, PlanAdoption::Primed { .. }), primed);
+                // W runs `P` ahead on the source-read clock: B's `not_before` is the render
+                // clock's.
+                let render_clock = rig.children.session.test_render_clock();
+                assert_eq!(
+                    rig.children.session.test_source_read_clock(),
+                    render_clock + LEAD
+                );
+                assert_eq!(
+                    rig.primed().map(|record| (record.epoch, record.not_before)),
+                    primed.then(|| (rig.children.session.newest_plan_epoch(), render_clock)),
+                    "after an adopted W, B warm: {primed}"
+                );
+            }
+
+            // Superseded by a `Next` B (W's growth reverted) or a warm B.
+            let mut reverted: Vec<SessionEdit> = remove_track("t3").into();
+            reverted.extend(plain_b.iter().cloned());
+            for (b, primed) in [(&reverted, false), (&plain_b, true)] {
+                let (mut rig, record) = pending();
+                let adoption = rig.rebuild(b);
+                assert_eq!(matches!(adoption, PlanAdoption::Primed { .. }), primed);
+                let newest = rig.children.session.newest_plan_epoch();
+                assert_ne!(newest, record.epoch);
+                assert_eq!(
+                    rig.primed().map(|record| record.epoch),
+                    primed.then_some(newest),
+                    "W superseded, B warm: {primed}"
+                );
+            }
+            // The warm B's admission at the effect-state cap `max(R + W + B, R + 2B)`: its
+            // reprepare row is the running plan alone, never the withdrawn W.
+            let state = |rig: &Rig| -> Vec<u64> {
+                let held = rig.children.session.held_epochs().expect("held");
+                held.as_slice()
+                    .iter()
+                    .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                    .collect()
+            };
+            let (mut probe, _) = pending();
+            let [r, w] = state(&probe)[..] else {
+                panic!("R and W")
+            };
+            probe.rebuild(&plain_b);
+            let [_, b] = state(&probe)[..] else {
+                panic!("R and B")
+            };
+            let (mut rig, _) = pending();
+            rig.children.session.limits.maximum_effect_state_bytes = (r + w + b).max(r + 2 * b);
+            assert!(
+                matches!(rig.rebuild(&plain_b), PlanAdoption::Primed { .. }),
+                "B fits beside R and W, and twice beside R"
+            );
+
+            // A declared stop.
+            let (mut rig, _) = pending();
+            rig.children
+                .session
+                .declare_discontinuity()
+                .expect("declaration");
+            assert_eq!(rig.primed(), None, "a stop");
+
+            // A refused supersession: B's admission does not fit the effect-state cap.
+            let (mut rig, record) = pending();
+            let held = rig.children.session.held_epochs().expect("held");
+            rig.children.session.limits.maximum_effect_state_bytes = held
+                .as_slice()
+                .iter()
+                .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                .sum();
+            let epoch = rig.children.session.newest_plan_epoch();
+            assert!(rig.transact(&warm_b).is_err(), "B is refused");
+            assert_eq!(rig.children.session.newest_plan_epoch(), epoch);
+            assert_eq!(rig.primed(), Some(record), "W keeps its record");
+            rig.ahead = AHEAD;
+            rig.render(1);
+            assert_eq!(rig.swaps(), [BEFORE + 1], "W is still pending");
+            assert_eq!(rig.primed(), None);
+        }
+
+        /// #1355 MAJOR-1 at the control plane: render adopts the `Primed` W in a call it then
+        /// refuses, so W never renders; the next structural edit's successor C, prepared from
+        /// W's inventory and published `Next`, displaces W at its first block, and the output
+        /// equals A continued. Test value: a carry that takes W's lines and rings without its
+        /// pending prime shifts every carried track by `P` from C's adoption.
+        #[test]
+        fn a_primed_candidate_displaced_by_a_refused_call_continues() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            assert!(matches!(
+                rig.rebuild(&growth()),
+                PlanAdoption::Primed { .. }
+            ));
+            rig.refused_call();
+            assert_eq!(
+                rig.rebuild(&muted_track("t4", 0)),
+                PlanAdoption::Next,
+                "C grows nothing over W"
+            );
+            assert_eq!(rig.primed(), None, "W was adopted");
+            rig.render(10);
+            assert_eq!(rig.swaps(), [BEFORE]);
+            let mut continued = Rig::new(None);
+            continued.render(rig.blocks.len());
+            assert_eq!(first_divergence(&rig, &continued), None);
         }
     }
 }

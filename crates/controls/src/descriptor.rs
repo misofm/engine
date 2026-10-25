@@ -6,16 +6,8 @@ use effect_contract::{
 };
 
 use crate::error::ControlError;
-use crate::{ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper};
+use crate::{ControlClass, ControlKind, Family, LiveRampRow, Taper};
 use session::Lane;
-
-/// The class of a value that a ruling makes live and whose issue has not landed.
-pub(crate) const fn ruled_live_not_built(issue: u32, reopen: &'static str) -> ControlClass {
-    ControlClass::RebuildOnly {
-        reason: RebuildReason::RuledLiveNotBuilt { issue },
-        reopen,
-    }
-}
 
 /// Whether a row holds one value per dual-mono lane or one value for its owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

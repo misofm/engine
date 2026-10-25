@@ -4,6 +4,7 @@ export * from "./live-controls.ts";
 export { EngineLiveControls } from "../core/live-controls.ts";
 export { TransactionBuilder, transaction } from "../core/session-transaction.ts";
 export type { SessionEditSpec, SessionTransaction } from "../core/session-transaction.ts";
+export type { EditOutcome, EditPath, WatermarkSnapshot } from "../core/session-edit.ts";
 export type { ControlEditSet, LiveControlTransport, SetControlOptions } from "../core/live-controls.ts";
 export { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 export type {
@@ -111,7 +112,24 @@ export * from "./policy.ts";
 // it is barrel surface rather than a deep import.
 export * from "./host-mirror.ts";
 export * from "./pcm-ring.ts";
-export * from "./pcm-feed.ts";
+// By name: `linkFeedEngine` and `FeedRetirement` are `createEngine`'s seam (#1297b), not public.
+export { PcmFeedError, PcmRunwayError, attachEngineFeed, prepareEngineFeed, waitForPcmRunway } from "./pcm-feed.ts";
+export type {
+  EngineFeed,
+  FeedContext,
+  FeedEngine,
+  FeedNode,
+  FeedNodeOptions,
+  FeedOptions,
+  FeedPort,
+  FeedSource,
+  FeedStart,
+  FeedStartSeek,
+  PcmFeedOperation,
+  PcmRunwayReason,
+  PcmRunwaySource,
+  WaitForPcmRunwayOptions,
+} from "./pcm-feed.ts";
 export { BrowserResponsePreview, createResponsePreview } from "./response.ts";
 export type { BrowserResponsePreviewOptions } from "./response.ts";
 export * from "../core/observation.ts";

@@ -296,7 +296,7 @@ describe("the most important eval -- what the builder writes, the engine boots",
       oneTrack({ id: "rate.96k", sampleRateHz: 96_000, quantumFrames: 127, frames: 9_600 }),
       { sampleRateHz: 96_000, quantumFrames: 127, tracks: ["t"] },
     );
-    assert.equal(shape.sourceRingFrames, 9_906);
+    assert.equal(shape.sourceRingFrames, 14_097);
     assert.equal(shape.sourceRingFrames % shape.quantumFrames, 0);
   });
 

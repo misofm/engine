@@ -10,6 +10,11 @@
 //! thread, before the commit; the records it returns are written after the commit and cannot
 //! fail.
 //!
+//! A structural transaction whose successor restarts a strip it keeps (an insert added, removed
+//! or reordered, a quality, `delay_samples` or another prepared value; the successor's
+//! `restarted_strips()`) ducks that strip the same way and adopts the successor at `S`; the
+//! successor arms the strip's fade-in (issue #1324, a duck-swap).
+//!
 //! The running plan keeps a [`DuckOverlay`] while the successor waits: the strips and routes
 //! phase 1 wrote, the removed sources that still feed that plan, and `S`. A later transaction in
 //! the same phase 1 writes no second ramp for anything in it and inherits its `S`.
@@ -216,14 +221,19 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 ///
 /// `base.committed` is the running plan's committed model and `base.monitor.committed` the monitor
 /// overlay its cells hold; `overlay` is the running plan's [`DuckOverlay`], empty outside phase 1.
-/// The strips to duck are every strip of `base.committed` that `next` does not hold and `overlay`
-/// does not list; the sources `overlay` lists that `next` keeps are restored
+/// The strips to duck are every strip of `base.committed` that `next` does not hold or that the
+/// prepared successor restarts (`restarted`, its [`crate::PreparedHost::restarted_strips`]: a
+/// duck-swap, #1324 D4; none at a declared discontinuity, `base.discontinuity`), and that
+/// `overlay` does not list; the sources `overlay` lists that `next` keeps are restored
 /// ([`StripTransition::restored_sources`]). The records are the classifier's for the running plan's
 /// base with `overlay` laid over it, against the same with each strip to duck muted on both
 /// channels and each of its routes whose tap precedes the fader muted, all at `next`'s mute ramp:
 /// exactly the records a value-only transaction making those mutes would write, so a strip or route
 /// already in the overlay gets no second write. `C` reads the running plan's compensation lines
-/// (`base.inventory`), keyed by the route's two edges, which add.
+/// (`base.inventory`), keyed by the route's two edges, which add, over every route out of a
+/// ducked strip: a restarted strip's route lines must empty before `S` as a removed strip's do.
+/// A sidechain line from a ducked strip's tap is not counted, and a carried effect keyed from a
+/// restarted strip's tap before the fader still steps at `S`: both are #1324b's.
 ///
 /// Control thread only: it clones the base model twice and allocates the lists.
 ///
@@ -234,16 +244,24 @@ pub fn plan_strip_transition(
     base: &SuccessorBase<'_>,
     overlay: &DuckOverlay,
     next: &SessionModel,
+    restarted: &[Box<str>],
 ) -> Result<StripTransition, StripTransitionError> {
     let committed = base.committed;
     let ramps = LiveRamps::for_session(next);
     let ramp = ramps.mute_samples;
     let in_next = |id: &str| next.strips().any(|strip| strip.id.as_str() == id);
+    // #1324 D4: a strip the successor restarts is ducked like a removed one. `restarted` names
+    // strips of both plans only. A successor at a declared discontinuity restarts every owner by
+    // design and need not continue the running plan's output (#1323 D2): its restarts duck
+    // nothing.
+    let restarts = |id: &str| {
+        !base.discontinuity && restarted.binary_search_by(|held| (**held).cmp(id)).is_ok()
+    };
     let strips = sorted_ids(
         committed
             .strips()
             .map(|strip| strip.id.as_str())
-            .filter(|id| !in_next(id) && !overlay.has_strip(id)),
+            .filter(|id| (!in_next(id) || restarts(id)) && !overlay.has_strip(id)),
     );
     let sources = sorted_ids(
         committed
@@ -503,6 +521,7 @@ mod tests {
                 &SuccessorBase::new(&prepared.inventory, committed, 2),
                 &overlay,
                 &next,
+                &[],
             )
             .expect("c's transition")
         };
@@ -518,6 +537,7 @@ mod tests {
             &SuccessorBase::new(&prepared.inventory, committed, 3),
             &overlay,
             &next,
+            &[],
         )
         .expect("b's transition");
 
@@ -635,6 +655,7 @@ mod tests {
             &SuccessorBase::new(&p1.inventory, committed, 3),
             &DuckOverlay::new(),
             &next,
+            &[],
         )
         .expect("b's transition");
         assert_eq!(

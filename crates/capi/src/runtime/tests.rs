@@ -880,7 +880,7 @@ fn a_carried_strip_meter_keeps_its_reader_across_a_c_abi_rebuild() {
 fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
     let model = parse_session_json(SESSION).expect("session");
     let derived = host_core::default_source_ring_frames(model.sample_rate_hz, model.quantum_frames);
-    assert_eq!(derived, 5_120);
+    assert_eq!(derived, 7_296);
 
     let mut zero = limits();
     zero.source_ring_frames = 0;
@@ -1740,6 +1740,36 @@ pub(super) fn feed_and_render_until_direct(
     // The service step promotes the adopted successor's epoch, as the next control call would.
     children.session.service().expect("service");
     (blocks, block)
+}
+
+/// Renders through the plan owner alone, the first half of `PlanState::render`, block by block
+/// from `sample` until a block applies a swap: a rebuild that restarts a strip is a duck-swap,
+/// adopted at its `S` (#1324a), so the swap window may open blocks after the commit. The swap
+/// block's report and its first sample. The blocks before it swap nothing, so the epoch the second
+/// half would publish for them is the one already published.
+pub(super) fn render_owner_until_swap(
+    children: &mut CompiledChildren,
+    pcm: &mut [f32; 256],
+    sample: u64,
+) -> (engine::realtime::RealtimeRenderReport, u64) {
+    let mut at = sample;
+    loop {
+        assert!(at < sample + 64 * 128, "a swap within 64 blocks");
+        let report = children
+            .plan
+            .test_owner_mut()
+            .render_contiguous(
+                RenderIo {
+                    output: PlanarBufferMut::try_new(pcm, 2, 128, 128).expect("output"),
+                },
+                at,
+            )
+            .expect("a block");
+        if report.swap == engine::realtime::SwapOutcome::Applied {
+            return (report, at);
+        }
+        at += 128;
+    }
 }
 
 fn assert_bit_identical(label: &str, first: u64, actual: &[Vec<f32>], expected: &[Vec<f32>]) {
@@ -3124,8 +3154,8 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
 /// (#1310 gate 4). The edit fits beside the eight-EQ plan alone, which is all a retry meets once
 /// render adopts it, so the refusal is retryable `Backpressure`, not a permanent compile rejection
 /// (batch 15a review fold, item 2). Inside the window the nine-EQ plan is reclaimed, so the edit
-/// sits beside the eight-EQ plan alone and is admitted; its plan is adopted at the next block,
-/// and the report table holds three rows meanwhile. Red if the lag refusal is kept (the window
+/// sits beside the eight-EQ plan alone and is admitted; its plan is adopted at its duck-swap's
+/// `S` (#1324a), and the report table holds three rows meanwhile. Red if the lag refusal is kept (the window
 /// answers `Backpressure`), if the admission pairs the candidate with the atomic's retired row
 /// (`effect.resource.limit`), or if the three-plan refusal is permanent.
 #[test]
@@ -3198,17 +3228,8 @@ fn a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan() {
     // eight-EQ plan is republished and adopted below.
     let pending = children.session.command(&request, 4_096);
 
-    // First half of `PlanState::render`: swap to the eight-EQ plan.
-    let report = children
-        .plan
-        .test_owner_mut()
-        .render_contiguous(
-            RenderIo {
-                output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
-            },
-            128,
-        )
-        .expect("swapping block");
+    // First half of `PlanState::render`: swap to the eight-EQ plan, at its duck-swap's `S`.
+    let (report, swapped_at) = render_owner_until_swap(&mut children, &mut pcm, 128);
     assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
     let window = children.session.command(&request, 4_096);
     let window_revision = children.session.test_controller().session().revision().0;
@@ -3245,14 +3266,8 @@ fn a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan() {
         ),
         "the eight-EQ plan rendering beside nine EQs fits; only a retired row says it does not"
     );
-    // The window's plan is adopted at the next block.
-    children
-        .plan
-        .render(
-            256,
-            PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
-        )
-        .expect("adopting block");
+    // The window's plan, a duck-swap too, is adopted at its own `S`.
+    feed_and_render_until_direct(&mut children, &[], swapped_at / 128 + 1, 44);
     assert_eq!(children.plan.owner().active_epoch().0, 2);
 }
 
@@ -5481,16 +5496,6 @@ fn a_refused_meter_table_is_typed_and_changes_nothing() {
                 "meter_period_blocks".to_owned(),
             )],
         ),
-        (
-            vec![
-                output_peak_entry(),
-                strip("eq0", protocol::MeterMetric::GainReduction),
-            ],
-            window,
-            StatusCode::Unavailable,
-            "meter.gain_reduction.unavailable",
-            path(1),
-        ),
     ];
     for (request, (meters, period, status, code, at)) in (2..).zip(refusals) {
         assert_eq!(
@@ -5844,6 +5849,296 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
             .collect::<Vec<_>>()
     );
     assert_eq!(meter_windows_lost_c(c_session, 100), 0);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Two tracks on one source, a compressor insert (`comp`) on the second only (#1587b).
+fn compressor_pair_session() -> session::SessionModel {
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
+    model.tracks[1].source_id = model.tracks[0].source_id.clone();
+    let protocol::SessionEdit::PutTrackEffect { effect, .. } = put_compressor(&model, 1) else {
+        panic!("an insert edit")
+    };
+    model.tracks[1].inserts.effects.insert(0, effect);
+    model
+}
+
+/// `UpsertTrack` of a muted copy of `model.tracks[index]` named `id`, effects included, and
+/// `UpsertRoute` of its route into the output.
+fn add_muted_copy(
+    model: &session::SessionModel,
+    index: usize,
+    id: &str,
+) -> [protocol::SessionEdit; 2] {
+    let [protocol::SessionEdit::UpsertTrack { mut track }, route] = add_muted_track(model, id)
+    else {
+        panic!("a track and its route")
+    };
+    let copy = model.tracks[index].clone();
+    track.inserts = copy.inserts;
+    track.source_id = copy.source_id;
+    [protocol::SessionEdit::UpsertTrack { track }, route]
+}
+
+/// The `Observe` edit of `track`'s compressor tap (#1587b).
+fn observe_compressor(
+    track: &session::StableId,
+    armed: bool,
+    window_blocks: u32,
+) -> protocol::SessionEdit {
+    protocol::SessionEdit::Observe {
+        strip_id: track.clone(),
+        section: protocol::control_core::TapSection::Inserts(
+            session::StableId::parse("comp").expect("compressor"),
+        ),
+        tap_id: 1,
+        armed,
+        window_blocks,
+    }
+}
+
+/// #1587b attempt 4: a candidate promoted before render's swap block has run (as
+/// `withdraw_pending_candidate` promotes one render has claimed) finds the carry record not yet
+/// written, marks its observation pairing pending, and settles it at the next service step once
+/// render has carried, with reclamation held so the reclaim fallback cannot do it. The rebuild adds
+/// a muted copy of the compressor's track that sorts first, so the carried handle moves from
+/// position 0 to 1. The running epoch's reader then holds the carried tap's windows, its sequence
+/// continuing from before the swap.
+///
+/// Test value: red if a promotion that reads an unwritten record pairs nothing for good (attempt
+/// 3), or if the settle pairs the wrong positions.
+#[test]
+fn a_promotion_before_the_carry_pairs_the_carried_tap_once_render_carries() {
+    let model = compressor_pair_session();
+    let track = model.tracks[1].id.clone();
+    let document = session::canonical_session_json(&model).expect("compressor session");
+    let mut children = compile_children(&document, limits()).expect("children");
+    let window = fixture_window_blocks();
+    let source = model.sources[0].id.as_str().as_bytes().to_vec();
+    command_direct(
+        &mut children,
+        &transaction_at(
+            1,
+            42,
+            &[observe_compressor(
+                &track,
+                true,
+                u32::try_from(window).expect("window"),
+            )],
+        ),
+    );
+    submit_direct(&mut children, &[&source], 0);
+    feed_and_render_direct(&mut children, &[&source], 0, 2 * window);
+    children.session.service().expect("service");
+    let held = |children: &CompiledChildren| {
+        let snapshot = children.session.test_transaction_snapshot();
+        snapshot
+            .observation_windows
+            .iter()
+            .find(|(epoch, strip, _, _)| {
+                *epoch == snapshot.provider_epoch && **strip == *track.as_str()
+            })
+            .expect("the compressor's readers")
+            .3[0]
+            .map(|(sequence, first, ..)| (sequence, first))
+    };
+    let before = held(&children).expect("a window before the rebuild");
+    command_direct(
+        &mut children,
+        &transaction_at(2, 42, &add_muted_copy(&model, 1, "a-muted")),
+    );
+    control_plane::test_hold_reclamation(true);
+    children
+        .session
+        .test_promote_pending_before_carry()
+        .expect("promoted before the carry");
+    feed_and_render_direct(&mut children, &[&source], 2 * window, 2 * window);
+    children.session.service().expect("service");
+    let after = held(&children);
+    control_plane::test_hold_reclamation(false);
+    children.session.service().expect("service");
+    assert_eq!(
+        after,
+        Some((before.0 + 2, 3 * window * 128)),
+        "the carried tap's windows, in the running epoch's reader"
+    );
+}
+
+/// #1587b gate 2: two tracks on one source, a compressor insert on the second only, driven past
+/// its threshold; `{first, gain reduction}` (handle 1) and `{second, gain reduction}` (handle 2)
+/// beside the output's peak, one batch per window. The first track has no tap, so its record is
+/// `{1, Aggregate, 0, 0.0}` throughout. For the second: unarmed, `{2, Aggregate, 0, 0.0}`.
+/// Armed at a window's first block, the batch of that window is `VALID` and reads the tap's
+/// window, which opened at the arm: `strip_reduction_db` of the window the session's reader
+/// holds. Disarmed, it is `{2, Aggregate, 0, 0.0}` again, though the reader still holds that
+/// window. Re-armed in the middle of a window, the batch at that window's end is still flags `0`:
+/// the reader's newest window opened before the re-arm. The next batch reads the re-armed tap's
+/// first window.
+///
+/// Test value: red if a window from before the tap's arm sample reaches a record (the fold
+/// ignores `arm_sample`), if a disarmed tap still reports (it ignores the slot's arm state), if a
+/// record carries another value than its tap's window's reduction, if a tap's reading lands on
+/// another strip's entry (a handle mapped to the wrong strip), or if gain reduction is still
+/// refused.
+#[test]
+fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
+    let model = compressor_pair_session();
+    let quiet = model.tracks[0].id.clone();
+    let track = model.tracks[1].id.clone();
+    let document = session::canonical_session_json(&model).expect("compressor session");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let window = fixture_window_blocks();
+    let gain_reduction = |id: &session::StableId| protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(id.as_str().into()),
+        metric: protocol::MeterMetric::GainReduction,
+    };
+    assert_eq!(
+        configure_meters_c(
+            c_session,
+            1,
+            vec![
+                gain_reduction(&quiet),
+                gain_reduction(&track),
+                output_peak_entry()
+            ],
+            window
+        ),
+        (StatusCode::Ok, None)
+    );
+    let mut request = 2;
+    let mut observe = |armed: bool| {
+        let edit = protocol::SessionEdit::Observe {
+            strip_id: track.clone(),
+            section: protocol::control_core::TapSection::Inserts(
+                session::StableId::parse("comp").expect("compressor"),
+            ),
+            tap_id: 1,
+            armed,
+            window_blocks: u32::try_from(window).expect("window"),
+        };
+        let (result, response) = command_c(c_session, &transaction_at(request, 42, &[edit]));
+        assert_eq!(
+            (result, response_status(&response)),
+            (crate::RESULT_OK, StatusCode::Ok),
+            "observe {armed}"
+        );
+        request += 1;
+    };
+    // A full-scale square wave, far above the compressor's default threshold.
+    let render_until = |end: u64, block: &mut u64| {
+        while *block < end {
+            let left: Vec<f32> = (0..128)
+                .map(|i| if i % 2 == 0 { 0.9 } else { -0.9 })
+                .collect();
+            submit_c(c_session, 1, *block * 128, 48_000, &left, &left, false);
+            render_c(c_plan, *block);
+            *block += 1;
+        }
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+        meter_batches_c(c_session)
+            .into_iter()
+            .map(|(_, _, _, records)| [records[0], records[1]])
+            .collect::<Vec<_>>()
+    };
+    let quiet_record = protocol::MeterRecord {
+        handle: 1,
+        component: protocol::MeterComponent::Aggregate,
+        flags: 0,
+        value: 0.0,
+    };
+    let absent = [
+        quiet_record,
+        protocol::MeterRecord {
+            handle: 2,
+            component: protocol::MeterComponent::Aggregate,
+            flags: 0,
+            value: 0.0,
+        },
+    ];
+    // The first sample and reduction of the newest window the session's reader holds.
+    let held = || {
+        let snapshot = crate::ffi::test_transaction_snapshot(c_session);
+        let (_, _, _, taps) = snapshot
+            .observation_windows
+            .iter()
+            .find(|(epoch, strip, _, _)| {
+                *epoch == snapshot.provider_epoch && **strip == *track.as_str()
+            })
+            .expect("the compressor's readers");
+        let (_, first, _, [left, right]) = taps[0].expect("a published window");
+        // The compressor's tap publishes its reduction in decibels, so its strip word is the
+        // deeper lane (`strip_reduction_db`; the readings stay inside its declared range).
+        (first, f32::from_bits(left).max(f32::from_bits(right)))
+    };
+    let valid = |value| {
+        [
+            quiet_record,
+            protocol::MeterRecord {
+                flags: 1,
+                value,
+                ..absent[1]
+            },
+        ]
+    };
+    let mut block = 0;
+    assert_eq!(render_until(window, &mut block), [absent], "unarmed");
+    observe(true);
+    assert_eq!(
+        render_until(2 * window, &mut block),
+        [valid(held().1)],
+        "armed"
+    );
+    let (first, reduction) = held();
+    assert_eq!(first, window * 128, "the window opened at the arm");
+    assert!(reduction > 1.0, "the compressor reduces: {reduction} dB");
+    observe(false);
+    assert_eq!(render_until(3 * window, &mut block), [absent], "disarmed");
+    assert_eq!(held().0, window * 128, "the reader keeps the window");
+    render_until(3 * window + window / 2, &mut block);
+    observe(true);
+    assert_eq!(
+        render_until(4 * window, &mut block),
+        [absent],
+        "re-armed, before the first window since the arm closes"
+    );
+    assert_eq!(
+        held().0,
+        window * 128,
+        "the reader holds the window from before the re-arm"
+    );
+    assert_eq!(
+        render_until(5 * window, &mut block),
+        [valid(held().1)],
+        "re-armed"
+    );
+    assert_eq!(
+        held().0,
+        (3 * window + window / 2) * 128,
+        "the re-armed tap's window"
+    );
+    // #1674's observation half: a rebuild that carries the compressor (a muted copy of its track,
+    // compressor included, whose ID sorts first, so every strip's position shifts and the
+    // carried reader moves from handle 0 to handle 1) keeps its armed tap's reading. The promoted
+    // epoch reads the carried slot, so each window after the swap is `VALID` again.
+    assert_eq!(
+        transact_c(c_session, 100, 42, &add_muted_copy(&model, 1, "a-muted")),
+        protocol::EditPath::Rebuild
+    );
+    for later in 5..11 {
+        assert_eq!(
+            render_until((later + 1) * window, &mut block),
+            [valid(held().1)],
+            "window {later}, after a carried rebuild"
+        );
+    }
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(c_plan),
+        (1, 0),
+        "the rebuild carried"
+    );
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
 }

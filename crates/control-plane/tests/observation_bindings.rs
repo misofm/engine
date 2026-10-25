@@ -7,6 +7,9 @@
 //! key, after the transaction's `SESSION_COMMITTED`, the room for it reserved before the commit.
 #![cfg(feature = "test-support")]
 
+#[path = "support/adoption.rs"]
+mod adoption;
+
 use control_plane::{
     CommandError, CompileFailure, CompiledChildren, ControlAdapter, ControlLimits, EventLane,
     ObservationChange, ObservationKeyError, ObservationKeyRef, ObservationLimit,
@@ -150,6 +153,41 @@ impl Rig {
 
     fn revision(&self) -> u64 {
         self.session.test_controller().session().revision().0
+    }
+
+    /// Renders until the plan applies the committed revision: a duck-swap is adopted at its `S`,
+    /// not at the next block (#1324a). The blocks rendered.
+    fn render_until_applied(&mut self) -> u64 {
+        let revision = self.revision();
+        adoption::render_until_applied(
+            self,
+            revision,
+            |rig| {
+                rig.plan
+                    .queries()
+                    .watermark()
+                    .expect("a watermark")
+                    .revision
+            },
+            Self::render,
+        )
+    }
+
+    /// [`Self::render_until_applied`] for a rebuild, which renders at least its adoption block;
+    /// the adoption block's first sample, the watermark's.
+    fn render_through_adoption(&mut self) -> u64 {
+        assert!(
+            self.render_until_applied() > 0,
+            "the rebuild waits for a block"
+        );
+        let first = self
+            .plan
+            .queries()
+            .watermark()
+            .expect("a watermark")
+            .first_sample;
+        assert_eq!(first, (self.block - 1) * 128, "the last block adopted it");
+        first
     }
 
     fn frame(&self, request: u64, edits: &[SessionEdit]) -> Vec<u8> {
@@ -890,7 +928,8 @@ impl Rig {
             self.apply(&[put_compressor(strip, id)])
                 .expect("the insert is added");
             self.render();
-            self.render();
+            // A duck-swap: the strip restarts, so its plan is adopted at `S` (#1324a).
+            self.render_until_applied();
             self.drain();
         }
     }
@@ -1313,6 +1352,9 @@ fn the_armed_count_follows_the_bindings_across_a_rebuild() {
         effect_id: StableId::parse("ins00").expect("insert"),
     }])
     .expect("the insert is removed");
+    // A duck-swap (#1324a): `comp1` restarts, so its kept taps re-arm on the successor, whose
+    // queues render drains from its adoption at `S`.
+    rig.render_until_applied();
     assert_eq!(rig.session.observation_armed(), 2);
     assert_eq!(rig.session.observation_bindings().len(), 2);
     let kept: Vec<(String, String)> = ["ins01", "ins02"]
@@ -1918,9 +1960,10 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         [new_tag, issued(&rig, "comp3", "comp")],
         "the reply's tags are the queued records'"
     );
-    // The swap block (block 5) adopts the successor, then three more: one window each.
-    let adopted_at = rig.block * 128;
-    rig.render_blocks(4);
+    // The swap block adopts the successor (a duck-swap: `comp2` restarts, so it is `S`, #1324a),
+    // then three more: one window each.
+    let adopted_at = rig.render_through_adoption();
+    rig.render_blocks(3);
     assert_eq!(
         rig.state_at("comp2", 1).arm_tag,
         new_tag,
@@ -1959,9 +2002,15 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         "the record on the successor arms the carried tap at the adoption block"
     );
     let carried = running("comp1").expect("the carried tap's window");
+    // The grid from block 0: the last whole window of the blocks rendered.
+    let windows = rig.block / u64::from(WINDOW_BLOCKS);
     assert_eq!(
         (carried.sequence, carried.first_sample, carried.blocks),
-        (3, 8 * 128, WINDOW_BLOCKS),
+        (
+            windows,
+            (windows - 1) * u64::from(WINDOW_BLOCKS) * 128,
+            WINDOW_BLOCKS
+        ),
         "the carried tap keeps its grid: no restart at the adoption block"
     );
     // The commit moved the counter past the tags its preparation issued: a later record's tag is
@@ -2045,8 +2094,9 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
             rig.session.observation_bindings().window_of(&key("comp3")),
             Some(window)
         );
-        let adopted_at = rig.block * 128;
-        rig.render_blocks(u64::from(window));
+        // A duck-swap (#1324a): both edits restart a strip, so the replacement waits for `S`.
+        let adopted_at = rig.render_through_adoption();
+        rig.render_blocks(u64::from(window) - 1);
         let reader = &rig
             .session
             .test_providers()

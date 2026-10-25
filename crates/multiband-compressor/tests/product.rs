@@ -45,8 +45,10 @@ fn active_values() -> [effect_contract::InitialParameterValue; support::PARAMETE
 ///
 /// The compact causal payload has one crossover word, two gain words, ten four-word ramps, four
 /// filter words, the silence counter, four four-word coefficient ramps and three four-word
-/// crossover word ramps per channel: 76 words. The common section stays empty: wave-2 decision
-/// W2-D2 on #83 defers the shared codec's versioned header to #95.
+/// crossover word ramps and the two four-word detector link glide weight ramps (#1367b) per
+/// channel: 84 words. The common section stays empty: wave-2 decision W2-D2 on #83 defers the
+/// shared codec's versioned header to #95. The byte rows are the descriptor's layout, not literals:
+/// an in-memory carry size is not a format pin.
 #[test]
 fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     effect_contract::validate_descriptor(&MULTIBAND_COMPRESSOR_DESCRIPTOR).expect("descriptor");
@@ -60,12 +62,16 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
         [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
-    for (rate, bytes) in [
-        (44_100u32, 304u32),
-        (48_000, 304),
-        (88_200, 304),
-        (96_000, 304),
-    ] {
+    for rate in [44_100u32, 48_000, 88_200, 96_000] {
+        let layout = MULTIBAND_COMPRESSOR_DESCRIPTOR
+            .qualities
+            .iter()
+            .find(|quality| quality.sample_rate == rate)
+            .expect("a launch-rate quality")
+            .maximum_state;
+        assert_eq!(layout.common_bytes, 0);
+        assert_eq!(layout.left_bytes, layout.right_bytes);
+        let bytes = layout.left_bytes;
         let initial = values();
         let mut prepared = request(&initial);
         prepared.sample_rate = rate;
@@ -74,7 +80,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             prepared.sample_rate,
             prepared.quality,
         );
-        prepared.limits.maximum_total_state_bytes = 608;
+        prepared.limits.maximum_total_state_bytes = layout.total().expect("total");
         // The contract requires a positive capacity limit even when the prepared effect needs no
         // scratch; one byte is the smallest admissible declaration for the exact zero-byte row.
         prepared.limits.maximum_scratch_bytes = 1;
@@ -1174,9 +1180,11 @@ fn bank_requests_are_validated_before_any_fallback() {
         .expect("state bytes")
         .checked_add(quality.scratch_fixed_bytes)
         .expect("prepared bytes");
-    assert_eq!(per_track, 608);
-    assert_eq!(per_track * 4, 2_432);
-    assert_eq!(per_track * 8, 4_864);
+    assert_eq!(
+        per_track,
+        u64::from(quality.maximum_state.left_bytes) * 2,
+        "no scratch and no common section"
+    );
 }
 
 /// Issue #1328, amendment A9: the payload's last word per channel is the input's silence counter,
