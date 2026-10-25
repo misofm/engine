@@ -1382,6 +1382,9 @@ NIGHTLY_BUDGET_COMMANDS = [
     'cargo test --locked --release --config profile.release.overflow-checks=true -p graph-compiler --test scale -- --ignored --exact compiles_and_binds_65_537_tracks_with_builtins',
     'cargo test --locked --release --config profile.release.overflow-checks=true -p builtins-compiler --features test-support --test scale -- --ignored --exact prepares_65_537_tracks_or_rejects_only_the_configured_resource',
     'cargo test --locked --release --config profile.release.overflow-checks=true -p builtins-compiler --features test-support --test allocation_tracker -- --ignored --exact phase_two_allocator_layouts_match_the_checked_resource_report_at_65_537_tracks',
+    'cargo test --locked --release --config profile.release.overflow-checks=true -p session --test scale_transaction -- --ignored --exact parses_a_65_537_track_document_back_to_its_canonical_model',
+    'cargo test --locked --release --config profile.release.overflow-checks=true -p protocol --test scale -- --ignored --exact a_fader_edit_on_the_strip_at_index_65536_commits_and_snapshots',
+    'cargo test --locked --release --config profile.release.overflow-checks=true -p host-core --test scale -- --ignored --exact prepares_a_65_537_track_kitchen_sink_session_live_attached',
 ]
 
 

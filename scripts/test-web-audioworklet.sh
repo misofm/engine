@@ -209,8 +209,16 @@ python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" "$metadata" >/dev
 mkdir -p "$mutation_dir/metadata"
 (cd "$repo_root" && cargo run --locked -q -p parameter-metadata -- --write "$mutation_dir/metadata") >/dev/null
 (cd "$repo_root" && cargo run --locked -q -p parameter-metadata -- --check "$mutation_dir/metadata") >/dev/null
-sed -i 's/"liveUpdatable": true/"liveUpdatable": false/' \
+# The document is compact JSON (#382), so the edit does not depend on whitespace, and an edit that
+# matches nothing fails here rather than reading as a caught mutation.
+cp "$mutation_dir/metadata/miso-engine-v1-parameter-metadata.json" "$mutation_dir/metadata-before.json"
+sed -i -E 's/"liveUpdatable": *true/"liveUpdatable":false/' \
   "$mutation_dir/metadata/miso-engine-v1-parameter-metadata.json"
+if cmp -s "$mutation_dir/metadata-before.json" \
+  "$mutation_dir/metadata/miso-engine-v1-parameter-metadata.json"; then
+  echo "the liveUpdatable mutation changed nothing in the metadata document" >&2
+  exit 1
+fi
 if (cd "$repo_root" && cargo run --locked -q -p parameter-metadata -- --check "$mutation_dir/metadata") >/dev/null 2>&1; then
   echo "a hand-edited metadata document escaped --check" >&2
   exit 1

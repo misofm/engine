@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::runtime::tests::{
-    command_bytes_at_revision, limits, render_direct, stateless_session, submit_direct,
+    command_bytes_at_revision, feed_and_render_until_direct, limits, render_direct,
+    stateless_session, submit_direct,
 };
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
 use session::{
@@ -543,9 +544,9 @@ fn a_removed_sources_producer_returns_to_the_running_epoch() {
     );
     assert_eq!(vacant(&mut children, replacement, ADDED), None);
     assert_eq!(vacant(&mut children, replacement, FIXTURE), Some(false));
-    // B's adoption retires the running epoch, `s`'s producer with it.
-    submit_direct(&mut children, &[FIXTURE], 2);
-    render_direct(&mut children, 1);
+    // B's adoption at `S` (after the removed strip's ramp, #1325 D3) retires the running epoch,
+    // `s`'s producer with it.
+    feed_and_render_until_direct(&mut children, &[FIXTURE], 1, 43);
     children.session.service().expect("service");
     assert_eq!(children.session.test_providers().test_epoch(), replacement);
     assert_eq!(

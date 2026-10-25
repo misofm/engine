@@ -499,7 +499,7 @@ impl World {
                     ObservationLane::new(&TAPS, vec![first, second], 2).expect("taps");
                 // Every other strip has its first tap armed at preparation.
                 if (chain * lanes + lane).is_multiple_of(2) {
-                    observation.arm(0, true, 2, 0);
+                    observation.arm(0, true, 2, 0, 0);
                 }
                 observations.push(Some(observation));
             }
@@ -874,10 +874,10 @@ fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
                 .expect("an in-chain swap");
             for strip in (0..swapped.strips()).filter(|strip| !strip.is_multiple_of(2)) {
                 swapped.writers[strip]
-                    .try_push_observe(1, true, 2)
+                    .try_push_observe(1, true, 2, 0)
                     .expect("room");
                 twin.writers[strip]
-                    .try_push_observe(1, true, 2)
+                    .try_push_observe(1, true, 2, 0)
                     .expect("room");
             }
             for _ in 0..2 {
@@ -894,10 +894,10 @@ fn a_swapped_strip_renders_and_publishes_what_its_twin_does() {
                 .expect("a cross-chain swap");
             for strip in (0..swapped.strips()).filter(|strip| strip.is_multiple_of(2)) {
                 swapped.writers[strip]
-                    .try_push_observe(1, true, 3)
+                    .try_push_observe(1, true, 3, 0)
                     .expect("room");
                 twin.writers[strip]
-                    .try_push_observe(1, true, 3)
+                    .try_push_observe(1, true, 3, 0)
                     .expect("room");
             }
             for _ in 0..5 {

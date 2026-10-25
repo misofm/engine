@@ -708,7 +708,10 @@ impl HostHalf {
             + self.prepared.report.route_control_resources.total_bytes
             + self.prepared.report.inventory_retained_bytes
             // #1696 D3: the epoch's monitor overlay row, at its model's bounds.
-            + self.monitor_and_ramp_rows().0;
+            + self.monitor_and_ramp_rows().0
+            // #1325 D6: the duck overlay a kept base of the epoch holds, at its model's bounds.
+            + control_plane::duck_overlay_bytes(self.store.compiled().normalized_model())
+                .expect("the duck overlay row");
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =
@@ -785,9 +788,16 @@ struct CompileObservation {
     /// a tap, so they are on the observed side as the send producers' upper bound is.
     observation_reserve: u64,
     /// The monitor overlay's and the edit-ramp table's rows (#1696), from
-    /// `control_plane::monitor_and_ramp_bytes` over the compiled model: bounds, not allocations,
-    /// since a boot solos nothing and keeps no ramp.
+    /// `control_plane::monitor_and_ramp_bytes` over the compiled model, and the duck overlay's
+    /// (#1325, `control_plane::duck_overlay_bytes`): bounds, not allocations, since a boot solos
+    /// nothing, keeps no ramp and ducks nothing.
     monitor_and_ramps: u64,
+    /// The response capture's armed job and delivered result (#1577), from
+    /// `control_plane::response_capture_bytes` over the compiled model: a bound, not an
+    /// allocation, since a boot arms nothing. It passes owner high-water 0 because
+    /// `observe_compile` compiles fresh at boot; a rebuild oracle must pass the session's high-water. `response_capture.rs` in control-plane holds a
+    /// capture at the bound within it.
+    response_capture: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -841,7 +851,15 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
     let (overlay_row, ramp_row) =
         control_plane::monitor_and_ramp_bytes(store.compiled().normalized_model())
             .expect("the monitor and ramp rows");
-    let monitor_and_ramps = overlay_row + ramp_row;
+    // #1325 D6: and the duck overlay a kept base holds, a bound like the overlay's.
+    let monitor_and_ramps = overlay_row
+        + ramp_row
+        + control_plane::duck_overlay_bytes(store.compiled().normalized_model())
+            .expect("the duck overlay row");
+    let response_capture =
+        control_plane::response_capture_bytes(store.compiled().normalized_model(), 0)
+            .expect("the response capture row")
+            .total_bytes;
     let host_core::PreparedHost {
         plan,
         sources,
@@ -887,6 +905,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         strip_table_charge,
         observation_reserve,
         monitor_and_ramps,
+        response_capture,
     }
 }
 
@@ -933,13 +952,14 @@ impl CompileObservation {
                 + self.owners.observations
                 + self.observation_reserve
                 + self.monitor_and_ramps
+                + self.response_capture
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
              observation readers + the decode-field rounding, all observed (left; the send producers' row is the graph \
-             function's total, and the observation reserve and the monitor and ramp rows are the control \
-             plane's bounds), against \
+             function's total, and the observation reserve, the monitor and ramp rows and the response \
+             capture row are the control plane's bounds), against \
              `capi_retained_bytes` (right)"
         );
     }
@@ -1337,6 +1357,12 @@ impl Budget {
 /// row does not depend on the lane width), above the 175,296 ceiling, so the ceiling is 192,972
 /// plus 10 %, rounded up to 64: 212,269.2 -> 212,288.
 ///
+/// #1577 charges the response capture: its channel's two queues (544 bytes) and, at the model's
+/// bounds, one armed job and one delivered result (52,076 bytes for this session: two owners and a
+/// 4,096-point result's three curves). `capi_retained_bytes` measured 197,855 before and 250,475
+/// after (x86-64; the row does not depend on the lane width), above the 212,288 ceiling, so the
+/// ceiling is 250,475 plus 10 %, rounded up to 64: 275,522.5 -> 275,584.
+///
 /// #887 (batch 13) tiles the gather and scatter of padded banks, a structural move: every bank
 /// chain now owns two lane-major staging planes, and a padded chain a `quantum`-word `+0.0` plane,
 /// and the estimates charge both (builtin banks had never been charged their staging). The
@@ -1458,8 +1484,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 212_288,
-        four_lanes: 212_288,
+        eight_lanes: 275_584,
+        four_lanes: 275_584,
     },
     Budget {
         row: "largest_named_allocation_bytes",

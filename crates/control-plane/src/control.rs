@@ -122,6 +122,118 @@ pub(crate) struct KeptBase {
     /// overlay change between `monitor` and its own with it, as one transaction holding every
     /// write would (`MonitorChange::ramp`).
     pub(crate) monitor_ramp: Option<Option<u32>>,
+    /// What phase 1 of a strip removal wrote to the epoch's cells while a successor waits (#1325
+    /// D6): the strips and routes ramped to `+0.0`, the removed sources that still feed the
+    /// epoch's plan, and `S`. Empty when no pending edit removed a strip. It drops with this base.
+    pub(crate) duck: host_core::DuckOverlay,
+}
+
+/// The overlay of a rebuild that supersedes nothing: no strip ducks yet (#1325 D6).
+static NO_DUCK: host_core::DuckOverlay = host_core::DuckOverlay::new();
+
+/// Where phase 1's records land in the running plan's epoch (#1325 D2): one strip producer index
+/// per strip record and one route producer index per route record, in record order.
+struct DuckWrites {
+    strips: Vec<usize>,
+    routes: Vec<usize>,
+}
+
+/// Resolve every producer phase 1 writes in `held`, the running plan's epoch, and check the stamp
+/// its writes take (#1325 D2, D8). Before the commit: every refusal is an internal fault, with
+/// nothing written. The stamp check is the caller's last fallible step: it leaves the stamp's key
+/// open on the gate, and [`write_duck`] takes the same key again.
+fn resolve_duck_writes(
+    held: &mut ProviderEpoch,
+    transition: &host_core::StripTransition,
+) -> Result<DuckWrites, CommandError> {
+    let lanes = &held.strips;
+    let controls = &lanes.controls;
+    let mut strips = Vec::new();
+    let mut routes = Vec::new();
+    if strips
+        .try_reserve_exact(transition.strip_records().len())
+        .is_err()
+        || routes.try_reserve_exact(transition.routes().len()).is_err()
+    {
+        return Err(CommandError::Internal);
+    }
+    for strip in transition.strip_records() {
+        let index = host_core::strip_position(
+            controls.len(),
+            lanes.track_count,
+            |index| &*controls[index].track_id,
+            &strip.strip_id,
+        )
+        .ok_or(CommandError::Internal)?;
+        let fader = &controls[index].fader;
+        if strip
+            .offsets
+            .iter()
+            .enumerate()
+            .any(|(channel, record)| record.is_some() && !fader.has_offsets(channel))
+        {
+            return Err(CommandError::Internal);
+        }
+        strips.push(index);
+    }
+    for route in transition.route_records() {
+        let index = match route.record {
+            host_core::SendRecord::Folded(_) => {
+                host_core::route_producer_position(&lanes.routes, route.route_id)
+            }
+            host_core::SendRecord::Following(record) => {
+                host_core::follow_route_producer_for(&lanes.follow_routes, route.route_id, &record)
+            }
+        }
+        .ok_or(CommandError::Internal)?;
+        routes.push(index);
+    }
+    let last = held.revision_gate.last_published();
+    if held.revision_gate.stamp_monitor(last).is_err() {
+        return Err(CommandError::Internal);
+    }
+    Ok(DuckWrites { strips, routes })
+}
+
+/// Write phase 1's ramped mutes to the running plan's cells and publish them on its gate (#1325
+/// D2): after the commit, and nothing here can fail. The stamp is a monitor publication under the
+/// gate's last published revision ([`resolve_duck_writes`] checked it), so render applies the
+/// writes at its next block and the gate still reports the revision it reported.
+fn write_duck(
+    held: &mut ProviderEpoch,
+    transition: &host_core::StripTransition,
+    writes: &DuckWrites,
+) {
+    let ProviderEpoch {
+        strips: lanes,
+        revision_gate,
+        ..
+    } = held;
+    let last = revision_gate.last_published();
+    let stamp = revision_gate
+        .stamp_monitor(last)
+        .expect("the phase-1 stamp was checked before the commit");
+    let key = stamp.key();
+    for (strip, &index) in transition.strip_records().iter().zip(&writes.strips) {
+        let producer = &mut lanes.controls[index];
+        for record in strip.fader_records() {
+            producer.fader.write(stamp, record);
+        }
+        for (channel, record) in strip.offsets.iter().enumerate() {
+            if let Some(record) = *record {
+                producer.fader.write_offsets(stamp, channel, record);
+            }
+        }
+    }
+    for (route, &index) in transition.route_records().zip(&writes.routes) {
+        match route.record {
+            host_core::SendRecord::Folded(record) => lanes.routes[index].write(stamp, record),
+            host_core::SendRecord::Following(record) => {
+                lanes.follow_routes[index].write(stamp, record);
+            }
+        }
+    }
+    revision_gate.publish_key(key);
 }
 
 /// What a rebuild publishes a successor for (#1323).
@@ -183,6 +295,20 @@ impl SpectrumRefusal {
         Self::Reply(status, code.to_owned())
     }
 }
+
+/// The record of every spectrum `BACKPRESSURE` refusal, which only `Busy` answers (#1944 D2,
+/// #1595 D6): the capture's one-shot arm slot, one entry, held. A collection without a selection
+/// also answers `Busy` and so reports the slot as held: a known imprecision, reopened only with D6.
+const SPECTRUM_ARM_BACKPRESSURE: protocol::Backpressure = protocol::Backpressure {
+    queue_kind: protocol::BackpressureQueueKind::SpectrumArm,
+    capacity: 1,
+    occupancy: 1,
+    requested_items: 1,
+    generation: None,
+    retry_boundary: None,
+    requested_bytes: None,
+    available_bytes: None,
+};
 
 /// The configuration a `SPECTRUM_CONFIGURE` request sets, by #1591 D2's constructors: `None` for
 /// an empty collection with budget 0. A constructor's refusal is `INVALID_FIELD` with its code.
@@ -807,6 +933,10 @@ thread_local! {
     /// Whether the service step leaves displaced plans in the retirement queue (batch 15a review
     /// fold M1): a render preempted between claiming a candidate and retiring the plan it displaced.
     static TEST_HOLD_RECLAMATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// The key the newest epoch's gate had last published when this thread last queued an
+    /// observation record (#1968): a commit's records are queued before its publication.
+    static TEST_OBSERVE_PUSH_KEY: core::cell::Cell<Option<engine::realtime::GateKey>> =
+        const { core::cell::Cell::new(None) };
     /// `(commits made from an in-place token, in-place tokens materialized)` on this thread.
     static IN_PLACE_COUNTS: core::cell::Cell<(usize, usize)> = const { core::cell::Cell::new((0, 0)) };
     static TEST_OWNER_STATE: core::cell::Cell<TestOwnerCounters> =
@@ -1036,10 +1166,14 @@ pub struct SessionState<A: ControlAdapter> {
     /// The most observation slots any committed plan has had; the ended-event cells and the
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
-    /// The observation records the last rebuild queued again on the plan it published, taken
-    /// from the candidate it superseded (#1310, root ruling B15-Q4); empty after a rebuild that
-    /// superseded nothing.
-    pub(crate) observation_forwarded: Vec<ObservationForward>,
+    /// The most owners one strip of any model this session committed has had (#1577): the
+    /// response capture is charged at it, since a job or result sized under a displaced model can
+    /// outlive the rebuild that displaced it.
+    pub(crate) capture_owners_high_water: usize,
+    /// The next arm tag this session issues (#1585 D4): `1` at compile, one more per queued
+    /// observation record, so tags are monotone per session and `0` is never one. A record is
+    /// tagged when it is queued, after its batch was admitted, so a refused submission issues none.
+    pub(crate) next_arm_tag: u64,
     /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
     /// the B17-R14 pattern; #1718 deletes it): `None` when none may.
     pub(crate) send_moves: Option<SendMoveWindow>,
@@ -1051,6 +1185,9 @@ pub struct SessionState<A: ControlAdapter> {
     /// render half does. `None` from boot when the session serves the meter batches itself
     /// ([`Self::meters`]).
     pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
+    /// The response capture's delivered result (#1577 D5), kept by `service` until a host takes
+    /// it; #1578 turns it into an event.
+    pub(crate) response_ready: Option<host_core::ResponseReady>,
     /// The session's meter delivery when its control plane serves the meter batches (#1583 D5,
     /// R2: the C ABI's), built at boot over the output meter's reader and a requested gate.
     pub(crate) meters: Option<SessionMeters>,
@@ -1324,19 +1461,23 @@ pub(crate) fn observation_slots(
         let key_bytes = wire.key_bytes(producer.track_id.len(), producer.effect_id.len());
         let key_bytes = u16::try_from(key_bytes).unwrap_or(u16::MAX);
         for tap in 0..producer.observe_capacity() {
-            let is_armed = !bindings.is_empty()
-                && producer
+            let binding = if bindings.is_empty() {
+                None
+            } else {
+                producer
                     .descriptor
                     .observations
                     .get(tap)
-                    .is_some_and(|declared| {
-                        bindings.is_armed_by_parts(
+                    .and_then(|declared| {
+                        bindings.binding_by_parts(
                             &producer.track_id,
                             producer.address.rack == host_core::LiveEffectRack::Console,
                             &producer.effect_id,
                             declared.id.0,
                         )
-                    });
+                    })
+            };
+            let is_armed = binding.is_some();
             armed += usize::from(is_armed);
             if is_armed {
                 armed_bytes += usize::from(key_bytes);
@@ -1347,6 +1488,8 @@ pub(crate) fn observation_slots(
                 mark: 0,
                 key_bytes,
                 queued: false,
+                // An armed tap's prepared arm publishes its binding's tag (#1585 R2).
+                tag: binding.map_or(0, |binding| binding.arm_tag),
             });
         }
     }
@@ -1390,6 +1533,11 @@ pub(crate) struct ObservationSlot {
     /// on its own instance, because a tap it carries from the running plan takes that plan's
     /// state and would lose the record.
     pub(crate) queued: bool,
+    /// The tag of the last record queued for this tap on the newest plan, or of the binding its
+    /// prepared arm publishes (#1585 D4); `0` for none. Its kind is [`Self::armed`], which every
+    /// push and every slot build sets with it. A reader reports the tap pending while the record
+    /// is an arm whose tag its slot has not published, and unarmed at once after a disarm.
+    pub(crate) tag: u64,
 }
 
 /// What the host last pushed to one observation slot (#1584 D6a).
@@ -1438,11 +1586,8 @@ fn tap_key_of(
 }
 
 /// One observation record a superseded candidate's queue held, as it is queued again on its
-/// replacement's matching instance (#1310, root ruling B15-Q4).
-///
-/// A host that keeps its own copy of each plan's armed taps reads them through
-/// [`SessionState::observation_forwarded`] and copies them onto the replacement's copy, as it does
-/// for a record it admitted itself.
+/// replacement's matching instance (#1310, root ruling B15-Q4). No host mirrors it: render
+/// publishes each tap's arm state in its slot when it drains the record (#1585 D3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationForward {
     /// The replacement's effect producer, a position in [`SessionState::effect_producers`].
@@ -1453,6 +1598,10 @@ pub struct ObservationForward {
     pub armed: bool,
     /// The bound window, `0` for the plan's meter window.
     pub window_blocks: u32,
+    /// The record's tag (#1585 D4): the donor slot's for a forward the transaction does not
+    /// change, so render publishes the tag the record was acknowledged with; `0` asks the commit
+    /// for a fresh one.
+    pub arm_tag: u64,
 }
 
 /// The records a withdrawn candidate's observation queues hold, as the replacement queues them
@@ -1516,6 +1665,7 @@ pub(crate) fn observation_forwards(
                 tap_index,
                 armed: window.is_some(),
                 window_blocks: window.unwrap_or(0),
+                arm_tag: slots.get(slot as usize).map_or(0, |entry| entry.tag),
             });
         }
     }
@@ -1545,7 +1695,7 @@ pub(crate) fn observation_forwards(
 fn observe_successor_pushes(
     writes: &[controls::ObserveWrite],
     successor: &[host_core::EffectControlProducer],
-    forwards: &[ObservationForward],
+    forwards: &mut [ObservationForward],
 ) -> Result<Vec<ObservationForward>, CommandError> {
     let mut pushes = Vec::new();
     pushes
@@ -1574,10 +1724,13 @@ fn observe_successor_pushes(
         let Some((position, tap_index)) = target else {
             continue;
         };
-        if forwards
-            .iter()
-            .any(|forward| forward.position == position && forward.tap_index == tap_index)
+        // A forward re-queues the bound state, this write's included: it carries this write's
+        // fresh tag (#1585 D4).
+        if let Some(forward) = forwards
+            .iter_mut()
+            .find(|forward| forward.position == position && forward.tap_index == tap_index)
         {
+            forward.arm_tag = 0;
             continue;
         }
         pushes.push(ObservationForward {
@@ -1585,6 +1738,7 @@ fn observe_successor_pushes(
             tap_index,
             armed: write.armed,
             window_blocks: write.window_blocks,
+            arm_tag: 0,
         });
     }
     for push in &pushes {
@@ -2368,6 +2522,23 @@ where
         &self.providers
     }
 
+    /// The key the newest epoch's gate had last published when this thread last queued an
+    /// observation record, and resets it (#1968): `None` if no record was queued since.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_observe_push_key(&self) -> Option<engine::realtime::GateKey> {
+        TEST_OBSERVE_PUSH_KEY.with(core::cell::Cell::take)
+    }
+
+    /// The key the newest epoch's gate published last (#1968).
+    #[cfg(feature = "test-support")]
+    pub fn test_newest_gate_key(&self) -> engine::realtime::GateKey {
+        self.pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .revision_gate
+            .last_published_key()
+    }
+
     /// The pending provider epochs, oldest first.
     #[cfg(feature = "test-support")]
     pub fn test_pending_providers(&self) -> &[ProviderEpoch] {
@@ -2698,10 +2869,61 @@ where
     pub fn service(&mut self) -> Result<(), CommandError> {
         self.fold_observation_pending();
         self.synchronize_plan_epochs()?;
+        self.poll_response_capture();
         self.refresh_provider_counters();
         self.collect_render_activity();
         self.refresh_provider_counters();
         Ok(())
+    }
+
+    /// Takes the response capture's reply, if one is there and no result is waiting (#1577 D5).
+    fn poll_response_capture(&mut self) {
+        if self.response_ready.is_some() {
+            return;
+        }
+        let (provider, store) = self.controller.provider_and_session_mut();
+        self.response_ready = provider.poll_response_capture(store.compiled().normalized_model());
+    }
+
+    /// Test seam (#1577 D5): arm one capture of `strip_id`'s response owners from the newest plan.
+    ///
+    /// # Errors
+    ///
+    /// The capture's refusal; a refusal changes nothing.
+    #[cfg(feature = "test-support")]
+    pub fn test_arm_track_response(
+        &mut self,
+        strip_id: &str,
+        grid: host_core::ResponsePreviewGrid,
+        channels: host_core::ResponseChannels,
+    ) -> Result<u64, host_core::ResponseCaptureRefusal> {
+        let (provider, store) = self.controller.provider_and_session_mut();
+        provider.arm_response_capture(
+            store.compiled().normalized_model(),
+            strip_id,
+            grid,
+            channels,
+        )
+    }
+
+    /// Test seam (#1577): the response capture row the newest epoch's plan was charged
+    /// (`CapiResources::response_capture`), the pending candidate's when one is pending.
+    #[cfg(feature = "test-support")]
+    pub fn test_response_capture_charge(&self) -> u64 {
+        self.pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .capi
+            .response_capture
+    }
+
+    /// Test seam (#1577 D5): take the delivered capture result and release the capture, as #1578
+    /// does when the host dequeues its event.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_track_response(&mut self) -> Option<host_core::ResponseReady> {
+        let ready = self.response_ready.take()?;
+        self.controller.provider_mut().release_response_capture();
+        Some(ready)
     }
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
@@ -3072,20 +3294,41 @@ where
                     &mut self.response_scratch,
                 )
                 .map_err(map_command_process_error),
-            Err(SpectrumRefusal::Reply(status, code)) => self
-                .controller
-                .complete_session_command_refused(
-                    prepared,
-                    status,
-                    &code,
-                    &mut self.response_scratch,
-                )
-                .map_err(map_command_process_error),
+            Err(SpectrumRefusal::Reply(status, code)) => {
+                self.complete_spectrum_refusal(prepared, status, &code)
+            }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
                 Err(error)
             }
         }
+    }
+
+    /// Completes a spectrum command's typed refusal, recorded for replay: a `BACKPRESSURE` with
+    /// the arm slot's record (#1944), any other status without one.
+    fn complete_spectrum_refusal(
+        &mut self,
+        prepared: protocol::PreparedSessionCommand,
+        status: protocol::StatusCode,
+        code: &str,
+    ) -> Result<usize, CommandError> {
+        if status == protocol::StatusCode::Backpressure {
+            self.controller
+                .complete_session_command_refused_backpressure(
+                    prepared,
+                    code,
+                    SPECTRUM_ARM_BACKPRESSURE,
+                    &mut self.response_scratch,
+                )
+        } else {
+            self.controller.complete_session_command_refused(
+                prepared,
+                status,
+                code,
+                &mut self.response_scratch,
+            )
+        }
+        .map_err(map_command_process_error)
     }
 
     /// Completes a `SPECTRUM_CAPTURE` with its reply or its refusal, as [`Self::session_command`]
@@ -3099,15 +3342,7 @@ where
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(SpectrumRefusal::Reply(status, code)) => {
-                return self
-                    .controller
-                    .complete_session_command_refused(
-                        prepared,
-                        status,
-                        &code,
-                        &mut self.response_scratch,
-                    )
-                    .map_err(map_command_process_error);
+                return self.complete_spectrum_refusal(prepared, status, &code);
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
@@ -3160,15 +3395,7 @@ where
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(SpectrumRefusal::Reply(status, code)) => {
-                return self
-                    .controller
-                    .complete_session_command_refused(
-                        prepared,
-                        status,
-                        &code,
-                        &mut self.response_scratch,
-                    )
-                    .map_err(map_command_process_error);
+                return self.complete_spectrum_refusal(prepared, status, &code);
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
@@ -3746,6 +3973,18 @@ where
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
         kept_ramps.keep_within(prospective.normalized_model());
+        // #1325 D6: the duck overlay of the running plan's cells while phase 1 runs, empty
+        // outside it. The successor's base composes it, so a strip or source this transaction
+        // restores carries from its ducked state and ramps back in from `S`.
+        let duck = if superseding {
+            &self
+                .kept_holder()
+                .and_then(|holder| holder.kept.as_ref())
+                .ok_or(CommandError::Internal)?
+                .duck
+        } else {
+            &NO_DUCK
+        };
         // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
         // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
         // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
@@ -3757,11 +3996,11 @@ where
                     .pending_providers
                     .last()
                     .ok_or(CommandError::Internal)?;
-                Some(
-                    holder
-                        .inventory
-                        .across_withdrawn(&donor.inventory, candidate.plan()),
-                )
+                Some(holder.inventory.across_withdrawn_in_phase_one(
+                    &donor.inventory,
+                    candidate.plan(),
+                    duck,
+                ))
             }
             None => None,
         };
@@ -3784,6 +4023,7 @@ where
                 observation: &observation_change.bindings,
                 discontinuity,
                 unchanged_revision,
+                duck,
                 ..SuccessorBase::new(inventory, kept.model.normalized_model(), revision)
             }
         } else {
@@ -3827,8 +4067,25 @@ where
             Some(base),
             &self.live_values_superseded,
             self.observation_slots_high_water,
+            self.capture_owners_high_water,
         )
         .map_err(spectrum_invariant)?;
+        // #1325 D7: after preparation, the pure transition step against the plan the successor
+        // displaces. A declared discontinuity need not continue the running plan's output
+        // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
+        // is built here, before anything is reserved or committed.
+        let transition = if declared {
+            None
+        } else {
+            Some(
+                host_core::plan_strip_transition(&base, duck, prospective.normalized_model())
+                    .map_err(|_| CommandError::Internal)?,
+            )
+        };
+        let next_duck = transition
+            .as_ref()
+            .map(|transition| duck.joined(transition));
+        let quantum = prospective.normalized_model().quantum_frames;
         let PreparedRuntime {
             sources,
             strips,
@@ -4105,7 +4362,7 @@ where
         // #1310 (root ruling B15-Q4): the observation records queued on A, re-queued on B's matching
         // instances, with their room checked here. A tap B carries from P0 takes P0's state at
         // the swap, which never saw them; arming from the bindings covers only a tap B starts.
-        let forwards = match self.pending_providers.last() {
+        let mut forwards = match self.pending_providers.last() {
             Some(donor) if superseding => observation_forwards(
                 &donor.effects,
                 &self.observation_offsets,
@@ -4127,7 +4384,7 @@ where
             Rebuild::Transaction(prepared) => observe_successor_pushes(
                 prepared.get().prospective_session().observe_writes(),
                 &candidate_provider.effects,
-                &forwards,
+                &mut forwards,
             )?,
             Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => Vec::new(),
         };
@@ -4204,6 +4461,31 @@ where
         {
             return Err(CommandError::Internal);
         }
+        // #1325 D2: the producers phase 1 writes, resolved in the epoch of the running plan, P0
+        // (the epoch the successor displaces), before the commit; a strip or route with no
+        // producer, or an offsets record for a lane with no offsets cell, is an internal fault
+        // found here, so no ack precedes a dropped write. Then the stamp P0's writes take: a
+        // monitor publication under P0's last published revision, which spends none, so P0's
+        // gate never reports this revision and the watermark reports it first when render
+        // adopts the successor (D5). The stamp check is the last fallible step before the commit.
+        let duck_writes = match transition.as_ref().filter(|transition| transition.ducks()) {
+            Some(transition) => {
+                let held = if superseding {
+                    let len = self.pending_providers.len();
+                    match len {
+                        0 => return Err(CommandError::Internal),
+                        1 => &mut self.providers,
+                        _ => &mut self.pending_providers[len - 2],
+                    }
+                } else {
+                    self.pending_providers
+                        .last_mut()
+                        .unwrap_or(&mut self.providers)
+                };
+                Some(resolve_duck_writes(held, transition)?)
+            }
+            None => None,
+        };
         let (committed, displaced) = match kind {
             Rebuild::Transaction(prepared) => {
                 // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
@@ -4261,6 +4543,19 @@ where
                     .pending_providers
                     .last_mut()
                     .unwrap_or(&mut self.providers);
+                // #1325 D6: a source B restores in phase 1 carries P0's ring, so its producer
+                // moves from P0's set, where phase 1 kept it, into B's. Every other entry B holds
+                // vacant took its producer from A's set above, so only restored ones move here.
+                let restored = candidate_provider
+                    .sources
+                    .adopt_persisting(&mut holder.sources);
+                debug_assert!(
+                    restored
+                        <= transition
+                            .as_ref()
+                            .map_or(0, |transition| transition.restored_sources().len()),
+                    "only a restored source's producer moves from the running plan's set"
+                );
                 if let Some(kept) = holder.kept.as_mut() {
                     kept.edit_ramps = kept_ramps;
                     if monitor_ramp.is_some() {
@@ -4291,6 +4586,7 @@ where
                         monitor: previous_monitor,
                         edit_ramps: kept_ramps,
                         monitor_ramp,
+                        duck: host_core::DuckOverlay::new(),
                     });
                 }
                 // Nothing was withdrawn, so nothing is pending but B: a taken candidate was
@@ -4304,6 +4600,40 @@ where
                 0
             }
         };
+        // #1325 D2, D3, D6: phase 1 on P0, which is now the newest epoch the control plane holds
+        // (a withdrawn candidate's epoch was popped above; the successor is pushed below). The
+        // ramped mutes go to P0's cells under the stamp checked before the commit, then `p` is
+        // read, then the successor's schedule is set: `S` from this transaction's writes, raised
+        // to the overlay's, which a superseding candidate inherits.
+        if let Some(mut next_duck) = next_duck {
+            let held = self
+                .pending_providers
+                .last_mut()
+                .unwrap_or(&mut self.providers);
+            if let (Some(transition), Some(writes)) = (transition.as_ref(), duck_writes.as_ref()) {
+                write_duck(held, transition, writes);
+                let p = reservation
+                    .inner
+                    .as_ref()
+                    .expect("reservation is live")
+                    .render_clock();
+                next_duck.raise_not_before(transition.not_before(p, quantum));
+            }
+            if let Some(not_before) = next_duck.not_before() {
+                reservation
+                    .inner
+                    .as_mut()
+                    .expect("reservation is live")
+                    .set_adoption(PlanAdoption::NoEarlierThan(not_before));
+            }
+            let held = self
+                .pending_providers
+                .last_mut()
+                .unwrap_or(&mut self.providers);
+            if let Some(kept) = held.kept.as_mut() {
+                kept.duck = next_duck;
+            }
+        }
         self.controller
             .provider_mut()
             .replace_session_catalog(candidate_catalog, revision);
@@ -4324,27 +4654,38 @@ where
         reservation.set_superseded(superseded_revisions);
         // #1310 (root ruling B15-Q4): A's queued observation records, on B's queues before B is
         // published. Their room was checked before the commit.
-        for forward in &forwards {
-            candidate_provider.effects[forward.position]
-                .try_push_observe(forward.tap_index, forward.armed, forward.window_blocks)
-                .expect("the room for every forwarded record was checked before the commit");
-            let first = slots.0[forward.position];
-            if let Some(slot) = slots.1.get_mut((first + forward.tap_index) as usize) {
-                slot.queued = true;
-            }
-        }
-        // #1584 T2: the transaction's own records, likewise, their room checked before the commit.
-        for push in &observe_pushes {
-            candidate_provider.effects[push.position]
-                .try_push_observe(push.tap_index, push.armed, push.window_blocks)
+        // #1584 T2: then the transaction's own records, likewise, their room checked before the
+        // commit. #1585 D4: each record is tagged here, after the commit, so a refused rebuild
+        // issues no tag; the slot and an armed binding take the tag its prepared arm or a reader
+        // compares against.
+        for record in forwards.iter().chain(&observe_pushes) {
+            let arm_tag = if record.arm_tag == 0 {
+                let tag = self.next_arm_tag;
+                self.next_arm_tag = tag.saturating_add(1);
+                tag
+            } else {
+                record.arm_tag
+            };
+            let producer = &mut candidate_provider.effects[record.position];
+            producer
+                .try_push_observe(
+                    record.tap_index,
+                    record.armed,
+                    record.window_blocks,
+                    arm_tag,
+                )
                 .expect("the room for every observe record was checked before the commit");
-            let first = slots.0[push.position];
-            if let Some(slot) = slots.1.get_mut((first + push.tap_index) as usize) {
+            if record.armed
+                && let Some(key) = tap_key_of(producer, record.tap_index)
+            {
+                self.observation.set_arm_tag(&key, arm_tag);
+            }
+            let first = slots.0[record.position];
+            if let Some(slot) = slots.1.get_mut((first + record.tap_index) as usize) {
                 slot.queued = true;
+                slot.tag = arm_tag;
             }
         }
-        // A move: the list was built before the commit.
-        self.observation_forwarded = forwards;
         // #1593 D4: the configuration the successor was prepared with is the session's from now
         // on; its epoch is the one the candidate's captures report at promotion.
         let configured_epoch = self.spectrum.commit(spectrum_configuration);
@@ -4353,7 +4694,12 @@ where
         {
             *epoch = configured_epoch;
         }
+        let candidate_epoch = candidate_provider.epoch;
         self.pending_providers.push(candidate_provider);
+        // #1577 D4: a capture armed from here on waits for the candidate.
+        self.controller
+            .provider_mut()
+            .set_newest_plan_epoch(candidate_epoch);
         // #1584 D6a: the newest plan's slots, built above. The fold ran when this command was
         // serviced and nothing has been pushed since (one thread), so none is lost.
         (
@@ -4366,6 +4712,17 @@ where
         self.observation_slots_high_water = self
             .observation_slots_high_water
             .max(self.observation_pending.len());
+        // #1577: the committed model's owners join the capture's high-water; the successor's
+        // charge already counted them (`response_capture_bytes`), so this can only hold or rise.
+        self.capture_owners_high_water = self.capture_owners_high_water.max(
+            host_core::response_capture_owners(
+                self.controller.session().compiled().normalized_model(),
+            )
+            // Unreachable: the successor's preparation counted this model's owners before the
+            // commit (`prepared_capi_resources` -> `response_capture_bytes`) and refused the
+            // transaction on an overflow, so the count is `Some` here.
+            .unwrap_or(usize::MAX),
+        );
         if let Some((_, donor)) = superseded.as_ref() {
             // #1310 D5 step 6: A's report row leaves; `retain` shrinks in place.
             let donor_epoch = donor.epoch;
@@ -5015,17 +5372,6 @@ where
                 *row = A::Row::from(resources);
             }
         }
-        // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
-        // that carries its content, the newest epoch's (#1502 D6), which is the routing the
-        // producers were chosen by, so the cells a commit writes and the gate that reveals them
-        // are one plan's. Every record push, cell write, target publication and owner commit is
-        // before it, so render's `Acquire` snapshot of the gate sees them all and the watermark
-        // never reports the revision before its values can apply. The stamp's revision is
-        // published, read into a local, so the always-on bound of `stamp` covers the publication. A
-        // monitor publication carries the committed revision (#1603).
-        if let Some(key) = key {
-            revision_gate.publish_key(key);
-        }
         // #1310: the kept base's lengths, built above, now that the edit is committed.
         if let Some(kept) = self
             .kept_holder_mut()
@@ -5040,12 +5386,39 @@ where
         }
         // #1584 D4: the subscriptions' records, admitted above with no observation record queued
         // since, then the table the edits left, before the reply exists. A record cannot be refused
-        // here: the control thread is the queues' only producer.
+        // here: the control thread is the queues' only producer. #1968: they are pushed before the
+        // revision is published below, on the queues of the plan whose gate publishes it, so a
+        // block whose snapshot covers the revision drains them in the same block (the drain pops
+        // the queue after the snapshot), and a watermark that covers the revision means the tap
+        // is armed. Render drains the queues outside the gate, so a record may apply one block
+        // early: a subscription has no revision (CONTROL_PROTOCOL_SEMANTICS.md, "Observation
+        // subscriptions"), so it is not one of the transaction's live values, and it applies at
+        // whatever block drains next, as an `Observe`-only transaction's does. So the first window
+        // may open one block before the revision's values apply; its `first_sample` says so, and a
+        // reader that needs the changed audio takes the windows whose `first_sample` is at or
+        // after the watermark's.
         if !observe_changes.is_empty() {
             self.push_admitted_observation_batch(observe_changes.iter().copied());
         }
         if let Some(bindings) = observe_bindings {
             self.observation = bindings;
+        }
+        // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
+        // that carries its content, the newest epoch's (#1502 D6), which is the routing the
+        // producers were chosen by, so the cells a commit writes and the gate that reveals them
+        // are one plan's. Every record push (the observation records above included, #1968), cell
+        // write, target publication and owner commit is before it, so render's `Acquire` snapshot
+        // of the gate sees them all and the watermark never reports the revision before its values
+        // can apply. The stamp's revision is published, read into a local, so the always-on bound
+        // of `stamp` covers the publication. A monitor publication carries the committed revision
+        // (#1603). The observation pushes borrowed the session, so the newest epoch's gate is
+        // borrowed again: the same epoch, since nothing in between adds or promotes one.
+        if let Some(key) = key {
+            self.pending_providers
+                .last_mut()
+                .unwrap_or(&mut self.providers)
+                .revision_gate
+                .publish_key(key);
         }
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
@@ -5259,6 +5632,23 @@ where
                 .any(|provider| provider.epoch == epoch)
     }
 
+    /// The index of source `id` in the graph source set of the plan of epoch `epoch`, as that
+    /// plan's state inventory records it, or `None` when the plan has no such source or the
+    /// control plane holds no epoch `epoch` (#1325). A host that owns the render plan on its own
+    /// thread resolves a source against the plan that renders with it: while a successor waits,
+    /// and through a strip removal's phase 1, that plan's source set is not the newest committed
+    /// session's.
+    pub fn rendering_source_index(&self, epoch: u64, id: &[u8]) -> Option<usize> {
+        let id = core::str::from_utf8(id).ok()?;
+        core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .chain(&self.retired_providers)
+            .find(|provider| provider.epoch == epoch)?
+            .inventory
+            .source(id)
+            .map(|row| row.index as usize)
+    }
+
     /// Sets the replacement peak ceiling ([`ControlLimits::maximum_replacement_peak_bytes`]) once
     /// the adapter knows its own fixed bytes exactly (#1290a D3): they are known only after the
     /// first plan is prepared, and the limits the session was built with are a plain value.
@@ -5274,6 +5664,31 @@ where
     #[must_use]
     pub fn newest_plan_epoch(&self) -> u64 {
         self.newest_providers().epoch
+    }
+
+    /// The epoch whose producer a source call for `id` goes to (#1325 D4): the running plan's
+    /// while a pending successor removes the source and the running plan still renders it (the
+    /// duck overlay lists it), so phase 1's ramp plays the PCM the host submits; else the newest
+    /// committed session's. One binary search, no allocation and no lock. Once render adopts the
+    /// successor, the service step promotes it and the overlay drops with the old epoch's kept
+    /// base, so the call is refused as an unknown source, as before.
+    fn source_providers_mut(&mut self, id: &[u8]) -> &mut ProviderEpoch {
+        // The overlay ends when render adopts the successor: from then on the running epoch's
+        // plan no longer renders, even before the service step promotes the successor (the
+        // browser's unserviced feed), so a removed source is refused as unknown (D4). One
+        // `Acquire` load of the epoch render published, no lock.
+        let rendered = self.shared.active_epoch.load(Ordering::Acquire);
+        let ducked = self.kept_holder().is_some_and(|holder| {
+            rendered <= holder.epoch
+                && holder
+                    .kept
+                    .as_ref()
+                    .is_some_and(|kept| kept.duck.has_source(id))
+        });
+        if ducked {
+            return self.kept_holder_mut().expect("a kept base has a holder");
+        }
+        self.newest_providers_mut()
     }
 
     fn newest_providers_mut(&mut self) -> &mut ProviderEpoch {
@@ -5373,6 +5788,28 @@ where
             producer,
             tap_index: resolve_observation_tap(found.descriptor, key.tap_id)?,
         })
+    }
+
+    /// The tag of the last record this session queued for the tap `key` names on the newest plan,
+    /// or of the binding a prepared arm publishes there, `0` for none or for a key the plan does
+    /// not have (#1585 D4). Tags are monotone, so a reader whose slot publishes a lower tag knows
+    /// render has not applied the tap's last record yet. Allocates nothing.
+    #[must_use]
+    pub fn observation_issued_tag(&self, key: &ObservationKeyRef<'_>) -> u64 {
+        self.observation_issued(key).0
+    }
+
+    /// [`Self::observation_issued_tag`] and the kind of that record: `true` for an arm or a
+    /// re-arm (or a binding's prepared arm), `false` for a disarm or for none (#1585, root ruling
+    /// on #1977). A disarm is in effect for a reader at once: no later window belongs to the
+    /// subscription it ends. Allocates nothing.
+    #[must_use]
+    pub fn observation_issued(&self, key: &ObservationKeyRef<'_>) -> (u64, bool) {
+        self.resolve_observation_key(key)
+            .ok()
+            .and_then(|tap| self.observation_slot(tap.producer, tap.tap_index))
+            .and_then(|slot| self.observation_pending.get(slot))
+            .map_or((0, false), |entry| (entry.tag, entry.armed))
     }
 
     /// The encoded bytes of the one `OBSERVATION_ENDED` frame that would end every armed tap,
@@ -5621,7 +6058,18 @@ where
             .unwrap_or(&mut self.providers)
             .effects
             .get_mut(position)?;
-        let pushed = producer.try_push_observe(tap_index, armed, window_blocks);
+        // #1585 D4: the record's tag, issued only when the push succeeds.
+        let arm_tag = self.next_arm_tag;
+        let pushed = producer.try_push_observe(tap_index, armed, window_blocks, arm_tag);
+        if pushed.is_ok() {
+            self.next_arm_tag = arm_tag.saturating_add(1);
+        }
+        #[cfg(feature = "test-support")]
+        if pushed.is_ok() {
+            let newest = self.pending_providers.last().unwrap_or(&self.providers);
+            let key = newest.revision_gate.last_published_key();
+            TEST_OBSERVE_PUSH_KEY.with(|cell| cell.set(Some(key)));
+        }
         // #1310 (root ruling B15-Q4): a record on a plan render has not adopted.
         let on_candidate = !self.pending_providers.is_empty();
         if pushed.is_ok() {
@@ -5644,6 +6092,7 @@ where
                     PendingArm::Disarm
                 };
                 entry.queued |= on_candidate;
+                entry.tag = arm_tag;
                 // The count and the bytes follow the slot's state (#1676, #1685): an arm of an
                 // armed tap only changes its window, and a disarm of a tap that is not armed
                 // removes nothing.
@@ -5688,13 +6137,15 @@ where
                 break;
             };
             for slot in first..end {
-                let arm = core::mem::take(&mut self.observation_pending[slot as usize].pending);
+                let entry = &mut self.observation_pending[slot as usize];
+                let arm = core::mem::take(&mut entry.pending);
+                let arm_tag = entry.tag;
                 let Some(key) = tap_key_of(producer, slot - first) else {
                     continue;
                 };
                 match arm {
                     PendingArm::None => {}
-                    PendingArm::Arm(window) => self.observation.set(key, window),
+                    PendingArm::Arm(window) => self.observation.set_tagged(key, window, arm_tag),
                     PendingArm::Disarm => {
                         self.observation.clear(&key);
                     }
@@ -5710,16 +6161,6 @@ where
     #[must_use]
     pub fn master_strip(&self) -> Option<&session::StableId> {
         self.monitor.master()
-    }
-
-    /// The observation records the last rebuild queued again on the plan it published, from the
-    /// unadopted candidate it superseded (#1310, root ruling B15-Q4), each with the tap's bound state.
-    /// Read right after a structural command publishes a plan; empty when it superseded nothing.
-    /// A host that mirrors each plan's armed taps copies these onto the new plan's mirror, as for a
-    /// record it admitted: the plan arms them at its first block, whatever its carry brings.
-    #[must_use]
-    pub fn observation_forwarded(&self) -> &[ObservationForward] {
-        &self.observation_forwarded
     }
 
     /// The taps the host has armed (#1584 D6a), for a test or an adapter that reports them.
@@ -5805,7 +6246,7 @@ where
         id: &[u8],
         submission: SourceSubmission<'_>,
     ) -> Result<source::SubmitReport, SourceFailure> {
-        self.newest_providers_mut()
+        self.source_providers_mut(id)
             .sources
             .submit(id, submission)
             .map_err(SourceFailure::Control)
@@ -5829,7 +6270,7 @@ where
         generation: u64,
         source_frame: u64,
     ) -> Result<(), SourceFailure> {
-        self.newest_providers_mut()
+        self.source_providers_mut(id)
             .sources
             .seek(id, generation, source_frame)
             .map_err(SourceFailure::Control)
@@ -5845,7 +6286,7 @@ where
         anchor_sample: u64,
     ) -> Result<(), SourceFailure> {
         self.service().map_err(|_| SourceFailure::Internal)?;
-        self.newest_providers_mut()
+        self.source_providers_mut(id)
             .sources
             .seek_at(id, generation, source_frame, anchor_sample)
             .map_err(SourceFailure::Control)

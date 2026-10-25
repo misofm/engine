@@ -332,12 +332,15 @@ impl Control<'_> {
         self.admitted == self.swaps || self.failure.is_some()
     }
 
-    /// Whether the race is over (#1405): every swap is admitted and either a control call has
-    /// overlapped a render call or [`OVERLAP_BLOCKS`] blocks have rendered since the last
+    /// Whether the race is over (#1405): every swap is admitted and adopted, and either a control
+    /// call has overlapped a render call or [`OVERLAP_BLOCKS`] blocks have rendered since the last
     /// admission, or the race failed.
     fn race_over(&self) -> bool {
         self.failure.is_some()
             || (self.is_done()
+                // #1325: the last removal is adopted at its scheduled sample, after its ramp.
+                && watermark_c(self.plan_address)
+                    .is_some_and(|watermark| watermark.revision >= self.revision)
                 && (self.overlapped > 0
                     || self.rendered.load(Ordering::Acquire)
                         >= self.admission_block + OVERLAP_BLOCKS))
@@ -376,7 +379,7 @@ impl Control<'_> {
 
     /// One control iteration: feed the source, race the two synchronizing dequeue entries and a
     /// resource query against the render thread, and, once two blocks have rendered since the
-    /// last admission, offer the next structural transaction.
+    /// last admission and (paced) the watermark reports it, offer the next structural transaction.
     fn step(&mut self) {
         // #1310 gate 5: back to back, every other step feeds only after its submit, so no block
         // can start while the command runs and the candidate before it stays unadopted
@@ -435,7 +438,14 @@ impl Control<'_> {
             self.done.store(true, Ordering::Release);
             return;
         }
-        if !self.back_to_back && blocks < self.admission_block + 2 {
+        // Paced, each candidate is adopted before the next edit: two blocks after the admission,
+        // and, since a removal adopts at its scheduled sample after its ramp (#1325), once the
+        // watermark reports it.
+        if !self.back_to_back
+            && (blocks < self.admission_block + 2
+                || watermark_c(self.plan_address)
+                    .is_none_or(|watermark| watermark.revision < self.revision))
+        {
             return;
         }
         let mut output = BytesOut {
@@ -499,8 +509,9 @@ impl Control<'_> {
                     self.done.store(true, Ordering::Release);
                 }
             }
-            // #1310 gate 5: a structural edit behind a pending candidate supersedes it, so any
-            // `RESULT_BACKPRESSURE` here fails.
+            // #1310 gate 5: a structural edit behind a pending candidate supersedes it, and an
+            // add of `a-race` during its removal's phase 1 is a restore that commits (#1325 D6),
+            // so any `RESULT_BACKPRESSURE` here fails.
             other => self.fail(format!(
                 "submit after {admitted} swaps and {} blocks: {other}",
                 blocks - self.admission_block
@@ -546,8 +557,9 @@ fn race_unpaced(control: &mut Control<'_>, render: impl FnOnce()) {
 ///
 /// This thread renders blocks through the exported entry while `render_while_producing`'s
 /// producer thread runs the control side ([`Control::step`]): it commits `swaps` structural
-/// transactions, offering each once two blocks have rendered since the last admission, and between
-/// them spins on the two dequeue entries, which synchronize plan epochs first, and on
+/// transactions, offering each once two blocks have rendered since the last admission and, when
+/// paced, once the watermark reports it (a removal adopts at its scheduled sample, #1325), and
+/// between them spins on the two dequeue entries, which synchronize plan epochs first, and on
 /// `miso_engine_v1_plan_resources`. The swap therefore lands inside a render call that the
 /// control thread is racing. Each reader thread polls `miso_engine_v1_plan_resources` until the
 /// race ends.

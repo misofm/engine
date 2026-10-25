@@ -63,11 +63,7 @@ pub(super) fn request(
             maximum_scratch_bytes: quality.scratch_fixed_bytes,
             maximum_automation_spans_per_block: 16,
         },
-        tail_bound: conformance::tail_bound_of(
-            Box::new(crate::TransientShaperFactory),
-            rate,
-            EffectQuality::Normal,
-        ),
+        tail_bound: tail_bound(rate),
     }
 }
 
@@ -80,7 +76,7 @@ pub(super) fn backend(width: BankWidth) -> Backend {
 }
 
 /// Binds through the public factory at the native width, and through `bind_bank` otherwise.
-fn bind(
+pub(super) fn bind(
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],
@@ -106,7 +102,7 @@ fn scalar(request: PrepareEffectRequest<'_>) -> PreparedEffect {
 }
 
 /// Initial values from one `(left, right)` pair per parameter.
-fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
+pub(super) fn values_from(pairs: [(f32, f32); PARAMETER_COUNT]) -> Values {
     (0..PARAMETER_COUNT * 2)
         .map(|index| InitialParameterValue {
             parameter_index: (index / 2) as u32,
@@ -341,11 +337,13 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
         .collect();
     // Gate 3's padded-lane clause (P2a verdict, L4): fed `+0.0`, a padded lane keeps its state
     // finite and at rest, block after block. "At rest" is an idle track's state: the state of a
-    // scalar instance of the member the lane clones, fed `+0.0` and no automation.
+    // scalar instance of the member the lane clones, fed `+0.0` and no automation, under the
+    // first member's link mode, which a padded lane takes (#1368 D5) and its payload's link
+    // weights show (#1370 D6).
     let idle_request = request(
         &padded.members[padded.clone_of],
         padded.rate,
-        padded.links[padded.clone_of],
+        padded.links[0],
     );
     let rest = payload_of(scalar(idle_request).processor.as_ref(), sizes);
     let mut idle: Vec<Option<Box<dyn PreparedNativeEffect>>> = lanes
@@ -1031,3 +1029,21 @@ fn a_tripping_lane_leaves_every_bank_mates_bits() {
 // Issue #1747: the lane-swap test reuses this module's helpers.
 #[path = "swap_tests.rs"]
 mod swap_tests;
+
+/// The registry's tail-bound entry at `rate`, computed once per launch rate: a registry admission
+/// derives every row's bound, and per request it dominated this module's debug test time (#1972).
+fn tail_bound(rate: u32) -> effect_contract::RegisteredTailBound {
+    static BOUNDS: [std::sync::OnceLock<effect_contract::RegisteredTailBound>; 4] =
+        [const { std::sync::OnceLock::new() }; 4];
+    let index = RATES
+        .iter()
+        .position(|launch| *launch == rate)
+        .expect("a launch rate");
+    *BOUNDS[index].get_or_init(|| {
+        conformance::tail_bound_of(
+            Box::new(crate::TransientShaperFactory),
+            rate,
+            EffectQuality::Normal,
+        )
+    })
+}

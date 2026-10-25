@@ -276,3 +276,203 @@ two render calls, so the ramp starts at `p`).
   a withdrawn candidate is the running plan P0's own inventory
   (`PlanStateInventory::across_withdrawn`), with its source rows filtered to those that A carried
   vacant. The restored source's carry program, the producer check and the adoption are unchanged.
+
+## Decision record, slice 1325a (2026-10-24)
+
+Slice 1325a implements D1-D5, D7, D8 and the overlay *record* of D6; slice 1325b does D6's restore
+and gate 4. Checked against `origin/main` `068742aba`.
+
+- **The 1325b boundary.** A transaction during phase 1 whose model holds a strip or a source of
+  the running plan's duck overlay (a restore) is refused as `CommandError::Backpressure` before
+  anything is prepared, so the caller republishes the withdrawn candidate. Without the base overlay
+  of 1325b the restored strip would carry its ducked fader and stay muted. Once the watermark
+  reports the removal, the same edit is an added strip (#1288). 1325b removes the refusal, the
+  retry in `crates/capi/tests/plan_swap_race.rs` (`Control::restore_retries`) that depends on it,
+  and the two restore assertions in `strip_transitions.rs`'s gate-1 test (refused mid-ramp,
+  committed after the adoption).
+- **D2 records come from the classifier.** `plan_strip_transition` classifies the running plan's
+  base model with the overlay applied against the same with the new mutes
+  (`classify_live_delta_with_monitor`, ramps `LiveRamps::for_session(next)`, no edit ramps, the
+  base's monitor overlay on both sides). The records are what a value-only transaction making the
+  same mutes writes, so gate 1's reference is exact, a strip or route already in the overlay gets
+  no record (no second write), and a following route gets its seven-word record. A route out of a
+  ducked strip is muted only if its tap precedes the fader: muting a `post_fader`/`post_pan` route
+  into the output is rebuild-only (`RebuildOnly(Optimisation)`), and the fader mute reaches it.
+- **D7 signature.** `plan_strip_transition(base: &SuccessorBase, overlay: &DuckOverlay, next:
+  &SessionModel) -> Result<StripTransition, StripTransitionError>`. The `successor: &PreparedHost`
+  argument is left out until #1324 adds `restarted_strips()` to the duck set. `S` is not a field:
+  `p` is read after the writes, so `StripTransition::not_before(p, q)` returns it, and the overlay
+  keeps it (`DuckOverlay::raise_not_before`, the maximum of its own and the new one). An error is an
+  invariant fault (`Internal`), before anything is reserved.
+- **Adoption and `p` (R1).** The reservation is taken with the classification's adoption as
+  before; after the commit, the producer moves, the D2 writes and the `p` read,
+  `PlanReplacementReservation::set_adoption(NoEarlierThan(S))` replaces it. Because the reservation
+  borrows the publisher, `p` is read through a new `PlanReplacementReservation::render_clock`
+  (the same `Acquire` load as `PlanPublisher::render_clock`).
+- **Stamp (R2).** The writes go to the running plan's cells under
+  `stamp_monitor(last_published)` on its gate, checked as the last fallible step before the commit
+  and taken again (same key) after it, then `publish_key`. The gate never publishes `r`.
+- **Which rebuilds inherit `S`.** A transaction and a monitor rebuild that supersede a candidate in
+  phase 1 inherit the overlay's `S` (`NoEarlierThan`). A declared discontinuity ducks nothing and
+  stays `Next` (#1323 D2: it need not continue the running plan's output); the overlay stays in the
+  running epoch's kept base, so a transaction that later supersedes the discontinuity successor
+  inherits `S` again.
+- **D4 routing (R5).** `submit`, `seek` and `seek_at` (and their unserviced forms) look the source
+  up in the kept holder's overlay first (one binary search, no allocation, no lock) and go to that
+  epoch's producers on a hit, unless render has already adopted a later epoch (one `Acquire` load
+  of the active epoch render publishes): then the overlay is over and the call falls through to
+  the newest set, so the browser's unserviced feed after the adoption is refused as
+  `source.id.unknown` before any service step (attempt 2). `session_seek` and `seek_report` are
+  unchanged.
+- **The browser's plain seek (attempt 2).** `hosts/host-web/src/lib.rs` `seek_source` prepared the
+  consumer at the committed session's source index. Through phase 1 the plan that renders still
+  has the removed source and its own indices, so the index is now the rendering plan's
+  (`SessionState::rendering_source_index`, from that epoch's inventory). A source that plan does
+  not render has no consumer to prepare and is answered by the control plane's routing.
+- **The overlay's charge (attempt 2).** `DuckOverlay::retained_ceiling` bounds an overlay by its
+  plan's strips, routes and sources (three `Box<str>` vectors at count capacity and the ID text);
+  `merged`/`sorted_ids` shrink to length after dedup; the shrink is defensive (`merged`'s inputs
+  are disjoint and `joined` builds a new vector, so no mutant of it is red). Each epoch's capi row carries `KEPT_BASES`
+  times that ceiling at its own model (`MonitorRows::duck`), an epoch row like the monitor
+  overlay's: an overlay names only the plan it ducks, and a superseding commit never changes that
+  plan. The second copy is the replacement a superseding rebuild builds while the stored one
+  lives. The longest vector joins the largest-allocation check.
+- **`C`.** The rows of `PlanStateInventory::delay_lines` whose edge is a route's `RouteSource` or
+  `RouteDestination` edge; a route's two lines add. A route has both when a successor floors its
+  route node above its source's arrival: re-pointing a route to an earlier tap keeps the node at
+  its old arrival (#1285), and the unit test builds exactly that. Root approved a read-only accessor
+  `PlanStateInventory::delay_lines` in `prepare.rs` for this (the field was private).
+- **Paths outside the scope note, root-approved.** `crates/host-core/src/prepare.rs` (the
+  accessor, nothing else). Seven test files whose tests encoded the old contract (a removal adopted
+  at the next block, a removed source refused and discarded at the commit):
+  `crates/capi/src/runtime/tests.rs` (helpers `feed_and_render_until_direct`/`_c`; five tests render
+  until the watermark reports the removal, and the D4 checks move after the adoption with both
+  sides asserted), `crates/capi/src/runtime/supersede_tests.rs` (renders until the adoption),
+  `crates/capi/tests/empty_boot.rs` (silence after the adoption), `crates/capi/tests/plan_swap_race.rs`
+  (the race accepts BACKPRESSURE only on an add of `a-race` while its removal is committed and the
+  watermark, read before the submit, has not reported it; it retries once the watermark has; the
+  race ends only once the last revision is adopted, and the withdrawal count adds the retries),
+  `crates/control-plane/tests/spectrum_monitor.rs` (the promotion bound), `hosts/host-web/src/tests.rs`
+  (the discard count: none before `S`, two blocks after it) and `hosts/host-web/tests/control_parity.rs`
+  (render until the adoption). Both hosts change: the browser runs the same control-plane rebuild.
+  Attempt 2, root-approved: `hosts/host-web/src/lib.rs` (`seek_source` only).
+  Also root-approved: `tools/realtime-policy/src/policy.rs` and `docs/REALTIME_DEPENDENCY_POLICY.md`
+  put the new capi test binary on the unsafe-ownership list (its unsafe is the C calls), as every
+  other capi test binary is.
+
+### Gates and test value (1325a)
+
+- `crates/capi/tests/strip_transitions.rs::a_removed_strip_ramps_out_then_leaves_at_s` (gates 1, 2,
+  6): red if a removal still cuts at the swap, if `S` lacks `+ q` or `C`, if a pre-fader send is
+  left unducked, if the watermark reports the removal before `S` or with another outcome, if the
+  removed source is retired at the commit (refused phase-1 submits), or if a block from the commit
+  through the adoption allocates on the render thread.
+- `...::a_supersession_in_phase_one_keeps_s_and_the_feed` (gates 3, 5): red if a superseding
+  candidate drops the inherited `S`, if a second transaction writes a second mute for an overlay
+  strip, or if the producer of a source removed across a withdrawn candidate is not returned to the
+  running epoch (#1310 D5 step 5).
+- `host_core::transition::tests::a_transition_ducks_the_removed_strips_outside_the_overlay`: red if
+  the duck set includes an overlay strip, if `C` is not the route's compensation line or not the
+  sum of a route's two lines, if a route whose tap follows the fader is muted, or if the ceiling
+  misses a term (a full overlay, every strip, route and source of the plan, retains exactly it).
+- The restore assertions in gate 1's test: red if a phase-1 restore commits (1325b boundary).
+- `capi/tests/resource_lifecycle.rs` capi epoch oracle: red if the duck row leaves the charge.
+- `host-web/tests/control_parity.rs::a_removed_source_seeks_and_feeds_until_its_adoption_alike_on_both_hosts`:
+  red if the browser prepares a seek at the committed session's index, or if its unserviced feed
+  routes a removed source to the retiring plan after the adoption.
+- Mutants, each recorded red (committed tree, restored with `git checkout` and `touch`): adoption
+  left `Next`; `S` without `+ q`; `S` without `C`; no route records; source routing off; no `S`
+  inheritance; no overlay exclusion and no overlay applied (second write); #1310 D5 step 5 removed;
+  an allocation in `PlanAdoption::admits` (the test process aborts); and, on the unit test, no
+  overlay exclusion, `C` = 0, and post-fader routes muted. Attempt 2: no restore refusal (gate 1
+  red), `C` as the max of a route's lines (972 expected, 486 got), the ceiling without the
+  source ID text (the full overlay's bytes differ), no duck row (resource oracle red by 834 bytes), no adoption check in the source routing and the
+  committed-index browser seek (parity test red on each).
+
+### Stated limits (1325a)
+
+- A removed strip that is already silent (muted long before) still waits for `S`: the control plane
+  cannot know that its route lines are empty.
+- A submit that runs concurrently with the render call that adopts the successor is treated as
+  coming before the adoption: it is accepted, and its PCM is discarded with P0.
+- The `StripTransition` built inside one rebuild is a transient control-thread value, as the
+  classifier's own working sets are, and is not charged.
+
+## Decision record, slice 1325b (2026-10-25)
+
+Slice 1325b does D6's restore and gate 4. Checked against `origin/main` `de42aac5a` (#1363 slice 1
+and 1325a merged).
+
+- **The base overlay.** `SuccessorBase` gains `duck: &DuckOverlay` (neutral: empty). The
+  preparation lays it over `committed` once, at its start (`DuckOverlay::apply_to` on a
+  control-thread copy that drops with the call), beside the discontinuity substitution: every join
+  reads `committed`, so the effective values the carry starts from are what the running plan's
+  cells hold, by the same function `plan_strip_transition` uses for the phase-1 records. A
+  transient copy, not a stored model: nothing the restore adds outlives the call, so no charge
+  changes (the overlay only loses restored sources).
+- **The restored strip carries; it is not armed (D6 corrected against today's code).** D6 says an
+  overlay strip the newer candidate keeps is restarted and so armed (#1288) with its pre-fader
+  routes (#1363 D1 (c)). Since #1698, the base across a withdrawn candidate is P0's own inventory,
+  with only its source rows filtered, so the restored strip, its routes and its compensation lines
+  carry from P0 as a direct P0 -> B swap carries them. With the overlay in the base, its fader
+  mute and its pre-fader send's mute differ between the base (muted) and the model (unmuted), so
+  the carry writes them as retargets at the session ramp `N` from the adoption at the inherited
+  `S`, where the cells have settled at `+0.0`: the strip ramps back in from its ducked level, which
+  is root's stated outcome, with no restart and no arm. An arm on a carried strip would fight the
+  carried lane, so none is added. Gate 4's reference (a value-only unmute at `S`) is matched bit
+  for bit; its "no insert, filters off" conditions are kept but no longer needed.
+- **The restored source.** `PlanStateInventory::across_withdrawn_in_phase_one` (P0's inventory
+  across A, plus the source rows the overlay lists; `across_withdrawn` is it with an empty
+  overlay) gives B P0's row for a removed source, so a restore with the same declaration and ring
+  configuration carries P0's ring at adoption; any other declaration starts fresh. After the
+  commit, beside #1310 D5 step 2, `adopt_persisting` moves P0's producer into B's set: every other
+  entry B holds vacant took its producer from A's set first, so only restored ones move. The move
+  cannot fail; the producer is in P0's set by construction (the overlay lists the source only
+  while P0 holds it, and D5 step 5 returns it), so no separate pre-commit check was added; a debug
+  assertion bounds the moves by the restored count.
+- **A restored source leaves the overlay (amends D6's "it never left the overlay").**
+  `StripTransition::restored_sources` lists the overlay sources the next model keeps, and
+  `DuckOverlay::joined` drops them, so D4's routing sends their calls to the newest committed
+  session (where the producer now is). Restored strips and routes stay: P0's cells still hold their
+  ducks, so a later transaction writes them no second ramp and its base keeps composing them. If a
+  later transaction in the same phase 1 removes the source again, it is a removed source of P0's
+  base not in the overlay, so it rejoins it, and #1310 D5 step 5 returns its producer to P0.
+- **Deleted (the 1325a interim).** The restore refusal in `rebuild`; the two restore assertions in
+  `strip_transitions.rs`'s gate-1 test; `plan_swap_race.rs`'s `removal`/`restore_retries`/`retried`
+  fields, the retry wait, the `in_phase_one` arm and the withdrawal term (the race's
+  `race_over` wait for the last adoption stays: removals still adopt at `S`). With the retry gone,
+  the paced race (two blocks between admissions) met an add during its removal's phase 1, which now
+  supersedes it, and its `superseded == 0` check went red; the paced mode now also waits for the
+  watermark to report the last admission before the next edit, which is what "each candidate
+  adopted before the next" meant before removals adopted at `S`. The back-to-back race restores
+  `a-race` in phase 1 on every other edit and settles to a fresh plan of the final model.
+- **Paths.** `crates/host-core/src/prepare.rs` (the base field, its composition, the phase-one
+  inventory), `transition.rs`, `crates/control-plane/src/control.rs`, the capi tests, the header
+  paragraph (comments only) and `docs/C_ABI_V1_QUALIFICATION.md`.
+
+### Gates and test value (1325b)
+
+- `crates/capi/tests/strip_transitions.rs::a_restore_in_phase_one_fades_back_in_from_s` (gates
+  4 (a) and (b) in one run: gate 1's feed is already one block ahead): red if the successor's base
+  omits the overlay (the restored strip keeps its ducked fader and stays muted after the adoption),
+  if the restore does not inherit `S` (adopted mid-ramp, ramping up from a part-ducked level), if
+  the restored source gets a fresh ring, if its producer stays in the running plan's set, or if it
+  stays in the overlay (its submits are refused after the restore).
+- Mutants, each recorded red on the committed tree (restored with `git checkout` and `touch`):
+  no overlay composition (block 31, the first after `S`, differs: `-7.65e-18` against
+  `1.81e-4`); overlay routes not composed (the same block differs); no `S` inheritance (adopted at
+  1408, not 3584; gate 3's test is red too); fresh ring (P0's row dropped) and no producer move
+  and restored source kept in the overlay (each: the first submit after the restore is refused).
+
+- PR evidence (the verifier's probe, not a committed test: one test per claim): a remove, restore,
+  remove of `b` and `src-b` in one phase 1 matches gate 1's reference bit for bit, `src-b` is
+  accepted until the adoption and refused after it, and the adoption is at `S = 3584`.
+- Merge with #1354a (`origin/main` after PR #1979): `SuccessorBase` holds both `warm` and `duck`
+  with both neutral values, and the duck substitution runs after the warm-lead check, which must
+  precede the preparation's first allocation (the ducked copy allocates).
+
+### Stated limits (1325b)
+
+- A restore declared with another source declaration or ring configuration starts its source
+  fresh at generation 1, frame 0, as an added source does; P0's ring drains until `S` and retires
+  with P0.

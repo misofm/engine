@@ -193,6 +193,8 @@ fn prepare<L: Lane>(case: usize, group: usize, channel: usize) -> (GateCoef<L>, 
             GateRamp::fixed(L::load(&attack[..width])),
             GateRamp::fixed(L::load(&release[..width])),
         ],
+        // At rest, so never read: the corpus renders no glide (issue #1370).
+        links: [GateRamp::fixed(L::zero()); 2],
     };
     for (index, ramp) in state.ramps.iter_mut().enumerate() {
         let current = L::load(&resting[index][..width]);

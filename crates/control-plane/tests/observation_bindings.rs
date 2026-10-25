@@ -1578,6 +1578,23 @@ impl Rig {
             .read()
     }
 
+    /// The published state of the newest plan's tap 0 of insert `index` of `strip` (#1585 D2).
+    fn state_at(&self, strip: &str, index: u32) -> engine::realtime::ObservationState {
+        self.session
+            .test_pending_providers()
+            .last()
+            .unwrap_or(self.session.test_providers())
+            .test_observations()
+            .iter()
+            .find(|handle| {
+                &*handle.track_id == strip && handle.address == LiveEffectAddress::insert(index)
+            })
+            .expect("the insert's readers")
+            .readers[0]
+            .read_state()
+            .expect("a whole read")
+    }
+
     fn render_blocks(&mut self, blocks: u64) {
         for _ in 0..blocks {
             self.render();
@@ -1841,9 +1858,37 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         rig.session.observation_bindings().window_of(&new_key),
         Some(WINDOW_BLOCKS)
     );
+    // #1585 D4: the commit tags the transaction's record, after every earlier record's tag, and
+    // the new binding and the tap's slot entry hold it.
+    let issued = |rig: &Rig, strip: &str, effect: &str| {
+        rig.session.observation_issued_tag(&ObservationKeyRef {
+            strip_id: strip.as_bytes(),
+            rack: LiveEffectRack::Inserts,
+            effect_id: effect.as_bytes(),
+            tap_id: 1,
+        })
+    };
+    let new_tag = issued(&rig, "comp2", "comp-b");
+    assert!(
+        new_tag > issued(&rig, "comp1", "comp"),
+        "the structural record has a fresh tag"
+    );
+    let bound = rig
+        .session
+        .observation_bindings()
+        .bindings()
+        .iter()
+        .find(|binding| binding.key == new_key)
+        .map(|binding| binding.arm_tag);
+    assert_eq!(bound, Some(new_tag), "the binding holds the record's tag");
     // The swap block (block 5) adopts the successor, then three more: one window each.
     let adopted_at = rig.block * 128;
     rig.render_blocks(4);
+    assert_eq!(
+        rig.state_at("comp2", 1).arm_tag,
+        new_tag,
+        "render published the record's tag"
+    );
     let fresh = rig.window_at("comp2", 1).expect("the new tap's window");
     assert_eq!(
         (fresh.sequence, fresh.first_sample, fresh.blocks),
@@ -1945,4 +1990,57 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
             "rearm {rearm}"
         );
     }
+}
+
+/// #1968: a live transaction that commits revision `r` with an `Observe` arm queues the arm's
+/// record before it publishes `r` on the plan gate, so a render block whose snapshot covers `r`
+/// drains the record in the same block: a reader that sees the watermark cover `r` sees the tap
+/// armed from that block. The push records the key the gate had last published, which must still
+/// be the key it held before the commit.
+///
+/// Red if the commit publishes the revision before it queues the transaction's observation
+/// records (the order before #1968), so the watermark can cover `r` one block before the arm.
+#[test]
+fn a_live_commit_queues_its_observation_records_before_it_publishes_the_revision() {
+    let mut rig = Rig::new();
+    let before = rig.revision();
+    let mute = SessionEdit::SetControl {
+        expected_effect: None,
+        address: ControlAddress {
+            owner: Owner::Strip(StableId::parse("comp1").expect("strip")),
+            section: Section::Builtins,
+            control: 6,
+            lane: Lane::Both,
+        },
+        value: 1.0,
+        ramp_samples: None,
+    };
+    let _ = rig.session.test_take_observe_push_key();
+    let published = rig.session.test_newest_gate_key();
+    assert_eq!(
+        rig.transact(&[mute, observe("comp1", true, 1)]),
+        Reply::Applied(protocol::EditPath::Live)
+    );
+    let revision = rig.revision();
+    assert_eq!(revision, before + 1, "the mute spends a revision");
+    let pushed = rig
+        .session
+        .test_take_observe_push_key()
+        .expect("the arm was queued");
+    assert_eq!(
+        (pushed, published.revision()),
+        (published, before),
+        "the arm is queued before its revision is published"
+    );
+    let first_sample = rig.block * 128;
+    rig.render();
+    let watermark = rig.plan.queries().watermark().expect("a watermark");
+    assert_eq!(
+        (watermark.revision, watermark.first_sample),
+        (revision, first_sample)
+    );
+    let window = rig
+        .window("comp1")
+        .expect("armed in the block that applied the revision");
+    assert_eq!((window.first_sample, window.blocks), (first_sample, 1));
 }

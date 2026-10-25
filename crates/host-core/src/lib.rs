@@ -100,6 +100,7 @@ pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+pub mod duck;
 #[cfg(feature = "control-provider")]
 pub mod live_delta;
 pub mod meters;
@@ -112,11 +113,14 @@ pub use control_preparation::{
 pub mod prepare;
 pub mod render_session;
 pub mod response;
+pub mod response_capture;
 pub mod route_controls;
 pub mod shape;
 pub mod source;
 pub mod spectrum;
 pub mod spectrum_service;
+#[cfg(feature = "control-provider")]
+pub mod transition;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
 // `test-support` width seam (`test_only_prepare_host_runtime_with_live_controls_on`) that
 // `tests/` files now use, and stays a unit test on the `#[cfg(test)]` backend seam in `prepare`.
@@ -136,6 +140,7 @@ pub use control_provider::{
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
+pub use duck::DuckOverlay;
 pub use engine::LAUNCH_SAMPLE_RATES;
 pub use engine::realtime::{
     ObserverCarry, ObserverKind, ResponseSnapshotAvailability, ResponseSnapshotCapture,
@@ -164,18 +169,19 @@ pub use prepare::{
     HostLiveLanes, HostMeterRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
     LiveRampRow, LiveRamps, MAXIMUM_VCA_REACH_PAIRS, MAXIMUM_VCAS_BOUNDED, MonitorBase,
     NO_OBSERVATION, PlanStateInventory, PreparedHost, SOURCE_STALL_TOLERANCE_MS, SendRecord,
-    SourceInventoryRow, SuccessorBase, check_counts, compile_host_model, compile_host_session,
-    count_effects, default_source_ring_frames, effect_producer_position, follow_route_producer_for,
+    SourceInventoryRow, SuccessorBase, WarmConfig, WarmDecision, WarmLead, WarmUnavailable,
+    check_counts, compile_host_model, compile_host_session, count_effects,
+    default_source_ring_frames, effect_producer_position, follow_route_producer_for,
     follow_route_producer_position, jump_length_retained_bytes, launch_maximum_observation_taps,
-    pair_carried_meters, pair_carried_observations, parse_host_session, prepare_host_runtime,
-    prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
+    p_max_samples, pair_carried_meters, pair_carried_observations, parse_host_session,
+    prepare_host_runtime, prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
     prepare_host_runtime_with_live_controls_successor, prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_live_lanes_and_spectrum,
     prepare_host_runtime_with_live_lanes_successor, prepare_host_runtime_with_selected_meters,
     prepare_host_runtime_with_selected_meters_successor, prepare_host_runtime_with_spectrum,
     prepare_host_runtime_with_spectrum_collection, prepare_host_session,
-    prepare_host_session_with_live_controls, session_jump_lengths, strip_control_table_bytes,
-    strip_position,
+    prepare_host_session_with_live_controls, session_jump_lengths, stall_ring_frames,
+    strip_control_table_bytes, strip_position, warm_lead,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
@@ -189,6 +195,12 @@ pub use response::{
     ResponseSnapshotQueryError, ResponseSnapshotQuerySummary, TrackResponse,
     compose_track_response, generate_response_grid, input_filter_target, prepare_response_preview,
     prepare_response_query, query_response_snapshot_into, resolve_response_target,
+};
+pub use response_capture::{
+    ResponseCaptureCeiling, ResponseCaptureClient, ResponseCaptureFailure, ResponseCaptureJob,
+    ResponseCaptureRefusal, ResponseCaptureServer, ResponseCaptureSetupError, ResponseReady,
+    response_capture_ceiling, response_capture_channel, response_capture_owners,
+    response_capture_retained_bytes,
 };
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
@@ -225,6 +237,10 @@ pub use spectrum_service::{
     SpectrumService, SpectrumServiceError, SpectrumSnapshot, SpectrumStreamMetadata,
     SpectrumStreamStatus, spectrum_channels_from_raw, spectrum_smoothing, spectrum_target_kind,
     spectrum_target_ref,
+};
+#[cfg(feature = "control-provider")]
+pub use transition::{
+    DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError, plan_strip_transition,
 };
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).

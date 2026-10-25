@@ -164,6 +164,16 @@ pub struct ReferenceGateTimingChange {
     pub timing: (ReferenceGateTiming, ReferenceGateTiming),
 }
 
+/// One detector link glide (issue #1370): from `frame` on, both channels detect through the
+/// glide's weights (`crate::reference_link_blend`'s law), and before it through the render's link.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReferenceGateLinkGlide {
+    /// The first frame rendered with the glide's first weights.
+    pub frame: usize,
+    /// The weights, from the render's link to the target's.
+    pub glide: crate::ReferenceLinkGlide,
+}
+
 /// Samples a changed rate coefficient takes to reach its new design (#1336 D3).
 const RATE_RAMP_SAMPLES: usize = 64;
 
@@ -229,7 +239,49 @@ pub fn reference_gate_expander_process(
         link,
         main,
         sidechain,
+        (None, None),
+    )
+}
+
+/// As [`reference_gate_expander_process`] with no sidechain, with one detector link glide from
+/// `glide.frame` on (issue #1370 D3): each channel's level is
+/// `own + w_link * (max + w_avg * (avg - max) - own)` under the glide's weights of that frame.
+/// `change`, if given, is one live timing change as in
+/// [`reference_gate_expander_process_with_timing_change`], so a glide can cross a parameter ramp.
+///
+/// # Errors
+///
+/// As [`reference_gate_expander_process`], and also if the glide or the change starts past the
+/// render, or the change's timing has another sample rate.
+pub fn reference_gate_expander_process_with_link_glide(
+    params: (
+        ReferenceGateExpanderParameters,
+        ReferenceGateExpanderParameters,
+    ),
+    hysteresis_db: (f64, f64),
+    timing: (ReferenceGateTiming, ReferenceGateTiming),
+    link: ReferenceGateLink,
+    main: (&[f64], &[f64]),
+    glide: ReferenceGateLinkGlide,
+    change: Option<ReferenceGateTimingChange>,
+) -> Result<ReferenceGateTrace, ReferenceGateExpanderError> {
+    if glide.frame >= main.0.len()
+        || change.is_some_and(|change| {
+            change.frame >= main.0.len()
+                || change.timing.0.sample_rate != timing.0.sample_rate
+                || change.timing.1.sample_rate != timing.0.sample_rate
+        })
+    {
+        return Err(ReferenceGateExpanderError::InvalidInput);
+    }
+    process(
+        params,
+        hysteresis_db,
+        timing,
+        link,
+        main,
         None,
+        (change, Some(glide)),
     )
 }
 
@@ -271,7 +323,7 @@ pub fn reference_gate_expander_process_with_timing_change(
         link,
         main,
         None,
-        Some(change),
+        (Some(change), None),
     )
 }
 
@@ -285,7 +337,10 @@ fn process(
     link: ReferenceGateLink,
     main: (&[f64], &[f64]),
     sidechain: Option<(&[f64], &[f64])>,
-    change: Option<ReferenceGateTimingChange>,
+    (change, mut glide): (
+        Option<ReferenceGateTimingChange>,
+        Option<ReferenceGateLinkGlide>,
+    ),
 ) -> Result<ReferenceGateTrace, ReferenceGateExpanderError> {
     let frames = main.0.len();
     if main.1.len() != frames
@@ -360,6 +415,10 @@ fn process(
     };
     for frame in 0..frames {
         let dry = (main.0[frame], main.1[frame]);
+        let weights = match glide.as_mut() {
+            Some(glide) if frame >= glide.frame => Some(glide.glide.next_weights().0),
+            _ => None,
+        };
         let since = match changed {
             Some((at, left, right)) if frame >= at => {
                 if frame == at {
@@ -394,10 +453,15 @@ fn process(
             let sources = [detector_source.0[frame], detector_source.1[frame]];
             let own = sources[channel].abs();
             let other = sources[partner].abs();
-            let level = match link {
-                ReferenceGateLink::DualMono => own,
-                ReferenceGateLink::Maximum => own.max(other),
-                ReferenceGateLink::Average => 0.5 * own + 0.5 * other,
+            let level = match (weights, link) {
+                (Some([link, average]), _) => {
+                    let maximum = own.max(other);
+                    let mean = 0.5 * own + 0.5 * other;
+                    own + link * (maximum + average * (mean - maximum) - own)
+                }
+                (None, ReferenceGateLink::DualMono) => own,
+                (None, ReferenceGateLink::Maximum) => own.max(other),
+                (None, ReferenceGateLink::Average) => 0.5 * own + 0.5 * other,
             };
             let level_db = (20.0 * level.max(LEVEL_FLOOR).log10()).clamp(-160.0, 24.0);
 

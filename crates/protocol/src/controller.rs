@@ -2344,7 +2344,38 @@ impl<P: ControlProvider> ProtocolController<P> {
         output: &mut [u8],
     ) -> Result<usize, CommandFrameProcessError> {
         debug_assert_ne!(status, StatusCode::Ok);
-        let mut outcome = self.non_ok(status, None);
+        // A session `BACKPRESSURE` names its own resource (#1944): it goes through
+        // `complete_session_command_refused_backpressure`, never the replay-cache default.
+        debug_assert_ne!(status, StatusCode::Backpressure);
+        let outcome = self.non_ok(status, None);
+        self.complete_session_refusal(prepared, outcome, code, output)
+    }
+
+    /// Complete a command the session refused with `BACKPRESSURE`, the one diagnostic `code` and
+    /// the `backpressure` record that names the saturated resource (#1944), recorded for replay as
+    /// [`Self::complete_session_command_refused`] records a refusal.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::complete_session_command`].
+    pub fn complete_session_command_refused_backpressure(
+        &mut self,
+        prepared: PreparedSessionCommand,
+        code: &str,
+        backpressure: Backpressure,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        let outcome = self.non_ok(StatusCode::Backpressure, Some(backpressure));
+        self.complete_session_refusal(prepared, outcome, code, output)
+    }
+
+    fn complete_session_refusal(
+        &mut self,
+        prepared: PreparedSessionCommand,
+        mut outcome: Outcome,
+        code: &str,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
         if let Body::NonOk(payload) = &mut outcome.body
             && let Some(diagnostic) = payload.diagnostics.first_mut()
         {
@@ -3434,6 +3465,12 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// Mutably borrow the provider on its endpoint-owning control thread.
     pub fn provider_mut(&mut self) -> &mut P {
         &mut self.provider
+    }
+
+    /// Lend the provider mutably and the committed session immutably at once, on the endpoint's
+    /// control thread: a provider step that reads the committed model (#1577's capture poll).
+    pub fn provider_and_session_mut(&mut self) -> (&mut P, &SessionStore) {
+        (&mut self.provider, &self.session)
     }
 
     /// Borrow the bounded replay cache for occupancy fixture checks.

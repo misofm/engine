@@ -79,6 +79,10 @@ pub struct CapiResources {
     /// row: a successor that keeps spectrum keeps the same service, so the replacement peak adds
     /// only a candidate's bytes beyond the newest plan's.
     pub spectrum_service: u64,
+    /// The response capture's armed job and delivered result (#1577), part of `active_retained`:
+    /// [`host_core::response_capture_ceiling`] at the session's owner high-water, the row
+    /// `capi_resources` charges.
+    pub response_capture: u64,
 }
 
 /// Source-ring bytes a successor plan carries from the plan it displaces (issue #1273 D5).
@@ -296,6 +300,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
     monitor: MonitorRows,
+    response_capture: host_core::ResponseCaptureCeiling,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -378,6 +383,8 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         // the same row one commit ahead and is not charged twice. The edit ramps are not an epoch
         // row: see `CapiResources::edit_ramps`.
         monitor.overlay,
+        // #1325 D6: the duck overlay a kept base of this epoch holds, and its replacement.
+        monitor.duck,
     ];
     let ObservationReserve {
         ended_event,
@@ -456,6 +463,12 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         queue.retained_payload_bytes,
         replay.retained_payload_bytes,
         exchange.retained_payload_bytes,
+        // #1577 D2: the response capture channel's two queues.
+        host_core::response_capture_retained_bytes()
+            .map_err(|_| failure(ResourceFault::Arithmetic))?,
+        // #1577 (root ruling, attempt 2): one armed job and one delivered result, which outlive a
+        // call, at the session's bounds (`response_capture_bytes`).
+        response_capture.total_bytes,
     ];
     // The affine token (#1615): the response frame it stages (the measured length, never more than
     // a control frame), its own layout, and a copy of the request the commit writes into the
@@ -490,6 +503,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         source_id_row,
         strip_table_bytes,
         monitor.overlay_vector,
+        monitor.duck_vector,
     ]
     .into_iter()
     .chain([
@@ -504,6 +518,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         replay.largest_allocation_bytes,
         exchange.largest_allocation_bytes,
         provider.largest_allocation_bytes,
+        response_capture.largest_allocation_bytes,
     ])
     .max()
     .unwrap_or(0);
@@ -514,6 +529,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         largest,
         edit_ramps: monitor.edit_ramps,
         spectrum_service: 0,
+        response_capture: response_capture.total_bytes,
     })
 }
 
@@ -527,6 +543,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     observation: ObservationResources,
     limits: ControlLimits,
     strip_heap_bytes: u64,
+    capture_owners_high_water: usize,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
@@ -567,7 +584,28 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         route_controls,
         observation,
         monitor,
+        response_capture_bytes(compiled.normalized_model(), capture_owners_high_water)?,
     )
+}
+
+/// The response capture's control-side charge (#1577): [`host_core::response_capture_ceiling`]
+/// at the most owners of `model` and of every model the session committed before it
+/// (`owners_high_water`, 0 at boot), since a job or result sized under a displaced model can
+/// still be held. A bound, not an allocation.
+///
+/// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
+///
+/// # Errors
+///
+/// An arithmetic fault when the bound cannot be represented.
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub fn response_capture_bytes(
+    model: &session::SessionModel,
+    owners_high_water: usize,
+) -> Result<host_core::ResponseCaptureCeiling, CompileFailure> {
+    host_core::response_capture_owners(model)
+        .and_then(|owners| host_core::response_capture_ceiling(owners.max(owners_high_water)))
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))
 }
 
 /// The monitor overlay's and the edit-ramp table's rows of one epoch (#1696 D1-D3), bounded by
@@ -583,6 +621,14 @@ pub(crate) struct MonitorRows {
     /// and VCAs: the kept bases' ramp tables, pruned to this (the newest committed) model's owners
     /// whenever they are stored (#1696 root ruling).
     pub(crate) edit_ramps: u64,
+    /// [`KEPT_BASES`] times `host_core::DuckOverlay::retained_ceiling` of the model's strips,
+    /// routes and sources (#1325 D6): the duck overlay a kept base of this epoch holds and the
+    /// replacement a superseding rebuild builds while it lives. An epoch row, at the epoch model's
+    /// bounds, as the monitor overlay's is: an overlay names only the strips, routes and sources
+    /// of the plan it ducks, and a superseding commit never changes that plan.
+    pub(crate) duck: u64,
+    /// The overlay's longest ID vector alone, one allocation, for the largest-allocation check.
+    pub(crate) duck_vector: u64,
 }
 
 /// The summed text of `ids`.
@@ -605,6 +651,7 @@ pub(crate) fn monitor_rows(model: &session::SessionModel) -> Result<MonitorRows,
         .unwrap_or(0);
     let route_id_bytes = id_text_bytes(model.routes.iter().map(|route| &route.id))?;
     let vca_id_bytes = id_text_bytes(model.vcas.iter().map(|vca| &vca.id))?;
+    let source_id_bytes = id_text_bytes(model.sources.iter().map(|source| &source.id))?;
     let to_bytes =
         |bytes: usize| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform));
     Ok(MonitorRows {
@@ -625,7 +672,29 @@ pub(crate) fn monitor_rows(model: &session::SessionModel) -> Result<MonitorRows,
             .and_then(|table| table.checked_mul(KEPT_BASES))
             .ok_or_else(arithmetic)?,
         )?,
+        duck_vector: checked_layout::<Box<str>>(
+            strips.max(model.routes.len()).max(model.sources.len()),
+        )?,
+        duck: to_bytes(
+            host_core::DuckOverlay::retained_ceiling(
+                [strips, model.routes.len(), model.sources.len()],
+                [strip_id_bytes, route_id_bytes, source_id_bytes],
+            )
+            .and_then(|overlay| overlay.checked_mul(KEPT_BASES))
+            .ok_or_else(arithmetic)?,
+        )?,
     })
+}
+
+/// The duck-overlay epoch row of `model` (#1325 D6), so the C ABI's oracle can hold
+/// `capi_retained_bytes` to it.
+///
+/// # Errors
+///
+/// The arithmetic overflowed.
+#[cfg(feature = "test-support")]
+pub fn duck_overlay_bytes(model: &session::SessionModel) -> Result<u64, CompileFailure> {
+    Ok(monitor_rows(model)?.duck)
 }
 
 /// The monitor overlay's epoch row and the kept bases' edit-ramp row of `model` (#1696), so the
@@ -1141,6 +1210,17 @@ pub(crate) fn validate_replacement_peak(
                     .saturating_sub(newest.capi.spectrum_service),
             )
         })
+        // #1577: the response capture is charged once per session, at its owner high-water; a
+        // capture armed under the committed model is sized by the candidate's row, which can be
+        // larger than the newest's.
+        .and_then(|value| {
+            value.checked_add(
+                prospective
+                    .capi
+                    .response_capture
+                    .saturating_sub(newest.capi.response_capture),
+            )
+        })
         .ok_or_else(arithmetic)?;
     if capi_peak > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
@@ -1403,6 +1483,7 @@ pub trait RuntimePreparer: Send {
 /// report's source rows count those rings too (D5). `compile_session` passes `None`.
 ///
 /// `spectrum` is the session's spectrum preparation (#1593 D3), passed to the preparer as it is.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_runtime<A: ControlAdapter>(
     preparer: &dyn RuntimePreparer,
     compiled: &CompiledSession,
@@ -1411,6 +1492,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     successor: Option<SuccessorBase<'_>>,
     superseded: &host_core::LiveValuesSuperseded,
     observation_slots_high_water: usize,
+    capture_owners_high_water: usize,
 ) -> Result<PreparedRuntime, CompileFailure> {
     check_output_meter_caps(limits)?;
     let caps = prepare_caps(limits);
@@ -1501,6 +1583,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         )?,
         limits,
         strip_heap_bytes,
+        capture_owners_high_water,
     )?;
     // #1594 R6, #1595 R7: a plan with spectrum captures has a session spectrum service, analysis
     // and one-shot result beside it (made at boot or at the promotion that installs the first
@@ -1650,6 +1733,7 @@ where
         None,
         &live_values_superseded,
         0,
+        0,
     )?;
     // #1689 D3: a boot designates no master; the app writes the strip's `master` row after boot.
     let monitor = controls::MonitorOverlay::new();
@@ -1731,6 +1815,10 @@ where
     let (output_observer, output_reader, output_gate) = host_core::output_peak_meter(window_frames)
         .map_err(|_| failure(ResourceFault::Allocation))?;
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
+    // #1577 D5: the session's one response capture channel, its server beside the plan.
+    let (mut capture_client, capture_server) =
+        host_core::response_capture_channel().map_err(|_| failure(ResourceFault::Allocation))?;
+    capture_client.set_newest_plan_epoch(owner.active_epoch().0);
     let provider = SessionControlProvider::try_new(
         control_catalog,
         store.revision().0,
@@ -1740,6 +1828,7 @@ where
         // A reply must fit the endpoint's frame and the replay cache's response bound, both the
         // host's control frame limit.
         control_bytes,
+        capture_client,
     )
     .map_err(|_| failure(ResourceFault::Allocation))?;
     // #1583 R2: an adapter whose control plane serves the meter batches owns the delivery here,
@@ -1845,11 +1934,13 @@ where
         observation_wire: observation_wire(limits.maximum_control_frame_bytes)?,
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
-        observation_forwarded: Vec::new(),
+        capture_owners_high_water: 0,
+        next_arm_tag: 1,
         send_moves: None,
         spectrum,
         output_meter,
         meters: session_meters,
+        response_ready: None,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,
@@ -1863,9 +1954,14 @@ where
     session.observation_armed = armed;
     session.observation_armed_bytes = armed_bytes;
     session.observation_slots_high_water = session.observation_pending.len();
+    // #1577: the boot model's owners start the response capture's high-water.
+    session.capture_owners_high_water = host_core::response_capture_owners(
+        session.controller.session().compiled().normalized_model(),
+    )
+    .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     Ok(CompiledChildren {
         session,
-        plan: PlanState::new(owner, shared, output_observer, output_gate),
+        plan: PlanState::new(owner, shared, output_observer, output_gate, capture_server),
     })
 }
 
@@ -1949,6 +2045,7 @@ mod admission_tests {
                 largest: base,
                 edit_ramps: 0,
                 spectrum_service: 0,
+                response_capture: 0,
             },
             carried: CarriedSourceBytes::default(),
         }
@@ -2167,6 +2264,10 @@ mod admission_tests {
     /// candidate's promotion makes: a candidate with the service beside a newest plan without it
     /// raises the control-retained peak by the service's bytes (accepted at the peak, refused one
     /// byte below), and beside a newest plan that has it already, by nothing.
+    ///
+    /// #1577: likewise the response capture row. A candidate whose model has more owners per strip
+    /// than the newest plan's raises the peak by the rows' difference, and one with the same row by
+    /// nothing; red if the replacement admission leaves the capture row's growth out.
     #[test]
     fn the_replacement_admission_charges_a_new_spectrum_service_once() {
         let models =
@@ -2191,6 +2292,24 @@ mod admission_tests {
                 verdict(&held, prospective, models, with_cap(7, peak - 1)),
                 Err(CAPS[7].1.to_owned()),
                 "{label}: refused one byte below"
+            );
+        }
+        let mut prospective = candidate(1_000);
+        prospective.capi.response_capture = 900;
+        for (label, newest_row, peak) in [
+            ("a grown capture row", 300, control + 600),
+            ("a kept capture row", 900, control),
+        ] {
+            let mut newest = epoch(1);
+            newest.capi.response_capture = newest_row;
+            let held = [newest];
+            assert_eq!(
+                (
+                    verdict(&held, prospective, models, with_cap(7, peak)),
+                    verdict(&held, prospective, models, with_cap(7, peak - 1)),
+                ),
+                (Ok(()), Err(CAPS[7].1.to_owned())),
+                "{label}: accepted at the peak, refused one byte below"
             );
         }
     }

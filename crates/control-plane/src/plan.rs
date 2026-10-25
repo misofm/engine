@@ -60,6 +60,9 @@ pub struct PlanState<A: ControlAdapter> {
     /// The output meter's render half (#1581 D4): made with the session's first plan and part of
     /// no plan, so a plan swap does not touch it. The session hands out its reader and gate.
     pub(crate) output_meter: host_core::OutputPeakObserver,
+    /// The render half of the session's response capture (#1577 D3): made with the session's
+    /// first plan and part of no plan, run after every successful block.
+    pub(crate) response_capture: host_core::ResponseCaptureServer,
     /// The relay of the output meter's gate (#1583) when the session's meter delivery runs on the
     /// control thread (the C ABI): the delivery writes a requested gate, and [`Self::render`]
     /// applies it before each block, so the gate moves only here, between blocks. `None` when the
@@ -73,6 +76,7 @@ impl<A: ControlAdapter> PlanState<A> {
         shared: Arc<SharedPlanState<A::Row>>,
         output_meter: host_core::OutputPeakObserver,
         output_gate: Option<host_core::meters::OutputPeakGateRelay>,
+        response_capture: host_core::ResponseCaptureServer,
     ) -> Self {
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_plan_constructed += 1);
@@ -81,6 +85,7 @@ impl<A: ControlAdapter> PlanState<A> {
             shared,
             fp_env_attested: core::cell::Cell::new(false),
             output_meter,
+            response_capture,
             output_gate,
         }
     }
@@ -380,6 +385,9 @@ impl<A: ControlAdapter> PlanState<A> {
         self.shared
             .source_underrun_blocks
             .store(self.owner.source_underrun_blocks(), Ordering::Release);
+        // #1577 D3: after the epoch store, so the control side never reads an epoch this step
+        // has not yet seen; never after an error.
+        self.response_capture.after_block(&mut self.owner);
         Ok(report.watermark)
     }
 
@@ -492,7 +500,15 @@ mod tests {
         let (output_meter, _reader, gate) =
             host_core::output_peak_meter(core::num::NonZeroU32::MIN).expect("output meter");
         (
-            PlanState::<TestAdapter>::new(owner, shared, output_meter, None),
+            PlanState::<TestAdapter>::new(
+                owner,
+                shared,
+                output_meter,
+                None,
+                host_core::response_capture_channel()
+                    .expect("capture channel")
+                    .1,
+            ),
             gate,
         )
     }

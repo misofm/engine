@@ -63,11 +63,7 @@ pub(super) fn request(
             maximum_scratch_bytes: quality.scratch_fixed_bytes,
             maximum_automation_spans_per_block: 16,
         },
-        tail_bound: conformance::tail_bound_of(
-            Box::new(crate::GateExpanderFactory),
-            rate,
-            EffectQuality::Normal,
-        ),
+        tail_bound: tail_bound(rate),
     }
 }
 
@@ -80,7 +76,7 @@ fn backend(width: BankWidth) -> Backend {
 }
 
 /// Binds through the public factory at the native width, and through `bind_bank` otherwise.
-fn bind(
+pub(super) fn bind(
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],
@@ -346,11 +342,13 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
         .state_sizes;
     // Gate 3's padded-lane clause (P2a verdict, L4): fed `+0.0`, a padded lane keeps its state
     // finite and at rest, block after block. "At rest" is an idle track's state: the state of a
-    // scalar instance of the member the lane clones, fed `+0.0` and no automation.
+    // scalar instance of the member the lane clones, fed `+0.0` and no automation, under the
+    // first member's link mode, which a padded lane takes (#1368 D5) and its payload's link
+    // weights show (#1370 D6).
     let idle_request = request(
         &padded.members[padded.clone_of],
         padded.rate,
-        padded.links[padded.clone_of],
+        padded.links[0],
     );
     let mut idle: Vec<Option<Box<dyn PreparedNativeEffect>>> = lanes
         .iter()
@@ -1050,4 +1048,22 @@ fn a_tripping_lane_leaves_every_bank_mates_bits() {
         }
     }
     lane::each_vector_lane!(|L, N| at::<L>(BankWidth::for_lanes(N).expect("a bank width")));
+}
+
+/// The registry's tail-bound entry at `rate`, computed once per launch rate: a registry admission
+/// derives every row's bound, and per request it dominated this module's debug test time (#1972).
+fn tail_bound(rate: u32) -> effect_contract::RegisteredTailBound {
+    static BOUNDS: [std::sync::OnceLock<effect_contract::RegisteredTailBound>; 4] =
+        [const { std::sync::OnceLock::new() }; 4];
+    let index = [44_100, 48_000, 88_200, 96_000]
+        .iter()
+        .position(|launch| *launch == rate)
+        .expect("a launch rate");
+    *BOUNDS[index].get_or_init(|| {
+        conformance::tail_bound_of(
+            Box::new(crate::GateExpanderFactory),
+            rate,
+            EffectQuality::Normal,
+        )
+    })
 }
