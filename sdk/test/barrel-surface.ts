@@ -119,7 +119,6 @@ type BrowserResponsePreviewClass =
 type BrowserResponsePreviewCreate =
   Assert<Exact<typeof browserBarrel.createResponsePreview, typeof browserResponse.createResponsePreview>>;
 
-
 // --- the barrels the deep imports already had ---------------------------------------------------
 //
 // The three entry points `sdk/package.json` names must each keep their pre-#278 surface. Naming a

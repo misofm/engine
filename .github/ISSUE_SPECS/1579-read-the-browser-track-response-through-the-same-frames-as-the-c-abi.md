@@ -288,6 +288,9 @@ SDK public behaviour changes of #1579b (browser engine; add them to the changelo
 12. `queryTrackResponse` settles after the next rendered block. A suspended or never-started
     context rejects it at `responseLimits.requestDeadlineMs` (default 5 s), with `MisoUsageError`
     "exceeded its deadline".
+    The managed owner's shared poll runs its response jobs one after another, each waiting for one
+    rendered block, so with N response jobs one poll waits at least N quanta before the spectrum
+    refresh in the same poll runs.
 13. Concurrent queries run one at a time, in call order. Before, the second was refused "already in
     flight".
 14. A failed or disposed host rejects every pending and queued query at once with a lifecycle
