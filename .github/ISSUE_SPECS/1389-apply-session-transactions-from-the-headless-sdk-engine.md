@@ -162,7 +162,11 @@ All behavioural gates run in `sdk/test/headless-apply-evals.mjs` against the rea
 - **D3.** The watermark is read after each `render()` and on `watermark()`/`applied()`, and settles the
   ledger. `revision` is the core's committed revision word, read on demand.
 - **D4.** `replaceSession` rebinds `liveControls()`/`withSession` to the replacement document; after an
-  `apply` rebuild live controls resolve from the core's control list (#1562b-K). Gate 4 is folded into gate 1.
+  `apply` rebuild live controls resolve from the core's control list (#1562b-K). Gate 4's first half is
+  already held, once each: strips rebinding after a rebuild in `sdk/test/structure-evals.mjs` (#1562b-K) and
+  the stale-list refusal in `sdk/test/control-list-evals.mjs`; gate 1 adds only the replace's own claim
+  (`withSession` of the replacement document succeeds). A mutant caching the boot's session map stays green
+  because edits resolve through the control list's strip order, so no headless map rebinding exists to test.
 - **Found, not fixed (outside the authorized paths): a `ControlTransactionQueue` made before an `apply` or
   `replaceSession` refuses its next `SET_CONTROL` with `revision_conflict`.** The queue expects the revision
   of its own last reply and retries nothing on a refusal (`control-queue.ts`, `#transact`), so the second
