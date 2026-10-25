@@ -30,6 +30,13 @@ Do not claim before launch without an owner comment here.
 - Second change (root): the pretty print made the shipped metadata 54 % larger, a real cost for the
   browser SDK, so both documents are compact JSON: no formatter at all and the smallest asset. The
   regeneration check guards these generated files, not a human diff.
+- Layout-dependent readers (root-authorized search of `scripts/`, `.github/`, `sdk/`, `hosts/` for
+  sed, grep, awk, regex or line edits of the two documents): one found and fixed.
+  `scripts/test-web-audioworklet.sh` mutated the metadata with `s/"liveUpdatable": true/.../`,
+  which matched nothing in compact JSON (CI red on #1978). It is now `"liveUpdatable": *true`, and
+  the script fails if the edit leaves the file unchanged. Every other reader parses the JSON
+  (`json.load`, `JSON.parse`, `serde_json`) or names the file only; the schema gates' self-tests
+  mutate parsed values.
 - Part 2: `scripts/check-web-audioworklet.sh` requires each shipped JS file to declare
   `COMMAND_RECORD_BYTES` exactly once, equal to the shipped layout's `commandRecord.bytes`.
 
