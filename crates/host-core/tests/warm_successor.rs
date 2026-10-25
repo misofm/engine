@@ -494,13 +494,22 @@ fn a_send_into_a_bus_from_a_latent_track_restarts_the_track() {
         assert_eq!(restarted(&w), ["x"], "bus limiter {bus_limiter}");
         // Scope R6: the warm program moves none of X's pre-fader owners (its input section and
         // its limiter) and not its fader; everything else the ordinary successor carries, it
-        // carries.
+        // carries. Of the compensation lines, X's are all new, and the one line A and the warm
+        // successor share, `s-main`'s (without the bus limiter), carries: the whole-strip restart
+        // filter (#1324a) drops no line of a strip it does not restart.
         let mut ordinary = edit.prepare(edit.base()).expect("ordinary");
         assert!(ordinary.restarted_strips().is_empty());
-        let [sources, inputs, strips, effects] = graph::test_only_carry_counts(&mut ordinary.plan);
+        let [sources, inputs, strips, effects, _] =
+            graph::test_only_carry_counts(&mut ordinary.plan);
         assert_eq!(
             graph::test_only_carry_counts(&mut w.plan),
-            [sources, inputs - 1, strips - 1, effects - 1],
+            [
+                sources,
+                inputs - 1,
+                strips - 1,
+                effects - 1,
+                usize::from(!bus_limiter)
+            ],
             "bus limiter {bus_limiter}"
         );
         let mut carried = stages("s", TrackStage::Input);

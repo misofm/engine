@@ -5785,13 +5785,13 @@ pub fn test_only_timeline_at(
 }
 
 /// The entries of the plan's carry tables that [`carry_program_retained_bytes`] charges, as
-/// counts: `[source moves, input-section lane moves, strip-stage moves, effect-lane moves]`. All
-/// zero for a plan without a carry program or for any other plan.
+/// counts: `[source moves, input-section lane moves, strip-stage moves, effect-lane moves,
+/// compensation-line moves]`. All zero for a plan without a carry program or for any other plan.
 #[cfg(any(test, feature = "test-support"))]
-pub fn test_only_carry_counts(plan: &mut PreparedRenderPlan) -> [usize; 4] {
+pub fn test_only_carry_counts(plan: &mut PreparedRenderPlan) -> [usize; 5] {
     plan.executor_any_mut()
         .and_then(|any| any.downcast_mut::<GraphExecutor>())
-        .map_or([0; 4], |executor| {
+        .map_or([0; 5], |executor| {
             [
                 executor
                     .carry
@@ -5800,6 +5800,7 @@ pub fn test_only_carry_counts(plan: &mut PreparedRenderPlan) -> [usize; 4] {
                 executor.carry_inputs.len(),
                 executor.carry_strips.len(),
                 executor.carry_effects.len(),
+                executor.carry_delays.len(),
             ]
         })
 }

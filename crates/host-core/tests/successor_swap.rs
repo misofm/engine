@@ -46,9 +46,11 @@ const AUX_SOURCE: &str = "aux-source";
 const MUTED_TRACK: &str = "a-muted";
 
 /// The carry program's table entries, `[source moves, input-section lane moves, strip-stage
-/// moves, effect-lane moves]` (#1276, #1277 D8, #1280): `graph::test_only_carry_counts`.
+/// moves, effect-lane moves]` (#1276, #1277 D8, #1280): the first four of
+/// `graph::test_only_carry_counts`.
 fn carry_counts(prepared: &mut host_core::PreparedHost) -> [usize; 4] {
-    graph::test_only_carry_counts(&mut prepared.plan)
+    let [sources, inputs, strips, effects, _] = graph::test_only_carry_counts(&mut prepared.plan);
+    [sources, inputs, strips, effects]
 }
 
 /// The command queue and seek-report record a successor's carried timeline brings (#1641 D7,
