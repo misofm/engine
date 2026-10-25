@@ -698,19 +698,26 @@ class MisoSabFeedAttachProcessor extends AudioWorkletProcessor {
         withdraw(this.delivered)
         this.delivered = []
       } else if (data.op === "detach-source") {
-        // Issue #1297b D5: withdraw one ring this node brought. The reply is posted after the
-        // engine stopped reading it: this handler runs between blocks, on the drain's thread.
-        if (this.delivered.indexOf(data.ring) >= 0) {
-          this.delivered = this.delivered.filter((ring) => ring !== data.ring)
+        // Issue #1297b D5: withdraw one ring this node brought, named by its index in the attach
+        // list. A port clones every message, so a SharedArrayBuffer it carries is a new object
+        // each time and can never name a ring this node holds; the index survives the clone. The
+        // reply is posted after the engine stopped reading the ring (this handler runs between
+        // blocks, on the drain's thread) and says whether a ring was withdrawn.
+        const index = data.index
+        const ring = Number.isSafeInteger(index) && index >= 0 && index < this.delivered.length
+          ? this.delivered[index]
+          : null
+        if (ring != null) {
           if (registry.engine === null) {
-            if (registry.pending !== null) registry.pending = registry.pending.filter((ring) => ring !== data.ring)
+            if (registry.pending !== null) registry.pending = registry.pending.filter((entry) => entry !== ring)
           } else {
-            registry.engine.detachSharedRings([data.ring])
+            registry.engine.detachSharedRings([ring])
           }
+          this.delivered = this.delivered.map((entry, at) => (at === index ? null : entry))
         }
-        this.port.postMessage({ op: "source-detached", requestId: data.requestId })
+        this.port.postMessage({ op: "source-detached", requestId: data.requestId, detached: ring != null })
       } else if (data.op === "prepare-seek") {
-        const result = registry.engine === null ? { kind: "refused", result: RESULT_WRONG_STATE } : registry.engine.prepareSharedSeeks(this.delivered, data.seeks)
+        const result = registry.engine === null ? { kind: "refused", result: RESULT_WRONG_STATE } : registry.engine.prepareSharedSeeks(this.delivered.filter((ring) => ring !== null), data.seeks)
         registry.engine?.rebindMemoryViews()
         this.port.postMessage({ op: "seek-prepared", requestId: data.requestId, ...result })
       }

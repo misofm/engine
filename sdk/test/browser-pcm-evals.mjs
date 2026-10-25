@@ -670,8 +670,10 @@ function anchoredPrelude(source) {
   sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
   const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
   const attach = new (registrations.get("miso-sab-feed-attach"))();
-  const node = { port: { onmessage: null, postMessage: (data) => attach.port.onmessage({ data }) }, disconnect() {} };
-  attach.port.postMessage = (data) => node.port.onmessage?.({ data });
+  // Each direction clones its message as a browser port does: a SharedArrayBuffer arrives as a new
+  // object over the same memory, so the worklet can never find a ring by the SDK's object identity.
+  const node = { port: { onmessage: null, postMessage: (data) => attach.port.onmessage({ data: structuredClone(data) }) }, disconnect() {} };
+  attach.port.postMessage = (data) => node.port.onmessage?.({ data: structuredClone(data) });
   return { engine, attach, node, submissions, seeks, seekAts, process: () => engine.process([], []), setSeekAtResult: (value) => { seekAtResult = value; } };
 }
 
@@ -755,8 +757,9 @@ test("an anchored start is applied once by the engine handler, and the drain rea
 
 test("detachSource withdraws one ring: the drain never reads it after it resolves, and the others keep draining", async () => {
   // #1297b gate 4 (the feed half; the engine's timing is browser-evals'). Red if detachSource
-  // resolves before the worklet withdrew the ring, withdraws another node's or every ring, or
-  // leaves the ring's writer engaged.
+  // resolves before the worklet withdrew the ring, names the ring by an identity a cloned message
+  // loses (the worklet then withdraws nothing and still confirms), withdraws another node's or
+  // every ring, or leaves the ring's writer engaged.
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
   const run = anchoredPrelude(source);
   const feed = attachEngineFeed({ context, sources: [{ sourceId: "kept", channels: 1 }, { sourceId: "gone", channels: 1 }], quantumFrames: 4, capacityChunks: 4, createNode: () => run.node });
@@ -773,6 +776,11 @@ test("detachSource withdraws one ring: the drain never reads it after it resolve
   assert.deepEqual(run.submissions.map(({ id }) => id), ["kept"]);
   assert.equal(controls(goneRing)[MSB1_CONTROL.READ_INDEX], 0, "the withdrawn ring is never read");
   await assert.rejects(feed.detachSource("gone"), /no source gone/);
+  // A worklet that withdrew nothing says so; the SDK rejects and closes rather than leak the ring.
+  const unconfirmed = { port: { onmessage: null, postMessage: (data) => { if (data.op === "detach-source") unconfirmed.port.onmessage?.({ data: { op: "source-detached", requestId: data.requestId, detached: false } }); } }, disconnect() {} };
+  const refused = attachEngineFeed({ context, sources: [{ sourceId: "lost", channels: 1 }], quantumFrames: 4, createNode: () => unconfirmed });
+  await assert.rejects(refused.detachSource("lost"), (error) => error instanceof PcmFeedError && error.operation === "detachRefused");
+  assert.equal(refused.state, "closed");
 });
 
 test("the pump's writer publishes a plain seek in the SDK's ring layout", async () => {

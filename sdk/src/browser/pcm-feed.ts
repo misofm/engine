@@ -12,7 +12,7 @@ import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
 
 export type PcmFeedOperation = "moduleLoad" | "nodeCreate" | "attachPost" | "readyTimeout" | "closed"
   | "prepareState" | "prepareBusy" | "preparePost" | "prepareTimeout" | "prepareSuperseded" | "prepareRefused"
-  | "detachPost" | "detachTimeout";
+  | "detachPost" | "detachTimeout" | "detachRefused";
 
 export class PcmFeedError extends Error {
   readonly operation: PcmFeedOperation;
@@ -127,7 +127,8 @@ export interface EngineFeed {
   prepareSeek(options?: { readonly timeoutMs?: number }): Promise<void>;
   /**
    * Withdraw one source's ring (issue 1297b D5): resolves after the worklet's drain stopped reading
-   * it, then releases it. The other rings keep draining. Timeout closes the feed.
+   * it, then releases it. The other rings keep draining. A worklet that withdrew no ring rejects
+   * with `detachRefused`; it and a timeout close the feed, which withdraws every ring.
    */
   detachSource(sourceId: string, options?: { readonly timeoutMs?: number }): Promise<void>;
   close(): void;
@@ -406,9 +407,11 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   if (options.engine !== undefined && link === undefined) throw new MisoUsageError("the feed's engine is not one createEngine resolved with");
   if (link === undefined && starts.some((start) => start !== undefined)) throw new MisoUsageError("a feed source start needs the feed's engine");
   const created = options.sources.map((source) => createMsb1Ring({ sourceId: source.sourceId, channels: source.channels, frameCapacity: options.quantumFrames, capacity }));
-  // The rings still delivered, by source ID; `detachSource` withdraws one.
-  const live = new Map(options.sources.map((source, index) => [source.sourceId, created[index]!] as const));
-  let rings: readonly SharedArrayBuffer[] = Object.freeze([...live.values()]);
+  // The rings still delivered, by source ID, with each one's index in the attach list: a port
+  // clones a SharedArrayBuffer into a new object, so the worklet is told the index, never the ring.
+  const live = new Map(options.sources.map((source, index) => [source.sourceId, { ring: created[index]!, index }] as const));
+  const liveRings = (): readonly SharedArrayBuffer[] => Object.freeze([...live.values()].map((entry) => entry.ring));
+  let rings = liveRings();
   let node: FeedNode;
   try {
     node = options.createNode?.(options.context, "miso-sab-feed-attach", { numberOfInputs: 0, numberOfOutputs: 1 }) ?? defaultNode(options.context);
@@ -427,7 +430,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   let starting: Promise<void> | undefined;
   node.port.onmessage = ({ data }: MessageEvent): void => {
     if (data?.op === "source-detached") {
-      detaching.get(data.requestId)?.();
+      detaching.get(data.requestId)?.(data.detached === true ? undefined : new PcmFeedError("detachRefused", "PCM feed worklet withdrew no ring for the source"));
       return;
     }
     if (data?.op !== "seek-prepared" || data.requestId !== pending?.id || pending === undefined) return;
@@ -540,13 +543,14 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     },
     async detachSource(sourceId: string, settings = {}): Promise<void> {
       if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
-      const ring = live.get(sourceId);
-      if (ring === undefined) throw new MisoUsageError(`the feed delivers no source ${sourceId}`);
+      const entry = live.get(sourceId);
+      if (entry === undefined) throw new MisoUsageError(`the feed delivers no source ${sourceId}`);
+      const { ring, index } = entry;
       const timeoutMs = settings.timeoutMs ?? 2_000;
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new MisoUsageError("detachSource timeoutMs must be finite and positive");
       // The ring leaves the delivered set now, so no prepareSeek or later retirement names it.
       live.delete(sourceId);
-      rings = Object.freeze([...live.values()]);
+      rings = liveRings();
       unstarted = unstarted.filter((entry) => entry.source.sourceId !== sourceId);
       await new Promise<void>((resolve, reject) => {
         const id = ++requestId;
@@ -558,9 +562,12 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
         detaching.set(id, (error) => {
           clearTimeout(timer);
           detaching.delete(id);
-          if (error === undefined) resolve(); else reject(error);
+          if (error === undefined) { resolve(); return; }
+          reject(error);
+          // An unconfirmed withdrawal is not left to leak: closing withdraws every ring of the node.
+          if (error.operation === "detachRefused") close();
         });
-        try { node.port.postMessage({ op: "detach-source", requestId: id, ring }); }
+        try { node.port.postMessage({ op: "detach-source", requestId: id, index }); }
         catch (cause) { detaching.get(id)?.(new PcmFeedError("detachPost", "PCM source detach could not be posted", cause)); close(); }
       });
       // Confirmed: the drain no longer reads it, so the writer is released.

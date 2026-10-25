@@ -972,9 +972,11 @@ describe("browser session edits", () => {
       port: {
         onmessage: null,
         postMessage(data) {
-          if (data.op !== "detach-source") return;
-          detached.push(data.ring);
-          node.port.onmessage?.({ data: { op: "source-detached", requestId: data.requestId } });
+          // Cloned as a browser port does; the ring is named by its index in the attach list.
+          const message = structuredClone(data);
+          if (message.op !== "detach-source") return;
+          detached.push(message.index);
+          node.port.onmessage?.({ data: structuredClone({ op: "source-detached", requestId: message.requestId, detached: true }) });
         },
       },
       disconnect() {},
@@ -999,11 +1001,11 @@ describe("browser session edits", () => {
     try {
       const removal = await engine.apply(transaction(fed(["a", "b", "c"])).removeRoute("tb.main").removeTrack("tb").removeSource("b").build());
       await untilApplied(removal.revision);
-      assert.deepEqual(detached.splice(0), [b]);
+      assert.deepEqual(detached.splice(0), [1]);
       assert.deepEqual(feed.rings, [a, c]);
       const replaced = await engine.replaceSession(fed(["a"]));
       await untilApplied(replaced.revision);
-      assert.deepEqual(detached.splice(0), [c]);
+      assert.deepEqual(detached.splice(0), [2]);
       assert.deepEqual(feed.rings, [a]);
     } finally {
       feed.close();
