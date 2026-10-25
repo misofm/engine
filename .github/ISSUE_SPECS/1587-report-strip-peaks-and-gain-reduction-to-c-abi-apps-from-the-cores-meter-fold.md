@@ -245,13 +245,19 @@ Commands: `cargo test --locked -p host-core --all-features`,
   rebuild the promoted epoch read the successor's fresh slots, which nothing published to, so a
   strip's gain reduction never came back. The swap record lives in the successor's executor, on
   the render thread, so the C ABI plan now carries a host attachment (`CarriedTapsAttachment`,
-  set in `prepare_runtime` for a `METER_DELIVERY` adapter; the browser keeps its own) whose
+  set in `prepare_runtime` for a `METER_DELIVERY` adapter's plan with observation readers; the
+  hook runs only when both plans have one, which is every swap that can carry a tap; the browser
+  keeps its own) whose
   `adopt_predecessor` copies the record's `Observation` entries into a preallocated
   `CarriedTaps` (atomic pairs, one per handle, count stored last with `Release`; a marked
   realtime region). `promote_pending_provider` pairs `next.observations` with the running
   epoch's from those entries through `pair_carried_observations`, beside the meter pairing:
   from what carried, never from a preparation-time list (#1674 R1's constraint). Charged in the
-  epoch's observation handle bytes: `capi_retained_bytes` 313,601 (+96 B; ceiling 344,192 stays).
+  epoch's observation handle bytes. The reference session has no observation reader, so
+  `capi_retained_bytes` is 313,553 with or without the slice (after merging main; ceiling 344,192
+  stays). Attaching the record to every C ABI plan instead (attempt 3's first cut) broke
+  `double_live_oracle_drives_exact_and_one_below_c_caps` (`capi.resource.limit` at the exact cap:
+  the oracle has no term for a plan with no reader), which the gating fixed.
   - Gate 2 gains the carried-rebuild row: `add_muted_track` (ID sorting first), six windows each
     `{2, Aggregate, VALID, reader's value}`, `test_plan_carry_counts == (1, 0)`. Red before the
     fix (the promoted epoch's reader held no window: "a published window" panic at window 5).

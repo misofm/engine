@@ -1706,8 +1706,10 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     };
     // #1587b: the record of the readers the plan's swap block carries, for an adapter whose
     // control plane serves the meter batches (the C ABI's), whose preparer sets no attachment of
-    // its own. Every such plan has one, so the hook runs at each of its swaps.
-    let carried_taps = if A::METER_DELIVERY {
+    // its own, and a plan with observation readers. The hook runs at a swap only when both plans
+    // have an attachment, which is every swap that can carry a tap: a plan with no reader has no
+    // tap to give or take.
+    let carried_taps = if A::METER_DELIVERY && !observations.is_empty() {
         Some(std::sync::Arc::new(
             crate::control::CarriedTaps::new(observations.len())
                 .map_err(|_| failure(ResourceFault::Allocation))?,

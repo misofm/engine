@@ -1411,10 +1411,10 @@ impl Budget {
 /// (285,632 and 275,584), so the ceiling is 312,897 plus 10 %, rounded up to 64: 344,186.7 ->
 /// 344,192.
 ///
-/// #1587b: `capi_retained_bytes` measured 313,601: 313,505 before the slice (the 608 B above
-/// 312,897 came from rows merged on `main` since), plus 96 B for the record of the observation
-/// readers each plan's swap block carries (its attachment, shared allocation and pairs). Under the
-/// ceiling, which stays.
+/// #1587b: `capi_retained_bytes` measured 313,553, the same with and without the slice's rows
+/// (the 656 B above 312,897 came from rows merged on `main` since): the reference session has no
+/// observation reader, so it builds neither the readers' strip indices nor the record of the
+/// readers a swap carries. The ceiling stays.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
