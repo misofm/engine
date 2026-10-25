@@ -96,12 +96,11 @@ describe("headless session edits", () => {
     // Red if replaceSession reboots instead of editing (the sources restart at frame 0), or if the
     // successor plan restarts an unchanged node's state: the blocks then differ from a fresh engine
     // booted from the new session and fed the same PCM from frame 0. Red too if the SDK cannot read
-    // the `unchanged` path of a replace by the committed document. Gate 4 rides here: red if the
-    // engine keeps binding live controls to the booted session after a rebuild.
+    // the `unchanged` path of a replace by the committed document, or if `withSession()` stays held to
+    // the booted document after a replace.
     const engine = await boot(base());
     const reference = await boot(withFifth());
     try {
-      const listBefore = await engine.controls();
       const blocks = run(engine, 0, 6);
       const revision = engine.revision;
       const outcome = await engine.replaceSession(withFifth());
@@ -118,11 +117,8 @@ describe("headless session edits", () => {
       assertSameBlocks(blocks, run(reference, 0, block + 6), "replace versus a fresh engine");
       // The committed document again: nothing to commit, and the revision stays.
       assert.deepEqual(await engine.replaceSession(withFifth()), { revision: outcome.revision, path: "unchanged" });
-
-      // Gate 4: a list read before the rebuild is stale; the added track is addressable at once.
-      await assert.rejects(engine.controlState(listBefore), { code: "control.list.stale" });
-      const controls = engine.liveControls();
-      assert.equal((await controls.submit(controls.edit.track("t5").faderDb(-3))).ok, true);
+      // D4: live controls now hold a session to the replacement, not to the booted document.
+      assert.doesNotThrow(() => engine.liveControls().withSession(withFifth()));
     } finally {
       engine.dispose();
       reference.dispose();
