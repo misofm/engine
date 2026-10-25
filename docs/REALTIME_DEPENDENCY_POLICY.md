@@ -66,7 +66,10 @@ that is not listed here needs a new decision, not an edit to a pattern.
   ring. It owns fixed `UnsafeCell<MaybeUninit<T>>` storage, and its `SAFETY` comments rely on one
   producer, one consumer, release publication after writes, acquire before reads, and shared `Arc`
   storage that outlives both non-cloneable endpoints. `Arc` creation and destruction stay outside
-  push, pop, and render.
+  push, pop, and render. Its slot lookup (`Ring::slot`, #2041) skips the bounds check: a ring
+  cursor advances only through `wrap_increment(cursor, slots_len)` and so stays below
+  `slots_len == slots.len()`, which the lookup `debug_assert`s. The plan mailbox's cell index stays
+  checked: the optimiser already proves it below 2.
 - `crates/engine/src/realtime/disjoint.rs` (issue 100): the plan-owned disjoint audio arena, which
   the sequential executor still renders through. #1154 removed its `UnsafeCell`, manual
   `Send`/`Sync` implementations and foreign leases. `read_stereo` and `write_stereo` use safe
@@ -360,9 +363,9 @@ in them; #1438's Amendment removes them from the allowlist.
 
 Approved unsafe code that runs on a render thread, per entry:
 
-- `spsc.rs`: yes. Its push and pop unsafe sites (`:381`, `:449`) lie inside the gate's marked
-  render region (`:295-459`); render drains event and control rings and exchanges plans through
-  them.
+- `spsc.rs`: yes. Its push, pop and peek unsafe sites and the unchecked `Ring::slot`
+  lookup lie inside the gate's marked render regions; render drains event and
+  control rings and exchanges plans through them.
 - `disjoint.rs`: yes. Its raw-slice borrows lie inside its marked region (`:106-347`), and the
   sequential executor forms its combined multi-buffer and stereo borrows through them.
 - `fpenv.rs`: yes, at every native render entry, on both `x86_64` and AArch64. On wasm its guard is
