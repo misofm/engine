@@ -1134,9 +1134,9 @@ impl LiveRoute {
     /// Fire the armed fade at this block boundary (#1363 D3): from the coefficients the route is
     /// at (`[+0.0; 4]` for a fade-in) to the armed target over the armed length, exactly the
     /// retarget a live unmute record runs; a fading copy's fade-out (#1953b) ramps to silence the
-    /// same way, as a live mute record would. The executor calls it before the route's op runs, so the block's
-    /// own live value drains after it. A route not armed is left alone. Render-thread code:
-    /// allocation-, lock- and syscall-free.
+    /// same way, as a live mute record would. The executor calls it before the route's op runs,
+    /// so the block's own live value drains after it. A route not armed is left alone.
+    /// Render-thread code: allocation-, lock- and syscall-free.
     pub(crate) fn fire_fade_in(&mut self) {
         if let Some(arm) = self.armed.take() {
             self.ramp = IndexedRamp::new(

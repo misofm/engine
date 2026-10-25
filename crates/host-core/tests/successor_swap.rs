@@ -4206,7 +4206,8 @@ fn a_pending_route_fade_survives_a_second_swap_on_every_width() {
 /// neither swap block allocates or frees. Inner claims:
 ///
 /// * (b) a second swap prepared after the fire and adopted mid-ramp keeps the copy, carrying its
-///   ramp and its fade entry;
+///   ramp and its fade entry, also when it adds a user route under the copy's ID with the copy's
+///   endpoints: the copy is renamed and the user route fades in on its own;
 /// * (c) a second swap at block 11 drops the copy once it has settled (without the line: its ramp
 ///   ended at 1248) and keeps it while its line still delivers the fade (with the 486-sample line,
 ///   it settles at 1734): either way every block equals the reference;
@@ -4304,6 +4305,60 @@ fn a_removed_or_repointed_lane_less_route_fades_out_through_its_line(backend: Ba
                 "{backend:?} {claim}: allocator calls"
             );
         }
+        // (b) The second transaction, prepared after the fire and adopted mid-ramp, adds a user
+        // route `aux-out-` (the copy's ID) with the copy's endpoints. The copy stays, renamed
+        // (`aux-out--`); the user route is an added route that fades in from an empty line, with
+        // neither the copy's line nor its op. Every block equals A with the old route under the
+        // renamed copy's ID and the user route, both from `pre_fader`, given a live mute of the
+        // old at the first swap and a live unmute of the user route (muted) at the second.
+        let user = |model: &SessionModel, tap, muted| {
+            with_route(model.clone(), "aux-out-", "aux", tap, into_output(), muted)
+        };
+        let b3 = Session::compile(user(&base, session::SendTap::PostFader, false));
+        let run = fade_run(
+            &a,
+            &[
+                swap(SWAP_BLOCK, &b, &a.model, None),
+                swap(SWAP_BLOCK + 2, &b3, &b.model, Some(SWAP_BLOCK + 1)),
+            ],
+            &feeds,
+            None,
+            &[],
+            backend,
+        );
+        assert_eq!(
+            run.arms[1],
+            vec![(0, ramp), (0, ramp)],
+            "{backend:?} {} (b): the user route's fade-in, then the kept copy's",
+            case(limited)
+        );
+        let named = with_route(
+            user(&base, session::SendTap::PreFader, true),
+            "aux-out--",
+            "aux",
+            session::SendTap::PreFader,
+            into_output(),
+            false,
+        );
+        let writes = [
+            route_mute_write(&named, "aux-out--", SWAP_BLOCK, ramp, true),
+            route_mute_write(&named, "aux-out-", SWAP_BLOCK + 2, ramp, false),
+        ];
+        let reference = fade_run(
+            &Session::compile(named),
+            &[],
+            &feeds,
+            None,
+            &writes,
+            backend,
+        );
+        assert_eq!(
+            first_fade_difference(&run, &reference),
+            None,
+            "{backend:?} {} (b): a user route under the copy's ID fades in on its own",
+            case(limited)
+        );
+        assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (b): allocator calls");
         // (d) B re-points `aux-out` into the bus, where it has a lane: both halves ramp. The
         // successor arms the re-pointed route (`D = 0`: the bus line sits after its op) and the
         // old route's copy (`aux-out-`), and every block equals A with the old route under the

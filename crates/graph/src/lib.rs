@@ -4939,7 +4939,15 @@ fn carry_fade_arms(
             *pending = pending.saturating_sub(1);
             fired.set(pair.successor as usize, WATCH_SETTLED);
         }
-        own.state = from.state;
+        // #1953b: a settling entry settles when this plan's own tail has passed: a kept copy
+        // whose line changed length takes the difference.
+        own.state = match from.state {
+            FadeArmState::Settling(at) => FadeArmState::Settling(
+                at.saturating_add(u64::from(own.tail_samples))
+                    .saturating_sub(u64::from(from.tail_samples)),
+            ),
+            state => state,
+        };
     }
 }
 // REALTIME_POLICY_END

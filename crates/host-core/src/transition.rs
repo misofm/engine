@@ -241,10 +241,10 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// ([`StripTransition::restored_sources`]). The routes to duck alone (#1953a) are every route of
 /// `base.committed` with a live lane that `next` drops or re-points (another source, tap or
 /// destination), whose source and destination strips `next` keeps and nothing ducks; a lane-less
-/// route keeps the fold and is not one: the successor fades it out as a fading copy (#1953b). The records are the classifier's for the running
-/// plan's base with `overlay` laid over it, against the same with each strip to duck muted on both
-/// channels, each of its routes whose tap precedes the fader muted and each route to duck alone
-/// muted, all at `next`'s mute ramp:
+/// route keeps the fold and is not one: the successor fades it out as a fading copy (#1953b).
+/// The records are the classifier's for the running plan's base with `overlay` laid over it,
+/// against the same with each strip to duck muted on both channels, each of its routes whose tap
+/// precedes the fader muted and each route to duck alone muted, all at `next`'s mute ramp:
 /// exactly the records a value-only transaction making those mutes would write, so a strip or route
 /// already in the overlay gets no second write. `C` reads the running plan's compensation lines
 /// (`base.inventory`), keyed by the route's two edges, which add, over every route out of a
