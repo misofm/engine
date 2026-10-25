@@ -1725,12 +1725,12 @@ fn observe_successor_pushes(
             continue;
         };
         // A forward re-queues the bound state, this write's included: it carries this write's
-        // fresh tag (#1585 D4).
+        // tag, which the preparation issued (#1585 D4).
         if let Some(forward) = forwards
             .iter_mut()
             .find(|forward| forward.position == position && forward.tap_index == tap_index)
         {
-            forward.arm_tag = 0;
+            forward.arm_tag = write.arm_tag;
             continue;
         }
         pushes.push(ObservationForward {
@@ -1738,7 +1738,7 @@ fn observe_successor_pushes(
             tap_index,
             armed: write.armed,
             window_blocks: write.window_blocks,
-            arm_tag: 0,
+            arm_tag: write.arm_tag,
         });
     }
     for push in &pushes {
@@ -2997,6 +2997,8 @@ where
         let observe = protocol::ObserveContext {
             bindings: &self.observation,
             enabled: A::OBSERVE_EDIT,
+            // #1585 D4: the records are tagged from the session's one counter.
+            next_arm_tag: self.next_arm_tag,
         };
         let prepared = if in_place {
             self.controller.prepare_command_frame_in_place_observed(
@@ -4394,6 +4396,13 @@ where
             )?,
             Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => Vec::new(),
         };
+        // #1585 D4: the counter past the tags the preparation issued, installed at the commit.
+        let next_arm_tag_after = match &kind {
+            Rebuild::Transaction(prepared) => {
+                prepared.get().prospective_session().next_arm_tag_after()
+            }
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => None,
+        };
         let epoch = reservation.epoch();
         candidate_provider.epoch = epoch;
         let mut reports = self
@@ -4661,9 +4670,13 @@ where
         // #1310 (root ruling B15-Q4): A's queued observation records, on B's queues before B is
         // published. Their room was checked before the commit.
         // #1584 T2: then the transaction's own records, likewise, their room checked before the
-        // commit. #1585 D4: each record is tagged here, after the commit, so a refused rebuild
-        // issues no tag; the slot and an armed binding take the tag its prepared arm or a reader
-        // compares against.
+        // commit. #1585 D4: the transaction's records carry the tags its preparation issued, and
+        // the counter moves past them only here, after the commit, so a refused rebuild issues
+        // none; a record with no tag takes a fresh one. The slot and an armed binding take the tag
+        // its prepared arm or a reader compares against.
+        if let Some(next) = next_arm_tag_after {
+            self.next_arm_tag = next;
+        }
         for record in forwards.iter().chain(&observe_pushes) {
             let arm_tag = if record.arm_tag == 0 {
                 let tag = self.next_arm_tag;
@@ -4849,6 +4862,8 @@ where
             .prospective_session()
             .observe_bindings()
             .cloned();
+        // #1585 D4: the counter after the records' tags, installed with the table.
+        let next_arm_tag_after = prepared.get().prospective_session().next_arm_tag_after();
         let observe_changes =
             self.admit_observe_writes(prepared.get().prospective_session().observe_writes());
         let transaction = prepared.get().prospective_session();
@@ -5404,10 +5419,13 @@ where
         // reader that needs the changed audio takes the windows whose `first_sample` is at or
         // after the watermark's.
         if !observe_changes.is_empty() {
-            self.push_admitted_observation_batch(observe_changes.iter().copied());
+            self.push_tagged_observation_batch(observe_changes.iter().copied());
         }
         if let Some(bindings) = observe_bindings {
             self.observation = bindings;
+        }
+        if let Some(next) = next_arm_tag_after {
+            self.next_arm_tag = next;
         }
         // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
         // that carries its content, the newest epoch's (#1502 D6), which is the routing the
@@ -5948,12 +5966,22 @@ where
         &mut self,
         changes: impl Iterator<Item = ObservationChange>,
     ) {
-        for change in changes {
+        self.push_tagged_observation_batch(changes.map(|change| (change, 0)));
+    }
+
+    /// [`Self::push_admitted_observation_batch`] with each record's tag (#1585 D4): the tag a
+    /// transaction preparation issued, or `0` for a fresh one from the counter.
+    fn push_tagged_observation_batch(
+        &mut self,
+        changes: impl Iterator<Item = (ObservationChange, u64)>,
+    ) {
+        for (change, arm_tag) in changes {
             self.push_effect_observe(
                 change.position,
                 change.tap_index,
                 change.armed,
                 change.window_blocks,
+                arm_tag,
             )
             .expect("the room check found the producer")
             .expect("the room check found room for every record of the batch");
@@ -6040,7 +6068,7 @@ where
         armed: bool,
         window_blocks: u32,
     ) -> Option<Result<(), effect_contract::ObservePushError>> {
-        self.push_effect_observe(position, tap_index, armed, window_blocks)
+        self.push_effect_observe(position, tap_index, armed, window_blocks, 0)
     }
 
     /// Queues one observation record on the newest plan's effect producer at `position` of
@@ -6051,12 +6079,16 @@ where
     /// # Errors
     ///
     /// `None` for a position past the list, else the producer's refusal (no queue, or full).
+    ///
+    /// `arm_tag` is the tag a transaction preparation issued for the record (#1585 D4), which the
+    /// caller installs the counter past when it commits; `0` issues the counter's next tag here.
     pub(crate) fn push_effect_observe(
         &mut self,
         position: usize,
         tap_index: u32,
         armed: bool,
         window_blocks: u32,
+        arm_tag: u64,
     ) -> Option<Result<(), effect_contract::ObservePushError>> {
         let producer = self
             .pending_providers
@@ -6064,10 +6096,11 @@ where
             .unwrap_or(&mut self.providers)
             .effects
             .get_mut(position)?;
-        // #1585 D4: the record's tag, issued only when the push succeeds.
-        let arm_tag = self.next_arm_tag;
+        // #1585 D4: a fresh record's tag, issued only when the push succeeds.
+        let fresh = arm_tag == 0;
+        let arm_tag = if fresh { self.next_arm_tag } else { arm_tag };
         let pushed = producer.try_push_observe(tap_index, armed, window_blocks, arm_tag);
-        if pushed.is_ok() {
+        if pushed.is_ok() && fresh {
             self.next_arm_tag = arm_tag.saturating_add(1);
         }
         #[cfg(feature = "test-support")]
@@ -6191,7 +6224,7 @@ where
     fn admit_observe_writes(
         &mut self,
         writes: &[controls::ObserveWrite],
-    ) -> Result<Vec<ObservationChange>, CommandError> {
+    ) -> Result<Vec<(ObservationChange, u64)>, CommandError> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
@@ -6203,14 +6236,17 @@ where
             let resolved = self
                 .resolve_observation_key(&observation_key_ref(&write.key))
                 .map_err(|_| CommandError::Internal)?;
-            changes.push(ObservationChange {
-                position: resolved.producer,
-                tap_index: resolved.tap_index,
-                armed: write.armed,
-                window_blocks: write.window_blocks,
-            });
+            changes.push((
+                ObservationChange {
+                    position: resolved.producer,
+                    tap_index: resolved.tap_index,
+                    armed: write.armed,
+                    window_blocks: write.window_blocks,
+                },
+                write.arm_tag,
+            ));
         }
-        self.admit_observation_batch(changes.iter().copied())
+        self.admit_observation_batch(changes.iter().map(|(change, _)| *change))
             .map_err(|refusal| match refusal {
                 ObservationRefusal::Full { .. } => CommandError::Backpressure,
                 ObservationRefusal::Limit(_) => {
