@@ -310,3 +310,21 @@ Test value and mutants (each red, one run each):
   returned withdrawal; kept across a `Next` supersession (each red).
 - `a_primed_candidate_displaced_by_a_refused_call_continues`: #1355's displaced-prime replay
   removed (red).
+
+## Decision record (attempt 2, 2026-10-25)
+
+- **MAJOR-1 (root ruling).** The duck set is the removed and restarted strips (D2), so a growth that
+  also removes a source no strip read stays in the warm arm. The phase-1 schedule step no longer
+  overwrites a warm candidate's `Primed` with the overlay's `NoEarlierThan`; it debug-asserts that
+  such an overlay's `S` is 0. The overlay still keeps the removed source, so its calls go to the
+  running plan until the adoption. Gate 1 row: growth plus removal of an unused source is `Primed`,
+  recorded, and A continued (red with the overwrite).
+- **MINOR-1.** Gate 2 row: a growth while a phase-1 removal is pending inherits the overlay and is
+  published `NoEarlierThan(S' >= S)` with no record (red without the empty-overlay condition).
+- **MINOR-2.** Gate 4: a warm B superseding W at the effect-state cap `max(R + W + B, R + 2B)` is
+  published `Primed` (red with the reprepare row over every held row).
+- **NIT-1.** The superseding branch of the publication debug-asserts a pending candidate.
+- **A `warm_lead` error refuses the edit** (accepted by root): a warm compile that exceeds the caps
+  is refused, as gate 1's admission is (the warm path's resource limit). Reopening note for #1397 /
+  #1360: if the owner wants such an edit routed as `Unavailable` (the transition) instead, that arm
+  changes there.
