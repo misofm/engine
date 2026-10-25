@@ -223,7 +223,8 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// overlay its cells hold; `overlay` is the running plan's [`DuckOverlay`], empty outside phase 1.
 /// The strips to duck are every strip of `base.committed` that `next` does not hold or that the
 /// prepared successor restarts (`restarted`, its [`crate::PreparedHost::restarted_strips`]: a
-/// duck-swap, #1324 D4), and that `overlay` does not list; the sources `overlay` lists that `next` keeps are restored
+/// duck-swap, #1324 D4; none at a declared discontinuity, `base.discontinuity`), and that
+/// `overlay` does not list; the sources `overlay` lists that `next` keeps are restored
 /// ([`StripTransition::restored_sources`]). The records are the classifier's for the running plan's
 /// base with `overlay` laid over it, against the same with each strip to duck muted on both
 /// channels and each of its routes whose tap precedes the fader muted, all at `next`'s mute ramp:
@@ -250,8 +251,12 @@ pub fn plan_strip_transition(
     let ramp = ramps.mute_samples;
     let in_next = |id: &str| next.strips().any(|strip| strip.id.as_str() == id);
     // #1324 D4: a strip the successor restarts is ducked like a removed one. `restarted` names
-    // strips of both plans only.
-    let restarts = |id: &str| restarted.binary_search_by(|held| (**held).cmp(id)).is_ok();
+    // strips of both plans only. A successor at a declared discontinuity restarts every owner by
+    // design and need not continue the running plan's output (#1323 D2): its restarts duck
+    // nothing.
+    let restarts = |id: &str| {
+        !base.discontinuity && restarted.binary_search_by(|held| (**held).cmp(id)).is_ok()
+    };
     let strips = sorted_ids(
         committed
             .strips()
