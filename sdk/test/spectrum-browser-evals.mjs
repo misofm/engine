@@ -127,8 +127,8 @@ async function nextReady(subscription, render, seen = []) {
 test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in a boot word", SKIP, async (t) => {
   // Red if the hop reaches neither the boot configure nor the stream (the boot words no longer
   // carry it), if a boot word still carries it (the worklet would call the hop boot export), if a
-  // policy changed after `createEngine` was called changes it, or if a published metadata's nested
-  // target can be changed.
+  // policy changed after `createEngine` was called changes it, if a published metadata's nested
+  // target can be changed, or if a one-shot query is let onto the capture during a managed update.
   t.mock.timers.enable({ apis: ["setInterval"] });
   const policy = { spectrumHopFrames: 256 };
   const { engine, render, harness } = await served({
@@ -143,6 +143,11 @@ test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in 
     const ready = await nextReady(subscription, render);
     assert.equal(ready.metadata.hopFrames, 256);
     assert.throws(() => { ready.metadata.target.outputId = "changed"; }, TypeError);
+    // A single-form smoothing update stops and restarts the stream: the capture stays the
+    // subscription's throughout, and the update completes.
+    const updating = subscription.update({ ...OUTPUT, smoothingMs: 50, cadenceMs: 1 });
+    await assert.rejects(engine.querySpectrum(OUTPUT), /managed spectrum stream holds the capture/);
+    assert.equal((await updating).configuration.smoothingMs, 50);
     await subscription.close();
   } finally {
     await engine.close();
@@ -212,8 +217,13 @@ test("a one-shot query arms past an arm it does not own, and past its own timed-
     let release;
     harness.hold = new Promise((resolve) => { release = resolve; });
     harness.holdAfter = 1;
-    await assert.rejects(engine.querySpectrum({ ...OUTPUT, spectrumLimits: { requestDeadlineMs: 10 } }), /deadline/);
+    const timingOut = engine.querySpectrum({ ...OUTPUT, spectrumLimits: { requestDeadlineMs: 10 } });
+    await assert.rejects(engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0 }), /one-shot spectrum query is in flight/);
+    await assert.rejects(timingOut, /deadline/);
     release();
+    await flush();
+    // The query that stopped waiting gave its arm back: a stream can start.
+    await (await engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0 })).close();
     const result = await rendering(engine.querySpectrum(OUTPUT), render);
     assert.deepEqual(result.target, OUTPUT.target);
   } finally {
@@ -234,6 +244,8 @@ test("a stream read past its deadline stops the stream behind it and ends the su
     await assert.rejects(failed.pump(), /deadline/);
     release();
     await assert.rejects(failed.pump(), /closed|stale/);
+    // The ended subscription gave the capture back to one-shot queries.
+    assert.deepEqual((await rendering(engine.querySpectrum(OUTPUT), render)).target, OUTPUT.target);
     const replacement = await engine.subscribeSpectrum(request);
     assert.equal((await nextReady(replacement, render)).status, "ready");
     await replacement.close();
@@ -302,7 +314,8 @@ test("the boot refuses an engine without spectrum frames, and a configure past i
   }).catch((error) => { release(); throw error; }), (error) => {
     assert.ok(error instanceof MisoEngineError);
     assert.equal(error.phase, "boot");
-    assert.equal(error.diagnosticCode, "sdk.boot.deadline");
+    assert.equal(error.code, "bootConfigureTimeout");
+    assert.equal(error.result, undefined);
     return true;
   });
   assert.equal(timedOut.disposed, 1);

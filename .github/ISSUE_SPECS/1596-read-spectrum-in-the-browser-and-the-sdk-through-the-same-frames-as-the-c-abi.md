@@ -229,9 +229,9 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   `sdk-spectrum-control-allocations` row (the handler's allocations grow across each query).
   Browser public changes: `BrowserEngine.configureSpectrum` is new; `querySpectrum` and the
   managed stream raise `MisoEngineError` (`code` the result class, `diagnosticCode` the core's) where
-  the SDK raised `MisoUsageError` for an unprepared engine, unprepared channels, a capture limit
-  above the prepared bound or an active stream (`spectrum.unprepared`, `spectrum.channels`,
-  `spectrum.busy`); the capture limit of a query is no longer checked (the configured budget is
+  the SDK raised `MisoUsageError` for an unprepared engine, unprepared channels or a capture limit
+  above the prepared bound (`spectrum.unprepared`, `spectrum.channels`); an overlap of a query
+  and a managed stream stays the SDK's `MisoUsageError` (attempt 2); the capture limit of a query is no longer checked (the configured budget is
   the core's); a single-form query of another target is still `MisoUsageError`; a timed-out query
   no longer refuses the next one as in flight; `querySpectrum` works on a collection and both calls
   work after a run-time `configureSpectrum` on an engine booted without taps; a stream read refused
@@ -247,8 +247,10 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   under backpressure) no longer leaves `spectrum.busy` for good. The SDK refuses the overlap of a
   one-shot query and a managed stream with `MisoUsageError` in both orders: a query while a stream
   start is in flight or its stream runs, and a stream start while a query runs. Before, the overlap
-  reached the core, which answered it `spectrum.busy` for some orders only. A boot configure past
-  `requestDeadlineMs` rejects `createEngine` with a boot-phase `MisoEngineError` (`wrongState`,
-  `sdk.boot.deadline`), not `MisoUsageError`. Root-added paths: `sdk/README.md` (the hop section now
+  reached the core, which answered it `spectrum.busy` for some orders only. A query is also refused
+  while a managed subscription is active, so a single-form update's stop and restart keeps the
+  capture. A boot configure past `requestDeadlineMs` rejects `createEngine` with a boot-phase
+  `MisoEngineError` whose code is the new SDK timeout code `bootConfigureTimeout` (no `result`;
+  `sdk/src/core/errors.ts` and `sdk/test/error-types.ts`, root-extended paths), not `MisoUsageError`. Root-added paths: `sdk/README.md` (the hop section now
   describes the boot configure and `configureSpectrum`) and `docs/CONTROL_PROTOCOL_REGISTRY.md`
   (the bit-16 sentence); root approved both edits.

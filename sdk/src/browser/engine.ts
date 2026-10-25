@@ -538,15 +538,10 @@ async function configureBootSpectrum(
   signal: AbortSignal | undefined,
 ): Promise<ControlTransactionQueue> {
   const started = Date.now();
-  // The boot's own deadline is a boot failure, not a usage error of the caller's.
+  // The boot's own deadline is the SDK's boot timeout, not a usage error of the caller's.
   const expired = (): Error => new MisoEngineError(
     `the boot spectrum configuration did not complete within ${deadlineMs} ms`,
-    {
-      phase: "boot",
-      code: "wrongState",
-      result: constantValue("resultCodes", "wrongState"),
-      diagnostics: [{ code: "sdk.boot.deadline", path: "requestDeadlineMs" }],
-    },
+    { phase: "boot", code: "bootConfigureTimeout" },
   );
   const queue = await awaitSpectrum(createBrowserControlQueue(host), started, deadlineMs, signal, expired);
   const requestId = queue.requestIds.next();
@@ -1183,7 +1178,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
       if (spectrumPending) throw new MisoUsageError("a spectrum query is already in flight");
-      if (spectrumStreamHeld) throw new MisoUsageError("a managed spectrum stream holds the capture");
+      // A managed subscription holds the capture through all of its life, an update's stop and
+      // restart included (the headless `cancelSpectrum` refuses it the same way).
+      if (spectrumStreamHeld || observationSubscriptions?.managedSpectrumActive() === true) {
+        throw new MisoUsageError("a managed spectrum stream holds the capture");
+      }
       const selected = spectrumSelection(request);
       const channels = selected.channels ?? "both";
       const deadline = queryDeadline(request);
