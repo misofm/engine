@@ -369,7 +369,7 @@ the arm reaches render through the same queues).
 | test-web-audioworklet.mjs: the host's `command()`/`observe()` cases (the 256-record bound, `windowBlocks: 0`, record encoding and refusals, ack backpressure, the map's order and bus binding, reasons 10/11/15 and the retired 12-14, recompile and re-subscribe, the disposed refusals of the two), the worklet's `miso.command.v1` case, two calls of the #393 mixed-ID loop (200 calls now) | Feature gone. A refused `Observe` is a control reply (SDK `observation-subscription-evals` typed-refusal tests); the #151 dead-meter class needs a reason table that no longer exists. |
 | test-web-audioworklet.sh: the command-reason and command-kind vocabulary gates with their on-disk mutations, the reason-cap mutation; `scripts/check-command-kind-vocabulary.py`, `scripts/check-command-reason-vocabulary.py` | Feature gone (the vocabularies are deleted). |
 | check-abi-layout-v1.py `--self-test`: "a command-record field moves", "a retired value-command kind returns", the two `commandReasons` cases | Feature gone; replaced by the four return-of-deleted-surface mutations (37 in all). |
-| check-parameter-metadata-v1.py `--self-test`: the twenty `commandKinds`/`commandReasons` cases | Feature gone; two mutations refuse their return. |
+| check-parameter-metadata-v1.py `--self-test`: the eighteen `commandRecordBytes`/`commandKinds`/`commandReasons` cases | Feature gone; two mutations refuse their return. |
 | check-web-audioworklet-callgraph.py `--self-test` (b1b) and `--allocation-only` | Feature gone (its one caller was `command_submit`). |
 | check-web-audioworklet.sh: the `command_submit` allocation leg, the command-record stride check | Feature gone (gate 4). |
 
