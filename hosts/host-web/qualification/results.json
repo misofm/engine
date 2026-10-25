@@ -5,7 +5,7 @@
   "playwrightVersion": "1.62.1",
   "platform": "linux-headless",
   "artifact": "single shipped simd128 AudioWorklet artifact",
-  "defaultRingFrames": 5120,
+  "stallRingFrames": 5120,
   "minimumStallMs": 100,
   "browsers": [
     {

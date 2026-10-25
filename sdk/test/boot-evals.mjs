@@ -52,12 +52,15 @@ describe("eval 1 -- the three red probes at the SDK boundary", () => {
   test("(a) a quoted-key 48k/128 raw document boots headless", async () => {
     const engine = await createOfflineEngine(
       sessionDocument({ quoteKeys: true, sampleRateHz: 48_000, quantumFrames: 128 }),
-      { asset },
+      { asset, sourceRingFrames: 1_280 },
     );
     try {
       const shape = engine.shape();
       assert.equal(shape.sampleRateHz, 48_000);
       assert.equal(shape.quantumFrames, 128);
+      // #1406b: the shape reports the ring the engine resolved, so an override boot reports the
+      // override, not the default ring (7,296 here).
+      assert.equal(shape.sourceRingFrames, 1_280);
     } finally {
       engine.dispose();
     }
