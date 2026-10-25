@@ -197,9 +197,9 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   The headless boot still stages its taps (R2's kept path): a headless engine adopts a plan only
   when its caller renders, so taps sent after boot could not be in effect before `createEngine`
   resolves. The boot's one `SPECTRUM_CONFIGURE` is then equal (no change) or retunes the hop
-  without a plan, and `adopted_epoch == configured_epoch` at once. Open for #1597: how a headless
-  boot puts its taps in the first plan once the staging exports are gone (a core answer, for
-  example adoption before the first block). A refused spectrum call raises `MisoEngineError` with
+  without a plan, and `adopted_epoch == configured_epoch` at once. Root ruling (2026-10-25): this
+  boot choice stands for #1596b; #1597 owns the boot route once the staging exports go, and must
+  give a headless boot its taps in the first plan (sample 0 armable). A refused spectrum call raises `MisoEngineError` with
   `code` the result class of the status (as `responseRefusalResult`) and the core's code as
   `diagnosticCode`; a `spectrum.*` `MisoErrorCode` member needs `errors.ts`. A stream reply has
   no floor or token: a stream `SpectrumResult` reports the analysis floor (-120 dB) and
