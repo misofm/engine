@@ -1188,8 +1188,11 @@ impl MeterFrameProducer {
             return false;
         };
         copy_frame(&mut slot, frame);
-        // The published queue holds every frame the free queue does not, so it has room.
-        let _ = self.published.try_push(slot);
+        // The published queue holds every frame the free queue does not, so it has room. The
+        // unreachable refusal is forgotten, not dropped: no free joins the render thread's code.
+        if let Err(full) = self.published.try_push(slot) {
+            core::mem::forget(full);
+        }
         true
     }
 }
