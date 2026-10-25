@@ -5186,7 +5186,6 @@ impl Runtime {
                 // for an ungrouped unit); the skip counter says whether the chain skipped.
                 let grouped = lane_map.group(index).map(|(group, _)| group);
                 let skips = chain.silent_skips();
-                let words = frames;
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
                 set_block_time(chain, block_time);
                 if let Some(symmetric) = input_symmetric {
@@ -5211,24 +5210,21 @@ impl Runtime {
                     chain.run(&mut planes, frames, first_sample, snapshot)?;
                 }
                 // Issue #1981: the packer's fact, which lanes had an exact `+0.0` input and are at
-                // rest for the coming block. A skipped block proved it for every lane, so it scans
-                // nothing (silence costs no work). Otherwise one rest query, and the skip's own
-                // head test only on the lanes at rest; a running unit's rest mask is usually
-                // empty. The input buffers are the producers', which this unit never writes; a
-                // wrong fact would only cost a bank run, never a bit.
+                // rest for the coming block. A skipped block proved both for every lane, so it asks
+                // nothing (silence costs no work). Otherwise the chain's gather already folded each
+                // lane's input words into its silent mask, and the rest query runs only when some
+                // lane's input was silent: a running unit with no silent lane pays one load.
                 if let Some(group) = grouped {
                     let populated = (1_u32 << lanes.min(8)) - 1;
                     let quiet = if chain.silent_skips() != skips {
                         populated
                     } else {
-                        let rest = chain.lanes_at_rest() & populated;
-                        (0..lanes.min(8))
-                            .filter(|lane| (rest >> lane) & 1 != 0)
-                            .fold(0_u32, |mask, lane| {
-                                mask | (u32::from(BankMembers::input_is_positive_zero(
-                                    &planes, lane, words,
-                                )) << lane)
-                            })
+                        let silent = chain.input_silent_lanes() & populated;
+                        if silent == 0 {
+                            0
+                        } else {
+                            silent & chain.lanes_at_rest()
+                        }
                     };
                     lane_map.record_facts(group, index, lanes, quiet);
                 }
