@@ -979,7 +979,13 @@ pub enum ConformanceDecoder {
 /// `removed_arm_tags` 4, packed `u64`), and `response.session_transaction` carries both. Only that
 /// frame moves; the 53 others are byte-equal. Re-pinned from `06bb3b6f65f39eec`; the frame count
 /// stays 54.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x5b6c_bc15_7a1f_6154;
+/// #1586 adds `OBSERVATION_READ` (`0x000f`): the corpus gains `command.observation_read` (a console
+/// slot's tap with the left lane and an insert's with the right) and `response.observation_read` (a
+/// ready row with both lanes, a pending armed row and an unarmed row). The static capabilities
+/// frame does not list `0x000f`, with bit 15 clear, which the bit-15 invariant allows. The 54
+/// earlier frames are byte-equal: their hash is the old pin. Re-pinned from `5b6cbc157a1f6154`;
+/// the frame count is 56.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xf4c2_fe33_3739_f44d;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1096,6 +1102,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
                             | CommandPayload::SpectrumConfigure(_)
                             | CommandPayload::SpectrumCapture(_)
                             | CommandPayload::SpectrumStream(_)
+                            | CommandPayload::ObservationRead(_)
                             | CommandPayload::TransportGet
                             | CommandPayload::CountersGet(_)
                             | CommandPayload::DiagnosticsGet(_)
@@ -1185,6 +1192,32 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             channels: ParameterChannel::Left,
             smoothing_ms: Some(150.0),
         })
+    );
+    // #1586: a console slot's tap with the left lane and an insert's with the right, so both
+    // sections and two lane sets are present.
+    let observation_read = ObservationReadRequest {
+        selections: vec![
+            ObservationReadSelection {
+                strip_id: StableId::parse("vocal").expect("literal strip ID"),
+                section: control_core::TapSection::Console(
+                    StableId::parse("bus_comp").expect("literal slot ID"),
+                ),
+                tap_id: 1,
+                channels: ParameterChannel::Left,
+            },
+            ObservationReadSelection {
+                strip_id: StableId::parse("drums").expect("literal strip ID"),
+                section: control_core::TapSection::Inserts(
+                    StableId::parse("gate").expect("literal insert ID"),
+                ),
+                tap_id: 2,
+                channels: ParameterChannel::Right,
+            },
+        ],
+    };
+    command!(
+        "command.observation_read",
+        CommandPayload::ObservationRead(&observation_read)
     );
 
     let capabilities = Capabilities {
@@ -1364,6 +1397,50 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
                 left_db: Some(left_db.as_slice().into()),
                 right_db: None,
             }),
+        })
+    );
+    // #1586: a ready row with both lanes, a pending armed row and an unarmed one, so every row
+    // field is present.
+    let ready_row = ObservationReadRow {
+        status: ObservationRowStatus::Ready,
+        armed: true,
+        arm_sample: 4_096,
+        arm_tag: 3,
+        window: Some(ObservationRowWindow {
+            first_sample: 4_096,
+            end_sample: 4_608,
+            sequence: 2,
+            blocks: 4,
+        }),
+        left: Some(-3.5),
+        right: Some(-1.25),
+        unit: ParameterUnit::Db,
+    };
+    let observation_rows = [
+        ready_row,
+        ObservationReadRow {
+            status: ObservationRowStatus::Pending,
+            window: None,
+            left: None,
+            right: None,
+            ..ready_row
+        },
+        ObservationReadRow {
+            status: ObservationRowStatus::Unarmed,
+            armed: false,
+            arm_sample: 0,
+            arm_tag: 0,
+            window: None,
+            left: None,
+            right: None,
+            unit: ParameterUnit::Linear,
+        },
+    ];
+    success!(
+        "response.observation_read",
+        SuccessResponsePayload::ObservationRead(ObservationReadPage {
+            observed_sample: 4_736,
+            rows: observation_rows.as_slice().into(),
         })
     );
     success!(

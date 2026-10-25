@@ -1323,5 +1323,32 @@ nine-track session has no tapped effect, so its rows are unchanged. The parity r
 `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` arms and disarms a
 bypassed compressor's tap every sixteenth edit with zero render-thread allocations; the core claims
 are `crates/control-plane/tests/observation_bindings.rs`. A carried tap keeps its publisher across a
-swap (#1327 D2), so its windows go on in the reader of the epoch it was armed on: a read command
-(#1586) must follow carried readers across a swap, as the browser does (`pair_carried_observations`).
+swap (#1327 D2), so its windows go on in the reader of the epoch it was armed on. The read command
+(#1586) reads the running epoch's readers; pairing carried readers across a swap, as the browser
+does (`pair_carried_observations`), is #1674's observation half (see the stated limit under "Issue
+1586 observation read" below).
+
+## Issue 1586 observation read (slice b)
+
+`OBSERVATION_READ` (`000f`) crosses `miso_engine_v1_submit_command` to the one core path, which
+executes it on the session (`PreparedCommandFrame::Session`), with no new C symbol or struct. The
+C ABI's capability report lists `000f` and sets flag bit 15 (`ProviderFeatures::observation`,
+from the adapter's `ControlAdapter::OBSERVE_EDIT`); the browser lists neither until #1589. Each
+epoch keeps its plan's `ObservationIndex` (one entry per effect instance by stable key, with the
+position of its reader set), built in `prepare_runtime` and promoted with the epoch; the session
+keeps a 256-row reply table from boot. `capi_retained_bytes` charges the index per epoch (its
+entries and their ID copies) and the row table as a fixed row. The read runs
+`host_core::observation::read_with` on the running epoch's readers, checks the whole batch first
+and never acknowledges. The read allocates nothing on the submit path: the controller prepares it
+without boxing or copying the request (`PreparedCommandFrame::ObservationRead`), and the selections
+are decoded onto the stack, borrowed from the request bytes (`ObservationSelectionRef`), by the
+same address codec as the `Observe` edit's. The capability vectors pinned in `crates/capi/src/runtime/tests.rs`
+re-pin for `000f` and bit 15. The gates are `runtime::live_tests::an_observation_read_follows_the_arm_through_the_c_abi`
+(the arm's status, tag and window, and zero allocations through `miso_engine_v1_submit_command`
+for a 1-row and a 256-row read), the race of
+`live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` with a read
+after every edit and zero render-thread allocations, `runtime::live_tests::an_observation_read_refuses_a_bad_batch_whole`
+and the parity row `protocol_cross_host::both_hosts_read_one_observation_tap_alike`. Stated limit:
+the C ABI does not pair carried observation readers yet (#1674's observation half), so after a
+rebuild that carries a tapped effect the read reads the successor's own slot, which the carried tap
+does not publish to: the row carries no window, never one the tap did not publish.
