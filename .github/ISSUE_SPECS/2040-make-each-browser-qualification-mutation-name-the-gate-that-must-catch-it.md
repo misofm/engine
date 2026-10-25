@@ -50,7 +50,7 @@ record each choice. No gate's own logic changes.
   `sdk-protocol-refusal` gate had no other mutation. The mutation now sets `refusal.name = "Error"` on both
   engines, so the cross-engine answers gate holds and only the refusal gate's predicate fails. The refusal
   gate's own browser-versus-headless comparison is unreachable by any mutation (the answers gate compares
-  the same object first); recorded, not changed (no gate logic changes).
+  the same object first); deleted under the root ruling below.
 - Red check (PR evidence): `sdk-spectrum-continuous-hop-wrong` pointed at `sdk-spectrum-hop` fails Chromium with
   `chromium: sdk-spectrum-continuous-hop-wrong: red mutation escaped its gate sdk-spectrum-hop`.
 - Root ruling (2026-10-25): the refusal gate's browser-versus-headless equality clause is deleted. The

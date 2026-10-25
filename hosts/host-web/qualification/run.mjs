@@ -28,7 +28,8 @@ const PLAYWRIGHT_VERSION = JSON.parse(
 const ENGINES = { chromium, firefox, webkit };
 // Issue #2040: each red mutation and the one gate that must catch it. `mutationProofs` holds the
 // thrown message to `${browserName}: ${gate}:`, so a gate that stops firing turns red even while
-// another gate still throws on the same record. A mutation is named for the gate it reaches.
+// another gate still throws on the same record. A mutation whose name names a gate names the gate
+// it reaches.
 const caughtBy = (gate, ...mutations) => mutations.map((mutation) => ({ mutation, gate }));
 const MUTATIONS = Object.freeze([
   ...caughtBy("attestation", "attestation"),
