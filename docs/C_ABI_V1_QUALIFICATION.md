@@ -1377,3 +1377,27 @@ after every edit and zero render-thread allocations, `runtime::live_tests::an_ob
 and the parity row `protocol_cross_host::both_hosts_read_one_observation_tap_alike`. After a
 rebuild that carries a tapped effect the read follows the carried tap: the promotion pairs the
 carried readers from the swap block's record (#1674's observation half, #1587b).
+
+## Issue 1578 track response
+
+A strip `RESPONSE_GET` (`000e`, target 3) crosses `miso_engine_v1_submit_command` to the session
+provider, which checks it (the core's checks, `response.rate.session`, the strip, the bound of its
+event at the strip's owner count against the control frame limit and `maximum_reply_bytes`), arms
+the session's one response capture (#1577) and answers its tag; the capture's result arrives as
+one reliable `RESPONSE_READY` (`8040`) through `miso_engine_v1_dequeue_event`. No C symbol or
+struct changes; the capability report lists `8040` with `000e` under flag bit 14, and the
+capability vectors pinned in `crates/capi/src/runtime/tests.rs` re-pin for it. `SessionState::service`
+turns the delivered result into the event (`host_core::response_ready_event`, #1578 D5) and moves
+it into the protocol controller's one cell; a full reliable queue, a held cell or an outstanding
+structural transaction keeps it for the next `service`, an event the frame limit cannot carry
+becomes its `LIMIT_EXCEEDED` `response.reply_too_large` refusal, and the capture is released once
+its event's frame has reached the host. The response capture's charge
+(`host_core::response_capture_ceiling`) adds the event's member table, which is allocated while
+the result's is still held. The gates are `crates/capi/tests/response_strip.rs`:
+`end_to_end_then_removed_strip` (no event before a render; one event after one render whose curves
+and owners are bit-equal to `compose_track_response` over a `PreparedHost` of the same document;
+one event across a rebuild; `NOT_FOUND` `response.strip.removed` for a strip a superseding removal
+took), `one_in_flight_none_lost_and_replay` (`BACKPRESSURE` `response.capture.pending` with queue
+kind 8 while one is in flight; held, not lost, behind a full reliable queue; a replay returns the
+same tag and arms nothing; released after delivery) and
+`a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal`.

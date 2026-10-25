@@ -146,6 +146,9 @@ pub enum MessageId {
     CounterSnapshot = 0x8021,
     /// `DIAGNOSTIC`.
     Diagnostic = 0x8030,
+    /// `RESPONSE_READY` (#1578; decision 17, C13): the result of one strip `RESPONSE_GET`, named by
+    /// the tag its reply carried.
+    ResponseReady = 0x8040,
 }
 
 /// The message IDs that were allocated and are retired: `PARAMETER_METADATA_GET` (`0x0004`) and
@@ -205,6 +208,7 @@ impl MessageId {
             0x8020 => Self::MeterBatch,
             0x8021 => Self::CounterSnapshot,
             0x8030 => Self::Diagnostic,
+            0x8040 => Self::ResponseReady,
             0x6000..=0x6fff => return Err(DecodeError::PcmForbidden),
             _ => return Err(DecodeError::UnsupportedMessage),
         };
