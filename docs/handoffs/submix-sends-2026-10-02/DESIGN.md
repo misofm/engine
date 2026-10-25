@@ -202,12 +202,12 @@ In the owner's source-file vocabulary it is a *stereo* strip: it never takes the
      `Stereo` explicitly is harmless but not sufficient. Slice 03 names the set as the guard and
      gates it.
 
-**Consequence for bus compression: a hazard, not a footnote.** A console slot's `link_mode` is
-session-level, and every bus carries every console slot (O1). If the session declares the console
-compressor `dual_mono` for tracks, that compressor runs **unlinked** on every stereo bus and shifts
-the image under asymmetric material. The guidance, carried by slice 08's `author-session` skill
-update and its app handoff, is: bypass the console compressor on buses, and use a linked insert for
-bus glue. Whether a submix may override a slot's `link_mode` is owner question Q1 (8.2).
+**Consequence for bus compression (superseded 2026-10-25 by #1369).** A console slot's
+`link_mode` is the session-level default, and every bus carries every console slot (O1). Owner
+question Q1 (8.2) was answered yes, and #1369 delivered it: each strip's console entry carries a
+`link_mode` that is `slot` (the slot's mode) or an override. A bus whose console compressor should
+link sets its entry's `link_mode` to `maximum` or `average`; the earlier guidance (bypass the
+console compressor on buses and use a linked insert for bus glue) is withdrawn.
 
 **Input section: all five keys.**
 

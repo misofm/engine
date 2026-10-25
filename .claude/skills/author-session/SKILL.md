@@ -50,9 +50,12 @@ target it.
   The delay, the multiband compressor, third-party (`cid`) effects and anything keyed by a
   sidechain are inserts.
 - **Every strip carries every slot**: every track's and every submix's `console` array holds
-  exactly one `{ "slot", "bypass", "params" }` entry per slot, in slot order (`pre_insert`, then
-  `post_insert`). An entry carries only the strip's knobs; a bypassed entry still runs (and still
-  pays its latency). A strip cannot add, drop or reorder a slot.
+  exactly one `{ "slot", "bypass", "link_mode", "params" }` entry per slot, in slot order
+  (`pre_insert`, then `post_insert`). An entry carries only the strip's knobs; a bypassed entry
+  still runs (and still pays its latency). A strip cannot add, drop or reorder a slot.
+- **An entry's `link_mode`** is required: `slot` runs the slot's declared mode; `dual_mono`,
+  `maximum` or `average` overrides it for that strip only. A mode the effect does not support is
+  `effect.link_mode.unsupported` at the entry's `link_mode` path (prepare-effects).
 - **`inserts`** is `{ "effects": [...] }`: the strip's own full effect declarations, in chain
   order, with `sidechain` (normally `{"kind":"none"}`; a keyed effect uses
   `{"kind":"routed","source":{...},"port_id":"sidechain-in"}`). It may be empty. An insert ID may
@@ -185,11 +188,9 @@ is `schema.unknown_field`; out of range is `numeric.out_of_schema_range` at
   `post_fader` (or `pre_fader`) tap to a `verb` submix whose `inserts` hold the effect (for example
   `miso.delay`), and route `verb` at `post_pan` to the output. The send level is the route's
   `gain_db`.
-- **The bus-compressor hazard.** A console slot's `link_mode` is session-level, and every bus
-  carries every console slot. A console compressor declared `dual_mono` for the tracks therefore
-  runs unlinked on every stereo bus, and moves the stereo image under asymmetric material. On a
-  bus, bypass the console compressor's entry, and for bus glue put a linked compressor
-  (`link_mode` `maximum` or `average`) in the bus's `inserts`.
+- **Bus glue on the console compressor.** A console compressor declared `dual_mono` for the
+  tracks runs unlinked on a bus unless the bus overrides it: set the bus's entry `link_mode` to
+  `maximum` or `average` so the bus compressor links.
 - **Latency grows with bus depth.** Every strip pays the latency of every latent console slot,
   bypassed or not, and plugin-delay compensation aligns the rest of the graph to it. Each level of
   bus nesting therefore adds the console's latency again: with a console `miso.true-peak-limiter`,
@@ -239,7 +240,7 @@ is `schema.unknown_field`; out of range is `numeric.out_of_schema_range` at
 | An entry out of slot order | `console.entry_order` | typed-model |
 | A repeated entry, or a slot ID repeated across sections | `id.duplicate` | typed-model |
 | An entry naming no declared slot | `reference.missing_entity` | typed-model |
-| `identity`/`quality`/`link_mode`/`sidechain`/`id` on an entry; `sidechain`/`bypass`/`params` on a slot; `simd1`/`dynamic`/`simd2` on a track; `source_id` on a submix | `schema.unknown_field` | typed-model |
+| `identity`/`quality`/`sidechain`/`id` on an entry; `sidechain`/`bypass`/`params` on a slot; `simd1`/`dynamic`/`simd2` on a track; `source_id` on a submix | `schema.unknown_field` | typed-model |
 | A `cid` slot | `console.slot_not_native` | typed-model |
 | A slot effect off the eligibility list | `console.slot.ineligible_effect` | prepare-effects |
 
