@@ -2,8 +2,9 @@
 """The browser identity fixture's resource budgets and PCM digests (issues #217 and #1060).
 
 `hosts/host-web/tests/browser-v1/expected.json` records the shipped `wasm32-unknown-unknown`
-simd128 worklet module's resource report beside its PCM digests. This gate builds the module (or
-takes a built artifact directory), runs the fixture's own `direct-oracle.mjs` under Node in
+simd128 worklet module's resource report beside its PCM digests. This gate builds the module with
+the shipped builder, `scripts/build-web-audioworklet.sh --module-only` (or takes a built artifact
+directory, as CI does), runs the fixture's own `direct-oracle.mjs` under Node in
 `MISO_ENGINE_WEB_ORACLE_PRINT=1` mode -- no browser, no WebDriver, no audio device -- and checks
 the printed document against `expected.json`.
 
@@ -71,14 +72,6 @@ WORKLET_JS = REPO / "hosts/host-web/web/miso-engine-v1-audio-worklet.js"
 FIXTURE_RUNNER_JS = FIXTURE / "browser-correctness.js"
 
 MODULE_NAME = "miso-engine-v1-audio-worklet.simd128.wasm"
-# Shared with every other `target/ci/*` gate: a persistent directory, so a sweep does not pay a
-# cold Wasm build of the whole workspace on every run.
-WASM_TARGET_DIR = REPO / "target/ci/browser-expected-resources"
-WASM_TARGET = "wasm32-unknown-unknown"
-# The one flag that changes an answer in this report: it selects `Lane::LANES == 4` and
-# `BACKEND_SIMD128`. `-C strip=debuginfo` is a delivery-size decision and moves no row, so this
-# gate does not carry it.
-SIMD128_FLAG = "-C target-feature=+simd128"
 
 DIRECT_ORACLE_SCHEMA = "miso.web.browser.direct-oracle.v1"
 BACKEND_SIMD128 = 1
@@ -451,32 +444,20 @@ def validate(
 
 
 def build_module(destination: pathlib.Path) -> None:
-    """Build the shipped simd128 module and place it under the name the oracle expects."""
-    text = DELIVERY_SCRIPT.read_text()
-    require(
-        "target-feature=+simd128" in text,
-        f"{DELIVERY_SCRIPT.name} no longer builds the shipped module with +simd128, so this "
-        "gate's module would not be the shipped one",
-    )
-    require(
-        "-p host-web" in text and WASM_TARGET in text,
-        f"{DELIVERY_SCRIPT.name} no longer builds host-web for {WASM_TARGET}",
-    )
-    environment = dict(os.environ)
-    environment["CARGO_TARGET_DIR"] = str(WASM_TARGET_DIR)
-    environment["RUSTFLAGS"] = SIMD128_FLAG
+    """Build the shipped simd128 module into the empty `destination` with the shipped builder.
+
+    `build-web-audioworklet.sh --module-only` is the module's one cargo line (the pinned nightly
+    with `-Zbuild-std`, #1334) and owns its target directory, so this gate reads the bytes the
+    delivery build ships, under the name the oracle expects (#2046).
+    """
     subprocess.run(
-        [
-            "cargo", "build", "--locked", "--release",
-            "--target", WASM_TARGET, "-p", "host-web",
-        ],
+        ["bash", str(DELIVERY_SCRIPT), "--module-only", str(destination)],
         cwd=REPO,
-        env=environment,
         check=True,
     )
-    shutil.copyfile(
-        WASM_TARGET_DIR / WASM_TARGET / "release" / "host_web.wasm",
-        destination / MODULE_NAME,
+    require(
+        (destination / MODULE_NAME).is_file(),
+        f"{DELIVERY_SCRIPT.name} --module-only did not write {MODULE_NAME}",
     )
 
 

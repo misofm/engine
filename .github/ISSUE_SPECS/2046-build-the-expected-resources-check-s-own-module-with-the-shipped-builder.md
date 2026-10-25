@@ -27,3 +27,13 @@ there; delete its own cargo line. No change to any expected digest or budget.
 
 ## Paths
 `scripts/check-browser-expected-resources.py`, this spec.
+
+## Decision and evidence record (attempt 1, 2026-10-25)
+- `build_module` runs `bash scripts/build-web-audioworklet.sh --module-only <empty TemporaryDirectory>` and
+  reads the module the builder writes there under `MODULE_NAME`; no copy. The builder owns its target
+  directory (root decision), so `WASM_TARGET_DIR`, `WASM_TARGET` and `SIMD128_FLAG` are deleted with the
+  own cargo line and the two builder-text greps. `--artifacts` (CI's path) is unchanged.
+- The self-test never read the deleted greps; it is unchanged (43 red mutations).
+- Digest evidence (PR evidence, not a committed test): the no-argument run's module, a separate
+  `--module-only` build and the delivery build's module are all
+  `478ca94c5edc1963e7c85b54eca40399ea54d26ab50abe6c7d7d3b7b54db052c`.
