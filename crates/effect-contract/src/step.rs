@@ -193,8 +193,7 @@ const MAXIMUM_LATTICE_POINTS: usize = 1_000_000;
 
 /// Render a descriptor number with its pinned precision.
 ///
-/// This is descriptor-authoring conversion, not persisted document conversion. Document values
-/// are parsed as exact scaled decimals and matched against these strings before the sole
+/// This is descriptor-authoring conversion. A rendering reaches the engine only through the sole
 /// [`decimal_to_f32`] boundary.
 #[must_use]
 pub fn canonical_descriptor_decimal(value: f32, precision: u8) -> Option<String> {
@@ -689,221 +688,14 @@ pub fn resolve_parameter_step(
 }
 
 // ---------------------------------------------------------------------------
-// Exact-decimal document matching (#242 S2, as amended by #239 ruling
-// 5462028562 section B).
+// No document-text matching in the engine (#1733).
 //
-// Lattice membership of a persisted value is decided on the DOCUMENT'S decimal
-// text in exact decimal arithmetic. It is never decided by comparing `f32`
-// words: two different decimals routinely round to one `f32`, so an `f32`
-// comparison silently admits off-lattice text (the `0.3`-with-step-`0.1`
-// class). Equivalent spellings of one number (`0.3`, `0.30`, `3e-1`) are the
-// same decimal and are all accepted; the accepted spelling is preserved in the
-// document, and only the matched point's canonical rendering ever reaches
-// [`decimal_to_f32`].
+// Session parameter values are `f32` words, so the engine never matches a
+// document's decimal spelling against a lattice. A lattice point's canonical
+// rendering reaches the engine only through [`decimal_to_f32`]. Spelling
+// equivalence (`0.3`, `0.30`, `3e-1`) belongs to the SDK, which the lattice
+// oracle's point digest holds to these renderings.
 // ---------------------------------------------------------------------------
-
-/// A decimal literal normalized to sign, integer digits and fraction digits.
-///
-/// Leading integer zeros and trailing fraction zeros are removed, so two
-/// spellings of one number normalize to one value and compare equal without
-/// any scaling arithmetic that could overflow.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExactDecimal {
-    negative: bool,
-    integer: String,
-    fraction: String,
-}
-
-/// Longest decimal literal admitted, in significant characters.
-///
-/// Persisted parameter text far past this cannot be a lattice rendering, and
-/// the bound keeps the normalizer's working strings small.
-const MAXIMUM_DECIMAL_CHARACTERS: usize = 512;
-
-impl ExactDecimal {
-    /// Parse one decimal literal exactly, or report that it is not one.
-    ///
-    /// Accepts an optional sign, digits with optional `_` separators, an
-    /// optional fraction, and an optional decimal exponent. Hexadecimal,
-    /// infinite and NaN spellings are rejected: they are not lattice
-    /// renderings.
-    #[must_use]
-    pub fn parse(text: &str) -> Option<Self> {
-        if text.is_empty() || text.len() > MAXIMUM_DECIMAL_CHARACTERS {
-            return None;
-        }
-        let (negative, rest) = match text.as_bytes()[0] {
-            b'-' => (true, &text[1..]),
-            b'+' => (false, &text[1..]),
-            _ => (false, text),
-        };
-        let (mantissa, exponent) = match rest.find(['e', 'E']) {
-            Some(split) => {
-                let raw = &rest[split + 1..];
-                let (negative_exponent, digits) = match raw.as_bytes().first() {
-                    Some(b'-') => (true, &raw[1..]),
-                    Some(b'+') => (false, &raw[1..]),
-                    _ => (false, raw),
-                };
-                if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                    return None;
-                }
-                // A wilder exponent than this cannot name a lattice point.
-                let magnitude = digits.parse::<i32>().ok()?;
-                (
-                    &rest[..split],
-                    if negative_exponent {
-                        -magnitude
-                    } else {
-                        magnitude
-                    },
-                )
-            }
-            None => (rest, 0),
-        };
-        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-        let whole: String = whole
-            .chars()
-            .filter(|character| *character != '_')
-            .collect();
-        let fraction: String = fraction
-            .chars()
-            .filter(|character| *character != '_')
-            .collect();
-        if whole.is_empty()
-            || !whole.bytes().all(|byte| byte.is_ascii_digit())
-            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
-            || (mantissa.contains('.') && fraction.is_empty())
-        {
-            return None;
-        }
-        let mut digits = whole;
-        let mut point = digits.len();
-        digits.push_str(&fraction);
-        // Shift the decimal point by the exponent, padding with zeros on
-        // whichever side the shift runs off.
-        let shifted = i64::try_from(point).ok()? + i64::from(exponent);
-        if shifted < 0 {
-            let pad = usize::try_from(-shifted).ok()?;
-            if digits.len() + pad > MAXIMUM_DECIMAL_CHARACTERS {
-                return None;
-            }
-            let mut padded = "0".repeat(pad);
-            padded.push_str(&digits);
-            digits = padded;
-            point = 0;
-        } else {
-            point = usize::try_from(shifted).ok()?;
-            if point > digits.len() {
-                let pad = point - digits.len();
-                if digits.len() + pad > MAXIMUM_DECIMAL_CHARACTERS {
-                    return None;
-                }
-                digits.extend(core::iter::repeat_n('0', pad));
-            }
-        }
-        let (integer, fraction) = digits.split_at(point);
-        let integer = integer.trim_start_matches('0');
-        let fraction = fraction.trim_end_matches('0');
-        Some(Self {
-            // `-0` and `0` are one lattice value; the descriptor surface has no
-            // signed zero (`canonical_descriptor_decimal` refuses `-0.0`).
-            negative: negative && !(integer.is_empty() && fraction.is_empty()),
-            integer: integer.to_owned(),
-            fraction: fraction.to_owned(),
-        })
-    }
-}
-
-impl Ord for ExactDecimal {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        use core::cmp::Ordering;
-        match (self.negative, other.negative) {
-            (false, true) => return Ordering::Greater,
-            (true, false) => return Ordering::Less,
-            _ => {}
-        }
-        let magnitude = self
-            .integer
-            .len()
-            .cmp(&other.integer.len())
-            .then_with(|| self.integer.cmp(&other.integer))
-            .then_with(|| {
-                let width = self.fraction.len().max(other.fraction.len());
-                let left = self.fraction.bytes().chain(core::iter::repeat(b'0'));
-                let right = other.fraction.bytes().chain(core::iter::repeat(b'0'));
-                left.take(width).cmp(right.take(width))
-            });
-        if self.negative {
-            magnitude.reverse()
-        } else {
-            magnitude
-        }
-    }
-}
-
-impl PartialOrd for ExactDecimal {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// The two legal values a refused persisted value falls between.
-///
-/// A bound is absent only when the refused value lies outside the lattice on
-/// that side, which is the out-of-domain case rather than the off-lattice one.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NearestLatticeValues {
-    /// Greatest legal value below the refused one, in canonical rendering.
-    pub lower: Option<String>,
-    /// Least legal value above the refused one, in canonical rendering.
-    pub upper: Option<String>,
-}
-
-/// Match one persisted decimal against a lattice in exact decimal arithmetic.
-///
-/// On success the returned index selects the lattice point whose canonical
-/// rendering is the sole input to [`decimal_to_f32`]. On failure the two
-/// nearest legal values are named so the refusal can quote them.
-///
-/// # Errors
-///
-/// Returns the neighbouring legal values when `text` is not a decimal literal
-/// or is not one of `points`.
-pub fn lattice_index_for_decimal(
-    points: &[LatticePoint],
-    text: &str,
-) -> Result<u32, NearestLatticeValues> {
-    let bracket = |lower: Option<usize>, upper: Option<usize>| NearestLatticeValues {
-        lower: lower.map(|index| points[index].canonical.clone()),
-        upper: upper.map(|index| points[index].canonical.clone()),
-    };
-    let Some(value) = ExactDecimal::parse(text) else {
-        // Not a decimal literal at all: no side of the lattice brackets it.
-        return Err(NearestLatticeValues {
-            lower: None,
-            upper: None,
-        });
-    };
-    // `points` is ascending by construction, so this is a plain binary search
-    // whose comparisons are exact decimal comparisons.
-    let mut low = 0_usize;
-    let mut high = points.len();
-    while low < high {
-        let middle = low + (high - low) / 2;
-        let candidate = ExactDecimal::parse(&points[middle].canonical)
-            .expect("descriptor renderings are decimal literals");
-        match candidate.cmp(&value) {
-            core::cmp::Ordering::Equal => return Ok(points[middle].index),
-            core::cmp::Ordering::Less => low = middle + 1,
-            core::cmp::Ordering::Greater => high = middle,
-        }
-    }
-    Err(bracket(
-        low.checked_sub(1),
-        (low < points.len()).then_some(low),
-    ))
-}
 
 #[cfg(test)]
 mod tests {
@@ -941,10 +733,9 @@ mod tests {
     ///
     /// The persist plane carries the ordinal, which is what makes the step identically one over
     /// a closed set. The document, however, states the declared choice value, so those values
-    /// are the canonical decimal renderings a persisted word is matched against. An earlier
-    /// revision rendered the ordinals here; against the shipped parametric EQ, whose six `kind`
-    /// choices are valued `1.0 .. 6.0`, that refused `notch` outright and matched every other
-    /// spelling to the wrong choice.
+    /// are the canonical decimal renderings. An earlier revision rendered the ordinals here;
+    /// against the shipped parametric EQ, whose six `kind` choices are valued `1.0 .. 6.0`, that
+    /// refused `notch` outright and spelled every other choice as the wrong value.
     #[test]
     fn an_index_lattice_is_ordinal_indexed_and_choice_value_spelled() {
         static CHOICES: [EnumChoice; 3] = [
@@ -983,11 +774,5 @@ mod tests {
             "the persisted index stays the choice ordinal"
         );
         assert!(points.iter().all(|point| point.intrinsic));
-        // Every declared choice is reachable, and nothing between them is.
-        assert_eq!(lattice_index_for_decimal(&points, "9.0"), Ok(2));
-        assert_eq!(lattice_index_for_decimal(&points, "1"), Ok(0));
-        let refusal = lattice_index_for_decimal(&points, "2").expect_err("not a choice");
-        assert_eq!(refusal.lower.as_deref(), Some("1"));
-        assert_eq!(refusal.upper.as_deref(), Some("4"));
     }
 }

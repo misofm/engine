@@ -3669,6 +3669,26 @@ pub trait GraphPreparedSourceSetDriver: Send {
     ) -> Option<TimelineSpan> {
         None
     }
+    /// Whether every ring a warm successor carries can be primed (#1355 D4): the timeline and
+    /// every occupied source whose consumer reads `prime_required` would play each of the
+    /// `lead_blocks + 1` blocks from `source_read_sample` on from queued PCM, with no command and
+    /// no held seek in the window (#1320 D2, #1641 D5). Asked on the **active** plan for a due
+    /// `Primed` candidate. Render-thread code: read-only, at most `lead_blocks + 2` loads per
+    /// flagged ring, no allocation, lock or syscall. The default `false` cannot check, so a
+    /// `Primed` candidate is never adopted over it.
+    fn prime_ready(&self, _source_read_sample: u64, _lead_blocks: u32) -> bool {
+        false
+    }
+    /// Replay one block of a warm successor's prime (#1355 D5): advance the timeline and each
+    /// successor source of `moves` (the carry program's `(successor, predecessor)` pairs) by the
+    /// block that reads from `source_read_sample`, exactly as that block would play, observing no
+    /// command (#1320 D3, #1641 D5). The played planes are then lent by
+    /// [`Self::played_planes`]. Render-thread code: bounded by `moves.len()`, no allocation,
+    /// lock or syscall. `false` (the default, or a move that names no occupied entry) primes
+    /// nothing.
+    fn prime_block_at(&mut self, _source_read_sample: u64, _moves: &[(u32, u32)]) -> bool {
+        false
+    }
 }
 
 /// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
@@ -4263,6 +4283,15 @@ struct GraphExecutor {
     /// The live-send section of the hand-over (#1284 D2), sorted by predecessor unit; empty (and
     /// never allocated) when no live route carries.
     carry_routes: Box<[runtime::RouteCarryStep]>,
+    /// The prime section of a warm successor's hand-over (#1355 D5): the blocks it replays, 0
+    /// for every other plan, and its source-claim and sidechain fills; empty (and never
+    /// allocated) without a prime.
+    prime_blocks: u32,
+    prime_claims: Box<[ClaimFillRow]>,
+    prime_sidechains: Box<[SidechainFillRow]>,
+    /// Set by a carried hand-over of a plan with a prime: the next block replays the prime before
+    /// its sources begin, then clears it.
+    prime_pending: bool,
     /// The side table of the moves whose predecessor row is a following route (#1652 D3,
     /// MINOR-3): the comparisons a six-word successor of a following predecessor leaves for its
     /// first block. `None` (never allocated) when no such move exists, so a session without
@@ -4393,6 +4422,14 @@ pub enum GraphCarryInstallError {
     RouteOutOfRange,
     /// A successor or predecessor live route appears twice.
     DuplicateRoute,
+    /// A prime was installed before the plan's [`GraphCarryProgram`], with no lead block, or on
+    /// a plan with no source set (#1355 D5).
+    NoPrimeCarryProgram,
+    /// A fill names a line that is not one of the plan's, a node that is not a source claim of
+    /// the plan, or no lane (#1355 D5).
+    PrimeFillOutOfRange,
+    /// A fill's line appears twice (#1355 D5).
+    DuplicatePrimeFill,
 }
 
 /// Where one builtin bank lane sits in a bound graph plan: its runtime unit, its bank chain slot
@@ -4873,6 +4910,8 @@ fn step_fade_arms(
         {
             match arm.target {
                 GraphFadeTarget::Fader(fader) => {
+                    // Issue #1782a: the arm names the lane bind gave the strip.
+                    let fader = runtime.current_location(fader);
                     if let Some((chain, slot, lane)) =
                         runtime::strip_lane_mut(&mut runtime.units, BuiltinStripOwner::Fader, fader)
                         && let Some(processor) = runtime::builtin_processor_mut(chain, slot)
@@ -5692,6 +5731,323 @@ pub fn install_strip_delay_carry(
     Ok(())
 }
 
+/// One source-claim line a warm successor fills at its adoption block (#1355 D5, lemma L2): the
+/// strip delay line of a track whose source the carry program moves. The source is read `P`
+/// further ahead in the successor, so the line takes the `P` frames between: the predecessor's
+/// pending words first on the lanes that grew by `P` (the line the predecessor held, if any),
+/// then, on every lane of `lanes`, the prime the source replays.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphClaimFill {
+    /// The strip delay line in the successor ([`GraphStripDelayLine::line`]).
+    pub line: u32,
+    /// The track's `TrackStage::Input` node: a source claim of the successor, whose planes the
+    /// prime pushes.
+    pub claim: GraphNodeId,
+    /// The predecessor's line of the same strip whose pending words go in first, on
+    /// `pending_lanes`; `None` when the predecessor held none.
+    pub predecessor: Option<u32>,
+    /// The lanes that grew by `P` ([`STRIP_DELAY_LEFT`], [`STRIP_DELAY_RIGHT`]): they start at
+    /// rest and take the predecessor's pending words first.
+    pub pending_lanes: u8,
+    /// The lanes the prime goes into: the grown lanes and the lanes the strip-delay section moves.
+    pub lanes: u8,
+}
+
+/// One `Input`-tap sidechain line a warm successor fills at its adoption block (#1355 D5, lemma
+/// L3): the compensation line of a sidechain edge from a restarted track's `Input` stage into a
+/// carried node. Its consumer continues, so the line takes the head of the stream the
+/// predecessor's consumer would have heard: the predecessor's pending words of the same edge,
+/// then the source track's claim pending in the predecessor, then the prime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphSidechainFill {
+    /// The compensation line in the successor ([`GraphDelayLine::line`]).
+    pub line: u32,
+    /// The source track's `TrackStage::Input` node: a source claim of the successor.
+    pub claim: GraphNodeId,
+    /// The predecessor's line of the same edge, `None` when it held none.
+    pub predecessor: Option<u32>,
+    /// The source track's strip delay line in the predecessor, `None` when it held none.
+    pub claim_line: Option<u32>,
+}
+
+/// One [`GraphClaimFill`] as the plan runs it: the claim resolved to its index.
+#[derive(Clone, Copy, Debug)]
+struct ClaimFillRow {
+    line: u32,
+    claim: u32,
+    predecessor: Option<u32>,
+    pending_lanes: u8,
+    lanes: u8,
+}
+
+/// One [`GraphSidechainFill`] as the plan runs it, with the words each channel has taken: the
+/// predecessor's parts at the carry, the prime at the first block.
+#[derive(Clone, Copy, Debug)]
+struct SidechainFillRow {
+    line: u32,
+    claim: u32,
+    predecessor: Option<u32>,
+    claim_line: Option<u32>,
+    written: [u32; 2],
+}
+
+/// The bytes a prime section of `claims` and `sidechains` fills retains in its plan (#1355 D5):
+/// its two tables. `None` on overflow.
+#[must_use]
+pub fn prime_carry_retained_bytes(claims: usize, sidechains: usize) -> Option<u64> {
+    let claims = claims.checked_mul(core::mem::size_of::<ClaimFillRow>())?;
+    let sidechains = sidechains.checked_mul(core::mem::size_of::<SidechainFillRow>())?;
+    u64::try_from(claims.checked_add(sidechains)?).ok()
+}
+
+/// Install the prime section of the hand-over a warm successor runs at its adoption block (#1355
+/// D5), after its [`GraphCarryProgram`]. In the first block after a carried hand-over the plan
+/// replays `lead_blocks` blocks of every source the program moves, and of the timeline, from the
+/// source-read sample the predecessor would have read, and pushes them into `claims` and
+/// `sidechains` behind the predecessor's pending words (pushed at the carry). The plan's own
+/// sources then read `lead_blocks` quanta further ahead, its source-read offset.
+///
+/// A plan with this section installed fills its lines whenever it is adopted with a carry: there
+/// is no adoption of it whose lines stay at rest. Its readiness is the publisher's to check: it is
+/// published `Primed { lead_blocks, .. }` (#1311), so the prime never underruns.
+///
+/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
+/// program or source set, `lead_blocks` is 0, a fill names a line that is not the plan's, a node
+/// that is not one of its source claims, or no lane, or a line appears twice. Predecessor lines are
+/// checked against the predecessor at the swap block, where one that does not resolve refuses the
+/// whole hand-over.
+pub fn install_prime_carry(
+    plan: &mut PreparedRenderPlan,
+    lead_blocks: u32,
+    claims: Vec<GraphClaimFill>,
+    sidechains: Vec<GraphSidechainFill>,
+) -> Result<(), GraphCarryInstallError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    let Some(set) = executor.source_set.as_ref() else {
+        return Err(GraphCarryInstallError::NoPrimeCarryProgram);
+    };
+    if executor.carry.is_none() || lead_blocks == 0 {
+        return Err(GraphCarryInstallError::NoPrimeCarryProgram);
+    }
+    let claim_index = |node: &GraphNodeId| {
+        set.claims
+            .binary_search_by(|claim| claim.node.cmp(node))
+            .ok()
+            .and_then(|index| u32::try_from(index).ok())
+    };
+    let both = STRIP_DELAY_LEFT | STRIP_DELAY_RIGHT;
+    let mut lines = BTreeSet::new();
+    let mut claim_rows = Vec::with_capacity(claims.len());
+    for fill in &claims {
+        let claim = claim_index(&fill.claim).ok_or(GraphCarryInstallError::PrimeFillOutOfRange)?;
+        if fill.line as usize >= executor.runtime.track_delays.len()
+            || fill.lanes == 0
+            || fill.lanes & !both != 0
+            || fill.pending_lanes & !fill.lanes != 0
+        {
+            return Err(GraphCarryInstallError::PrimeFillOutOfRange);
+        }
+        if !lines.insert(fill.line) {
+            return Err(GraphCarryInstallError::DuplicatePrimeFill);
+        }
+        claim_rows.push(ClaimFillRow {
+            line: fill.line,
+            claim,
+            predecessor: fill.predecessor,
+            pending_lanes: fill.pending_lanes,
+            lanes: fill.lanes,
+        });
+    }
+    let mut lines = BTreeSet::new();
+    let mut sidechain_rows = Vec::with_capacity(sidechains.len());
+    for fill in &sidechains {
+        let claim = claim_index(&fill.claim).ok_or(GraphCarryInstallError::PrimeFillOutOfRange)?;
+        if fill.line as usize >= executor.runtime.delays.len() {
+            return Err(GraphCarryInstallError::PrimeFillOutOfRange);
+        }
+        if !lines.insert(fill.line) {
+            return Err(GraphCarryInstallError::DuplicatePrimeFill);
+        }
+        sidechain_rows.push(SidechainFillRow {
+            line: fill.line,
+            claim,
+            predecessor: fill.predecessor,
+            claim_line: fill.claim_line,
+            written: [0; 2],
+        });
+    }
+    executor.prime_blocks = lead_blocks;
+    executor.prime_claims = claim_rows.into_boxed_slice();
+    executor.prime_sidechains = sidechain_rows.into_boxed_slice();
+    Ok(())
+}
+
+// REALTIME_POLICY_BEGIN: #1355 D5, the prime's fills run in the adoption block.
+/// Whether every predecessor line the prime fills name is a line of `predecessor` (#1355 D5).
+fn prime_fills_resolve(
+    claims: &[ClaimFillRow],
+    sidechains: &[SidechainFillRow],
+    predecessor: &runtime::Runtime,
+) -> bool {
+    let track_line = |line: Option<u32>| {
+        line.is_none_or(|line| (line as usize) < predecessor.track_delays.len())
+    };
+    claims.iter().all(|row| track_line(row.predecessor))
+        && sidechains.iter().all(|row| {
+            track_line(row.claim_line)
+                && row
+                    .predecessor
+                    .is_none_or(|line| (line as usize) < predecessor.delays.len())
+        })
+}
+
+/// The lanes of `lanes` of a line's pending words, the others empty.
+fn lanes_of(pending: [[&[f32]; 2]; 2], lanes: u8) -> [[&[f32]; 2]; 2] {
+    let none: [&[f32]; 2] = [&[], &[]];
+    let [left, right] = pending;
+    [
+        if lanes & STRIP_DELAY_LEFT != 0 {
+            left
+        } else {
+            none
+        },
+        if lanes & STRIP_DELAY_RIGHT != 0 {
+            right
+        } else {
+            none
+        },
+    ]
+}
+
+/// L2's first part (#1355 D5): a grown claim line takes its predecessor line's pending words on
+/// the grown lanes. Bounded by two slice copies a lane.
+fn fill_claim_pending(
+    row: &ClaimFillRow,
+    runtime: &mut runtime::Runtime,
+    predecessor: &runtime::Runtime,
+) {
+    let (Some(from), Some(line)) = (
+        row.predecessor
+            .and_then(|line| predecessor.track_delays.get(line as usize)),
+        runtime.track_delays.get_mut(row.line as usize),
+    ) else {
+        return;
+    };
+    let [left, right] = lanes_of(from.pending(), row.pending_lanes);
+    line.push(left[0], right[0]);
+    line.push(left[1], right[1]);
+}
+
+/// L3's first parts (#1355 D5): the sidechain line's head takes the predecessor's pending words
+/// of the same edge, then the source track's claim pending in the predecessor.
+fn fill_sidechain_pending(
+    row: &mut SidechainFillRow,
+    runtime: &mut runtime::Runtime,
+    predecessor: &runtime::Runtime,
+) {
+    use runtime::FillPart::Words;
+    row.written = [0; 2];
+    let Some(line) = runtime.delays.get_mut(row.line as usize) else {
+        return;
+    };
+    if let Some(from) = row
+        .predecessor
+        .and_then(|line| predecessor.delays.get(line as usize))
+    {
+        let [left, right] = from.pending();
+        line.fill_head(Words(left[0]), Words(right[0]), &mut row.written);
+        line.fill_head(Words(left[1]), Words(right[1]), &mut row.written);
+    }
+    if let Some(from) = row
+        .claim_line
+        .and_then(|line| predecessor.track_delays.get(line as usize))
+    {
+        let [left, right] = from.pending();
+        line.fill_head(Words(left[0]), Words(right[0]), &mut row.written);
+        line.fill_head(Words(left[1]), Words(right[1]), &mut row.written);
+    }
+}
+
+/// The prime (#1355 D5): `blocks` blocks of the timeline and of every source of `moves`, from
+/// the source-read sample `first` on, each pushed into the claim lines (L2) and the head of the
+/// sidechain lines (L3) of its source; a block a source played no PCM for (its region's end) is
+/// `+0.0`, as its render would be. Bounded by `blocks · (moves + fills)`, at most two slice copies
+/// a lane and fill; nothing is staged, allocated or freed.
+#[allow(clippy::too_many_arguments)]
+fn run_prime(
+    runtime: &mut runtime::Runtime,
+    set: &mut GraphPreparedSourceSet,
+    moves: &[(u32, u32)],
+    blocks: u32,
+    first: u64,
+    claims: &[ClaimFillRow],
+    sidechains: &mut [SidechainFillRow],
+) {
+    use runtime::FillPart::{Silence, Words};
+    let quantum = set.envelope.quantum.0;
+    let frames = quantum as usize;
+    for block in 0..blocks {
+        let Some(sample) = u64::from(block)
+            .checked_mul(u64::from(quantum))
+            .and_then(|offset| first.checked_add(offset))
+        else {
+            return;
+        };
+        if !set.driver.prime_block_at(sample, moves) {
+            debug_assert!(false, "#1355 D5: a carried prime names its moved sources");
+            return;
+        }
+        for row in claims {
+            let Some(line) = runtime.track_delays.get_mut(row.line as usize) else {
+                continue;
+            };
+            match set.played_planes(row.claim as usize) {
+                Some((left, right)) => {
+                    let [left, right] =
+                        lanes_of([[left, &[]], [right, &[]]], row.lanes).map(|lane| lane[0]);
+                    line.push(left, right);
+                }
+                None => line.push_silence(frames, row.lanes),
+            }
+        }
+        for row in sidechains.iter_mut() {
+            let Some(line) = runtime.delays.get_mut(row.line as usize) else {
+                continue;
+            };
+            match set.played_planes(row.claim as usize) {
+                Some((left, right)) => line.fill_head(Words(left), Words(right), &mut row.written),
+                None => line.fill_head(Silence(frames), Silence(frames), &mut row.written),
+            }
+        }
+    }
+}
+
+/// A warm plan's pending prime (#1355 D5), for its first block's source-read sample
+/// `source_read_sample` (`S + O`, its offset including its lead): the prime starts its lead
+/// before it, where its predecessor would have read, so the plan's sources then begin at
+/// `S + O`. Run once, by the plan's first block or, for a plan displaced before that block, by its
+/// successor's carry (#1355 MAJOR-1).
+#[allow(clippy::too_many_arguments)]
+fn replay_prime(
+    runtime: &mut runtime::Runtime,
+    set: &mut GraphPreparedSourceSet,
+    moves: &[(u32, u32)],
+    blocks: u32,
+    source_read_sample: u64,
+    claims: &[ClaimFillRow],
+    sidechains: &mut [SidechainFillRow],
+) {
+    let lead = u64::from(blocks) * u64::from(set.envelope.quantum.0);
+    match source_read_sample.checked_sub(lead) {
+        Some(first) => run_prime(runtime, set, moves, blocks, first, claims, sidechains),
+        None => debug_assert!(false, "#1355 D1: a warm offset includes its lead"),
+    }
+}
+// REALTIME_POLICY_END
+
 /// Install the live-send section of the hand-over this graph plan runs when it displaces its
 /// predecessor (#1284 D2), after its [`GraphCarryProgram`], which names that predecessor.
 ///
@@ -5819,6 +6175,32 @@ pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
         })
 }
 
+/// Test-only (issue #1782a): `(first unit, last unit, width)` of each pack group of a graph plan,
+/// in unit order; empty for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_pack_groups(plan: &PreparedRenderPlan) -> Vec<(u32, u32, u32)> {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or_else(Vec::new, |executor| executor.runtime.pack_groups())
+}
+
+/// Test-only (issue #1782a): trade the strips at `(unit, lane)` `a` and `b` of one pack group, as
+/// #1782b's packing move will at a block boundary. Call it between renders, on the render thread.
+/// `false`, with nothing moved, when the plan is not a graph plan or the move is refused.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_swap_bank_lanes(
+    plan: &mut PreparedRenderPlan,
+    a: (usize, usize),
+    b: (usize, usize),
+) -> bool {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .is_some_and(|executor| executor.runtime.swap_bank_lanes(a, b).is_ok())
+}
+
 /// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
 /// any other plan.
 pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
@@ -5862,6 +6244,11 @@ pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
                 delay_carry_retained_bytes(executor.carry_delays.len()).unwrap_or(u64::MAX);
             let strip_delays = strip_delay_carry_retained_bytes(executor.carry_strip_delays.len())
                 .unwrap_or(u64::MAX);
+            let prime = prime_carry_retained_bytes(
+                executor.prime_claims.len(),
+                executor.prime_sidechains.len(),
+            )
+            .unwrap_or(u64::MAX);
             let routes = route_carry_retained_bytes(
                 executor.carry_routes.len(),
                 executor
@@ -5873,6 +6260,7 @@ pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
             sources
                 .saturating_add(delays)
                 .saturating_add(strip_delays)
+                .saturating_add(prime)
                 .saturating_add(routes)
                 .saturating_add(inputs)
                 .saturating_add(strips)
@@ -6132,6 +6520,10 @@ impl GraphExecutor {
             carry_delays: Box::default(),
             compensation_lines,
             carry_strip_delays: Box::default(),
+            prime_blocks: 0,
+            prime_claims: Box::default(),
+            prime_sidechains: Box::default(),
+            prime_pending: false,
             carry_routes: Box::default(),
             route_checks: None,
             bind_identities,
@@ -6227,6 +6619,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             .saturating_add(slice(&self.carry_delays))
             .saturating_add(compensation_lines)
             .saturating_add(slice(&self.carry_strip_delays))
+            .saturating_add(slice(&self.prime_claims))
+            .saturating_add(slice(&self.prime_sidechains))
             .saturating_add(slice(&self.carry_routes))
             .saturating_add(route_checks)
             .saturating_add(strip_delays)
@@ -6250,6 +6644,37 @@ impl PreparedPlanExecutor for GraphExecutor {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// Whether this plan, running, can be displaced by a warm successor whose prime replays
+    /// `lead_blocks` blocks at the block from `block_start` (#1355 D4): its source set's check at
+    /// the block's source-read sample `block_start + O`, where the successor's prime begins. A
+    /// plan with no source set has no ring to prime. An overflowing sample is never ready.
+    ///
+    /// A warm plan adopted but not yet rendered still owes its own prime of `k` blocks, which the
+    /// successor's carry replays first (#1355 MAJOR-1): the check then starts at its prime's
+    /// sample `block_start + O - k·q` and walks both primes, `k + lead_blocks` blocks.
+    fn prime_ready(&self, block_start: u64, lead_blocks: u32) -> bool {
+        let Some(set) = self.source_set.as_ref() else {
+            return true;
+        };
+        let owed = if self.prime_pending {
+            self.prime_blocks
+        } else {
+            0
+        };
+        let Some((first_sample, blocks)) = block_start
+            .checked_add(self.source_read_offset)
+            .and_then(|sample| {
+                sample.checked_sub(u64::from(owed) * u64::from(set.envelope.quantum.0))
+            })
+            .zip(lead_blocks.checked_add(owed))
+        else {
+            return false;
+        };
+        set.driver.prime_ready(first_sample, blocks)
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
     /// Move the sources the installed [`GraphCarryProgram`] names out of the predecessor graph
     /// plan, and copy the strip input lanes [`install_builtin_input_carry`] names (issue #1276),
     /// the fader, mute and matrix stages [`install_builtin_strip_carry`] names (issue #1277) and
@@ -6263,162 +6688,22 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// nothing and reports `PredecessorMismatch`. A console effect restore that refuses after the
     /// moves resolved leaves its lane as prepared and counts in [`carry_refusal_count`] (#1279
     /// D6); the hand-over still reports `Carried`.
-    fn adopt_predecessor(&mut self, predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
-        let Some(program) = self.carry.as_ref() else {
-            return CarryOutcome::NotRequested;
-        };
-        let Some(predecessor) = predecessor
-            .as_any_mut()
-            .and_then(|any| any.downcast_mut::<Self>())
-        else {
-            // A program asks for state; a predecessor that is not a graph plan has none to give.
-            return CarryOutcome::PredecessorMismatch;
-        };
-        if predecessor.identity != program.predecessor {
-            return CarryOutcome::PredecessorMismatch;
-        }
-        // #1652 MINOR-2: a predecessor displaced before its own first block still holds the
-        // comparisons its carry left. Take them first, as that block would have (under every
-        // snapshot and its held jump lengths, as the carry applies pending values), so this
-        // plan carries the state the predecessor's next block would have rendered from. (Not
-        // gated in graph: two swaps with a following route need host-core's attach, #1652c.
-        // Reachable when a render call adopts a plan and is then refused before it renders;
-        // gated by host-core's `route_mute`
-        // `a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison`.)
-        if let Some(checks) = predecessor.route_checks.as_deref_mut()
-            && core::mem::take(&mut checks.pending)
-        {
-            let lengths = predecessor
-                .jump_lengths
-                .as_deref()
-                .map(|reader| reader.held);
-            predecessor.runtime.finish_route_carry(
-                &predecessor.carry_routes,
-                &mut checks.slots,
-                LiveSnapshot::ALL,
-                lengths,
-            );
-        }
-        // Issue #1276: every builtin-input move must resolve before anything moves, so a refused
-        // hand-over moves nothing at all.
-        if !self
-            .runtime
-            .can_carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs)
-        {
-            return CarryOutcome::PredecessorMismatch;
-        }
-        // Issue #1277: likewise every strip move.
-        if !self
-            .runtime
-            .can_carry_strip_lanes(&mut predecessor.runtime, &self.carry_strips)
-        {
-            return CarryOutcome::PredecessorMismatch;
-        }
-        // Issue #1279: likewise every console-effect move, and the scratch holds every payload.
-        if !self.runtime.can_carry_effect_lanes(
-            &mut predecessor.runtime,
-            &self.carry_effects,
-            self.carry_scratch.len(),
-        ) {
-            return CarryOutcome::PredecessorMismatch;
-        }
-        // Issue #1327: likewise every observer move.
-        if let Some(observers) = self.observer_carry.as_deref()
-            && !self
-                .runtime
-                .can_carry_observers(&mut predecessor.runtime, &observers.moves)
-        {
-            return CarryOutcome::PredecessorMismatch;
-        }
-        // Issue #1283: likewise every compensation-line move.
-        if !self
-            .runtime
-            .can_carry_delay_lines(&predecessor.runtime, &self.carry_delays)
-        {
-            return CarryOutcome::PredecessorMismatch;
-        }
-        // Issue #1284: likewise every strip delay line and live send move.
-        if !self
-            .runtime
-            .can_carry_strip_delays(&predecessor.runtime, &self.carry_strip_delays)
-            || !self.runtime.can_carry_live_routes(
-                &predecessor.runtime,
-                &self.carry_routes,
-                self.route_checks
-                    .as_deref()
-                    .map_or(&[][..], |checks| &checks.slots[..]),
-            )
-        {
-            return CarryOutcome::PredecessorMismatch;
-        }
-        if !program.sources.is_empty() || program.timeline {
-            let (Some(successor_set), Some(predecessor_set)) =
-                (self.source_set.as_mut(), predecessor.source_set.as_mut())
-            else {
-                return CarryOutcome::PredecessorMismatch;
-            };
-            if !successor_set
-                .driver
-                .adopt_sources(&mut *predecessor_set.driver, &program.sources)
-            {
-                return CarryOutcome::PredecessorMismatch;
-            }
-        }
-        self.runtime
-            .carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs);
-        self.runtime
-            .carry_strip_lanes(&mut predecessor.runtime, &self.carry_strips);
-        // Issue #1392 D3: after the lane import, each carried fade arm takes its render state.
-        if !self.fade_arm_carry.is_empty() {
-            carry_fade_arms(
-                &mut self.fade_arms,
-                &mut self.fade_arms_pending,
-                &self.fade_fired,
-                &predecessor.fade_arms,
-                &self.fade_arm_carry,
-            );
-        }
-        self.runtime
-            .carry_delay_lines(&mut predecessor.runtime, &self.carry_delays);
-        self.runtime
-            .carry_strip_delays(&mut predecessor.runtime, &self.carry_strip_delays);
-        let mut no_checks = [];
-        let checks = self.route_checks.as_deref_mut();
-        let pending = self.runtime.carry_live_routes(
-            &mut predecessor.runtime,
-            &self.carry_routes,
-            checks.map_or(&mut no_checks[..], |checks| &mut checks.slots[..]),
+    ///
+    /// A warm successor ([`install_prime_carry`], #1355 D5) also pushes the predecessor's pending
+    /// words into the lines its prime fills, and its first block replays the prime.
+    fn adopt_predecessor(
+        &mut self,
+        predecessor: &mut dyn PreparedPlanExecutor,
+        block_start: u64,
+    ) -> CarryOutcome {
+        let outcome = self.take_predecessor(predecessor, block_start);
+        // #1355 D5: a warm successor is prepared against the plan render runs, so its carry, and
+        // with it its prime, cannot be refused.
+        debug_assert!(
+            self.prime_blocks == 0 || outcome == CarryOutcome::Carried,
+            "a warm successor's hand-over is refused: {outcome:?}"
         );
-        if let Some(checks) = self.route_checks.as_deref_mut() {
-            checks.pending = pending;
-        }
-        let refused = self.runtime.carry_effect_lanes(
-            &mut predecessor.runtime,
-            &self.carry_effects,
-            &mut self.carry_scratch,
-            predecessor.next_block_sample,
-            self.observer_carry
-                .as_deref_mut()
-                .map_or(&mut [][..], |observers| &mut observers.taps[..]),
-        );
-        self.node_carry_refused = self.node_carry_refused.saturating_add(refused);
-        if let Some(observers) = self.observer_carry.as_deref_mut() {
-            // The meters' observers first, then the effect taps, which the effect section above
-            // already brought up to date with the predecessor's pending subscriptions (#1280 D3).
-            let meters = self.runtime.carry_observers(
-                &mut predecessor.runtime,
-                &observers.moves,
-                &observers.joins,
-                &mut observers.record,
-            );
-            let taps = self.runtime.carry_taps(
-                &mut predecessor.runtime,
-                &observers.taps,
-                observers.record.get_mut(meters..).unwrap_or(&mut []),
-            );
-            observers.carried = meters + taps;
-        }
-        CarryOutcome::Carried
+        outcome
     }
 
     /// The observers [`Self::adopt_predecessor`] carried (#1327 D3): empty until this plan has
@@ -6508,7 +6793,7 @@ impl PreparedPlanExecutor for GraphExecutor {
             source_input_buffers,
             active_units,
             identity: _,
-            carry: _,
+            carry,
             carry_inputs: _,
             carry_strips: _,
             carry_effects: _,
@@ -6520,6 +6805,10 @@ impl PreparedPlanExecutor for GraphExecutor {
             carry_delays: _,
             compensation_lines: _,
             carry_strip_delays: _,
+            prime_blocks,
+            prime_claims,
+            prime_sidechains,
+            prime_pending,
             carry_routes,
             route_checks,
             bind_identities: _,
@@ -6558,6 +6847,20 @@ impl PreparedPlanExecutor for GraphExecutor {
                 host.silence();
                 return Err(RenderError::TimeOverflow);
             };
+            // #1355 D5: a warm successor's first block replays its prime first, from the sample
+            // its predecessor would have read (`S + O`, its own offset less the lead), so its
+            // sources then begin at `S + O + P`.
+            if core::mem::take(prime_pending) {
+                replay_prime(
+                    runtime,
+                    source_set,
+                    carry.as_ref().map_or(&[][..], |program| &program.sources),
+                    *prime_blocks,
+                    source_read_sample,
+                    prime_claims,
+                    prime_sidechains,
+                );
+            }
             if let Err(error) =
                 source_set.begin_block(source_read_sample, source_set.envelope.quantum.0)
             {
@@ -6731,11 +7034,10 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// rows *is* `symmetry_counters`, and `the_half_mono_cohort_banks_like_a_uniform_one (which asserts rows-sum-to-census inline)` pins that.
     fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         self.runtime
-            .units
+            .identity
             .iter()
-            .zip(self.runtime.identity.iter())
             .enumerate()
-            .map(|(unit, (runtime_unit, identity))| PlanUnitEligibility {
+            .map(|(unit, identity)| PlanUnitEligibility {
                 unit: u32::try_from(unit).unwrap_or(u32::MAX),
                 banked: identity.banking.banked(),
                 gathers_track_input: identity.banking.gathers_track_input(),
@@ -6743,7 +7045,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                 stages: identity.stages,
                 upstream_of_seam_stages: identity.upstream_of_seam_stages,
                 lane_tracks: identity.lane_tracks.clone(),
-                lane_eligible: runtime_unit.lane_eligibility().into_boxed_slice(),
+                // Issue #1782a: each home lane's strip, wherever it renders now.
+                lane_eligible: self.runtime.lane_eligibility_of(unit).into_boxed_slice(),
             })
             .collect()
     }
@@ -6772,6 +7075,225 @@ impl PreparedPlanExecutor for GraphExecutor {
             .as_ref()
             .map_or(0, |set| set.driver.unread_source_frames())
     }
+}
+
+impl GraphExecutor {
+    // REALTIME_POLICY_BEGIN
+    /// The hand-over [`PreparedPlanExecutor::adopt_predecessor`] documents.
+    fn take_predecessor(
+        &mut self,
+        predecessor: &mut dyn PreparedPlanExecutor,
+        block_start: u64,
+    ) -> CarryOutcome {
+        let Some(program) = self.carry.as_ref() else {
+            return CarryOutcome::NotRequested;
+        };
+        let Some(predecessor) = predecessor
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+        else {
+            // A program asks for state; a predecessor that is not a graph plan has none to give.
+            return CarryOutcome::PredecessorMismatch;
+        };
+        if predecessor.identity != program.predecessor {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // Issue #1782a: every move table below names a lane by the location bind gave it, and
+        // drains a predecessor bank's lanes together, so both plans go back to their identity lane
+        // maps first: a bounded series of lane swaps, none under the identity. A move back that
+        // refuses is a defect, and then nothing is carried.
+        if !predecessor.runtime.restore_home_lanes() || !self.runtime.restore_home_lanes() {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // #1652 MINOR-2: a predecessor displaced before its own first block still holds the
+        // comparisons its carry left. Take them first, as that block would have (under every
+        // snapshot and its held jump lengths, as the carry applies pending values), so this
+        // plan carries the state the predecessor's next block would have rendered from. (Not
+        // gated in graph: two swaps with a following route need host-core's attach, #1652c.
+        // Reachable when a render call adopts a plan and is then refused before it renders;
+        // gated by host-core's `route_mute`
+        // `a_successor_of_a_plan_that_never_rendered_takes_its_pending_comparison`.)
+        if let Some(checks) = predecessor.route_checks.as_deref_mut()
+            && core::mem::take(&mut checks.pending)
+        {
+            let lengths = predecessor
+                .jump_lengths
+                .as_deref()
+                .map(|reader| reader.held);
+            predecessor.runtime.finish_route_carry(
+                &predecessor.carry_routes,
+                &mut checks.slots,
+                LiveSnapshot::ALL,
+                lengths,
+            );
+        }
+        // #1355 MAJOR-1: likewise a warm predecessor displaced before its first block still owes
+        // its prime. Replay it at this block, the one it would have rendered first, before its
+        // lines and sources are read or taken, so this plan carries the lines and ring positions
+        // that block would have left. (The source set's absence leaves nothing to prime, as in
+        // render.)
+        if predecessor.prime_pending
+            && let Some(set) = predecessor.source_set.as_mut()
+        {
+            let source_read_sample = block_start.checked_add(predecessor.source_read_offset);
+            predecessor.prime_pending = false;
+            match source_read_sample {
+                Some(source_read_sample) => replay_prime(
+                    &mut predecessor.runtime,
+                    set,
+                    predecessor
+                        .carry
+                        .as_ref()
+                        .map_or(&[][..], |program| &program.sources),
+                    predecessor.prime_blocks,
+                    source_read_sample,
+                    &predecessor.prime_claims,
+                    &mut predecessor.prime_sidechains,
+                ),
+                None => debug_assert!(false, "#1355: a displaced prime's sample overflows"),
+            }
+        }
+        // Issue #1276: every builtin-input move must resolve before anything moves, so a refused
+        // hand-over moves nothing at all.
+        if !self
+            .runtime
+            .can_carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs)
+        {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // Issue #1277: likewise every strip move.
+        if !self
+            .runtime
+            .can_carry_strip_lanes(&mut predecessor.runtime, &self.carry_strips)
+        {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // Issue #1279: likewise every console-effect move, and the scratch holds every payload.
+        if !self.runtime.can_carry_effect_lanes(
+            &mut predecessor.runtime,
+            &self.carry_effects,
+            self.carry_scratch.len(),
+        ) {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // Issue #1327: likewise every observer move.
+        if let Some(observers) = self.observer_carry.as_deref()
+            && !self
+                .runtime
+                .can_carry_observers(&mut predecessor.runtime, &observers.moves)
+        {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // Issue #1283: likewise every compensation-line move.
+        if !self
+            .runtime
+            .can_carry_delay_lines(&predecessor.runtime, &self.carry_delays)
+        {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // #1355 D5: likewise every predecessor line a prime fill takes pending words from.
+        if !prime_fills_resolve(
+            &self.prime_claims,
+            &self.prime_sidechains,
+            &predecessor.runtime,
+        ) {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // Issue #1284: likewise every strip delay line and live send move.
+        if !self
+            .runtime
+            .can_carry_strip_delays(&predecessor.runtime, &self.carry_strip_delays)
+            || !self.runtime.can_carry_live_routes(
+                &predecessor.runtime,
+                &self.carry_routes,
+                self.route_checks
+                    .as_deref()
+                    .map_or(&[][..], |checks| &checks.slots[..]),
+            )
+        {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        if !program.sources.is_empty() || program.timeline {
+            let (Some(successor_set), Some(predecessor_set)) =
+                (self.source_set.as_mut(), predecessor.source_set.as_mut())
+            else {
+                return CarryOutcome::PredecessorMismatch;
+            };
+            if !successor_set
+                .driver
+                .adopt_sources(&mut *predecessor_set.driver, &program.sources)
+            {
+                return CarryOutcome::PredecessorMismatch;
+            }
+        }
+        self.runtime
+            .carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs);
+        self.runtime
+            .carry_strip_lanes(&mut predecessor.runtime, &self.carry_strips);
+        // Issue #1392 D3: after the lane import, each carried fade arm takes its render state.
+        if !self.fade_arm_carry.is_empty() {
+            carry_fade_arms(
+                &mut self.fade_arms,
+                &mut self.fade_arms_pending,
+                &self.fade_fired,
+                &predecessor.fade_arms,
+                &self.fade_arm_carry,
+            );
+        }
+        self.runtime
+            .carry_delay_lines(&mut predecessor.runtime, &self.carry_delays);
+        // #1355 D5, L3: each sidechain line's head is the predecessor's edge pending, then the
+        // source track's claim pending, read before the strip-delay section moves that line.
+        for row in &mut self.prime_sidechains {
+            fill_sidechain_pending(row, &mut self.runtime, &predecessor.runtime);
+        }
+        self.runtime
+            .carry_strip_delays(&mut predecessor.runtime, &self.carry_strip_delays);
+        // #1355 D5, L2: each grown claim line takes the predecessor's pending words first.
+        for row in &self.prime_claims {
+            fill_claim_pending(row, &mut self.runtime, &predecessor.runtime);
+        }
+        // The prime itself needs the block's source-read sample: the first block replays it.
+        self.prime_pending = self.prime_blocks != 0;
+        let mut no_checks = [];
+        let checks = self.route_checks.as_deref_mut();
+        let pending = self.runtime.carry_live_routes(
+            &mut predecessor.runtime,
+            &self.carry_routes,
+            checks.map_or(&mut no_checks[..], |checks| &mut checks.slots[..]),
+        );
+        if let Some(checks) = self.route_checks.as_deref_mut() {
+            checks.pending = pending;
+        }
+        let refused = self.runtime.carry_effect_lanes(
+            &mut predecessor.runtime,
+            &self.carry_effects,
+            &mut self.carry_scratch,
+            predecessor.next_block_sample,
+            self.observer_carry
+                .as_deref_mut()
+                .map_or(&mut [][..], |observers| &mut observers.taps[..]),
+        );
+        self.node_carry_refused = self.node_carry_refused.saturating_add(refused);
+        if let Some(observers) = self.observer_carry.as_deref_mut() {
+            // The meters' observers first, then the effect taps, which the effect section above
+            // already brought up to date with the predecessor's pending subscriptions (#1280 D3).
+            let meters = self.runtime.carry_observers(
+                &mut predecessor.runtime,
+                &observers.moves,
+                &observers.joins,
+                &mut observers.record,
+            );
+            let taps = self.runtime.carry_taps(
+                &mut predecessor.runtime,
+                &observers.taps,
+                observers.record.get_mut(meters..).unwrap_or(&mut []),
+            );
+            observers.carried = meters + taps;
+        }
+        CarryOutcome::Carried
+    }
+    // REALTIME_POLICY_END
 }
 
 #[cfg(test)]

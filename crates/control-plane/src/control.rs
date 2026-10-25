@@ -59,6 +59,11 @@ pub struct ProviderEpoch {
     /// meter's consumer moves from the displaced epoch to this one, at the entry the plan's
     /// `meter_pairing` names (#1674 R1), so a consumer stays with the observer that renders on.
     pub(crate) meters: Box<[host_core::MeterConsumer]>,
+    /// This epoch's plan's meter tables (#1587a R2), built with the plan for a control-plane meter
+    /// delivery: held here while the epoch is pending, in the session's delivery while it renders
+    /// (its promotion exchanges them by pointer, `MeterDelivery::adopt`), and here again once it
+    /// is parked. The running epoch holds empty tables, which allocate nothing.
+    pub(crate) meter_tables: host_core::MeterTables,
     /// The readers of this epoch's plan's effect observation taps (#1584 D7), one per observed
     /// effect instance in `HostLiveControlHandles::effect_observations` order: the windows a tap an
     /// `Observe` edit armed publishes. Empty for a host whose preparer keeps them itself (the
@@ -692,6 +697,7 @@ impl ProviderEpoch {
             strips,
             effects,
             meters,
+            meter_tables: host_core::MeterTables::empty(),
             observations: Box::default(),
             capi,
             revision_gate,
@@ -733,6 +739,7 @@ impl ProviderEpoch {
             strips,
             effects,
             meters,
+            meter_tables: host_core::MeterTables::empty(),
             observations: Box::default(),
             capi,
             revision_gate,
@@ -1193,12 +1200,23 @@ pub struct SessionState<A: ControlAdapter> {
     pub(crate) meters: Option<SessionMeters>,
 }
 
-/// The meter delivery a control plane serves (#1583 D5): the output meter's delivery, with no
-/// strip consumer until #1587 (R1), the fold of its frames into batches, and the configuration
-/// the two were last set for.
+/// The meter delivery a control plane serves (#1583 D5, #1587a): the delivery over the output
+/// meter and the strip meters of the epoch whose tables it holds, the fold of its frames into
+/// batches, each table entry's strip in that epoch, and the configuration they were last set for.
 pub(crate) struct SessionMeters {
     delivery: host_core::MeterDelivery,
     fold: host_core::meters::MeterBatchFold,
+    /// The provider epoch whose meter tables the delivery holds (#1587a): the plan whose frames it
+    /// folds. It follows render one reclaimed plan at a time (`adopt_meters`), and the poll runs
+    /// only while it is the running epoch.
+    epoch: u64,
+    /// Each table entry's strip in `epoch`'s plan (#1587a D2, R4): its index in the frame's strip
+    /// peaks, or `None` for an absent strip and for every entry that reads no strip peak. Rebuilt
+    /// at each accepted configure and each meter adoption, never searched by a batch. Reserved at
+    /// boot for the most entries a table holds, so neither rebuild allocates.
+    resolution: Vec<Option<u32>>,
+    /// Each table entry's peak fold over the open batch, as long as `resolution`.
+    folds: Vec<host_core::meters::StripPeakFold>,
     /// The meter window in blocks, which the provider echoes and the period divides.
     window_blocks: core::num::NonZeroU32,
     /// The controller's telemetry generation the delivery's level and the fold were set for.
@@ -1208,17 +1226,49 @@ pub(crate) struct SessionMeters {
 }
 
 impl SessionMeters {
+    /// A delivery over the boot epoch's tables, with room for `entries` table entries.
     pub(crate) fn new(
         delivery: host_core::MeterDelivery,
         window_blocks: core::num::NonZeroU32,
-    ) -> Self {
-        Self {
+        entries: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let mut resolution = Vec::new();
+        resolution.try_reserve_exact(entries)?;
+        let mut folds = Vec::new();
+        folds.try_reserve_exact(entries)?;
+        Ok(Self {
             delivery,
             fold: host_core::meters::MeterBatchFold::new(core::num::NonZeroU32::MIN),
+            epoch: 0,
+            resolution,
+            folds,
             window_blocks,
             generation: 0,
             unstaged: 0,
-        }
+        })
+    }
+
+    /// Resolve every entry of `table` against `consumers`, the strip meters of the epoch whose
+    /// tables the delivery holds (one per strip, in the frame's strip order), and size the folds
+    /// to the table. The folds keep their values: they are indexed by table entry, so a batch an
+    /// adoption interrupts goes on folding into them, and `push_with_strips` resets them at a
+    /// batch's first frame. A table never holds more entries than were reserved, so this
+    /// allocates nothing.
+    fn resolve(&mut self, table: &[protocol::MeterEntry], consumers: &[host_core::MeterConsumer]) {
+        self.resolution.clear();
+        self.resolution.extend(table.iter().map(|entry| {
+            match (&entry.target, entry.metric) {
+                (protocol::MeterTarget::Strip(id), protocol::MeterMetric::Peak) => consumers
+                    .iter()
+                    .position(|meter| *meter.track_id == **id)
+                    .and_then(|index| u32::try_from(index).ok()),
+                _ => None,
+            }
+        }));
+        self.folds.resize(
+            self.resolution.len(),
+            host_core::meters::StripPeakFold::START,
+        );
     }
 
     /// Every closed meter window that never reached a `METER_BATCH` (#1583 D5): the output
@@ -1231,8 +1281,10 @@ impl SessionMeters {
     /// `unstaged` is defensive: on the C ABI no service step can see a refusal. The step runs at
     /// the start of every session call, before a structural token exists (none outlives its
     /// call), so `stage_meter_batch_event` is never refused as structural-outstanding; the level
-    /// is on only with a nonempty table, which is not `Disabled`; and the two records of the
-    /// output entry always encode.
+    /// is on only with a nonempty table, which is not `Disabled`; and an accepted table's batch
+    /// encodes, because the provider checks the 256-record bound at the configure
+    /// (`meter.records`, #1587a). A stage that is refused all the same counts its batch's windows
+    /// here.
     fn windows_lost(&self) -> u64 {
         self.delivery
             .output_dropped_windows()
@@ -1241,7 +1293,20 @@ impl SessionMeters {
     }
 }
 
-/// The C ABI's delivery has no strip meter until #1587, so it visits no gain-reduction tap.
+/// The strip meter consumers of provider epoch `epoch`: the running one's or a parked one's, or
+/// `None` when neither is `epoch`.
+fn epoch_meters<'a>(
+    current: &'a ProviderEpoch,
+    retired: &'a [ProviderEpoch],
+    epoch: u64,
+) -> Option<&'a [host_core::MeterConsumer]> {
+    core::iter::once(current)
+        .chain(retired)
+        .find(|provider| provider.epoch == epoch)
+        .map(|provider| &*provider.meters)
+}
+
+/// The C ABI's delivery reads no gain-reduction tap until #1587b.
 struct NoGainReductionTaps;
 
 impl host_core::GainReductionTaps for NoGainReductionTaps {
@@ -2120,15 +2185,27 @@ where
             meters.fold.drop_partial();
         }
         meters.fold.restart(windows);
+        // #1587a D2: the entries' strips in the plan whose frames the delivery folds.
+        if let Some(consumers) =
+            epoch_meters(&self.providers, &self.retired_providers, meters.epoch)
+        {
+            meters.resolve(&telemetry.meters, consumers);
+        }
         let next_sample = self.shared.render_sample.load(Ordering::Acquire);
         meters.delivery.set_level(on, next_sample);
     }
 
-    /// Stage one `METER_BATCH` per batch the delivery's closed windows complete (#1583 D5): the
-    /// delivery publishes at most one frame per poll, so the loop polls until it publishes none,
-    /// bounded by the window queue's depth and one more. Records follow the table: the output's
-    /// peak entry gives its left and right peak, `VALID` when the batch's output peak covered its
-    /// span and `CLIPPED` above `1.0`; no other entry is served until #1587.
+    /// Stage one `METER_BATCH` per batch the delivery's closed windows complete (#1583 D5,
+    /// #1587a): the delivery publishes at most one frame per poll, so the loop polls until it
+    /// publishes none, bounded by the window queue's depth and one more. It polls only while the
+    /// delivery holds the running epoch's tables, with that epoch's strip meters.
+    ///
+    /// Records follow the table (D3), two per entry: the output's peak entry gives the batch's
+    /// left and right output peak, `VALID` when the output peak covered the batch's span; a strip's
+    /// peak entry gives its strip's left and right peak, the maxima over the batch's frames,
+    /// `VALID` when every frame had the strip; `CLIPPED` marks a valid value above `1.0`, and a
+    /// value that is not valid is `0.0` with flags `0`. An accepted table needs at most
+    /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, so the records stay on the stack.
     fn stage_meter_batches(&mut self, revision: protocol::SessionRevision) {
         /// `METER_BATCH` record flags (registry): valid and clipped.
         const VALID: u16 = 1;
@@ -2136,49 +2213,71 @@ where
         let Some(meters) = self.meters.as_mut() else {
             return;
         };
+        if meters.epoch != self.providers.epoch {
+            return;
+        }
         let next_sample = self.shared.render_sample.load(Ordering::Acquire);
+        let blank = protocol::MeterRecord {
+            handle: 0,
+            component: protocol::MeterComponent::Left,
+            flags: 0,
+            value: 0.0,
+        };
+        let mut records = [blank; host_core::MAXIMUM_METER_BATCH_RECORDS];
         for _ in 0..=host_core::METER_QUEUE_DEPTH {
-            let Some(frame) = meters
-                .delivery
-                .poll(&mut [], &mut NoGainReductionTaps, next_sample)
-            else {
+            let Some(frame) = meters.delivery.poll(
+                &mut self.providers.meters,
+                &mut NoGainReductionTaps,
+                next_sample,
+            ) else {
                 break;
             };
-            let Some(batch) = meters.fold.push(frame) else {
+            let Some(batch) =
+                meters
+                    .fold
+                    .push_with_strips(frame, &meters.resolution, &mut meters.folds)
+            else {
                 continue;
             };
-            let handle = self
-                .controller
-                .telemetry_configuration()
-                .meters
-                .iter()
-                .position(|entry| {
-                    entry.target == protocol::MeterTarget::Output
-                        && entry.metric == protocol::MeterMetric::Peak
-                })
-                .and_then(|index| u32::try_from(index + 1).ok());
-            let Some(handle) = handle else {
-                continue;
-            };
-            let record = |component, value: f32| {
-                let mut flags = 0;
-                if batch.output_valid {
-                    flags |= VALID;
-                    if value > 1.0 {
-                        flags |= CLIPPED;
+            let table = &self.controller.telemetry_configuration().meters;
+            let mut count = 0;
+            for ((entry, fold), handle) in table.iter().zip(&meters.folds).zip(1_u32..) {
+                let (valid, peak) = match (&entry.target, entry.metric) {
+                    (protocol::MeterTarget::Output, protocol::MeterMetric::Peak) => {
+                        (batch.output_valid, batch.output_peak)
                     }
+                    (protocol::MeterTarget::Strip(_), protocol::MeterMetric::Peak) => {
+                        (fold.present, fold.peak)
+                    }
+                    // Refused at the configure until #1587b.
+                    (_, protocol::MeterMetric::GainReduction) => continue,
+                };
+                for (component, value) in [
+                    (protocol::MeterComponent::Left, peak[0]),
+                    (protocol::MeterComponent::Right, peak[1]),
+                ] {
+                    let Some(slot) = records.get_mut(count) else {
+                        continue;
+                    };
+                    let mut flags = 0;
+                    if valid {
+                        flags |= VALID;
+                        if value > 1.0 {
+                            flags |= CLIPPED;
+                        }
+                    }
+                    *slot = protocol::MeterRecord {
+                        handle,
+                        component,
+                        flags,
+                        value: if valid { value } else { 0.0 },
+                    };
+                    count += 1;
                 }
-                protocol::MeterRecord {
-                    handle,
-                    component,
-                    flags,
-                    value: if batch.output_valid { value } else { 0.0 },
-                }
-            };
-            let records = [
-                record(protocol::MeterComponent::Left, batch.output_peak[0]),
-                record(protocol::MeterComponent::Right, batch.output_peak[1]),
-            ];
+            }
+            if count == 0 {
+                continue;
+            }
             let span = protocol::MeterWindowSpan {
                 first_sample: protocol::SampleTime(batch.first_sample),
                 end_sample: protocol::SampleTime(batch.end_sample),
@@ -2186,7 +2285,7 @@ where
             };
             if self
                 .controller
-                .stage_meter_batch_event(revision, span, &records)
+                .stage_meter_batch_event(revision, span, &records[..count])
                 .is_err()
             {
                 meters.unstaged = meters
@@ -2704,17 +2803,28 @@ where
     /// of three each parked plan still holds a retirement credit, so the list has room for every
     /// epoch a promotion parks whichever order runs, and no test is red without the order (batch
     /// 15a fold 3, m-B).
+    ///
+    /// **Atomic before the drain (#1587a R1').** The atomic is loaded before the drain: render
+    /// retires a displaced plan before it publishes the epoch that displaced it, so every plan
+    /// displaced up to the loaded epoch is reclaimable by then, and the drain promotes through
+    /// each one. Outside the test hold, then, every promotion is a reclaim's, which knows its
+    /// successor's adoption sample (the reclaimed plan's own clock), and the atomic promotes
+    /// nothing more.
     fn synchronize_plan_epochs(&mut self) -> Result<(), CommandError> {
         #[cfg(feature = "test-support")]
         let hold = TEST_HOLD_RECLAMATION.with(core::cell::Cell::get);
         #[cfg(not(feature = "test-support"))]
         let hold = false;
+        let active_epoch = self.shared.active_epoch.load(Ordering::Acquire);
         while !hold && let Ok((retired_epoch, retired_plan)) = self.retirer.try_reclaim() {
             // #1699 D1/D3: a source the successor carried left a vacant entry, so what the
             // retired plan still holds unread is a removed or redeclared source's discarded PCM.
             self.source_frames_discarded = self
                 .source_frames_discarded
                 .saturating_add(retired_plan.unread_source_frames());
+            // #1587a R1': the displaced plan's clock stopped where its successor's first block
+            // started.
+            let adoption_sample = retired_plan.next_absolute_sample();
             drop(ObservedRetiredPlan::new(retired_plan));
             if retired_epoch.0 == self.providers.epoch {
                 let replacement = self
@@ -2724,6 +2834,7 @@ where
                     .epoch;
                 self.promote_pending_provider(replacement)?;
             }
+            self.adopt_meters(retired_epoch.0, adoption_sample);
             let index = self
                 .retired_providers
                 .iter()
@@ -2732,7 +2843,6 @@ where
             self.retired_providers.remove(index);
         }
 
-        let active_epoch = self.shared.active_epoch.load(Ordering::Acquire);
         if active_epoch > self.providers.epoch {
             self.promote_pending_provider(active_epoch)?;
         }
@@ -2754,6 +2864,77 @@ where
                 || pending.iter().any(|provider| provider.epoch == *epoch)
         });
         Ok(())
+    }
+
+    /// Hand the meter delivery from the plan of `displaced`, whose reclaim this is, to its
+    /// successor, adopted at `adoption_sample` (#1587a D1, R1', R3). Nothing happens unless the
+    /// delivery holds `displaced`'s tables; the successor is the oldest promoted epoch after it,
+    /// running or parked, since render adopts in publication order and a withdrawn candidate is
+    /// never promoted. The successor's tables go to the delivery by pointer
+    /// ([`host_core::MeterDelivery::adopt`]), with a [`host_core::MeterCarry`] for each strip
+    /// meter its plan's swap block carried (`meter_pairing`, and the handles the two epochs'
+    /// consumers publish under); the delivery's displaced tables go back to `displaced`'s parked
+    /// epoch and drop with it, on this thread. A swap that carried no strip meter restarts the
+    /// grid at `adoption_sample`, where render restarted the gate (`OutputPeakGateRelay::
+    /// restart_at`). The entries are then resolved against the successor's strips.
+    ///
+    /// Run once per reclaimed plan, in reclaim order, so after a test hold's lagging promotions
+    /// the delivery catches up one epoch per reclaim. Allocates nothing.
+    fn adopt_meters(&mut self, displaced: u64, adoption_sample: u64) {
+        let Some(meters) = self.meters.as_mut() else {
+            return;
+        };
+        if meters.epoch != displaced {
+            return;
+        }
+        let Some(successor) = core::iter::once(&mut self.providers)
+            .chain(self.retired_providers.iter_mut())
+            .filter(|provider| provider.epoch > displaced)
+            .min_by_key(|provider| provider.epoch)
+        else {
+            return;
+        };
+        let mut tables =
+            core::mem::replace(&mut successor.meter_tables, host_core::MeterTables::empty());
+        let successor_epoch = successor.epoch;
+        let (Some(next), Some(previous)) = (
+            core::iter::once(&self.providers)
+                .chain(&self.retired_providers)
+                .find(|provider| provider.epoch == successor_epoch),
+            core::iter::once(&self.providers)
+                .chain(&self.retired_providers)
+                .find(|provider| provider.epoch == displaced),
+        ) else {
+            return;
+        };
+        let pairing = next
+            .inventory
+            .meter_pairing()
+            .iter()
+            .filter(|carry| carry.kind == engine::realtime::ObserverKind::Meter);
+        let carried = pairing.clone().next().is_some();
+        let carries = pairing.filter_map(|carry| {
+            Some(host_core::MeterCarry {
+                successor: u32::try_from(carry.successor).ok()?,
+                predecessor: u32::try_from(carry.predecessor).ok()?,
+                successor_handle: next.meters.get(carry.successor)?.handle.0.get(),
+                predecessor_handle: previous.meters.get(carry.predecessor)?.handle.0.get(),
+            })
+        });
+        meters
+            .delivery
+            .adopt(&mut tables, carries, carried, adoption_sample);
+        meters.epoch = successor_epoch;
+        meters.resolve(
+            &self.controller.telemetry_configuration().meters,
+            &next.meters,
+        );
+        if let Some(previous) = core::iter::once(&mut self.providers)
+            .chain(self.retired_providers.iter_mut())
+            .find(|provider| provider.epoch == displaced)
+        {
+            previous.meter_tables = tables;
+        }
     }
 
     /// Makes the pending provider of `epoch` current and parks the previous one until its plan
@@ -4093,6 +4274,7 @@ where
             strips,
             effects,
             meters,
+            meter_tables,
             observations,
             plan: candidate_plan,
             resources,
@@ -4125,6 +4307,7 @@ where
         );
         candidate_provider.discontinuity = discontinuity;
         candidate_provider.observations = observations;
+        candidate_provider.meter_tables = meter_tables;
         // The configuration epoch is set beside the push, after the commit.
         candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {
             captures: candidate_captures,

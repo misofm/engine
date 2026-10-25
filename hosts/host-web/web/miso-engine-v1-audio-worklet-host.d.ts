@@ -903,8 +903,11 @@ export interface MisoAudioWorkletHost {
   /// handler. The frame is copied. One request-ID allocator must serve every frame sent through
   /// this method, because the engine's replay cache refuses a reused ID with different bytes. A
   /// frame that is empty or over 16384 bytes rejects with `RESULT_INVALID_ARGUMENT` (1), and more
-  /// than 64 frames in flight with `RESULT_BACKPRESSURE` (6), before the port.
-  control(frame: Uint8Array): Promise<MisoControlReply>;
+  /// than 64 frames in flight with `RESULT_BACKPRESSURE` (6), before the port. `document` (issue
+  /// 1697) is the document a `SESSION_REPLACE` frame names, copied and sent beside it, up to the
+  /// boot's 1 MiB document bound; an empty one rejects with `RESULT_INVALID_ARGUMENT` (1) before
+  /// the port, and one over the bound answers `RESULT_INVALID_ARGUMENT` with an empty response.
+  control(frame: Uint8Array, document?: Uint8Array): Promise<MisoControlReply>;
   /// Submit one batch of observation records (kinds 7 and 8) as a single transaction (issue 137
   /// D1). Values go through `control()`.
   command(request: MisoCommandRequest): Promise<MisoCommandAck>;
