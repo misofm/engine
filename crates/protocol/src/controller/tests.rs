@@ -4970,3 +4970,78 @@ fn a_session_command_completes_once_and_replays_its_exact_bytes() {
         StatusCode::Unavailable
     );
 }
+
+/// #1586 D6: an `OBSERVATION_READ` completes only with the request it prepared. Completed with a
+/// request of the same length and request ID but another selection, or with a longer request, it
+/// answers `Internal` without panicking and leaves the replay cache empty; the prepared request
+/// then completes once and is cached.
+///
+/// Red if the completion records a replay entry for bytes the read was not planned for (or panics
+/// on a longer request's reservation).
+#[test]
+fn an_observation_read_completes_only_with_its_own_request() {
+    let read = |strip: &str, tap_id| crate::ObservationReadRequest {
+        selections: vec![crate::ObservationReadSelection {
+            strip_id: session::StableId::parse(strip).expect("strip"),
+            section: controls::TapSection::Inserts(session::StableId::parse("comp").expect("id")),
+            tap_id,
+            channels: crate::ParameterChannel::Both,
+        }],
+    };
+    let frame = |request: &crate::ObservationReadRequest| {
+        full_command(
+            7,
+            ExpectedRevision::Any,
+            crate::CommandPayload::ObservationRead(request),
+        )
+    };
+    let input = frame(&read("t1", 1));
+    let same_length = frame(&read("t1", 2));
+    let longer = frame(&read("a-much-longer-strip-id", 1));
+    assert_eq!(input.len(), same_length.len());
+    assert!(longer.len() > input.len());
+    let page = crate::ObservationReadPage {
+        observed_sample: 0,
+        rows: std::borrow::Cow::Owned(vec![crate::ObservationReadRow {
+            status: crate::ObservationRowStatus::Unarmed,
+            armed: false,
+            arm_sample: 0,
+            arm_tag: 0,
+            window: None,
+            left: None,
+            right: None,
+            unit: crate::ParameterUnit::Db,
+        }]),
+    };
+    let mut endpoint = controller(8);
+    let prepare = |endpoint: &mut ProtocolController<MockProvider>| {
+        let PreparedCommandFrame::ObservationRead(prepared) = endpoint
+            .prepare_command_frame(
+                &input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
+            .expect("prepare")
+        else {
+            panic!("the session executes the read");
+        };
+        prepared
+    };
+    let mut output = [0_u8; 2048];
+    for other in [&same_length, &longer] {
+        let prepared = prepare(&mut endpoint);
+        assert!(matches!(
+            endpoint.complete_observation_read(prepared, other, page.clone(), &mut output),
+            Err(CommandFrameProcessError::Internal)
+        ));
+        assert!(endpoint.replay().is_empty(), "no entry for another request");
+    }
+    let prepared = prepare(&mut endpoint);
+    assert!(
+        endpoint
+            .complete_observation_read(prepared, &input, page, &mut output)
+            .is_ok()
+    );
+    assert_eq!(endpoint.replay().len(), 1);
+}

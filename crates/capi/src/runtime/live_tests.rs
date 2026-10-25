@@ -9709,7 +9709,7 @@ impl Rig {
 /// sequence and both lanes are the reader's own window, bit for bit, in dB. A second read with no
 /// render answers the same rows. After a disarm it is unarmed at once, and after one block it is
 /// unarmed with the disarm's tag. A read of 1 and of 256 compressor taps through
-/// `miso_engine_v1_submit_command`, after a warm-up read of each shape, allocates nothing: the
+/// `miso_engine_v1_submit_command`, after the reads above, allocates nothing: the
 /// frame decode, the read, the reply's encode and its replay entry.
 ///
 /// Red if a row reports an arm render has not applied, a window from before the arm, another
@@ -9798,7 +9798,7 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
     );
     assert_eq!(row(&mut rig), ready, "a read consumes nothing");
 
-    // Gate 6: 256 rows, after a warm-up read, allocate nothing.
+    // Gate 6: a 1-row and a 256-row read allocate nothing.
     let every = model
         .tracks
         .iter()
@@ -9812,8 +9812,6 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
     assert_eq!(every.len(), protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS);
     for rows in [1, protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS] {
         let selections = every[..rows].to_vec();
-        // A warm-up read of the same shape, then the counted one, each under its own request ID.
-        let _ = rig.observation_rows(selections.clone());
         let (result, used) = rig.observation_read_counted(selections);
         assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
         assert_eq!(
@@ -9846,9 +9844,11 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
 /// followed by an unknown tap, by the same tap again (other lanes), an unknown strip, a console
 /// slot whose effect has no observation lane, and a batch whose widest reply exceeds the frame
 /// limit each answer the typed refusal (D4: status, code and `selection[i]`; the frame:
-/// `LIMIT_EXCEEDED`, `observation.frame`) and no page; the good selection alone then reads.
+/// `LIMIT_EXCEEDED`, `observation.frame`) and no page; the good selection alone then reads. A raw
+/// frame of 257 selections answers a typed `INVALID_FIELD` that replays.
 ///
-/// Red if a partly bad batch answers rows, or a refusal names the wrong selection or code.
+/// Red if a partly bad batch answers rows, a refusal names the wrong selection or code, or a frame
+/// of 257 selections reaches the session.
 #[test]
 fn an_observation_read_refuses_a_bad_batch_whole() {
     let document = effect_session(10, 48_000);
@@ -9938,7 +9938,47 @@ fn an_observation_read_refuses_a_bad_batch_whole() {
         )
     );
     assert_eq!(
-        rig.observation_rows(vec![good])[0].status,
+        rig.observation_rows(vec![good.clone()])[0].status,
         protocol::ObservationRowStatus::Unarmed
     );
+    // A raw frame of 257 selections (the typed encoder writes at most 256) is refused by the
+    // controller's decode as a typed `INVALID_FIELD` reply, which an exact replay answers again,
+    // at a frame limit that carries the request.
+    let mut wide_rig = Rig::with_limits(&document, observation_limits());
+    wide_rig.step();
+    let request = wide_rig.next_request();
+    let mut bytes = command_bytes_at_revision(
+        request,
+        ExpectedRevision::Any,
+        protocol::CommandPayload::ObservationRead(&protocol::ObservationReadRequest {
+            selections: (1..=256)
+                .map(|tap| tap_selection(&track, good.section.clone(), tap))
+                .collect(),
+        }),
+    );
+    let header = protocol::OUTER_HEADER_BYTES;
+    let first_len = u32::from_le_bytes(bytes[header + 4..header + 8].try_into().expect("length"));
+    let first = bytes[header..header + 8 + (first_len as usize).next_multiple_of(8)].to_vec();
+    bytes.extend_from_slice(&first);
+    let payload_len = u32::try_from(bytes.len() - header).expect("a short frame");
+    bytes[20..24].copy_from_slice(&payload_len.to_le_bytes());
+    bytes[40..44].copy_from_slice(&257_u32.to_le_bytes());
+    let replies = [0, 1].map(|_| {
+        let (result, _, response) = super::tests::command_c_capacity(
+            wide_rig.session,
+            &bytes,
+            OBSERVATION_FRAME_BYTES as usize,
+        );
+        assert_eq!(result, crate::RESULT_OK, "{:?}", wide_rig.last_error());
+        response
+    });
+    assert_eq!(replies[0], replies[1], "the refusal replays");
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::NonOk { header, .. } = ProtocolCodec::default()
+        .decode_typed_response(&replies[0], &mut DecodeScratch::new(&mut fields))
+        .expect("a response frame")
+    else {
+        panic!("257 selections answer no page");
+    };
+    assert_eq!(header.status, protocol::StatusCode::InvalidField);
 }

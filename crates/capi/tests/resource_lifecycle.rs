@@ -3430,6 +3430,26 @@ fn race_live_edits(run: usize) -> RaceCounts {
     let in_render = AtomicBool::new(false);
     let rendered = AtomicU64::new(first_race_block);
     let mut edits = RaceEdits::new(&document);
+    // #1586 gate 6: the race compressor's tap armed once before the race, with the window the
+    // race's own `Observe` edits use, so their arms join it and their disarms leave it armed, and
+    // every racing read reads a live window.
+    let arm = transaction(
+        2,
+        42,
+        &[SessionEdit::Observe {
+            strip_id: edits.tracks[0].clone(),
+            section: protocol::control_core::TapSection::Inserts(
+                StableId::parse(RACE_COMPRESSOR).expect("stable id"),
+            ),
+            tap_id: 1,
+            armed: true,
+            window_blocks: 4,
+        }],
+    );
+    // SAFETY: The session and the caller-owned buffers are live; no other thread uses it yet.
+    let armed = unsafe { submit(session, &arm, &mut response) };
+    assert_eq!(armed, RESULT_OK);
+    assert_eq!(&response[18..20], &[0, 0], "the tap is armed");
 
     let (control, (render_observed, render_failure)) = std::thread::scope(|scope| {
         let render = scope.spawn(|| {

@@ -1319,6 +1319,14 @@ pub enum PreparedCommandFrame {
     ObservationRead(PreparedObservationRead),
 }
 
+/// The FNV-1a 64-bit digest of a request's bytes, which ties an `OBSERVATION_READ` completion to the
+/// request it prepared (#1586 D6). Allocates nothing.
+fn request_digest(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 /// An `OBSERVATION_READ` decoded, checked and planned against the replay cache (#1586 D6): affine
 /// and bound to one controller generation as [`PreparedSessionCommand`] is, and holding nothing
 /// on the heap. The completion takes the request bytes again, which must be the prepared ones.
@@ -1327,6 +1335,8 @@ pub struct PreparedObservationRead {
     generation: u64,
     request_id: RequestId,
     request_len: usize,
+    /// [`request_digest`] of the prepared request's bytes.
+    request_digest: u64,
     replay_plan: ReplayPreflightPlan,
     armed: bool,
 }
@@ -2385,6 +2395,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 generation,
                 request_id: header.request_id,
                 request_len: input.len(),
+                request_digest: request_digest(input),
                 replay_plan,
                 armed: true,
             },
@@ -2659,7 +2670,12 @@ impl<P: ControlProvider> ProtocolController<P> {
             .decode_header(request)
             .ok()
             .and_then(|decoded| decoded.header.command().map(|header| header.request_id));
-        if request.len() != prepared.request_len || header_id != Some(prepared.request_id) {
+        // Any other request is refused before the cache is touched: its replay entry would not be
+        // the planned one.
+        if request.len() != prepared.request_len
+            || header_id != Some(prepared.request_id)
+            || request_digest(request) != prepared.request_digest
+        {
             return Err(CommandFrameProcessError::Internal);
         }
         let written = self.complete_planned(
