@@ -10219,6 +10219,7 @@ mod tests {
                 shape: effect_contract::EffectLaneShape::from_descriptor(&GAIN_DESCRIPTOR, 0),
                 bypass: false,
                 observation_depth: 0,
+                link: None,
             },
             &engine::realtime::LiveValuesSuperseded::new(),
         )
@@ -10268,6 +10269,7 @@ mod tests {
                     shape,
                     bypass: false,
                     observation_depth: 0,
+                    link: None,
                 },
                 &superseded,
             )

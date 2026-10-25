@@ -2830,6 +2830,14 @@ impl LiveControlEffect {
     #[inline]
     fn stage(&mut self, snapshot: LiveSnapshot, first_sample: u64) -> effect_contract::Staged {
         let staged = self.control.stage(&mut self.spans, first_sample, snapshot);
+        // #1371 D2: the lane's link switch reaches the processor before the block renders.
+        if let Some(link) = staged.link {
+            let taken = self
+                .effect
+                .processor
+                .retarget_link(0, link.mode, link.ramp_samples);
+            self.control.settle_link(link.mode, taken);
+        }
         // #1585 R2: a prepared arm reaches its slot in the plan's first block drain, before the
         // block's records.
         if let Some(observation) = self.observation.as_deref_mut() {

@@ -12,9 +12,10 @@
 use effect_contract::{
     BankCrossfade, BankCrossfadeLane, BankWidth, BypassShunt, ChannelSymmetryWitness,
     EffectBankProcessBlock, EffectControlLane, EffectControlRecord, EffectId, EffectProgramKey,
-    LatencySamples, ObservationLane, ObservationSample, PreparedAutomationSpan, PreparedEffectBank,
-    PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort, SeamSide,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, apply_observe, transpose_tile_4,
+    LatencySamples, LinkMode, ObservationLane, ObservationSample, PreparedAutomationSpan,
+    PreparedEffectBank, PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort,
+    SeamSide, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, apply_observe,
+    transpose_tile_4,
 };
 use engine::realtime::{Consumer, LiveSnapshot, RenderError};
 
@@ -949,6 +950,39 @@ fn carry_payload(
     Some(effect_contract::payload_sections_agree(left, right))
 }
 
+/// Seat the predecessor's link mode on the successor bank's lane `lane` before a carry restores
+/// the predecessor's state payload into it (#1371 D6): a restore keeps a payload's glide words
+/// only under the mode they glide to, so a successor prepared at another mode (the committed one,
+/// which a pending link write still has to reach) would otherwise rest at its own mode, a step.
+/// Seated, the restore continues the glide in flight bit for bit, and the link write glides the lane
+/// on to the committed mode at the successor's first block ([`EffectControlLane::link_to_seat`]).
+///
+/// Returns the successor lane's prepared mode when a mode was seated, for [`unseat_link`] to
+/// restore if the carry is then refused; `None` when nothing was seated.
+// REALTIME_POLICY_BEGIN: #1371 D6, the plan-swap carry seats a lane's mode in the swap block.
+fn seat_link(
+    into: &mut dyn PreparedNativeEffectBank,
+    lane: usize,
+    own: Option<&EffectControlLane>,
+    predecessor: Option<&EffectControlLane>,
+) -> Option<LinkMode> {
+    let own = own?;
+    let mode = own.link_to_seat(predecessor?)?;
+    into.retarget_link(lane, mode, 0)
+        .then_some(own.link_mode())
+        .flatten()
+}
+
+/// Return lane `lane` to its prepared mode `seat` after a refused carry ([`seat_link`]), so a
+/// refused lane is left as prepared, at rest.
+fn unseat_link(into: &mut dyn PreparedNativeEffectBank, lane: usize, seat: Option<LinkMode>) {
+    if let Some(prepared) = seat {
+        let restored = into.retarget_link(lane, prepared, 0);
+        debug_assert!(restored, "the prepared mode is supported");
+    }
+}
+// REALTIME_POLICY_END
+
 /// [`carry_payload`] from a per-node instance into a bank lane (#1281 D2): the instance's
 /// `snapshot_state_payload` goes into `scratch`, and the bank's `restore_track_state_payload`
 /// takes it. The two payloads share one layout (#1278).
@@ -1741,14 +1775,27 @@ impl LiveControlEffectBankStage {
     ) -> bool {
         let taken = if self.can_carry_lane_from(lane, predecessor, predecessor_lane, scratch.len())
         {
-            carry_payload(
+            let seat = seat_link(
+                &mut *self.processor,
+                lane,
+                self.lanes.get(lane).and_then(Option::as_ref),
+                predecessor
+                    .lanes
+                    .get(predecessor_lane)
+                    .and_then(Option::as_ref),
+            );
+            let restored = carry_payload(
                 &mut *self.processor,
                 lane,
                 &*predecessor.processor,
                 predecessor_lane,
                 &self.layout,
                 scratch,
-            )
+            );
+            if restored.is_none() {
+                unseat_link(&mut *self.processor, lane, seat);
+            }
+            restored
         } else {
             None
         };
@@ -1854,13 +1901,23 @@ impl LiveControlEffectBankStage {
         scratch: &mut [u8],
     ) -> bool {
         let taken = if self.can_carry_instance(lane, from.control, scratch.len()) {
-            carry_payload_from_instance(
+            let seat = seat_link(
+                &mut *self.processor,
+                lane,
+                self.lanes.get(lane).and_then(Option::as_ref),
+                Some(from.control),
+            );
+            let restored = carry_payload_from_instance(
                 &mut *self.processor,
                 lane,
                 from.processor,
                 &self.layout,
                 scratch,
-            )
+            );
+            if restored.is_none() {
+                unseat_link(&mut *self.processor, lane, seat);
+            }
+            restored
         } else {
             None
         };
@@ -1909,6 +1966,18 @@ impl LiveControlEffectBankStage {
         if !self.can_carry_lane_into_instance(lane, into.control, scratch.len()) {
             return false;
         }
+        // #1371 D6: the instance's processor takes the bank lane's mode before the restore, as a
+        // bank lane does ([`seat_link`]).
+        let mut seat = None;
+        if let Some(mode) = self
+            .lanes
+            .get(lane)
+            .and_then(Option::as_ref)
+            .and_then(|from| into.control.link_to_seat(from))
+            && into.processor.retarget_link(0, mode, 0)
+        {
+            seat = into.control.link_mode();
+        }
         if carry_payload_into_instance(
             into.processor,
             &*self.processor,
@@ -1918,6 +1987,10 @@ impl LiveControlEffectBankStage {
         )
         .is_none()
         {
+            if let Some(prepared) = seat {
+                let restored = into.processor.retarget_link(0, prepared, 0);
+                debug_assert!(restored, "the prepared mode is supported");
+            }
             return false;
         }
         if let Some(from) = self.lanes.get(lane).and_then(Option::as_ref) {
@@ -2510,6 +2583,15 @@ impl LiveControlEffectBankStage {
         for (lane, channel) in self.lanes.iter_mut().enumerate() {
             if let Some(channel) = channel.as_mut() {
                 let staged = channel.stage(&mut self.staging, first_sample, snapshot);
+                // #1371 D2: the lane's link switch reaches the processor here, before the chain
+                // decides the block's mode or asks which lanes rest. It moves both channels'
+                // weights alike, so a collapsed block and its desymmetrize boundary see one glide.
+                if let Some(link) = staged.link {
+                    let taken = self
+                        .processor
+                        .retarget_link(lane, link.mode, link.ramp_samples);
+                    channel.settle_link(link.mode, taken);
+                }
                 // Packed at this lane's own offset, immediately: that offset is what makes the
                 // window reusable and what gives the lane its private partition of `packed`.
                 self.packed[packed..packed + staged.staged]

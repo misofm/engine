@@ -678,6 +678,7 @@ mod effect_bank {
                 shape: EffectLaneShape::from_live_parameters([], 0),
                 bypass: false,
                 observation_depth: 0,
+                link: None,
             },
             &superseded,
         )

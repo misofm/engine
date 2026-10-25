@@ -13,8 +13,9 @@ mod symmetry;
 pub use live::{
     BANK_CROSSFADE_LANES, BankCrossfade, BankCrossfadeLane, BypassShunt, BypassSwitch,
     EffectCellWriter, EffectControlLane, EffectControlRecord, EffectLaneResources, EffectLaneShape,
-    EffectLaneSpec, EffectWriteRefusal, LaneSwapRefusal, ObservationLane, ObservePushError, Staged,
-    apply_observe, effect_control_lane, swap_bank_lanes, swap_bank_lanes_scratch_bytes,
+    EffectLaneSpec, EffectWriteRefusal, LaneSwapRefusal, LinkSwitch, ObservationLane,
+    ObservePushError, Staged, apply_observe, effect_control_lane, swap_bank_lanes,
+    swap_bank_lanes_scratch_bytes,
 };
 pub use prepared_target::{
     EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,

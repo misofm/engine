@@ -79,6 +79,7 @@ impl Rig {
                 shape,
                 bypass: false,
                 observation_depth,
+                link: None,
             },
             &superseded,
         )

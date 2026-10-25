@@ -481,6 +481,7 @@ impl World {
                         ),
                         bypass: false,
                         observation_depth: 2,
+                        link: None,
                     },
                     &superseded,
                 )
@@ -1048,6 +1049,7 @@ fn a_quiet_live_slot_renders_what_one_read_every_block_does() {
                             ),
                             bypass: false,
                             observation_depth: 2,
+                            link: None,
                         },
                         &superseded,
                     )
@@ -1187,6 +1189,7 @@ fn collapse_case(width: BankWidth, lanes: usize, seed: u64, case: OddStrip) {
                                 ),
                                 bypass: false,
                                 observation_depth: 2,
+                                link: None,
                             },
                             &superseded,
                         )

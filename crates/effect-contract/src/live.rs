@@ -25,6 +25,9 @@
 //! (`CellReader::read_counted`). One lane holds
 //!
 //! - one **bypass** cell (two words: the bypass and the crossfade ramp that carries it, #1341);
+//! - one **link** cell for an effect whose descriptor has `lane_link` (two words: the detector link
+//!   mode's code and the glide that carries it, #1371 D1). The stage that owns the processor hands
+//!   an applied word to `retarget_link`;
 //! - one **parameter** cell per `(parameter_index, channel)` of every `Block`-rate parameter: a
 //!   `Shared` parameter has one `Both` cell, a `PerLane` one a `Left` and a `Right` cell (one
 //!   word, the value's bits). A lane whose effect owns prepared targets (the parametric EQ) has
@@ -33,7 +36,7 @@
 //!   ([`PREPARED_EFFECT_TARGET_WORDS`] words; a `Both` target writes both channel cells).
 //!
 //! The cell's index is its dirty bit and its place in the canonical drain order (D3): bypass, then
-//! the parameter cells in `(parameter_index, channel)` order, then the target cells in `(slot,
+//! the link cell (#1371 D2), then the parameter cells in `(parameter_index, channel)` order, then the target cells in `(slot,
 //! channel)` order. Where both channel cells of one parameter or target were applied in a block
 //! with equal words, the channels are a pair: the channel-symmetry witness keeps its `LIVE` term
 //! and a target is applied once, as `Both`. Every other applied cell is a lone channel write and
@@ -86,10 +89,11 @@ use lane::kernels::{
 use std::sync::Arc;
 
 use crate::{
-    AutomationRate, ChannelSymmetryWitness, EffectDescriptor, ObservationDescriptor,
-    ObservationFold, ObservationSample, PREPARED_EFFECT_TARGET_WORDS, ParameterChannel,
-    ParameterChannelPolicy, PreparedAutomationSpan, PreparedEffectTarget, PreparedNativeEffectBank,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+    AutomationRate, ChannelSymmetryWitness, EffectDescriptor, LINK_GLIDE_MAX_SAMPLES, LinkMode,
+    LinkModeSet, ObservationDescriptor, ObservationFold, ObservationSample,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterChannelPolicy, PreparedAutomationSpan,
+    PreparedEffectTarget, PreparedNativeEffectBank, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes,
 };
 
 /// One admitted live control event for one prepared effect instance.
@@ -97,7 +101,8 @@ use crate::{
 /// It is `Copy` and fixed-size. Addressing is *not* carried: a lane belongs to exactly one effect
 /// instance (or, in a bank, to exactly one lane of one slot), so the record only says what to
 /// change. [`EffectCellWriter::write`] puts a [`Parameter`](Self::Parameter),
-/// [`PreparedTarget`](Self::PreparedTarget) or [`Bypass`](Self::Bypass) value into its cell, and
+/// [`PreparedTarget`](Self::PreparedTarget), [`Bypass`](Self::Bypass) or [`Link`](Self::Link)
+/// value into its cell, and
 /// [`EffectCellWriter::try_push_observe`] queues an [`Observe`](Self::Observe).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EffectControlRecord {
@@ -149,6 +154,38 @@ pub enum EffectControlRecord {
     /// [`EffectWriteRefusal::Ramp`] by [`EffectCellWriter::check`] and
     /// [`EffectCellWriter::write`], with nothing written.
     Bypass(BypassSwitch),
+    /// Glide this instance's detector link to another mode (#1371).
+    ///
+    /// The record is the whole link cell, two words: the mode and the glide's length
+    /// ([`LinkSwitch`]), written and drained as one unit. The stage that owns the processor hands
+    /// an applied word to `retarget_link` at the block boundary. A lane whose effect has no
+    /// `lane_link` holds no link cell and refuses it as [`EffectWriteRefusal::Link`], as it does a
+    /// mode the effect does not support; a glide longer than [`LINK_GLIDE_MAX_SAMPLES`] is
+    /// refused as [`EffectWriteRefusal::Ramp`]. Nothing is written on a refusal.
+    Link(LinkSwitch),
+}
+
+/// A detector link mode and the glide that carries it: the two words of the link cell, written and
+/// drained as one unit (#1371 D1).
+///
+/// The lane's detector glides from the weights in force to `mode`'s rest weights over
+/// `ramp_samples` frames (`retarget_link`, #1370); `0` is a step. A host fills the length from the
+/// edit's own ramp, else the session's `fader_ms` (`LiveRamps::link_samples`, #1054 D3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LinkSwitch {
+    /// The mode the lane's detector reaches when the glide ends.
+    pub mode: LinkMode,
+    /// The glide's length in frames, at most [`LINK_GLIDE_MAX_SAMPLES`]; `0` is a step.
+    pub ramp_samples: u32,
+}
+
+impl LinkSwitch {
+    /// The mode whose code (`LinkMode as u32`) is `code`, if any.
+    fn mode_of(code: u32) -> Option<LinkMode> {
+        [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
+            .into_iter()
+            .find(|mode| *mode as u32 == code)
+    }
 }
 
 /// A live bypass and the crossfade ramp that carries it: the two words of the bypass cell, written
@@ -213,6 +250,9 @@ struct ParameterGroup {
 #[derive(Debug, Eq, PartialEq)]
 pub struct EffectLaneShape {
     groups: Box<[ParameterGroup]>,
+    /// The modes the lane's link cell may hold, or `None` for a lane without one: its effect has
+    /// no `lane_link` (#1371 D1).
+    link: Option<LinkModeSet>,
     /// The parameter cells of all groups: one per `Shared` group, two per `PerLane` one.
     parameter_cells: u32,
     target_slots: usize,
@@ -253,20 +293,43 @@ impl EffectLaneShape {
         }
         Self {
             groups: groups.into_boxed_slice(),
+            link: None,
             parameter_cells,
             target_slots,
         }
     }
 
+    /// This shape with a link cell that holds the modes in `modes` (#1371 D1).
+    #[must_use]
+    pub fn with_link(self, modes: LinkModeSet) -> Self {
+        Self {
+            link: Some(modes),
+            ..self
+        }
+    }
+
+    /// Whether the lane holds a link cell.
+    #[must_use]
+    pub const fn has_link(&self) -> bool {
+        self.link.is_some()
+    }
+
     /// The shape of `descriptor`'s lane: one cell group per `Block`-rate parameter when the effect
     /// owns no prepared targets (`target_slots == 0`), and none when it does, because a
-    /// prepared-target owner's parameters ride its targets (D1).
+    /// prepared-target owner's parameters ride its targets (D1); and a link cell when the
+    /// descriptor has `lane_link`, holding its supported modes (#1371 D1).
     #[must_use]
     pub fn from_descriptor(descriptor: &EffectDescriptor, target_slots: usize) -> Self {
-        if target_slots != 0 {
-            return Self::from_live_parameters(core::iter::empty(), target_slots);
+        let shape = if target_slots != 0 {
+            Self::from_live_parameters(core::iter::empty(), target_slots)
+        } else {
+            Self::from_live_parameters(live_parameters(descriptor), 0)
+        };
+        if descriptor.lane_link {
+            shape.with_link(descriptor.supported_link_modes)
+        } else {
+            shape
         }
-        Self::from_live_parameters(live_parameters(descriptor), 0)
     }
 
     /// The live parameter cell count of `descriptor`: one per `Shared` `Block`-rate parameter and
@@ -296,14 +359,22 @@ impl EffectLaneShape {
         self.target_slots
     }
 
-    /// Every cell of the lane: bypass, parameters and targets. Also the dirty bit count.
+    /// Every cell of the lane: bypass, link, parameters and targets. Also the dirty bit count.
     fn cell_count(&self) -> usize {
-        1 + self.parameter_cells() + 2 * self.target_slots
+        self.parameter_base() + self.parameter_cells() + 2 * self.target_slots
+    }
+
+    /// The dirty bit of the link cell, which follows the bypass cell's (#1371 D2).
+    const LINK_BIT: usize = 1;
+
+    /// The dirty bit of the first parameter cell: after the bypass cell and the link cell.
+    fn parameter_base(&self) -> usize {
+        1 + usize::from(self.link.is_some())
     }
 
     /// The dirty bit (and cell index) of target cell `index`.
     fn target_bit(&self, index: usize) -> usize {
-        1 + self.parameter_cells() + index
+        self.parameter_base() + self.parameter_cells() + index
     }
 
     /// The parameter cell of `(parameter_index, channel)`, or why there is none.
@@ -360,8 +431,12 @@ pub enum EffectWriteRefusal {
     /// The record is an observation subscription, which the queue takes
     /// ([`EffectCellWriter::try_push_observe`]).
     Observe,
-    /// A bypass switch's ramp is longer than [`INDEXED_RAMP_LENGTH_MAXIMUM`].
+    /// A bypass switch's ramp is longer than [`INDEXED_RAMP_LENGTH_MAXIMUM`], or a link switch's
+    /// glide is longer than [`LINK_GLIDE_MAX_SAMPLES`].
     Ramp,
+    /// The lane holds no link cell (its effect has no `lane_link`), or the effect does not
+    /// support the switch's mode.
+    Link,
 }
 
 /// Why an observation subscription was not queued. Nothing was queued.
@@ -379,6 +454,8 @@ pub enum ObservePushError {
 struct EffectCells {
     shape: EffectLaneShape,
     bypass: LatestCell<2>,
+    /// Written and read only when the shape has a link cell.
+    link: LatestCell<2>,
     parameters: Box<[LatestCell<1>]>,
     targets: Box<[LatestCell<PREPARED_EFFECT_TARGET_WORDS>]>,
     /// One word per 64 cells.
@@ -397,6 +474,7 @@ impl EffectCells {
                 .collect(),
             dirty: (0..dirty_words).map(|_| DirtyWord::new()).collect(),
             bypass: LatestCell::new(),
+            link: LatestCell::new(),
             shape,
         }
     }
@@ -430,6 +508,8 @@ impl EffectLaneResources {
 enum Address {
     /// The bypass cell and its two words: the bypass and the ramp.
     Bypass(BypassSwitch),
+    /// The link cell and its two words: the mode's code and the glide's length.
+    Link(LinkSwitch),
     /// A parameter cell and the value's bits.
     Parameter(usize, u32),
     /// The first and last target cell of a target (a `Both` target addresses two) and its words.
@@ -444,6 +524,7 @@ enum Address {
 pub struct EffectCellWriter {
     cells: Arc<EffectCells>,
     bypass: CellWriter<2>,
+    link: CellWriter<2>,
     parameters: Box<[CellWriter<1>]>,
     targets: Box<[CellWriter<PREPARED_EFFECT_TARGET_WORDS>]>,
     observe: Option<Producer<EffectControlRecord>>,
@@ -476,6 +557,20 @@ impl EffectCellWriter {
             EffectControlRecord::Bypass(switch) => {
                 switch.check()?;
                 Ok(Address::Bypass(switch))
+            }
+            EffectControlRecord::Link(switch) => {
+                if !self
+                    .cells
+                    .shape
+                    .link
+                    .is_some_and(|modes| modes.contains(switch.mode))
+                {
+                    return Err(EffectWriteRefusal::Link);
+                }
+                if switch.ramp_samples > LINK_GLIDE_MAX_SAMPLES {
+                    return Err(EffectWriteRefusal::Ramp);
+                }
+                Ok(Address::Link(switch))
             }
             EffectControlRecord::Observe { .. } => Err(EffectWriteRefusal::Observe),
         }
@@ -515,8 +610,18 @@ impl EffectCellWriter {
                     [u32::from(switch.bypassed), switch.ramp_samples],
                 );
             }
+            Address::Link(switch) => {
+                let bit = EffectLaneShape::LINK_BIT;
+                self.link.write(
+                    &cells.link,
+                    &cells.dirty[bit / 64],
+                    (bit % 64) as u32,
+                    stamp,
+                    [switch.mode as u32, switch.ramp_samples],
+                );
+            }
             Address::Parameter(index, bits) => {
-                let bit = 1 + index;
+                let bit = cells.shape.parameter_base() + index;
                 self.parameters[index].write(
                     &cells.parameters[index],
                     &cells.dirty[bit / 64],
@@ -611,8 +716,8 @@ impl EffectCellWriter {
         resources
     }
 
-    /// Test-only: how many writes the bypass cell has taken, then each parameter cell, then each
-    /// target cell, in cell order. Valid while no write is in flight, which a quiescent test
+    /// Test-only: how many writes the bypass cell has taken, then the link cell (on a lane that
+    /// holds one), then each parameter cell, then each target cell, in cell order. Valid while no write is in flight, which a quiescent test
     /// thread guarantees.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -624,6 +729,12 @@ impl EffectCellWriter {
         let reader = CellReader::new();
         let cells = &*self.cells;
         core::iter::once(count(reader.peek_unread(&cells.bypass)))
+            .chain(
+                cells
+                    .shape
+                    .has_link()
+                    .then(|| count(reader.peek_unread(&cells.link))),
+            )
             .chain(
                 cells
                     .parameters
@@ -650,6 +761,11 @@ pub struct EffectLaneSpec {
     /// The observation queue's depth: the effect's declared tap count, or `0` for no queue (an
     /// effect without taps, or a plan with no observation capacity).
     pub observation_depth: usize,
+    /// The link mode the instance is prepared with, for a lane whose shape holds a link cell
+    /// (#1371 D6): the mode the lane's detector rests at before any link write applies. `None`
+    /// when the lane has no link cell, or the builder does not know the mode; such a lane's
+    /// plan-swap carry seats no mode before a restore.
+    pub link: Option<LinkMode>,
 }
 
 /// The cells and observation queue of one effect instance, as its two ends: control's writer and
@@ -667,7 +783,9 @@ pub fn effect_control_lane(
         shape,
         bypass,
         observation_depth,
+        link,
     } = spec;
+    let link = link.filter(|_| shape.has_link());
     let (producer, consumer) = match NonZeroUsize::new(observation_depth) {
         Some(depth) => {
             let (producer, consumer) =
@@ -685,6 +803,7 @@ pub fn effect_control_lane(
     let writer = EffectCellWriter {
         cells: Arc::clone(&cells),
         bypass: CellWriter::new(),
+        link: CellWriter::new(),
         parameters: (0..parameter_cells).map(|_| CellWriter::new()).collect(),
         targets: (0..target_cells).map(|_| CellWriter::new()).collect(),
         observe: producer,
@@ -692,6 +811,7 @@ pub fn effect_control_lane(
     let lane = EffectControlLane {
         cells: Some(cells),
         bypass_reader: CellReader::new(),
+        link_reader: CellReader::new(),
         parameter_readers: (0..parameter_cells).map(|_| CellReader::new()).collect(),
         target_readers: (0..target_cells).map(|_| CellReader::new()).collect(),
         dirty: (0..dirty_words).map(|_| DirtyReader::new()).collect(),
@@ -713,9 +833,12 @@ pub fn effect_control_lane(
         mix_position: 0,
         symmetry,
         carried_bypass: CarriedCell::EMPTY,
+        carried_link: CarriedCell::EMPTY,
         carried_parameters: Box::default(),
         carried_targets: Box::default(),
         carried_pending: false,
+        link,
+        link_refusals: 0,
     };
     Some((writer, lane))
 }
@@ -740,6 +863,7 @@ pub struct EffectControlLane {
     /// `None` for a lane that only carries a prepared bypass ([`Self::without_channel`]).
     cells: Option<Arc<EffectCells>>,
     bypass_reader: CellReader,
+    link_reader: CellReader,
     parameter_readers: Box<[CellReader]>,
     target_readers: Box<[CellReader]>,
     /// Render's half of each dirty word: the cells whose newest write was above the snapshot that
@@ -783,6 +907,8 @@ pub struct EffectControlLane {
     symmetry: ChannelSymmetryWitness,
     /// The predecessor's unread bypass write this lane took at a plan swap (#1280 D2).
     carried_bypass: CarriedCell<2>,
+    /// The predecessor's unread link write this lane took at a plan swap (#1371 D6).
+    carried_link: CarriedCell<2>,
     /// The predecessor's unread parameter writes, one per parameter cell. Empty until
     /// [`EffectControlLane::install_carry_slots`] runs: a lane no successor carries holds none
     /// (#1633 D1).
@@ -793,6 +919,15 @@ pub struct EffectControlLane {
     /// Whether any carried slot holds a write: the next [`Self::stage`] resolves them before it
     /// decides it has nothing to read.
     carried_pending: bool,
+    /// The link mode the processor's lane is heading for or rests at (#1371 D6): the prepared mode
+    /// until a link write applies, then the mode of the last switch `retarget_link` took
+    /// ([`Self::settle_link`]). It moves with the lane in a lane swap and a plan swap, so a
+    /// carry knows which mode the payload it restores was taken under. `None` for a lane without
+    /// a link cell, or one built without its prepared mode.
+    link: Option<LinkMode>,
+    /// Link switches the processor refused (`retarget_link` returned `false`). The writer refuses
+    /// every switch the effect would, so this stays `0`.
+    link_refusals: u64,
 }
 
 /// A write the retiring plan's cell held unread at a plan swap, which its successor's lane applies
@@ -847,6 +982,7 @@ impl EffectControlLane {
         Self {
             cells: None,
             bypass_reader: CellReader::new(),
+            link_reader: CellReader::new(),
             parameter_readers: Box::default(),
             target_readers: Box::default(),
             dirty: Box::default(),
@@ -860,9 +996,12 @@ impl EffectControlLane {
             mix_position: 0,
             symmetry,
             carried_bypass: CarriedCell::EMPTY,
+            carried_link: CarriedCell::EMPTY,
             carried_parameters: Box::default(),
             carried_targets: Box::default(),
             carried_pending: false,
+            link: None,
+            link_refusals: 0,
         }
     }
 
@@ -1128,7 +1267,9 @@ impl EffectControlLane {
     /// from it and nothing writes a cell: control stays each cell's only writer.
     ///
     /// * The applied live bypass flag, the bypass crossfade (its mix and position, so a swap inside
-    ///   a ramp continues it, #1341 D7) and the live symmetry terms are copied.
+    ///   a ramp continues it, #1341 D7) and the live symmetry terms are copied, and so is the link
+    ///   mode the predecessor's processor lane holds, when it is known (#1371 D6): the stage that
+    ///   moves the processor's state has seated that mode first ([`Self::link_to_seat`]).
     /// * Each predecessor cell's newest unread write ([`CellReader::peek_unread`]) goes to this
     ///   lane's carried slot of the cell, with the count of unread writes. The slot resolves at
     ///   this lane's first rendered block, before that block stages anything ([`Self::stage`]):
@@ -1146,6 +1287,9 @@ impl EffectControlLane {
         self.mix = predecessor.mix;
         self.mix_position = predecessor.mix_position;
         self.symmetry = predecessor.symmetry;
+        if predecessor.link.is_some() {
+            self.link = predecessor.link;
+        }
         let Some(before) = predecessor.cells.as_deref() else {
             return true;
         };
@@ -1156,6 +1300,14 @@ impl EffectControlLane {
             predecessor.carried_bypass,
         );
         pending |= self.carried_bypass.unread != 0;
+        if before.shape.has_link() {
+            self.carried_link = CarriedCell::of(
+                &predecessor.link_reader,
+                &before.link,
+                predecessor.carried_link,
+            );
+            pending |= self.carried_link.unread != 0;
+        }
         // A predecessor that was never carried into holds no slots: it has no earlier writes.
         for (index, ((slot, cell), reader)) in self
             .carried_parameters
@@ -1191,6 +1343,46 @@ impl EffectControlLane {
         true
     }
 
+    /// The link mode this lane's processor holds, as far as the lane knows it (#1371 D6): the
+    /// prepared mode until a switch applies, then the last one [`Self::settle_link`] recorded.
+    #[must_use]
+    pub const fn link_mode(&self) -> Option<LinkMode> {
+        self.link
+    }
+
+    /// The mode the stage that carries `predecessor` into this lane seats on this lane's processor
+    /// before it restores the predecessor's state payload (#1371 D6): the predecessor's mode, when
+    /// both lanes know theirs and they differ. A restore keeps a payload's glide words only under
+    /// the mode they glide to, so the seat lets the glide in flight continue bit for bit; the
+    /// link write of the committed mode (the successor's own, or the predecessor's carried one)
+    /// then glides the lane on from there, with no step. `None` when there is nothing to seat.
+    #[must_use]
+    pub fn link_to_seat(&self, predecessor: &Self) -> Option<LinkMode> {
+        match (self.link, predecessor.link) {
+            (Some(own), Some(before)) if own != before => Some(before),
+            _ => None,
+        }
+    }
+
+    /// Record what the processor did with the link switch to `mode` that the last
+    /// [`Self::stage`] returned (#1371 D2): `taken` is `retarget_link`'s answer. A taken switch
+    /// becomes the lane's mode; a refused one is counted in [`Self::link_refusals`] and changes
+    /// nothing.
+    pub fn settle_link(&mut self, mode: LinkMode, taken: bool) {
+        if taken {
+            self.link = Some(mode);
+        } else {
+            self.link_refusals = self.link_refusals.saturating_add(1);
+        }
+    }
+
+    /// Link switches the processor refused ([`Self::settle_link`]). The writer refuses every switch
+    /// an effect would, so this is `0`.
+    #[must_use]
+    pub const fn link_refusals(&self) -> u64 {
+        self.link_refusals
+    }
+
     /// The targets applied by the most recent [`stage`](Self::stage), in `(slot, channel)` order.
     #[must_use]
     pub fn prepared_targets(&self) -> &[PreparedEffectTarget] {
@@ -1198,7 +1390,8 @@ impl EffectControlLane {
     }
 
     /// Read every pending cell under the block's snapshot `snapshot` and stage what they hold: the
-    /// bypass first, then the parameter spans into `staging` in canonical `(parameter_index,
+    /// bypass first, then the link switch ([`Staged::link`], which the caller hands to the
+    /// processor's `retarget_link` and settles with [`Self::settle_link`]), then the parameter spans into `staging` in canonical `(parameter_index,
     /// channel)` order, then the prepared targets in `(slot, channel)` order (D3). It pops
     /// nothing: the observation queue is drained apart ([`drain_observations`](Self::drain_observations)
     /// per node, the rack's own loop per bank).
@@ -1225,6 +1418,7 @@ impl EffectControlLane {
         let Self {
             cells,
             bypass_reader,
+            link_reader,
             parameter_readers,
             target_readers,
             dirty,
@@ -1237,9 +1431,11 @@ impl EffectControlLane {
             mix_position,
             symmetry,
             carried_bypass,
+            carried_link,
             carried_parameters,
             carried_targets,
             carried_pending,
+            link,
             ..
         } = self;
         *staged_targets = 0;
@@ -1291,6 +1487,25 @@ impl EffectControlLane {
                 )));
             }
         }
+        // A switch whose mode is the one the lane already heads for changes nothing (the newest
+        // write of the cell decides, so a change and its reversal before a read leave the lane be).
+        let mut switch = None;
+        if cells.shape.has_link()
+            && let Some([code, ramp_samples]) = reads.read(
+                EffectLaneShape::LINK_BIT,
+                &cells.link,
+                link_reader,
+                Some(carried_link),
+            )
+            // The writer stores only checked switches, so every code names a mode.
+            && let Some(mode) = LinkSwitch::mode_of(code)
+            && *link != Some(mode)
+        {
+            let record = LinkSwitch { mode, ramp_samples };
+            symmetry.admit(&EffectControlRecord::Link(record));
+            switch = Some(record);
+        }
+        let base = cells.shape.parameter_base();
         let mut staged = 0_usize;
         for group in cells.shape.groups.iter() {
             let first = group.first as usize;
@@ -1303,7 +1518,7 @@ impl EffectControlLane {
             {
                 *slot = reads
                     .read(
-                        1 + first + offset,
+                        base + first + offset,
                         &cells.parameters[first + offset],
                         &mut parameter_readers[first + offset],
                         carried_parameters.get_mut(first + offset),
@@ -1378,6 +1593,7 @@ impl EffectControlLane {
         Staged {
             staged,
             staged_targets: *staged_targets,
+            link: switch,
         }
     }
 
@@ -1500,6 +1716,10 @@ pub struct Staged {
     pub staged: usize,
     /// Prepared targets retained in the lane-owned prefix.
     pub staged_targets: usize,
+    /// The link switch this block applies, for the caller to hand to the processor's
+    /// `retarget_link` before the block renders and to settle on the lane
+    /// ([`EffectControlLane::settle_link`]); `None` when the lane's mode does not change.
+    pub link: Option<LinkSwitch>,
 }
 
 /// One declared tap's arm state and open window, for one prepared instance or one bank lane.
