@@ -5635,6 +5635,94 @@ fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
     crate::ffi::test_session_destroy(c_session);
 }
 
+/// #1587a: a rebuild that carries no strip meter (the one track replaced by another ID) restarts
+/// the meter grid at its adoption block, mid-window. Render moves the output meter's gate there
+/// at the swap (`OutputPeakGateRelay::restart_at`), the control thread's adoption asks for the same
+/// value (`MeterDelivery::adopt`, `align` at the adoption sample), and every window after it pairs
+/// with the new plan's strip windows: the batches tile from the adoption sample, `VALID`, with
+/// consecutive sequences, and no window is lost.
+///
+/// Test value: red if render does not restart the gate at an uncarried swap, or the control
+/// thread's request is not the restart's value (either opens the output windows off the new strip
+/// grid, so no batch pairs again), or if the adoption reads a stale adoption sample.
+#[test]
+fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let document = session::canonical_session_json(&model).expect("one-track session");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let window = fixture_window_blocks();
+    assert_eq!(
+        configure_meters_c(c_session, 1, vec![output_peak_entry()], window),
+        (StatusCode::Ok, None)
+    );
+    let feed = |block: u64| {
+        let left = [0.25_f32; 128];
+        let right = [-0.125_f32; 128];
+        submit_c(c_session, 1, block * 128, 48_000, &left, &right, false);
+        render_c(c_plan, block);
+    };
+    let swap_block = window + 2;
+    for block in 0..swap_block {
+        feed(block);
+    }
+    let mut replacement = model.tracks[0].clone();
+    replacement.id = session::StableId::parse("eq9").expect("track ID");
+    let mut route = model.routes[0].clone();
+    route.id = session::StableId::parse("eq9-main").expect("route ID");
+    route.source = session::RouteSource::Track {
+        track_id: replacement.id.clone(),
+        tap: session::SendTap::PostPan,
+    };
+    let edits = [
+        protocol::SessionEdit::RemoveRoute {
+            route_id: model.routes[0].id.clone(),
+        },
+        protocol::SessionEdit::RemoveTrack {
+            track_id: model.tracks[0].id.clone(),
+        },
+        protocol::SessionEdit::UpsertTrack { track: replacement },
+        protocol::SessionEdit::UpsertRoute { route },
+    ];
+    let transaction = command_bytes_at_revision(
+        2,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
+    );
+    let (result, response) = command_c(c_session, &transaction);
+    assert_eq!(
+        (result, response_status(&response)),
+        (crate::RESULT_OK, StatusCode::Ok)
+    );
+    for block in swap_block..swap_block + 3 * window {
+        feed(block);
+    }
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let span = window * 128;
+    let adoption = swap_block * 128;
+    assert_eq!(
+        meter_batches_c(c_session)
+            .into_iter()
+            .map(|(first, end, sequence, records)| (
+                first,
+                end,
+                sequence,
+                records.iter().map(|record| record.flags).collect::<Vec<_>>()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (0, span, 1, vec![1, 1]),
+            (adoption, adoption + span, 2, vec![1, 1]),
+            (adoption + span, adoption + 2 * span, 3, vec![1, 1]),
+            (adoption + 2 * span, adoption + 3 * span, 4, vec![1, 1]),
+        ]
+    );
+    assert_eq!(meter_windows_lost_c(c_session, 100), 0);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
 /// #1583 gate 5: nine windows rendered with no service call overflow the output meter's queue of
 /// eight. With three windows per batch, the first service stages batches 1 and 2 (windows 1-6),
 /// render dropped window 9, and the next window's gap discards the partial batch of windows 7
