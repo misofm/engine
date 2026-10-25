@@ -26,7 +26,7 @@
 //! The record reports every distribution, each growth's `prime_bytes()` and adoption lateness,
 //! the carry refusal count (root ruling 2026-10-12: read and reported, never asserted zero), the
 //! smallest output peak of the timed blocks, and D3's derivation over this round's numbers.
-//! `scripts/swap-benchmark-validator.jq` is the frozen validator; the runner is
+//! `scripts/operator/swap-benchmark-validator.jq` is the frozen validator; the runner is
 //! `scripts/operator/run-console-benchmark.sh --swap --step NAME`.
 //!
 //! `bench swap --preflight` runs [`self_test`], gate 1: the same code over one move swap and one
@@ -1144,8 +1144,8 @@ mod tests {
         ".missing_metadata = []"
     );
 
-    /// Whether `scripts/swap-benchmark-validator.jq` accepts `records` after `edit` is applied to
-    /// each.
+    /// Whether `scripts/operator/swap-benchmark-validator.jq` accepts `records` after `edit` is
+    /// applied to each.
     fn validator_accepts(records: &[String], edit: &str) -> bool {
         let edited: Vec<String> = records
             .iter()
@@ -1159,8 +1159,8 @@ mod tests {
                 String::from_utf8(output.stdout).expect("jq writes UTF-8")
             })
             .collect();
-        let validator =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/swap-benchmark-validator.jq");
+        let validator = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/operator/swap-benchmark-validator.jq");
         let verdict = jq(
             &[
                 "-s",

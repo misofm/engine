@@ -1,7 +1,8 @@
 # Aggregate validator for the swap benchmark (#1286, `bench swap`): the two measured rounds'
-# records, slurped (`jq -s -e -f scripts/swap-benchmark-validator.jq raw.jsonl`). Frozen with the
-# subject before any timing (AGENTS.md); `tools/bench/src/swap.rs`'s tests run it on a record the
-# subject printed and on each refusal below.
+# records, slurped (`jq -s -e -f scripts/operator/swap-benchmark-validator.jq raw.jsonl`). Frozen
+# with the subject before any timing (AGENTS.md); `tools/bench/src/swap.rs`'s tests run it on a
+# record the subject printed and on each refusal below. It lives in `scripts/operator/` because
+# only the operator runner reaches it (`scripts/check-script-reachability.py`).
 #
 # It refuses: a missing distribution or D3 value; a swap, adoption, cycle or growth count other
 # than the frozen one; a swap that did not carry, or an adoption whose prime is empty; an adoption

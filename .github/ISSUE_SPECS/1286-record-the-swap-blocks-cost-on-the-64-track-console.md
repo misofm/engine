@@ -276,6 +276,9 @@ whole-bank move (#1269, Deferred) earns a brief.
   and items 1-2 at every launch rate (ring PCM bytes are session A's one stereo source, `f32`).
   The validator recomputes D3's rows from the record's own numbers in the subject's order of
   operations.
+- **Validator home.** `scripts/operator/swap-benchmark-validator.jq`: only the operator runner
+  reaches it, and `scripts/check-script-reachability.py` requires a file no workflow reaches to
+  live in `scripts/operator/`. `cargo test -p bench` runs it on the subject's own record.
 - **Out-of-scope path.** Adding `controls`, `host-core` and `session` to `tools/bench/Cargo.toml`
   (D4) adds three names to `bench`'s entry in `Cargo.lock`; no new external crate.
 - **1286a evidence.** At 96 kHz the self-test measured `prime_bytes()` of 524,288 (512 KiB), 1,040,384,

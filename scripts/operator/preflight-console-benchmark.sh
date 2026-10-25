@@ -51,7 +51,7 @@ if [[ "$subject" == console ]]; then
 else
     # The validator parses and refuses an empty run; its refusals of real records are the bench
     # crate's tests, run below.
-    verdict=$(jq -s -f scripts/swap-benchmark-validator.jq </dev/null 2>/dev/null) ||
+    verdict=$(jq -s -f scripts/operator/swap-benchmark-validator.jq </dev/null 2>/dev/null) ||
         fail 'the swap validator does not parse'
     [[ "$verdict" == false ]] || fail 'the swap validator accepted an empty run'
 fi
@@ -106,7 +106,7 @@ if [[ "$subject" == swap ]]; then
         --arg subject_sha256 "$(sha256sum tools/bench/src/swap.rs | awk '{print $1}')" \
         --arg fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-app.json | awk '{print $1}')" \
         --arg runner_sha256 "$(sha256sum scripts/operator/run-console-benchmark.sh | awk '{print $1}')" \
-        --arg validator_sha256 "$(sha256sum scripts/swap-benchmark-validator.jq | awk '{print $1}')" \
+        --arg validator_sha256 "$(sha256sum scripts/operator/swap-benchmark-validator.jq | awk '{print $1}')" \
         --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
         --arg bench_cpu "$bench_cpu" --arg producer_cpu "$producer_cpu" \
         '{schema_version: 1, issue: 1286, kind: "swap_benchmark_preflight",

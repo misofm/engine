@@ -16,7 +16,7 @@
 # `--swap` (#1286) runs the `bench swap` subject instead of `bench console`: the swap block's cost
 # on the 64-track app-shape console. Everything below holds for it, with its own artifact names
 # (`swap-benchmark.*` in the same step directory), two records (one per measured round) and its own
-# frozen validator, `scripts/swap-benchmark-validator.jq`.
+# frozen validator, `scripts/operator/swap-benchmark-validator.jq`.
 #
 # Before anything is timed the run refuses (exit 1), in this order: when a record already exists
 # in that directory (a record is never overwritten), when the host is not x86_64 with AVX2, when
@@ -419,7 +419,7 @@ failure_reason=record_count
 [[ "$(wc -l <"$raw")" == "$records_required" ]] || exit 1
 failure_reason=validation_failed
 if [[ "$subject" == swap ]]; then
-    jq -s -e -f scripts/swap-benchmark-validator.jq "$raw" >/dev/null || exit 1
+    jq -s -e -f scripts/operator/swap-benchmark-validator.jq "$raw" >/dev/null || exit 1
 else
     jq -s -e -L scripts -f scripts/console-benchmark-validator.jq "$raw" >/dev/null || exit 1
 fi
