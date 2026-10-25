@@ -959,7 +959,6 @@ fn carry_payload(
 ///
 /// Returns the successor lane's prepared mode when a mode was seated, for [`unseat_link`] to
 /// restore if the carry is then refused; `None` when nothing was seated.
-// REALTIME_POLICY_BEGIN: #1371 D6, the plan-swap carry seats a lane's mode in the swap block.
 fn seat_link(
     into: &mut dyn PreparedNativeEffectBank,
     lane: usize,
@@ -981,7 +980,6 @@ fn unseat_link(into: &mut dyn PreparedNativeEffectBank, lane: usize, seat: Optio
         debug_assert!(restored, "the prepared mode is supported");
     }
 }
-// REALTIME_POLICY_END
 
 /// [`carry_payload`] from a per-node instance into a bank lane (#1281 D2): the instance's
 /// `snapshot_state_payload` goes into `scratch`, and the bank's `restore_track_state_payload`
