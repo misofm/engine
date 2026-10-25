@@ -4476,11 +4476,13 @@ fn a_removed_or_repointed_lane_less_route_fades_out_through_its_line_on_every_wi
 ///   only the track's carried fade): the run equals the one that added it at its new values.
 ///   "unmuted" defends the `(!armed_source || tap.precedes_fader())` guard on the `retargeted`
 ///   path of `added_route_fades`; "another gain" defends R2's copy skip;
-/// * (d) a plan replaced before it renders: P1 adds `aux-out` at the swap block, and P2, prepared
-///   before P1's first block (P1's arm unfired), sets it to another gain at the next block. P2
-///   both copies the route (aliasing P1's op mid-ramp) and re-arms it at its new values, carrying
-///   P1's entry: every block equals both routes from `pre_fader`, muted, given a live unmute of
-///   the old at the swap block, then its mute and the new one's unmute at the next.
+/// * (d) P2 is prepared before P1's first block and adopted after it: P1 adds `aux-out` at the
+///   swap block, and P2, prepared while P1's arm is unfired, sets it to another gain at the next
+///   block. P2 both copies the route (aliasing P1's op mid-ramp) and re-arms it at its new values,
+///   carrying P1's entry: every block equals both routes from `pre_fader`, muted, given a live
+///   unmute of the old at the swap block, then its mute and the new one's unmute at the next. The
+///   sub-case where P1 is replaced before it renders (its copy fades out silence) has no row:
+///   `fade_run` cannot adopt two plans in one block.
 ///
 /// Neither swap block allocates or frees.
 fn a_lane_less_route_value_change_crossfades_at_the_swap(backend: Backend) {
@@ -4562,7 +4564,7 @@ fn a_lane_less_route_value_change_crossfades_at_the_swap(backend: Backend) {
             expected.blocks,
             "{backend:?} (a) {line}: the crossfade block is observable"
         );
-        // (d) P1 is replaced before it renders.
+        // (d) P2 is prepared before P1's first block and adopted after it.
         let p0 = Session::compile(base.clone());
         let p1 = Session::compile(route(&base, "aux-out", post, false, None));
         let p2 = Session::compile(route(&base, "aux-out", post, false, Some(-9.0)));

@@ -61,18 +61,20 @@ Root rulings, as the scope note recommends:
   route makes no copy), a mute is the copy fade-out only (a muted kept route arms nothing).
 
 Implementation (`crates/host-core/src/prepare.rs`): one predicate, `crossfades_values`, names a kept
-lane-less route at other values (same ID, source and destination; R2 applied). `route_copies` then copies it at the old values (fade-out, alias of the
-old op and lines), and `added_route_fades` (a) arms it like an added route (`strip: None`,
-`D = 0`). The copy takes the predecessor's destination line; the kept route's line starts cold. No
+lane-less route at other values (same ID, source and destination; R2 applied). `route_copies` then
+copies it at the old values (fade-out, alias of the old op and lines), and `added_route_fades` (a)
+arms it like an added route (`strip: None`, `D = 0`). The copy takes the predecessor's destination line; the kept route's line starts cold. No
 graph change (one doc comment on `GraphFadeTarget::RouteOut`).
 
-A kept route whose predecessor arm had not fired at preparation (P1 replaced by P2 before P1
-renders) takes both halves: a copy that aliases P1's op (mid-ramp if P1's arm fired before the
+A kept route whose predecessor arm had not fired at preparation (P2 prepared before P1's first
+block) takes both halves: a copy that aliases P1's op (mid-ramp if P1's arm fired before the
 swap; settled at 0 and muted if not) and the carried re-arm at the new values (#1877 D2). Attempt 1
 left this case out and so stepped: the carried re-arm restarted from 0 and dropped the old route's
 mid-ramp output (verifier probe, attempt 1 review). Cost: when P1 is replaced before it renders,
 P2 compiles one copy that fades out silence for one ramp. That cost is on the control side only and
-is inaudible.
+is inaudible. Only the mid-ramp sub-case (P2 adopted after P1's first block) has a test row;
+the replaced-before-it-renders sub-case (the silent-copy cost) has none, because `fade_run` cannot
+adopt two plans in one block.
 
 Accepted (root, attempt 1 review): a kept value-change route out of a chain-restarted strip
 (`strip_carry.restarted`, known only after the graph compile) arms at the full ramp while its copy
@@ -83,7 +85,7 @@ Evidence:
 - New row `a_lane_less_route_value_change_crossfades_at_the_swap_on_every_width` (Simd8, Simd4):
   (a) gain change, with and without the 486-sample line; (b) unmute and mute; (c) R2, a waiting
   added track's route unmuted, or at another gain, by a rebuild before its fire; (d) P1 adds the
-  route and is replaced before it renders by P2 at another gain.
+  route, and P2 at another gain is prepared before P1's first block and adopted after it.
 - Red on main (0b8036ec1's `prepare.rs`): (a), (b)-unmute and (b)-mute make no arm and differ at
   block 9 (line) / 6 (no line) on both widths; (c) green on main (it defends R2). R2 mutant (drop
   the waiting-strip check): (c) "another gain" red (an extra copy arm).
