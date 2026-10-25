@@ -58,3 +58,7 @@ One row per item. Lines are at ad5c7ae86.
 - 2026-10-25, root ruling: fix it. `model.rs` now refuses any order that is not an exact
   permutation (duplicates included) before the rack is taken; the test's `[a, a]` assertion that
   the model is unchanged was red on the old code and is green now.
+- 2026-10-25, conflict with open #291 (parameter lattice v2): its spec cites `ExactDecimal::parse`
+  as existing and keeps `NearestLatticeValues` "preserved verbatim". Option (a) deleted both, and
+  the engine matches no document text; if #291 is ever built it must re-derive document-text
+  matching (git history keeps the deleted code).

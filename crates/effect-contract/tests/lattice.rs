@@ -232,6 +232,8 @@ fn a_bound_the_pinned_precision_cannot_spell_is_a_declaration_error() {
         canonical_descriptor_decimal(0.995, 2).as_deref(),
         Some("1.00")
     );
+    // The descriptor surface has no signed zero: `-0.0` is refused rather than spelled.
+    assert_eq!(canonical_descriptor_decimal(-0.0, 1), None);
 
     // The shipped delay row's per-parameter override: three decimals spell the bound exactly and
     // leave one irregular top detent, which is the ruled precedent.
