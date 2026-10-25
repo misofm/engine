@@ -119,8 +119,8 @@ browser, an invalid record on the C ABI), never `0`.
   formula (`reduction_db`).
 - No master peak. The master has no structural bus; its peak is the strip's own entry.
 - No change to #1683's row, the boot word (#1689) or the browser's lease frame bytes.
-- No SDK API beyond the generated table type; a later issue gives the SDK a `masterGainReduction`
-  call on the batch.
+- No SDK API beyond the generated table type. Root's R1 ruling (2026-10-25) dropped the
+  `masterGainReduction` call on the batch: the app reads the master entry's record by its handle.
 
 ## Objective gates
 
