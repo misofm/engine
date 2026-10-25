@@ -19,6 +19,13 @@ const document = execFileSync(
   { cwd: new URL("../", import.meta.url), maxBuffer: MAXIMUM_DOCUMENT_BYTES + WASM_PAGE_BYTES },
 );
 assert.equal(document.byteLength, MAXIMUM_DOCUMENT_BYTES);
+// Issue #1295: the browser qualification builds this document in JS (its job has no Rust
+// toolchain); the two builders must give the same bytes, the 1 MiB bound included.
+assert.deepEqual(
+  Buffer.from((await import("../hosts/host-web/qualification/worst-replace-document.js")).worstReplaceDocument()),
+  document,
+  "qualification/worst-replace-document.js differs from the worst_boot_document example",
+);
 const compiledModule = await WebAssembly.compile(await readFile(process.argv[2]));
 
 function stage(instance, maximumMemoryBytes) {
