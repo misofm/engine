@@ -134,5 +134,5 @@ Half a day.
   tool's `UNWRAPPED_EXPORTS` list must name it (as #1294a's `watermark_read`). And
   `hosts/host-web/tests/protocol_cross_host.rs` step 1 pins the capabilities asymmetry ("#1697
   removes this exception"): with the transport on, the C ABI's reply is the browser's plus only
-  `0x0010`-`0x0012`. The three edits are one patch, not committed, awaiting root's authorization;
-  every gate passes with it applied, and without it the hermetic suite and that test are red.
+  `0x0010`-`0x0012`. Root authorized the three edits as scope amendments for #1697 on
+  2026-10-25; they are one commit. #1644 also adds `UNWRAPPED_EXPORTS` entries and rebases after.

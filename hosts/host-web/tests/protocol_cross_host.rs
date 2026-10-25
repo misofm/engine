@@ -649,11 +649,10 @@ fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
 fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let mut legs = Legs::new();
 
-    // 1. CAPABILITIES_GET. #1697 removes this exception: until the browser has a document
-    // transport, the C ABI's reply is the browser's plus exactly the `SESSION_REPLACE` (`0x0013`)
-    // entry of the command list (#1386, root decision), and every other step stays byte-equal.
-    // #1596 removes the second: until the browser reads spectrum through the frames, the C ABI
-    // also lists the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1595 R2).
+    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697). #1596 removes
+    // the one exception: until the browser reads spectrum through the frames, the C ABI's reply is
+    // the browser's plus exactly the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16
+    // (#1595 R2), and every other step stays byte-equal.
     let request = legs.next();
     let bytes = frame(
         request,
@@ -671,11 +670,11 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     assert_eq!(
         capabilities_plus(
             &browser_reply,
-            &[0x0010, 0x0011, 0x0012, 0x0013],
+            &[0x0010, 0x0011, 0x0012],
             protocol::CapabilityFlags::SPECTRUM.0
         ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0010-0x0013 and bit 16"
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0010-0x0012 and bit 16"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
