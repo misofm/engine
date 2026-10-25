@@ -219,3 +219,49 @@ R5 the queue after #1586b).
     red.
   - `a_backpressure_payload_naming_the_retired_automation_queue_is_refused` (one row): red if kind 8
     stops decoding or decodes with a generation. Mutant: kind 8 given a generation. Red.
+
+**Root, 2026-10-25.** I1 accepted. #1578b lands in the same PR as #1578a, because #1578a alone
+advertises `0x8040` on the C ABI before it can send one. Acked-batch lens for the delivery: an
+issued tag ends in exactly one `RESPONSE_READY`, across a rebuild, a supersession and a dispose.
+
+**#1578b, attempt 1 (implementer, 2026-10-25).** No hash re-pin.
+
+- D3: `SessionControlProvider::response_get` serves target 3 before the shared preflight (which
+  still refuses it, `response.target.unavailable`, for the session-less entry): the core's checks
+  (`response.points`, `response.grid`), `response.rate.session`, the strip (`NOT_FOUND`
+  `control.address.unknown`), the event bound at the strip's owner count against the smaller of
+  the reply bound and field 18 (`LIMIT_EXCEEDED` `response.reply_too_large`), then `arm`, with
+  `Pending` as `BACKPRESSURE` `response.capture.pending` (the controller attaches the kind-8
+  record). The tag is answered after the job is in the render queue.
+- D4: `SessionState.response_ready` holds `PendingResponse::Event` while the controller cannot
+  take it; `service` releases the capture once the controller's cell and this field are both
+  empty (R1), polls, converts and queues. A full queue, a held cell or an outstanding structural
+  transaction keeps the event. Implementer decision I2: an event the endpoint cannot encode (a
+  rebuild grew the strip past the frame limit after the bound check) becomes its refusal
+  (`LIMIT_EXCEEDED` `response.reply_too_large`, or `INTERNAL` `response.capture` for another encode
+  failure) and is queued in its place, so the tag is still answered and the capture is released.
+  The #1577 test seam keeps its own variants (`SeamArmed`, `SeamResult`) under `test-support`: a
+  seam-armed capture issued no protocol tag and owes no event.
+- D5: `host_core::response_ready_event` moves every buffer. `response_capture_ceiling` adds the
+  event's member table, which is allocated while the result's is still held.
+- Dispose: a session destroyed with a capture in flight owes nothing; the last test ends that way.
+- Files outside the spec's list: `crates/host-core/src/lib.rs` (the export of
+  `response_ready_event`) and `crates/capi/tests/response_get.rs` (its strip-target refusal row is
+  superseded and deleted).
+- Tests, each red first on a recorded mutant:
+  - `crates/capi/tests/response_strip.rs::end_to_end_then_removed_strip`: red if the C ABI's curve
+    or owners differ from the core's composition, if the event arrives before a render, if a strip a
+    superseding removal took is never answered, or if a rebuild leaves a tag without its event or
+    with two. Mutants: the event's masks swapped (red only once the insert's masks differ by side);
+    `StripRemoved` mapped to `INTERNAL`; no release; the strip target still refused. All red.
+  - `one_in_flight_none_lost_and_replay`: red if a full queue drops an acked request's event, two
+    captures run at once, a replay arms, or a delivered capture is never released. Mutants: a held
+    event dropped on a refused enqueue; no release. Both red.
+  - `a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal`: red if an unencodable event
+    is held for ever or dropped. Mutant: no refusal replacement. Red.
+  - `host_core::control_provider::tests::a_strip_request_is_checked_before_it_arms`: red if a
+    refused strip request arms, the bound is not checked before arming, or a refusal has the wrong
+    status or code. Mutants: no bound check; unknown strip as `UNAVAILABLE`. Both red.
+  - Not mutated: gate 5's replay is the controller's replay cache, which answers before `execute`;
+    the test shows that the replayed frame returns tag 1, that no event follows, and that the next
+    tag is 2.
