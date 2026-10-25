@@ -192,8 +192,15 @@ given a live unmute at that block (`an_added_route_fades_in_after_its_line_fills
 `an_added_strips_pre_fader_send_fades_with_it_on_every_width`). An added `post_fader` or `post_pan`
 route into the output, which has no lane, binds live for that plan only so it can ramp, and loses
 the fold there. A muted route, a route whose destination strip is added, a following route with
-an automated source mute and a declared discontinuity arm nothing; a removed or re-pointed route
-still steps (#1953). A later structural transaction adopted before an added route's fade has run
+an automated source mute and a declared discontinuity arm nothing. A route the transaction
+removes or re-points (another source, tap or destination) between two strips it keeps ramps out
+first when it has a lane, that is when it goes into a submix or leaves before the fader (#1953a,
+D15-9): phase 1 mutes it on the running plan over the session mute ramp, `C` counts its lines, and
+the successor is adopted at `S`; a re-pointed route is a removal plus an addition and fades in at
+its new destination from `S`, while its source strip plays on
+(`capi`'s `a_removed_or_repointed_send_ramps_out_then_in_at_s`, `host-core`'s
+`a_repointed_send_fades_in_at_its_new_destination_on_every_width`). A removed or re-pointed
+`post_fader` or `post_pan` route into the output keeps the fold and still steps (1953b). A later structural transaction adopted before an added route's fade has run
 keeps it as #1392 keeps a strip's (#1877): the successor re-arms the route with its own target and
 ramp, a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never
 runs again (`a_pending_route_fade_survives_a_second_swap_on_every_width`). The frozen exported set is now 15

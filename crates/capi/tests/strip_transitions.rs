@@ -1,7 +1,9 @@
 //! Removing a strip in two phases through the exported C entries (issue #1325, decision 15
 //! D15-9): the removed strip ramps out on the running plan, then the successor is adopted at a
 //! scheduled sample `S`. A strip whose successor restarts it is duck-swapped the same way and
-//! fades back in after `S` (issue #1324).
+//! fades back in after `S` (issue #1324). A route with a lane that a transaction removes or
+//! re-points between two kept strips ramps out the same way, and a re-pointed one fades in at its
+//! new destination from `S` (issue #1953a).
 //!
 //! Every run is single-threaded at 48 kHz in 128-frame blocks with a session `mute_ms` that gives
 //! `N = 2000` samples and 1024-frame source rings. Tracks `a` and `b` play distinct, never-zero
