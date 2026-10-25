@@ -1343,15 +1343,25 @@ mod tests {
             E::ReportBusy,
         ];
         let slots: Vec<usize> = every.iter().map(|error| slot(*error)).collect();
-        assert_eq!(slots, (0..every.len()).collect::<Vec<_>>(), "every variant once, in order");
+        assert_eq!(
+            slots,
+            (0..every.len()).collect::<Vec<_>>(),
+            "every variant once, in order"
+        );
         const STALE: &str = "source.generation.stale";
         for error in every {
             let code = error.diagnostic();
             if code == STALE {
                 continue;
             }
-            assert!(!code.starts_with(STALE), "{error:?} begins with the stale code: {code}");
-            assert!(!STALE.starts_with(code), "{error:?} is a prefix of the stale code: {code}");
+            assert!(
+                !code.starts_with(STALE),
+                "{error:?} begins with the stale code: {code}"
+            );
+            assert!(
+                !STALE.starts_with(code),
+                "{error:?} is a prefix of the stale code: {code}"
+            );
         }
     }
 }
