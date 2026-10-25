@@ -491,7 +491,11 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
         TestStructuralFaultPhase::PanicAtPrimedPublication,
     ] {
         let panicked = run(Some(phase));
-        assert_eq!(reference.len(), panicked.len(), "{phase:?}: the same block count");
+        assert_eq!(
+            reference.len(),
+            panicked.len(),
+            "{phase:?}: the same block count"
+        );
         for (block, (actual, expected)) in panicked.iter().zip(&reference).enumerate() {
             assert_eq!(bits(actual), bits(expected), "{phase:?}: block {block}");
         }
