@@ -477,6 +477,7 @@ fn a_replacement_over_the_three_plan_ceiling_is_refused_and_the_candidate_kept()
 /// Test value: red if the supersession drops A with the producers B did not take (D5 step 5
 /// missing, or after A's drop): the running epoch's entry for `s` is then vacant. Gates 1-5 do not
 /// see it, because none removes a source A persisted.
+/// #1587a adds: red if the reclaim path (R1') promotes a candidate withdrawn before adoption.
 #[test]
 fn a_removed_sources_producer_returns_to_the_running_epoch() {
     let mut model = stateless_session(48_000);
@@ -519,6 +520,7 @@ fn a_removed_sources_producer_returns_to_the_running_epoch() {
         "A holds `s`'s producer"
     );
     let disposed = children.session.test_owner_counters();
+    let withdrawn = children.session.test_pending_providers()[0].test_epoch();
     commit(&mut children, 2, 43, &second);
     let counters = children.session.test_owner_counters();
     assert_eq!(
@@ -548,6 +550,13 @@ fn a_removed_sources_producer_returns_to_the_running_epoch() {
     render_direct(&mut children, 1);
     children.session.service().expect("service");
     assert_eq!(children.session.test_providers().test_epoch(), replacement);
+    // #1587a R1': the reclaim promotes the candidate render adopted; A, withdrawn before render
+    // took it, is never promoted (nor parked) through it.
+    assert_ne!(withdrawn, replacement);
+    assert!(
+        children.session.test_epoch_mut(withdrawn).is_none(),
+        "A never promotes"
+    );
     assert_eq!(
         children
             .session
