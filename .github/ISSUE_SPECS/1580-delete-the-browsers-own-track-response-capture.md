@@ -195,3 +195,21 @@ Mirrors that named the deleted code (as #1597's slice did): `hosts/host-web/src/
 module's deleted exports), `sdk/src/core/abi.ts` (the union member, needed to type-check),
 `sdk/test/browser-evals.mjs` (above), and `hosts/host-web/qualification/sdk-response-entry.ts`
 (the D2 helper).
+
+### Browser identity fixture rows (CI fix, after PR #2073's first run)
+
+`check-browser-expected-resources.py --artifacts` was red: the deletion moves the fixture's rows
+on purpose. Base `f4d2b7862` against this branch, both measured on the built module with the same
+script:
+
+- Exact rows `largestBridgeAllocationBytes` and `largestNamedAllocationBytes`: 1,048,576 to
+  24,576. The 1 MiB was `ResponseStaging`'s capture buffer; 24,576 is now the largest remaining
+  bridge row.
+- Retained rows `bridgeMetadataBytes` 1,600,745 to 551,994 and `bridgeRetainedBytes` 1,637,853 to
+  589,102: each is 1,048,751 less, the deleted staging (`1 << 20` + 127 + 48). Their ceilings
+  carried the 1 MiB on top of the 10 % rule; they are re-derived by the rule alone: 1,628,864 to
+  607,232 and 1,667,648 to 648,064.
+- `memoryBytes` peak 3,014,656 to 1,966,080 (16 pages less); `memoryBytesCeiling` 3,080,192 to
+  2,097,152, the peak plus two pages.
+- No other row moved: every other exact row, every other retained row, the transcripts and the four
+  PCM digests are equal on the base and here.
