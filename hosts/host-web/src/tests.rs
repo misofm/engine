@@ -4296,6 +4296,15 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     assert_eq!(right[0].left, None);
     assert_eq!(right[0].right, Some(expected_rearmed.right));
 
+    // #1585: a disarm is in effect when it is accepted, before a block drains it; no later window
+    // belongs to the subscription it ends.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), RESULT_OK);
+    let disarmed = host
+        .read_observations(&[selection])
+        .expect("disarmed selected read");
+    assert_eq!(disarmed[0].status, ObservationReadStatus::Unarmed);
+    assert_eq!(disarmed[0].window, None);
+
     let invalid = [
         selection,
         ObservationSelection {

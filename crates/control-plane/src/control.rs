@@ -1397,8 +1397,9 @@ pub(crate) struct ObservationSlot {
     /// state and would lose the record.
     pub(crate) queued: bool,
     /// The tag of the last record queued for this tap on the newest plan, or of the binding its
-    /// prepared arm publishes (#1585 D4); `0` for none. A reader reports the tap pending while
-    /// its slot's published tag is below this.
+    /// prepared arm publishes (#1585 D4); `0` for none. Its kind is [`Self::armed`], which every
+    /// push and every slot build sets with it. A reader reports the tap pending while the record
+    /// is an arm whose tag its slot has not published, and unarmed at once after a disarm.
     pub(crate) tag: u64,
 }
 
@@ -5408,11 +5409,20 @@ where
     /// render has not applied the tap's last record yet. Allocates nothing.
     #[must_use]
     pub fn observation_issued_tag(&self, key: &ObservationKeyRef<'_>) -> u64 {
+        self.observation_issued(key).0
+    }
+
+    /// [`Self::observation_issued_tag`] and the kind of that record: `true` for an arm or a
+    /// re-arm (or a binding's prepared arm), `false` for a disarm or for none (#1585, root ruling
+    /// on #1977). A disarm is in effect for a reader at once: no later window belongs to the
+    /// subscription it ends. Allocates nothing.
+    #[must_use]
+    pub fn observation_issued(&self, key: &ObservationKeyRef<'_>) -> (u64, bool) {
         self.resolve_observation_key(key)
             .ok()
             .and_then(|tap| self.observation_slot(tap.producer, tap.tap_index))
             .and_then(|slot| self.observation_pending.get(slot))
-            .map_or(0, |entry| entry.tag)
+            .map_or((0, false), |entry| (entry.tag, entry.armed))
     }
 
     /// The encoded bytes of the one `OBSERVATION_ENDED` frame that would end every armed tap,

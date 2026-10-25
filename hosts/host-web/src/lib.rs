@@ -568,12 +568,12 @@ pub enum ObservationReadChannels {
 /// Availability of one selected observation at the time of a read.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ObservationReadStatus {
-    /// The tap's last subscription has not been applied by render yet, or it is armed and no
+    /// The tap's last subscription is an arm render has not applied yet, or it is armed and no
     /// complete window has been published since its arm (#1585 D4).
     #[default]
     Pending,
-    /// The tap exists, and its last subscription is a disarm that render has applied, or it has
-    /// none (#1585 D3, D4). A disarm render has not applied yet reads [`Self::Pending`].
+    /// The tap exists, and its last subscription is a disarm, in effect when it is accepted, or
+    /// it has none (#1585 D3, D4).
     Unarmed,
     /// A complete resident window was read without consuming it.
     Ready,
@@ -4431,32 +4431,39 @@ fn read_observation_values(
         .and_then(|(companions, reader)| companions.effect_observations.get(reader as usize))
         .ok_or(ObservationReadError::Unsupported)?;
     // #1585 D4, D6: the arm state and the window are one read of the tap's slot, which render
-    // writes. The tap is pending while render has not applied the last record the control plane
-    // queued for it (its slot publishes a lower tag than the one issued: tags are monotone) and
-    // while every attempt of the read tore; otherwise the slot's state is the answer.
-    let issued = observed
-        .descriptor
-        .observations
-        .get(tap_index)
-        .map_or(0, |declared| {
-            ready.control.observation_issued_tag(&ObservationKeyRef {
-                strip_id: observed.track_id.as_bytes(),
-                rack: observed.address.rack,
-                effect_id: observed.effect_id.as_bytes(),
-                tap_id: declared.id.0,
-            })
-        });
+    // writes. The tap is pending while the last record the control plane queued for it is an arm
+    // (or a re-arm) render has not applied (its slot publishes a lower tag than the one issued:
+    // tags are monotone) and while every attempt of the read tore. A disarm is in effect at once:
+    // no later window belongs to the subscription it ends. Otherwise the slot's state is the
+    // answer.
+    let (issued, issued_arms) =
+        observed
+            .descriptor
+            .observations
+            .get(tap_index)
+            .map_or((0, false), |declared| {
+                ready.control.observation_issued(&ObservationKeyRef {
+                    strip_id: observed.track_id.as_bytes(),
+                    rack: observed.address.rack,
+                    effect_id: observed.effect_id.as_bytes(),
+                    tap_id: declared.id.0,
+                })
+            });
+    let disarmed = issued != 0 && !issued_arms;
     let state = handle
         .readers
         .get(tap_index)
         .and_then(engine::realtime::ObservationReader::read_state)
         .filter(|state| state.arm_tag >= issued);
-    let window = state.filter(|state| state.armed).and_then(|state| {
-        state
-            .window
-            .and_then(|window| window_since_arm(window, state.arm_sample))
-    });
+    let window = state
+        .filter(|state| state.armed && !disarmed)
+        .and_then(|state| {
+            state
+                .window
+                .and_then(|window| window_since_arm(window, state.arm_sample))
+        });
     let status = match state {
+        _ if disarmed => ObservationReadStatus::Unarmed,
         Some(state) if !state.armed => ObservationReadStatus::Unarmed,
         _ if window.is_some() => ObservationReadStatus::Ready,
         _ => ObservationReadStatus::Pending,
