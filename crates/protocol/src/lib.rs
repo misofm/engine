@@ -104,6 +104,6 @@ pub use controller::{
     PreparedImmediateCommandFrame, PreparedObservationRead, PreparedSessionCommand,
     PreparedStructuralCommand, ProtocolController, ProtocolControllerConfig, ProviderFeatures,
     ReplayCache, ReplayCacheConfig, ReplayCacheError, ReplayCacheResourceReport, ReplayDecision,
-    ReplayHit, ResponseProviderError, SessionCommand, SessionCommandReply, TelemetryRefusal,
-    TelemetryRefusalPath,
+    ReplayHit, ResponseProviderError, ResponseReadyEnqueueError, SessionCommand,
+    SessionCommandReply, TelemetryRefusal, TelemetryRefusalPath,
 };

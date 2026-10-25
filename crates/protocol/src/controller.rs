@@ -3991,6 +3991,9 @@ impl<P: ControlProvider> ProtocolController<P> {
     /// ([`EventEgressError::ResponseReadyOccupied`]), the endpoint does not serve `RESPONSE_GET`
     /// ([`EventEgressError::Disabled`]), or the event's frame cannot be encoded or the sequence is
     /// exhausted ([`EventEgressError::Encode`]). Nothing changes on an error.
+    // The refusal returns the event by value, so the host keeps it without a copy or an
+    // allocation and retries; nothing is dropped (#1578 D4).
+    #[allow(clippy::result_large_err)]
     pub fn enqueue_response_ready_event(
         &mut self,
         revision: SessionRevision,
