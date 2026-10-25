@@ -633,6 +633,18 @@ struct CollectorOwner {
     right_len: usize,
 }
 
+/// The heap bytes [`ResponseSnapshotCollector::new`] allocates for `maximum_owners` owners with
+/// `maximum_identity_bytes`-byte identities: the owner table and three identity strings per owner
+/// (#1577's charge).
+pub(crate) fn collector_heap_bytes(
+    maximum_owners: usize,
+    maximum_identity_bytes: usize,
+) -> Option<usize> {
+    size_of::<CollectorOwner>()
+        .checked_add(maximum_identity_bytes.checked_mul(3)?)?
+        .checked_mul(maximum_owners)
+}
+
 impl ResponseSnapshotCollector {
     /// Allocate bounded worker-side storage for one capture.
     #[must_use]
@@ -703,6 +715,8 @@ impl ResponseSnapshotCollector {
     }
 }
 
+// REALTIME_POLICY_BEGIN
+// The collector's copy runs on the thread that renders, after a block (#1577).
 impl ResponseSnapshotSink for ResponseSnapshotCollector {
     fn copy_owner(
         &mut self,
@@ -741,6 +755,7 @@ impl ResponseSnapshotSink for ResponseSnapshotCollector {
         Ok(())
     }
 }
+// REALTIME_POLICY_END
 
 /// Caller-owned output for a composed live track subtotal.
 #[derive(Debug)]
@@ -1750,11 +1765,11 @@ pub fn compose_track_response(
     if !(2..=RESPONSE_MAXIMUM_POINTS).contains(&points) {
         return Err(ResponseSnapshotQueryError::InvalidGrid);
     }
-    let members = snapshot
-        .owners
-        .iter()
-        .map(|owner| response_member(strip_id, owner))
-        .collect::<Result<Vec<_>, _>>()?;
+    // Exactly one member per owner, reserved once: #1577 charges the table at that length.
+    let mut members = Vec::with_capacity(snapshot.owners.len());
+    for owner in &snapshot.owners {
+        members.push(response_member(strip_id, owner)?);
+    }
     let mut frequencies_hz = vec![0.0_f32; points];
     let mut left = vec![0.0_f32; points];
     let mut right = vec![0.0_f32; points];
