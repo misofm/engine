@@ -62,7 +62,10 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
       };
     });
   const engine = await createOfflineEngine(sessionDocument({
-    effects: { preInsert: [effectEntry("eq", "miso.parametric-eq", params)] },
+    effects: {
+      preInsert: [effectEntry("eq", "miso.parametric-eq", params)],
+      inserts: [effectEntry("comp", "miso.compressor")],
+    },
   }), { asset });
   const request = {
     trackId: "t",
@@ -96,6 +99,24 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
     assert.ok(notification);
     assert.equal(notification.revision, 2n);
     assert.equal(notification.skippedPublications, 0n);
+
+    // A live bypass of the compressor (kind 3: no curve, so no curve bit moves) changes one member
+    // field and publishes exactly once. Test value: red if the owner's comparison skips a member
+    // field such as `bypassed`, so an owner change with an unchanged curve is never published.
+    const editedLeft = [...first.readLatest().leftDb];
+    await semanticLiveControls.submit(
+      semanticLiveControls.edit.track("t").insert("comp", "miso.compressor").bypass(true),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const bypassed = await renderUntil(engine, first.pump());
+    assert.ok(bypassed);
+    assert.equal(bypassed.revision, 3n);
+    const compressor = first.readLatest().members.find((member) => member.stableId === "comp");
+    assert.equal(compressor.kindValue, 3);
+    assert.equal(compressor.bypassed, true);
+    assert.deepEqual([...first.readLatest().leftDb], editedLeft);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(await renderUntil(engine, first.pump()), undefined);
 
     await first.close();
     assert.ok(second.readLatest());

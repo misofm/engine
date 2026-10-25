@@ -799,11 +799,13 @@ function validateSdkResponse(browserName, response) {
     && liveU64(managedInitial.snapshotToken),
   "managed track-response subscription did not match the one-shot owner membership and values");
   // #1579b gate 4: renders with no edit publish nothing; after an edit, one publication whose
-  // capture is at or after the edit's applied sample (the clause `sdk-live-eq-cuts` carried).
+  // capture is after the edit's applied sample (the clause `sdk-live-eq-cuts` carried). A capture
+  // is stamped with its block's exclusive end, so equality would be a committed-model read.
   gate(browserName, "sdk-track-response-subscription", managedResponse?.unchangedOverRenders === true
     && managedResponse.unchangedNotificationCount === 0
     && managedResponse.changedPublication === true
-    && BigInt(managedAfterRender?.capturedSample ?? -1) >= BigInt(managedResponse.appliedAtSample ?? 0)
+    && liveU64(managedResponse.appliedAtSample)
+    && BigInt(managedAfterRender?.capturedSample ?? -1) > BigInt(managedResponse.appliedAtSample)
     && managedResponse.publishedOnce === true
     && managedResponse.callbackCount === 1
     && managedResponse.callbackOwner === managedResponse.owner
@@ -1169,7 +1171,7 @@ function mutate(result, mutation) {
   if (mutation === "sdk-track-response-once") copy.sdkResponse.observations.managedResponse.publishedOnce = false;
   if (mutation === "sdk-track-response-early") {
     copy.sdkResponse.observations.managedResponse.appliedAtSample =
-      (BigInt(copy.sdkResponse.observations.managedResponse.afterRender.capturedSample) + 1n).toString();
+      copy.sdkResponse.observations.managedResponse.afterRender.capturedSample;
   }
   if (mutation === "sdk-live-response-serialized") copy.sdkResponse.observations.liveResponse.serialized = false;
   if (mutation === "sdk-live-response-sections") copy.sdkResponse.observations.liveResponse.members[0].rackValue = 0;

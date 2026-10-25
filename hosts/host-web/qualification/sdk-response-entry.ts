@@ -1704,7 +1704,9 @@ async function runTrackResponseLiveQualification(): Promise<Record<string, unkno
     if (afterRender === undefined) throw new Error("track response subscription lost its result after the edit");
     const changedPublication = !responseValuesEqual(initial, afterRender)
       && subscription.revision === 2n
-      && afterRender.capturedSample >= appliedAtSample;
+      // A capture is stamped with its block's exclusive end, so the block that applied the edit
+      // reports appliedAt + 128: equality would be a read of the committed model, not the audio.
+      && afterRender.capturedSample > appliedAtSample;
     const callbackMatches = callbackResult !== undefined && responseValuesEqual(callbackResult, afterRender);
     // After the edit: one publication, however many blocks render.
     await renderLiveBlocks(browser, TRACK_RESPONSE_QUIET_BLOCKS, TRACK_RESPONSE_QUIET_MS);
