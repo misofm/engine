@@ -70,6 +70,8 @@ tests; this spec.
   case `(user_mute, user_unmute) = (true, true)` and a lane muted before the arm, on all four
   record cases. Red on base 609ccf399: the case "mute then unmute" and the two cases "muted at
   the arm, then unmute" fail on rendered bits; the other five pass unchanged.
-- Open: five `crates/host-core/tests/successor_swap.rs` assertions pin the old rule "a muted
-  strip arms nothing". Each one now sees one more arm, from a muted strip. That file is outside
-  this scope's paths.
+- Root allowed `crates/host-core/tests/successor_swap.rs` for its five arm-count assertions and
+  one stale comment only: they pinned #1288's old rule "a muted strip arms nothing", which R1
+  replaces. Each assertion now states the exact arm list or count, the muted strip's arm
+  included, and each is red when a muted lane does not arm (mutant run). No audio or digest
+  assertion changed.
