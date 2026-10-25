@@ -706,6 +706,86 @@ function normalizeRouteDestination(value: RouteDestination): ModelRecord {
     : freeze({ kind: "output_input", output_id: value.outputId });
 }
 
+/**
+ * The graph entities a route's endpoints are resolved against: the session builder's
+ * declarations, or a transaction's working copy of them (#1385).
+ * @internal
+ */
+export interface RouteGraph {
+  readonly tracks: ReadonlySet<string>;
+  readonly submixes: ReadonlySet<string>;
+  readonly outputs: ReadonlySet<string>;
+}
+
+/**
+ * A route source's record, refused unless it is a well-formed tap of a declared track or submix.
+ * Shared by `SessionBuilder.route` and the transaction builder's route edits (#1385).
+ * @internal
+ */
+export function normalizeRouteSourceSpec(value: RouteSource, graph: RouteGraph, path: string): ModelRecord {
+  validateRouteSource(value, path);
+  if (value.kind === "track") {
+    if (!graph.tracks.has(value.trackId)) fail(`${path}.trackId`, `'${value.trackId}' is not a declared track`);
+  } else if (!graph.submixes.has(value.submixId)) {
+    fail(`${path}.submixId`, `'${value.submixId}' is not a declared submix`);
+  }
+  return normalizeRouteSource(value);
+}
+
+/**
+ * A route destination's record, refused unless it names a declared submix or output.
+ * @internal
+ */
+export function normalizeRouteDestinationSpec(
+  value: RouteDestination,
+  graph: RouteGraph,
+  path: string,
+): ModelRecord {
+  validateRouteDestination(value, path);
+  if (value.kind === "submix_input") {
+    if (!graph.submixes.has(value.submixId)) {
+      fail(`${path}.submixId`, `'${value.submixId}' is not a declared submix`);
+    }
+  } else if (!graph.outputs.has(value.outputId)) {
+    fail(`${path}.outputId`, `'${value.outputId}' is not a declared output`);
+  }
+  return normalizeRouteDestination(value);
+}
+
+/** The refusal of a following route into the output (#1218 D5), at `path`. @internal */
+export function refuseOutputFollowsMute(path: string): never {
+  fail(path, "follows_mute applies only to a route into a submix", CODE.invalidEnum);
+}
+
+/**
+ * One route's normalized record: both endpoints resolved against `graph`, the matrix and gain in
+ * their domains, and `follows_mute` defaulted as #1218 D5 says. Shared by `SessionBuilder.route`
+ * and the transaction builder's `upsertRoute` (#1385); `path` is `verb("id")`.
+ * @internal
+ */
+export function normalizeRoute(spec: RouteSpec, graph: RouteGraph, path: string): ModelRecord {
+  const source = normalizeRouteSourceSpec(spec.source, graph, `${path}.source`);
+  const destination = normalizeRouteDestinationSpec(spec.destination, graph, `${path}.destination`);
+  const channelMatrix = routeMatrixRecord(spec.matrix ?? IDENTITY_MATRIX, `${path}.matrix`);
+  const gainDb = routeNumber(spec.gainDb ?? 0, ROUTE_GAIN_DB_DOMAIN, `${path}.gainDb`);
+  const mute = spec.mute === undefined ? false : bool(spec.mute, `${path}.mute`);
+  let followsMute = spec.destination.kind === "submix_input";
+  if (spec.followsMute !== undefined) {
+    followsMute = bool(spec.followsMute, `${path}.followsMute`);
+    if (followsMute && spec.destination.kind !== "submix_input") refuseOutputFollowsMute(`${path}.followsMute`);
+  }
+  return freeze({
+    id: spec.id,
+    source,
+    destination,
+    channel_matrix: channelMatrix,
+    gain_db: gainDb,
+    mute,
+    // #1218 D5: a send follows its source's mute by default; a route into the output never does.
+    follows_mute: followsMute,
+  });
+}
+
 // -------------------------------------------------------------------------------------------
 // The builder.
 // -------------------------------------------------------------------------------------------
@@ -731,8 +811,11 @@ export interface TrackEntry {
   readonly spec: TrackSpec;
 }
 
-/** A declared submix: its strip, or `undefined` for the transparent strip `.submix(id)` declares. */
-interface SubmixEntry {
+/**
+ * A declared submix: its strip, or `undefined` for the transparent strip `.submix(id)` declares.
+ * @internal
+ */
+export interface SubmixEntry {
   readonly id: string;
   readonly spec: SubmixSpec | undefined;
 }
@@ -768,7 +851,7 @@ interface BuilderState {
 
 /**
  * What a builder has declared that an edit of it is validated against (#1383): the rate, the
- * sources, the console slots, the tracks, and the other graph IDs (submixes, VCAs, outputs).
+ * sources, the console slots and the tracks. The rest it reads from the builder's model.
  * @internal
  */
 export interface BuilderContext {
@@ -776,7 +859,6 @@ export interface BuilderContext {
   readonly sources: readonly SourceEntry[];
   readonly slots: readonly ConsoleSlotEntry[];
   readonly tracks: readonly TrackEntry[];
-  readonly otherGraphIds: ReadonlySet<string>;
 }
 
 let readContext: (builder: SessionBuilder) => BuilderContext;
@@ -801,11 +883,6 @@ export class SessionBuilder {
         sources: state.sources,
         slots: state.console ?? [],
         tracks: state.tracks,
-        otherGraphIds: new Set([
-          ...state.submixes.map((entry) => entry.id),
-          ...state.vcas.map((entry) => entry.id),
-          ...state.outputs,
-        ]),
       };
     };
   }
@@ -852,19 +929,7 @@ export class SessionBuilder {
           + "are checked against its slots",
       );
     }
-    if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
-      fail(path, "expected { preInsert, postInsert }");
-    }
-    knownKeys(spec, CONSOLE_KEYS, path, "the session console");
-    const slots: ConsoleSlotEntry[] = [];
-    for (const [section, key] of [["pre_insert", "preInsert"], ["post_insert", "postInsert"]] as const) {
-      const declared = spec[key] ?? [];
-      if (!Array.isArray(declared)) fail(`${path}.${key}`, "expected an array of console slots");
-      declared.forEach((raw: ConsoleSlotSpec, index: number) => {
-        slots.push(consoleSlot(raw, section, `${path}.${key}[${index}]`, slots));
-      });
-    }
-    return this.#next({ console: freeze(slots) });
+    return this.#next({ console: normalizeConsoleSlots(spec, path) });
   }
 
   /**
@@ -969,29 +1034,7 @@ export class SessionBuilder {
     if (this.#state.routes.some((route) => route.id === spec.id)) {
       fail(`${path}.id`, "a route with this ID is already declared");
     }
-    validateRouteSource(spec.source, `${path}.source`);
-    this.#resolveRouteSource(spec.source, `${path}.source`);
-    validateRouteDestination(spec.destination, `${path}.destination`);
-    if (spec.destination.kind === "submix_input") {
-      if (!this.#hasSubmix(spec.destination.submixId)) {
-        fail(`${path}.destination.submixId`, `'${spec.destination.submixId}' is not a declared submix`);
-      }
-    } else if (!this.#state.outputs.includes(spec.destination.outputId)) {
-      fail(`${path}.destination.outputId`, `'${spec.destination.outputId}' is not a declared output`);
-    }
-    if (spec.matrix !== undefined) {
-      for (const key of ["ll", "lr", "rl", "rr"] as const) {
-        routeNumber(spec.matrix[key], ROUTE_COEFFICIENT_DOMAIN, `${path}.matrix.${key}`);
-      }
-    }
-    if (spec.gainDb !== undefined) routeNumber(spec.gainDb, ROUTE_GAIN_DB_DOMAIN, `${path}.gainDb`);
-    if (spec.mute !== undefined) bool(spec.mute, `${path}.mute`);
-    if (spec.followsMute !== undefined) {
-      bool(spec.followsMute, `${path}.followsMute`);
-      if (spec.followsMute && spec.destination.kind !== "submix_input") {
-        fail(`${path}.followsMute`, "follows_mute applies only to a route into a submix", CODE.invalidEnum);
-      }
-    }
+    normalizeRoute(spec, routeGraph(this.#state), path);
     return this.#next({ routes: [...this.#state.routes, freeze({ ...spec })] });
   }
 
@@ -1052,24 +1095,8 @@ export class SessionBuilder {
     ]);
   }
 
-  #hasSubmix(id: string): boolean {
-    return this.#state.submixes.some((entry) => entry.id === id);
-  }
-
   #source(id: string): SourceEntry | undefined {
     return this.#state.sources.find((entry) => entry.id === id);
-  }
-
-  #resolveRouteSource(source: RouteSource, path: string): void {
-    if (source.kind === "track") {
-      if (!this.#state.tracks.some((entry) => entry.id === source.trackId)) {
-        fail(`${path}.trackId`, `'${source.trackId}' is not a declared track`);
-      }
-      return;
-    }
-    if (!this.#hasSubmix(source.submixId)) {
-      fail(`${path}.submixId`, `'${source.submixId}' is not a declared submix`);
-    }
   }
 
   #validateTrack(spec: TrackSpec, path: string): void {
@@ -1112,12 +1139,7 @@ export function session(options: SessionOptions): SessionBuilder {
     fail("session()", "expected a session options object");
   }
   const sessionId = stableId(options.id, "session().id");
-  if (!LAUNCH_RATES.includes(options.sampleRateHz)) {
-    fail(
-      "session().sampleRateHz",
-      `${String(options.sampleRateHz)} is not a launch rate; expected one of ${LAUNCH_RATES.join(", ")}`,
-    );
-  }
+  launchRate(options.sampleRateHz, "session().sampleRateHz");
   const revision = u64(options.revision ?? 0, "session().revision");
   if (revision > REVISION_MAX) {
     fail(
@@ -1126,12 +1148,7 @@ export function session(options: SessionOptions): SessionBuilder {
       CODE.outOfRange,
     );
   }
-  const quantumFrames = integer(
-    options.quantumFrames ?? 128,
-    "session().quantumFrames",
-    1,
-    0xffff_ffff,
-  );
+  const quantumFrames = quantum(options.quantumFrames ?? 128, "session().quantumFrames");
   return new SessionBuilder(freeze({
     options: {
       sessionId,
@@ -1149,6 +1166,23 @@ export function session(options: SessionOptions): SessionBuilder {
     routes: [],
     automation: [],
   }));
+}
+
+/**
+ * A session rate: one of the four launch rates (owner ruling R5). Shared by `session()` and the
+ * transaction builder's `setSampleRateHz` (#1385).
+ * @internal
+ */
+export function launchRate(value: unknown, path: string): SessionSampleRateHz {
+  if (!LAUNCH_RATES.includes(value as number)) {
+    fail(path, `${String(value)} is not a launch rate; expected one of ${LAUNCH_RATES.join(", ")}`);
+  }
+  return value as SessionSampleRateHz;
+}
+
+/** A render quantum: a nonzero `u32`. Shared by `session()` and `setQuantumFrames` (#1385). @internal */
+export function quantum(value: unknown, path: string): number {
+  return integer(value, path, 1, 0xffff_ffff);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1465,6 +1499,27 @@ function consoleSlot(
     quality: "normal" as const,
     linkMode: mode,
   });
+}
+
+/**
+ * A session console's slots, pre-insert first, each in declared order. Shared by
+ * `SessionBuilder.console` and the transaction builder's `setConsole` (#1385).
+ * @internal
+ */
+export function normalizeConsoleSlots(spec: ConsoleSpec, path: string): readonly ConsoleSlotEntry[] {
+  if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
+    fail(path, "expected { preInsert, postInsert }");
+  }
+  knownKeys(spec, CONSOLE_KEYS, path, "the session console");
+  const slots: ConsoleSlotEntry[] = [];
+  for (const [section, key] of [["pre_insert", "preInsert"], ["post_insert", "postInsert"]] as const) {
+    const declared = spec[key] ?? [];
+    if (!Array.isArray(declared)) fail(`${path}.${key}`, "expected an array of console slots");
+    declared.forEach((raw: ConsoleSlotSpec, index: number) => {
+      slots.push(consoleSlot(raw, section, `${path}.${key}[${index}]`, slots));
+    });
+  }
+  return freeze(slots);
 }
 
 /**
@@ -1816,14 +1871,23 @@ export function normalizeTrack(
 /**
  * A submix strip in the track's key order without the source fields. A spec-less submix is the
  * transparent strip, the engine's `Submix::unity`: every field at its identity, the identity
- * matrix, and one bypassed entry per declared console slot.
+ * matrix, and one bypassed entry per declared console slot. Shared by the session builder and the
+ * transaction builder's `upsertSubmix` (#1385); refusal paths start with `verb("id")`.
+ * @internal
  */
-function normalizeSubmix(
+export function normalizeSubmix(
   entry: SubmixEntry,
   slots: readonly ConsoleSlotEntry[],
   sampleRateHz: number,
+  verb = "submix",
 ): ModelRecord {
-  const path = `submix("${entry.id}")`;
+  const path = `${verb}("${entry.id}")`;
+  if (entry.spec !== undefined) {
+    if (entry.spec === null || typeof entry.spec !== "object" || Array.isArray(entry.spec)) {
+      fail(path, "expected a submix strip specification");
+    }
+    knownKeys(entry.spec, SUBMIX_KEYS, path, "a submix strip");
+  }
   const spec: SubmixSpec = entry.spec ?? {
     console: slots.map((slot) => ({ slot: slot.slot, bypass: true })),
     pan: { matrix: IDENTITY_MATRIX },
@@ -1855,17 +1919,9 @@ function normalize(state: BuilderState): SessionModel {
     .map(({ id, fader, members }) => freeze({ id, fader, members: [...members].sort(asciiCompare) }))
     .sort(byId);
   const outputs = state.outputs.map((id) => freeze({ id })).sort(byId);
+  const graph = routeGraph(state);
   const routes = state.routes
-    .map((spec) => freeze({
-      id: spec.id,
-      source: normalizeRouteSource(spec.source),
-      destination: normalizeRouteDestination(spec.destination),
-      channel_matrix: routeMatrixRecord(spec.matrix ?? IDENTITY_MATRIX, `route("${spec.id}").matrix`),
-      gain_db: routeNumber(spec.gainDb ?? 0, ROUTE_GAIN_DB_DOMAIN, `route("${spec.id}").gainDb`),
-      mute: spec.mute ?? false,
-      // #1218 D5: a send follows its source's mute by default; a route into the output never does.
-      follows_mute: spec.followsMute ?? spec.destination.kind === "submix_input",
-    }))
+    .map((spec) => normalizeRoute(spec, graph, `route("${spec.id}")`))
     .sort(byId);
   const automation = state.automation
     .map((spec) => normalizeAutomation(spec, state))
@@ -1889,6 +1945,14 @@ function normalize(state: BuilderState): SessionModel {
     routes,
     automation,
   }) as SessionModel;
+}
+
+function routeGraph(state: BuilderState): RouteGraph {
+  return {
+    tracks: new Set(state.tracks.map((entry) => entry.id)),
+    submixes: new Set(state.submixes.map((entry) => entry.id)),
+    outputs: new Set(state.outputs),
+  };
 }
 
 /** A route's `channel_matrix`: each coefficient inside the route coefficient domain. */

@@ -1,5 +1,6 @@
 /**
- * Issue #1383 (slices 1383a and 1383b): the SDK's session-transaction builder against the engine.
+ * Issues #1383 (slices 1383a and 1383b) and #1385: the SDK's session-transaction builder against
+ * the engine.
  *
  * The oracle (`hosts/host-web/examples/sdk_transaction_oracle.rs`) decodes each SDK frame with the
  * protocol codec, re-encodes the decoded edits, and applies them to the base session with the
@@ -162,6 +163,89 @@ describe("session transactions encode as the engine's codec does", () => {
     ]));
   });
 
+  test("session, console, submix, output and route edits are the codec's bytes, each ramp omitted, 0 and 960", () => {
+    // Red if any field of a session, profile, console, submix, output or route payload is out of
+    // order, at the wrong width, without its mandatory flag or miscounted (console slots and
+    // entries at 0, 1 and 2): the codec then decodes other edits, which re-encode to other bytes,
+    // or refuses the frame. The re-encoding cannot tell an omitted `rampSamples` written as 0 from
+    // a given 0, so the three ramp variants must also be three different frames.
+    const graph = (revision) => session({ id: "tx.graph", sampleRateHz: 48_000, revision })
+      .source("a", stereo)
+      .track("t", { source: "a" })
+      .submix("bus")
+      .output("main")
+      .route({ id: "r1", source: { kind: "track", trackId: "t", tap: "post_fader" }, destination: { kind: "submix_input", submixId: "bus" } })
+      .route({ id: "r2", source: { kind: "submix", submixId: "bus", tap: "post_pan" }, destination: { kind: "output_input", outputId: "main" } });
+    const edits = transaction(graph(0))
+      .setSessionId("tx.renamed")
+      // The session store applies a rate or quantum change; the control plane refuses it (#1290a).
+      .setSampleRateHz(96_000)
+      .setQuantumFrames(256)
+      .setRenderProfile({ id: "studio" })
+      .setOutputProfile({ id: "stereo", channels: 2, sampleFormat: "f32_planar" })
+      .upsertSubmix("fx")
+      .upsertSubmix("stems", {
+        builtins: { left: { trimDb: -2 }, right: { hpfHz: 40 } },
+        inserts: [effect("miso.compressor", { ratio: 2 }, { slotId: "glue" })],
+        fader: { rightDb: -4, leftMute: true },
+        pan: { left: -0.25, right: 0.75, smoothingSamples: 32 },
+      })
+      .upsertOutput("alt")
+      .upsertRoute({
+        id: "r3",
+        source: { kind: "submix", submixId: "fx", tap: "insert_send" },
+        destination: { kind: "output_input", outputId: "alt" },
+        matrix: { ll: 0.5, lr: -0.25, rl: 0.125, rr: 1 },
+        gainDb: -3.5,
+        mute: true,
+      })
+      .upsertRoute({
+        id: "r4",
+        source: { kind: "track", trackId: "t", tap: "pre_fader" },
+        destination: { kind: "submix_input", submixId: "stems" },
+        followsMute: false,
+      })
+      .setRouteSource("r1", { kind: "track", trackId: "t", tap: "input" })
+      .setRouteDestination("r1", { kind: "submix_input", submixId: "fx" })
+      .removeRoute("r2")
+      .removeSubmix("bus")
+      .removeOutput("main");
+    assertCodecBytes(oracle(graph(0), [edits.build()]));
+
+    // The console: one slot to none, then none to two, each strip given its entries in the same
+    // transaction; `setConsole` and `setTrackConsole` with `rampSamples` omitted, 0 and 960.
+    const oneSlot = (revision) => session({ id: "tx.console", sampleRateHz: 48_000, revision })
+      .console({ preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }] })
+      .source("a", mono)
+      .track("t", { source: "a", console: [{ slot: "eq" }] })
+      .submix("bus");
+    const noSlot = (revision) => session({ id: "tx.console", sampleRateHz: 48_000, revision })
+      .source("a", mono)
+      .track("t", { source: "a" })
+      .submix("bus");
+    const frames = [undefined, 0, 960].map((rampSamples) => {
+      const ramp = rampSamples === undefined ? {} : { rampSamples };
+      const clear = transaction(oneSlot(0))
+        .setConsole({}, ramp)
+        .setTrackConsole("t", [], ramp)
+        .setTrackConsole("bus", [], ramp);
+      const two = transaction(noSlot(1))
+        .setConsole({
+          preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }],
+          postInsert: [{ slot: "comp", effectId: "miso.compressor", linkMode: "maximum" }],
+        }, ramp)
+        .setTrackConsole("t", [
+          { slot: "eq", parameters: { "band-1-gain": 2 } },
+          { slot: "comp", bypass: true, linkMode: "dual_mono", parameters: { ratio: 3 } },
+        ], ramp)
+        .upsertSubmix("bus");
+      const answers = oracle(oneSlot(0), [clear.build(), two.build()]);
+      assertCodecBytes(answers);
+      return answers.map((answer) => answer.sdk).join("");
+    });
+    assert.equal(new Set(frames).size, 3, "omitted, 0 and 960 are three different frames");
+  });
+
   test("each snapshot after a transaction is the document a session builder declares directly", () => {
     // Red if a byte-valid encoder maps a spec field to the wrong model field (left and right
     // builtins swapped, the fader's or pan's lanes crossed, a parameter on the wrong channel, a
@@ -187,6 +271,56 @@ describe("session transactions encode as the engine's codec does", () => {
     assert.equal(added.ok, afterAdd.toJson());
     const reassigned = { ...vocal, source: { id: "drums", left: 1, right: 0 } };
     assert.equal(removed.ok, declare(2).source("vox", mono).track("vocal", reassigned).toJson());
+  });
+
+  test("console, submix, output and route edits land on the entity and field they name", () => {
+    // Red if a byte-valid encoder maps a spec field to the wrong model field (a route's tap, mute
+    // and follows_mute, or matrix coefficients crossed, a destination's kind swapped, a submix
+    // strip's console entry, fader lane or pan crossed, a console slot in the wrong section): the
+    // store's snapshot then differs from the builder's document for the same session.
+    const base = session({ id: "tx.graph.semantics", sampleRateHz: 48_000 })
+      .source("a", stereo)
+      .track("t", { source: "a" })
+      .output("main");
+    const console = {
+      preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }],
+      postInsert: [{ slot: "comp", effectId: "miso.compressor", linkMode: "average" }],
+    };
+    const trackConsole = [{ slot: "eq", parameters: { "band-1-gain": -3 } }, { slot: "comp", bypass: true }];
+    const bus = {
+      console: [{ slot: "eq", bypass: true }, { slot: "comp", channel: "left", parameters: { ratio: 6 } }],
+      fader: { leftDb: -1.5, rightMute: true },
+      pan: { left: 0.25, right: -0.5 },
+    };
+    const send = {
+      id: "send",
+      source: { kind: "track", trackId: "t", tap: "pre_fader" },
+      destination: { kind: "submix_input", submixId: "bus" },
+      matrix: { ll: 0.75, lr: 0.25, rl: -0.5, rr: 1 },
+      gainDb: -6,
+      mute: false,
+      followsMute: true,
+    };
+    const edits = transaction(base)
+      .setConsole(console)
+      .setTrackConsole("t", trackConsole)
+      .upsertSubmix("bus", bus)
+      .upsertOutput("alt")
+      .upsertRoute(send)
+      .upsertRoute({ id: "out", source: { kind: "track", trackId: "t", tap: "post_pan" }, destination: { kind: "output_input", outputId: "main" } })
+      .setRouteSource("out", { kind: "submix", submixId: "bus", tap: "post_fader" })
+      .setRouteDestination("out", { kind: "output_input", outputId: "alt" })
+      .removeOutput("main");
+    const [answer] = oracle(base, [edits.build()]);
+    const expected = session({ id: "tx.graph.semantics", sampleRateHz: 48_000, revision: 1 })
+      .console(console)
+      .source("a", stereo)
+      .track("t", { source: "a", console: trackConsole })
+      .submix("bus", bus)
+      .output("alt")
+      .route(send)
+      .route({ id: "out", source: { kind: "submix", submixId: "bus", tap: "post_fader" }, destination: { kind: "output_input", outputId: "alt" } });
+    assert.equal(answer.ok, expected.toJson());
   });
 
   test("rack and effect edits land on the strip, insert and field they name", () => {
@@ -306,6 +440,51 @@ describe("the builder refuses what the engine would refuse, before any byte exis
     for (const rampSamples of [-1, 1.5, 2 ** 32, "960"]) {
       refused(() => tx.setTrackConsole("t", [{ slot: "eq" }], { rampSamples }), /setTrackConsole\("t"\)\.rampSamples must be an integer/);
     }
+    // A `setConsole` that leaves the base session's console as it was opens nothing (#1561 D3).
+    refused(
+      () => tx.setConsole({ preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }] }).setTrackConsole("t", [{ slot: "eq" }]),
+      /setTrackConsole\("t"\): .*change only after the same transaction changes the console/,
+    );
+    refused(() => tx.build(), /at least one edit/);
+  });
+
+  test("session, console, submix, output and route edits the engine would refuse", () => {
+    // Red if a session-level or graph edit the engine refuses (a rate off the launch list, a zero
+    // quantum, a mono output, a console slot the console cannot hold, an ID another entity kind
+    // holds, a missing submix, output or route, an endpoint outside the working graph, a following
+    // route into the output) reaches the wire: the caller pays a round trip and loses the path.
+    const base = session({ id: "tx.graph.refusals", sampleRateHz: 48_000 })
+      .source("a", mono)
+      .track("t", { source: "a" })
+      .submix("bus")
+      .output("main")
+      .route({ id: "send", source: { kind: "track", trackId: "t", tap: "pre_fader" }, destination: { kind: "submix_input", submixId: "bus" } });
+    const tx = transaction(base);
+    refused(() => tx.setSessionId("Bad ID"), /setSessionId\(\)\.sessionId: a Session V1 stable ID/);
+    refused(() => tx.setSampleRateHz(192_000), /setSampleRateHz\(\)\.sampleRateHz: 192000 is not a launch rate/);
+    refused(() => tx.setQuantumFrames(0), /setQuantumFrames\(\)\.quantumFrames: expected an integer in 1/);
+    refused(() => tx.setRenderProfile({ id: "native", mode: "waves" }), /setRenderProfile\(\)\.mode: single_thread is the only/);
+    refused(() => tx.setOutputProfile({ id: "main", channels: 1 }), /setOutputProfile\(\)\.channels: V1 output must contain exactly two/);
+    refused(() => tx.setConsole({ preInsert: [{ slot: "d", effectId: "miso.delay" }] }), /setConsole\(\)\.preInsert\[0\]\.effectId: 'miso\.delay' cannot be a console slot/);
+    refused(() => tx.upsertSubmix("t"), /upsertSubmix\("t"\)\.id: tracks, submixes, VCAs and outputs share one ID namespace/);
+    refused(() => tx.upsertOutput("bus"), /upsertOutput\("bus"\)\.id: tracks, submixes, VCAs and outputs share one ID namespace/);
+    refused(() => tx.removeOutput("main").upsertTrack("main", { source: "a" }).upsertSubmix("main"), /upsertSubmix\("main"\)\.id: .*share one ID namespace/);
+    refused(() => tx.upsertSubmix("fx", { console: [{ slot: "eq" }] }), /upsertSubmix\("fx"\)\.console\[0\]\.slot: 'eq' is not a console slot/);
+    refused(() => tx.removeSubmix("missing"), /removeSubmix\("missing"\)\.id: 'missing' is not a declared submix/);
+    refused(() => tx.removeOutput("missing"), /removeOutput\("missing"\)\.id: 'missing' is not a declared output/);
+    refused(() => tx.removeRoute("missing"), /removeRoute\("missing"\)\.id: 'missing' is not a declared route/);
+    refused(
+      () => tx.removeSubmix("bus").upsertRoute({ id: "r", source: { kind: "submix", submixId: "bus", tap: "post_pan" }, destination: { kind: "output_input", outputId: "main" } }),
+      /upsertRoute\("r"\)\.source\.submixId: 'bus' is not a declared submix/,
+    );
+    refused(
+      () => tx.upsertRoute({ id: "r", source: { kind: "track", trackId: "t", tap: "input" }, destination: { kind: "output_input", outputId: "main" }, followsMute: true }),
+      /upsertRoute\("r"\)\.followsMute: follows_mute applies only to a route into a submix/,
+    );
+    refused(() => tx.setRouteSource("send", { kind: "track", trackId: "t", tap: "pre_send" }), /setRouteSource\("send"\)\.source\.tap: unknown track tap/);
+    refused(() => tx.setRouteDestination("send", { kind: "output_input", outputId: "missing" }), /setRouteDestination\("send"\)\.destination\.outputId: 'missing' is not a declared output/);
+    // The base send follows its source's mute by default, so it cannot be pointed at the output.
+    refused(() => tx.setRouteDestination("send", { kind: "output_input", outputId: "main" }), /setRouteDestination\("send"\)\.destination: follows_mute applies only/);
     refused(() => tx.build(), /at least one edit/);
   });
 });

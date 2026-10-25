@@ -154,3 +154,34 @@ Source: `stream-e2-batch-verdict-2.md` (batch head `fcc5c890e`).
   same bytes); A1.2's `null` case catches the first.
 
 **Decision 17 amendment (2026-10-13).** #1561 retires `SetControlSmoothing` (`0x0008`), `SetRouteChannelMatrix`, `SetRouteGainDb`, `SetRouteMute`, `SetRouteFollowsMute` (`0x0504`-`0x0507`) and `SetVcaFader` (`0x0702`); their values are `SET_CONTROL` edits. This issue encodes only the remaining structural ops. The stored automation target is a control address (#1566).
+
+## Decision record (implementation, 2026-10-25)
+
+Spec corrections (scope note of 2026-10-25, recorded here; they supersede the text above where it conflicts):
+
+- **Deliverables 1** is `sdk/src/core/session-transaction.ts` (#1383's file); `transaction.ts` does not exist.
+- **D1** is twenty methods. Decision 17 (#1561) retired `setControlSmoothing`, `setRouteChannelMatrix`,
+  `setRouteGainDb`, `setRouteMute`, `setRouteFollowsMute` and `setVcaFader`; they are not added. **Amendment 1**
+  (A1.1-A1.3) and the `sdk/src/internal/control-smoothing.ts` path are struck with `setControlSmoothing`.
+- **D4** keeps `setConsole` only: `schema::session::ramp_samples_field` gives `ramp_samples` to `SetConsole`,
+  `SetTrackConsole` and `SetControl` and to no other opcode.
+- **D2** reuses `session.ts`'s validators, exported `@internal` (R1): `normalizeConsoleSlots` (the body of
+  `SessionBuilder.console`), `normalizeSubmix` (a `verb` parameter, as `normalizeTrack`), `normalizeRoute`,
+  `normalizeRouteSourceSpec`, `normalizeRouteDestinationSpec` (shape, endpoint existence and defaults, now also what
+  `SessionBuilder.route` and its model run), `launchRate` and `quantum` (`session()`'s rate and quantum checks).
+  `BuilderContext.otherGraphIds` is removed: the transaction keeps its own working track, submix, VCA and output
+  ID sets, read from the base model, so an ID freed by a removal can be reused in the same transaction.
+- A rate or quantum change (R2): the session store the oracle runs applies it; the control plane refuses it at apply
+  with `control.apply.reprepare_required` (#1290a). So gate 1's row is an ordinary applied frame.
+- The render and output profiles have no `SessionBuilder` counterpart (it writes them fixed). `setRenderProfile({ id,
+  mode? })` and `setOutputProfile({ id, channels?, sampleFormat? })` refuse what the session validator refuses: a
+  mode other than `single_thread`, channels other than 2 (`numeric.out_of_schema_range`), a format other than
+  `f32_planar`.
+- `consoleChanged` is true when the working console differs from the base session's, as the store's
+  `SetTrackConsole` rule compares the candidate console with the committed one; a `setConsole` that restates the
+  base console opens nothing.
+- **Gate 1 test value, corrected:** the oracle re-encodes what it decoded, so an omitted `rampSamples` written as 0
+  re-encodes to the same bytes and stays green on the byte comparison. The eval therefore also asserts that the
+  omitted, 0 and 960 variants of the same console transaction are three different frames.
+- **Gate 1 also owns the `setTrackConsole` byte rows** (root comment of 2026-10-24): `rampSamples` omitted, 0 and
+  960, after a `setConsole` in the same transaction.
