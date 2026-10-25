@@ -240,7 +240,7 @@ Commands: `cargo test --locked -p host-core --all-features`,
     on the maximum (3.0 for 2.0) and on a fold not reset at a batch's first frame (2.0 kept).
   - `TestObservationWindows` gains each window's strip reduction word (bits), which gate 2 reads.
   - Attempt 2 (verifier): the gate 5 race row was removed (no render code path; it guarded
-    nothing). Gate 2 now has two strips: red on mutant `strips.push(0)` for every handle (MUTANT_RESULT).
+    nothing). Gate 2 now has two strips: red on mutant `strips.push(0)` for every handle (red at "armed": handle 1 flags 1 12.79 dB, handle 2 flags 0).
   - Docs: peak readings continue across a carried swap; a strip's gain reduction restarts at a
     rebuild's adoption and is absent until its taps' first window there closes, until #1674's
     observation half pairs carried readers.
