@@ -245,3 +245,16 @@ Commands: `cargo test --locked -p host-web --all-features`, `cargo test --locked
   outside the scope note's paths: its #1530 logger and resident row read `host.command` and
   `appliedAtSample`, which this slice removes from the SDK path. Kinds 7/8 stay for #1589c (the E12
   and staging-read rows still use `host.observe`).
+- **Tests outside the scope note's list.** The observation fakes of `spectrum-evals.mjs`,
+  `spectrum-browser-evals.mjs`, `response-subscription-evals.mjs` and `structure-evals.mjs` (m3)
+  move to the frame transport; `control-support.mjs` gains `scriptedObservationControl` (a scripted
+  `Observe`/`OBSERVATION_READ` endpoint for hand-written browser hosts). Deleted, with what holds
+  the claim now: `measurement-evals.mjs` "browser live controls retain the managed observation
+  conflict hook" (the browser rig test of the hook in `observation-subscription-evals.mjs`) and
+  "the browser engine sends an observation record that names its tap by key" (an `Observe` edit has
+  no index on the wire: the codec fixture); `structure-evals.mjs` "through the browser transport"
+  and the `browser` row of #1677's transports (a hand-built owner in the test; both engines send the
+  same frames, and gate 3's browser leg runs the real browser engine); the observation-subscription
+  evals' "booted with no observation taps" (the SDK's own boot-word check is gone) and "past a full
+  frame ... observationLimit" (the frame path's full frame is a non-backpressure refusal, the rule
+  the "not backpressure" test holds).
