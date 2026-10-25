@@ -191,8 +191,23 @@ extern "C" {
  * response.limit, response.target.unavailable); a reply that would not fit the control frame
  * limit, or the request's own maximum_reply_bytes, is refused whole as
  * response.reply_too_large before any curve is computed. An exact replay of the request returns
- * the same bytes and computes nothing. The address and strip targets are refused
- * response.target.unavailable until their slices.
+ * the same bytes and computes nothing.
+ *
+ * Track response (issue 1578). RESPONSE_GET with a strip target (a track or submix stable ID)
+ * through miso_engine_v1_submit_command answers a request tag at once; the curve of the strip's
+ * input filters and EQs, from the values its plan renders, with the list of the owners that make
+ * it, arrives later as one reliable RESPONSE_READY event (message ID 0x8040, listed with 0x000e
+ * under capability flag bit 14) through miso_engine_v1_dequeue_event, carrying the same tag. No
+ * C symbol or struct is added. The result comes from the first successful render block of the
+ * newest plan after the request, so a host that does not render and service the session does not
+ * get it. One capture is in flight per session: a strip request while one is in flight or its
+ * event is unread is BACKPRESSURE response.capture.pending. Every request answered with a tag
+ * gets exactly one RESPONSE_READY: OK with the curves, or a refusal (response.strip.removed when
+ * the strip left the session first, response.effect.unsupported, response.limit,
+ * response.capture); a full event queue delays it and never drops it. An unknown strip is
+ * NOT_FOUND control.address.unknown, and a request whose event could exceed the control frame
+ * limit or maximum_reply_bytes is response.reply_too_large; neither arms anything. A replayed
+ * request returns the same tag and arms nothing.
  *
  * Spectrum taps (issue 1594). SPECTRUM_CONFIGURE (message ID 0x0010) through
  * miso_engine_v1_submit_command sets, changes or removes the session's spectrum taps while it
