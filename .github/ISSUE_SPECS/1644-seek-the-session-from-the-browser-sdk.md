@@ -295,8 +295,8 @@ Evidence (attempt 2): gate 1 runs on the real module (moved source, fresh source
 refusal at the session generation); 23 mutants red, among them the attempt-1 rule (consume
 without the export), no rule, any `invalidArgument` consumed, the consumed refusal counted as
 `REFUSED`, a wrong reply generation accepted, no diagnostic view bound, a bare producer error, a
-raw host refusal record and no closed guard. Attempt 1's 14 mutants, kept: drain seeks the
-applied epoch, drain swallows every epoch, anchored message calls the plain export, no export call, declaration first,
+raw host refusal record and no closed guard. Attempt 1's 12 other mutants, rerun red:
+anchored message calls the plain export, no export call, declaration first,
 two unsettled, malformed reaches the export, refusal records the generation, producers before the
 reply, producers on a refusal, stale default generation, unsafe frame posted, bigint frame to a
 producer, pump ignores the generation). No rendered bit moves: `process()` is untouched.
