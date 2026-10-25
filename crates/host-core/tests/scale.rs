@@ -3,7 +3,8 @@
 //!
 //! Release-only nightly row: the prepare compiles, lays out, binds and attaches live controls to
 //! 65,537 tracks, each with its own source, a fader automation and a send into one of 64 submixes;
-//! every 8th track carries a sidechained compressor, and one VCA holds every track.
+//! every 8th track carries a sidechained compressor, one VCA holds every track and a second holds
+//! `track-9999`. Only the two rendered tracks' sends are open.
 
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,9 @@ const SUBMIXES: u32 = 64;
 /// track `i - 1`. The phase puts one on `track-9999`, the last track in ID order (index 65,536).
 const SIDECHAIN_EVERY: u32 = 8;
 const SIDECHAIN_PHASE: u32 = 7;
+
+/// The two tracks the render feeds: `track-9999` (index 65,536) and its sidechain key.
+const RENDERED: [u32; 2] = [9_998, 9_999];
 
 /// The fader row (builtin parameter 5).
 const FADER_DB: u32 = 5;
@@ -105,10 +109,11 @@ const fn sidechained(track: u32) -> bool {
     track % SIDECHAIN_EVERY == SIDECHAIN_PHASE
 }
 
-/// The kitchen-sink session of `tracks` (track numbers): the fixture's first track (with the console's EQ
-/// slot) on its own source `src-{i}`, a two-segment fader automation, a post-fader send into
-/// `bus-{i % 64}`, a compressor keyed by the previous track's post-fader tap on every 8th track,
-/// one VCA over every track, and each submix routed to the output.
+/// The kitchen-sink session of `tracks` (track numbers): the fixture's first track (with the
+/// console's EQ slot) on its own source `src-{i}`, a two-segment fader automation, a post-fader
+/// send into `bus-{i % 64}` (muted unless the track is in [`RENDERED`]), a compressor keyed by the
+/// previous track's post-fader tap on every 8th track, one VCA over every track and one over
+/// `track-9999`, and each submix routed to the output.
 fn kitchen_sink_document(tracks: &[u32]) -> String {
     let mut model: SessionModel = parse_session_json(EXAMPLE).expect("fixture parses");
     let source = model.sources[0].clone();
@@ -163,16 +168,35 @@ fn kitchen_sink_document(tracks: &[u32]) -> String {
     }];
     // ID order, so the member at index 65,536 is `track-9999`, the strip the render reads.
     model.vcas[0].members.sort();
+    // A second VCA on `track-9999` alone, so the reach of the strip at index 65,536 (both VCAs)
+    // differs from the reach of every other strip.
+    if tracks.contains(&9_999) {
+        model.vcas.push(Vca {
+            id: id("vca-last"),
+            fader: DualMonoFader {
+                left_db: -1.5,
+                right_db: -1.5,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: vec![id("track-9999")],
+        });
+    }
     model.routes = tracks
         .iter()
         .map(|&index| {
-            route(
+            let mut send = route(
                 &format!("send-{index}"),
                 post_fader(index),
                 RouteDestination::SubmixInput {
                     submix_id: id(&format!("bus-{}", index % SUBMIXES)),
                 },
-            )
+            );
+            // Only the rendered pair's sends are open: a muted live send writes its
+            // route-activity bit `false` every block, so a send index that aliases one of them
+            // silences the pair.
+            send.mute = !RENDERED.contains(&index);
+            send
         })
         .chain((0..SUBMIXES).map(|bus| {
             route(
@@ -361,7 +385,7 @@ fn prepares_a_65_537_track_kitchen_sink_session_live_attached() {
         "the compressor's producer on the strip at index 65,536 resolves"
     );
 
-    let (mut pair, _) = prepare(&kitchen_sink_document(&[9_998, 9_999]));
+    let (mut pair, _) = prepare(&kitchen_sink_document(&RENDERED));
     let expected = render(&mut pair);
     assert!(
         expected.iter().any(|&bits| f32::from_bits(bits) != 0.0),
