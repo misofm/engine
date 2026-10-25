@@ -1663,6 +1663,39 @@ mod tests {
             credits_balance(&publisher, &mut retirer, 1);
         }
 
+        /// #1597: before any block, `adopt_before_first_block` adopts the published candidate in
+        /// place and retires the displaced plan; once `render_contiguous` has run a block it
+        /// adopts nothing. Test value: red if a render call stops closing the window (the call
+        /// would then swap a running plan off the render thread), or if the in-place adoption
+        /// does not retire the plan it displaces.
+        #[test]
+        fn adopt_before_first_block_adopts_only_before_a_render_call() {
+            let (mut publisher, mut owner, mut retirer) =
+                plan_exchange(prepared(1), one_retirement()).expect("exchange");
+            reserve(&mut publisher, prepared(2), PlanAdoption::Next);
+            assert_eq!(owner.adopt_before_first_block(), SwapOutcome::Applied);
+            assert_eq!(owner.active_epoch(), PlanEpoch(1));
+            assert_eq!(owner.active_plan_id(), 2);
+            let (retired, plan) = retirer.try_reclaim().expect("the displaced plan retires");
+            assert_eq!((retired, plan.program().plan_id()), (PlanEpoch(0), 1));
+            drop(plan);
+
+            let mut output = [1.0_f32; 2];
+            let io = RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+            };
+            let report = owner.render_contiguous(io, 0).expect("render");
+            assert_eq!((report.swap, report.render.plan_id), (SwapOutcome::None, 2));
+            reserve(&mut publisher, prepared(3), PlanAdoption::Next);
+            assert_eq!(owner.adopt_before_first_block(), SwapOutcome::None);
+            assert_eq!(
+                (owner.active_epoch(), owner.active_plan_id()),
+                (PlanEpoch(1), 2)
+            );
+            assert!(retirer.try_reclaim().is_err(), "nothing retired");
+            assert!(matches!(publisher.withdraw(), Withdrawal::Withdrawn(_)));
+        }
+
         /// Gate 1 on the production path: `render_contiguous`, which the C ABI drives, schedules
         /// by the running plan's clock. A candidate due at 7 (between block starts) renders the
         /// predecessor at 0, 2, 4 and 6 and adopts at 8.
