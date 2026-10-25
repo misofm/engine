@@ -70,17 +70,21 @@ fn options() -> WebBootOptions {
     }
 }
 
-/// #1588 D5's meter table: the output's peak and the track's peak. Both hosts refuse a
-/// gain-reduction entry `meter.gain_reduction.unavailable` until #1587b, which adds the track's.
+/// #1588 D5's meter table: the output's peak and the track's peak and gain reduction (#1587b).
 fn meter_table() -> Vec<protocol::MeterEntry> {
+    let strip = || protocol::MeterTarget::Strip(TRACK_ID.into());
     vec![
         protocol::MeterEntry {
             target: protocol::MeterTarget::Output,
             metric: protocol::MeterMetric::Peak,
         },
         protocol::MeterEntry {
-            target: protocol::MeterTarget::Strip(TRACK_ID.into()),
+            target: strip(),
             metric: protocol::MeterMetric::Peak,
+        },
+        protocol::MeterEntry {
+            target: strip(),
+            metric: protocol::MeterMetric::GainReduction,
         },
     ]
 }

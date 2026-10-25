@@ -202,3 +202,7 @@ and #1534 gate 3's worklet commands.
   edits applied in a scratch tree the gate and `check-sdk-headless.sh` (640 pass) are green.
   Each admitted site is an engine SPSC `slots[cursor]` bounds check, bounded by
   `wrap_increment(cursor, slots_len)`; the script comments name each one.
+- **D5 restored after #1587b.** With #1587b on main both hosts serve a gain-reduction entry, so
+  step 5's table is D5's own: `[{output, peak}, {strip track, peak}, {strip track, gain
+  reduction}]`. Step 8 adds a structural rebuild between its first two batches (verifier
+  MINOR-1); #1596a's step 16 continues from step 8's last block.
