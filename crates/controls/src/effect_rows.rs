@@ -24,13 +24,13 @@ use session::{
 };
 
 use crate::descriptor::{
-    AutomationRule, BASE, Choice, ControlDescriptor, ControlScope, DomainRule, Lanes, Motion,
-    ruled_live_not_built,
+    AutomationExclusion, AutomationRule, BASE, Choice, ControlDescriptor, ControlScope, DomainRule,
+    Lanes, Motion, ruled_live_not_built,
 };
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
 use crate::registry::{ControlRow, Resolved, push_control};
-use crate::{ControlClass, ControlKind, Family, RebuildReason, Taper};
+use crate::{ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper};
 use session::{ControlAddress, Lane, Owner, Section};
 
 /// The control ID of an effect's bypass.
@@ -41,10 +41,32 @@ pub const BYPASS_CONTROL: u32 = 0;
 pub const LINK_MODE_CONTROL: u32 = 0x8000_0000;
 
 /// The multiband compressor's link mode is live once #1367 lands (decision 15 E2).
-///
-/// A console entry's link mode of any other effect is live once #1371 lands; until then it is
-/// rebuild-only like an insert's (decision 17: a value not live yet).
 const MULTIBAND_LINK_ISSUE: u32 = 1367;
+
+/// The native effects whose link mode is a live update (decision 15 E2, #1371): each holds its
+/// mode per lane (`lane_link`) and glides a lane's detector to another mode
+/// (`retarget_link`, #1370 and #1969), so its insert's and its console entry's link rows are
+/// `Live` and ramp over the session's `fader_ms` or the edit's own length
+/// ([`LiveRampRow::LinkGlide`]). The list is the row's class, never a runtime answer: an effect
+/// that is not on it keeps a rebuild-only link row, and one on it whose processor refused the
+/// glide would be an acknowledged edit render never hears (decision 15 E4), which the controls
+/// test of this list refuses. The multiband compressor is not on it until #1367 makes its link
+/// per lane.
+pub const LIVE_LINK_EFFECTS: [&str; 6] = [
+    "miso.compressor",
+    "miso.gate-expander",
+    "miso.transient-shaper",
+    "miso.true-peak-limiter",
+    "miso.de-esser",
+    "miso.dynamic-eq",
+];
+
+/// Why a live link row is kept out of automation: it chooses a detector law, as a strip's
+/// `matrix_mode` chooses a shape.
+const LINK_AUTOMATION: AutomationExclusion = AutomationExclusion {
+    reason: "a mode, not a performance value",
+    reopen: "an owner request",
+};
 
 const MULTIBAND_ID: &str = "miso.multiband-compressor";
 
@@ -286,21 +308,34 @@ pub(crate) fn bypass_descriptor() -> ControlDescriptor {
 pub(crate) fn link_mode_descriptor(
     effect_id: &str,
     choices: &'static [Choice],
-    row: LinkRow,
 ) -> ControlDescriptor {
-    let class = match row {
-        _ if effect_id == MULTIBAND_ID => ruled_live_not_built(
-            MULTIBAND_LINK_ISSUE,
-            "decision 15 E2, #1367 makes the link mode live",
-        ),
-        LinkRow::Insert => ControlClass::RebuildOnly {
-            reason: RebuildReason::Optimisation,
-            reopen: "decision 15 E2, #1368-#1371",
-        },
-        LinkRow::Console => ControlClass::RebuildOnly {
-            reason: RebuildReason::Optimisation,
-            reopen: "#1371",
-        },
+    // An insert's row and a console entry's have one class: a console slot's declared mode is a
+    // slot declaration with no row, and stays a structural edit (decision 17 C5).
+    let (class, motion, automation) = if LIVE_LINK_EFFECTS.contains(&effect_id) {
+        (
+            ControlClass::Live,
+            Motion::Ramp(LiveRampRow::LinkGlide),
+            AutomationRule::Excluded(&LINK_AUTOMATION),
+        )
+    } else if effect_id == MULTIBAND_ID {
+        (
+            ruled_live_not_built(
+                MULTIBAND_LINK_ISSUE,
+                "decision 15 E2, #1367 makes the link mode live",
+            ),
+            Motion::Fixed,
+            AutomationRule::Computed,
+        )
+    } else {
+        // No launch effect other than these offers a choice of modes; one that does is rebuilt.
+        (
+            ControlClass::RebuildOnly {
+                reason: RebuildReason::Optimisation,
+                reopen: "decision 15 E2, a lane_link glide (#1370)",
+            },
+            Motion::Fixed,
+            AutomationRule::Computed,
+        )
     };
     let first = choices.first().map_or(1.0, |choice| choice.value);
     ControlDescriptor {
@@ -313,9 +348,10 @@ pub(crate) fn link_mode_descriptor(
         taper: Taper::Stepped,
         lattice: ParameterLattice::indices(),
         choices,
-        motion: Motion::Fixed,
+        motion,
         class,
         family: Family::Effect,
+        automation,
         ..BASE
     }
 }
@@ -432,7 +468,7 @@ pub(crate) fn push_rows(
             &owner,
             section,
             LINK_MODE_CONTROL,
-            &link_mode_descriptor(effect_id, choices, link.row()),
+            &link_mode_descriptor(effect_id, choices),
             |_| link.code(),
         );
     }
@@ -448,9 +484,7 @@ pub(crate) fn resolve(instance: &Instance<'_>, control: u32) -> Option<Resolved>
         LINK_MODE_CONTROL => {
             let link = instance.link_mode;
             let choices = link_choices(descriptor, link.row())?;
-            Resolved::stored(link_mode_descriptor(effect_id, choices, link.row()), |_| {
-                link.code()
-            })
+            Resolved::stored(link_mode_descriptor(effect_id, choices), |_| link.code())
         }
         control => {
             let parameter = descriptor

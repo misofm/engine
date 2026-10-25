@@ -3326,6 +3326,136 @@ fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
     );
 }
 
+/// `with_effects` with a compressor console slot `glue` declared at `maximum` ahead of the EQ
+/// slot: the first track's entry runs the slot's mode, the second overrides it with `average`.
+fn with_linked_console() -> SessionModel {
+    let mut model = with_effects();
+    model.console.pre_insert.insert(
+        0,
+        ConsoleSlot {
+            slot: id("glue"),
+            identity: EffectIdentity::Native {
+                effect_id: id("miso.compressor"),
+            },
+            quality: model.console.post_insert[0].quality,
+            link_mode: session::LinkMode::Maximum,
+        },
+    );
+    for (track, link_mode) in model.tracks.iter_mut().zip([
+        session::ConsoleLinkMode::Slot,
+        session::ConsoleLinkMode::Average,
+    ]) {
+        track.console.insert(
+            0,
+            ConsoleEntry {
+                slot: id("glue"),
+                bypass: false,
+                link_mode,
+                params: Vec::new(),
+            },
+        );
+    }
+    normalized(&model)
+}
+
+/// #1371 gate 1. Red if a link change of a live-link effect is not one link record on its own
+/// instance with D3's glide (the edit's length, an explicit 0, else `LiveRamps::link_samples`), if
+/// a console entry on `slot` is resolved against anything but the slot's declared mode (so a move
+/// to the declared mode writes a glide, or an override's write is lost), or if a slot's declared
+/// mode, a structural edit (decision 17 C5), or the multiband compressor's link (#1367) is acked
+/// live.
+#[test]
+fn a_link_change_is_one_glide_record_with_the_edits_ramp() {
+    let current = with_linked_console();
+    let first = current.tracks[0].id.clone();
+    let ramps = LiveRamps {
+        link_samples: 480,
+        ..STEP
+    };
+    let glide = |mode, ramp_samples| {
+        EffectControlRecord::Link(effect_contract::LinkSwitch { mode, ramp_samples })
+    };
+    let link_ramp = |samples| {
+        let mut edit = EditRamps::new();
+        edit.set(
+            &EditRampTarget::Strip(first.clone()),
+            EditRampRow::Link,
+            samples,
+        );
+        edit
+    };
+    let records = |edit: fn(&mut SessionModel), edit_ramps: &EditRamps| {
+        let next = edited(&current, edit);
+        classify_live_delta(&current, &next, ramps, edit_ramps).map(|delta| {
+            delta
+                .effects
+                .iter()
+                .map(|entry| (entry.address, entry.records.clone()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let insert_to_maximum: fn(&mut SessionModel) = |next| {
+        next.tracks[0].inserts.effects[0].link_mode = session::LinkMode::Maximum;
+    };
+    for (edit_ramps, ramp) in [
+        (EditRamps::new(), 480),
+        (link_ramp(Some(37)), 37),
+        (link_ramp(Some(0)), 0),
+    ] {
+        assert_eq!(
+            records(insert_to_maximum, &edit_ramps),
+            Ok(vec![(
+                LiveEffectAddress::insert(0),
+                vec![glide(effect_contract::LinkMode::Maximum, ramp)]
+            )]),
+            "ramp {ramp}"
+        );
+    }
+    // The first track's entry overrides its slot's `maximum` with `average`: one glide on the
+    // console instance, which also sits at console address 0.
+    assert_eq!(
+        records(
+            |next| next.tracks[0].console[0].link_mode = session::ConsoleLinkMode::Average,
+            &EditRamps::new()
+        ),
+        Ok(vec![(
+            LiveEffectAddress::console(0),
+            vec![glide(effect_contract::LinkMode::Average, 480)]
+        )])
+    );
+    // An override equal to the slot's mode resolves to what runs: live, no record.
+    assert_eq!(
+        records(
+            |next| next.tracks[0].console[0].link_mode = session::ConsoleLinkMode::Maximum,
+            &EditRamps::new()
+        ),
+        Ok(Vec::new())
+    );
+    // A slot's declared mode is a slot declaration: structural, whichever entries follow it.
+    assert_eq!(
+        records(
+            |next| next.console.pre_insert[0].link_mode = session::LinkMode::Average,
+            &EditRamps::new()
+        ),
+        Err(LiveRebuild::Structure)
+    );
+    // The multiband compressor's link is not per lane yet (#1367): its row says so.
+    let mut multiband = current.clone();
+    multiband.tracks[0].inserts.effects[1].identity = EffectIdentity::Native {
+        effect_id: id("miso.multiband-compressor"),
+    };
+    let multiband = normalized(&multiband);
+    let next = edited(&multiband, |next| {
+        next.tracks[0].inserts.effects[1].link_mode = session::LinkMode::Maximum;
+    });
+    assert_eq!(
+        classify_live_delta(&multiband, &next, ramps, &EditRamps::new()).map(|_| ()),
+        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
+            issue: 1367
+        }))
+    );
+}
+
 /// #1554 D5 on the bypass. Red if a submix strip's effects are left structural: a submix effect's
 /// bypass is a record addressed to the submix's ID, like a track's.
 #[test]

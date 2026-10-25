@@ -653,6 +653,20 @@ impl RampRecorder<'_> {
 /// so the table of which control ramps lives in the control core and nowhere else.
 fn control_ramp_row(address: &controls::ControlAddress) -> Option<(EditRampTarget, EditRampRow)> {
     use controls::{LiveRampRow, Motion, Owner};
+    // An effect instance's link-mode row (#1371 D3): its rows come from the effect's descriptor,
+    // not a kind table, so `row_motion` does not list it. `controls::check` refused an explicit
+    // length on a link row that does not ramp, so a length here is one a live link row honours.
+    // Every link row of a strip shares its strip's one `Link` key.
+    if matches!(
+        address.section.kind(),
+        controls::SectionKind::Console | controls::SectionKind::Inserts
+    ) && address.control == controls::LINK_MODE_CONTROL
+    {
+        return match &address.owner {
+            Owner::Strip(id) => Some((EditRampTarget::Strip(id.clone()), EditRampRow::Link)),
+            _ => None,
+        };
+    }
     let Motion::Ramp(ramp_row) = controls::row_motion(
         address.owner.kind(),
         address.section.kind(),
@@ -672,8 +686,8 @@ fn control_ramp_row(address: &controls::ControlAddress) -> Option<(EditRampTarge
         LiveRampRow::SendMatrix => EditRampRow::RouteMatrix,
         LiveRampRow::VcaOffset => EditRampRow::VcaFader,
         LiveRampRow::VcaMute => EditRampRow::VcaMute,
-        // Solo is a monitor row (refused by `set`), the link glide has no control row with a
-        // per-edit length, and the bypass crossfade is fixed.
+        // Solo is a monitor row (refused by `set`), the link glide's rows are an effect
+        // instance's (above), and the bypass crossfade is fixed.
         LiveRampRow::Solo | LiveRampRow::LinkGlide | LiveRampRow::BypassCrossfade => return None,
     };
     let target = match &address.owner {

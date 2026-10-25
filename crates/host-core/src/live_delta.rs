@@ -1707,6 +1707,7 @@ fn effect_records<'a>(
         effect_after,
         ctx.next.structure().sample_rate_hz,
         ctx.ramps,
+        ctx.edit.link,
     )?
     .map(|instance| LiveEffectRecords {
         strip_id: target.after.id.as_str(),
@@ -1723,19 +1724,29 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
-    /// The lowering of the fixture's insert `eq` between the fixture and `edit` applied to it.
-    fn insert_records(edit: impl FnOnce(&mut Effect)) -> Result<Option<usize>, LiveRebuild> {
-        let current = parse_session_json(FIXTURE).expect("fixture parses");
-        let mut next = current.clone();
+    /// The lowering of the fixture's insert `eq`, running `effect`, between the fixture and `edit`
+    /// applied to it.
+    fn insert_records(
+        effect: &str,
+        edit: impl FnOnce(&mut Effect),
+    ) -> Result<Option<Vec<EffectControlRecord>>, LiveRebuild> {
+        let mut current = parse_session_json(FIXTURE).expect("fixture parses");
         let eq = StableId::parse("eq").expect("stable id");
-        edit(
-            next.tracks[0]
+        fn insert<'m>(model: &'m mut SessionModel, eq: &StableId) -> &'m mut Effect {
+            model.tracks[0]
                 .inserts
                 .effects
                 .iter_mut()
-                .find(|effect| effect.id == eq)
-                .expect("the fixture's insert"),
-        );
+                .find(|effect| effect.id == *eq)
+                .expect("the fixture's insert")
+        }
+        let identity = insert(&mut current, &eq);
+        identity.identity = EffectIdentity::Native {
+            effect_id: StableId::parse(effect).expect("an effect ID"),
+        };
+        identity.params.clear();
+        let mut next = current.clone();
+        edit(insert(&mut next, &eq));
         let (current, next) = (&current, &next);
         let ctx = Context {
             current,
@@ -1750,22 +1761,38 @@ mod tests {
             index: 0,
             instance: None,
         };
-        effect_records(&ctx, &target, &Section::Inserts(eq))
-            .map(|records| records.map(|records| records.records.len()))
+        effect_records(&ctx, &target, &Section::Inserts(eq.clone()))
+            .map(|records| records.map(|records| records.records))
     }
 
-    /// Batch 2 review fold item 2. Red if a changed effect row that is neither the bypass nor a
-    /// parameter (the link mode) lowers to no record: a live classification of it would be acked
-    /// and dropped, and the next row made live would repeat the bug. A bypass flip stays one
-    /// record, so the guard is not a blanket refusal.
+    /// Batch 2 review fold item 2, as #1371 makes the link mode live. Red if a changed link mode of
+    /// an effect on `controls::LIVE_LINK_EFFECTS` lowers to anything but one link record (no record
+    /// is an ack render never hears), or if the link mode of any other effect lowers at all: it has
+    /// no glide, so a live classification of it would be acked and dropped. A bypass flip stays
+    /// one record, so the guard is not a blanket refusal.
     #[test]
-    fn a_changed_effect_row_without_a_record_is_a_rebuild() {
+    fn a_changed_link_mode_is_one_record_only_where_the_effect_glides() {
+        let fader = LiveRamps::for_session(&parse_session_json(FIXTURE).expect("fixture parses"))
+            .link_samples;
+        assert_eq!(
+            insert_records("miso.compressor", |effect| effect.link_mode =
+                LinkMode::Maximum),
+            Ok(Some(vec![EffectControlRecord::Link(
+                effect_contract::LinkSwitch {
+                    mode: effect_contract::LinkMode::Maximum,
+                    ramp_samples: fader,
+                }
+            )]))
+        );
         assert!(matches!(
-            insert_records(|effect| effect.link_mode = LinkMode::Maximum),
+            insert_records("miso.parametric-eq", |effect| effect.link_mode =
+                LinkMode::Maximum),
             Err(LiveRebuild::Structure)
         ));
         assert_eq!(
-            insert_records(|effect| effect.bypass = !effect.bypass),
+            insert_records("miso.parametric-eq", |effect| effect.bypass =
+                !effect.bypass)
+            .map(|records| records.map(|records| records.len())),
             Ok(Some(1))
         );
     }
