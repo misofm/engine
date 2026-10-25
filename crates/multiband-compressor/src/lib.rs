@@ -68,6 +68,8 @@ use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
 #[cfg(test)]
+mod glide_tests;
+#[cfg(test)]
 mod padding_tests;
 #[cfg(test)]
 mod rest_tests;

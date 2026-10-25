@@ -126,6 +126,8 @@ pub(crate) fn glide_levels<L: Lane>(
     far: &GlideWeights<L>,
 ) -> (L, L) {
     let (prepared_left, prepared_right) = link_levels::<L, LINK_MIXED>(left, right, lanes);
+    #[cfg(test)]
+    let raw = (left, right);
     let (left, right) = (left.abs(), right.abs());
     let maximum = left.max(right);
     let half = L::splat(0.5);
@@ -134,10 +136,13 @@ pub(crate) fn glide_levels<L: Lane>(
         let combined = maximum.add(weights.current[1].mul(average.sub(maximum)));
         own.add(weights.current[0].mul(combined.sub(own)))
     };
-    (
+    let levels = (
         L::select(near.gliding, blend(left, near), prepared_left),
         L::select(far.gliding, blend(right, far), prepared_right),
-    )
+    );
+    #[cfg(test)]
+    crate::glide_tests::record(raw, levels);
+    levels
 }
 
 /// One sample of a log-domain branching smoother.
