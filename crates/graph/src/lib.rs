@@ -4681,7 +4681,8 @@ pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
 /// `[+0.0; 4]`, muted, and fires over `ramp_samples`, a six-word route to its prepared target and
 /// a following route (#2011) to each column's target composed with the curve it hears at the
 /// fire; a record (or a curve event) it reads before the fire retargets the fire only. A route
-/// the session mutes arms nothing.
+/// the session mutes arms too and gets an entry (#2069): its fire goes to its prepared mute and
+/// ramps nowhere unless a record before the fire unmutes it.
 ///
 /// Refused, arming nothing, when the plan is not a graph plan, a fader location is not a
 /// populated lane of a fader bank, a route unit is not a live route's, or a target repeats.

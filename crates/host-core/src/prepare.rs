@@ -4181,7 +4181,20 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .chain(base.inventory.fade_arms.iter().filter(in_flight))
                 .map(|row| (&*row.id, row.entry))
                 .collect();
-            added_route_fades(base.committed, model, &added, &waiting, &waiting_routes)
+            // #2069: a muted route's mute is live when the route binds a lane: a six-word one,
+            // or a following one.
+            let live_mute = |route: &session::Route| {
+                (six_word && controls::route_rows_live(route))
+                    || follow_cells.iter().any(|(id, _)| *id == route.id.as_str())
+            };
+            added_route_fades(
+                base.committed,
+                model,
+                &added,
+                &waiting,
+                &waiting_routes,
+                live_mute,
+            )
         }
         _ => Vec::new(),
     };
@@ -5033,7 +5046,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 let has_op = live_routes
                     .binary_search_by(|row| (*row.route_id).cmp(route.id.as_str()))
                     .is_ok();
-                if route.mute || into_added || !has_op {
+                // #2069: a route the session mutes arms too; its op holds a lane (a muted route
+                // is never a transition route outside `route_fades`), so its mute is live.
+                if into_added || !has_op {
                     continue;
                 }
                 fades.push(RouteFade {
@@ -7788,21 +7803,26 @@ struct RouteFade<'a> {
 /// of an added strip whose tap precedes the fader. A route from a
 /// strip whose fader is armed (`added`, or `waiting`: a strip with an unfired predecessor entry)
 /// and whose tap follows the fader takes none (the fader's fade shapes it), and neither does a
-/// route whose destination strip is added (its fader's fade does) or a route the session mutes
-/// (it arms nothing). A route that follows an automated source mute ([`follows_automated_mute`])
-/// arms as any other (#2011): its fire composes with the curve it hears. A tap before an armed
-/// fader waits for that strip's fade.
+/// route whose destination strip is added (its fader's fade does). A route the session mutes
+/// arms as any other when its mute is live in this plan (`live_mute`, #2069): its fire goes to
+/// its prepared mute, so an unmute before the fire opens it at the fire, over the fade; one whose
+/// mute is not live (no lane: no value can unmute it before the fire) arms nothing. A route that
+/// follows an automated source mute ([`follows_automated_mute`]) arms as any other (#2011): its
+/// fire composes with the curve it hears. A tap before an armed fader waits for that strip's
+/// fade.
 ///
 /// #1877 D2: a route of `waiting_routes` (one whose predecessor entry has not fired, with that
 /// entry) that `committed` holds with the same source, tap and destination is armed again on the
-/// terms of (a), carrying the entry, whatever its live op's kind in either plan; one this model
-/// re-points or mutes is not (the displaced arm then fires at the swap, #1363 D3a).
+/// terms of (a), carrying the entry, whatever its live op's kind in either plan, a route this
+/// model mutes included (#2069); one this model re-points is not (the displaced arm then fires
+/// at the swap, #1363 D3a).
 fn added_route_fades<'a>(
     committed: &SessionModel,
     model: &'a SessionModel,
     added: &[&str],
     waiting: &[&str],
     waiting_routes: &[(&str, u32)],
+    live_mute: impl Fn(&session::Route) -> bool,
 ) -> Vec<RouteFade<'a>> {
     // #1953a (D15-9): a route `committed` holds under the same ID with another source, tap or
     // destination is a removal plus an addition, so it is not known: it arms as added. #1953b:
@@ -7818,7 +7838,7 @@ fn added_route_fades<'a>(
     let known = same_endpoints;
     let mut fades = Vec::new();
     for route in &model.routes {
-        if route.mute {
+        if route.mute && !live_mute(route) {
             continue;
         }
         let (source, tap) = match &route.source {
