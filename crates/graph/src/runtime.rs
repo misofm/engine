@@ -1028,12 +1028,15 @@ pub(crate) struct LiveRoute {
     /// The route's live lane; `None` for a transition route (#1363 D2): a route a plan swap adds
     /// that has no lane in this plan, bound live only so its fade-in can ramp it.
     control: Option<Box<crate::RouteControlLane>>,
-    /// The fade-in a plan swap armed (#1363 D3), until it fires: the route then waits silent.
+    /// The fade-in a plan swap armed (#1363 D3), until it fires: the route then waits silent. Or
+    /// a fading copy's fade-out (#1953b), until it fires: the copy then plays on at its prepared
+    /// coefficients.
     armed: Option<RouteArm>,
 }
 
-/// An armed route's fade-in (#1363 D3): the target and mute it fires to, and the fade's length.
-/// A record that arrives before the fire replaces the target and mute only.
+/// An armed route's fade (#1363 D3, #1953b): the target and mute it fires to, and the fade's
+/// length. A record that arrives before the fire replaces the target and mute only (a fading copy
+/// has no lane, so none does).
 #[derive(Clone, Copy, Debug)]
 struct RouteArm {
     target: [f32; 4],
@@ -1077,6 +1080,22 @@ impl LiveRoute {
         true
     }
 
+    /// Arm the fade-out of a fading copy (#1953b), off the render thread, before the plan is
+    /// published: the copy plays on at its prepared coefficients until the fire, which ramps it
+    /// from the coefficients it is at to `[+0.0; 4]` over `ramp_samples` and mutes it. A copy
+    /// already muted, or already armed, arms nothing. Returns whether it armed.
+    pub(crate) fn arm_fade_out(&mut self, ramp_samples: u32) -> bool {
+        if self.mute || self.armed.is_some() {
+            return false;
+        }
+        self.armed = Some(RouteArm {
+            target: [0.0; 4],
+            mute: true,
+            ramp_samples,
+        });
+        true
+    }
+
     /// #1347 D3: read the route's cell under the block's snapshot `S` and, if it holds a value not
     /// applied before, retarget once from the coefficients the route is at to that value over its
     /// ramp, exactly as one drained record did before the cells. Returns how many values were
@@ -1112,9 +1131,10 @@ impl LiveRoute {
         applied
     }
 
-    /// Fire the armed fade-in at this block boundary (#1363 D3): from the coefficients the route
-    /// is at (`[+0.0; 4]`) to the armed target over the armed length, exactly the retarget a
-    /// live unmute record runs. The executor calls it before the route's op runs, so the block's
+    /// Fire the armed fade at this block boundary (#1363 D3): from the coefficients the route is
+    /// at (`[+0.0; 4]` for a fade-in) to the armed target over the armed length, exactly the
+    /// retarget a live unmute record runs; a fading copy's fade-out (#1953b) ramps to silence the
+    /// same way, as a live mute record would. The executor calls it before the route's op runs, so the block's
     /// own live value drains after it. A route not armed is left alone. Render-thread code:
     /// allocation-, lock- and syscall-free.
     pub(crate) fn fire_fade_in(&mut self) {
@@ -7596,7 +7616,17 @@ impl crate::runtime::Runtime {
         }
     }
 
-    /// Fire the armed fade-in of the live route in unit `unit`, of either kind (#1363 D3,
+    /// Arm the fade-out of the fading copy in unit `unit` (#1953b, [`LiveRoute::arm_fade_out`]),
+    /// off the render thread. A copy is a transition route, which is never a following one.
+    /// Returns whether it armed.
+    pub(crate) fn arm_route_fade_out(&mut self, unit: u32, ramp_samples: u32) -> bool {
+        match carried_route_mut(&mut self.units, unit) {
+            Some(CarriedRoute::Six(live)) => live.arm_fade_out(ramp_samples),
+            Some(CarriedRoute::Seven(_)) | None => false,
+        }
+    }
+
+    /// Fire the armed fade of the live route in unit `unit`, of either kind (#1363 D3,
     /// [`LiveRoute::fire_fade_in`]; #2011, [`LiveFollowRoute::fire_fade_in`]). Render-thread
     /// code: allocation-, lock- and syscall-free.
     pub(crate) fn fire_route_fade_in(&mut self, unit: u32) {
@@ -18721,6 +18751,8 @@ mod tests {
     /// own lane only, once; a submix arm (no source) fires at the first block.
     ///
     /// Red if the fire ignores `D` (640) or rounds it down (768), or ignores the played block (0).
+    /// #1953b: each entry settles at the first block after its fire plus its ramp: the track's at
+    /// 1024, not at its fire block. Red if an entry settles at its fire, while its ramp still runs.
     #[test]
     fn a_fade_arm_fires_at_the_first_block_after_its_first_played_block_plus_d() {
         let shape = SourceShape {
@@ -18753,12 +18785,14 @@ mod tests {
                     source: Some(input),
                     delay_samples: 200,
                     ramp_samples: 64,
+                    tail_samples: 0,
                 },
                 crate::GraphFadeArm {
                     target: crate::GraphFadeTarget::Fader(fader("track01")),
                     source: None,
                     delay_samples: 0,
                     ramp_samples: 64,
+                    tail_samples: 0,
                 },
             ])
             .expect("installed");
@@ -18773,6 +18807,12 @@ mod tests {
                 block * 128,
             )
             .expect("render");
+            let watch = &installed.1;
+            assert_eq!(
+                (watch.fired(0), watch.settled(0), watch.settled(1)),
+                (block >= 7, block >= 8, block >= 1),
+                "the watch after block {block}"
+            );
         }
         let lane = |track: &str| usize::from(fader(track).lane);
         assert_eq!(
