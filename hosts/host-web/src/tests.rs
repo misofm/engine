@@ -3220,8 +3220,10 @@ fn the_counters_get_reply_counts_each_block_a_source_underran() {
 /// Issue #1699 gates 1-3: `COUNTERS_GET` reports `SOURCE_FRAMES_DISCARDED`, the accepted
 /// frames render never read because the caller's own transaction removed their source. The one
 /// source is fed three blocks and render plays one, so two (256 frames) are unread when the
-/// removal commits; the block after the commit adopts the plan without the source and the service
-/// step after it counts them. Case "empty" plays every fed block first and counts 0. Case
+/// removal commits. Until the plan without the source is adopted at `S`, after the removed
+/// strip's ramp (#1325 D3, D4), the source feeds the ramp one block a block and nothing is
+/// counted; the adoption retires the two unread blocks, and the service step after it counts
+/// them. Case "empty" plays every fed block first, feeds nothing more, and counts 0. Case
 /// "supersede" commits an unrelated rebuild first, which carries the source unchanged and waits
 /// unrendered, then a removal that supersedes it: it counts the same as the direct removal.
 ///
@@ -3338,9 +3340,44 @@ fn the_counters_get_reply_counts_the_frames_a_source_removal_discards() {
         } else {
             commit(&mut host, 2, &removal);
         }
-        assert_eq!(host.render_next(), RESULT_OK, "{case}: the adoption block");
+        let committed = host.committed_revision();
+        let mut next_block = 3_u64;
+        let mut request = 4;
+        loop {
+            assert_eq!(host.render_next(), RESULT_OK);
+            assert_eq!(host.read_watermark(), RESULT_OK);
+            if host.watermark().revision >= committed {
+                break;
+            }
+            assert!(
+                next_block < 8,
+                "{case}: the removal is adopted inside the region"
+            );
+            assert_eq!(
+                served_counter(&mut host, request, CounterId::SourceFramesDiscarded),
+                0,
+                "{case}: nothing is discarded before S"
+            );
+            request += 1;
+            if expected > 0 {
+                assert_eq!(
+                    host.submit_source(
+                        b"fixture-source",
+                        1,
+                        next_block * u64::from(QUANTUM),
+                        48_000,
+                        &planes,
+                        QUANTUM,
+                        next_block + 1 == 8,
+                    ),
+                    RESULT_OK,
+                    "{case}: the removed source feeds the ramp"
+                );
+                next_block += 1;
+            }
+        }
         assert_eq!(
-            served_counter(&mut host, 4, CounterId::SourceFramesDiscarded),
+            served_counter(&mut host, request, CounterId::SourceFramesDiscarded),
             expected,
             "{case}"
         );
@@ -4200,9 +4237,15 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     assert_eq!(pending[0].native_effect_id, "miso.compressor");
     assert_eq!(pending[0].descriptor.display_unit, "dB");
 
-    for block in 0..2 {
-        feed_and_render_tracks(&mut host, block, 0.0);
-    }
+    // #1585 D4: render has applied the arm (its slot publishes the issued tag) and no window has
+    // closed yet.
+    feed_and_render_tracks(&mut host, 0, 0.0);
+    let applied = host
+        .read_observations(&[selection])
+        .expect("applied selected read");
+    assert_eq!(applied[0].status, ObservationReadStatus::Pending);
+    assert_eq!(applied[0].window, None);
+    feed_and_render_tracks(&mut host, 1, 0.0);
     let expected = {
         let ready = host.ready.as_ref().expect("ready ownership");
         let (effect, tap) = resolve_observation(ready, &selection).expect("resolved selection");
@@ -4289,6 +4332,15 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     assert_eq!(right[0].window, Some(expected_rearmed));
     assert_eq!(right[0].left, None);
     assert_eq!(right[0].right, Some(expected_rearmed.right));
+
+    // #1585: a disarm is in effect when it is accepted, before a block drains it; no later window
+    // belongs to the subscription it ends.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), RESULT_OK);
+    let disarmed = host
+        .read_observations(&[selection])
+        .expect("disarmed selected read");
+    assert_eq!(disarmed[0].status, ObservationReadStatus::Unarmed);
+    assert_eq!(disarmed[0].window, None);
 
     let invalid = [
         selection,
@@ -4514,11 +4566,11 @@ fn observe_key(
     host.submit_commands(1)
 }
 
-/// The armed-tap mask of the insert `insert_id` of strip `strip_id` on the plan that renders, or
-/// `None` when the plan has no such insert. Test support only: every caller is in a `test-support`
-/// module.
+/// The armed-tap mask of the insert `insert_id` of strip `strip_id` on the plan that renders, as
+/// its taps' slots report it (#1585 D6), or `None` when the plan has no such insert. Test support
+/// only: every caller is in a `test-support` module.
 #[cfg(feature = "test-support")]
-fn armed_mask(host: &AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
+fn armed_mask(host: &mut AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
     let ready = host.ready.as_ref().expect("ready");
     let strip = strip_index(
         &ready.shape.tracks,
@@ -4526,7 +4578,20 @@ fn armed_mask(host: &AudioWorkletEngineHost, strip_id: &str, insert_id: &str) ->
         strip_id.as_bytes(),
     )?;
     let effect = ready.effect_by_id(strip, LiveEffectRack::Inserts, insert_id.as_bytes())?;
-    ready.shape.observation_armed.get(effect).copied()
+    let reader = ready.shape.effect_instances.get(effect)?.as_ref()?.reader?;
+    let companions = host
+        .plan
+        .as_mut()?
+        .active_attachment_mut::<RenderCompanions>()?;
+    let handle = companions.effect_observations.get(reader as usize)?;
+    Some(
+        handle
+            .readers
+            .iter()
+            .enumerate()
+            .filter(|(_, reader)| reader.read_state().is_some_and(|state| state.armed))
+            .fold(0, |mask, (tap, _)| mask | (1_u32 << tap)),
+    )
 }
 
 /// The frame's gain-reduction section: one non-negative magnitude per track, then the master's.
@@ -7190,7 +7255,21 @@ mod structural_apply {
                 .status,
             SpectrumStreamStatus::Ready
         );
+        // The removed strip ramps out, then render adopts the successor at `S` (#1325 D3); until
+        // then a service step keeps the running plan's service.
         rig.step();
+        while rig.epoch() == 0 {
+            assert_eq!(rig.host.service(None), RESULT_OK);
+            assert_eq!(
+                rig.host
+                    .spectrum_stream_metadata()
+                    .expect("the running plan's service reads until adoption")
+                    .status,
+                SpectrumStreamStatus::Ready
+            );
+            assert!(rig.block < 64, "render adopts the successor");
+            rig.step();
+        }
         assert_eq!(rig.epoch(), 1, "render adopted the successor");
         assert_eq!(rig.host.service(None), RESULT_OK);
         assert_eq!(rig.spectrum_promotions_waiting(), 0);
@@ -7479,8 +7558,8 @@ mod structural_apply {
         );
         assert_eq!(
             (
-                armed_mask(&rig.host, "track", "comp"),
-                armed_mask(&rig.host, "a-track", "comp")
+                armed_mask(&mut rig.host, "track", "comp"),
+                armed_mask(&mut rig.host, "a-track", "comp")
             ),
             (Some(1), Some(0)),
             "the record armed the compressor it named, not the one that took its old index"
@@ -7693,10 +7772,13 @@ mod structural_apply {
                 }
             ));
             if swap {
-                for _ in 0..4 {
+                // The removed strip ramps out, then the removal is adopted at `S` (#1325 D3).
+                let mut blocks = 0;
+                while rig.pending() {
                     rig.step();
+                    blocks += 1;
+                    assert!(blocks <= 64, "swap {swap}: the removal was adopted");
                 }
-                assert!(!rig.pending(), "swap {swap}: the removal was adopted");
             } else {
                 assert!(
                     rig.pending(),
@@ -7957,12 +8039,10 @@ mod structural_apply {
     /// subscription acked against a candidate that a later structural edit supersedes arms the
     /// replacement and publishes windows there. The replacement carries "track"'s compressor from
     /// the plan that renders, which never saw the record, so the core queues the record again on
-    /// the replacement and the host copies it onto the replacement's tables.
+    /// the replacement, whose first block arms the tap in its slot.
     ///
-    /// Test value: red if the record is lost with the superseded candidate, in the engine (the
-    /// carried tap keeps the running plan's unarmed state and no window publishes) or in the
-    /// host's tables (the hand-over copies the running plan's unarmed bit and the read reports
-    /// the tap unarmed).
+    /// Test value: red if the record is lost with the superseded candidate (the carried tap keeps
+    /// the running plan's unarmed state, the read reports it unarmed and no window publishes).
     #[test]
     fn a_subscription_queued_on_a_superseded_candidate_publishes_on_its_replacement() {
         let mut model =
@@ -8013,8 +8093,8 @@ mod structural_apply {
         assert_eq!(rig.epoch(), 2, "the replacement is adopted");
         assert_eq!(
             (
-                armed_mask(&rig.host, "track", "comp"),
-                armed_mask(&rig.host, "a-track", "comp")
+                armed_mask(&mut rig.host, "track", "comp"),
+                armed_mask(&mut rig.host, "a-track", "comp")
             ),
             (Some(1), Some(0)),
             "the replacement's tables hold the subscription"
@@ -8044,13 +8124,12 @@ mod structural_apply {
     /// compressor (its link mode changed), which a later structural edit supersedes by putting the
     /// compressor back as the plan that renders has it. The replacement now carries the
     /// compressor from the plan that renders, whose tap never saw the record, so the core queues
-    /// the record again on the replacement and the host copies it onto the replacement's tables,
-    /// as for a compressor the candidate itself carried.
+    /// the record again on the replacement, as for a compressor the candidate itself carried.
     ///
-    /// Test value: red if the record forwarding or the host's table hand-over serves only a tap
-    /// the candidate carried, and not one the replacement carries from the plan that renders
-    /// across a candidate that restarted it: the carried tap keeps the running plan's unarmed
-    /// state, the tables report it unarmed and no window publishes.
+    /// Test value: red if the record forwarding serves only a tap the candidate carried, and not
+    /// one the replacement carries from the plan that renders across a candidate that restarted
+    /// it: the carried tap keeps the running plan's unarmed state, its slot reads unarmed and no
+    /// window publishes.
     #[test]
     fn a_subscription_on_a_candidate_that_restarted_the_tap_publishes_on_a_replacement_that_reverts_it()
      {
@@ -8093,7 +8172,7 @@ mod structural_apply {
         rig.step();
         assert_eq!(rig.epoch(), 2, "the replacement is adopted");
         assert_eq!(
-            armed_mask(&rig.host, "track", "comp"),
+            armed_mask(&mut rig.host, "track", "comp"),
             Some(1),
             "the replacement's tables hold the subscription"
         );
@@ -8474,16 +8553,24 @@ mod structural_apply {
     /// are matched by position instead of identity (the frame would name other strips' peaks).
     #[test]
     fn a_window_closed_before_a_handle_shift_is_published_by_its_carried_strip() {
-        let model = gate_model();
+        // A zero mute ramp and no compensation line: phase 1 of the removal (#1325 D3) is the one
+        // block `q`, so a transaction before block 5 is adopted at block 6, the swap this row
+        // needs after a closed, unpolled window. The removed strip is muted throughout, so its
+        // ramp would sound nothing.
+        let mut model = gate_model();
+        model.control_smoothing = Some(session::ControlSmoothing {
+            mute_ms: 0.0,
+            ..session::CONTROL_SMOOTHING_DEFAULT
+        });
         let with_added = with_muted_track(&model, ADDED);
         let reference = fresh_windows(&model, 10);
 
         let mut rig = Rig::boot(&with_added, options(), None);
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         // Windows close after the odd blocks; polling after the even blocks leaves each window
-        // queued for one block. The transaction runs before block 6, which adopts the successor
-        // and is polled: the window that closed after block 5 is polled after the swap.
-        let before = poll_cadence(&mut rig, 6, 2, 0);
+        // queued for one block. The transaction runs before block 5, so block 6 adopts the
+        // successor and is polled: the window that closed after block 5 is polled after the swap.
+        let before = poll_cadence(&mut rig, 5, 2, 0);
         let last = before.last().expect("the boot plan published windows");
         assert_eq!(last.0.track_count, 10);
         assert_eq!(last.0.first_sample, 256, "the window of blocks 2 and 3");
@@ -8505,8 +8592,14 @@ mod structural_apply {
                 revision: base + 1
             }
         );
-        let after = poll_cadence(&mut rig, 4, 2, 0);
+        let after = poll_cadence(&mut rig, 5, 2, 0);
         assert_eq!(rig.epoch(), 1);
+        let watermark = rig.watermark();
+        assert_eq!(
+            (watermark.revision, watermark.first_sample),
+            (base + 1, 6 * u64::from(QUANTUM)),
+            "the removal is adopted at block 6, the first polled block after the closed window"
+        );
         assert_eq!(
             after.len(),
             2,
@@ -8581,14 +8674,13 @@ mod structural_apply {
         }
     }
 
-    /// An acknowledged subscription survives a swap (#1381b): the tap's armed bit and arm sample
-    /// move with its effect to the successor's slot, which a strip added in front shifts, and the
-    /// successor's reader is the carried tap's, so its windows continue.
+    /// An acknowledged subscription survives a swap (#1381b): the tap's slot, which holds its arm
+    /// state (#1585 D6), moves with its effect to the successor's effect slot, which a strip added
+    /// in front shifts, and the successor's reader is the carried tap's, so its windows continue.
     ///
-    /// Test value: red if the swap block's hook does not pair the observation readers or the
-    /// table hand-over does not carry the armed bits through the reader-to-slot map (the tap would
-    /// read as unarmed and the page's subscription would silently stop after every swap), or if
-    /// it maps the readers to the wrong slot after the added strip shifts them.
+    /// Test value: red if the swap block's hook does not pair the observation readers (the tap
+    /// would read as unarmed and the page's subscription would silently stop after every swap), or
+    /// if it maps the readers to the wrong effect slot after the added strip shifts them.
     #[test]
     fn an_armed_tap_and_its_windows_follow_the_effect_through_a_swap() {
         let mut model =
@@ -8647,47 +8739,6 @@ mod structural_apply {
             .expect("the carried tap kept publishing")
             .sequence;
         assert!(after > before, "the windows continue ({before} to {after})");
-    }
-
-    /// A tap command admitted against the successor at sample zero is not overwritten by the
-    /// predecessor's state (#1381b): the hand-over tells "commanded" from the arm sample's zero,
-    /// which is also the sample of a command admitted before the first block.
-    ///
-    /// Test value: red if the hand-over reads arm sample zero as "no command" (the predecessor's
-    /// armed bit would come back over a disarm admitted against the successor before any block
-    /// rendered, and the page's unsubscribe would silently be undone by the swap).
-    #[test]
-    fn a_tap_command_admitted_at_sample_zero_survives_the_hand_over() {
-        let mut model =
-            parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
-                .expect("accepted command fixture");
-        model.tracks[0].inserts.effects[0] = observed_compressor_insert();
-        let mut rig = Rig::boot(&model, options(), None);
-        assert_eq!(
-            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
-            RESULT_OK,
-            "the subscription is admitted before the first block, at sample zero"
-        );
-        assert_eq!(rig.host.observation_armed_taps(), 1);
-        assert!(matches!(
-            rig.apply(&add_muted_track(&model, ADDED), 1),
-            Outcome::Applied {
-                path: EditPath::Rebuild,
-                ..
-            }
-        ));
-        assert_eq!(
-            observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 1, 2, false),
-            RESULT_OK,
-            "the disarm is admitted against the successor, still at sample zero"
-        );
-        rig.step();
-        assert_eq!(rig.epoch(), 1);
-        assert_eq!(
-            rig.host.observation_armed_taps(),
-            0,
-            "the successor keeps the disarm it was commanded; the predecessor's arm is not carried"
-        );
     }
 
     fn meter_loss(rig: &Rig) -> u64 {
@@ -8854,13 +8905,13 @@ mod structural_apply {
     }
 
     /// #1584 D6b, restart: a subscribed compressor whose link mode changes is prepared again (a
-    /// rebuild with no carry), and the successor's tables say what its lanes were armed with. The
-    /// tap is armed on the browser's side, the first window opens at the adoption block's first
+    /// rebuild with no carry), and its first block publishes the prepared arm in the tap's slot
+    /// (#1585 R2). The tap reads armed, the first window opens at the adoption block's first
     /// sample, and the windows continue block after block.
     ///
-    /// Test value: red if `build_plan_shape` leaves the successor's armed bits clear for a tap the
-    /// plan's lane armed (the read would answer `Unarmed` and the page's subscription would
-    /// silently stop at every restart of its effect, as `observation_armed_taps` reads zero).
+    /// Test value: red if the successor's first block does not publish the prepared arm (the read
+    /// would answer `Unarmed` and the page's subscription would silently stop at every restart of
+    /// its effect, as `observation_armed_taps` reads zero).
     #[test]
     fn a_restarted_effects_subscription_keeps_publishing_windows_on_the_browser() {
         let model = observed_model();
@@ -8939,106 +8990,6 @@ mod structural_apply {
             gain_reduction(&rig.host).0[0] > 0.0,
             "the meter frame's gain-reduction word follows the restarted tap"
         );
-    }
-
-    /// #1584 D6b via #1679: the successor's `observation_armed` word of every observed effect is
-    /// the `armed_taps` host-core prepared the handle with. The session has one compressor `comp`
-    /// as a console slot and as an insert on each of two tracks (an ID reused for another effect
-    /// in the other rack and on another strip); the host armed the first track's insert and the
-    /// second track's console slot, and a restart rebuilds both.
-    ///
-    /// Test value: red if the browser matches bindings to taps by its own rule again and that rule
-    /// differs from host-core's (an ID match that ignores the rack or the strip would arm the
-    /// console slot of the first track, or the insert of the second, in the page's tables only).
-    #[test]
-    fn the_browsers_armed_bits_are_the_mask_host_core_prepared() {
-        let mut model = observed_model();
-        model.console.pre_insert = vec![session::ConsoleSlot {
-            slot: StableId::parse("comp").expect("slot ID"),
-            identity: session::EffectIdentity::Native {
-                effect_id: StableId::parse("miso.compressor").expect("effect ID"),
-            },
-            quality: session::EffectQuality::Normal,
-            link_mode: session::LinkMode::DualMono,
-        }];
-        model.tracks[0].console = model
-            .console
-            .slots()
-            .map(|slot| session::ConsoleEntry {
-                slot: slot.slot.clone(),
-                bypass: false,
-                params: Vec::new(),
-            })
-            .collect();
-        let (mut second, route) = muted_track(&model, "zz");
-        second.fader.left_mute = false;
-        second.fader.right_mute = false;
-        model.tracks.push(second);
-        model.routes.push(route);
-        let mut rig = Rig::boot(&model, options(), None);
-        rig.step();
-        assert_eq!(
-            observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
-            RESULT_OK
-        );
-        assert_eq!(
-            observe(&mut rig.host, 1, RACK_CONSOLE, 0, 1, 2, true),
-            RESULT_OK
-        );
-        for _ in 0..4 {
-            rig.step();
-        }
-        assert_eq!(rig.host.observation_armed_taps(), 2);
-
-        let mut restarted = model.tracks[0].inserts.effects[0].clone();
-        restarted.link_mode = session::LinkMode::Maximum;
-        let base = rig.host.committed_revision();
-        assert!(matches!(
-            rig.apply(
-                &[SessionEdit::PutTrackEffect {
-                    track_id: model.tracks[0].id.clone(),
-                    rack_name: session::RackName::Inserts,
-                    final_position: 0,
-                    effect: restarted,
-                }],
-                1
-            ),
-            Outcome::Applied {
-                path: EditPath::Rebuild,
-                revision
-            } if revision == base + 1
-        ));
-        rig.step();
-        assert_eq!(rig.epoch(), 1);
-        let slots = rig
-            .host
-            .ready
-            .as_ref()
-            .expect("ready")
-            .shape
-            .observation_armed
-            .len();
-        let (mut observed, mut armed) = (0, 0);
-        for slot in 0..slots {
-            let Some(mask) = rig.host.test_observation_handle(slot).map(|h| h.armed_taps) else {
-                continue;
-            };
-            let word = rig
-                .host
-                .ready
-                .as_ref()
-                .expect("ready")
-                .shape
-                .observation_armed[slot];
-            assert_eq!(word, mask, "slot {slot}: the page copies host-core's mask");
-            observed += 1;
-            armed += mask.count_ones();
-        }
-        assert_eq!(
-            observed, 4,
-            "two inserts and two console slots are observed"
-        );
-        assert_eq!(armed, 2, "only the two acknowledged taps are armed");
     }
 
     /// #1584 D6b, removal: the removed insert has no slot on the successor, the browser's read
@@ -9593,8 +9544,19 @@ mod structural_apply {
             "the rendering plan keeps its master until adoption"
         );
         assert_eq!(rig.listed_masters(3), Vec::<String>::new());
-        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
-        assert!(!rig.pending());
+        // The removed strip ramps out, then the rebuild is adopted at `S` (#1325 D3); every block
+        // before it still renders the plan with the master.
+        let mut blocks = 0;
+        while rig.pending() {
+            assert_eq!(
+                rig.host.meter_header().master_track_plus_one,
+                1,
+                "the rendering plan keeps its master until adoption"
+            );
+            assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
+            blocks += 1;
+            assert!(blocks <= 64, "the rebuild is adopted");
+        }
         assert_eq!(
             rig.host.meter_header().master_track_plus_one,
             0,

@@ -2830,6 +2830,11 @@ impl LiveControlEffect {
     #[inline]
     fn stage(&mut self, snapshot: LiveSnapshot, first_sample: u64) -> effect_contract::Staged {
         let staged = self.control.stage(&mut self.spans, first_sample, snapshot);
+        // #1585 R2: a prepared arm reaches its slot in the plan's first block drain, before the
+        // block's records.
+        if let Some(observation) = self.observation.as_deref_mut() {
+            observation.publish_prepared_arms(first_sample);
+        }
         self.control
             .drain_observations(first_sample, self.observation.as_deref_mut());
         staged
