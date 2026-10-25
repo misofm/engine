@@ -64,9 +64,6 @@ fn options() -> WebBootOptions {
         require_sample_rate_hz: RATE,
         require_quantum_frames: QUANTUM,
         source_ring_frames: QUANTUM * 2,
-        // #1588 D4: the browser's strip meters at the C ABI's default window (12 blocks at 48 kHz
-        // and 128 frames), so the two hosts serve one meter window.
-        live_control_meter_blocks: 12,
         ..WebBootOptions::explicit_defaults()
     }
 }
@@ -579,9 +576,30 @@ impl Legs {
     }
 }
 
+/// The lossy lane size a `CAPABILITIES_GET` reply `reply` reports.
+fn capabilities_telemetry_slots(reply: &[u8]) -> u64 {
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::Capabilities(value),
+        ..
+    } = protocol::ProtocolCodec::default()
+        .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
+        .expect("a capabilities reply")
+    else {
+        panic!("a capabilities reply")
+    };
+    value.telemetry_slots
+}
+
 /// The `CAPABILITIES_GET` reply `reply` with `added` merged into its ascending command list,
-/// and `flags` set, re-encoded by the codec so every length field matches. The browser's list must not hold an added ID already.
-fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
+/// `flags` set and, when `telemetry_slots` is `Some`, that lossy lane size, re-encoded by the codec
+/// so every length field matches. The browser's list must not hold an added ID already.
+fn capabilities_plus(
+    reply: &[u8],
+    added: &[u16],
+    flags: u64,
+    telemetry_slots: Option<u64>,
+) -> Vec<u8> {
     let codec = protocol::ProtocolCodec::default();
     let mut fields = [0_u16; 64];
     let protocol::DecodedTypedResponseFrame::Success {
@@ -617,7 +635,7 @@ fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
         control_command_bytes: value.control_command_bytes,
         reliable_response_slots: value.reliable_response_slots,
         reliable_event_slots: value.reliable_event_slots,
-        telemetry_slots: value.telemetry_slots,
+        telemetry_slots: telemetry_slots.unwrap_or(value.telemetry_slots),
         replay_entries: value.replay_entries,
         replay_bytes: value.replay_bytes,
         maximum_cached_response_bytes: value.maximum_cached_response_bytes,
@@ -656,7 +674,9 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     // entry of the command list (#1386, root decision), and every other step stays byte-equal.
     // #1596 removes the second: until the browser reads spectrum through the frames, the C ABI
     // also lists the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1595 R2).
-    // Both hosts serve meter batches (#1588), so both lossy meter lanes hold one whole batch.
+    // #1588 removes the third: until the browser serves meter batches through the frames, the C
+    // ABI's lossy meter lane holds one whole batch, 256 slots, and the browser's keeps two
+    // (#1587a, root ruling m2).
     let request = legs.next();
     let bytes = frame(
         request,
@@ -667,18 +687,27 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let (c_result, c_reply) = legs.c.send(&bytes);
     assert_eq!(browser_result, c_result, "1 capabilities: the result codes");
     assert_eq!(
-        capabilities_plus(&browser_reply, &[], 0),
+        capabilities_plus(&browser_reply, &[], 0, None),
         browser_reply,
         "1 capabilities: the browser's reply re-encodes to itself"
+    );
+    // #1588 removes this assertion when it sizes the browser's lane: until then the browser keeps
+    // its two-slot lossy lane, and only the C ABI's grows to one whole meter batch (#1587a).
+    assert_eq!(
+        capabilities_telemetry_slots(&browser_reply),
+        2,
+        "1 capabilities: the browser's lossy lane keeps two slots"
     );
     assert_eq!(
         capabilities_plus(
             &browser_reply,
             &[0x0010, 0x0011, 0x0012, 0x0013],
-            protocol::CapabilityFlags::SPECTRUM.0
+            protocol::CapabilityFlags::SPECTRUM.0,
+            Some(host_core::MAXIMUM_METER_BATCH_RECORDS as u64)
         ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0010-0x0013 and bit 16"
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0010-0x0013, bit 16 and \
+         its 256-slot meter lane"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
@@ -727,7 +756,8 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     legs.drain("after 4");
 
     // 5. TELEMETRY_CONFIGURE: no meter, LIVE_VALUES_SUPERSEDED at period 1, diagnostics on at
-    // Info. #1583 D4: both echoes carry the meter window (field 8), and the two are equal.
+    // Info. #1583 D4: the C ABI's echo carries its meter window (field 8) and the browser's none,
+    // until #1588 gives the browser a meter delivery; every other field and the header agree.
     let request = legs.next();
     let configure = frame(
         request,
@@ -762,13 +792,20 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let (browser_header, browser_value) = echo(&browser_echo);
     let (c_header, c_value) = echo(&c_echo);
     assert_eq!(browser_header, c_header, "5 telemetry: the reply headers");
+    assert_eq!(browser_value.meter_window_blocks, None);
     assert_eq!(
         c_value.meter_window_blocks,
         core::num::NonZeroU32::new(12),
         "the C ABI's window at 48 kHz and 128 frames"
     );
-    // #1588 D4: both hosts serve the meter batches, so both echo the meter window.
-    assert_eq!(browser_value, c_value, "5 telemetry: every field");
+    assert_eq!(
+        TelemetryConfiguration {
+            meter_window_blocks: None,
+            ..c_value
+        },
+        browser_value,
+        "5 telemetry: every other field"
+    );
     legs.drain("after 5");
 
     // 6. CONTROL_LIST_GET, first page.
@@ -1050,4 +1087,50 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
             c.drain();
         },
     );
+}
+
+/// #1588a: until the render half pushes its frames to the control half (#1588b), the browser
+/// refuses a meter table `meter.unavailable`, even booted with a meter window, rather than
+/// acknowledge a table it would never serve.
+///
+/// Test value: red if the browser's meter delivery is turned on before its render push exists,
+/// so a configure is acknowledged and no `METER_BATCH` ever follows.
+#[test]
+fn the_browser_refuses_a_meter_table_until_its_render_push_exists() {
+    let mut browser = Browser {
+        host: AudioWorkletEngineHost::boot(
+            document(8_192).as_bytes(),
+            WebBootOptions {
+                live_control_meter_blocks: 12,
+                ..options()
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic()))),
+    };
+    let configure = frame(
+        1,
+        ExpectedRevision::Exact(SessionRevision(browser.host.committed_revision())),
+        CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+            meters: vec![protocol::MeterEntry {
+                target: protocol::MeterTarget::Output,
+                metric: protocol::MeterMetric::Peak,
+            }],
+            meter_period_blocks: 12,
+            meter_window_blocks: None,
+            counter_ids: Vec::new(),
+            counter_period_blocks: 0,
+            diagnostics_enabled: false,
+            minimum_diagnostic_severity: DiagnosticSeverity::Info,
+        }),
+    );
+    let (result, reply) = browser.send(&configure);
+    assert_eq!(result, RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let decoded = ProtocolCodec::default()
+        .decode_typed_response(&reply, &mut protocol::DecodeScratch::new(&mut fields))
+        .expect("a reply");
+    let protocol::DecodedTypedResponseFrame::NonOk { payload, .. } = decoded else {
+        panic!("the browser accepted a meter table")
+    };
+    assert_eq!(payload.diagnostics[0].code, "meter.unavailable");
 }

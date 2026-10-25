@@ -4920,8 +4920,10 @@ pub struct WebAdapter;
 impl ControlAdapter for WebAdapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
-    // #1588 R1: the browser serves the meter batches from its render half's fold.
-    const METER_DELIVERY: bool = true;
+    // #1588 R1: the browser's meter batches come from its render half's fold. Its
+    // `METER_DELIVERY` stays off (meter tables refused `meter.unavailable`) until #1588b lands
+    // the render half's ring push in the same commit that turns it on: a table accepted with no
+    // push would be an acknowledged no-op (decision 15 E4).
     const RENDER_METER_FOLD: bool = true;
 }
 

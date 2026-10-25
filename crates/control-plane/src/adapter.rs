@@ -43,7 +43,8 @@ pub trait ControlAdapter {
     /// [`host_core::MeterLevel`], and pushes each frame the protocol's table needs into the
     /// plan's [`host_core::MeterFrameRing`]; the control plane stages the batches from the rings
     /// with the same fold and records as its own delivery. The browser's. Read only with
-    /// [`Self::METER_DELIVERY`].
+    /// [`Self::METER_DELIVERY`], which the browser turns on with its render half's ring push
+    /// (#1588b).
     const RENDER_METER_FOLD: bool = false;
     /// Whether the session advertises the spectrum commands (#1595 R2): `SPECTRUM_CONFIGURE`,
     /// `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` with capability bit 16
