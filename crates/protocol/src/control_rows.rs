@@ -14,8 +14,8 @@ use crate::SessionEdit;
 ///
 /// `name` is the row's name in its table (`fader_db`, `trim_db`, `gain_db`, `offset_db`,
 /// `fader_ms`, ...). In an insert or console section `bypass` and `link_mode` name the effect's
-/// two fixed rows; an effect parameter has no name here, its row is its parameter ID, so a caller builds that
-/// address from [`ControlAddress`] directly.
+/// two fixed rows; an effect parameter has no name here, its row is its parameter ID, so a caller
+/// builds that address from [`ControlAddress`] directly.
 #[must_use]
 pub fn row_address(
     owner: Owner,

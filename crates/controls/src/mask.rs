@@ -31,8 +31,9 @@ struct Target<'a> {
 
 /// Copy, for every owner present in both models with the same ID and kind, the model fields that
 /// hold control values from `from` into `into`: each strip's `builtins`, `fader` and
-/// `matrix_or_pan`, and each console entry's and insert's `params`, `bypass` and `link_mode`; each route's `gain_db`, `mute`, `channel_matrix` and `follows_mute`; the session's
-/// whole `vcas` list (decision 17, C6, #1558 D1); and the session's `control_smoothing`.
+/// `matrix_or_pan`, and each console entry's and insert's `params`, `bypass` and `link_mode`; each
+/// route's `gain_db`, `mute`, `channel_matrix` and `follows_mute`; the session's whole `vcas` list
+/// (decision 17, C6, #1558 D1); and the session's `control_smoothing`.
 ///
 /// The VCA list is wholly the inputs of the effective values: the set, the IDs, every offset and
 /// mute and every member list. A VCA added or removed, or a member changed, is a value change that
