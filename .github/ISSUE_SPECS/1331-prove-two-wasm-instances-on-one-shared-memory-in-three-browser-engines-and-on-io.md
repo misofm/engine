@@ -223,7 +223,7 @@ memory; `single-plain` = D5; `single-iso` = the same module's single-instance re
 | Engine | D4.1 COI | D4.2 digest (two, single-iso, single-plain) | D4.3 Worker cycles: total / inside window | D4.3 glitches | D4.4 growth | D5 shared memory in worklet, non-isolated |
 |---|---|---|---|---|---|---|
 | Chromium 151.0.7922.34 | true | = native, all three | 32 / 31 | no trap, hang, render error, non-finite or render allocation; one 5-quantum skip at the 2nd `process()` call (before the window) and one 23 ms first rendered block: the same pair appears in both single legs | 2 explicit grows of 16 MiB inside the window plus allocator growth (6.5 -> 45.5 MiB); worklet saw 14 buffer changes | succeeds (`SharedArrayBuffer` undefined on page and in worklet), digest = native |
-| Firefox 153.0 | true | = native, all three | 20 / 5 (boot ~150 ms; the worklet kept rendering, 1197 blocks, until the 20th) | none of the above; 0 skipped quanta; about 44 % of calls inside the window (155/350) read 3-5 ms by `Date.now()` (1 ms resolution), 36 % over the whole run (436/1216), and 47-48 % in both single legs: the session's own cost, not the Worker's | as Chromium, 14 changes | succeeds, digest = native |
+| Firefox 153.0 | true | = native, all three | 20 / 5 (boot ~150 ms; the worklet kept rendering, 1197 blocks, until the 20th) | none of the above; 0 skipped quanta; about 44 % of calls inside the window (155/350) read 3-5 ms by `Date.now()` (1 ms resolution), 36 % over the whole run (436/1216), and 47-48 % in both single legs: not the Worker's; cause open (see D7) | as Chromium, 14 changes | succeeds, digest = native |
 | WebKit 26.5 | true | = native, all three | 57 / 56 | none; one 6 ms first rendered block (single legs: 5 ms + one 3 ms call, and 4 ms) | as Chromium, 13 changes | succeeds, digest = native |
 
 D4.3 is judged as no increase over the same engine's single-instance legs; the glitch proxy has 1 ms
@@ -273,6 +273,104 @@ takes a kernel-chosen port and that leg ran once.
 **Outcome under D9 (desktop part).** Every desktop engine passes D4 1-5 and D5: #1334 may start.
 Open for #1331a-2: D7 headroom (Firefox's ~3 ms readings per 2.67 ms quantum on this 64-track
 session make it the engine to watch) and gates 3-5. #1380/#1332 still wait for #1331b.
+
+### #1331a-2 result (2026-10-25, base `b0bc367af`): gates 3, 5 PASS; gate 4 plain PASS, atomic not passed (runner); D7 recorded
+
+Evidence: `/home/bl/misofm/engine-work-evidence/1331/a2/` (README there). Toolchain for every
+nightly step: `nightly-2026-08-20` = `rustc 1.100.0-nightly (f7d782a3b 2026-08-19)`, the same
+install as #1331a-1. The host runner, the native comparator and `parameter-metadata` stay on the
+repo's stable pin.
+
+**Rebuild at this base.** #1331a-1's modules refuse today's fixture (`boot_result` 1): #1369a moved
+the session grammar to `link_mode: "slot"` after `56fbe4617`. The D2 commands, unchanged, rebuilt
+both modules: atomic `ff266dfc456573263cdcea57c99e83985a9d2f5bf9eaffcb94e9f18ffe6ed022` (5,626,039 B; named twin
+`db6e0aff...`), plain `4a7dc7eedea7f022fa71a74acf0a3a94db4afa53eef86673efaf60e9320dd964` (5,624,549 B; named twin
+`cf17b597...`). The gate-5 script copy built the same plain bytes in another target dir. Note for
+#1380: the atomic shape prints `unstable feature specified for -Ctarget-feature: atomics` once per
+build; it does not fail under `-D warnings`, and `-A unstable_features` does not silence it
+(`a2/logs/atomics-warning.log`: a trivial crate, all three forms print it once and exit 0).
+
+**D7 headroom (descriptive).** Workload frozen before timing (`a2/workload/FROZEN.txt`): the atomic
+module, and the 64-track app session with one change, `fixture-source` declared 1,441,280 frames
+(30 s) instead of 48,000. Reason: a design probe in Node (`a2/probe/silence-probe.mjs`, untimed)
+showed that render after the 1 s region ends costs less (silence skipping): the logged run
+(`a2/logs/silence-probe.json`) reads 0.259 ms per block inside the region and 0.095 ms per block
+after it, about 2.7 times less (a first, unlogged run read about 3.4). So a 10 s span on the
+fixture as is would measure silence. The isolated `two` page: the worklet renders the session in real time. The Worker
+instance (own stack and TLS, recipe rule 2) boots a second copy and renders it as fast as it can:
+one warmup and two measured spans of 3750 blocks (10 s), back to back on one boot. A block is the
+worklet's own transcript step (feed one quantum through `source_submit`, render, copy 256 words
+out). `headroom = 10 s / span wall time`, `performance.now()` in the Worker. One invocation per
+browser, no retry, under the exclusive bench lock.
+
+Headroom at fs_h = 48 kHz, q = 128 frames:
+
+| Engine | warmup | round 1 | round 2 | Worker boot | worklet during the spans: calls, late (> 2 ms), missed quanta, max |
+|---|---|---|---|---|---|
+| Chromium 151.0.7922.34 | 14.75 | 16.13 | 16.36 | 191 ms | 712, 0, 0, 1 ms |
+| Firefox 153.0 | 1.10 | 1.10 | 1.10 | 150 ms | 10219, 4381, 0, 4 ms |
+| WebKit 26.5 | 13.13 | 13.67 | 13.69 | 38 ms | 834, 0, 0, 1 ms |
+
+All spans: 0 render errors, 0 non-finite words, 0 silent blocks; worklet render allocations 0, no
+trap. In all three engines, the worklet's first 350 blocks gave the #1331a-1 native digest
+`44ecef33...` (the longer source does not change them). In the Worker, Firefox renders this
+session about 15 times slower than Chromium. The Firefox Worker uses about 0.91 of real time per
+block (1/h). About 43 % of the worklet's calls during the spans read over 2 ms (4381/10219), and
+#1331a-1 saw 44 % in `two` and 47-48 % in both single legs, with one instance and no Worker (the
+memory is still shared), so the slowdown is not specific to the Worker or to the second instance.
+Every #1331a-1 and #1331a-2 browser leg that recorded a late-call share ran the atomic module on a
+shared memory, and no browser leg measured late calls on the plain module, so shared memory or
+the atomic build (`+atomics` codegen) is not ruled out as the cause; the diagnosis issue tests
+both. The cause is not investigated, and the slowdown can be a property of the Playwright Firefox
+build only. Firefox h = 1.10 gives m·h = 0.77 ≤ 1,
+which triggers #1286 D3's stop: #1286 D3 derives no browser value and its slice stops for an
+owner ruling. These
+rows are the browser input to #1286 D3; this spike sizes nothing.
+
+**Gate 3 (native under the nightly): PASS.** `RUSTUP_TOOLCHAIN=nightly-2026-08-20 cargo test
+--locked --release -p lane -p math -p wasm-gates --features math/lane`: 35 test binaries, 128
+passed, 0 failed, 7 ignored, no warning. `RUSTUP_TOOLCHAIN=nightly-2026-08-20 cargo test --locked
+-p host-web --lib tests::native_identity_session_digest_pins_the_wasm_parity`: 1 passed.
+
+**Gate 4 (G5 under the nightly): plain PASS; atomic not passed as written (runner).** A scratch copy of
+`scripts/run-wasm-gates.sh` (diff in `a2/gates/`) builds the guest with the D2 shape
+(`cargo +nightly-2026-08-20 ... -Zbuild-std=std,panic_abort -p wasm-gate-guest`, the D2 flags and
+the three remaps; `--without-v8-spill`).
+
+- plain: native leg (the stable host runner) and wasm leg 0 mismatches (155 cases; 385 and 270 comparisons), detector
+  residency 21 limiter functions, both f64 lane censuses vectorised: the script prints `ok`.
+- atomic: NOT PASSED as written. The committed runner cannot load the guest: wasmtime refuses it
+  with `threads must be enabled for shared memories`, because the guest imports `env.memory` as
+  shared, 17..8192 pages.
+- Under the preserved shim (`a2/gates/runner-threads-shim.diff`: `Config::wasm_threads(true)`,
+  `Config::shared_memory(true)`, wasmtime feature `threads`, a `SharedMemory` for the import; run in
+  a detached scratch worktree, now removed), the atomic guest has 0 mismatches over 270
+  comparisons, residency 21, and both censuses green. The plain guest also passes under the shim.
+  The runner change (threads plus the `SharedMemory` import) goes to #1380, the first slice that
+  ships `+atomics`; root amends #1380's authorized paths.
+
+**Gate 5 (browser bit identity on the plain nightly module): PASS.** A scratch copy of
+`scripts/build-web-audioworklet.sh` built the closure. Only its cargo line changed, plus its
+`repo_root` line, because the copy is outside the repo. `check-browser-expected-resources.py
+--artifacts`: every expected.json digest and exact row agrees, budgets hold, self-test 43 red
+mutations. `npm run qualify -- --artifacts <closure> --sdk-root <worktree>/sdk --browser <b>`:
+`all qualification gates passed` in Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5. WebKit
+runs on this Linux box (Playwright's WebKit 26.5 build), so WebKit has no stated limit here. The
+first Chromium launch stopped before any page loaded (`Socket path too long`: the harness had set
+`TMPDIR` to a long scratch path). It ran once more with the default `TMPDIR` and passed. Also run,
+but not gates of this spec: the shape gate `check-web-audioworklet.sh
+--without-metadata-regeneration` and the V8 spill gate pass on the nightly plain closure and its
+named twin.
+
+**Gate 7: PASS.** Only this spec changed in the repo.
+
+**Outcome.** Gates 3 and 5 pass; gate 4 passes for the plain shape and is not passed for the
+atomic shape as written (runner; green under the shim). The nightly keeps every committed native,
+G5 and browser pin on the plain shape, so #1334 may adopt the plain D2 command as recorded. Open:
+(1) the cause of Firefox's slow render (every mode, also with one instance and no Worker (the
+memory is still shared); shared memory or the atomic build is not ruled out; maybe the Playwright build only). Owner: root routes it as an owner question and a successor diagnosis issue; until
+then #1286 D3 derives no browser value and its slice stops for an owner ruling. (2) G5 for the atomic shape needs the runner change, in #1380.
+#1331b (iPhone) stays owner-gated, and D7 on iOS is part of it.
 
 ## Amendment (decision 17, root 2026-10-13)
 
