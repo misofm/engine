@@ -18,6 +18,7 @@ import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import {
   POLICY_WORDS,
   ROLE_DEFINED_WORDS,
+  SessionSeekProducerError,
   assertQuantumMatch,
   assertWebDeliverableSources,
   bootOptionsAgree,
@@ -450,6 +451,7 @@ describe("the browser open sequence", () => {
     // makes the session seek stale and the ring stall; a stale default generation does the same.
     const log = [];
     let result = 0;
+    let localRefusal = null;
     const engine = await createEngine({
       document: sessionDocument(),
       simd128ModuleUrl: "/wasm",
@@ -464,6 +466,7 @@ describe("the browser open sequence", () => {
       }),
       createHost: async () => ({
         seekSession: async (request) => {
+          if (localRefusal !== null) throw localRefusal;
           log.push(["host", request]);
           await Promise.resolve();
           log.push(["reply", result]);
@@ -487,7 +490,21 @@ describe("the browser open sequence", () => {
       "a refused seek repositions nothing");
     await assert.rejects(engine.seek(2n ** 53n, { producers }), MisoUsageError);
     assert.deepEqual(log, [], "an unsafe frame posts nothing");
+    result = 0;
+    // The host's local refusal of a second unsettled seek is its numeric record.
+    localRefusal = Object.freeze({ tag: "miso.error.v1", requestId: 0, result: 6 });
+    await assert.rejects(engine.seek(0n, { producers }), (error) =>
+      error instanceof MisoEngineError && error.code === "backpressure" && error.result === 6);
+    localRefusal = null;
+    const failure = new RangeError("seek generation must be a bigint above the pump's own");
+    const failing = { seek: async () => { throw failure; } };
+    await assert.rejects(engine.seek(0n, { generation: 9n, producers: [producers[0], failing, producers[1]] }), (error) =>
+      error instanceof SessionSeekProducerError && error.generation === 9n && error.producerIndex === 1 && error.cause === failure);
+    assert.deepEqual(log.splice(0), [["host", { generation: 9n, frame: 0n }], ["reply", 0], ["a", 0, 9n]],
+      "a producer failure after the OK names the applied generation and stops");
     await engine.close();
+    await assert.rejects(engine.seek(0n), MisoUsageError);
+    assert.deepEqual(log, [], "a closed engine posts nothing");
   });
 
   test("close still releases the AudioContext when host disposal rejects", async () => {

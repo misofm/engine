@@ -513,24 +513,67 @@ test("control preparation never discards or applies a superseding producer gener
   assert.deepEqual(raced.seeks, [[2n, 12n], [3n, 16n]]);
 });
 
-test("a ring seek at the generation of an accepted session seek is consumed without a source seek", async () => {
-  // Issue #1644 gate 1: after a session seek at 2 every source is at 2, so a per-source seek at 2
-  // is refused as stale and the ring never drains again; a ring at any other generation still
-  // seeks its source.
+test("actual Wasm: a ring seek is consumed only when the engine refuses it as already at the session seek's generation", async () => {
+  // Issue #1644 gate 1 (R4 amended). After a session seek at 2 a moved source refuses its own seek
+  // at 2 as stale, and without the rule that ring never drains again. A source the session seek
+  // did not move (one a later plan added, still at 1) must still be seeked, or every chunk at 2 is
+  // refused for good; any other refusal at that generation is counted as before.
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
-  const run = runPrelude(source, { initial: false });
-  run.engine.lastSessionSeekGeneration = 2n; // what the engine handler records after an OK
-  const [sessionRing, otherRing] = run.writers;
-  sessionRing.seek(2n, 12n);
-  sessionRing.reserve(4)[0].fill(0.5);
-  sessionRing.commit({ generation: 2n, startFrame: 12n, frames: 4, endOfRegion: false });
-  otherRing.seek(3n, 8n);
-  run.process();
-  assert.deepEqual(run.seeks, [[3n, 8n]], "only the ring at another generation seeks its source");
-  assert.equal(run.ringControls[0][MSB1_CONTROL.SEEKS_APPLIED], 1);
-  assert.equal(run.ringControls[0][MSB1_CONTROL.REFUSED], 0);
-  assert.deepEqual(run.submissions.map(({ generation, start }) => ({ generation, start })), [{ generation: 2n, start: 12n }],
-    "the consumed ring's later PCM is submitted");
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const document = new TextEncoder().encode(sessionDocument({ frames: 4_800 }));
+  const feedOver = async ({ sessionSeek }) => {
+    const instance = await asset.instantiate();
+    let handle;
+    const exports = { ...instance.exports, miso_engine_web_v1_boot(...args) { handle = instance.exports.miso_engine_web_v1_boot(...args); return handle; } };
+    const boundary = await WasmBoundary.boot({ instantiate: async () => ({ exports }) }, document, { sourceRingFrames: 512 });
+    if (sessionSeek) assert.equal(boundary.sessionSeek({ generation: 2n, frame: 256n }).ok, true);
+    const { sandbox, registrations } = preludeHarness(source);
+    class Engine {
+      constructor() {
+        this.quantumFrames = 128; this.maximumSourceChannels = 2;
+        this.exports = recordFeedCalls(exports); this.handle = handle; this.memoryBuffer = exports.memory.buffer;
+        this.sourceIdPointer = exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourceId"));
+        this.sourceIdCapacity = exports.miso_engine_web_v1_buffer_capacity(handle, constantValue("bufferKinds", "sourceId"));
+        this.sourcePcm = new Float32Array(this.memoryBuffer, exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourcePcm")), 256);
+        // The engine worklet's boot binds this view (the hermetic suite pins it).
+        this.diagnosticView = new Uint8Array(this.memoryBuffer, exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "diagnostic")), exports.miso_engine_web_v1_buffer_capacity(handle, constantValue("bufferKinds", "diagnostic")));
+        this.ready = true; this.disposed = false; this.stickyResult = 0;
+        this.lastSessionSeekGeneration = 2n; // what the engine handler records after an OK
+      }
+      rebindMemoryViews() { this.memoryBuffer = this.exports.memory.buffer; }
+      process() { return true; }
+    }
+    sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
+    const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
+    const attach = new (registrations.get("miso-sab-feed-attach"))();
+    const ring = createMsb1Ring({ sourceId: "s", channels: 2, frameCapacity: 128, capacity: 4 });
+    attach.port.onmessage({ data: { op: "attach", rings: [ring] } });
+    const writer = new Msb1RingWriter(ring); writer.engage(1n);
+    const seekAndWrite = (frame) => {
+      writer.seek(2n, frame);
+      writer.reserve(128);
+      writer.commit({ generation: 2n, startFrame: frame, frames: 128, endOfRegion: false });
+      engine.process([], []);
+      return controls(ring);
+    };
+    return { boundary, seekAndWrite };
+  };
+  const counts = (c) => [c[MSB1_CONTROL.SEEKS_APPLIED], c[MSB1_CONTROL.REFUSED], c[MSB1_CONTROL.SUBMITTED]];
+
+  const moved = await feedOver({ sessionSeek: true });
+  try {
+    assert.deepEqual(counts(moved.seekAndWrite(256n)), [1, 0, 1], "the moved source's stale refusal is the seek applied, not a refusal");
+  } finally { moved.boundary.dispose(); }
+  const fresh = await feedOver({ sessionSeek: false });
+  try {
+    assert.deepEqual(counts(fresh.seekAndWrite(0n)), [1, 0, 1], "a source the session seek did not move is seeked, so its PCM at 2 is accepted");
+  } finally { fresh.boundary.dispose(); }
+  const outside = await feedOver({ sessionSeek: false });
+  try {
+    const c = outside.seekAndWrite(1_000_000n);
+    assert.deepEqual(counts(c), [0, 1, 0], "another refusal at the session generation is counted, and the epoch stays unseen");
+    assert.equal(c[MSB1_CONTROL.LAST_RESULT], 1);
+  } finally { outside.boundary.dispose(); }
 });
 
 test("the pump seeks every ring under the session's generation and refuses one not above its own", async () => {

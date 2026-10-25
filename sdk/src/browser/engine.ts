@@ -215,6 +215,24 @@ export interface SessionSeekProducer {
   seek(frame: number, generation: bigint): void | Promise<void>;
 }
 
+/**
+ * A producer failed after the engine had accepted the session seek (issue #1644 D3): the engine's
+ * timeline and every source are at `generation`, the producers before `producerIndex` were
+ * repositioned, and that one and the ones after it were not. `cause` is the producer's error.
+ * Reposition the rest under `generation`; the seek is not to be sent again.
+ */
+export class SessionSeekProducerError extends Error {
+  readonly generation: bigint;
+  readonly producerIndex: number;
+
+  constructor(generation: bigint, producerIndex: number, cause: unknown) {
+    super(`the engine applied the session seek at generation ${generation}, but producer ${producerIndex} failed to reposition`, { cause });
+    this.name = "SessionSeekProducerError";
+    this.generation = generation;
+    this.producerIndex = producerIndex;
+  }
+}
+
 /** The options of `BrowserEngine.seek`. */
 export interface BrowserSeekOptions {
   /** The generation to seek under; by default one above the largest this engine has used. */
@@ -323,9 +341,12 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * generation; the feed then consumes their ring seeks without seeking the sources again. An app
    * that drives its producers itself must also wait for this call to resolve: a producer that
    * seeks first makes the session seek stale. A refused seek (a stale generation is
-   * `invalidArgument`, `source.generation.stale`) repositions nothing and rejects with a
-   * `MisoEngineError` that carries the result. A `frame` that is not a non-negative bigint at most
-   * `Number.MAX_SAFE_INTEGER` throws `MisoUsageError` before anything is sent.
+   * `invalidArgument`, `source.generation.stale`), or a second seek sent while one is unsettled
+   * (`backpressure`), repositions nothing and rejects with a `MisoEngineError` that carries the
+   * result. A producer that fails after the engine accepted the seek rejects the call with
+   * `SessionSeekProducerError`, which carries the applied generation. A `frame` that is not a
+   * non-negative bigint at most `Number.MAX_SAFE_INTEGER`, or a closed engine, throws
+   * `MisoUsageError` before anything is sent.
    */
   seek(frame: bigint, options?: BrowserSeekOptions): Promise<{ readonly generation: bigint }>;
   /**
@@ -1565,6 +1586,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         });
       },
       seek: async (frame: bigint, options?: BrowserSeekOptions) => {
+        if (closed) throw new MisoUsageError("the browser engine is closed");
         if (typeof frame !== "bigint" || frame < 0n || frame > BigInt(Number.MAX_SAFE_INTEGER)) {
           throw new MisoUsageError("seek frame must be a non-negative bigint at most Number.MAX_SAFE_INTEGER");
         }
@@ -1576,16 +1598,33 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         if (!Array.isArray(producers) || producers.some((producer) => typeof producer?.seek !== "function")) {
           throw new MisoUsageError("seek producers must each have a seek method");
         }
-        const reply = await host.seekSession({ generation, frame });
-        if (reply.result !== constantValue("resultCodes", "ok")) {
-          throw new MisoEngineError("the browser host refused the session seek", {
+        const refused = (result: number): MisoEngineError =>
+          new MisoEngineError("the browser host refused the session seek", {
             phase: "source",
-            code: resultName(reply.result, "call"),
-            result: reply.result,
+            code: resultName(result, "call"),
+            result,
           });
+        let reply: Awaited<ReturnType<MisoAudioWorkletHost["seekSession"]>>;
+        try {
+          reply = await host.seekSession({ generation, frame });
+        } catch (error) {
+          // The host rejects a local refusal (a second unsettled seek: `backpressure`) and a
+          // sticky failure with its numeric record; keep the result in the SDK's vocabulary.
+          const result = (error as { readonly result?: unknown }).result;
+          if (typeof result === "number" && Number.isSafeInteger(result) && result >= 0) {
+            throw refused(result);
+          }
+          throw error;
         }
+        if (reply.result !== constantValue("resultCodes", "ok")) throw refused(reply.result);
         if (generation > highestSeekGeneration) highestSeekGeneration = generation;
-        for (const producer of producers) await producer.seek(Number(frame), generation);
+        for (const [index, producer] of producers.entries()) {
+          try {
+            await producer.seek(Number(frame), generation);
+          } catch (error) {
+            throw new SessionSeekProducerError(generation, index, error);
+          }
+        }
         return Object.freeze({ generation });
       },
       close: () => {

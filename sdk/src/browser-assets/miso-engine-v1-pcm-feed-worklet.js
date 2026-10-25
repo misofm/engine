@@ -126,8 +126,13 @@ const SLOT_I64_START_FRAME = 3
 const FLAG_END_OF_REGION = 1
 
 const RESULT_OK = 0
+const RESULT_INVALID_ARGUMENT = 1
 const RESULT_BACKPRESSURE = 6
 const RESULT_WRONG_STATE = 3
+// The core's code for a seek at a generation the source already has (issue
+// #1644 D2), as the bytes a refusal writes at the start of the session
+// diagnostic. Built once at load: the worklet scope has no TextEncoder.
+const STALE_GENERATION_CODE = Uint8Array.from("source.generation.stale", (character) => character.charCodeAt(0))
 
 /** The one engine processor in this scope, and any rings that arrived before
  *  it existed. Both nodes are constructed by the same main thread in a fixed
@@ -467,19 +472,24 @@ function wrapEngineProcessor(Base) {
       const control = ring.control
       if (epoch !== ring.seenEpoch) {
         const requested = generation ?? ring.controlI64[CONTROL_I64_SEEK_GENERATION]
-        // Issue #1644 D2: a session seek the engine accepted at this generation already moved
-        // this source, and seeking it again would be refused as stale and stall the ring for
-        // good. The engine handler records that generation on this same object, so the epoch is
-        // consumed as an applied seek with no export call.
-        let result = RESULT_OK
-        if (requested !== this.lastSessionSeekGeneration) {
-          ring.idTarget.set(ring.idBytes)
-          result = this.exports.miso_engine_web_v1_source_seek(
-            this.handle,
-            ring.idLength,
-            requested,
-            frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
-          )
+        ring.idTarget.set(ring.idBytes)
+        let result = this.exports.miso_engine_web_v1_source_seek(
+          this.handle,
+          ring.idLength,
+          requested,
+          frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
+        )
+        // Issue #1644 D2 (R4 amended): a session seek the engine accepted at this generation
+        // already moved this source, so its own seek at the same generation is refused as stale,
+        // and the ring would stall for good. That one refusal is the seek applied. The source is
+        // always asked first: one that the session seek did not move (a source a later plan
+        // added) accepts the seek, and every other refusal is handled as before.
+        if (
+          result === RESULT_INVALID_ARGUMENT &&
+          requested === this.lastSessionSeekGeneration &&
+          this.refusedAsStaleGeneration()
+        ) {
+          result = RESULT_OK
         }
         if (result === RESULT_BACKPRESSURE) {
           // Ordinary flow control. Leave the epoch unseen and retry the same
@@ -500,6 +510,19 @@ function wrapEngineProcessor(Base) {
         control[CONTROL_DEPTH] = 0
       }
       return RESULT_OK
+    }
+
+    /** Whether the last refusal wrote `source.generation.stale` into the session diagnostic.
+     *  A byte compare over the engine's fixed view: no allocation. */
+    refusedAsStaleGeneration() {
+      const view = this.diagnosticView
+      if (view == null || view.buffer !== this.memoryBuffer || view.length < STALE_GENERATION_CODE.length) {
+        return false
+      }
+      for (let index = 0; index < STALE_GENERATION_CODE.length; index += 1) {
+        if (view[index] !== STALE_GENERATION_CODE[index]) return false
+      }
+      return true
     }
 
     /** Consumer-owned stale release, called only by the attachment port between blocks. */

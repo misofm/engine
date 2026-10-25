@@ -148,6 +148,7 @@ async function testMainRealm() {
   // Issue #1644: every session seek message the fake port received, and the result it answers.
   const sessionSeekMessages = [];
   let sessionSeekResult = 0;
+  let sessionSeekGenerationOffset = 0n;
   let mixedSuccess = false;
   let commandMutation = null;
   let compileGate = null;
@@ -243,7 +244,7 @@ async function testMainRealm() {
           sessionSeekMessages.push(received);
           response = {
             tag: "miso.session-seek.v1", requestId: received.requestId,
-            result: sessionSeekResult, generation: received.generation,
+            result: sessionSeekResult, generation: received.generation + sessionSeekGenerationOffset,
           };
         } else {
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
@@ -1900,6 +1901,10 @@ async function testMainRealm() {
       generation: 3n, frame: 0n, anchorSample: 128n,
     })).result, 1, "a refused session seek resolves with the engine's result");
     sessionSeekResult = 0;
+    sessionSeekGenerationOffset = 1n;
+    await errorResult(pipelineHost.seekSession({ generation: 4n, frame: 0n }), 255);
+    sessionSeekGenerationOffset = 0n;
+    sessionSeekMessages.pop();
     assert.deepEqual(sessionSeekMessages, [
       { tag: "miso.session-seek.v1", generation: 2n, sourceFrame: 480n, anchorSample: -1n, requestId: 8 },
       { tag: "miso.session-seek.v1", generation: 3n, sourceFrame: 0n, anchorSample: 128n, requestId: 9 },
@@ -2742,10 +2747,11 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
   const pointers = {
-    2: 4096, 3: 5000, 5: 8192, 6: liveControlsAttached ? commandPointer : 0, 7: meterFramePointer,
+    2: 4096, 3: 5000, 4: 150000, 5: 8192, 6: liveControlsAttached ? commandPointer : 0,
+    7: meterFramePointer,
   };
   const capacities = {
-    2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4,
+    2: 64, 3: 2 * quantum * 4, 4: 256, 5: 2 * quantum * 4,
     6: liveControlsAttached ? 256 * 272 : 0,
     7: meterFrameFloats * 4,
   };
@@ -4291,6 +4297,12 @@ async function testProcessor() {
         tag: "miso.session-seek.v1", requestId: 1, result: 0, generation: 2n,
       });
       assert.equal(processor.lastSessionSeekGeneration, 2n);
+      // The feed drain reads a refused seek's code through this boot-time view (#1644 D2).
+      assert.deepEqual(
+        [processor.diagnosticView.byteOffset, processor.diagnosticView.length,
+          processor.diagnosticView.buffer === processor.memoryBuffer],
+        [150000, 256, true],
+      );
       assert.deepEqual(seek(2, 3n, 0n, 128n).result, 0);
       fake.calls.sessionSeekResult = 1;
       assert.deepEqual(seek(3, 4n, 0n, -1n), {

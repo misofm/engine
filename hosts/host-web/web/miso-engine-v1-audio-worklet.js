@@ -20,6 +20,7 @@ const COMMAND_REASON_UNSUPPORTED_KIND = 7;
 const RESULT_INTERNAL = 255;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
+const BUFFER_DIAGNOSTIC = 4;
 const BUFFER_OUTPUT_PCM = 5;
 const BUFFER_COMMAND = 6;
 const BUFFER_METER_FRAME = 7;
@@ -297,6 +298,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // none). The SDK's feed drain runs on this same object, between the same handler calls, and
     // consumes a ring seek at exactly this generation without seeking the source again.
     this.lastSessionSeekGeneration = undefined;
+    // The session diagnostic staging, where a refused call writes its core code (null: none).
+    this.diagnosticView = null;
     this.clock = renderClock();
     // Issue #1381a D6, `single` mode: the instance's control work runs here, in the message
     // handler, outside `process()`. The service step follows every message, the main realm's
@@ -447,6 +450,18 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     this.maximumSourceChannels = sourcePcmCapacity / (this.quantumFrames * 4);
     this.bindView("sourcePcm", Float32Array, this.sourcePcmPointer, sourcePcmCapacity / 4);
+    // Issue #1644 D2 (R4 amended): the feed drain tells a stale-generation seek refusal from any
+    // other `invalidArgument` by the code the refusal wrote here. A module without the staging
+    // leaves the view null, and the drain then handles every refusal as before.
+    const diagnosticPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_DIAGNOSTIC);
+    const diagnosticCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
+      this.handle,
+      BUFFER_DIAGNOSTIC,
+    );
+    if (u32(diagnosticPointer) && diagnosticPointer !== 0
+        && u32(diagnosticCapacity) && diagnosticCapacity > 0) {
+      this.bindView("diagnosticView", Uint8Array, diagnosticPointer, diagnosticCapacity);
+    }
     this.bindView("outputLeft", Float32Array, outputPointer, this.quantumFrames);
     this.bindView("outputRight", Float32Array,
       outputPointer + this.quantumFrames * 4, this.quantumFrames);
