@@ -1479,13 +1479,16 @@ fn a_warm_successor_waits_for_every_carried_ring_and_a_held_seek() {
 
     // A seek anchored two blocks past the running plan's read, inside the window
     // `[S + O, S + O + P + q)`. A source-read sample `X` is heard at render sample `X` on either
-    // plan (`O` ahead, then `O` late in the claim lines), so A continued takes the same anchor;
-    // its feed, `O` behind, is first topped up to the anchor so the old generation has no gap.
-    let seek = |stream: &mut Stream, anchor: u64| {
+    // plan (`O` ahead, then `O` late in the claim lines), so A continued takes the same anchor.
+    // Each feed is first topped up to `through` with the old generation: A continued's (`O`
+    // behind) to the anchor, so it has no gap, and the swapped stream's past the window's end,
+    // so the frames readiness walks are all there and only the held anchor holds the adoption
+    // (the seek discards the frames past the anchor).
+    let seek = |stream: &mut Stream, anchor: u64, through: u64| {
         let ahead = stream.feeder.ahead;
         stream
             .feeder
-            .top_up(&mut stream.sources, anchor.saturating_sub(ahead));
+            .top_up(&mut stream.sources, through.saturating_sub(ahead));
         stream
             .feeder
             .seek_at(&mut stream.sources, 2, 40 * QUANTUM, anchor);
@@ -1496,7 +1499,7 @@ fn a_warm_successor_waits_for_every_carried_ring_and_a_held_seek() {
     swapped.render(AFTER);
     assert_eq!(swapped.offset, LEAD);
     let anchor = swapped.read() + 2 * QUANTUM;
-    seek(&mut swapped, anchor);
+    seek(&mut swapped, anchor, anchor + 2 * LEAD);
     swapped.grow(&c, &CONFIG);
     swapped.render(AFTER);
     assert_eq!(
@@ -1506,7 +1509,7 @@ fn a_warm_successor_waits_for_every_carried_ring_and_a_held_seek() {
     );
     let mut continued = alone(&a, &caps, backend, AHEAD);
     continued.render(BEFORE + AFTER);
-    seek(&mut continued, anchor);
+    seek(&mut continued, anchor, anchor);
     continued.render(AFTER);
     assert_eq!(first_divergence(&swapped, &continued), None, "held seek");
 }
