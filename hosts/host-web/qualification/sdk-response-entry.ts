@@ -3,9 +3,11 @@ import { EngineLiveControls } from "../../../sdk/src/core/live-controls.ts";
 import { ControlTransactionQueue } from "../../../sdk/src/core/control-queue.ts";
 import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrder } from "../../../sdk/src/browser/live-controls.ts";
 import {
-  WIRE_BYTES, WIRE_U32, WIRE_U8, commandFrame, concat, controlCallFailure, decodeControlReply, decodeRefusalBody,
+  MESSAGE_SESSION_TRANSACTION_APPLY, WIRE_BYTES, WIRE_U32, WIRE_U8, commandFrame, concat, controlCallFailure,
+  decodeControlReply, decodeRefusalBody, encodeObserveTransaction,
   decodeResponseEnvelope, field, scalar, u32,
 } from "../../../sdk/src/core/control-frame.ts";
+import type { ObserveEdit } from "../../../sdk/src/core/control-frame.ts";
 import { ProtocolClient } from "../../../sdk/src/core/protocol-messages.ts";
 import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
@@ -1757,11 +1759,15 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   }
 }
 
-/** One `host.command` call of the observation wait instances (#1530 D4): its ack and its records. */
+/**
+ * One `Observe` transaction of the observation wait instances (#1530 D4, on the core's frames since
+ * #1589b): the `host.control` call's result, the reply's status (`null` for a failed call, which
+ * carries no reply frame) and the frame's edits (its payload, without the header's request ID and
+ * revision), as hex.
+ */
 interface ObservationWaitCommand {
   readonly result: number;
-  readonly reason: number;
-  /** `request.commands` as JSON, with each bigint spelled `<digits>n`. */
+  readonly status: string | null;
   readonly records: string;
 }
 
@@ -1806,23 +1812,24 @@ async function createResidentObservationBrowser(
         hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
       });
       if (commandLog !== undefined) {
-        // D4: log each command batch and its ack; nothing else in the host is wrapped.
-        const command = Object.getPrototypeOf(host).command as (this: typeof host, ...args: never[]) => Promise<{
+        // D4: log each `Observe` transaction and its answer; nothing else in the host is wrapped.
+        const control = Object.getPrototypeOf(host).control as (this: typeof host, ...args: never[]) => Promise<{
           readonly result: number;
-          readonly reason: number;
+          readonly response: Uint8Array;
         }>;
-        Object.defineProperty(host, "command", {
+        Object.defineProperty(host, "control", {
           configurable: true,
           writable: true,
-          value: async (commandRequest: { readonly commands: unknown }) => {
-            const ack = await command.call(host, commandRequest as never);
-            commandLog.push({
-              result: ack.result,
-              reason: ack.reason,
-              records: JSON.stringify(commandRequest.commands, (_key, item) =>
-                typeof item === "bigint" ? `${item}n` : item),
-            });
-            return ack;
+          value: async (frame: Uint8Array, ...rest: unknown[]) => {
+            const answer = await control.call(host, frame as never, ...rest as never[]);
+            if (frame.length >= 48 && (frame[16]! | (frame[17]! << 8)) === MESSAGE_SESSION_TRANSACTION_APPLY) {
+              commandLog.push({
+                result: answer.result,
+                status: answer.result === 0 ? decodeControlReply(answer.response).status : null,
+                records: Array.from(frame.subarray(48), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+              });
+            }
+            return answer;
           },
         });
       }
@@ -2035,6 +2042,12 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
     const ready = subscription.readLatest();
     const repeated = subscription.readLatest();
     const firstSnapshot = ready.map(observationRowKey);
+    // #1589 D4: the reads above saw both taps armed, so `armed()` has settled; the guard turns a
+    // pending one into a named red gate, never a page timeout.
+    const armedSample = await Promise.race([
+      subscription.armed().then((sample) => sample.toString(), (error: unknown) => `rejected: ${String(error)}`),
+      new Promise<null>((resolve) => globalThis.setTimeout(() => resolve(null), 1_000)),
+    ]);
 
     const shared = await browser.subscribeObservations({
       selections,
@@ -2104,7 +2117,7 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
       subscriptionId: subscription.id.toString(),
       owner: subscription.owner.toString(),
       epoch: subscription.epoch.toString(),
-      appliedAtSample: subscription.appliedAtSample.toString(),
+      armedSample,
       bounds: subscription.bounds,
       sharedBinding,
       firstCloseKeepsLive,
@@ -2709,6 +2722,34 @@ export async function sourceUnderrunBlocksThroughSdk(host: MisoAudioWorkletHost)
  * control list, #1564 D5). The worklet's session map no longer carries them (#1565B), and the
  * raw qualification rows read them here, through the SDK, so that they hold no reader of their own.
  */
+/**
+ * One `Observe` edit as a `SESSION_TRANSACTION_APPLY` (#1589b), posted as the host's `control`
+ * message with the host's one request-ID allocator: the #1535 run arms and disarms its tap with it.
+ * A failed call (a full tap queue) reports its result with no status; an answered one reports the
+ * reply's status and, when applied, its edit path and the edit's arm tag.
+ */
+export async function observeThroughSdk(
+  host: MisoAudioWorkletHost,
+  edit: ObserveEdit,
+): Promise<{ result: number; status: string | null; path: string | null; armTag: string | null }> {
+  const queue = await createBrowserControlQueue(host);
+  const frame = encodeObserveTransaction({
+    requestId: queue.requestIds.next(),
+    expectedRevision: queue.revision,
+    edits: [edit],
+  });
+  const reply = await host.control(frame);
+  queue.noteCommit(reply.revision);
+  if (reply.result !== 0) return { result: reply.result, status: null, path: null, armTag: null };
+  const decoded = decodeControlReply(reply.response);
+  return {
+    result: 0,
+    status: decoded.status,
+    path: decoded.applied?.editPath ?? null,
+    armTag: decoded.applied?.observeArmTags[0]?.toString() ?? null,
+  };
+}
+
 export async function readTracksThroughSdk(host: MisoAudioWorkletHost): Promise<readonly string[]> {
   return (await createBrowserStripOrder(host)()).tracks;
 }
