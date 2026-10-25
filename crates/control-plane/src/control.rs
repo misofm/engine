@@ -4078,8 +4078,14 @@ where
             None
         } else {
             Some(
-                host_core::plan_strip_transition(&base, duck, prospective.normalized_model())
-                    .map_err(|_| CommandError::Internal)?,
+                host_core::plan_strip_transition(
+                    &base,
+                    duck,
+                    prospective.normalized_model(),
+                    // #1324 D4: the strips the successor restarts duck-swap.
+                    prepared_runtime.inventory.restarted_strips(),
+                )
+                .map_err(|_| CommandError::Internal)?,
             )
         };
         let next_duck = transition
