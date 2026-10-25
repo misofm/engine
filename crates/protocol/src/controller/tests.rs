@@ -4443,11 +4443,14 @@ fn a_stale_structure_epoch_is_a_revision_conflict_that_names_itself() {
 /// Gate 2: the capability registry lists `0x000c` and `0x000d` and never the retired `0x0004` and
 /// `0x0005`; without the controls feature neither new message is listed, bit 7 is clear and a
 /// request for one is `UNAVAILABLE`. #1595 D8: with the spectrum feature the three spectrum
-/// commands are listed with bit 16, and without it none is and bit 16 is clear.
+/// commands are listed with bit 16, and without it none is and bit 16 is clear. #1586 D6: the
+/// observation feature switches `0x000f` and bit 15 together, and the session executes the read
+/// exactly when it is advertised.
 ///
 /// Red if a retired ID is advertised or served, bit 7 stops tracking the pair, a disabled
 /// provider answers a control request, or the spectrum feature does not switch the three
-/// commands and bit 16 together.
+/// commands and bit 16 together, or the observation feature `0x000f`, bit 15 and the read's
+/// route.
 #[test]
 fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones() {
     let ids = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
@@ -4466,19 +4469,21 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
         // is listed.
         assert_eq!(decoded.flags.0 & (1 << 14) != 0, commands.contains(&14));
         assert_eq!(decoded.flags.0 & (1 << 16) != 0, commands.contains(&0x0010));
+        assert_eq!(decoded.flags.0 & (1 << 15) != 0, commands.contains(&0x000f));
         (commands, decoded.flags.0 & (1 << 7) != 0)
     };
     let mut endpoint = controller(8);
     assert_eq!(
         ids(&mut endpoint, 1),
         (
-            vec![1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x0010, 0x0011, 0x0012],
+            vec![1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x000f, 0x0010, 0x0011, 0x0012],
             true
         )
     );
     endpoint.set_provider_features(ProviderFeatures {
         controls: false,
         spectrum: false,
+        observation: false,
         ..ProviderFeatures::ALL
     });
     assert_eq!(
@@ -4502,6 +4507,52 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
             panic!("a disabled control provider must refuse");
         };
         assert_eq!(header.status, StatusCode::Unavailable);
+    }
+    // #1586 D6: the session executes an advertised `OBSERVATION_READ`; an endpoint that does not
+    // advertise it answers `UNAVAILABLE` itself.
+    let read = crate::ObservationReadRequest {
+        selections: vec![crate::ObservationReadSelection {
+            strip_id: session::StableId::parse("t1").expect("strip"),
+            section: controls::TapSection::Inserts(session::StableId::parse("comp").expect("id")),
+            tap_id: 1,
+            channels: crate::ParameterChannel::Both,
+        }],
+    };
+    for (request_id, observation) in [(5, false), (6, true)] {
+        endpoint.set_provider_features(ProviderFeatures {
+            observation,
+            ..ProviderFeatures::ALL
+        });
+        let input = full_command(
+            request_id,
+            ExpectedRevision::Any,
+            crate::CommandPayload::ObservationRead(&read),
+        );
+        let prepared = endpoint
+            .prepare_command_frame(
+                &input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
+            .expect("prepare");
+        match (observation, prepared) {
+            (true, PreparedCommandFrame::Session(prepared)) => assert_eq!(
+                prepared.command(),
+                &crate::SessionCommand::ObservationRead(read.clone())
+            ),
+            (false, PreparedCommandFrame::Immediate(response)) => {
+                let mut output = [0_u8; 2048];
+                let written = response.write_into(&mut output).expect("reply");
+                let crate::DecodedTypedResponseFrame::NonOk { header, .. } =
+                    decode_response(&output[..written])
+                else {
+                    panic!("an unadvertised read must refuse");
+                };
+                assert_eq!(header.status, StatusCode::Unavailable);
+            }
+            _ => panic!("observation {observation}: the read took the wrong path"),
+        }
     }
 }
 

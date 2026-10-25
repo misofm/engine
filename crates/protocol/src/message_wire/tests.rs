@@ -375,8 +375,7 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     assert_parity_rejects(&[1, 2, 6], &events);
     assert_parity_rejects(&commands, &[]);
     assert!(!IdSource::LittleEndian(&[1]).is_strict_allocated(false));
-    // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family; `0x000f` is
-    // claimed by an open spec, not allocated.
+    // #1386: `SESSION_REPLACE` (`0x0013`) is allocated and rides the session family.
     assert!(
         check_capabilities_invariants(view(
             IdSource::Native(&[1, 2, 3, 0x0013]),
@@ -384,7 +383,22 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
         ))
         .is_ok()
     );
+    // #1586 D6: `OBSERVATION_READ` (`0x000f`) is listed exactly when bit 15 is set, and both ride
+    // the session family.
     assert_parity_rejects(&[1, 2, 3, 0x000f], &events);
+    let bit_15 = |commands: &'static [u16]| CapabilityInvariantView {
+        flags: CapabilityFlags(
+            view(IdSource::Native(&[]), IdSource::Native(&[])).flags.0
+                | CapabilityFlags::OBSERVATION.0,
+        ),
+        ..view(IdSource::Native(commands), IdSource::Native(&events))
+    };
+    assert!(check_capabilities_invariants(bit_15(&[1, 2, 3, 0x000f])).is_ok());
+    assert_eq!(
+        check_capabilities_invariants(bit_15(&[1, 2, 3])),
+        Err(DecodeError::InvalidTlv),
+        "bit 15 without the command"
+    );
     // #1595 D8a: the three spectrum commands are listed together, exactly when bit 16 is set.
     let spectrum = |flags: u64| CapabilityInvariantView {
         flags: CapabilityFlags(view(IdSource::Native(&[]), IdSource::Native(&[])).flags.0 | flags),
@@ -434,6 +448,14 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     assert_eq!(
         check_capabilities_invariants(without_session(&[1, 2, 0x0013])),
         Err(DecodeError::InvalidTlv)
+    );
+    assert_eq!(
+        check_capabilities_invariants(CapabilityInvariantView {
+            flags: CapabilityFlags(without_session(&[]).flags.0 | CapabilityFlags::OBSERVATION.0),
+            ..without_session(&[1, 2, 0x000f])
+        }),
+        Err(DecodeError::InvalidTlv),
+        "the read and bit 15 without the session family"
     );
 }
 
@@ -1944,11 +1966,11 @@ fn retired_message_ids_are_never_reused_or_advertised() {
             .all(|id| allocated_id(id, true))
     );
     assert!(
-        [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14]
+        [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0x0013]
             .into_iter()
             .all(|id| allocated_id(id, false))
     );
-    assert!(!allocated_id(0, false) && !allocated_id(15, false));
+    assert!(!allocated_id(0, false) && !allocated_id(0x0014, false));
 }
 
 fn session_capabilities<'a>(commands: &'a [u16], events: &'a [u16]) -> Capabilities<'a> {
@@ -4769,6 +4791,304 @@ fn spectrum_stream_round_trips_and_refuses_malformed_frames_both_ways() {
         let (wire, count) = edited(base, |fields| edit(fields));
         assert_eq!(
             codec.decode_spectrum_stream_reply(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
+}
+
+// --- OBSERVATION_READ (#1586 D1) ---
+
+fn observation_selection(strip: &str, section: controls::TapSection) -> ObservationReadSelection {
+    ObservationReadSelection {
+        strip_id: session::StableId::parse(strip).expect("strip"),
+        section,
+        tap_id: 1,
+        channels: ParameterChannel::Both,
+    }
+}
+
+fn observation_selections(count: usize) -> ObservationReadRequest {
+    let comp = session::StableId::parse("comp").expect("insert");
+    ObservationReadRequest {
+        selections: (0..count)
+            .map(|index| ObservationReadSelection {
+                tap_id: u32::try_from(index).expect("small"),
+                ..observation_selection("vocal", controls::TapSection::Inserts(comp.clone()))
+            })
+            .collect(),
+    }
+}
+
+fn ready_row(left: Option<f32>, right: Option<f32>) -> ObservationReadRow {
+    ObservationReadRow {
+        status: ObservationRowStatus::Ready,
+        armed: true,
+        arm_sample: 1_024,
+        arm_tag: 3,
+        window: Some(ObservationRowWindow {
+            first_sample: 1_024,
+            end_sample: 1_536,
+            sequence: 2,
+            blocks: 4,
+        }),
+        left,
+        right,
+        unit: ParameterUnit::Db,
+    }
+}
+
+fn encode_observation_page(codec: &ProtocolCodec, page: &ObservationReadPage<'_>) -> Vec<u8> {
+    let mut bytes = vec![0; codec.encoded_observation_read_page_len(page).expect("length")];
+    codec
+        .encode_observation_read_page(page, &mut bytes)
+        .expect("encode");
+    bytes
+}
+
+/// #1586 D1 and gate 3 (the codec half): a request of console and insert selections with each
+/// lane set, a request of 256 selections and pages of every status (ready with each lane set, an
+/// armed pending row, an unarmed row that render still runs armed) round-trip exactly, and the
+/// largest-frame measure equals the encoded frame of 1 and of 256 widest rows. An empty request,
+/// one of 257 selections, a selection address with a `control` field, a status or unit outside its
+/// table, a window field without the other three, a window or a lane on a row that is not ready, a
+/// ready row with no lane, unarmed, untagged or with a window that opened before the arm, and an
+/// empty or 257-row page are refused as `INVALID_FIELD`, on encode where the typed value can say
+/// it and on decode.
+///
+/// Red if the codec admits a read that is not 1 to 256 selections or a row whose window, lanes and
+/// arm state disagree with its status in either direction, or if the measure the session bounds a
+/// read's reply by drifts from the encoder.
+#[test]
+fn observation_read_round_trips_and_refuses_malformed_frames_both_ways() {
+    use std::borrow::Cow;
+    let codec = ProtocolCodec::default();
+    let encode_request = |value: &ObservationReadRequest| {
+        let mut bytes = vec![
+            0;
+            codec
+                .encoded_observation_read_request_len(value)
+                .expect("length")
+        ];
+        codec
+            .encode_observation_read_request(value, &mut bytes)
+            .expect("encode");
+        bytes
+    };
+    let two = ObservationReadRequest {
+        selections: vec![
+            ObservationReadSelection {
+                channels: ParameterChannel::Left,
+                ..observation_selection(
+                    "vocal",
+                    controls::TapSection::Console(
+                        session::StableId::parse("bus_comp").expect("slot"),
+                    ),
+                )
+            },
+            ObservationReadSelection {
+                tap_id: 2,
+                channels: ParameterChannel::Right,
+                ..observation_selection(
+                    "drums",
+                    controls::TapSection::Inserts(session::StableId::parse("gate").expect("id")),
+                )
+            },
+        ],
+    };
+    for request in [two.clone(), observation_selections(256)] {
+        let bytes = encode_request(&request);
+        assert_eq!(
+            codec.decode_observation_read_request(&bytes, top_level_count(&bytes)),
+            Ok(request)
+        );
+    }
+    for count in [0, 257] {
+        assert_eq!(
+            codec.encoded_observation_read_request_len(&observation_selections(count)),
+            Err(EncodeError::InvalidField),
+            "{count} selections"
+        );
+    }
+    let full = encode_request(&observation_selections(256));
+    let two_bytes = encode_request(&two);
+    type Edit = Box<dyn Fn(&mut Vec<Tlv>)>;
+    let requests: [(&str, &Vec<u8>, Edit); 3] = [
+        ("no selection", &two_bytes, Box::new(|f| remove(f, 1))),
+        (
+            "257 selections",
+            &full,
+            Box::new(|f| {
+                let again = f[0].clone();
+                insert_again(f, again);
+            }),
+        ),
+        (
+            "an address with a control",
+            &two_bytes,
+            Box::new(|f| insert(nth(nth(f, 1, 0), 1, 0), leaf(5, 3, &7_u32.to_le_bytes()))),
+        ),
+    ];
+    for (name, base, edit) in requests {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_observation_read_request(&wire, count),
+            Err(DecodeError::InvalidField),
+            "{name}"
+        );
+    }
+
+    // Replies.
+    let pending = ObservationReadRow {
+        status: ObservationRowStatus::Pending,
+        window: None,
+        left: None,
+        right: None,
+        ..ready_row(None, None)
+    };
+    let unarmed = ObservationReadRow {
+        status: ObservationRowStatus::Unarmed,
+        unit: ParameterUnit::Linear,
+        ..pending
+    };
+    let page = ObservationReadPage {
+        observed_sample: 2_048,
+        rows: Cow::Owned(vec![
+            ready_row(Some(-3.0), None),
+            ready_row(None, Some(-6.0)),
+            ready_row(Some(-1.5), Some(-2.5)),
+            pending,
+            unarmed,
+        ]),
+    };
+    let bytes = encode_observation_page(&codec, &page);
+    assert_eq!(
+        codec.decode_observation_read_page(&bytes, top_level_count(&bytes)),
+        Ok(page.clone())
+    );
+    for rows in [1, 256] {
+        let widest = ObservationReadPage {
+            observed_sample: 0,
+            rows: Cow::Owned(vec![ready_row(Some(0.0), Some(0.0)); rows]),
+        };
+        let frame = crate::TypedSuccessResponseFrame {
+            request_id: crate::RequestId::new(9).expect("nonzero"),
+            revision: crate::SessionRevision(3),
+            payload: crate::SuccessResponsePayload::ObservationRead(widest),
+        };
+        let mut output = vec![0; 1 << 17];
+        let written = codec
+            .encode_success_response_frame_into(&frame, &mut output)
+            .expect("frame");
+        assert_eq!(
+            codec.observation_read_largest_frame_len(rows),
+            Ok(written),
+            "{rows} rows"
+        );
+    }
+    assert_eq!(
+        codec.observation_read_largest_frame_len(257),
+        Err(EncodeError::InvalidField)
+    );
+    let refused_rows = [
+        ObservationReadRow {
+            window: None,
+            ..ready_row(Some(0.0), None)
+        },
+        ObservationReadRow {
+            window: ready_row(None, None).window,
+            ..pending
+        },
+        ObservationReadRow {
+            left: Some(0.0),
+            ..unarmed
+        },
+        ready_row(None, None),
+        ObservationReadRow {
+            armed: false,
+            ..ready_row(Some(0.0), None)
+        },
+        ObservationReadRow {
+            arm_tag: 0,
+            ..ready_row(Some(0.0), None)
+        },
+        ObservationReadRow {
+            arm_sample: 1_025,
+            ..ready_row(Some(0.0), None)
+        },
+    ];
+    for row in refused_rows {
+        assert_eq!(
+            codec.encoded_observation_read_page_len(&ObservationReadPage {
+                observed_sample: 0,
+                rows: Cow::Owned(vec![row]),
+            }),
+            Err(EncodeError::InvalidField),
+            "{row:?}"
+        );
+    }
+    for rows in [0, 257] {
+        assert_eq!(
+            codec.encoded_observation_read_page_len(&ObservationReadPage {
+                observed_sample: 0,
+                rows: Cow::Owned(vec![pending; rows]),
+            }),
+            Err(EncodeError::InvalidField),
+            "{rows} rows"
+        );
+    }
+    let many = encode_observation_page(
+        &codec,
+        &ObservationReadPage {
+            observed_sample: 0,
+            rows: Cow::Owned(vec![pending; 256]),
+        },
+    );
+    let rules: [(&str, &Vec<u8>, Edit); 9] = [
+        ("status 4", &bytes, Box::new(|f| set(nth(f, 2, 0), 1, &[4]))),
+        ("unit 7", &bytes, Box::new(|f| set(nth(f, 2, 0), 11, &[7]))),
+        (
+            "a window without its end",
+            &bytes,
+            Box::new(|f| remove(nth(f, 2, 0), 6)),
+        ),
+        (
+            "a pending row with a window",
+            &bytes,
+            Box::new(|f| set(nth(f, 2, 0), 1, &[1])),
+        ),
+        (
+            "an unarmed row with a lane",
+            &bytes,
+            Box::new(|f| {
+                let lane = leaf(9, 6, &0.0_f32.to_le_bytes());
+                insert(nth(f, 2, 4), lane);
+            }),
+        ),
+        (
+            "a ready row with no lane",
+            &bytes,
+            Box::new(|f| remove(nth(f, 2, 0), 9)),
+        ),
+        (
+            "a window before the arm",
+            &bytes,
+            Box::new(|f| set(nth(f, 2, 0), 3, &2_000_u64.to_le_bytes())),
+        ),
+        ("no row", &bytes, Box::new(|f| f.retain(|field| field.id != 2))),
+        (
+            "257 rows",
+            &many,
+            Box::new(|f| {
+                let again = f[1].clone();
+                insert_again(f, again);
+            }),
+        ),
+    ];
+    for (name, base, edit) in rules {
+        let (wire, count) = edited(base, |fields| edit(fields));
+        assert_eq!(
+            codec.decode_observation_read_page(&wire, count),
             Err(DecodeError::InvalidField),
             "{name}"
         );

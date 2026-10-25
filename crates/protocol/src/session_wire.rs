@@ -1343,7 +1343,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
 /// The address of an `Observe` edit (#1584 D1): the control list's address message with the owner
 /// kind `strip` and its ID, the section `console` or `inserts` and its slot ID, and neither
 /// `control` nor `lane`. The typed edit has no spelling for any other shape.
-fn tx_observe_address(
+pub(crate) fn tx_observe_address(
     sink: &mut dyn Sink,
     strip_id: &StableId,
     section: &controls::TapSection,
@@ -1370,7 +1370,7 @@ fn tx_observe_address(
 
 /// The decoder of [`tx_observe_address`]'s message: a route, VCA or session owner, an `own` or
 /// `builtins` section, a missing ID, or a `control` or `lane` field is `INVALID_FIELD`.
-fn parse_observe_address(
+pub(crate) fn parse_observe_address(
     message: Message<'_>,
 ) -> Result<(StableId, controls::TapSection), DecodeError> {
     use schema::control_address as a;

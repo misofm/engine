@@ -61,7 +61,11 @@ impl CapabilityFlags {
     /// The spectrum commands `SPECTRUM_CONFIGURE`, `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM`
     /// (#1594 D10, #1595 D8): set exactly when all three are listed.
     pub const SPECTRUM: Self = Self(1 << 16);
-    const KNOWN: u64 = (((1 << 15) - 1) & !(1 << 5)) | Self::SPECTRUM.0;
+    /// `OBSERVATION_READ` and the `Observe` edit (#1586 D6): set exactly when `0x000f` is listed,
+    /// which rides the session family.
+    pub const OBSERVATION: Self = Self(1 << 15);
+    const KNOWN: u64 =
+        (((1 << 15) - 1) & !(1 << 5)) | Self::OBSERVATION.0 | Self::SPECTRUM.0;
 }
 
 /// All 23 fields of a successful `CAPABILITIES_GET` response.
@@ -4544,6 +4548,10 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
         || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
+        // `OBSERVATION_READ` and bit 15 together, and both ride the session family, since the
+        // `Observe` edit that arms a tap is a transaction's (#1586 D6).
+        || ((value.flags.0 & CapabilityFlags::OBSERVATION.0 != 0) != has_command(0x000f))
+        || (has_command(0x000f) && !session_family)
         // The three spectrum commands are listed together or not at all, and bit 16 says so
         // (#1594 D10, #1595 D8a).
         || ((value.flags.0 & CapabilityFlags::SPECTRUM.0 != 0) != has_command(0x0010))
@@ -4570,10 +4578,10 @@ fn allocated_id(id: u16, event: bool) -> bool {
             && !crate::wire::is_retired_message_id(id)
     } else {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
-        // `0x0010` is `SPECTRUM_CONFIGURE` (#1594), `0x0011` and `0x0012` are `SPECTRUM_CAPTURE`
-        // and `SPECTRUM_STREAM` (#1595) and `0x0013` is `SESSION_REPLACE` (#1386); `0x000f` is
-        // claimed, not allocated.
-        matches!(id, 1..=14 | 0x0010..=0x0013) && !crate::wire::is_retired_message_id(id)
+        // `0x000f` is `OBSERVATION_READ` (#1586), `0x0010` is `SPECTRUM_CONFIGURE` (#1594),
+        // `0x0011` and `0x0012` are `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` (#1595) and `0x0013`
+        // is `SESSION_REPLACE` (#1386).
+        matches!(id, 1..=0x0013) && !crate::wire::is_retired_message_id(id)
     }
 }
 
@@ -5071,6 +5079,395 @@ fn checked_writer_len(sink: &dyn Sink, required: usize) -> Result<usize, EncodeE
         return Err(EncodeError::LimitExceeded);
     }
     Ok(required)
+}
+
+// --- OBSERVATION_READ (`0x000f`, #1586 D1) ---
+
+/// The most selections one `OBSERVATION_READ` names (#1586 D1). The codec refuses an empty
+/// request and one with more.
+pub const OBSERVATION_READ_MAXIMUM_SELECTIONS: usize = 256;
+
+/// One selection of an `OBSERVATION_READ`: a tap by its stable address and the lanes to return.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationReadSelection {
+    /// The track or submix, by its ID.
+    pub strip_id: session::StableId,
+    /// The console slot or the insert, by its ID.
+    pub section: controls::TapSection,
+    /// The effect-local tap ID (`ObservationDescriptor::id`).
+    pub tap_id: u32,
+    /// The lanes to return.
+    pub channels: ParameterChannel,
+}
+
+/// An `OBSERVATION_READ` request: 1 to [`OBSERVATION_READ_MAXIMUM_SELECTIONS`] selections.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationReadRequest {
+    /// The taps to read, in the order the reply's rows follow.
+    pub selections: Vec<ObservationReadSelection>,
+}
+
+control_code_table! {
+    /// The status of one `OBSERVATION_READ` row (#1586 D2, under #1585's status contract).
+    ObservationRowStatus {
+        /// The tap's last subscription is an arm render has not applied yet, or it is armed and
+        /// no complete window has closed since its arm, or the read tore on every attempt.
+        Pending = 1,
+        /// The tap is not armed, or its last subscription is a disarm.
+        Unarmed = 2,
+        /// A window that opened at or after the arm has closed: the row carries it.
+        Ready = 3,
+    }
+}
+
+/// The window of a ready row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationRowWindow {
+    /// The first absolute sample of the window; at or after the row's `arm_sample`.
+    pub first_sample: u64,
+    /// The exclusive end sample of the window.
+    pub end_sample: u64,
+    /// The window's sequence number in its slot.
+    pub sequence: u64,
+    /// The render blocks the window spans.
+    pub blocks: u32,
+}
+
+/// One row of an `OBSERVATION_READ` reply, for the selection at the same position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ObservationReadRow {
+    /// The row's status.
+    pub status: ObservationRowStatus,
+    /// Whether render has applied an arm the slot still holds: the slot's published state, or
+    /// `false` when render has not applied the tap's last record or the read tore.
+    pub armed: bool,
+    /// The sample of the arm render applied; `0` when none.
+    pub arm_sample: u64,
+    /// The tag of the record render applied last; `0` when none.
+    pub arm_tag: u64,
+    /// The window: present exactly when the status is ready.
+    pub window: Option<ObservationRowWindow>,
+    /// The left lane: present exactly when ready and asked for.
+    pub left: Option<f32>,
+    /// The right lane: present exactly when ready and asked for.
+    pub right: Option<f32>,
+    /// The tap's native unit.
+    pub unit: ParameterUnit,
+}
+
+/// The success reply of an `OBSERVATION_READ`: one row per selection, in selection order. The
+/// rows borrow the session's row table when it encodes and own them when decoded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObservationReadPage<'a> {
+    /// The render sample at the read: the end of the last block render completed.
+    pub observed_sample: u64,
+    /// The rows: 1 to [`OBSERVATION_READ_MAXIMUM_SELECTIONS`].
+    pub rows: std::borrow::Cow<'a, [ObservationReadRow]>,
+}
+
+const fn observation_count_is_valid(count: usize) -> bool {
+    count != 0 && count <= OBSERVATION_READ_MAXIMUM_SELECTIONS
+}
+
+/// A row's presence rules, both directions: a window and lanes exactly when ready; a ready row is
+/// armed, tagged, and its window opened at or after the arm and is not empty.
+fn observation_row_is_valid(row: &ObservationReadRow) -> bool {
+    match (row.status, row.window) {
+        (ObservationRowStatus::Ready, Some(window)) => {
+            row.armed
+                && row.arm_tag != 0
+                && window.first_sample >= row.arm_sample
+                && window.end_sample > window.first_sample
+                && window.blocks != 0
+                && (row.left.is_some() || row.right.is_some())
+        }
+        (ObservationRowStatus::Ready, None) | (_, Some(_)) => false,
+        (_, None) => row.left.is_none() && row.right.is_none(),
+    }
+}
+
+pub(crate) fn write_observation_read_request(
+    sink: &mut dyn Sink,
+    value: &ObservationReadRequest,
+) -> Result<(), EncodeError> {
+    use schema::{observation_read_request as r, observation_selection as s};
+    if !observation_count_is_valid(value.selections.len()) {
+        return Err(EncodeError::InvalidField);
+    }
+    let count = r::SPEC.field_count(&[(r::SELECTION, value.selections.len())])?;
+    sink.check_field_count(count)?;
+    for selection in &value.selections {
+        sink.nested_spec(r::SELECTION, &mut |sink| {
+            sink.message_header(s::SPEC.field_count(&[])?)?;
+            sink.nested_spec(s::ADDRESS, &mut |sink| {
+                crate::session_wire::tx_observe_address(
+                    sink,
+                    &selection.strip_id,
+                    &selection.section,
+                )
+            })?;
+            write_spec!(sink, s::TAP_ID, &selection.tap_id.to_le_bytes())?;
+            write_spec!(
+                sink,
+                s::CHANNELS,
+                &[schema::parameter_channel_wire(selection.channels)]
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn decode_observation_read_request(
+    codec: &ProtocolCodec,
+    message: Message<'_>,
+) -> Result<ObservationReadRequest, DecodeError> {
+    use schema::{observation_read_request as r, observation_selection as s};
+    let limits = codec.limits();
+    let message = message.schema_spec(&r::SPEC)?;
+    let mut selections = Vec::new();
+    for selection in values_spec!(message, r::SELECTION)? {
+        if selections.len() == OBSERVATION_READ_MAXIMUM_SELECTIONS {
+            return Err(DecodeError::InvalidField);
+        }
+        let selection = Message::nested_at_depth(selection, limits, 1)?.schema_spec(&s::SPEC)?;
+        let (strip_id, section) = crate::session_wire::parse_observe_address(
+            selection.nested_value(one_spec!(selection, s::ADDRESS)?)?,
+        )?;
+        selections.push(ObservationReadSelection {
+            strip_id,
+            section,
+            tap_id: read_u32(one_spec!(selection, s::TAP_ID)?)?,
+            channels: schema::parameter_channel_from_wire(read_u8(one_spec!(
+                selection,
+                s::CHANNELS
+            )?)?)
+            .map_err(|_| DecodeError::InvalidField)?,
+        });
+    }
+    if selections.is_empty() {
+        return Err(DecodeError::InvalidField);
+    }
+    Ok(ObservationReadRequest { selections })
+}
+
+pub(crate) fn write_observation_read_page(
+    sink: &mut dyn Sink,
+    value: &ObservationReadPage<'_>,
+) -> Result<(), EncodeError> {
+    use schema::{observation_read_page as p, observation_row as r};
+    if !observation_count_is_valid(value.rows.len())
+        || !value.rows.iter().all(observation_row_is_valid)
+    {
+        return Err(EncodeError::InvalidField);
+    }
+    let count = p::SPEC.field_count(&[(p::ROW, value.rows.len())])?;
+    sink.check_field_count(count)?;
+    write_spec!(
+        sink,
+        p::OBSERVED_SAMPLE,
+        &value.observed_sample.to_le_bytes()
+    )?;
+    for row in value.rows.iter() {
+        sink.nested_spec(p::ROW, &mut |sink| {
+            let window = usize::from(row.window.is_some());
+            sink.message_header(r::SPEC.field_count(&[
+                (r::FIRST_SAMPLE, window),
+                (r::END_SAMPLE, window),
+                (r::SEQUENCE, window),
+                (r::BLOCKS, window),
+                (r::LEFT, usize::from(row.left.is_some())),
+                (r::RIGHT, usize::from(row.right.is_some())),
+            ])?)?;
+            write_spec!(sink, r::STATUS, &[row.status.code()])?;
+            write_spec!(sink, r::ARMED, &[u8::from(row.armed)])?;
+            write_spec!(sink, r::ARM_SAMPLE, &row.arm_sample.to_le_bytes())?;
+            write_spec!(sink, r::ARM_TAG, &row.arm_tag.to_le_bytes())?;
+            if let Some(window) = row.window {
+                write_spec!(sink, r::FIRST_SAMPLE, &window.first_sample.to_le_bytes())?;
+                write_spec!(sink, r::END_SAMPLE, &window.end_sample.to_le_bytes())?;
+                write_spec!(sink, r::SEQUENCE, &window.sequence.to_le_bytes())?;
+                write_spec!(sink, r::BLOCKS, &window.blocks.to_le_bytes())?;
+            }
+            if let Some(left) = row.left {
+                write_spec!(sink, r::LEFT, &left.to_le_bytes())?;
+            }
+            if let Some(right) = row.right {
+                write_spec!(sink, r::RIGHT, &right.to_le_bytes())?;
+            }
+            write_spec!(sink, r::UNIT, &[schema::parameter_unit_wire(row.unit)])
+        })?;
+    }
+    Ok(())
+}
+
+fn decode_observation_read_page(
+    codec: &ProtocolCodec,
+    message: Message<'_>,
+) -> Result<ObservationReadPage<'static>, DecodeError> {
+    use schema::{observation_read_page as p, observation_row as r};
+    let limits = codec.limits();
+    let message = message.schema_spec(&p::SPEC)?;
+    let observed_sample = read_u64(one_spec!(message, p::OBSERVED_SAMPLE)?)?;
+    let mut rows = Vec::new();
+    for row in values_spec!(message, p::ROW)? {
+        if rows.len() == OBSERVATION_READ_MAXIMUM_SELECTIONS {
+            return Err(DecodeError::InvalidField);
+        }
+        let row = Message::nested_at_depth(row, limits, 1)?.schema_spec(&r::SPEC)?;
+        let word = |spec: schema::FieldSpec| optional_spec!(row, spec)?.map(read_u64).transpose();
+        let lane = |spec: schema::FieldSpec| optional_spec!(row, spec)?.map(read_f32).transpose();
+        let blocks = optional_spec!(row, r::BLOCKS)?.map(read_u32).transpose()?;
+        // The four window fields are present together or not at all.
+        let window = match (
+            word(r::FIRST_SAMPLE)?,
+            word(r::END_SAMPLE)?,
+            word(r::SEQUENCE)?,
+            blocks,
+        ) {
+            (Some(first_sample), Some(end_sample), Some(sequence), Some(blocks)) => {
+                Some(ObservationRowWindow {
+                    first_sample,
+                    end_sample,
+                    sequence,
+                    blocks,
+                })
+            }
+            (None, None, None, None) => None,
+            _ => return Err(DecodeError::InvalidField),
+        };
+        let value = ObservationReadRow {
+            status: ObservationRowStatus::from_code(read_u8(one_spec!(row, r::STATUS)?)?)?,
+            armed: read_bool(one_spec!(row, r::ARMED)?)?,
+            arm_sample: read_u64(one_spec!(row, r::ARM_SAMPLE)?)?,
+            arm_tag: read_u64(one_spec!(row, r::ARM_TAG)?)?,
+            window,
+            left: lane(r::LEFT)?,
+            right: lane(r::RIGHT)?,
+            unit: schema::parameter_unit_from_wire(read_u8(one_spec!(row, r::UNIT)?)?)
+                .map_err(|_| DecodeError::InvalidField)?,
+        };
+        if !observation_row_is_valid(&value) {
+            return Err(DecodeError::InvalidField);
+        }
+        rows.push(value);
+    }
+    if rows.is_empty() {
+        return Err(DecodeError::InvalidField);
+    }
+    Ok(ObservationReadPage {
+        observed_sample,
+        rows: std::borrow::Cow::Owned(rows),
+    })
+}
+
+impl ProtocolCodec {
+    /// Return the exact caller-buffer size of an `OBSERVATION_READ` request.
+    pub fn encoded_observation_read_request_len(
+        &self,
+        value: &ObservationReadRequest,
+    ) -> Result<usize, EncodeError> {
+        let mut sink = CountSink::new(self.limits());
+        write_observation_read_request(&mut sink, value)?;
+        checked_sink_len(self, &mut sink)
+    }
+
+    /// Encode an `OBSERVATION_READ` request without allocation.
+    pub fn encode_observation_read_request(
+        &self,
+        value: &ObservationReadRequest,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let required = self.encoded_observation_read_request_len(value)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_observation_read_request(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode an `OBSERVATION_READ` request.
+    pub fn decode_observation_read_request(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<ObservationReadRequest, DecodeError> {
+        decode_observation_read_request(self, Message::top_level(payload, count, self.limits())?)
+    }
+
+    /// Return the exact caller-buffer size of an `OBSERVATION_READ` reply.
+    pub fn encoded_observation_read_page_len(
+        &self,
+        value: &ObservationReadPage<'_>,
+    ) -> Result<usize, EncodeError> {
+        let mut sink = CountSink::new(self.limits());
+        write_observation_read_page(&mut sink, value)?;
+        checked_sink_len(self, &mut sink)
+    }
+
+    /// Encode an `OBSERVATION_READ` reply without allocation.
+    pub fn encode_observation_read_page(
+        &self,
+        value: &ObservationReadPage<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let required = self.encoded_observation_read_page_len(value)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_observation_read_page(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode an `OBSERVATION_READ` reply.
+    pub fn decode_observation_read_page(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<ObservationReadPage<'static>, DecodeError> {
+        decode_observation_read_page(self, Message::top_level(payload, count, self.limits())?)
+    }
+
+    /// The largest complete response frame, in bytes, of an `OBSERVATION_READ` of `selections`
+    /// taps: every row ready with both lanes, the widest a row encodes. Measured by the encoder
+    /// itself, so it cannot drift from it, and exact for that reply, since every row field has a
+    /// fixed width. Allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::InvalidField`] for 0 or more than [`OBSERVATION_READ_MAXIMUM_SELECTIONS`]
+    /// selections; [`EncodeError::LimitExceeded`] when the payload exceeds this codec's frame
+    /// limit.
+    pub fn observation_read_largest_frame_len(
+        &self,
+        selections: usize,
+    ) -> Result<usize, EncodeError> {
+        const WIDEST: ObservationReadRow = ObservationReadRow {
+            status: ObservationRowStatus::Ready,
+            armed: true,
+            arm_sample: 0,
+            arm_tag: 1,
+            window: Some(ObservationRowWindow {
+                first_sample: 0,
+                end_sample: 1,
+                sequence: 0,
+                blocks: 1,
+            }),
+            left: Some(0.0),
+            right: Some(0.0),
+            unit: ParameterUnit::Db,
+        };
+        static ROWS: [ObservationReadRow; OBSERVATION_READ_MAXIMUM_SELECTIONS] =
+            [WIDEST; OBSERVATION_READ_MAXIMUM_SELECTIONS];
+        let rows = ROWS.get(..selections).ok_or(EncodeError::InvalidField)?;
+        self.encoded_observation_read_page_len(&ObservationReadPage {
+            observed_sample: 0,
+            rows: std::borrow::Cow::Borrowed(rows),
+        })?
+        .checked_add(crate::OUTER_HEADER_BYTES)
+        .ok_or(EncodeError::LimitExceeded)
+    }
 }
 
 #[cfg(test)]

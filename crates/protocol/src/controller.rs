@@ -23,7 +23,7 @@ use crate::{
     CounterTelemetryRecord, CounterValue, CountersRequest, DecodeError, DecodeScratch,
     DecodedCommandPayload, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
     EditPath, EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord,
-    NonOkResponse, ObservationEnded, ObservationTapKey, PreparedSessionTransaction, ProtocolCodec,
+    NonOkResponse, ObservationEnded, ObservationReadPage, ObservationReadRequest, ObservationTapKey, PreparedSessionTransaction, ProtocolCodec,
     ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
     ResponseResult, SampleTime, SessionCommitted, SessionEdit, SessionReplaceRequest,
     SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, SpectrumCaptureReply,
@@ -205,6 +205,10 @@ pub struct ProviderFeatures {
     /// #1594 D10, #1595 D8): a host whose session serves the spectrum reads on its own transport
     /// advertises the three together.
     pub spectrum: bool,
+    /// `OBSERVATION_READ` (capability flag bit 15, #1586 D6): a host whose session serves the
+    /// read and the `Observe` edit on its own transport advertises it. It rides the session
+    /// family, so it needs `session_events`.
+    pub observation: bool,
 }
 
 impl ProviderFeatures {
@@ -220,6 +224,7 @@ impl ProviderFeatures {
         transport_events: true,
         observation_events: true,
         spectrum: true,
+        observation: true,
     };
     /// Disable every optional provider and event family.
     pub const NONE: Self = Self {
@@ -233,6 +238,7 @@ impl ProviderFeatures {
         transport_events: false,
         observation_events: false,
         spectrum: false,
+        observation: false,
     };
 }
 
@@ -1129,6 +1135,11 @@ pub enum ControlCommand<'a> {
     SpectrumStream {
         request: SpectrumStreamRequest,
     },
+    /// `OBSERVATION_READ` (#1586): executed by the session, refused here as
+    /// [`Self::SpectrumConfigure`] is.
+    ObservationRead {
+        request: ObservationReadRequest,
+    },
 }
 
 impl ControlCommand<'_> {
@@ -1159,6 +1170,7 @@ impl ControlCommand<'_> {
             Self::SpectrumConfigure { .. } => MessageId::SpectrumConfigure,
             Self::SpectrumCapture { .. } => MessageId::SpectrumCapture,
             Self::SpectrumStream { .. } => MessageId::SpectrumStream,
+            Self::ObservationRead { .. } => MessageId::ObservationRead,
         }
     }
 }
@@ -1322,6 +1334,8 @@ pub enum SessionCommand {
     SpectrumCapture(SpectrumCaptureRequest),
     /// `SPECTRUM_STREAM` (#1595).
     SpectrumStream(SpectrumStreamRequest),
+    /// `OBSERVATION_READ` (#1586).
+    ObservationRead(ObservationReadRequest),
 }
 
 /// The success reply of a command the session executed. A reply borrows what it carries (a
@@ -1334,6 +1348,8 @@ pub enum SessionCommandReply<'a> {
     SpectrumCaptured(SpectrumCaptureReply<'a>),
     /// The `SPECTRUM_STREAM` reply.
     SpectrumStreamed(SpectrumStreamReply<'a>),
+    /// The `OBSERVATION_READ` reply.
+    ObservationRead(ObservationReadPage<'a>),
 }
 
 /// A command the session executes, decoded and checked, whose replay entry is planned against
@@ -1907,6 +1923,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumStream(request) => {
                 ControlCommand::SpectrumStream { request }
             }
+            DecodedCommandPayload::ObservationRead(request) => {
+                ControlCommand::ObservationRead { request }
+            }
         };
         Ok(self.process(ControllerRequest {
             request_id: header.request_id,
@@ -2132,10 +2151,13 @@ impl<P: ControlProvider> ProtocolController<P> {
         preparation: Preparation,
         observe: crate::ObserveContext<'_>,
     ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        // An `OBSERVATION_READ` the endpoint does not advertise takes the one-call path, which
+        // refuses it as `UNAVAILABLE` (#1586 D6).
         if matches!(
             header.message_id,
             MessageId::SpectrumConfigure | MessageId::SpectrumCapture | MessageId::SpectrumStream
-        ) {
+        ) || (header.message_id == MessageId::ObservationRead && self.serves_observation_read())
+        {
             return self.prepare_session_command(input, scratch, output_capacity, header);
         }
         match self.plan_structural_command(
@@ -2200,6 +2222,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
                 DecodedCommandPayload::SpectrumStream(request) => {
                     SessionCommand::SpectrumStream(request)
+                }
+                DecodedCommandPayload::ObservationRead(request) => {
+                    SessionCommand::ObservationRead(request)
                 }
                 _ => {
                     let outcome = refusal(self, StatusCode::Internal);
@@ -2300,6 +2325,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                     output,
                 );
             }
+            SessionCommandReply::ObservationRead(value) => {
+                return self.complete_session_borrowed(
+                    prepared,
+                    SuccessResponsePayload::ObservationRead(value),
+                    output,
+                );
+            }
         };
         let outcome = self.ok(body);
         self.complete_session_outcome(prepared, outcome, output)
@@ -2354,6 +2386,36 @@ impl<P: ControlProvider> ProtocolController<P> {
         // `complete_session_command_refused_backpressure`, never the replay-cache default.
         debug_assert_ne!(status, StatusCode::Backpressure);
         let outcome = self.non_ok(status, None);
+        self.complete_session_refusal(prepared, outcome, code, output)
+    }
+
+    /// [`Self::complete_session_command_refused`] whose one diagnostic names the request's
+    /// repeated `field` at `index` (`field[index]`), as an `OBSERVATION_READ` refusal names the
+    /// selection it found wrong (#1586 D4).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::complete_session_command`].
+    pub fn complete_session_command_refused_at(
+        &mut self,
+        prepared: PreparedSessionCommand,
+        status: StatusCode,
+        code: &str,
+        field: &str,
+        index: u64,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        debug_assert_ne!(status, StatusCode::Ok);
+        debug_assert_ne!(status, StatusCode::Backpressure);
+        let mut outcome = self.non_ok(status, None);
+        if let Body::NonOk(payload) = &mut outcome.body
+            && let Some(diagnostic) = payload.diagnostics.first_mut()
+        {
+            diagnostic.path = vec![
+                crate::PathSegment::Field(field.to_owned()),
+                crate::PathSegment::Index(index),
+            ];
+        }
         self.complete_session_refusal(prepared, outcome, code, output)
     }
 
@@ -3217,6 +3279,9 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumStream(request) => {
                 ControlCommand::SpectrumStream { request }
             }
+            DecodedCommandPayload::ObservationRead(request) => {
+                ControlCommand::ObservationRead { request }
+            }
         };
         self.execute(&ControllerRequest {
             request_id: header.request_id,
@@ -3916,6 +3981,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 features.controls
             }
             ControlCommand::ResponseGet { .. } => features.response,
+            ControlCommand::ObservationRead { .. } => self.serves_observation_read(),
             ControlCommand::TransportGet => features.transport,
             ControlCommand::TransportSet { .. } => features.transport && features.transport_events,
             ControlCommand::CountersGet { .. } => features.counters,
@@ -4021,7 +4087,8 @@ impl<P: ControlProvider> ProtocolController<P> {
             // The session executes it (#1594 D9); this path has none.
             ControlCommand::SpectrumConfigure { .. }
             | ControlCommand::SpectrumCapture { .. }
-            | ControlCommand::SpectrumStream { .. } => self.non_ok(StatusCode::Unavailable, None),
+            | ControlCommand::SpectrumStream { .. }
+            | ControlCommand::ObservationRead { .. } => self.non_ok(StatusCode::Unavailable, None),
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
                     Ok(page) => match self.fit_control_list(page) {
@@ -4470,15 +4537,23 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         self.non_ok_value(status, self.bounded_non_ok_diagnostics(&diagnostics))
     }
+    /// Whether the endpoint serves `OBSERVATION_READ` (#1586 D6): the feature, on the session
+    /// family, since the `Observe` edit that arms a tap is a transaction's.
+    const fn serves_observation_read(&self) -> bool {
+        self.config.provider_features.observation
+            && self.config.provider_features.session_events
+            && self.config.maximum_transaction_edits != 0
+    }
+
     fn capability_registry(&self) -> CapabilitySet {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
         let mut commands = [0_u16; 16];
         let mut command_len = 0_usize;
-        // `0x000f` is claimed by an open spec and never advertised until it lands. The three
-        // spectrum commands are listed together, with bit 16, or not at all (#1595 D8).
-        for id in (1_u16..=14).chain([0x0010, 0x0011, 0x0012, 0x0013]) {
+        // The three spectrum commands are listed together, with bit 16, or not at all (#1595 D8);
+        // `OBSERVATION_READ` with bit 15, on the session family (#1586 D6).
+        for id in 1_u16..=0x0013 {
             let enabled = match id {
                 // The retired IDs are never advertised.
                 id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
@@ -4489,6 +4564,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 11 => features.diagnostics,
                 12 | 13 => features.controls,
                 14 => features.response,
+                0x000f => self.serves_observation_read(),
                 0x0010..=0x0012 => features.spectrum,
                 0x0013 => session_transactions && self.config.document_replace.is_some(),
                 _ => true,
@@ -4544,6 +4620,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if features.response {
             flags |= 1 << 14;
+        }
+        if self.serves_observation_read() {
+            flags |= CapabilityFlags::OBSERVATION.0;
         }
         if features.spectrum {
             flags |= CapabilityFlags::SPECTRUM.0;
