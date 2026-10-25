@@ -1551,6 +1551,24 @@ impl Rig {
         }
     }
 
+    /// The `observe_arm_tags` of the success reply of `length` bytes (#1585 D5).
+    fn observe_arm_tags(&self, length: usize) -> Vec<u64> {
+        let mut fields = vec![0_u16; 4_096];
+        match ProtocolCodec::default()
+            .decode_typed_response(
+                self.session.command_response(length),
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("a transaction reply")
+        {
+            protocol::DecodedTypedResponseFrame::Success {
+                payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+                ..
+            } => applied.observe_arm_tags,
+            _ => panic!("a transaction success"),
+        }
+    }
+
     /// The records queued so far on `strip`'s `comp` insert's observation queue.
     fn queued(&self, strip: &str) -> u64 {
         self.session.effect_producers()[self.position(strip)].observe_success_count()
@@ -1840,14 +1858,18 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         refused("observation.address.unknown", 0)
     );
     assert_eq!(rig.revision(), revision);
-    assert_eq!(
-        rig.transact(&[
+    let length = rig
+        .apply(&[
             put_compressor("comp2", "comp-b"),
             observe_tap("comp2", "comp-b", 1, true, WINDOW_BLOCKS),
             observe("comp3", true, WINDOW_BLOCKS),
-        ]),
+        ])
+        .expect("a reply");
+    assert_eq!(
+        rig.reply(length),
         Reply::Applied(protocol::EditPath::Rebuild)
     );
+    let replied = rig.observe_arm_tags(length);
     assert_eq!(rig.revision(), revision + 1);
     let new_key = TapKey {
         strip: StableId::parse("comp2").expect("strip"),
@@ -1881,6 +1903,12 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         .find(|binding| binding.key == new_key)
         .map(|binding| binding.arm_tag);
     assert_eq!(bound, Some(new_tag), "the binding holds the record's tag");
+    // #1585 D5: the reply names the tags the records were queued with, in edit order.
+    assert_eq!(
+        replied,
+        [new_tag, issued(&rig, "comp3", "comp")],
+        "the reply's tags are the queued records'"
+    );
     // The swap block (block 5) adopts the successor, then three more: one window each.
     let adopted_at = rig.block * 128;
     rig.render_blocks(4);
