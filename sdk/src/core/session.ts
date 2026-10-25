@@ -8,6 +8,7 @@ import { normalizeControlSmoothing } from "../internal/control-smoothing.ts";
 import { CODE, f32, fail, freeze, knownKeys, nameList } from "../internal/validation.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type {
+  AutomationSegment,
   AutomationSpec,
   AutomationTarget,
   BuiltinsSpec,
@@ -706,6 +707,86 @@ function normalizeRouteDestination(value: RouteDestination): ModelRecord {
     : freeze({ kind: "output_input", output_id: value.outputId });
 }
 
+/**
+ * The graph entities a route's endpoints are resolved against: the session builder's
+ * declarations, or a transaction's working copy of them (#1385).
+ * @internal
+ */
+export interface RouteGraph {
+  readonly tracks: ReadonlySet<string>;
+  readonly submixes: ReadonlySet<string>;
+  readonly outputs: ReadonlySet<string>;
+}
+
+/**
+ * A route source's record, refused unless it is a well-formed tap of a declared track or submix.
+ * Shared by `SessionBuilder.route` and the transaction builder's route edits (#1385).
+ * @internal
+ */
+export function normalizeRouteSourceSpec(value: RouteSource, graph: RouteGraph, path: string): ModelRecord {
+  validateRouteSource(value, path);
+  if (value.kind === "track") {
+    if (!graph.tracks.has(value.trackId)) fail(`${path}.trackId`, `'${value.trackId}' is not a declared track`);
+  } else if (!graph.submixes.has(value.submixId)) {
+    fail(`${path}.submixId`, `'${value.submixId}' is not a declared submix`);
+  }
+  return normalizeRouteSource(value);
+}
+
+/**
+ * A route destination's record, refused unless it names a declared submix or output.
+ * @internal
+ */
+export function normalizeRouteDestinationSpec(
+  value: RouteDestination,
+  graph: RouteGraph,
+  path: string,
+): ModelRecord {
+  validateRouteDestination(value, path);
+  if (value.kind === "submix_input") {
+    if (!graph.submixes.has(value.submixId)) {
+      fail(`${path}.submixId`, `'${value.submixId}' is not a declared submix`);
+    }
+  } else if (!graph.outputs.has(value.outputId)) {
+    fail(`${path}.outputId`, `'${value.outputId}' is not a declared output`);
+  }
+  return normalizeRouteDestination(value);
+}
+
+/** The refusal of a following route into the output (#1218 D5), at `path`. @internal */
+export function refuseOutputFollowsMute(path: string): never {
+  fail(path, "follows_mute applies only to a route into a submix", CODE.invalidEnum);
+}
+
+/**
+ * One route's normalized record: both endpoints resolved against `graph`, the matrix and gain in
+ * their domains, and `follows_mute` defaulted as #1218 D5 says. Shared by `SessionBuilder.route`
+ * and the transaction builder's `upsertRoute` (#1385); `path` is `verb("id")`.
+ * @internal
+ */
+export function normalizeRoute(spec: RouteSpec, graph: RouteGraph, path: string): ModelRecord {
+  const source = normalizeRouteSourceSpec(spec.source, graph, `${path}.source`);
+  const destination = normalizeRouteDestinationSpec(spec.destination, graph, `${path}.destination`);
+  const channelMatrix = routeMatrixRecord(spec.matrix ?? IDENTITY_MATRIX, `${path}.matrix`);
+  const gainDb = routeNumber(spec.gainDb ?? 0, ROUTE_GAIN_DB_DOMAIN, `${path}.gainDb`);
+  const mute = spec.mute === undefined ? false : bool(spec.mute, `${path}.mute`);
+  let followsMute = spec.destination.kind === "submix_input";
+  if (spec.followsMute !== undefined) {
+    followsMute = bool(spec.followsMute, `${path}.followsMute`);
+    if (followsMute && spec.destination.kind !== "submix_input") refuseOutputFollowsMute(`${path}.followsMute`);
+  }
+  return freeze({
+    id: spec.id,
+    source,
+    destination,
+    channel_matrix: channelMatrix,
+    gain_db: gainDb,
+    mute,
+    // #1218 D5: a send follows its source's mute by default; a route into the output never does.
+    follows_mute: followsMute,
+  });
+}
+
 // -------------------------------------------------------------------------------------------
 // The builder.
 // -------------------------------------------------------------------------------------------
@@ -731,8 +812,11 @@ export interface TrackEntry {
   readonly spec: TrackSpec;
 }
 
-/** A declared submix: its strip, or `undefined` for the transparent strip `.submix(id)` declares. */
-interface SubmixEntry {
+/**
+ * A declared submix: its strip, or `undefined` for the transparent strip `.submix(id)` declares.
+ * @internal
+ */
+export interface SubmixEntry {
   readonly id: string;
   readonly spec: SubmixSpec | undefined;
 }
@@ -768,7 +852,7 @@ interface BuilderState {
 
 /**
  * What a builder has declared that an edit of it is validated against (#1383): the rate, the
- * sources, the console slots, the tracks, and the other graph IDs (submixes, VCAs, outputs).
+ * sources, the console slots and the tracks. The rest it reads from the builder's model.
  * @internal
  */
 export interface BuilderContext {
@@ -776,7 +860,6 @@ export interface BuilderContext {
   readonly sources: readonly SourceEntry[];
   readonly slots: readonly ConsoleSlotEntry[];
   readonly tracks: readonly TrackEntry[];
-  readonly otherGraphIds: ReadonlySet<string>;
 }
 
 let readContext: (builder: SessionBuilder) => BuilderContext;
@@ -801,11 +884,6 @@ export class SessionBuilder {
         sources: state.sources,
         slots: state.console ?? [],
         tracks: state.tracks,
-        otherGraphIds: new Set([
-          ...state.submixes.map((entry) => entry.id),
-          ...state.vcas.map((entry) => entry.id),
-          ...state.outputs,
-        ]),
       };
     };
   }
@@ -852,19 +930,7 @@ export class SessionBuilder {
           + "are checked against its slots",
       );
     }
-    if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
-      fail(path, "expected { preInsert, postInsert }");
-    }
-    knownKeys(spec, CONSOLE_KEYS, path, "the session console");
-    const slots: ConsoleSlotEntry[] = [];
-    for (const [section, key] of [["pre_insert", "preInsert"], ["post_insert", "postInsert"]] as const) {
-      const declared = spec[key] ?? [];
-      if (!Array.isArray(declared)) fail(`${path}.${key}`, "expected an array of console slots");
-      declared.forEach((raw: ConsoleSlotSpec, index: number) => {
-        slots.push(consoleSlot(raw, section, `${path}.${key}[${index}]`, slots));
-      });
-    }
-    return this.#next({ console: freeze(slots) });
+    return this.#next({ console: normalizeConsoleSlots(spec, path) });
   }
 
   /**
@@ -897,11 +963,7 @@ export class SessionBuilder {
       fail(`${path}.id`, "tracks, submixes, VCAs and outputs share one ID namespace");
     }
     if (spec !== undefined) {
-      if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
-        fail(path, "expected a submix strip specification");
-      }
-      knownKeys(spec, SUBMIX_KEYS, path, "a submix strip");
-      this.#validateStrip(spec, path);
+      normalizeSubmix({ id, spec }, this.#state.console ?? [], this.#state.options.sampleRateHz);
     }
     return this.#next({
       submixes: [...this.#state.submixes, freeze({ id, spec: spec === undefined ? undefined : { ...spec } })],
@@ -932,33 +994,12 @@ export class SessionBuilder {
     if (this.#graphIds().has(id)) {
       fail(`${path}.id`, "tracks, submixes, VCAs and outputs share one ID namespace", CODE.duplicateId);
     }
-    if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
-      fail(path, "expected { fader?, members }");
-    }
-    knownKeys(spec, VCA_KEYS, path, "a VCA");
-    if (!Array.isArray(spec.members)) fail(`${path}.members`, "expected an array of member IDs", CODE.wrongType);
     const strips = new Set([
       ...this.#state.tracks.map((entry) => entry.id),
       ...this.#state.submixes.map((entry) => entry.id),
       ...this.#state.vcas.map((entry) => entry.id),
     ]);
-    const members: string[] = [];
-    spec.members.forEach((member: unknown, index: number) => {
-      const memberPath = `${path}.members[${index}]`;
-      stableId(member, memberPath);
-      if (members.includes(member as string)) {
-        fail(memberPath, `'${String(member)}' is already a member of this VCA`, CODE.duplicateId);
-      }
-      if (!strips.has(member as string)) {
-        fail(
-          memberPath,
-          `'${String(member)}' is not a declared track, submix or VCA; declare a member before the VCA that lists it`,
-          CODE.missingEntity,
-        );
-      }
-      members.push(member as string);
-    });
-    const fader = normalizeVcaFader(spec.fader, `${path}.fader`);
+    const { fader, members } = normalizeVca(spec, strips, path);
     return this.#next({ vcas: [...this.#state.vcas, freeze({ id, fader, members })] });
   }
 
@@ -969,29 +1010,7 @@ export class SessionBuilder {
     if (this.#state.routes.some((route) => route.id === spec.id)) {
       fail(`${path}.id`, "a route with this ID is already declared");
     }
-    validateRouteSource(spec.source, `${path}.source`);
-    this.#resolveRouteSource(spec.source, `${path}.source`);
-    validateRouteDestination(spec.destination, `${path}.destination`);
-    if (spec.destination.kind === "submix_input") {
-      if (!this.#hasSubmix(spec.destination.submixId)) {
-        fail(`${path}.destination.submixId`, `'${spec.destination.submixId}' is not a declared submix`);
-      }
-    } else if (!this.#state.outputs.includes(spec.destination.outputId)) {
-      fail(`${path}.destination.outputId`, `'${spec.destination.outputId}' is not a declared output`);
-    }
-    if (spec.matrix !== undefined) {
-      for (const key of ["ll", "lr", "rl", "rr"] as const) {
-        routeNumber(spec.matrix[key], ROUTE_COEFFICIENT_DOMAIN, `${path}.matrix.${key}`);
-      }
-    }
-    if (spec.gainDb !== undefined) routeNumber(spec.gainDb, ROUTE_GAIN_DB_DOMAIN, `${path}.gainDb`);
-    if (spec.mute !== undefined) bool(spec.mute, `${path}.mute`);
-    if (spec.followsMute !== undefined) {
-      bool(spec.followsMute, `${path}.followsMute`);
-      if (spec.followsMute && spec.destination.kind !== "submix_input") {
-        fail(`${path}.followsMute`, "follows_mute applies only to a route into a submix", CODE.invalidEnum);
-      }
-    }
+    normalizeRoute(spec, routeGraph(this.#state), path);
     return this.#next({ routes: [...this.#state.routes, freeze({ ...spec })] });
   }
 
@@ -1052,24 +1071,8 @@ export class SessionBuilder {
     ]);
   }
 
-  #hasSubmix(id: string): boolean {
-    return this.#state.submixes.some((entry) => entry.id === id);
-  }
-
   #source(id: string): SourceEntry | undefined {
     return this.#state.sources.find((entry) => entry.id === id);
-  }
-
-  #resolveRouteSource(source: RouteSource, path: string): void {
-    if (source.kind === "track") {
-      if (!this.#state.tracks.some((entry) => entry.id === source.trackId)) {
-        fail(`${path}.trackId`, `'${source.trackId}' is not a declared track`);
-      }
-      return;
-    }
-    if (!this.#hasSubmix(source.submixId)) {
-      fail(`${path}.submixId`, `'${source.submixId}' is not a declared submix`);
-    }
   }
 
   #validateTrack(spec: TrackSpec, path: string): void {
@@ -1084,7 +1087,7 @@ export class SessionBuilder {
     this.#validateStrip(spec, path);
   }
 
-  /** A strip's fields after its source: shared by tracks and submixes. */
+  /** A track's strip fields after its source (a submix runs `normalizeSubmix`). */
   #validateStrip(spec: SubmixSpec, path: string): void {
     normalizeBuiltins(spec.builtins, this.#state.options.sampleRateHz, `${path}.builtins`);
     normalizeConsoleEntries(spec.console, this.#state.console ?? [], `${path}.console`);
@@ -1094,10 +1097,8 @@ export class SessionBuilder {
   }
 
   #validateAutomation(spec: AutomationSpec, path: string): void {
-    resolveAutomationTarget(spec.target, this.#state, `${path}.target`);
-    if (spec.segments.length === 0) {
-      fail(`${path}.segments`, "automation must declare at least one segment");
-    }
+    resolveAutomationTarget(spec.target, automationScope(this.#state), `${path}.target`);
+    requireSegments(spec.segments, `${path}.segments`);
     normalizeAutomationOffset(spec.offset, `${path}.offset`);
   }
 
@@ -1112,12 +1113,7 @@ export function session(options: SessionOptions): SessionBuilder {
     fail("session()", "expected a session options object");
   }
   const sessionId = stableId(options.id, "session().id");
-  if (!LAUNCH_RATES.includes(options.sampleRateHz)) {
-    fail(
-      "session().sampleRateHz",
-      `${String(options.sampleRateHz)} is not a launch rate; expected one of ${LAUNCH_RATES.join(", ")}`,
-    );
-  }
+  launchRate(options.sampleRateHz, "session().sampleRateHz");
   const revision = u64(options.revision ?? 0, "session().revision");
   if (revision > REVISION_MAX) {
     fail(
@@ -1126,12 +1122,7 @@ export function session(options: SessionOptions): SessionBuilder {
       CODE.outOfRange,
     );
   }
-  const quantumFrames = integer(
-    options.quantumFrames ?? 128,
-    "session().quantumFrames",
-    1,
-    0xffff_ffff,
-  );
+  const quantumFrames = quantum(options.quantumFrames ?? 128, "session().quantumFrames");
   return new SessionBuilder(freeze({
     options: {
       sessionId,
@@ -1149,6 +1140,23 @@ export function session(options: SessionOptions): SessionBuilder {
     routes: [],
     automation: [],
   }));
+}
+
+/**
+ * A session rate: one of the four launch rates (owner ruling R5). Shared by `session()` and the
+ * transaction builder's `setSampleRateHz` (#1385).
+ * @internal
+ */
+export function launchRate(value: unknown, path: string): SessionSampleRateHz {
+  if (!LAUNCH_RATES.includes(value as number)) {
+    fail(path, `${String(value)} is not a launch rate; expected one of ${LAUNCH_RATES.join(", ")}`);
+  }
+  return value as SessionSampleRateHz;
+}
+
+/** A render quantum: a nonzero `u32`. Shared by `session()` and `setQuantumFrames` (#1385). @internal */
+export function quantum(value: unknown, path: string): number {
+  return integer(value, path, 1, 0xffff_ffff);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1255,6 +1263,41 @@ function normalizeBuiltins(
       ),
   });
   return freeze({ left: lane(left ?? {}, "left"), right: lane(right ?? {}, "right") });
+}
+
+/**
+ * A VCA's offset fader and members in declared order, each member one of `strips` (the declared
+ * tracks, submixes and VCAs) and listed once. Shared by `SessionBuilder.vca` and the transaction
+ * builder's `upsertVca` (#1385); `path` is `verb("id")`.
+ * @internal
+ */
+export function normalizeVca(
+  spec: VcaSpec,
+  strips: ReadonlySet<string>,
+  path: string,
+): { readonly fader: ModelRecord; readonly members: readonly string[] } {
+  if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
+    fail(path, "expected { fader?, members }");
+  }
+  knownKeys(spec, VCA_KEYS, path, "a VCA");
+  if (!Array.isArray(spec.members)) fail(`${path}.members`, "expected an array of member IDs", CODE.wrongType);
+  const members: string[] = [];
+  spec.members.forEach((member: unknown, index: number) => {
+    const memberPath = `${path}.members[${index}]`;
+    stableId(member, memberPath);
+    if (members.includes(member as string)) {
+      fail(memberPath, `'${String(member)}' is already a member of this VCA`, CODE.duplicateId);
+    }
+    if (!strips.has(member as string)) {
+      fail(
+        memberPath,
+        `'${String(member)}' is not a declared track, submix or VCA; declare a member before the VCA that lists it`,
+        CODE.missingEntity,
+      );
+    }
+    members.push(member as string);
+  });
+  return { fader: normalizeVcaFader(spec.fader, `${path}.fader`), members };
 }
 
 /**
@@ -1468,6 +1511,27 @@ function consoleSlot(
 }
 
 /**
+ * A session console's slots, pre-insert first, each in declared order. Shared by
+ * `SessionBuilder.console` and the transaction builder's `setConsole` (#1385).
+ * @internal
+ */
+export function normalizeConsoleSlots(spec: ConsoleSpec, path: string): readonly ConsoleSlotEntry[] {
+  if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
+    fail(path, "expected { preInsert, postInsert }");
+  }
+  knownKeys(spec, CONSOLE_KEYS, path, "the session console");
+  const slots: ConsoleSlotEntry[] = [];
+  for (const [section, key] of [["pre_insert", "preInsert"], ["post_insert", "postInsert"]] as const) {
+    const declared = spec[key] ?? [];
+    if (!Array.isArray(declared)) fail(`${path}.${key}`, "expected an array of console slots");
+    declared.forEach((raw: ConsoleSlotSpec, index: number) => {
+      slots.push(consoleSlot(raw, section, `${path}.${key}[${index}]`, slots));
+    });
+  }
+  return freeze(slots);
+}
+
+/**
  * One track's console entries against the session's slots, in the engine's own order.
  *
  * This walks the entries exactly as the engine's `validate_console_entries` does, so the first
@@ -1564,8 +1628,8 @@ function normalizeConsole(slots: readonly ConsoleSlotEntry[]): ModelRecord {
   return freeze({ pre_insert: section("pre_insert"), post_insert: section("post_insert") });
 }
 
-/** A stored automation's target, resolved to the keys the session document writes. */
-interface ResolvedAutomationTarget {
+/** A stored automation's target, resolved to the keys the session document writes. @internal */
+export interface ResolvedAutomationTarget {
   readonly owner: "strip" | "route" | "vca";
   readonly ownerId: string;
   readonly section: "own" | "builtins" | "console" | "inserts";
@@ -1585,6 +1649,33 @@ interface ControlTableRow {
 }
 
 /**
+ * What an automation target is resolved against: the console slots, each strip's inserts as
+ * `[insert ID, effect ID]` in rack order, and the route and VCA IDs. Built from the session
+ * builder's declarations, or from a transaction's working copy of them (#1385).
+ * @internal
+ */
+export interface AutomationScope {
+  readonly slots: readonly ConsoleSlotEntry[];
+  readonly strips: ReadonlyMap<string, readonly (readonly [string, string])[]>;
+  readonly routes: ReadonlySet<string>;
+  readonly vcas: ReadonlySet<string>;
+}
+
+function automationScope(state: BuilderState): AutomationScope {
+  const inserts = (decls: readonly EffectDecl[] | undefined): readonly (readonly [string, string])[] =>
+    (decls ?? []).map((decl, position) => [insertId(decl, position), decl.effectId] as const);
+  return {
+    slots: state.console ?? [],
+    strips: new Map([
+      ...state.tracks.map((entry) => [entry.id, inserts(entry.spec.inserts)] as const),
+      ...state.submixes.map((entry) => [entry.id, inserts(entry.spec?.inserts)] as const),
+    ]),
+    routes: new Set(state.routes.map((route) => route.id)),
+    vcas: new Set(state.vcas.map((vca) => vca.id)),
+  };
+}
+
+/**
  * Resolve an automation target (#1566, decision 17 C2) to the keys of the session document.
  *
  * A target is a control address, the one `edit.set` and the control list use. This resolves only
@@ -1594,10 +1685,11 @@ interface ControlTableRow {
  * unit. Whether the row is automatable, takes the lane and accepts the span's values is the
  * engine's rule (`controls::automation_diagnostics`), reported by `validate()` and preparation:
  * a rebuild-only row, a derived row, a monitor row, a setting or a lane the row lacks all build.
+ * @internal
  */
-function resolveAutomationTarget(
+export function resolveAutomationTarget(
   target: AutomationTarget,
-  state: BuilderState,
+  scope: AutomationScope,
   path: string,
 ): ResolvedAutomationTarget {
   if (target === null || typeof target !== "object") {
@@ -1626,19 +1718,18 @@ function resolveAutomationTarget(
   }
 
   // The owner exists, and a route or a VCA has an own section and nothing else.
-  let strip: { readonly inserts: readonly EffectDecl[] } | undefined;
+  let strip: { readonly inserts: readonly (readonly [string, string])[] } | undefined;
   if (owner.kind === "strip") {
-    const track = state.tracks.find((entry) => entry.id === ownerId);
-    const submix = state.submixes.find((entry) => entry.id === ownerId);
-    if (track === undefined && submix === undefined) {
+    const inserts = scope.strips.get(ownerId);
+    if (inserts === undefined) {
       fail(`${path}.owner.id`, `'${ownerId}' is not a declared track or submix`, CODE.missingEntity);
     }
-    strip = { inserts: (track?.spec.inserts ?? submix?.spec?.inserts) ?? [] };
+    strip = { inserts };
   } else if (owner.kind === "route") {
-    if (!state.routes.some((route) => route.id === ownerId)) {
+    if (!scope.routes.has(ownerId)) {
       fail(`${path}.owner.id`, `'${ownerId}' is not a declared route`, CODE.missingEntity);
     }
-  } else if (!state.vcas.some((vca) => vca.id === ownerId)) {
+  } else if (!scope.vcas.has(ownerId)) {
     fail(`${path}.owner.id`, `'${ownerId}' is not a declared VCA`, CODE.missingEntity);
   }
   if (strip === undefined && section.kind !== "own") {
@@ -1653,14 +1744,13 @@ function resolveAutomationTarget(
     let effectId: string | undefined;
     if (section.kind === "console") {
       slotId = stableId(section.slot, `${path}.section.slot`);
-      effectId = (state.console ?? []).find((slot) => slot.slot === slotId)?.effectId;
+      effectId = scope.slots.find((slot) => slot.slot === slotId)?.effectId;
       if (effectId === undefined) {
         fail(`${path}.section.slot`, `'${slotId}' is not a console slot of this session`, CODE.missingEntity);
       }
     } else {
       slotId = stableId(section.effect, `${path}.section.effect`);
-      const inserts = strip.inserts;
-      effectId = inserts.find((decl, position) => insertId(decl, position) === slotId)?.effectId;
+      effectId = strip.inserts.find(([id]) => id === slotId)?.[1];
       if (effectId === undefined) {
         fail(`${path}.section.effect`, `'${slotId}' is not one of ${ownerId}'s inserts`, CODE.missingEntity);
       }
@@ -1705,13 +1795,56 @@ function resolveAutomationTarget(
   };
 }
 
-function normalizeAutomation(spec: AutomationSpec, state: BuilderState): ModelRecord {
-  const path = `automation("${spec.id}")`;
-  const resolved = resolveAutomationTarget(spec.target, state, `${path}.target`);
+/**
+ * One stored automation's record: its target resolved against `scope`, its spans in the row's unit.
+ * Shared by the session builder and the transaction builder's `upsertAutomation` (#1385); refusal
+ * paths start with `verb("id")`.
+ * @internal
+ */
+export function normalizeAutomation(spec: AutomationSpec, scope: AutomationScope, verb = "automation"): ModelRecord {
+  const path = `${verb}("${spec.id}")`;
+  const resolved = resolveAutomationTarget(spec.target, scope, `${path}.target`);
+  requireSegments(spec.segments, `${path}.segments`);
+  return freeze({
+    id: spec.id,
+    target: automationTargetRecord(resolved),
+    segments: normalizeAutomationSegments(spec.segments, resolved.unit, `${path}.segments`),
+    offset: normalizeAutomationOffset(spec.offset, `${path}.offset`),
+  });
+}
+
+/** A resolved target as the session document writes it. @internal */
+export function automationTargetRecord(resolved: ResolvedAutomationTarget): ModelRecord {
+  return freeze({
+    owner: resolved.owner,
+    owner_id: resolved.ownerId,
+    section: resolved.section,
+    ...(resolved.slotId === undefined ? {} : { slot_id: resolved.slotId }),
+    control: resolved.control,
+    lane: resolved.lane,
+  });
+}
+
+/** Refuse an automation with no span, as the engine's validator does. @internal */
+export function requireSegments(segments: readonly AutomationSegment[], path: string): void {
+  if (!Array.isArray(segments)) fail(path, "expected an array of automation segments");
+  if (segments.length === 0) fail(path, "automation must declare at least one segment");
+}
+
+/**
+ * An automation's spans in declared order, each written in `unit`, the unit of the row its target
+ * names. `path` is the `segments` path.
+ * @internal
+ */
+export function normalizeAutomationSegments(
+  raw: readonly AutomationSegment[],
+  unit: string,
+  path: string,
+): readonly ModelRecord[] {
   let previousStart: bigint | undefined;
   let previousEnd: bigint | undefined;
-  const segments = spec.segments.map((segment, index) => {
-    const where = `${path}.segments[${index}]`;
+  return raw.map((segment, index) => {
+    const where = `${path}[${index}]`;
     if (!["step", "linear", "exponential"].includes(segment.shape)) {
       fail(`${where}.shape`, "expected step, linear or exponential");
     }
@@ -1749,21 +1882,8 @@ function normalizeAutomation(spec: AutomationSpec, state: BuilderState): ModelRe
       end_sample: end.toString(),
       start_value: value(segment.startValue, "startValue"),
       end_value: value(segment.endValue, "endValue"),
-      unit: resolved.unit,
+      unit,
     });
-  });
-  return freeze({
-    id: spec.id,
-    target: freeze({
-      owner: resolved.owner,
-      owner_id: resolved.ownerId,
-      section: resolved.section,
-      ...(resolved.slotId === undefined ? {} : { slot_id: resolved.slotId }),
-      control: resolved.control,
-      lane: resolved.lane,
-    }),
-    segments,
-    offset: normalizeAutomationOffset(spec.offset, `${path}.offset`),
   });
 }
 
@@ -1816,14 +1936,23 @@ export function normalizeTrack(
 /**
  * A submix strip in the track's key order without the source fields. A spec-less submix is the
  * transparent strip, the engine's `Submix::unity`: every field at its identity, the identity
- * matrix, and one bypassed entry per declared console slot.
+ * matrix, and one bypassed entry per declared console slot. Shared by the session builder and the
+ * transaction builder's `upsertSubmix` (#1385); refusal paths start with `verb("id")`.
+ * @internal
  */
-function normalizeSubmix(
+export function normalizeSubmix(
   entry: SubmixEntry,
   slots: readonly ConsoleSlotEntry[],
   sampleRateHz: number,
+  verb = "submix",
 ): ModelRecord {
-  const path = `submix("${entry.id}")`;
+  const path = `${verb}("${entry.id}")`;
+  if (entry.spec !== undefined) {
+    if (entry.spec === null || typeof entry.spec !== "object" || Array.isArray(entry.spec)) {
+      fail(path, "expected a submix strip specification");
+    }
+    knownKeys(entry.spec, SUBMIX_KEYS, path, "a submix strip");
+  }
   const spec: SubmixSpec = entry.spec ?? {
     console: slots.map((slot) => ({ slot: slot.slot, bypass: true })),
     pan: { matrix: IDENTITY_MATRIX },
@@ -1855,20 +1984,13 @@ function normalize(state: BuilderState): SessionModel {
     .map(({ id, fader, members }) => freeze({ id, fader, members: [...members].sort(asciiCompare) }))
     .sort(byId);
   const outputs = state.outputs.map((id) => freeze({ id })).sort(byId);
+  const graph = routeGraph(state);
   const routes = state.routes
-    .map((spec) => freeze({
-      id: spec.id,
-      source: normalizeRouteSource(spec.source),
-      destination: normalizeRouteDestination(spec.destination),
-      channel_matrix: routeMatrixRecord(spec.matrix ?? IDENTITY_MATRIX, `route("${spec.id}").matrix`),
-      gain_db: routeNumber(spec.gainDb ?? 0, ROUTE_GAIN_DB_DOMAIN, `route("${spec.id}").gainDb`),
-      mute: spec.mute ?? false,
-      // #1218 D5: a send follows its source's mute by default; a route into the output never does.
-      follows_mute: spec.followsMute ?? spec.destination.kind === "submix_input",
-    }))
+    .map((spec) => normalizeRoute(spec, graph, `route("${spec.id}")`))
     .sort(byId);
+  const scope = automationScope(state);
   const automation = state.automation
-    .map((spec) => normalizeAutomation(spec, state))
+    .map((spec) => normalizeAutomation(spec, scope))
     .sort(byId);
   return freeze({
     schema_version: 1,
@@ -1889,6 +2011,14 @@ function normalize(state: BuilderState): SessionModel {
     routes,
     automation,
   }) as SessionModel;
+}
+
+function routeGraph(state: BuilderState): RouteGraph {
+  return {
+    tracks: new Set(state.tracks.map((entry) => entry.id)),
+    submixes: new Set(state.submixes.map((entry) => entry.id)),
+    outputs: new Set(state.outputs),
+  };
 }
 
 /** A route's `channel_matrix`: each coefficient inside the route coefficient domain. */

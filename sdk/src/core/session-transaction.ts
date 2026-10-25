@@ -23,28 +23,60 @@ import { MisoUsageError } from "./errors.ts";
 import {
   SessionBuilder,
   builderContext,
+  automationTargetRecord,
+  launchRate,
+  normalizeAutomation,
+  normalizeAutomationSegments,
   normalizeConsoleEntries,
+  normalizeConsoleSlots,
   normalizeInsert,
   normalizeInserts,
+  normalizeRoute,
+  normalizeRouteDestinationSpec,
+  normalizeRouteSourceSpec,
   normalizeSidechain,
   normalizeSource,
+  normalizeSubmix,
   normalizeTrack,
+  normalizeVca,
   quality,
+  quantum,
+  refuseOutputFollowsMute,
+  requireSegments,
+  resolveAutomationTarget,
   resolveLanes,
   retargetInsert,
   stableId,
   trackSourceRef,
 } from "./session.ts";
-import type { ConsoleSlotEntry, ModelRecord, ModelValue, SourceEntry } from "./session.ts";
-import { CODE, fail, freeze } from "../internal/validation.ts";
+import type {
+  AutomationScope,
+  ConsoleSlotEntry,
+  ModelRecord,
+  ModelValue,
+  RouteGraph,
+  SourceEntry,
+} from "./session.ts";
+import { CONTROLS } from "../generated/controls.ts";
+import { CODE, fail, freeze, knownKeys } from "../internal/validation.ts";
 import type { EffectId } from "../generated/catalog.ts";
 import type {
+  AutomationSegment,
+  AutomationSpec,
+  AutomationTarget,
   ConsoleEntrySpec,
+  ConsoleSpec,
   EffectDecl,
+  RouteDestination,
+  RouteSource,
+  RouteSpec,
+  SessionSampleRateHz,
   SidechainSpec,
   SourceSpec,
+  SubmixSpec,
   TrackSourceSpec,
   TrackSpec,
+  VcaSpec,
 } from "./types.ts";
 
 /**
@@ -62,11 +94,12 @@ import type {
  * sources, the console slots -- and the builder keeps a working copy, so an `upsertTrack` sees an
  * earlier `upsertSource` of the same transaction.
  *
- * The builder checks the shape of each edit, not the references between entities: the engine's
- * store refuses those at the transaction's final validation with a typed missing-entity error, so
- * nothing is lost silently. A sidechain source, a sidechain whose source track a later edit
- * removes, and automation that targets a removed insert are the store's to refuse, as they are for
- * `SessionBuilder`.
+ * The builder checks each edit's shape and the references it can resolve against the working
+ * session -- a track's source, a route's endpoints, a VCA's members, an automation's target -- as
+ * `SessionBuilder` checks them against its declarations. What it does not check, the engine's store
+ * refuses at the transaction's final validation with a typed missing-entity error, so nothing is
+ * lost silently: a sidechain source, and a reference that a later edit of the same transaction
+ * removes (a sidechain's source track, a route's endpoint, an automated insert).
  *
  * # What the frame carries, and when
  *
@@ -86,12 +119,32 @@ import type {
  * An insert is named by its stable ID on the strip (`effect()`'s `slotId`), never by its native
  * effect ID. The builder keeps each strip's working inserts, so a later edit sees an earlier one.
  *
- * `setTrackConsole` gives a strip its console entries after the console's slot set changed. The
- * engine accepts it only after an earlier `SetConsole` of the same transaction changed the console
- * (`session.edit.value_op_retired`, #1561 D3); a console knob's value is a `SET_CONTROL`. This
- * builder has no `setConsole` yet (#1385), so `setTrackConsole` is refused here, after its
- * arguments are validated, until a console-changing edit precedes it. It is the one method that
- * takes `{ rampSamples }`, written as the optional `ramp_samples` field only when given.
+ * `setConsole` replaces the console's slots (#1385). Every strip carries one entry per slot, so a
+ * transaction that changes the slots also gives each strip its new entries -- `setTrackConsole`,
+ * `upsertTrack` or `upsertSubmix`, each checked against the new slots -- or the store's final
+ * validation refuses it. The engine accepts `setTrackConsole` only after an earlier `SetConsole`
+ * of the same transaction left the console different from the base session's
+ * (`session.edit.value_op_retired`, #1561 D3), and this builder refuses it, after its arguments are
+ * validated, on the same rule; a console knob's value is a `SET_CONTROL`. These two are the only
+ * methods that take `{ rampSamples }`, written as the optional `ramp_samples` field only when
+ * given (#1394 D1).
+ *
+ * # Session, submix, output and route edits
+ *
+ * A rate or quantum change is encoded like any other edit, and the engine's control plane refuses
+ * it at apply with its typed result (`control.apply.reprepare_required`, #1290a), so the C ABI and
+ * the browser see the same transaction. A route's
+ * endpoints are checked against the working graph, as `SessionBuilder.route` checks them against
+ * its declarations; an endpoint a later edit removes is the store's to refuse.
+ *
+ * # Automation and VCA edits
+ *
+ * An automation target resolves through `resolveAutomationTarget` against the working strips,
+ * inserts, console slots, routes and VCAs, exactly as `SessionBuilder.automation` resolves it, and
+ * its spans are written in the unit of the row it names. Whether that row is automatable is the
+ * engine's rule (#1566): the engine's preparation refuses it, as `validate()` refuses the built
+ * session. A VCA's members must be in the working graph, written in declared order (the store keeps
+ * them sorted); a membership cycle, which only a replaced VCA can make, is the store's to refuse.
  *
  * `sdk/test/transaction-evals.mjs` compares these bytes to the codec's re-encoding of them and
  * the store's snapshot after them to a `SessionBuilder` declaring the result
@@ -99,6 +152,12 @@ import type {
  */
 
 // `SessionEditOpcode` (`crates/protocol/src/model.rs`).
+const OP_SET_SESSION_ID = 0x0001;
+const OP_SET_SAMPLE_RATE_HZ = 0x0002;
+const OP_SET_QUANTUM_FRAMES = 0x0003;
+const OP_SET_RENDER_PROFILE = 0x0004;
+const OP_SET_OUTPUT_PROFILE = 0x0005;
+const OP_SET_CONSOLE = 0x0007;
 const OP_UPSERT_SOURCE = 0x0100;
 const OP_REMOVE_SOURCE = 0x0101;
 const OP_SET_SOURCE_CONTENT = 0x0103;
@@ -113,6 +172,20 @@ const OP_SET_EFFECT_IDENTITY = 0x0208;
 const OP_SET_EFFECT_QUALITY = 0x0209;
 const OP_SET_EFFECT_SIDECHAIN = 0x020c;
 const OP_SET_TRACK_CONSOLE = 0x0211;
+const OP_UPSERT_SUBMIX = 0x0300;
+const OP_REMOVE_SUBMIX = 0x0301;
+const OP_UPSERT_OUTPUT = 0x0400;
+const OP_REMOVE_OUTPUT = 0x0401;
+const OP_UPSERT_ROUTE = 0x0500;
+const OP_REMOVE_ROUTE = 0x0501;
+const OP_SET_ROUTE_SOURCE = 0x0502;
+const OP_SET_ROUTE_DESTINATION = 0x0503;
+const OP_UPSERT_AUTOMATION = 0x0600;
+const OP_REMOVE_AUTOMATION = 0x0601;
+const OP_SET_AUTOMATION_TARGET = 0x0602;
+const OP_SET_AUTOMATION_SEGMENTS = 0x0603;
+const OP_UPSERT_VCA = 0x0700;
+const OP_REMOVE_VCA = 0x0701;
 
 /** `RackName::Inserts`'s wire code (`schema::parameter_rack_wire`). */
 const RACK_INSERTS = 2;
@@ -140,6 +213,17 @@ const TAP_CODES = codes([
 const CHANNEL_CODES = codes(["left", "right", "both"]);
 const UNIT_CODES = codes(["db", "hz", "milliseconds", "samples", "linear", "ratio"]);
 const ROUTE_SOURCE_TAGS = codes(["track", "submix"]);
+const ROUTE_DESTINATION_TAGS = codes(["submix_input", "output_input"]);
+/** `RenderMode::SingleThread` and `SampleFormat::F32Planar`, each its enum's only code. */
+const RENDER_MODE_CODES = codes(["single_thread"]);
+const SAMPLE_FORMAT_CODES = codes(["f32_planar"]);
+const SHAPE_CODES = codes(["step", "linear", "exponential"]);
+/** The control address codes, from the generated control tables (`CONTROLS.address`). */
+const OWNER_KIND_CODES = named(CONTROLS.address.ownerKinds);
+const SECTION_KIND_CODES = named(CONTROLS.address.sectionKinds);
+const LANE_CODES = named(CONTROLS.address.lanes);
+const RENDER_PROFILE_KEYS: ReadonlySet<string> = new Set(["id", "mode"]);
+const OUTPUT_PROFILE_KEYS: ReadonlySet<string> = new Set(["id", "channels", "sampleFormat"]);
 const SIDECHAIN_TAGS = codes(["none", "routed"]);
 const IDENTITY_NATIVE = 1;
 const PAN_TAG = 1;
@@ -149,8 +233,23 @@ function codes(tokens: readonly string[]): ReadonlyMap<ModelValue, number> {
   return new Map<ModelValue, number>(tokens.map((token, index) => [token, index + 1]));
 }
 
+function named(rows: readonly { readonly name: string; readonly code: number }[]): ReadonlyMap<ModelValue, number> {
+  return new Map<ModelValue, number>(rows.map((row) => [row.name, row.code]));
+}
+
+/** A session's render profile: a stable ID and the only V1 render mode, the default. */
+type RenderProfileSpec = { readonly id: string; readonly mode?: "single_thread" };
+/** A session's output profile: a stable ID, two channels and planar `f32`, the defaults. */
+type OutputProfileSpec = { readonly id: string; readonly channels?: 2; readonly sampleFormat?: "f32_planar" };
+
 /** One structural edit of a session transaction, as the caller gave it. */
 export type SessionEditSpec =
+  | { readonly kind: "setSessionId"; readonly sessionId: string }
+  | { readonly kind: "setSampleRateHz"; readonly sampleRateHz: SessionSampleRateHz }
+  | { readonly kind: "setQuantumFrames"; readonly quantumFrames: number }
+  | { readonly kind: "setRenderProfile"; readonly renderProfile: RenderProfileSpec }
+  | { readonly kind: "setOutputProfile"; readonly outputProfile: OutputProfileSpec }
+  | { readonly kind: "setConsole"; readonly console: ConsoleSpec; readonly rampSamples?: number }
   | { readonly kind: "upsertSource"; readonly sourceId: string; readonly source: SourceSpec }
   | { readonly kind: "removeSource"; readonly sourceId: string }
   | { readonly kind: "setSourceContent"; readonly sourceId: string; readonly source: SourceSpec }
@@ -193,7 +292,25 @@ export type SessionEditSpec =
     readonly trackId: string;
     readonly console: readonly ConsoleEntrySpec[];
     readonly rampSamples?: number;
-  };
+  }
+  | { readonly kind: "upsertSubmix"; readonly submixId: string; readonly submix?: SubmixSpec }
+  | { readonly kind: "removeSubmix"; readonly submixId: string }
+  | { readonly kind: "upsertOutput"; readonly outputId: string }
+  | { readonly kind: "removeOutput"; readonly outputId: string }
+  | { readonly kind: "upsertRoute"; readonly route: RouteSpec }
+  | { readonly kind: "removeRoute"; readonly routeId: string }
+  | { readonly kind: "setRouteSource"; readonly routeId: string; readonly source: RouteSource }
+  | { readonly kind: "setRouteDestination"; readonly routeId: string; readonly destination: RouteDestination }
+  | { readonly kind: "upsertAutomation"; readonly automation: AutomationSpec }
+  | { readonly kind: "removeAutomation"; readonly automationId: string }
+  | { readonly kind: "setAutomationTarget"; readonly automationId: string; readonly target: AutomationTarget }
+  | {
+    readonly kind: "setAutomationSegments";
+    readonly automationId: string;
+    readonly segments: readonly AutomationSegment[];
+  }
+  | { readonly kind: "upsertVca"; readonly vcaId: string; readonly vca: VcaSpec }
+  | { readonly kind: "removeVca"; readonly vcaId: string };
 
 
 /**
@@ -218,18 +335,28 @@ export interface SessionTransactionRequest {
 }
 
 interface BuilderState {
+  /** The session's rate after the edits so far. */
   readonly sampleRateHz: number;
+  /** The base session's console slots, which `consoleChanged` compares the working ones with. */
+  readonly baseSlots: readonly ConsoleSlotEntry[];
+  /** The console slots after the edits so far. */
   readonly slots: readonly ConsoleSlotEntry[];
-  readonly otherGraphIds: ReadonlySet<string>;
   /** The sources after the edits so far, by ID. */
   readonly sources: ReadonlyMap<string, SourceEntry>;
-  /** The track IDs after the edits so far. */
+  /** The track, submix, VCA and output IDs after the edits so far: one namespace. */
   readonly tracks: ReadonlySet<string>;
+  readonly submixes: ReadonlySet<string>;
+  readonly vcas: ReadonlySet<string>;
+  readonly outputs: ReadonlySet<string>;
+  /** The routes' records after the edits so far, by ID. */
+  readonly routes: ReadonlyMap<string, ModelRecord>;
+  /** The stored automations' records after the edits so far, by ID. */
+  readonly automations: ReadonlyMap<string, ModelRecord>;
   /** Each strip's (track's or submix's) insert records after the edits so far, by strip ID. */
   readonly strips: ReadonlyMap<string, readonly ModelRecord[]>;
   /**
-   * Whether an earlier edit changed the console's slot set, which opens `setTrackConsole`.
-   * Always false until the builder can edit the console (#1385).
+   * Whether the working console differs from the base session's, which opens `setTrackConsole`
+   * as the engine's store opens `SetTrackConsole` (#1561 D3).
    */
   readonly consoleChanged: boolean;
   readonly edits: readonly { readonly spec: SessionEditSpec; readonly bytes: Uint8Array }[];
@@ -245,6 +372,104 @@ export class TransactionBuilder {
   /** @internal Use `transaction(base)`. */
   constructor(state: BuilderState) {
     this.#state = state;
+  }
+
+  /** Rename the session. */
+  setSessionId(sessionId: string): TransactionBuilder {
+    const id = stableId(sessionId, "setSessionId().sessionId");
+    return this.#next({ kind: "setSessionId", sessionId: id }, OP_SET_SESSION_ID, [utf8(1, id)], {});
+  }
+
+  /**
+   * Change the session's rate to another launch rate. The engine refuses a rate change at apply
+   * with its typed result (#1290a); later edits of this builder are checked at the new rate.
+   */
+  setSampleRateHz(sampleRateHz: SessionSampleRateHz): TransactionBuilder {
+    const rate = launchRate(sampleRateHz, "setSampleRateHz().sampleRateHz");
+    return this.#next(
+      { kind: "setSampleRateHz", sampleRateHz: rate },
+      OP_SET_SAMPLE_RATE_HZ,
+      [word(1, rate)],
+      { sampleRateHz: rate },
+    );
+  }
+
+  /** Change the render quantum, a nonzero `u32`. The engine refuses a change at apply (#1290a). */
+  setQuantumFrames(quantumFrames: number): TransactionBuilder {
+    const frames = quantum(quantumFrames, "setQuantumFrames().quantumFrames");
+    return this.#next(
+      { kind: "setQuantumFrames", quantumFrames: frames },
+      OP_SET_QUANTUM_FRAMES,
+      [word(1, frames)],
+      {},
+    );
+  }
+
+  /** Replace the render profile: a stable ID, and `single_thread`, the only V1 mode. */
+  setRenderProfile(profile: RenderProfileSpec): TransactionBuilder {
+    const path = "setRenderProfile()";
+    if (profile === null || typeof profile !== "object" || Array.isArray(profile)) {
+      fail(path, "expected { id, mode? }");
+    }
+    knownKeys(profile, RENDER_PROFILE_KEYS, path, "a render profile");
+    const id = stableId(profile.id, `${path}.id`);
+    const mode = profile.mode ?? "single_thread";
+    if (mode !== "single_thread") fail(`${path}.mode`, "single_thread is the only V1 render mode", CODE.invalidEnum);
+    return this.#next(
+      { kind: "setRenderProfile", renderProfile: { id, mode } },
+      OP_SET_RENDER_PROFILE,
+      [message(1, [utf8(1, id), code(2, RENDER_MODE_CODES, mode)])],
+      {},
+    );
+  }
+
+  /** Replace the output profile: a stable ID, two channels and `f32_planar`, the only V1 output. */
+  setOutputProfile(profile: OutputProfileSpec): TransactionBuilder {
+    const path = "setOutputProfile()";
+    if (profile === null || typeof profile !== "object" || Array.isArray(profile)) {
+      fail(path, "expected { id, channels?, sampleFormat? }");
+    }
+    knownKeys(profile, OUTPUT_PROFILE_KEYS, path, "an output profile");
+    const id = stableId(profile.id, `${path}.id`);
+    const channels = profile.channels ?? 2;
+    if (channels !== 2) {
+      fail(`${path}.channels`, "V1 output must contain exactly two dual-mono channels", CODE.outOfRange);
+    }
+    const sampleFormat = profile.sampleFormat ?? "f32_planar";
+    if (sampleFormat !== "f32_planar") {
+      fail(`${path}.sampleFormat`, "f32_planar is the only V1 sample format", CODE.invalidEnum);
+    }
+    return this.#next(
+      { kind: "setOutputProfile", outputProfile: { id, channels, sampleFormat } },
+      OP_SET_OUTPUT_PROFILE,
+      [message(1, [utf8(1, id), byte(2, channels), code(3, SAMPLE_FORMAT_CODES, sampleFormat)])],
+      {},
+    );
+  }
+
+  /**
+   * Replace the session console's slots, validated as `SessionBuilder.console` validates them.
+   * Each strip then needs its entries for the new slots in the same transaction: a later
+   * `setTrackConsole`, `upsertTrack` or `upsertSubmix` is checked against them. `rampSamples`, when
+   * given, is the edit's own ramp length, as `setTrackConsole`'s.
+   */
+  setConsole(spec: ConsoleSpec, options: { readonly rampSamples?: number } = {}): TransactionBuilder {
+    const path = "setConsole()";
+    const slots = normalizeConsoleSlots(spec, path);
+    const rampSamples = rampOption(options, path);
+    return this.#next(
+      {
+        kind: "setConsole",
+        console: {
+          preInsert: (spec.preInsert ?? []).map((slot) => ({ ...slot })),
+          postInsert: (spec.postInsert ?? []).map((slot) => ({ ...slot })),
+        },
+        ...(rampSamples === undefined ? {} : { rampSamples }),
+      },
+      OP_SET_CONSOLE,
+      [message(1, consoleFields(slots)), ...rampField(2, rampSamples)],
+      { slots, consoleChanged: !sameSlots(slots, this.#state.baseSlots) },
+    );
   }
 
   /** Declare a source, or replace the source with this ID. */
@@ -294,13 +519,7 @@ export class TransactionBuilder {
   /** Declare a track, or replace the track with this ID, with the session builder's rules. */
   upsertTrack(trackId: string, spec: TrackSpec): TransactionBuilder {
     stableId(trackId, "upsertTrack().id");
-    if (this.#state.otherGraphIds.has(trackId)) {
-      fail(
-        `upsertTrack("${trackId}").id`,
-        "tracks, submixes, VCAs and outputs share one ID namespace",
-        CODE.duplicateId,
-      );
-    }
+    this.#freeGraphId(trackId, "tracks", `upsertTrack("${trackId}")`);
     const record = normalizeTrack(
       { id: trackId, spec },
       [...this.#state.sources.values()],
@@ -508,10 +727,7 @@ export class TransactionBuilder {
     this.#strip(trackId, path);
     if (!Array.isArray(console)) fail(`${path}.console`, "expected an array of console entries in slot order");
     const entries = normalizeConsoleEntries(console, this.#state.slots, `${path}.console`);
-    if (options === null || typeof options !== "object") fail(`${path}.options`, "expected { rampSamples? }");
-    const rampSamples = options.rampSamples === undefined
-      ? undefined
-      : requireU32(options.rampSamples, `${path}.rampSamples`);
+    const rampSamples = rampOption(options, path);
     if (!this.#state.consoleChanged) {
       fail(
         path,
@@ -531,9 +747,133 @@ export class TransactionBuilder {
       [
         utf8(1, trackId),
         ...entries.map((entry) => message(2, consoleEntryFields(entry))),
-        ...(rampSamples === undefined ? [] : [field(3, WIRE_U32, false, u32(rampSamples))]),
+        ...rampField(3, rampSamples),
       ],
       {},
+    );
+  }
+
+  /**
+   * Declare a submix strip, or replace the submix with this ID, with the session builder's rules:
+   * with a `spec` it follows a track's rules, checked against the working console's slots; with
+   * none it is the transparent strip, every console slot bypassed.
+   */
+  upsertSubmix(submixId: string, spec?: SubmixSpec): TransactionBuilder {
+    stableId(submixId, "upsertSubmix().id");
+    const path = `upsertSubmix("${submixId}")`;
+    this.#freeGraphId(submixId, "submixes", path);
+    const record = normalizeSubmix(
+      { id: submixId, spec },
+      this.#state.slots,
+      this.#state.sampleRateHz,
+      "upsertSubmix",
+    );
+    const submixes = new Set(this.#state.submixes);
+    submixes.add(submixId);
+    return this.#next(
+      { kind: "upsertSubmix", submixId, ...(spec === undefined ? {} : { submix: { ...spec } }) },
+      OP_UPSERT_SUBMIX,
+      [message(1, submixFields(record))],
+      { submixes, strips: this.#withInserts(submixId, records((record.inserts as ModelRecord).effects)) },
+    );
+  }
+
+  /** Remove a declared submix. A route or VCA that still names it makes the engine refuse. */
+  removeSubmix(submixId: string): TransactionBuilder {
+    this.#declared(this.#state.submixes, submixId, "submix", `removeSubmix("${String(submixId)}")`);
+    const submixes = new Set(this.#state.submixes);
+    submixes.delete(submixId);
+    const strips = new Map(this.#state.strips);
+    strips.delete(submixId);
+    return this.#next(
+      { kind: "removeSubmix", submixId },
+      OP_REMOVE_SUBMIX,
+      [utf8(1, submixId)],
+      { submixes, strips },
+    );
+  }
+
+  /** Declare an output. Its ID shares the graph-entity namespace. */
+  upsertOutput(outputId: string): TransactionBuilder {
+    stableId(outputId, "upsertOutput().id");
+    this.#freeGraphId(outputId, "outputs", `upsertOutput("${outputId}")`);
+    const outputs = new Set(this.#state.outputs);
+    outputs.add(outputId);
+    return this.#next(
+      { kind: "upsertOutput", outputId },
+      OP_UPSERT_OUTPUT,
+      [message(1, [utf8(1, outputId)])],
+      { outputs },
+    );
+  }
+
+  /** Remove a declared output. A route that still reaches it makes the engine refuse. */
+  removeOutput(outputId: string): TransactionBuilder {
+    this.#declared(this.#state.outputs, outputId, "output", `removeOutput("${String(outputId)}")`);
+    const outputs = new Set(this.#state.outputs);
+    outputs.delete(outputId);
+    return this.#next({ kind: "removeOutput", outputId }, OP_REMOVE_OUTPUT, [utf8(1, outputId)], { outputs });
+  }
+
+  /**
+   * Declare a route, or replace the route with this ID, with the session builder's rules: both
+   * endpoints in the working graph, the matrix and gain in their domains, and `followsMute`
+   * defaulting to `true` into a submix and refused into the output.
+   */
+  upsertRoute(spec: RouteSpec): TransactionBuilder {
+    stableId(spec?.id, "upsertRoute().id");
+    const record = normalizeRoute(spec, this.#graph(), `upsertRoute("${spec.id}")`);
+    const routes = new Map(this.#state.routes);
+    routes.set(spec.id, record);
+    return this.#next(
+      { kind: "upsertRoute", route: { ...spec } },
+      OP_UPSERT_ROUTE,
+      [message(1, routeFields(record))],
+      { routes },
+    );
+  }
+
+  /** Remove a declared route. */
+  removeRoute(routeId: string): TransactionBuilder {
+    this.#route(routeId, `removeRoute("${String(routeId)}")`);
+    const routes = new Map(this.#state.routes);
+    routes.delete(routeId);
+    return this.#next({ kind: "removeRoute", routeId }, OP_REMOVE_ROUTE, [utf8(1, routeId)], { routes });
+  }
+
+  /** Read a declared route from another tap of a track or submix in the working graph. */
+  setRouteSource(routeId: string, source: RouteSource): TransactionBuilder {
+    const path = `setRouteSource("${String(routeId)}")`;
+    const route = this.#route(routeId, path);
+    const normalized = normalizeRouteSourceSpec(source, this.#graph(), `${path}.source`);
+    const routes = new Map(this.#state.routes);
+    routes.set(routeId, freeze({ ...route, source: normalized }));
+    return this.#next(
+      { kind: "setRouteSource", routeId, source: { ...source } },
+      OP_SET_ROUTE_SOURCE,
+      [utf8(1, routeId), message(2, routeSourceFields(normalized))],
+      { routes },
+    );
+  }
+
+  /**
+   * Send a declared route to another submix or output in the working graph. A route that follows
+   * its source's mute cannot reach the output (#1218 D5): clear `followsMute` with `upsertRoute`.
+   */
+  setRouteDestination(routeId: string, destination: RouteDestination): TransactionBuilder {
+    const path = `setRouteDestination("${String(routeId)}")`;
+    const route = this.#route(routeId, path);
+    const normalized = normalizeRouteDestinationSpec(destination, this.#graph(), `${path}.destination`);
+    if (route.follows_mute === true && normalized.kind !== "submix_input") {
+      refuseOutputFollowsMute(`${path}.destination`);
+    }
+    const routes = new Map(this.#state.routes);
+    routes.set(routeId, freeze({ ...route, destination: normalized }));
+    return this.#next(
+      { kind: "setRouteDestination", routeId, destination: { ...destination } },
+      OP_SET_ROUTE_DESTINATION,
+      [utf8(1, routeId), message(2, routeDestinationFields(normalized))],
+      { routes },
     );
   }
 
@@ -562,7 +902,164 @@ export class TransactionBuilder {
     }
   }
 
-  /** A declared strip's working inserts: a track's, or a base submix's. */
+  /**
+   * Declare a stored automation, or replace the automation with this ID, with the session
+   * builder's rules: the target resolved against the working session, at least one span, the
+   * spans written in the target row's unit.
+   */
+  upsertAutomation(spec: AutomationSpec): TransactionBuilder {
+    stableId(spec?.id, "upsertAutomation().id");
+    const record = normalizeAutomation(spec, this.#automationScope(), "upsertAutomation");
+    const automations = new Map(this.#state.automations);
+    automations.set(spec.id, record);
+    return this.#next(
+      {
+        kind: "upsertAutomation",
+        automation: {
+          ...spec,
+          segments: spec.segments.map((segment) => ({ ...segment })),
+          ...(spec.offset === undefined ? {} : { offset: { ...spec.offset } }),
+        },
+      },
+      OP_UPSERT_AUTOMATION,
+      [message(1, automationFields(record))],
+      { automations },
+    );
+  }
+
+  /** Remove a declared stored automation. */
+  removeAutomation(automationId: string): TransactionBuilder {
+    this.#automation(automationId, `removeAutomation("${String(automationId)}")`);
+    const automations = new Map(this.#state.automations);
+    automations.delete(automationId);
+    return this.#next(
+      { kind: "removeAutomation", automationId },
+      OP_REMOVE_AUTOMATION,
+      [utf8(1, automationId)],
+      { automations },
+    );
+  }
+
+  /**
+   * Point a declared automation at another control, resolved as `upsertAutomation` resolves it.
+   * Its spans keep their unit, so the new row must be in the same unit (`control.domain`
+   * otherwise, as the engine refuses a span in another unit); replace it with `upsertAutomation`.
+   */
+  setAutomationTarget(automationId: string, target: AutomationTarget): TransactionBuilder {
+    const path = `setAutomationTarget("${String(automationId)}")`;
+    const current = this.#automation(automationId, path);
+    const resolved = resolveAutomationTarget(target, this.#automationScope(), `${path}.target`);
+    const unit = String(records(current.segments)[0]?.unit);
+    if (resolved.unit !== unit) {
+      fail(
+        `${path}.target.control`,
+        `the row is in ${resolved.unit} and this automation's spans are in ${unit}; replace it with upsertAutomation`,
+        "control.domain",
+      );
+    }
+    const targetRecord = automationTargetRecord(resolved);
+    const automations = new Map(this.#state.automations);
+    automations.set(automationId, freeze({ ...current, target: targetRecord }));
+    return this.#next(
+      { kind: "setAutomationTarget", automationId, target: { ...target } as AutomationTarget },
+      OP_SET_AUTOMATION_TARGET,
+      [utf8(1, automationId), message(2, automationTargetFields(targetRecord))],
+      { automations },
+    );
+  }
+
+  /**
+   * Replace a declared automation's spans, validated as `SessionBuilder.automation`'s and written
+   * in its target row's unit. An automation keeps at least one span: remove it instead.
+   */
+  setAutomationSegments(automationId: string, segments: readonly AutomationSegment[]): TransactionBuilder {
+    const path = `setAutomationSegments("${String(automationId)}")`;
+    const current = this.#automation(automationId, path);
+    requireSegments(segments, `${path}.segments`);
+    const unit = String(records(current.segments)[0]?.unit);
+    const normalized = normalizeAutomationSegments(segments, unit, `${path}.segments`);
+    const automations = new Map(this.#state.automations);
+    automations.set(automationId, freeze({ ...current, segments: normalized }));
+    return this.#next(
+      { kind: "setAutomationSegments", automationId, segments: segments.map((segment) => ({ ...segment })) },
+      OP_SET_AUTOMATION_SEGMENTS,
+      [utf8(1, automationId), ...normalized.map((segment) => message(2, automationSegmentFields(segment)))],
+      { automations },
+    );
+  }
+
+  /**
+   * Declare a VCA group, or replace the VCA with this ID, with the session builder's rules: each
+   * member a track, submix or other VCA of the working graph, listed once; the offset fader in the
+   * `fader_db` domain, 0 dB unmuted by default.
+   */
+  upsertVca(vcaId: string, spec: VcaSpec): TransactionBuilder {
+    stableId(vcaId, "upsertVca().id");
+    const path = `upsertVca("${vcaId}")`;
+    this.#freeGraphId(vcaId, "vcas", path);
+    const candidates = new Set([...this.#state.tracks, ...this.#state.submixes, ...this.#state.vcas]);
+    candidates.delete(vcaId);
+    const { fader, members } = normalizeVca(spec, candidates, path);
+    const vcas = new Set(this.#state.vcas);
+    vcas.add(vcaId);
+    return this.#next(
+      { kind: "upsertVca", vcaId, vca: { ...spec, members: [...spec.members] } },
+      OP_UPSERT_VCA,
+      [message(1, [utf8(1, vcaId), message(2, faderFields(fader)), ...members.map((member) => utf8(3, member))])],
+      { vcas },
+    );
+  }
+
+  /** Remove a declared VCA. A VCA that still lists it, or automation on it, makes the engine refuse. */
+  removeVca(vcaId: string): TransactionBuilder {
+    this.#declared(this.#state.vcas, vcaId, "VCA", `removeVca("${String(vcaId)}")`);
+    const vcas = new Set(this.#state.vcas);
+    vcas.delete(vcaId);
+    return this.#next({ kind: "removeVca", vcaId }, OP_REMOVE_VCA, [utf8(1, vcaId)], { vcas });
+  }
+
+  /** Refuse `id` when another kind of graph entity than `own` already holds it. */
+  #freeGraphId(id: string, own: "tracks" | "submixes" | "vcas" | "outputs", path: string): void {
+    const kinds = ["tracks", "submixes", "vcas", "outputs"] as const;
+    if (kinds.some((kind) => kind !== own && this.#state[kind].has(id))) {
+      fail(`${path}.id`, "tracks, submixes, VCAs and outputs share one ID namespace", CODE.duplicateId);
+    }
+  }
+
+  #declared(ids: ReadonlySet<string>, id: string, what: string, path: string): void {
+    if (typeof id !== "string" || !ids.has(id)) {
+      fail(`${path}.id`, `'${String(id)}' is not a declared ${what}`, CODE.missingEntity);
+    }
+  }
+
+  #route(routeId: string, path: string): ModelRecord {
+    this.#declared(new Set(this.#state.routes.keys()), routeId, "route", path);
+    return this.#state.routes.get(routeId) as ModelRecord;
+  }
+
+  #automation(automationId: string, path: string): ModelRecord {
+    this.#declared(new Set(this.#state.automations.keys()), automationId, "automation", path);
+    return this.#state.automations.get(automationId) as ModelRecord;
+  }
+
+  /** The working session an automation target resolves against. */
+  #automationScope(): AutomationScope {
+    return {
+      slots: this.#state.slots,
+      strips: new Map([...this.#state.strips].map(([id, inserts]) => [
+        id,
+        inserts.map((insert) => [String(insert.id), String(record(insert.identity).effect_id)] as const),
+      ] as const)),
+      routes: new Set(this.#state.routes.keys()),
+      vcas: this.#state.vcas,
+    };
+  }
+
+  #graph(): RouteGraph {
+    return { tracks: this.#state.tracks, submixes: this.#state.submixes, outputs: this.#state.outputs };
+  }
+
+  /** A declared strip's working inserts: a track's or a submix's. */
   #strip(trackId: string, path: string): readonly ModelRecord[] {
     const inserts = typeof trackId === "string" ? this.#state.strips.get(trackId) : undefined;
     if (inserts === undefined) {
@@ -605,7 +1102,7 @@ export class TransactionBuilder {
     spec: SessionEditSpec,
     opcode: number,
     payload: readonly Uint8Array[],
-    update: Partial<Pick<BuilderState, "sources" | "tracks" | "strips">>,
+    update: Partial<Omit<BuilderState, "baseSlots" | "edits">>,
   ): TransactionBuilder {
     const bytes = nested(1, true, [field(1, WIRE_U16, true, u16(opcode)), nested(2, true, payload)]);
     return new TransactionBuilder(Object.freeze({
@@ -635,12 +1132,19 @@ export function transaction(base: SessionBuilder): TransactionBuilder {
       records(record(strip.inserts).effects),
     ] as const),
   );
+  const ids = (entities: readonly ModelRecord[]): ReadonlySet<string> =>
+    new Set(entities.map((entity) => String(entity.id)));
   return new TransactionBuilder(Object.freeze({
     sampleRateHz: context.sampleRateHz,
+    baseSlots: context.slots,
     slots: context.slots,
-    otherGraphIds: context.otherGraphIds,
     sources: new Map(context.sources.map((entry) => [entry.id, entry] as const)),
     tracks: new Set(context.tracks.map((entry) => entry.id)),
+    submixes: ids(model.submixes),
+    vcas: ids(model.vcas),
+    outputs: ids(model.outputs),
+    routes: new Map(model.routes.map((route) => [String(route.id), route] as const)),
+    automations: new Map(model.automation.map((entry) => [String(entry.id), entry] as const)),
     strips,
     consoleChanged: false,
     edits: Object.freeze([]),
@@ -670,6 +1174,26 @@ export function encodeSessionTransaction(
 // Entity encoders: one per `session_wire.rs` `tx_*` function, from the normalized record.
 // -------------------------------------------------------------------------------------------
 
+/** The `{ rampSamples? }` option of `setConsole` and `setTrackConsole`: a `u32`, or absent. */
+function rampOption(options: { readonly rampSamples?: number }, path: string): number | undefined {
+  if (options === null || typeof options !== "object") fail(`${path}.options`, "expected { rampSamples? }");
+  return options.rampSamples === undefined ? undefined : requireU32(options.rampSamples, `${path}.rampSamples`);
+}
+
+/** The optional `ramp_samples` field (#1394 D1): written only when a length is given. */
+function rampField(id: number, rampSamples: number | undefined): Uint8Array[] {
+  return rampSamples === undefined ? [] : [field(id, WIRE_U32, false, u32(rampSamples))];
+}
+
+/** Whether two slot lists are the same console, as the engine compares `Console` values. */
+function sameSlots(a: readonly ConsoleSlotEntry[], b: readonly ConsoleSlotEntry[]): boolean {
+  return a.length === b.length && a.every((slot, index) => {
+    const other = b[index] as ConsoleSlotEntry;
+    return slot.slot === other.slot && slot.section === other.section && slot.effectId === other.effectId
+      && slot.quality === other.quality && slot.linkMode === other.linkMode;
+  });
+}
+
 function utf8(id: number, value: ModelValue | undefined): Uint8Array {
   return field(id, WIRE_UTF8, true, text(String(value)));
 }
@@ -679,9 +1203,13 @@ function byte(id: number, value: number): Uint8Array {
 }
 
 function code(id: number, table: ReadonlyMap<ModelValue, number>, value: ModelValue | undefined): Uint8Array {
+  return byte(id, codeOf(table, value));
+}
+
+function codeOf(table: ReadonlyMap<ModelValue, number>, value: ModelValue | undefined): number {
   const found = value === undefined ? undefined : table.get(value);
   if (found === undefined) throw new MisoUsageError(`${String(value)} has no wire code`);
-  return byte(id, found);
+  return found;
 }
 
 function boolean(id: number, value: ModelValue | undefined): Uint8Array {
@@ -818,6 +1346,89 @@ function matrixOrPanFields(strip: ModelRecord): Uint8Array[] {
   }
   const pan = record(strip.pan);
   return [byte(1, PAN_TAG), float(2, pan.left), float(3, pan.right), word(4, pan.smoothing_samples)];
+}
+
+/** `tx_console`: the pre-insert slots as field 1, then the post-insert slots as field 2. */
+function consoleFields(slots: readonly ConsoleSlotEntry[]): Uint8Array[] {
+  const section = (id: number, name: ConsoleSlotEntry["section"]): Uint8Array[] => slots
+    .filter((slot) => slot.section === name)
+    .map((slot) => message(id, [
+      utf8(1, slot.slot),
+      message(2, [byte(1, IDENTITY_NATIVE), utf8(2, slot.effectId)]),
+      code(3, QUALITY_CODES, slot.quality),
+      code(4, LINK_MODE_CODES, slot.linkMode),
+    ]));
+  return [...section(1, "pre_insert"), ...section(2, "post_insert")];
+}
+
+/** `tx_submix`: the track's strip fields without the source, `console` before `inserts`. */
+function submixFields(submix: ModelRecord): Uint8Array[] {
+  return [
+    utf8(1, submix.id),
+    message(2, builtinsFields(record(submix.builtins))),
+    ...records(submix.console).map((entry) => message(3, consoleEntryFields(entry))),
+    message(4, records(record(submix.inserts).effects).map((effect) => message(1, effectFields(effect)))),
+    message(5, faderFields(record(submix.fader))),
+    message(6, matrixOrPanFields(submix)),
+  ];
+}
+
+/** `tx_route`. */
+function routeFields(route: ModelRecord): Uint8Array[] {
+  const matrix = record(route.channel_matrix);
+  return [
+    utf8(1, route.id),
+    message(2, routeSourceFields(record(route.source))),
+    message(3, routeDestinationFields(record(route.destination))),
+    message(4, [float(1, matrix.ll), float(2, matrix.lr), float(3, matrix.rl), float(4, matrix.rr)]),
+    float(5, route.gain_db),
+    boolean(6, route.mute),
+    boolean(7, route.follows_mute),
+  ];
+}
+
+/** `tx_automation`: the segments repeat as field 3, and the hand-move offset is field 4. */
+function automationFields(automation: ModelRecord): Uint8Array[] {
+  const offset = record(automation.offset);
+  return [
+    utf8(1, automation.id),
+    message(2, automationTargetFields(record(automation.target))),
+    ...records(automation.segments).map((segment) => message(3, automationSegmentFields(segment))),
+    message(4, [float(1, offset.left_db), float(2, offset.right_db)]),
+  ];
+}
+
+/**
+ * `tx_automation_target`: the control list's address message (#1566 D4), its ID, slot, control
+ * and lane fields written optional as the list writes them, and no expected effect.
+ */
+function automationTargetFields(target: ModelRecord): Uint8Array[] {
+  return [
+    code(1, OWNER_KIND_CODES, target.owner),
+    field(2, WIRE_UTF8, false, text(String(target.owner_id))),
+    code(3, SECTION_KIND_CODES, target.section),
+    ...(target.slot_id === undefined ? [] : [field(4, WIRE_UTF8, false, text(String(target.slot_id)))]),
+    field(5, WIRE_U32, false, u32(Number(target.control))),
+    field(6, WIRE_U8, false, u8(codeOf(LANE_CODES, target.lane))),
+  ];
+}
+
+function automationSegmentFields(segment: ModelRecord): Uint8Array[] {
+  return [
+    code(1, SHAPE_CODES, segment.shape),
+    long(2, segment.start_sample),
+    long(3, segment.end_sample),
+    float(4, segment.start_value),
+    float(5, segment.end_value),
+    code(6, UNIT_CODES, segment.unit),
+  ];
+}
+
+function routeDestinationFields(destination: ModelRecord): Uint8Array[] {
+  return [
+    code(1, ROUTE_DESTINATION_TAGS, destination.kind),
+    utf8(2, destination.kind === "submix_input" ? destination.submix_id : destination.output_id),
+  ];
 }
 
 function consoleEntryFields(entry: ModelRecord): Uint8Array[] {

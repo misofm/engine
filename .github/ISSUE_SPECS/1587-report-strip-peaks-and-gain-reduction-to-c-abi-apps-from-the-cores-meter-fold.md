@@ -124,3 +124,88 @@ Commands: `cargo test --locked -p host-core --all-features`,
 
 - With #1581 and #1583, supersedes *Report each configured meter handle's own meter in the C ABI
   meter batch* (#1352); it closes when this slice merges.
+
+## Decision record (#1587a, 2026-10-24)
+
+- **Split.** #1587a is strip peaks only; gain reduction is #1587b (after #1585a). D1's "(new)
+  `MeterDelivery::adopt`" is read as "call the existing one" (scope R5).
+- **R1' (root, binding; replaces R1).** The adoption sample of epoch E is the retired
+  predecessor plan's `next_absolute_sample()`, taken on the reclaim path of
+  `synchronize_plan_epochs`, where `MeterDelivery::adopt` runs (`adopt_meters`). Reasons R1 (a
+  render-side `active_epoch_sample` atomic) was wrong: render retires the predecessor inside
+  `render_contiguous`, before `PlanState::render` could store a sample, so the reclaim path can
+  promote before the sample exists; two single-writer words read as a pair tear; and a second
+  adoption before the control thread promotes overwrites the first one's sample, which a carried
+  swap after an uncarried one needs. `synchronize_plan_epochs` loads `active_epoch` (Acquire)
+  before it drains, so outside the test hold every promotion is a reclaim's; with the hold on the
+  atomic still promotes and the delivery waits (`SessionMeters::epoch`; no poll until it is the
+  running epoch), catching up one epoch per reclaim. B-1's drain-first rule is unchanged.
+- **Gate.** At a block that adopts a successor whose strip meters were not carried,
+  `PlanState::render` calls `OutputPeakGateRelay::restart_at(block start)`: an active gate moves
+  there and `applied` is unchanged. That is the rule of the control thread's `align` at the
+  adoption sample, so its later request asks for the value the gate holds. The relay stays the
+  one writer.
+- **R2.** `ProviderEpoch::meter_tables`, built in `prepare_runtime` for a `METER_DELIVERY`
+  adapter, charged as an epoch row. The running epoch's tables live in the delivery; a parked
+  epoch gets its own back at the adoption that displaced it.
+- **R4.** `SessionMeters::{resolution, folds}`, reserved at boot for the most table entries,
+  rebuilt at each accepted configure and each meter adoption against the strip meters of the
+  epoch whose frames the delivery folds (not the committed model: a pending rebuild never
+  relabels a record).
+- **Records bound.** A batch carries at most 256 records, so the provider refuses the 129th peak
+  entry: `INVALID_FIELD`, `meter.records`, at that entry.
+- **Root ruling 1 (lane).** The meter lane holds one whole batch, 256 slots. The protocol queue
+  config sizes the counter-snapshot lane apart with no wire change (`ProtocolQueueConfig::
+  counter_telemetry_slots`, kept at 2), and `telemetry_slots` reports the meter lane. So the two
+  counter tests that relied on a two-slot lane are unchanged. The C ABI capability and event
+  vectors are re-pinned (field 15: 256, was 2); the conformance corpus passes, so
+  `COMPLETE_SCHEMA_HASH` did not move. `reference_session_retained_rows`: `capi_retained_bytes`
+  measured 259,662 after attempt 2's 128-entry bound (and #1325a's duck overlay from main),
+  ceiling 285,632 (+10 %, to 64), for the 32,512 B strip-ID reserve and the meter lane.
+  Merged with #1577's response capture: 312,897, ceiling 344,192.
+  Attempt 2 (verifier m2): the lane is sized by the adapter, 256 for a `METER_DELIVERY` adapter
+  (the C ABI) and 2 otherwise, so the browser's capability record does not change; #1588 sizes
+  the browser's lane. `protocol_cross_host` gains a third documented exception (the C ABI's
+  256-slot meter lane) and an assertion that the browser's lane stays at 2 slots (red on a
+  mutant that sizes the browser's lane to 256), both removed by #1588.
+- **Root ruling 2 (depth).** The C ABI's strip meter queues are as deep as the output meter's,
+  `METER_QUEUE_DEPTH` (8, was 1): at depth 1 every frame after a service lag of more than one
+  window was lost. Caps now charge 8 meter items per strip, so a session near
+  `maximum_meter_items` is refused earlier; a host can raise the cap. This moved the reference
+  session's `builtin_meter_payload_bytes` (20,538) and `builtin_retained_payload_bytes` (56,997)
+  past their ceilings, which are raised by the same rule (22,592 and 62,720); the ruling's "no
+  other budget" did not foresee these two, so they are flagged for root.
+- **Charge.** The strip-ID text of the two stored tables is charged at the reachable bound, 128
+  entries (the records bound) x `STABLE_ID_MAXIMUM_BYTES` x 2 = 32,512 B (`meter_text_reserve_bytes`),
+  with the resolution and fold vectors reserved for 128 entries (attempt 2, verifier m3; attempt 1
+  charged 256).
+- **Root ruling 3 (snap).** The relay keeps the strip meters' grid on render (origin 0, moved by
+  `restart_at`; the window) and `apply(block_start)` writes only gates on that grid at or after
+  the block: a request at or after the block opens at the grid's first boundary at or after it; a
+  request behind the block keeps a gate already open at or before the block, and otherwise opens
+  at the first boundary at or after the block. So a configure that races render, or a stale-grid
+  request after an uncarried swap, never opens an output window off the strip grid. Integer
+  arithmetic only, no allocation.
+- **Root ruling 4.** The re-exports in `host-core/src/lib.rs` and `control-plane/src/lib.rs` are
+  accepted.
+- **Tests (#1587a).** One per claim:
+  - `strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds` (capi; rewrites
+    #1583's gate-3 test, gates 1, 3, 4): red if a record carries another strip's or the output's
+    peak, a strip resolves by position or against a retired epoch, adoption drops carried windows
+    or restarts the sequence, an absent strip reports a stale value, or a returned strip moves its
+    handle. Attempt 2 (verifier B1): the carried rebuild is adopted in the middle of a batch; red
+    on attempt 1, where `resolve` cleared the folds at every adoption (eq0 Left 0.25 flags 1, want
+    1.5 flags 3). The folds now keep their values across a re-resolution. The reference is offline and exact (power-of-two gains). A returned strip fades in
+    over its first window, so that batch reads its second window.
+  - `an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block` (capi): red if render
+    does not restart the gate at an uncarried swap or the control thread's adoption asks for
+    another value.
+  - `a_gate_request_behind_its_block_opens_on_the_next_grid_boundary` (host-core): red if the
+    relay copies a request behind its block into the gate (root ruling 3).
+  - `a_meter_table_past_one_batch_of_records_is_refused_at_its_first_extra_entry` (host-core):
+    red if the records bound is missing or off by one.
+  - Gate 5: the render race's table gains two strip entries; red if strip meters or adoption
+    allocate on render. (Root's condition 1 asked for a withdrawn-candidate assertion; the
+    verifier found no defect it catches before "A's epoch is dropped" does, so it was removed in
+    attempt 2.)
+  - Deleted: the `meter.strip.unavailable` row of the capi refusal test (the refusal is gone).
