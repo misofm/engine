@@ -4377,7 +4377,9 @@ impl GainReductionTaps for WebGainReductionTaps<'_> {
 /// `panic_bounds_check` the fold brings is the slot index of the SPSC queues inlined into
 /// `MeterDelivery::poll`, which the ring keeps in range, and the ring push's own queues are the
 /// same kind. Both callers are on the render thread (`process()`), so the shipped artifact's
-/// call-graph gate covers it.
+/// call-graph gate covers it. Inlined into both, so the active attachment's downcast stays the
+/// caller's own pinned `call_indirect` pair.
+#[inline(always)]
 fn poll_meter_delivery(ready: &mut ReadyOwnership, plan: &mut WebPlan, next_sample: u64) -> u32 {
     // #1381a D3: the meter consumers and the observation readers are the active plan's
     // companions. The downcast allocates and drops nothing.
