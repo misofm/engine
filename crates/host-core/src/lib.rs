@@ -113,6 +113,7 @@ pub use control_preparation::{
 pub mod prepare;
 pub mod render_session;
 pub mod response;
+pub mod response_capture;
 pub mod route_controls;
 pub mod shape;
 pub mod source;
@@ -194,6 +195,12 @@ pub use response::{
     ResponseSnapshotQueryError, ResponseSnapshotQuerySummary, TrackResponse,
     compose_track_response, generate_response_grid, input_filter_target, prepare_response_preview,
     prepare_response_query, query_response_snapshot_into, resolve_response_target,
+};
+pub use response_capture::{
+    ResponseCaptureCeiling, ResponseCaptureClient, ResponseCaptureFailure, ResponseCaptureJob,
+    ResponseCaptureRefusal, ResponseCaptureServer, ResponseCaptureSetupError, ResponseReady,
+    response_capture_ceiling, response_capture_channel, response_capture_owners,
+    response_capture_retained_bytes,
 };
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
