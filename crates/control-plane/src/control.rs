@@ -858,6 +858,9 @@ pub enum TestStructuralFaultPhase {
     ProtocolCommit,
     /// The live arm, after every fallible check and before its first write (#1257 D7).
     BeforeLivePush,
+    /// A panic inside a rebuild, after the pending candidate was withdrawn and the successor
+    /// prepared, before admission (#2010).
+    PanicAfterWithdrawal,
 }
 
 /// How many of each owner the structural and live paths constructed, published and disposed.
@@ -4280,26 +4283,12 @@ where
                         Err(_) => return Err(CommandError::Internal),
                     }
                 }
-                // #1310 D1: a pending candidate is taken back before anything is prepared, so the
-                // replacement knows the plan render runs and the candidate's host-fed rings can
-                // move while the control thread owns them.
-                let mut withdrawn = self.withdraw_pending_candidate()?;
-                let result = self.rebuild(
+                self.rebuild_superseding(
                     Rebuild::Transaction(prepared),
                     revision,
                     monitor_change,
                     observation_change,
-                    &mut withdrawn,
-                );
-                // #1310 D4: a refusal leaves the withdrawn candidate here, whole; it is published
-                // again with its own epoch, credit, revision gate and words. Nothing was published
-                // since it was withdrawn, so this cannot fail.
-                if let Some(candidate) = withdrawn.take() {
-                    self.publisher.republish(candidate);
-                    #[cfg(feature = "test-support")]
-                    update_test_owners(|owners| owners.candidate_republished += 1);
-                }
-                result
+                )
             }
         }
     }
@@ -4375,21 +4364,13 @@ where
         if !observation_change.ended.is_empty() {
             return Err(CommandError::Internal);
         }
-        let mut withdrawn = self.withdraw_pending_candidate()?;
-        let result = self.rebuild(
+        self.rebuild_superseding(
             Rebuild::Discontinuity(model),
             revision,
             monitor_change,
             observation_change,
-            &mut withdrawn,
-        );
-        // #1310 D4: as for a transaction, a refusal republishes the withdrawn candidate whole.
-        if let Some(candidate) = withdrawn.take() {
-            self.publisher.republish(candidate);
-            #[cfg(feature = "test-support")]
-            update_test_owners(|owners| owners.candidate_republished += 1);
-        }
-        result.map(|_| ())
+        )
+        .map(|_| ())
     }
 
     /// Executes a command the session runs (#1594 D9) and completes it: a reply or a typed
@@ -5068,10 +5049,9 @@ where
         if !observation_change.ended.is_empty() {
             return Err(SpectrumRefusal::Error(CommandError::Internal));
         }
-        let mut withdrawn = self
-            .withdraw_pending_candidate()
-            .map_err(SpectrumRefusal::Error)?;
-        let result = self.rebuild(
+        // This assumes a withdrawal refuses only with `Internal` (`promote_pending_provider`),
+        // which the arm below answers as an error, never as a `LimitExceeded` reply.
+        let result = self.rebuild_superseding(
             Rebuild::Monitor {
                 model,
                 configuration,
@@ -5079,14 +5059,7 @@ where
             revision,
             monitor_change,
             observation_change,
-            &mut withdrawn,
         );
-        // #1310 D4: as for a transaction, a refusal republishes the withdrawn candidate whole.
-        if let Some(candidate) = withdrawn.take() {
-            self.publisher.republish(candidate);
-            #[cfg(feature = "test-support")]
-            update_test_owners(|owners| owners.candidate_republished += 1);
-        }
         match result {
             Ok(_) => self
                 .pending_providers
@@ -5100,6 +5073,72 @@ where
             )),
             Err(error) => Err(SpectrumRefusal::Error(error)),
         }
+    }
+
+    /// Withdraws the pending candidate, rebuilds, and republishes the candidate when the rebuild
+    /// does not take it: the one supersession path of a transaction, a declared discontinuity and
+    /// a monitor change.
+    ///
+    /// #1310 D1: a pending candidate is taken back before anything is prepared, so the replacement
+    /// knows the plan render runs and the candidate's host-fed rings can move while the control
+    /// thread owns them. The preparation reads the withdrawn candidate (its carried base, the
+    /// donation check), so the withdrawal cannot wait until after it (#2010). #1310 D4: a refusal
+    /// leaves the withdrawn candidate here, whole; it is published again with its own epoch,
+    /// credit, revision gate and words. Nothing was published since it was withdrawn, so this
+    /// cannot fail.
+    ///
+    /// #2010: a panic inside the rebuild before its commit republishes the candidate too, then
+    /// resumes the panic, so a host that catches it (the C ABI answers `RESULT_INTERNAL`) keeps
+    /// the candidate whose revisions it acked. Under `panic = "abort"` nothing unwinds and this
+    /// changes nothing. A panic after the commit, which has taken the candidate, is not covered.
+    /// Nor is a panic between the protocol commit (`prepared.commit`) and `withdrawn.take()`: it
+    /// still republishes the candidate, but over a half-committed controller, which then holds the
+    /// successor's model, revision, monitor overlay, observation and send moves while the
+    /// candidate renders (#2010 R2; a successor issue).
+    fn rebuild_superseding(
+        &mut self,
+        kind: Rebuild,
+        revision: u64,
+        monitor_change: controls::MonitorChange,
+        observation_change: controls::ObservationChange,
+    ) -> Result<usize, CommandError> {
+        let mut withdrawn = self.withdraw_pending_candidate()?;
+        self.rebuild_withdrawn(
+            kind,
+            revision,
+            monitor_change,
+            observation_change,
+            &mut withdrawn,
+        )
+    }
+
+    /// [`Self::rebuild_superseding`] after its withdrawal: rebuilds with `withdrawn` and
+    /// republishes a candidate the rebuild did not take, on a refusal and on a panic before the
+    /// commit, which it then resumes (#2010). The transition fallback (#1397 D2) runs it on the
+    /// candidate it withdrew itself; `withdrawn` is `None` on return.
+    fn rebuild_withdrawn(
+        &mut self,
+        kind: Rebuild,
+        revision: u64,
+        monitor_change: controls::MonitorChange,
+        observation_change: controls::ObservationChange,
+        withdrawn: &mut Option<engine::realtime::UnadoptedCandidate>,
+    ) -> Result<usize, CommandError> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.rebuild(
+                kind,
+                revision,
+                monitor_change,
+                observation_change,
+                withdrawn,
+            )
+        }));
+        if let Some(candidate) = withdrawn.take() {
+            self.publisher.republish(candidate);
+            #[cfg(feature = "test-support")]
+            update_test_owners(|owners| owners.candidate_republished += 1);
+        }
+        result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
     }
 
     /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
@@ -5157,7 +5196,8 @@ where
         let injected = TEST_REFUSE_REPREPARE.with(|state| state.replace(false));
         #[cfg(not(feature = "test-support"))]
         let injected = false;
-        let result = self.rebuild(
+        // A refusal republishes W whole, as a panic before the commit does (#2010).
+        let result = self.rebuild_withdrawn(
             Rebuild::Transition {
                 model,
                 #[cfg(feature = "test-support")]
@@ -5171,11 +5211,6 @@ where
         match result {
             Ok(_) => Ok(TransitionStep::Published),
             Err(error) => {
-                if let Some(candidate) = withdrawn.take() {
-                    self.publisher.republish(candidate);
-                    #[cfg(feature = "test-support")]
-                    update_test_owners(|owners| owners.candidate_republished += 1);
-                }
                 // W's record stays: the withdrawal of the epoch it names keeps it.
                 debug_assert_eq!(self.primed, Some(record));
                 self.transition_reprepare_refusals =
@@ -5613,6 +5648,9 @@ where
                 drop(candidate_provider);
                 drop(kind);
                 return Err(CommandError::Backpressure);
+            }
+            if self.take_test_fault(TestStructuralFaultPhase::PanicAfterWithdrawal) {
+                panic!("test fault: a rebuild panics after the withdrawal");
             }
         }
         // #1398 D4: the candidate beside every plan the control plane holds unreclaimed, a

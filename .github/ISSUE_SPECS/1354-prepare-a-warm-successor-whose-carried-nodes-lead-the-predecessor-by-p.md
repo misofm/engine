@@ -437,3 +437,79 @@ Test value (1354a):
   `a + P` and never reports it.
 - Filter unit test: a filter that keeps a whole-restarted strip's pre-fader lines carries their
   pending audio into a strip that restarts at rest.
+
+## Decision record (1354b, attempt 1, 2026-10-25)
+
+Scope: D2 step 2 and step 6's M1 rule, gates 5, 6 and gate 7's second case, the L3 term of D3,
+and the three debts recorded for 1354b. Class A: every change runs only under
+`SuccessorBase::warm`; the strip delay join's refactor is behaviour-identical (host-core's suites
+pass unchanged).
+
+- **Step 2 and M1 are one rule, #1324 D1's.** Each pass of `warm_lead` with `P > 0` runs
+  `close_over_sidechains` (1324b's helper, unchanged) over `R` (the join part, the strips restarted
+  whole and the lead's delay restarts) with the lead compile's sidechain lines against A's. On that
+  compile a submix `input`-tap line changes length exactly when the stage arrives at `a(n) + g`
+  with `g ≠ P`, so the closure's submix rule is M1, with step 2's exemption (`submix_input_is_quiet`,
+  the strips restarted whole counted as ducked). A strip that joins goes to `R`'s join part and the
+  pass repeats (step 2). With `P = 0` (step 4) the closure runs on the ordinary successor's lines.
+  The lead's lines come from the unbound compile's inserted delays (`compiled_sidechain_lines`);
+  gate 5 checks that the count over them equals the warm successor's over its bound lines.
+- **Debt (a), the re-pointed track.** The lead's strip delay join restarts a track whose claim line
+  grows on a source that does not carry; `warm_lead` now runs that join on each pass's compile
+  (`strip_delay_restarts`, one rule with `resolve_strip_delay_carry`) and adds its restarts to `R`.
+  Row: `the_prime_counts_the_words_its_fill_writes`, last case (prepares, restarts `[t1, t2]`).
+- **Debt (c), a consumer of a strip restarted whole.** Closed by the step-2 closure above. The warm
+  preparation now restarts every strip of `R` (its join part from `WarmLead`, whatever its own
+  join did) and refuses a restart outside `R` after the closure, not before it
+  (`host.successor.warm_invariant`). So the "reverse" of the 1354a join re-check (a strip in `R`
+  the join leaves carried at floor `a`) cannot occur.
+- **Debt (b), D3's L3 term.** `sidechain_fill_words`: each channel of an L3 line of length `λ'`
+  takes `min(λ', e + c + P)` words (the predecessor's pending words of the edge, the source
+  track's claim pending on that lane, the prime), as #1355's `fill_head` writes them. `warm_lead`
+  counts it over the lead compile's fills, preparation over its own (`sidechain_fills`).
+- **Pass bound** `2 · strips + 1`: a strip enters the join part and `whole` at most once each.
+- **Step 4 (amends D2).** `Ordinary` only when nothing is restarted whole and `R`'s join part is
+  the ordinary successor's; a strip that joined on an earlier lead compile makes it `Warm` with
+  `lead_samples = 0` (an ordinary rebuild that duck-swaps it). No gate reaches it: it needs a pass
+  whose `Δ` falls to 0 only because such a strip joined, and every shape found grows a carried
+  node after it too.
+- **Gate 5 (amends the gate text).** Gate 1's shape restarts track 1 by the join, which the
+  ordinary successor's closure (1324b) already covers. The gate uses gate 2's edit instead (step
+  6 restarts X whole) with track Y keyed from X: from `pre_fader`, Y joins `R` and its nodes
+  before the fader keep `a(n)`; from `input` and `post_fader`, Y leads by `P`; from `input` the
+  prime counts Y's L3 line (`P` words a channel).
+- **Gate 6.** In the `g < P` case T3's `Input` stage keeps `a(n)`; its compressor and the stages
+  after it wait for B's `Input` stage, as in A, so they are not at `a(n)`.
+- **Misaligned** has a gate now (1354a verify): gate 9's last case.
+- **Duck overlay:** `warm_lead` reads `base.committed` without the duck overlay (as 1354a). The
+  overlay changes only mutes, which `warm_lead` does not read; a later reader of mutes must use
+  the overlaid model (doc line at `warm_lead`).
+- **Verify fold (PASS, 2026-10-25):** gate 5 gains a row with a limiter before Y's compressor in
+  A, so the L3 line has predecessor words (`e = L`); its expected count is read from the prepared
+  line (`2 · λ'`), not a literal.
+
+Red on `main` (`66b5e0566`) before the change: gate 5 (`y` `Input` at 512, not 0), gate 6 `g < P`
+(`t3` `Input` at 512), the re-pointed row (`host.successor.warm_invariant`). Mutants of
+`prepare.rs`, one run each (`crates/host-core/tests/warm_successor.rs`):
+
+| mutant | red tests |
+|---|---|
+| no closure on the lead compile | gates 5, 6, re-pointed row |
+| closure does not count `whole` as restarted | gates 5, 7 (second case) |
+| lead delay join adds nothing | re-pointed row |
+| no L3 words; L3 on one channel | gate 5 |
+| L3 charges `P` words a channel (verify MINOR) | gate 5, the row with a limiter before Y's `comp` (`e = L`) |
+| preparation omits L3 | gate 5 |
+| no `Misaligned` | gate 9 |
+| preparation ignores `R`'s join part | gate 6, re-pointed row |
+| no restart-outside-`R` check | `a_join_outside_the_leads_restart_set_is_the_invariant_error` |
+| shared rule: every submix `input` tap adds; `pre_fader` keeps | gates 6, 7; gate 5 |
+
+Test value (1354b):
+- Gate 5: a closure that ignores the strips step 6 restarts whole leaves Y at `a + P` while it
+  restarts; a prime that leaves out L3 under-counts `PrimeBudget`.
+- Gate 6: a C1 that checks only C nodes keeps T3 at `a + P` with a sidechain line 26 samples
+  longer than A's; a rule that restarts every submix `input`-tap consumer restarts T3 when `g = P`.
+- Gate 7, second case: an exemption that does not count the strips restarted whole restarts T3.
+- Gate 9, last case: a loop with no `Misaligned` answers `Warm` with every reaching strip ducked.
+- Re-pointed row: an `R` without the lead's delay restarts refuses a valid warm edit.
