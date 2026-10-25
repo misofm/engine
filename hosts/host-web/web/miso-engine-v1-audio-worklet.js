@@ -94,6 +94,9 @@ const SOURCE_FIELDS = [
   "endOfRegion",
 ];
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
+// Issue #1644 D1 (root R1): one session seek message for both exports. `anchorSample` is always
+// present; `-1n` is a plain seek, any other value the absolute render sample of the anchored form.
+const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
 // Issue #1570b D4: the two event lanes in drain order (the C ABI's lane codes: reliable, lossy) and
@@ -290,6 +293,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.watermarkSample = -1n;
     // The record's three outcome counts as of that post: a count that rose since names a flag.
     this.watermarkCounts = [0n, 0n, 0n];
+    // Issue #1644 D2: the generation of the last session seek the engine accepted (undefined:
+    // none). The SDK's feed drain runs on this same object, between the same handler calls, and
+    // consumes a ring seek at exactly this generation without seeking the source again.
+    this.lastSessionSeekGeneration = undefined;
     this.clock = renderClock();
     // Issue #1381a D6, `single` mode: the instance's control work runs here, in the message
     // handler, outside `process()`. The service step follows every message, the main realm's
@@ -1160,6 +1167,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.disposed = true;
         this.handleDisposed = true;
         this.handle = 0;
+        this.lastSessionSeekGeneration = undefined;
       }
       this.acknowledge(message.requestId, result);
       return;
@@ -1173,6 +1181,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveSource(message);
     } else if (message?.tag === "miso.seek.v1" && exactFields(message, SEEK_FIELDS)) {
       this.receiveSeek(message);
+    } else if (message?.tag === "miso.session-seek.v1"
+        && exactFields(message, SESSION_SEEK_FIELDS)) {
+      this.receiveSessionSeek(message);
     } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
       this.receiveCommand(message);
     } else if (message?.tag === "miso.control.v1" && exactFields(message, CONTROL_FIELDS)) {
@@ -1872,6 +1883,37 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.handle, idLength, message.generation, message.sourceFrame,
       ),
     );
+  }
+
+  /// Issue #1644 D1, `single` mode: seek the timeline and every source under one generation, all
+  /// or nothing, in the message handler and never in `process()`. A plain seek (`anchorSample`
+  /// `-1n`) calls `session_seek`, which declares the discontinuity in the same call; an anchored
+  /// one calls `session_seek_at` once. A refusal is the reply's result and is not sticky; an OK
+  /// records the generation for the feed drain (D2) before the reply.
+  receiveSessionSeek(message) {
+    if (typeof message.generation !== "bigint" || message.generation <= 0n
+        || message.generation > 0xffffffffffffffffn
+        || typeof message.sourceFrame !== "bigint" || message.sourceFrame < 0n
+        || message.sourceFrame > 0xffffffffffffffffn
+        || typeof message.anchorSample !== "bigint" || message.anchorSample < -1n
+        || message.anchorSample > 0xffffffffffffffffn) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
+      return;
+    }
+    const result = message.anchorSample === -1n
+      ? this.exports.miso_engine_web_v1_session_seek(
+        this.handle, message.generation, message.sourceFrame,
+      )
+      : this.exports.miso_engine_web_v1_session_seek_at(
+        this.handle, message.generation, message.sourceFrame, message.anchorSample,
+      );
+    if (result === RESULT_OK) this.lastSessionSeekGeneration = message.generation;
+    this.port.postMessage({
+      tag: "miso.session-seek.v1",
+      requestId: message.requestId,
+      result,
+      generation: message.generation,
+    });
   }
 
   // PROCESS_POLICY_BEGIN

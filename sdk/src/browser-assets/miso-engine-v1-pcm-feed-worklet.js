@@ -466,13 +466,21 @@ function wrapEngineProcessor(Base) {
     applySharedSeek(ring, epoch = Atomics.load(ring.control, CONTROL_SEEK_EPOCH), generation, frame) {
       const control = ring.control
       if (epoch !== ring.seenEpoch) {
-        ring.idTarget.set(ring.idBytes)
-        const result = this.exports.miso_engine_web_v1_source_seek(
-          this.handle,
-          ring.idLength,
-          generation ?? ring.controlI64[CONTROL_I64_SEEK_GENERATION],
-          frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
-        )
+        const requested = generation ?? ring.controlI64[CONTROL_I64_SEEK_GENERATION]
+        // Issue #1644 D2: a session seek the engine accepted at this generation already moved
+        // this source, and seeking it again would be refused as stale and stall the ring for
+        // good. The engine handler records that generation on this same object, so the epoch is
+        // consumed as an applied seek with no export call.
+        let result = RESULT_OK
+        if (requested !== this.lastSessionSeekGeneration) {
+          ring.idTarget.set(ring.idBytes)
+          result = this.exports.miso_engine_web_v1_source_seek(
+            this.handle,
+            ring.idLength,
+            requested,
+            frame ?? ring.controlI64[CONTROL_I64_SEEK_FRAME]
+          )
+        }
         if (result === RESULT_BACKPRESSURE) {
           // Ordinary flow control. Leave the epoch unseen and retry the same
           // seek before touching any slots on the next process call.

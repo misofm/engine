@@ -205,7 +205,11 @@ export class CanonicalPcmPump {
     frames: number
     finished: boolean
   }>
-  seek(frame: number): Promise<void>
+  /**
+   * Reposition every stem under a new generation: `generation` when given (it must be above the
+   * pump's own; pass a session seek's only after the engine accepted it), else the pump's next.
+   */
+  seek(frame: number, generation?: bigint): Promise<void>
   stop(): void
 }
 

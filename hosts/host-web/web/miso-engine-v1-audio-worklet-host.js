@@ -89,6 +89,9 @@ const SOURCE_FIELDS = [
 ];
 
 const SEEK_FIELDS = ["sourceId", "generation", "sourceFrame"];
+// Issue #1644 D1: a session seek names its generation and frame, and optionally its anchor.
+const SESSION_SEEK_FIELDS = ["generation", "frame"];
+const ANCHORED_SESSION_SEEK_FIELDS = ["generation", "frame", "anchorSample"];
 // Issue #137 D1, #1677: the frozen 272-byte little-endian command record. It names its tap by
 // stable key: a one-byte length and a 128-byte zero-padded field for each of the strip's and the
 // effect's ID. The IDs are at most 127 UTF-8 bytes (`session::STABLE_ID_MAXIMUM_BYTES`).
@@ -740,6 +743,8 @@ class MisoAudioWorkletHost {
   #pending = new Map();
   #inFlightSources = new Map();
   #inFlightSeeks = new Map();
+  /// Issue #1644 D1: one session seek may be unsettled at a time.
+  #inFlightSessionSeeks = 0;
   /// The one status request on the port, `{ requestId, promise }`, or null. A `status()` call joins
   /// it only while no later request was sent; otherwise it joins `#statusFollow`, the one pending
   /// read the host sends when this one settles.
@@ -861,6 +866,8 @@ class MisoAudioWorkletHost {
       else this.#inFlightSources.set(pending.sourceId, count);
     } else if (pending.response === "seek") {
       this.#inFlightSeeks.delete(pending.sourceId);
+    } else if (pending.response === "sessionSeek") {
+      this.#inFlightSessionSeeks -= 1;
     } else if (pending.response === "status") {
       if (this.#statusRead?.requestId === pending.requestId) {
         this.#statusRead = null;
@@ -1057,6 +1064,8 @@ class MisoAudioWorkletHost {
         ]
         : pending.response === "renderAllocations"
           ? ["tag", "requestId", "result", "count"]
+        : pending.response === "sessionSeek"
+          ? ["tag", "requestId", "result", "generation"]
         : ["tag", "requestId", "result"];
     const expectedTag = pending.response === "status"
       ? "miso.status.v1"
@@ -1074,6 +1083,8 @@ class MisoAudioWorkletHost {
               ? "miso.trackresponse.v1"
               : pending.response === "spectrum"
                 ? "miso.spectrum.v1"
+                : pending.response === "sessionSeek"
+                  ? "miso.session-seek.v1"
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
@@ -1171,10 +1182,13 @@ class MisoAudioWorkletHost {
     );
     const validRenderAllocations = pending.response !== "renderAllocations"
       || (message.result === RESULT_OK && validU32(message.count));
+    const validSessionSeek = pending.response !== "sessionSeek"
+      || message.generation === pending.generation;
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validControl || !validSessionMap
-        || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum) {
+        || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum
+        || !validSessionSeek) {
       this.#fail(webError(255, message.requestId));
       return;
     }
@@ -1195,6 +1209,7 @@ class MisoAudioWorkletHost {
     this.#pending.clear();
     this.#inFlightSources.clear();
     this.#inFlightSeeks.clear();
+    this.#inFlightSessionSeeks = 0;
     this.#statusRead = null;
     const follow = this.#statusFollow;
     this.#statusFollow = null;
@@ -1214,6 +1229,7 @@ class MisoAudioWorkletHost {
       return (this.#inFlightSources.get(sourceId) ?? 0) >= this.#ringBlocks;
     }
     if (response === "seek") return this.#inFlightSeeks.has(sourceId);
+    if (response === "sessionSeek") return this.#inFlightSessionSeeks >= 1;
     if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
     // Issue #137 D1: the local bound is the worklet-side queue depth, so a flood is refused here,
     // before any transfer, and the caller keeps its record block. The engine-side bound is the
@@ -1236,6 +1252,8 @@ class MisoAudioWorkletHost {
       this.#inFlightSources.set(sourceId, (this.#inFlightSources.get(sourceId) ?? 0) + 1);
     } else if (response === "seek") {
       this.#inFlightSeeks.set(sourceId, true);
+    } else if (response === "sessionSeek") {
+      this.#inFlightSessionSeeks += 1;
     } else if (response === "renderAllocations") {
       this.#inFlightRenderAllocations += 1;
     } else if (response === "command") {
@@ -1282,6 +1300,7 @@ class MisoAudioWorkletHost {
         spectrumOperation: stamped.operation,
         spectrumBuffer: stamped.buffer,
         spectrumBufferBytes: stamped.buffer instanceof ArrayBuffer ? stamped.buffer.byteLength : 0,
+        generation: stamped.generation,
         resolve,
         reject,
         response,
@@ -1340,6 +1359,33 @@ class MisoAudioWorkletHost {
       false,
       undefined,
       request.sourceId,
+    );
+  }
+
+  /// @internal Seek the timeline and every source to `frame` under one new `generation`, all or
+  /// nothing (issue #1644 D1). Without `anchorSample` it is a plain seek, which declares the
+  /// discontinuity in the same call; with one, every consumer applies it in the block that starts
+  /// at that absolute render sample, with continuity kept. It resolves with the engine's result and
+  /// the generation; a refusal changes nothing. Reposition the PCM producers only after an OK: a
+  /// ring seek at this generation is then consumed without a second per-source seek. One session
+  /// seek may be unsettled at a time; a second is refused locally with `RESULT_BACKPRESSURE`. The
+  /// SDK's `engine.seek` is the public surface.
+  seekSession(request) {
+    const anchored = hasExactFields(request, ANCHORED_SESSION_SEEK_FIELDS);
+    if ((!anchored && !hasExactFields(request, SESSION_SEEK_FIELDS))
+        || !validU64(request.generation, true) || !validU64(request.frame)
+        || (anchored && !validU64(request.anchorSample))) {
+      return Promise.reject(webError(1));
+    }
+    return this.#request(
+      {
+        tag: "miso.session-seek.v1",
+        generation: request.generation,
+        sourceFrame: request.frame,
+        anchorSample: anchored ? request.anchorSample : -1n,
+      },
+      [],
+      "sessionSeek",
     );
   }
 
