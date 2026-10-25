@@ -886,29 +886,31 @@ describe("browser session edits", () => {
   });
 
   test("gate 2: a live apply settles at the watermark post that covers it, and close rejects it", async () => {
-    // Red if applied() resolves at the commit or on a post for an older revision, if the engine
-    // does not settle it from the host's watermark posts, if close() leaves it pending, or if the
-    // engine does not tell its live controls' queue the revision an apply committed beside it (the
-    // queue's next submit is then refused `revision_conflict`).
+    // Red if `revision` misses a live edit's commit, if applied() resolves at the commit or on a
+    // post for an older revision, if the engine does not settle it from the host's watermark posts,
+    // if close() leaves it pending, or if the engine does not tell its live controls' queue the
+    // revision an apply committed beside it (the queue's next submit is then refused
+    // `revision_conflict`).
     const { engine, tick, post } = await boot(base());
     try {
       const earlier = await engine.liveControls();
+      await earlier.submit(earlier.edit.track("t2").faderDb(-1));
+      assert.equal(engine.revision, 1n, "a live edit's revision is seen");
       tick();
       const fader = transaction(base()).upsertTrack("t1", { source: "a", inserts: [EQ()], fader: { leftDb: -12, rightDb: -12 } });
       const outcome = await engine.apply(fader.build());
-      assert.deepEqual(outcome, { revision: 1n, path: "live" });
+      assert.deepEqual(outcome, { revision: 2n, path: "live" });
       const applied = engine.applied(outcome.revision);
       assert.equal(await settled(applied), false, "pending at the commit");
       post({ revision: 0n, sample: 64n, outcome: 1n, exactCount: 0n, transitionFallbackCount: 0n, supersededCount: 0n });
       assert.equal(await settled(applied), false, "an older revision's post does not settle it");
       tick();
       const snapshot = await applied;
-      assert.deepEqual(snapshot, { revision: 1n, sample: BigInt(QUANTUM), outcome: { exact: true, transitionFallback: false, superseded: false } });
+      assert.deepEqual(snapshot, { revision: 2n, sample: BigInt(QUANTUM), outcome: { exact: true, transitionFallback: false, superseded: false } });
       assert.deepEqual(engine.watermark(), snapshot);
       assert.deepEqual(await earlier.submit(earlier.edit.track("t2").faderDb(-3)),
-        { ok: true, revision: 2n, path: "live", appliedOperations: 1 });
-      assert.equal(engine.revision, 2n, "a live edit's revision is seen");
-      const pending = engine.applied(2n);
+        { ok: true, revision: 3n, path: "live", appliedOperations: 1 });
+      const pending = engine.applied(3n);
       await engine.close();
       await assert.rejects(pending, MisoUsageError);
     } finally {
