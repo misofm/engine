@@ -475,39 +475,48 @@ fn removal() -> Vec<SessionEdit> {
     ]
 }
 
-/// The value-only reference: `b`'s fader and its `pre_fader` send muted, at the session ramp.
-fn reference_mutes(model: &SessionModel) -> Vec<SessionEdit> {
-    let mut edits = protocol::control_core::fader_edits(
-        &id("b"),
-        &session::DualMonoFader {
+/// The value-only edits that give strip `strip`'s fader and each of its routes from a tap before
+/// the fader the mutes `model` declares, or, when `duck`, mute them all, at the session ramp.
+fn strip_mutes(model: &SessionModel, strip: &str, duck: bool) -> Vec<SessionEdit> {
+    let fader = model
+        .strips()
+        .find(|held| held.id.as_str() == strip)
+        .expect("the strip")
+        .fader
+        .clone();
+    let fader = if duck {
+        session::DualMonoFader {
             left_mute: true,
             right_mute: true,
-            ..model.tracks[1].fader.clone()
-        },
-    );
-    let mut send = model
-        .routes
-        .iter()
-        .find(|route| route.id.as_str() == "b-send")
-        .expect("b's send")
-        .clone();
-    send.mute = true;
-    edits.push(SessionEdit::UpsertRoute { route: send });
+            ..fader
+        }
+    } else {
+        fader
+    };
+    let mut edits = protocol::control_core::fader_edits(&id(strip), &fader);
+    for route in &model.routes {
+        let (source, tap) = match &route.source {
+            session::RouteSource::Track { track_id, tap } => (track_id, tap),
+            session::RouteSource::Submix { submix_id, tap } => (submix_id, tap),
+        };
+        if source.as_str() == strip && tap.precedes_fader() {
+            let mut route = route.clone();
+            route.mute |= duck;
+            edits.push(SessionEdit::UpsertRoute { route });
+        }
+    }
     edits
+}
+
+/// The value-only reference: `b`'s fader and its `pre_fader` send muted, at the session ramp.
+fn reference_mutes(model: &SessionModel) -> Vec<SessionEdit> {
+    strip_mutes(model, "b", true)
 }
 
 /// The value-only unmutes that undo [`reference_mutes`]: `b`'s fader and its send as `model`
 /// declares them, at the session ramp.
 fn reference_unmutes(model: &SessionModel) -> Vec<SessionEdit> {
-    let mut edits = protocol::control_core::fader_edits(&id("b"), &model.tracks[1].fader);
-    let send = model
-        .routes
-        .iter()
-        .find(|route| route.id.as_str() == "b-send")
-        .expect("b's send")
-        .clone();
-    edits.push(SessionEdit::UpsertRoute { route: send });
-    edits
+    strip_mutes(model, "b", false)
 }
 
 /// The edits that restore `b`, its routes and its source exactly as `model` declares them.
@@ -894,15 +903,28 @@ fn duck_run(
     run
 }
 
-/// A fresh plan of `model` with `b`'s fader and `b-send` muted, fed `src-b` from frame `offset`
-/// on (its frame `f` plays `frame_b(offset + f)`), given the value-only unmutes of both before
-/// block `fire`: the oracle of a duck-swap's fade-in from `S = offset`. Blocks `0..blocks`.
-fn fresh_fade_run(model: &SessionModel, offset: u64, fire: u64, blocks: u64) -> Vec<Vec<u32>> {
+/// A fresh plan of `model` with track `strip`'s fader and its routes from a tap before the fader
+/// muted, fed `src-b` from frame `offset` on (its frame `f` plays `frame_b(offset + f)`), given the
+/// value-only unmutes of all of them before block `fire`: the oracle of a duck-swap's fade-in from
+/// `S = offset`. Blocks `0..blocks`.
+fn fresh_fade_run(
+    model: &SessionModel,
+    strip: &str,
+    offset: u64,
+    fire: u64,
+    blocks: u64,
+) -> Vec<Vec<u32>> {
     let mut muted = model.clone();
-    muted.tracks[1].fader.left_mute = true;
-    muted.tracks[1].fader.right_mute = true;
+    for track in &mut muted.tracks {
+        if track.id.as_str() == strip {
+            track.fader.left_mute = true;
+            track.fader.right_mute = true;
+        }
+    }
     for route in &mut muted.routes {
-        if route.id.as_str() == "b-send" {
+        if matches!(&route.source, session::RouteSource::Track { track_id, tap }
+            if track_id.as_str() == strip && tap.precedes_fader())
+        {
             route.mute = true;
         }
     }
@@ -916,7 +938,7 @@ fn fresh_fade_run(model: &SessionModel, offset: u64, fire: u64, blocks: u64) -> 
     (0..blocks)
         .map(|block| {
             if block == fire {
-                assert_eq!(rig.apply(&reference_unmutes(model)), EditPath::Live);
+                assert_eq!(rig.apply(&strip_mutes(model, strip, false)), EditPath::Live);
             }
             feed(&mut rig, block + 1);
             rig.render(block).0
@@ -983,7 +1005,7 @@ fn a_restarted_strip_ducks_then_fades_in_after_s() {
                 block,
             );
         }
-        let fresh = fresh_fade_run(&after, s, fire, last + 1 - s / Q);
+        let fresh = fresh_fade_run(&after, "b", s, fire, last + 1 - s / Q);
         for block in s / Q..=last {
             same(
                 &run.blocks[block as usize],
@@ -1222,4 +1244,232 @@ fn a_revert_during_the_duck_fades_back_in_at_s() {
             block,
         );
     }
+}
+
+// Issue #1324b: a carried effect keyed from a restarted strip ducks with it (D1's sidechain
+// closure), and `C` counts the sidechain lines a successor can shorten (D4).
+
+/// A compressor `insert` whose `sidechain-in` port reads `source`, at threshold `threshold_db`.
+fn keyed_compressor(
+    insert: &str,
+    source: session::RouteSource,
+    threshold_db: f32,
+) -> session::Effect {
+    session::Effect {
+        params: vec![session::EffectParam {
+            parameter_id: 1,
+            channel: session::ParameterChannel::Both,
+            unit: session::ParameterUnit::Db,
+            value: threshold_db,
+        }],
+        sidechain: session::SidechainDeclaration::Routed(session::Sidechain {
+            source,
+            port_id: id("sidechain-in"),
+        }),
+        ..compressor(insert)
+    }
+}
+
+/// #1324b gate 7 through the C entries. `b` and its send are muted in the model; `a` is audible
+/// and holds only a compressor keyed from `b`'s `tap`. Gate 1's transaction adds a compressor to
+/// `b`. (a) From `b`'s `insert_return` tap, `a` reads `b`'s restarted chain, so it is duck-swapped
+/// with `b`: every block before `S` equals the reference that live-mutes `a` at the same point, and
+/// from `S` every block equals a fresh plan of the successor with `a` muted and live-unmuted at its
+/// first block. (b) From `b`'s `input` tap, the raw source, `a` carries: every block equals a run
+/// with no transaction. Bit-identical.
+///
+/// Test value: red if the duck set ignores sidechain edges (`a`'s compressor reads `b`'s old chain
+/// until `S`, then the restarted chain's at-rest output: no duck before `S`), or if it also adds
+/// the consumers of an `input` tap (`a` ducks needlessly).
+#[test]
+fn a_sidechain_consumer_ducks_with_its_restarted_source() {
+    assert_installed();
+    let _ = session::parse_session_json(r#"{"warm":0}"#);
+    for (tap, ducks) in [
+        (session::SendTap::InsertReturn, true),
+        (session::SendTap::Input, false),
+    ] {
+        let mut before = duck_model(false, Vec::new());
+        before.tracks[0].inserts.effects =
+            vec![keyed_compressor("key", track_tap("b", tap), -18.0)];
+        before.tracks[1].fader.left_mute = true;
+        before.tracks[1].fader.right_mute = true;
+        for route in &mut before.routes {
+            if route.id.as_str() == "b-send" {
+                route.mute = true;
+            }
+        }
+        let mut after = before.clone();
+        after.tracks[1].inserts.effects.push(compressor("comp"));
+        let s = scheduled((K + 1) * Q, 0);
+        let last = s / Q + N.div_ceil(Q) + 4;
+        let what = format!("{tap:?}");
+        let run = duck_run(
+            &before,
+            &[(K + 1, upsert_b(&after), EditPath::Rebuild)],
+            last,
+            &frame_b,
+        );
+        assert_eq!(run.adopted.map(|(first, ..)| first), Some(s), "{what}");
+        let reference = if ducks {
+            duck_run(
+                &before,
+                &[(K + 1, strip_mutes(&before, "a", true), EditPath::Live)],
+                last,
+                &frame_b,
+            )
+        } else {
+            duck_run(&before, &[], last, &frame_b)
+        };
+        let carried_through = if ducks { s / Q } else { last + 1 };
+        for block in 0..carried_through {
+            same(
+                &run.blocks[block as usize],
+                &reference.blocks[block as usize],
+                block,
+            );
+        }
+        if ducks {
+            let fresh = fresh_fade_run(&after, "a", s, 0, last + 1 - s / Q);
+            for block in s / Q..=last {
+                same(
+                    &run.blocks[block as usize],
+                    &fresh[(block - s / Q) as usize],
+                    block,
+                );
+            }
+        }
+        assert!(
+            run.blocks[last as usize]
+                .iter()
+                .any(|bits| f32::from_bits(*bits) != 0.0),
+            "{what}: a is heard"
+        );
+    }
+}
+
+/// #1324b gate 9's session: `t2` routes from its `post_fader` tap into submix `bu`, which holds a
+/// true-peak limiter and routes into the output; `t3` holds a true-peak limiter, then a compressor
+/// keyed from `bu`'s `input` tap at a threshold every nonzero key exceeds, and routes into the
+/// output. So `t3`'s sidechain line is the limiter's latency `L`.
+fn gate_nine_model() -> SessionModel {
+    let fixture = session::parse_session_json(FIXTURE).expect("fixture");
+    let mut model = gate_model();
+    let mut t2 = plain_track(&fixture, "t2", "src-b");
+    t2.inserts.effects.clear();
+    let mut t3 = plain_track(&fixture, "t3", "src-a");
+    t3.inserts.effects = vec![
+        native("lim3", "miso.true-peak-limiter"),
+        keyed_compressor(
+            "key",
+            session::RouteSource::Submix {
+                submix_id: id("bu"),
+                tap: session::SendTap::Input,
+            },
+            -80.0,
+        ),
+    ];
+    model.tracks = vec![t2, t3];
+    let mut bu = session::Submix::unity(id("bu"), &model.console);
+    bu.inserts
+        .effects
+        .push(native("bulim", "miso.true-peak-limiter"));
+    model.submixes = vec![bu];
+    let out = output(&fixture);
+    model.routes = vec![
+        route(
+            &fixture,
+            "bu-main",
+            session::RouteSource::Submix {
+                submix_id: id("bu"),
+                tap: session::SendTap::PostPan,
+            },
+            out.clone(),
+        ),
+        route(
+            &fixture,
+            "t2-bu",
+            track_tap("t2", session::SendTap::PostFader),
+            session::RouteDestination::SubmixInput {
+                submix_id: id("bu"),
+            },
+        ),
+        route(
+            &fixture,
+            "t3-main",
+            track_tap("t3", session::SendTap::PostPan),
+            out,
+        ),
+    ];
+    model
+}
+
+/// #1324b gate 9 through the C entries. One transaction removes `t2`, adds `t1` (a true-peak
+/// limiter, reading `t2`'s source) routed from its `post_fader` tap into `bu`, and removes `bu`'s
+/// limiter. `bu` restarts and `t3` stays carried under D1's exemption (the only line into `bu`'s
+/// `Input` stage comes from added `t1`), while `t3`'s sidechain line shrinks from `L` to 0.
+/// (a) The watermark's first sample is `S = ceil_q(p + q + N + L)`: `C` is `t3`'s sidechain line
+/// plus `t2`'s line into `bu` (0). (b) Every block before `t1`'s fire block (the first at or after
+/// `S + L`) equals the reference that makes no structural edit and live-mutes `t2` and `bu` at the
+/// same point. Bit-identical.
+///
+/// Test value: red if `C` counts route lines only (`S` lands before the sidechain line empties, so
+/// the successor drops the last of `t2`'s fade from `t3`'s detector), or if the exemption is
+/// missing (`t3` ducks needlessly).
+#[test]
+fn a_shortened_sidechain_line_from_a_restarted_submix_drops_no_fade_sample() {
+    assert_installed();
+    let _ = session::parse_session_json(r#"{"warm":0}"#);
+    let fixture = session::parse_session_json(FIXTURE).expect("fixture");
+    let before = gate_nine_model();
+    let latency = Rig::boot(&before).latency();
+    let p = (K + 1) * Q;
+    let s = scheduled(p, latency);
+    assert!(
+        latency > scheduled(p, 0) - (p + Q + N),
+        "the sidechain line reaches past the rounding of S without it"
+    );
+    let mut t1 = plain_track(&fixture, "t1", "src-b");
+    t1.inserts
+        .effects
+        .push(native("lim1", "miso.true-peak-limiter"));
+    let mut bu = before.submixes[0].clone();
+    bu.inserts.effects.clear();
+    let edit = vec![
+        SessionEdit::RemoveRoute {
+            route_id: id("t2-bu"),
+        },
+        SessionEdit::RemoveTrack { track_id: id("t2") },
+        SessionEdit::UpsertTrack { track: t1 },
+        SessionEdit::UpsertRoute {
+            route: route(
+                &fixture,
+                "t1-bu",
+                track_tap("t1", session::SendTap::PostFader),
+                session::RouteDestination::SubmixInput {
+                    submix_id: id("bu"),
+                },
+            ),
+        },
+        SessionEdit::UpsertSubmix { submix: bu },
+    ];
+    let fire = (s + latency).div_ceil(Q);
+    let run = duck_run(&before, &[(K + 1, edit, EditPath::Rebuild)], fire, &frame_b);
+    assert_eq!(run.adopted.map(|(first, ..)| first), Some(s));
+    let mut mutes = strip_mutes(&before, "t2", true);
+    mutes.extend(strip_mutes(&before, "bu", true));
+    let reference = duck_run(&before, &[(K + 1, mutes, EditPath::Live)], fire, &frame_b);
+    for block in 0..fire {
+        same(
+            &run.blocks[block as usize],
+            &reference.blocks[block as usize],
+            block,
+        );
+    }
+    assert!(
+        reference.blocks[(fire - 1) as usize]
+            .iter()
+            .any(|bits| f32::from_bits(*bits) != 0.0),
+        "t3 is heard"
+    );
 }
