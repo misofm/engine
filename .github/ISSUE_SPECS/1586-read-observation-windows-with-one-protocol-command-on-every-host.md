@@ -202,6 +202,13 @@ change and no hash re-pin in #1586a.
   `observation_selection_for_address` stays as the numeric map. `ObservationReadChannels` and
   `ObservationReadStatus` are host-core's, re-exported by host-web under the same names.
 - **Charge.** The index's table and the IDs it copies join the shape's instance-table row.
+- **Tap bound.** The old `tap_index >= u32::BITS` refusal is replaced by `tap < readers.len()`
+  (`Unbound` otherwise): one reader per declared tap, and the tap count per effect is capped at
+  preparation.
+- **Gate 2, host-core half: closed on purpose.** The existing browser test
+  `selected_observation_reads_keep_same_track_owner_windows_and_sequences` asserts each reader's
+  `consumed_sequence` is unchanged after a read that now goes through `read_with`, so a
+  host-core copy would test the same claim twice.
 
 ### Evidence
 
@@ -214,6 +221,9 @@ change and no hash re-pin in #1586a.
 - Carry: `an_armed_tap_and_its_windows_follow_the_effect_through_a_swap` and two other
   structural tests are red on a mutant that reads handles copied at preparation; the existing test
   defends the claim, so no new test (its test-value sentence names it).
+- Charge: `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes` now boots one
+  console EQ and adds its instance rows and its index entry to the exact bridge totals; red when the
+  index charge is removed.
 - `a_read_checks_the_whole_batch_before_it_writes_a_row` (host-core): red on a single-pass read
   that writes before the batch passed, on a duplicate rule that compares lanes, and on a refusal
   that names selection 0.

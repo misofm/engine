@@ -798,11 +798,13 @@ fn extended_rates_refuse_typed_at_browser_boot() {
 /// decoded entries, each in the bridge rows.
 ///
 /// Test value: red if the browser keeps the retired mirrors' bytes (input-filter shadows, ramp
-/// table, VCA and strip-value mirrors) in the bridge rows, or if the decode array outlives the
-/// staging it decodes.
+/// table, VCA and strip-value mirrors) in the bridge rows, if the decode array outlives the
+/// staging it decodes, or if the plan's observation index (#1586 D3) is not charged.
 #[test]
 fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
-    let document = one_track_resource_session(128);
+    // One console EQ, which declares no tap: its instance and its observation index entry are
+    // charged to the bridge rows (#1586a) while the engine's observation row stays zero.
+    let document = one_track_session(128);
     let parsed = parse_host_session(&document).expect("resource session parse");
     let compiled = compile_host_model(
         &parsed,
@@ -817,7 +819,7 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
     )
     .expect("resource session compile");
     let shape = compiled_session_shape(&compiled).expect("resource session shape");
-    assert_eq!(shape.effect_count, 0, "resource fixture has no effects");
+    assert_eq!(shape.effect_count, 1, "one console EQ");
 
     let source_id_bytes: u64 = compiled
         .normalized_model()
@@ -908,22 +910,17 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             "{name}: typed decoded backing has exact element size"
         );
         assert_eq!(host.command_staging_bytes(), expected_wire_bytes);
-        assert!(
-            ready.shape.effect_instances.is_empty(),
-            "no effect additions"
+        assert_eq!(
+            ready.shape.effect_instances.len(),
+            1,
+            "{name}: one effect slot"
         );
         assert_eq!(
             ready.meters.tables().meter_count(),
             ready.shape.tracks.len() + ready.shape.submixes.len(),
             "{name}: one meter per strip"
         );
-        assert!(
-            ready
-                .shape
-                .rack_effects
-                .iter()
-                .all(|counts| *counts == [0, 0, 0])
-        );
+        assert_eq!(&*ready.shape.rack_effects, &[[1, 0, 0]], "{name}");
         assert_eq!(host.resources().observation_retained_bytes, 0);
 
         // The control plane's own retained row (its catalog, producers, protocol queues, replay
@@ -959,6 +956,15 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let meter_delivery_bytes = meter_delivery_bytes
             + strips * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>()) as u64;
         let frame_bytes = frame_bytes + meter_delivery_bytes;
+        // The one EQ's dense instance table, its producer-slot word and the IDs it copies, and
+        // its observation index entry with the same IDs again (#1586 D3).
+        let effect_ids = (model.tracks[0].id.as_str().len()
+            + model.console.pre_insert[0].slot.as_str().len()) as u64;
+        let instance_bytes = (size_of::<Option<EffectInstance>>() + 2 * size_of::<u32>()) as u64
+            + effect_ids
+            + size_of::<host_core::observation::ObservationIndexEntry>() as u64
+            + effect_ids;
+        let frame_bytes = frame_bytes + instance_bytes;
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes

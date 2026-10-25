@@ -539,6 +539,9 @@ pub const MAXIMUM_OBSERVATION_TAPS: u32 = 16;
 /// control-plane snapshot, not a subscription or a history, so the host never grows storage from
 /// the number of renders or from the number of reads a caller makes.
 pub const MAXIMUM_OBSERVATION_READS: usize = MAXIMUM_COMMAND_RECORDS as usize;
+// The browser's read is host-core's (#1586 D3), which refuses a longer batch.
+const _: () =
+    assert!(MAXIMUM_OBSERVATION_READS <= host_core::observation::MAXIMUM_OBSERVATION_SELECTIONS);
 
 /// Requested left lane in a selected observation record.
 pub const OBSERVATION_CHANNEL_LEFT: u32 = 1;
