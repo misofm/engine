@@ -44,10 +44,11 @@ Decide one of two, and record why:
   `scripts/` entry named it, so nothing else changed. The two handoff verdicts that mention it are
   history and stay.
 - Covering gates (origin/main `4448e90b3`):
-  1. `resume-clicks` (`run.mjs:441-451`, three mutations): every page boots the host on a context
-     that is suspended and resumes it only through a trusted click.
+  1. `resume-clicks` (`run.mjs:441-451`, three mutations): every real AudioContext the page
+     creates is suspended before boot and resumed only through a trusted click (most runs use an
+     OfflineAudioContext).
   2. `observation-unsubscribe` (`run.mjs:433-437`): `runObservationUnsubscribeRun`
-     (`qualification.js:1196-1317`) asserts the new context is suspended before boot
+     (`qualification.js:1195-1317`) asserts the new context is suspended before boot
      (`:1199`, failure `context` at `:1405`), then reads `status("status (R1)")` (`:1314`) before the
      only `resumeThroughClick` (`:1317`). A status that is refused or times out while suspended
      throws `requestFailure`, and a missing `renderedQuanta` fails `render-between` (`:1412`).
@@ -56,3 +57,9 @@ Decide one of two, and record why:
   3. The status reply's field order and `bigint` validation live in the host
      (`miso-engine-v1-audio-worklet-host.js:1068-1073, :1179-1197`), checked by
      `scripts/test-web-audioworklet.mjs` on a suspended mock context (`:352, :1029, :1091`).
+- Stated limits (root accepts, 2026-10-25):
+  - The live R1 read is checked only by a later read exceeding it, not as exactly zero quanta and
+    sample zero.
+  - No live gate boots a second host on the same real AudioContext after `dispose()`; only the
+    mock in `scripts/test-web-audioworklet.mjs` does.
+  - That `dispose()` resolves to `undefined` is not asserted.
