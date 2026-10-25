@@ -191,7 +191,8 @@ and #1534 gate 3's worklet commands.
   until #1587b, so step 5's table is `[{output, peak}, {strip track, peak}]` at period
   `2 x 12`; the browser leg boots with the default meter window; step 8 renders two batches
   (48 blocks) and drains after each block. Steps 1 and 5 have no meter exception left.
-- **Open: the shipped artifact's call-graph gate needs three edits outside #1588b's paths.**
+- **The shipped artifact's call-graph gate: three edits outside #1588b's paths (root authorized,
+  2026-10-25; landed).**
   `check-web-audioworklet.sh` is red on this branch: (1) `MeterFrameProducer::publish_frame`
   (host-core, #1588a) drops the `Box` of its unreachable `try_push` refusal, so the render and
   `meter_poll` closures reach `__rust_dealloc`; forgetting the refusal removes it; (2) the render
@@ -199,3 +200,5 @@ and #1534 gate 3's worklet commands.
   `MeterFrameProducer::publish_frame=2`, and `meter_poll`'s gains `publish_frame=2`; (3)
   `INDIRECT_SITES` pins `render_next` at 4 (the inlined fold's downcast pair). With the three
   edits applied in a scratch tree the gate and `check-sdk-headless.sh` (640 pass) are green.
+  Each admitted site is an engine SPSC `slots[cursor]` bounds check, bounded by
+  `wrap_increment(cursor, slots_len)`; the script comments name each one.
