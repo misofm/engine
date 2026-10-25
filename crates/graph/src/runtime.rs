@@ -1978,7 +1978,8 @@ impl LiveFollowRoute {
             let armed = armed.is_some();
             for column in 0..COLUMNS.len() {
                 let target = follow.heard_target(column, composition);
-                let moves = !armed && !same_entries(column_entries(ramps.target(), column), target.0);
+                let moves =
+                    !armed && !same_entries(column_entries(ramps.target(), column), target.0);
                 if !armed {
                     ramps.retarget_column(
                         column,

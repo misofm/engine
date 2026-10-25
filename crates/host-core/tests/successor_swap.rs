@@ -4353,6 +4353,142 @@ fn a_restarted_strip_carries_nothing_before_its_fader_on_every_width() {
     }
 }
 
+/// #2011's session: the #1363 base without `late`'s limiter, `aux` behind a 486-sample true-peak
+/// limiter with its own route to the output muted (so the bus carries all of `aux` the output
+/// hears), and a `pre_fader` send `aux-bus` from `aux` into the bus that follows `aux`'s mute.
+/// With `curve = Some((end, from, to))`, `aux`'s mute is a stored automation curve, one step
+/// segment that holds `from` from sample 0 and steps to `to` at `end`: the send then binds a
+/// following route. `restarted` adds a transparent insert to `aux`, a duck-swap (#1324).
+fn follow_send_model(curve: Option<(u64, f32, f32)>, restarted: bool) -> SessionModel {
+    let mut model = route_fade_base_limited(false);
+    add_limiter(&mut model, "aux", "lim");
+    if restarted {
+        track_mut(&mut model, "aux")
+            .inserts
+            .effects
+            .push(transparent_insert());
+    }
+    let mut model = with_route(
+        model,
+        "aux-bus",
+        "aux",
+        session::SendTap::PreFader,
+        into_bus(),
+        false,
+    );
+    for route in &mut model.routes {
+        match route.id.as_str() {
+            "aux-bus" => route.follows_mute = true,
+            "aux-main" => route.mute = true,
+            _ => {}
+        }
+    }
+    let Some((end, from, to)) = curve else {
+        return model;
+    };
+    let mut model = with_mute_automation(model, "aux", None);
+    let segment = &mut model.automation.last_mut().expect("the curve").segments[0];
+    segment.end_sample = end;
+    segment.start_value = from;
+    segment.end_value = to;
+    model
+}
+
+/// Issue #2011 at one width. A duck-swap at block 6 restarts `aux` (a transparent insert), and its
+/// `pre_fader` send into the bus, which follows `aux`'s automated mute, is armed with it: the fire
+/// waits for the limiter's 486 samples and lands at block 10. `aux` is fed exact zeros before the
+/// swap, so a fresh plan of the successor has the restarted chain's state. Arms:
+///
+/// * (a) the curve open throughout, and the curve muting `aux` until sample 500, which the send
+///   hears inside the wait (its tap's node time runs 486 samples behind the block): every block
+///   equals the same swap with no curve (the six-word send, whose fire ramps from zero to its
+///   prepared target): the following send waits silent and fires to the heard, open target over
+///   the same ramp.
+/// * (b) the curve muting `aux` until sample 900, which the send hears after the fire: every
+///   block equals a plan booted on the successor model with the same curve, in which the send
+///   opens at the curve's own event (the oracle: that opening is heard).
+/// * (c) the hand-over and every block from the swap on allocate and free nothing.
+fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
+    let kept = Feed::new(SOURCE, 1);
+    let aux = spliced(AUX_SOURCE, &Feed::new(AUX_SOURCE, 2), |block| {
+        (block >= SWAP_BLOCK).then_some(block)
+    });
+    let feeds = [&kept, &aux];
+    let swap_run = |curve| {
+        let a = Session::compile(follow_send_model(curve, false));
+        let b = Session::compile(follow_send_model(curve, true));
+        let swap = [FadeSwap {
+            block: SWAP_BLOCK,
+            to: &b,
+            committed: &a.model,
+            prepared_at: None,
+        }];
+        let run = fade_run(&a, &swap, &feeds, None, &[], backend);
+        assert_eq!(run.restarted[0], [Box::<str>::from("aux")], "{backend:?}");
+        assert_eq!(
+            run.allocator,
+            (0, 0, 0),
+            "{backend:?} {curve:?}: (c) allocator calls"
+        );
+        run
+    };
+    let six_word = swap_run(None);
+    let ramp = LiveRamps::for_session(&follow_send_model(None, false)).mute_samples;
+    assert_eq!(
+        six_word.arms[0],
+        [(486, ramp), (486, ramp)],
+        "{backend:?}: aux's fader and its send wait for the limiter"
+    );
+    // A curve that mutes `aux` at preparation leaves its fader unarmed (#1288: a muted lane
+    // arms nothing), and still arms its send (R2: the arm refuses on the route's own gate only).
+    for (case, curve, arms) in [
+        ("open throughout", (1, 0.0, 0.0), 2),
+        ("opening inside the wait", (500, 1.0, 0.0), 1),
+    ] {
+        let run = swap_run(Some(curve));
+        assert_eq!(
+            run.arms[0],
+            six_word.arms[0][..arms],
+            "{backend:?} (a) {case}: armed"
+        );
+        assert_eq!(
+            first_fade_difference(&run, &six_word),
+            None,
+            "{backend:?} (a) {case}: the following send fades in as the six-word one"
+        );
+    }
+    let curve = Some((900, 1.0, 0.0));
+    let run = swap_run(curve);
+    let booted = |curve| {
+        let b = Session::compile(follow_send_model(curve, true));
+        fade_run(&b, &[], &feeds, None, &[], backend)
+    };
+    let reference = booted(curve);
+    assert_eq!(
+        first_fade_difference(&run, &reference),
+        None,
+        "{backend:?} (b): the send stays silent through the fire and opens at the curve's event"
+    );
+    assert_ne!(
+        reference.blocks,
+        booted(Some((900, 1.0, 1.0))).blocks,
+        "{backend:?} (b): the curve's opening is heard"
+    );
+}
+
+/// Issue #2011 on every width. Red if a following send of a restarted strip is not armed (it
+/// enters the bus at its prepared value while the six-word send fades), if its fire ignores the
+/// arm's `D` or ramp, if the fire takes the prepared target instead of the curve heard (a step
+/// while the curve says silent), if the arm refuses on the curve's current silence or a curve
+/// event during the wait lifts its ramps off zero (it opens before the fire), or if the arm or
+/// the fire allocates on render.
+#[test]
+fn a_following_send_of_a_restarted_strip_fades_in_on_every_width() {
+    for backend in backends() {
+        a_following_send_of_a_restarted_strip_fades_in(backend);
+    }
+}
+
 /// A compressor `name` whose `sidechain-in` port reads `tap` of strip `source`.
 fn keyed_insert(name: &str, source: RouteSource) -> Effect {
     Effect {

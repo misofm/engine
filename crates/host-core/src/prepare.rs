@@ -4078,13 +4078,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             let waiting_routes: Vec<(&str, u32)> = unfired(FadeArmOwner::Route)
                 .map(|row| (&*row.id, row.entry))
                 .collect();
-            added_route_fades(
-                base.committed,
-                model,
-                &added,
-                &waiting,
-                &waiting_routes,
-            )
+            added_route_fades(base.committed, model, &added, &waiting, &waiting_routes)
         }
         _ => Vec::new(),
     };
