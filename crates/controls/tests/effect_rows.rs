@@ -13,9 +13,9 @@ use controls::{
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
-    AutomationRate, EffectDescriptor, EffectQuality, LinkMode, ParameterChannelPolicy,
-    ParameterUnit, PortRole, PrepareEffectLimits, PrepareEffectRequest, PreparedPorts,
-    PreparedSidechainPort, parameter_value_valid,
+    AutomationRate, EffectDescriptor, EffectLaneShape, EffectQuality, LinkMode,
+    ParameterChannelPolicy, ParameterUnit, PortRole, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedPorts, PreparedSidechainPort, parameter_value_valid,
 };
 use session::{
     EffectParam, ParameterChannel, ParameterUnit as SessionUnit, SessionModel,
@@ -225,10 +225,20 @@ fn effect_rows_carry_the_ruled_class() {
                 && row.address.control == LINK_MODE_CONTROL
         });
         match (effect, link) {
-            ("miso.multiband-compressor", Some(row)) => assert_eq!(
-                rebuild_reason(row.descriptor.class),
-                Some(RebuildReason::RuledLiveNotBuilt { issue: 1367 })
-            ),
+            ("miso.multiband-compressor", Some(row)) => {
+                assert_eq!(
+                    rebuild_reason(row.descriptor.class),
+                    Some(RebuildReason::RuledLiveNotBuilt { issue: 1367 })
+                );
+                // `lane_link`, but no glide yet (#1367b): its lane holds no link cell, so the
+                // writer refuses a switch (`EffectWriteRefusal::Link`) its processor would refuse
+                // after an ack.
+                assert!(descriptor.lane_link);
+                assert!(
+                    !EffectLaneShape::from_descriptor(descriptor, 0).has_link(),
+                    "{effect}"
+                );
+            }
             (_, Some(row)) => {
                 assert!(LIVE_LINK_EFFECTS.contains(&effect), "{effect}");
                 assert_eq!(row.descriptor.class, ControlClass::Live, "{effect}");
@@ -239,6 +249,10 @@ fn effect_rows_carry_the_ruled_class() {
                 );
                 assert!(!row.descriptor.automatable(), "{effect}: a mode");
                 assert!(glides(effect), "{effect} refuses a link glide");
+                assert!(
+                    EffectLaneShape::from_descriptor(descriptor, 0).has_link(),
+                    "{effect}"
+                );
             }
             (_, None) => assert_eq!(
                 descriptor.supported_link_modes.bits().count_ones(),

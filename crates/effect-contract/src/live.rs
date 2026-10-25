@@ -96,6 +96,23 @@ use crate::{
     StatePayloadSizes,
 };
 
+/// The native effects whose link mode is a live update (decision 15 E2, #1371): each holds its
+/// mode per lane (`lane_link`) and glides a lane's detector to another mode
+/// ([`PreparedNativeEffectBank::retarget_link`], #1370 and #1969). Only their lanes hold a link
+/// cell ([`EffectLaneShape::from_descriptor`]), and only their insert and console-entry link rows
+/// are `Live` (`controls`), so the list is the row's class and the cell's presence, never a
+/// runtime answer: one on it whose processor refused the glide would be an acknowledged edit
+/// render never hears (decision 15 E4), which the controls test of this list refuses. The
+/// multiband compressor is not on it until #1367b gives it the glide.
+pub const LIVE_LINK_EFFECTS: [&str; 6] = [
+    "miso.compressor",
+    "miso.gate-expander",
+    "miso.transient-shaper",
+    "miso.true-peak-limiter",
+    "miso.de-esser",
+    "miso.dynamic-eq",
+];
+
 /// One admitted live control event for one prepared effect instance.
 ///
 /// It is `Copy` and fixed-size. Addressing is *not* carried: a lane belongs to exactly one effect
@@ -316,8 +333,10 @@ impl EffectLaneShape {
 
     /// The shape of `descriptor`'s lane: one cell group per `Block`-rate parameter when the effect
     /// owns no prepared targets (`target_slots == 0`), and none when it does, because a
-    /// prepared-target owner's parameters ride its targets (D1); and a link cell when the
-    /// descriptor has `lane_link`, holding its supported modes (#1371 D1).
+    /// prepared-target owner's parameters ride its targets (D1); and a link cell, holding its
+    /// supported modes, when the effect is on [`LIVE_LINK_EFFECTS`] (#1371 D1), so its processor
+    /// takes every switch the writer stores. A `lane_link` effect off the list (the multiband
+    /// compressor until #1367b) holds none, and its writer refuses a switch.
     #[must_use]
     pub fn from_descriptor(descriptor: &EffectDescriptor, target_slots: usize) -> Self {
         let shape = if target_slots != 0 {
@@ -325,7 +344,7 @@ impl EffectLaneShape {
         } else {
             Self::from_live_parameters(live_parameters(descriptor), 0)
         };
-        if descriptor.lane_link {
+        if descriptor.lane_link && LIVE_LINK_EFFECTS.contains(&descriptor.id.as_str()) {
             shape.with_link(descriptor.supported_link_modes)
         } else {
             shape

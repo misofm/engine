@@ -43,23 +43,9 @@ pub const LINK_MODE_CONTROL: u32 = 0x8000_0000;
 /// The multiband compressor's link mode is live once #1367 lands (decision 15 E2).
 const MULTIBAND_LINK_ISSUE: u32 = 1367;
 
-/// The native effects whose link mode is a live update (decision 15 E2, #1371): each holds its
-/// mode per lane (`lane_link`) and glides a lane's detector to another mode
-/// (`retarget_link`, #1370 and #1969), so its insert's and its console entry's link rows are
-/// `Live` and ramp over the session's `fader_ms` or the edit's own length
-/// ([`LiveRampRow::LinkGlide`]). The list is the row's class, never a runtime answer: an effect
-/// that is not on it keeps a rebuild-only link row, and one on it whose processor refused the
-/// glide would be an acknowledged edit render never hears (decision 15 E4), which the controls
-/// test of this list refuses. The multiband compressor is not on it until #1367 makes its link
-/// per lane.
-pub const LIVE_LINK_EFFECTS: [&str; 6] = [
-    "miso.compressor",
-    "miso.gate-expander",
-    "miso.transient-shaper",
-    "miso.true-peak-limiter",
-    "miso.de-esser",
-    "miso.dynamic-eq",
-];
+/// The native effects whose link mode is a live update (decision 15 E2, #1371): the effect
+/// contract's list, the one that also decides which lanes hold a link cell.
+pub use effect_contract::LIVE_LINK_EFFECTS;
 
 /// Why a live link row is kept out of automation: it chooses a detector law, as a strip's
 /// `matrix_mode` chooses a shape.

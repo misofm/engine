@@ -9793,6 +9793,32 @@ fn forty_link_edits_before_one_block_are_all_accepted_and_the_last_is_heard() {
     );
 }
 
+/// #1371 D2, the same-mode rule. While `eq0`'s `glue` lane glides to `average` over 768 frames, two
+/// transactions before the next block write `maximum` and then `average`: the newest write is the
+/// mode the lane already heads for, so the glide goes on untouched, bit for bit what a twin that
+/// made only the first edit renders.
+///
+/// Test value: red if a block that reads a switch to the lane's own target retargets it anyway
+/// (the glide restarts its timeline from where it is, a different curve).
+#[test]
+fn a_change_and_its_reversal_before_a_block_leave_the_glide_be() {
+    let document = link_session(2);
+    let mut rig = Rig::new(&document);
+    let mut twin = Rig::new(&document);
+    for _ in 0..window(rig.latency(), 0, rig.quantum) {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()), "warm-up");
+    }
+    let first = link_edit("eq0", 3.0, Some(768));
+    assert_eq!(rig.apply(std::slice::from_ref(&first)), crate::RESULT_OK);
+    assert_eq!(twin.apply(std::slice::from_ref(&first)), crate::RESULT_OK);
+    assert_eq!(bits(&rig.step()), bits(&twin.step()), "the glide begins");
+    assert_eq!(rig.apply(&[link_edit("eq0", 2.0, None)]), crate::RESULT_OK);
+    assert_eq!(rig.apply(&[link_edit("eq0", 3.0, None)]), crate::RESULT_OK);
+    for block in 0..10 {
+        assert_eq!(bits(&rig.step()), bits(&twin.step()), "block {block}");
+    }
+}
+
 /// #1371 gate 4 (D6, root's mid-glide ruling). A rebuild that adds a muted track, whose ID sorts
 /// first so the carried lane moves, lands while `eq0`'s `glue` lane glides to `average` over 768
 /// frames: (a) the glide was applied a block before the swap, (b) the link edit is still unread

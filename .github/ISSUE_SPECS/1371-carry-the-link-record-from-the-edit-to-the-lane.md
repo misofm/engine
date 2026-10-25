@@ -234,11 +234,26 @@ parts of D1-D6:
   carried like any cell) then glides on from there. A refused restore returns the lane to its
   prepared mode. A per-node pair swaps processors and needs no seat. No new memory at the swap:
   one inline cell, reader and carried slot per lane, allocated at preparation.
-- **Gates as built.** Classifier: `host-core` `live_delta::tests::a_changed_link_mode_is_one_record_only_where_the_effect_glides`
-  (replaces the Structure expectation of the batch-2 guard) and
+- **Gates as built.** Classifier: `host-core` `live_delta::tests::a_changed_link_mode_of_an_effect_without_a_glide_is_a_rebuild`
+  (the batch-2 guard, kept for effects off the list) and
   `tests/live_delta.rs::a_link_change_is_one_glide_record_with_the_edits_ramp`. C ABI:
   `a_link_change_glides_live_and_is_heard` (gates 2 and 5, bank and per node),
   `forty_link_edits_before_one_block_are_all_accepted_and_the_last_is_heard` (gate 3),
   `a_rebuild_mid_glide_carries_the_glide_to_its_target` (gate 4: applied, unread and
   same-transaction). Writer bounds: `effect-contract` `a_record_without_a_cell_is_refused_and_writes_nothing`.
   Tests that used a link change to force a restart now route a sidechain instead.
+- **Gate 3's refusal case injects a `BeforeLivePush` fault, not an out-of-domain parameter.** Under
+  decision 17 a value outside its domain is refused by `controls::check` while the protocol
+  applies the `SET_CONTROL`, before classification and before any producer is touched, so it
+  cannot show that a link write waits for the commit's later checks. The fault refuses the
+  transaction after every preflight, at the last fallible step before the stamp, which is where a
+  link write placed too early would show: no cell write, the model and the plan unchanged.
+- **Verifier fold (m1): a link cell only where the processor glides.** `EffectLaneShape::from_descriptor`
+  gives a lane a link cell only for an effect on `effect_contract::LIVE_LINK_EFFECTS` (the list
+  moved to the contract crate; `controls` re-exports it), so the multiband compressor
+  (`lane_link`, no `retarget_link` yet) holds none and its writer refuses a switch
+  (`EffectWriteRefusal::Link`). **For #1367b:** adding the multiband to `LIVE_LINK_EFFECTS` once
+  its `retarget_link` lands gives its lanes the cell and flips its row in one edit; the controls
+  ruled-class test then requires the glide and the cell.
+- **Verifier fold (m2).** `a_change_and_its_reversal_before_a_block_leave_the_glide_be` pins the
+  same-mode rule of D2 (a switch to the lane's own target applies nothing).

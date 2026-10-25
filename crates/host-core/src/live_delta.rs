@@ -1765,25 +1765,13 @@ mod tests {
             .map(|records| records.map(|records| records.records))
     }
 
-    /// Batch 2 review fold item 2, as #1371 makes the link mode live. Red if a changed link mode of
-    /// an effect on `controls::LIVE_LINK_EFFECTS` lowers to anything but one link record (no record
-    /// is an ack render never hears), or if the link mode of any other effect lowers at all: it has
-    /// no glide, so a live classification of it would be acked and dropped. A bypass flip stays
-    /// one record, so the guard is not a blanket refusal.
+    /// Batch 2 review fold item 2, as #1371 makes the link mode live for the effects on
+    /// `controls::LIVE_LINK_EFFECTS` (their one link record is `tests/live_delta.rs`'s). Red if the
+    /// link mode of any other effect lowers at all: it has no glide, so a live classification of
+    /// it would be acked and dropped. A bypass flip stays one record, so the guard is not a blanket
+    /// refusal.
     #[test]
-    fn a_changed_link_mode_is_one_record_only_where_the_effect_glides() {
-        let fader = LiveRamps::for_session(&parse_session_json(FIXTURE).expect("fixture parses"))
-            .link_samples;
-        assert_eq!(
-            insert_records("miso.compressor", |effect| effect.link_mode =
-                LinkMode::Maximum),
-            Ok(Some(vec![EffectControlRecord::Link(
-                effect_contract::LinkSwitch {
-                    mode: effect_contract::LinkMode::Maximum,
-                    ramp_samples: fader,
-                }
-            )]))
-        );
+    fn a_changed_link_mode_of_an_effect_without_a_glide_is_a_rebuild() {
         assert!(matches!(
             insert_records("miso.parametric-eq", |effect| effect.link_mode =
                 LinkMode::Maximum),
