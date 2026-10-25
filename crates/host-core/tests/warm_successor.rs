@@ -1152,7 +1152,10 @@ impl Stream {
             ),
             "the call is refused after the boundary: {refused:?}"
         );
-        assert!(self.retirer.try_reclaim().is_ok(), "the candidate was adopted");
+        assert!(
+            self.retirer.try_reclaim().is_ok(),
+            "the candidate was adopted"
+        );
         self.offset = self.pending.take().expect("a pending candidate");
     }
 
@@ -1421,7 +1424,11 @@ fn a_warm_successor_displaced_before_its_first_block_keeps_its_prime() {
         assert_eq!(swapped.offset, LEAD);
         swapped.rebuild(&c);
         swapped.render(AFTER);
-        assert_eq!(swapped.swap_blocks(), [BEFORE], "{backend:?}: C adopted at once");
+        assert_eq!(
+            swapped.swap_blocks(),
+            [BEFORE],
+            "{backend:?}: C adopted at once"
+        );
         let mut continued = alone(&a, &caps, backend, AHEAD);
         continued.render(BEFORE + AFTER);
         assert_eq!(first_divergence(&swapped, &continued), None, "{backend:?}");
@@ -1449,11 +1456,15 @@ fn a_warm_successor_waits_for_every_carried_ring_and_a_held_seek() {
     muted_track(&mut b, "t3", vec![limiter()]);
     to_output(&mut b, "t3");
     let mut c = b.clone();
-    muted_track(&mut c, "t4", vec![limiter(), {
-        let mut second = limiter();
-        second.id = sid("limiter-2");
-        second
-    }]);
+    muted_track(
+        &mut c,
+        "t4",
+        vec![limiter(), {
+            let mut second = limiter();
+            second.id = sid("limiter-2");
+            second
+        }],
+    );
     to_output(&mut c, "t4");
     let (b, c) = (Session::compile(finish(b)), Session::compile(finish(c)));
     let caps = gate_caps();

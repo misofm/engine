@@ -7083,7 +7083,8 @@ impl GraphExecutor {
         // render.)
         if core::mem::take(&mut predecessor.prime_pending)
             && let Some(set) = predecessor.source_set.as_mut()
-            && let Some(source_read_sample) = block_start.checked_add(predecessor.source_read_offset)
+            && let Some(source_read_sample) =
+                block_start.checked_add(predecessor.source_read_offset)
         {
             replay_prime(
                 &mut predecessor.runtime,
