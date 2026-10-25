@@ -19,12 +19,7 @@ import { watermarkSnapshot } from "./session-edit.ts";
 import type { WatermarkSnapshot } from "./session-edit.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "./live-response.ts";
 import { decodeCapabilitiesReply } from "./protocol-messages.ts";
-import {
-  cloneSpectrumCollection,
-  cloneSpectrumQuery,
-  stageSpectrumCollectionRequest,
-  stageSpectrumRequest,
-} from "./spectrum.ts";
+import { cloneSpectrumCollection, cloneSpectrumQuery } from "./spectrum.ts";
 import type {
   SpectrumCollection,
   SpectrumConfigureOptions,
@@ -96,17 +91,10 @@ type ExportTable = Record<ExportName, (...args: (number | bigint)[]) => number |
   readonly memory: WebAssembly.Memory;
 };
 
-// The browser's spectrum-hop exports: the SDK no longer calls them (#1596 D2, the hop rides
-// `SPECTRUM_CONFIGURE`), so a module that lacks them stays valid; #1597 deletes them.
-const OPTIONAL_ADDITIVE_EXPORTS: ReadonlySet<string> = new Set([
-  "miso_engine_web_v1_spectrum_hop_capability",
-  "miso_engine_web_v1_boot_with_spectrum_hop",
-]);
 type ExportFunction = (...args: (number | bigint)[]) => number | bigint;
 function exportsOf(instance: WebAssembly.Instance): ExportTable {
   const table = instance.exports as Record<string, unknown>;
   for (const name of ABI_LAYOUT.exports) {
-    if (OPTIONAL_ADDITIVE_EXPORTS.has(name)) continue;
     if (typeof table[name] !== "function") {
       throw new MisoEngineError(`the engine asset does not export ${name}`, {
         phase: "asset",
@@ -449,11 +437,9 @@ export class WasmBoundary {
 
   /**
    * D2 of #1596 for the headless engine: one `SPECTRUM_CONFIGURE` of the boot's taps with the
-   * policy's hop. The boot staged the same taps, so the first plan carries them and the reply
-   * reports `adoptedEpoch === configuredEpoch` at once: an equal configuration changes nothing, and
-   * a hop retunes the taps without a plan (#1594 D4). The headless engine renders only when its
-   * caller does, so a configuration the first plan did not carry could not be adopted before boot
-   * returns; that is why the boot still stages the taps until #1597.
+   * policy's hop, before the first block. The engine prepares the plan with the taps and, as no
+   * block has rendered, adopts it in place of the boot's plan (#1597), so the reply reports
+   * `adoptedEpoch === configuredEpoch` at once and a capture armed now covers sample 0.
    */
   #configureBootSpectrum(snapshot: BootSnapshot): void {
     const configuration = snapshot.spectrumCollection ?? snapshot.spectrumQuery;
@@ -1656,14 +1642,6 @@ function stage(
   // 2. `boot_options_ptr` -- module-owned, zero-default, stable for the module's lifetime.
   const optionsPointer = Number(exports.miso_engine_web_v1_boot_options_ptr());
   const optionBytes = writeBootOptions(exports.memory, optionsPointer, options);
-  // The boot's spectrum taps are staged so the first plan carries them (#1596 R2): a headless
-  // engine cannot adopt a later plan before its caller renders. Every later spectrum call is a
-  // frame; #1597 removes this staging with the exports it writes.
-  if (options.spectrumCollection !== undefined) {
-    stageSpectrumCollectionRequest(exports, options.spectrumCollection);
-  } else {
-    stageSpectrumRequest(exports, options.spectrum);
-  }
 
   // 3. `document_ptr(len)` -- the admission gate. A document over the engine's maximum is refused
   //    *here*, before a byte is copied and before any staging is allocated, which is what makes
