@@ -2049,7 +2049,14 @@ impl LiveFollowRoute {
     ///
     /// #2011 (#1877 D6): an armed route keeps its own arm, its ramps at `[+0.0; 4]` and muted; its
     /// cursors and heard values still adopt, so its fire composes with the curve heard.
+    ///
+    /// An arm whose fire is pending (it fired at the swap block, before this route's first block)
+    /// counts as fired: it is dropped and the route takes the predecessor's ramps and mute, which
+    /// its first block compares with the curve heard ([`Self::place_carried`]).
     fn adopt(&mut self, ramps: ColumnRamps, mute: bool, from: Option<&Self>) {
+        if self.armed.is_some_and(|arm| arm.fire) {
+            self.armed = None;
+        }
         if self.armed.is_none() {
             self.ramps = ramps;
             self.mute = mute;
@@ -2347,23 +2354,24 @@ impl LiveFollowRoute {
         time: &crate::GraphBlockTime<'_>,
     ) -> Option<u32> {
         // #2011: a fire that came before this route's first block runs once the block has
-        // placed the cursors.
+        // placed the cursors (the arm still held), and before the block's cell, so the block's
+        // own record drains after the fire, as a six-word route's does.
         let firing = self.armed.is_some_and(|arm| arm.fire);
         let (block, start) = self.follow.block(time, firing);
         self.block = block;
-        let carried = match (start, block.start) {
-            (FollowStart::Carried, Some(at)) => Some(at),
-            _ => None,
-        };
-        self.apply_cell(snapshot, block.start);
-        if let Some(at) = carried {
-            self.place_carried(at);
-        }
         if firing {
-            if let (FollowStart::Fresh, Some(at)) = (start, block.start) {
-                self.follow.place_fresh(at);
+            match (start, block.start) {
+                (FollowStart::Fresh, Some(at)) => self.follow.place_fresh(at),
+                (FollowStart::Carried, Some(at)) => self.place_carried(at),
+                _ => {}
             }
             self.fire_now();
+            self.apply_cell(snapshot, block.start);
+        } else {
+            self.apply_cell(snapshot, block.start);
+            if let (FollowStart::Carried, Some(at)) = (start, block.start) {
+                self.place_carried(at);
+            }
         }
         if !(self.mute && self.ramps.is_settled() && !self.delayed) {
             return Some(0);
@@ -6814,7 +6822,8 @@ impl CarriedRoute<'_> {
     const fn armed(&self) -> bool {
         match self {
             Self::Six(live) => live.armed.is_some(),
-            Self::Seven(live) => live.armed.is_some(),
+            // #2011: a fire-pending arm counts as fired.
+            Self::Seven(live) => matches!(live.armed, Some(FollowRouteArm { fire: false, .. })),
         }
     }
 
@@ -19907,6 +19916,36 @@ mod follow_route_op_tests {
         );
     }
 
+    /// #2011: a fire that comes before a fresh route's first block runs in that block before its
+    /// cell, so a record the block drains retargets from the fire's first coefficients (rest) to
+    /// its own target over its own ramp, the order a six-word route's fire and record take.
+    ///
+    /// Test value: red if the deferred fire runs after the block's cell (the record's transform
+    /// then becomes the fire's target over the arm's ramp, not over the record's).
+    #[test]
+    fn a_deferred_fire_drains_its_blocks_record_after_it() {
+        const RECORD: u32 = 64;
+        let open = steps(&[0], &[0.0], 1 << 20);
+        let mut route = Fixture::new([Some(&open), None], 0, OPEN);
+        assert!(route.route.arm_fade_in(RECORD_RAMP));
+        route.write(MOVED, RECORD);
+        route.route.fire_fade_in();
+        let (mut left, mut right) = input(128);
+        assert!(route.block(FIRST, None, &mut left, &mut right));
+        let (mut expected_left, mut expected_right) = input(128);
+        route_mix_ramp_block::<FrameLane>(
+            &mut expected_left,
+            &mut expected_right,
+            &IndexedRamp::new([0.0; 4], gated(MOVED, [false; 2]), RECORD),
+            0,
+        );
+        assert_eq!(
+            bits((&left, &right)),
+            bits((&expected_left, &expected_right)),
+            "the record retargets from rest over its own ramp"
+        );
+    }
+
     /// #1652 D3: the carry of a live send across a plan swap, whatever its kind in either plan.
     /// Each case drives the swap block at the route level: `carry_route` (what
     /// `carry_live_routes` runs per move), then the successor's first block (with
@@ -20230,6 +20269,39 @@ mod follow_route_op_tests {
             let (mut left, mut right) = input(AFTER);
             assert!(into.block(&mut left, &mut right), "(e) its own fire mixes");
             assert_eq!(bits((&left, &right)), fired(), "(e) from rest");
+            // (f) A re-armed following successor whose own fire came at the swap block before
+            // its first block (its table copied the displaced entry's `Done`), over an open
+            // predecessor that has rendered: the pending fire counts as fired at the carry, so
+            // the successor takes the predecessor's settled ramps and plays on, bit for bit.
+            let mut from = Fixture::new([Some(&open), None], 0, OPEN);
+            let (mut left, mut right) = input(AFTER);
+            assert!(from.block(FIRST, None, &mut left, &mut right));
+            let mut into = Fixture::new([Some(&open), None], 0, OPEN);
+            assert!(into.route.arm_fade_in(RECORD_RAMP));
+            into.route.fire_fade_in();
+            carry_route(
+                CarriedRoute::Seven(&mut into.route),
+                CarriedRoute::Seven(&mut from.route),
+                None,
+            );
+            let next = FIRST + AFTER as u64;
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                into.block(next, None, &mut left, &mut right),
+                "(f) it mixes"
+            );
+            let (mut settled_left, mut settled_right) = input(AFTER);
+            route_mix_ramp_block::<FrameLane>(
+                &mut settled_left,
+                &mut settled_right,
+                &IndexedRamp::settled(gated(OPEN, [false; 2])),
+                0,
+            );
+            assert_eq!(
+                bits((&left, &right)),
+                bits((&settled_left, &settled_right)),
+                "(f) the successor plays on: its pending fire counts as fired"
+            );
         }
 
         /// Gate 4 (six -> seven, the rebuild adds an automated mute to the source). (a) With the
