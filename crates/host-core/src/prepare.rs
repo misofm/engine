@@ -1370,6 +1370,15 @@ impl PlanStateInventory {
         self.live_routes.len()
     }
 
+    /// The fading copies of this plan whose fade entry render has not settled (#1953b): the ones
+    /// a successor keeps, so a phase 1 that ducks a copy's source strip waits for its lines.
+    pub(crate) fn unsettled_route_copies(&self) -> impl Iterator<Item = &session::Route> {
+        self.route_copies
+            .iter()
+            .filter(|row| !self.fade_watch.settled(row.entry))
+            .map(|row| &row.route)
+    }
+
     /// The input floors a successor of this plan is compiled with (#1285 D2): every node whose
     /// input arrival in this plan is nonzero, with that arrival in samples, sorted by node ID.
     #[must_use]

@@ -1693,3 +1693,80 @@ fn a_removed_output_route_fades_out_through_its_line() {
         same(bits, want, block as u64);
     }
 }
+
+/// #1953b (MINOR-1): a removed lane-less route's fading copy is still in flight when a second
+/// transaction removes its source strip. The session is the gate session with `b`'s `post_pan`
+/// route `b-main` replaced by its `post_fader` route `b-out` into the output, so the copy's line
+/// `L` (behind `a`'s limiter) is the only line out of `b`. T1 removes `b-out` after block `K` (a
+/// rebuild adopted at the next block, whose copy fades out over `N` through that line); T2 removes
+/// `b` and its send after block `K + 1`, inside the copy's fade (`src-b` stays, so both runs feed
+/// it alike). T2's phase 1 counts the
+/// copy's line in `C`, so its successor is adopted at `S = ceil_q(p + q + N + L)` and the copy
+/// leaves with `b` only after its line has delivered its fade: every block equals the run whose T2
+/// only live-mutes `b`'s fader and send, which keeps the copy to the end.
+///
+/// Test value: red when phase 1 ignores an unsettled copy's lines: `S` is `ceil_q(p + q + N)`, and
+/// the copy's fade tail still in its line is cut at the adoption.
+#[test]
+fn a_strip_removed_during_its_route_copys_fade_waits_for_the_copys_line() {
+    assert_installed();
+    let fixture = session::parse_session_json(FIXTURE).expect("fixture");
+    let mut base = gate_model();
+    base.routes.retain(|route| route.id.as_str() != "b-main");
+    base.routes.push(route(
+        &fixture,
+        "b-out",
+        track_tap("b", session::SendTap::PostFader),
+        output(&fixture),
+    ));
+    base.routes
+        .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    let latency = Rig::boot(&base).latency();
+    let p = (K + 2) * Q;
+    let s = scheduled(p, latency);
+    assert!(
+        latency > scheduled(p, 0) - (p + Q + N),
+        "L = {latency} is longer than the rounding slack"
+    );
+    let last = s / Q + latency.div_ceil(Q) + 4;
+    let remove_out = vec![SessionEdit::RemoveRoute {
+        route_id: id("b-out"),
+    }];
+    let remove_b = vec![
+        SessionEdit::RemoveRoute {
+            route_id: id("b-send"),
+        },
+        SessionEdit::RemoveTrack { track_id: id("b") },
+    ];
+    let run = duck_run(
+        &base,
+        &[
+            (K + 1, remove_out.clone(), EditPath::Rebuild),
+            (K + 2, remove_b, EditPath::Rebuild),
+        ],
+        last,
+        &frame_b,
+    );
+    let (first_sample, flags, [before, after]) = run.adopted.expect("adopted");
+    assert_eq!(
+        first_sample, s,
+        "T2's successor is adopted at S, C the copy's line"
+    );
+    assert_eq!(flags, OUTCOME_EXACT);
+    assert_eq!(before, after, "no transition fallback");
+    assert_eq!(run.churn, 0, "render allocates nothing");
+    let mut kept = base.clone();
+    kept.routes.retain(|route| route.id.as_str() != "b-out");
+    let reference = duck_run(
+        &base,
+        &[
+            (K + 1, remove_out, EditPath::Rebuild),
+            (K + 2, reference_mutes(&kept), EditPath::Live),
+        ],
+        last,
+        &frame_b,
+    );
+    for (block, (bits, want)) in run.blocks.iter().zip(&reference.blocks).enumerate() {
+        same(bits, want, block as u64);
+    }
+}

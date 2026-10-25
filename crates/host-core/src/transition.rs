@@ -385,7 +385,18 @@ pub fn plan_strip_transition(
         .filter(|route| ducked(route_source_id(route)) || duck_route(route))
         .map(route_line)
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        // #1953b: and the lines of every fading copy out of a ducked strip whose fade has not
+        // settled: the copy leaves with its strip at `S`, so its fade tail must have left its
+        // destination line by then.
+        .max(
+            base.inventory
+                .unsettled_route_copies()
+                .filter(|copy| ducked(route_source_id(copy)))
+                .map(route_line)
+                .max()
+                .unwrap_or(0),
+        );
     // #1324 D4: and the longest sidechain path into a carried node that the successor can
     // shorten, so it holds only exact `+0.0` at `S`. A strip is carried when `next` keeps it and
     // neither the successor nor the overlay restarts it. Each sidechain line from a ducked strip's
