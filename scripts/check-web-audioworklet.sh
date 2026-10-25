@@ -536,17 +536,23 @@ fi
 # reviewed change.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 named_disassembly=$(wasm-objdump -d "$named")
-# Issue #2041: no render closure admits a trap owner. #1381a, #1577, #1581 and #1588b each pinned
-# an engine SPSC ring's checked `slots[cursor]` index here (a `panic_bounds_check` that could not
-# fire); `spsc.rs` now reads a slot without a bounds check under its unsafe charter, so a checked
-# index inlined into the render closure again is red.
+# Issue #2041: no render closure admits an unpinned trap owner. #1381a, #1577, #1581 and #1588b
+# each pinned an engine SPSC ring's checked `slots[cursor]` index here (a `panic_bounds_check` that
+# could not fire); `spsc.rs` now reads a slot without a bounds check under its unsafe charter, so a
+# checked index inlined into the render closure again is red.
+# Issue #2068: the one trap owner left is pinned at its site count, not admitted by name.
+# `PreparedRenderPlan::render_inner` inlines `PlanarBufferMut::plane_mut`, whose `&mut
+# self.storage[start..end]` is a checked slice index, in the executor-less silence branch: one
+# `unreachable`. Every web plan carries an executor (both graph binding paths end in
+# `prepare_with_executor`), so the branch is dead; it is core-owned (#84). A new checked index
+# inlined into `render_inner` changes the count and is red.
 # #1588b: `MeterFrameProducer::publish_frame`'s published-queue push refusal, unreachable because
 # that queue has room for every frame the free queue does not hold, is forgotten rather than
 # dropped, so no free joins the closure.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render \
-    --render-thread || exit 1
+    --trap-owner '18PreparedRenderPlan12render_inner=1' --render-thread || exit 1
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||
@@ -556,7 +562,7 @@ printf '%s
 # gate. `miso_engine_web_v1_meter_poll` runs on the render thread after every rendered block, and
 # `miso_engine_web_v1_command_submit` runs in `port.onmessage`, which the user agent dispatches
 # between quanta on that same thread; neither may reach an allocator or drop glue.
-# Neither closure admits a trap owner (#2041, as for the render export above). The allocation
+# Neither closure admits a trap owner (#2041; `render_inner` is in neither). The allocation
 # half of the gate is absolute: an allocator, a deallocator or drop glue in either closure fails.
 printf '%s
 ' "$named_disassembly" |

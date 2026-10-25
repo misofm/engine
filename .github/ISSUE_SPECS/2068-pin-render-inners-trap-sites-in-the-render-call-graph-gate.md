@@ -28,3 +28,12 @@ A changed count fails with the owner name, the found count and the pinned count.
 
 ## Paths
 `scripts/check-web-audioworklet-callgraph.py`; this spec.
+
+## Decision record
+- Root, 2026-10-25: shape A. `TRAP_ALLOW_LIST` is deleted; the render line of
+  `scripts/check-web-audioworklet.sh` pins `18PreparedRenderPlan12render_inner` through
+  `--trap-owner NAME=SITES`, with the reason beside it. The path set adds that script. Self-test row
+  (b2) is deleted with the mechanism it tested; (b1a) covers the pin.
+- Measured on `build-web-audioworklet.sh --named-twin` at 207cad85f: `render_inner` holds 1
+  `unreachable` site in the `miso_engine_web_v1_render` closure; it is in neither the `meter_poll`
+  nor the `command_submit` closure.

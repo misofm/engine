@@ -13,10 +13,11 @@ Modes
 `--callgraph EXPORT [--trap-owner SUBSTRING[=SITES] ...]`
     Walk the direct-call closure of `EXPORT` and fail if any member's name matches `FORBIDDEN`
     (allocator, deallocator or drop glue). Then list the closure members that contain an
-    `unreachable` instruction and fail unless that set equals `TRAP_ALLOW_LIST` plus any
-    `--trap-owner` substrings the caller named. An owner given as `SUBSTRING=SITES` is pinned:
-    its matching members together must hold exactly `SITES` `unreachable` instructions, so a new
-    checked index inlined into it is red rather than admitted with the old one (issue #1581).
+    `unreachable` instruction and fail unless every one of them matches a `--trap-owner`
+    substring the caller named; there is no built-in allow list (issue #2068). An owner given as
+    `SUBSTRING=SITES` is pinned: its matching members together must hold exactly `SITES`
+    `unreachable` instructions, so a new checked index inlined into it is red rather than
+    admitted with the old one (issue #1581).
 
     A C allocator name (any name containing `free`, `alloc`, `memalign` or `sbrk`) fails anywhere
     in an *unmangled* member name and never in a mangled Rust name (issues #1234 and #1417). A
@@ -167,13 +168,6 @@ FORBIDDEN = re.compile(
     r"|dealloc|dlmalloc|drop_glue|drop_in_place|drop_slow|unlink_chunk"
     r"|insert_large_chunk|memory_grow|__rust_alloc|__rust_realloc"
 )
-# The one non-entry trap owner that may remain, with the reason it is unreachable in production:
-# `PreparedRenderPlan::render_inner` inlines `PlanarBufferMut::plane_mut`, whose `&mut
-# self.storage[start..end]` is a checked slice index, in the executor-less silence branch. Every
-# web plan carries an executor (both graph binding paths end in `prepare_with_executor`), so the
-# branch is dead. It is core-owned (#84) and is not fixed from this job.
-TRAP_ALLOW_LIST = frozenset({"18PreparedRenderPlan12render_inner"})
-
 # Issue #1333 D4.1: std's thread-local destructor registration path, as substrings that must all
 # appear in one member name. `std::sys::thread_local::destructors::list::register` registers a
 # destructor; `std::sys::thread_local::guard::*::enable` arms the per-thread run of them.
@@ -548,7 +542,7 @@ def check_callgraph(
         names.add(name)
         if separator:
             pinned[name] = int(sites)
-    allowed_owners = frozenset(TRAP_ALLOW_LIST | names)
+    allowed_owners = frozenset(names)
     members = closure(functions, export)
     failures = 0
     forbidden = [function.name for function in members if FORBIDDEN.search(function.name)]
@@ -1228,7 +1222,7 @@ def self_test() -> int:
             check_callgraph(reaching(rust_name), "miso_engine_web_v1_render") == 1,
         )
 
-    # (b) an `unreachable` in a function that is neither a panic entry nor allow-listed fails.
+    # (b) an `unreachable` in a function that is neither a panic entry nor a named trap owner fails.
     trapping = VALID_SHAPE.replace(
         " 000024: 0b                         | end",
         " 000024: 00                         | unreachable\n"
@@ -1273,15 +1267,6 @@ def self_test() -> int:
     expect(
         "(b1b) allocation-only still fails a free",
         check_callgraph(parse(freeing), "miso_engine_web_v1_render", (), True) == 1,
-    )
-
-    # (b2) the same `unreachable` inside the allow-listed core function passes.
-    allowed = trapping.replace("<render_next>", "<_ZN18PreparedRenderPlan12render_innerE>").replace(
-        "call 1 <render_next>", "call 1 <_ZN18PreparedRenderPlan12render_innerE>"
-    )
-    expect(
-        "(b2) allow-listed trap owner",
-        check_callgraph(parse(allowed), "miso_engine_web_v1_render") == 0,
     )
 
     # (b3) a panic entry is a member but never a reported trap owner, and its callees are not
