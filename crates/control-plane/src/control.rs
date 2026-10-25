@@ -90,8 +90,9 @@ pub struct ProviderEpoch {
     pub(crate) observations_pending: Option<u64>,
     /// The plan's effect instances by stable key, with each one's position in
     /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
-    /// read resolves a stable address without allocating. Empty for a host whose preparer keeps
-    /// the readers itself (the browser's).
+    /// read resolves a stable address without allocating. For a host whose preparer keeps the
+    /// readers in its plan (the browser's), the positions are in that list
+    /// ([`crate::RuntimePreparer::kept_observations`], #1589 R2): the plan's one index.
     pub(crate) observation_index: host_core::observation::ObservationIndex,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
@@ -857,6 +858,9 @@ pub enum TestStructuralFaultPhase {
     ProtocolCommit,
     /// The live arm, after every fallible check and before its first write (#1257 D7).
     BeforeLivePush,
+    /// A panic inside a rebuild, after the pending candidate was withdrawn and the successor
+    /// prepared, before admission (#2010).
+    PanicAfterWithdrawal,
 }
 
 /// How many of each owner the structural and live paths constructed, published and disposed.
@@ -4055,6 +4059,50 @@ where
         document: &[u8],
         output_capacity: u64,
     ) -> Result<usize, CommandError> {
+        self.command_with_readers(request, document, output_capacity, None)
+    }
+
+    /// [`Self::command_with_document`] for an adapter whose preparer keeps its plans' observation
+    /// readers in the plan (the browser's, [`crate::RuntimePreparer::kept_observations`]):
+    /// `readers` is the reader list of the plan of epoch `epoch`, the one render runs, lent for
+    /// this call only. An `OBSERVATION_READ` reads them through the running plan's index (#1589
+    /// R2) and faults (`Internal`) when `epoch` is any other plan's, so the index and the readers
+    /// are always one plan's, and a tap the swap block carried reads the reader it publishes to.
+    /// Every other command ignores them.
+    pub fn command_with_plan_observations(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+        epoch: u64,
+        readers: &[host_core::EffectObservationHandle],
+    ) -> Result<usize, CommandError> {
+        self.command_with_readers(request, document, output_capacity, Some((epoch, readers)))
+    }
+
+    /// The `OBSERVATION_READ` index of the plan of epoch `epoch` (#1586 D6, #1589 R2): the
+    /// running plan's or a pending candidate's, `None` for an epoch the session does not hold. A
+    /// host that keeps the readers in its plan reads them through it, with the epoch of the plan
+    /// whose readers it reads.
+    #[must_use]
+    pub fn observation_index(
+        &self,
+        epoch: u64,
+    ) -> Option<&host_core::observation::ObservationIndex> {
+        core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .find(|provider| provider.epoch == epoch)
+            .map(|provider| &provider.observation_index)
+    }
+
+    /// The body of [`Self::command_with_document`], with the readers an adapter lends.
+    fn command_with_readers(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
+    ) -> Result<usize, CommandError> {
         let _canonical = lane::CanonicalFpEnv::enter();
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
@@ -4070,7 +4118,8 @@ where
         // them at all.
         let observe = protocol::ObserveContext {
             bindings: &self.observation,
-            enabled: A::OBSERVE_EDIT,
+            // #1589 R1: only a session whose plans bind every tap's queue serves the edit.
+            enabled: A::OBSERVE_EDIT && self.preparer.observation_queues(),
             // #1585 D4: the records are tagged from the session's one counter.
             next_arm_tag: self.next_arm_tag,
         };
@@ -4105,7 +4154,7 @@ where
             PreparedCommandFrame::Session(prepared) => self.session_command(*prepared),
             // #1586 D6: the read, which allocates nothing.
             PreparedCommandFrame::ObservationRead(prepared) => {
-                self.observation_read(prepared, request)
+                self.observation_read(prepared, request, readers)
             }
             PreparedCommandFrame::Structural(prepared) => {
                 let prepared = ObservedPreparedToken::new(prepared);
@@ -4233,26 +4282,12 @@ where
                         Err(_) => return Err(CommandError::Internal),
                     }
                 }
-                // #1310 D1: a pending candidate is taken back before anything is prepared, so the
-                // replacement knows the plan render runs and the candidate's host-fed rings can
-                // move while the control thread owns them.
-                let mut withdrawn = self.withdraw_pending_candidate()?;
-                let result = self.rebuild(
+                self.rebuild_superseding(
                     Rebuild::Transaction(prepared),
                     revision,
                     monitor_change,
                     observation_change,
-                    &mut withdrawn,
-                );
-                // #1310 D4: a refusal leaves the withdrawn candidate here, whole; it is published
-                // again with its own epoch, credit, revision gate and words. Nothing was published
-                // since it was withdrawn, so this cannot fail.
-                if let Some(candidate) = withdrawn.take() {
-                    self.publisher.republish(candidate);
-                    #[cfg(feature = "test-support")]
-                    update_test_owners(|owners| owners.candidate_republished += 1);
-                }
-                result
+                )
             }
         }
     }
@@ -4328,21 +4363,13 @@ where
         if !observation_change.ended.is_empty() {
             return Err(CommandError::Internal);
         }
-        let mut withdrawn = self.withdraw_pending_candidate()?;
-        let result = self.rebuild(
+        self.rebuild_superseding(
             Rebuild::Discontinuity(model),
             revision,
             monitor_change,
             observation_change,
-            &mut withdrawn,
-        );
-        // #1310 D4: as for a transaction, a refusal republishes the withdrawn candidate whole.
-        if let Some(candidate) = withdrawn.take() {
-            self.publisher.republish(candidate);
-            #[cfg(feature = "test-support")]
-            update_test_owners(|owners| owners.candidate_republished += 1);
-        }
-        result.map(|_| ())
+        )
+        .map(|_| ())
     }
 
     /// Executes a command the session runs (#1594 D9) and completes it: a reply or a typed
@@ -4400,6 +4427,7 @@ where
         &mut self,
         prepared: protocol::PreparedObservationRead,
         request: &[u8],
+        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<usize, CommandError> {
         let mut selections = [protocol::ObservationSelectionRef::EMPTY;
             protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS];
@@ -4427,7 +4455,7 @@ where
         }
         let mut rows = core::mem::take(&mut self.observation_rows);
         let outcome = match rows.get_mut(..count) {
-            Some(table) => self.read_observation_rows(&selections[..count], table),
+            Some(table) => self.read_observation_rows(&selections[..count], table, readers),
             None => Err(None),
         };
         let observed_sample = self.shared.render_sample.load(Ordering::Acquire);
@@ -4473,18 +4501,27 @@ where
         result
     }
 
-    /// Reads one row per selection into `rows` on the running plan's readers, with the whole
-    /// batch checked first (#1586 D4): the core read and the wire rows, no allocation. `Err(None)`
-    /// for a refusal the codec rules out (an internal fault).
+    /// Reads one row per selection into `rows` on the running plan's readers, or on the readers an
+    /// adapter lent with their plan's epoch (#1589 R2), with the whole batch checked first (#1586
+    /// D4): the core read and the wire rows, no allocation. `Err(None)` for a refusal the codec
+    /// rules out (an internal fault), and for lent readers whose epoch is not the running plan's:
+    /// the index and the readers are always one plan's.
     fn read_observation_rows(
         &self,
         selections: &[protocol::ObservationSelectionRef<'_>],
         rows: &mut [protocol::ObservationReadRow],
+        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<(), Option<host_core::observation::ObservationReadError>> {
-        let provider = &self.providers;
+        // One plan: the lent readers are the running plan's, since `command_with_readers` serviced
+        // first, so they read through the running plan's index; another epoch is a fault.
+        let handles = match readers {
+            Some((epoch, _)) if epoch != self.providers.epoch => return Err(None),
+            Some((_, handles)) => handles,
+            None => &*self.providers.observations,
+        };
         host_core::observation::read_with(
-            &provider.observation_index,
-            &provider.observations,
+            &self.providers.observation_index,
+            handles,
             selections,
             |selection| {
                 Ok::<_, host_core::observation::ObservationReadError>(core_selection(selection))
@@ -5011,10 +5048,9 @@ where
         if !observation_change.ended.is_empty() {
             return Err(SpectrumRefusal::Error(CommandError::Internal));
         }
-        let mut withdrawn = self
-            .withdraw_pending_candidate()
-            .map_err(SpectrumRefusal::Error)?;
-        let result = self.rebuild(
+        // This assumes a withdrawal refuses only with `Internal` (`promote_pending_provider`),
+        // which the arm below answers as an error, never as a `LimitExceeded` reply.
+        let result = self.rebuild_superseding(
             Rebuild::Monitor {
                 model,
                 configuration,
@@ -5022,14 +5058,7 @@ where
             revision,
             monitor_change,
             observation_change,
-            &mut withdrawn,
         );
-        // #1310 D4: as for a transaction, a refusal republishes the withdrawn candidate whole.
-        if let Some(candidate) = withdrawn.take() {
-            self.publisher.republish(candidate);
-            #[cfg(feature = "test-support")]
-            update_test_owners(|owners| owners.candidate_republished += 1);
-        }
         match result {
             Ok(_) => self
                 .pending_providers
@@ -5088,6 +5117,72 @@ where
         }
     }
 
+    /// Withdraws the pending candidate, rebuilds, and republishes the candidate when the rebuild
+    /// does not take it: the one supersession path of a transaction, a declared discontinuity and
+    /// a monitor change.
+    ///
+    /// #1310 D1: a pending candidate is taken back before anything is prepared, so the replacement
+    /// knows the plan render runs and the candidate's host-fed rings can move while the control
+    /// thread owns them. The preparation reads the withdrawn candidate (its carried base, the
+    /// donation check), so the withdrawal cannot wait until after it (#2010). #1310 D4: a refusal
+    /// leaves the withdrawn candidate here, whole; it is published again with its own epoch,
+    /// credit, revision gate and words. Nothing was published since it was withdrawn, so this
+    /// cannot fail.
+    ///
+    /// #2010: a panic inside the rebuild before its commit republishes the candidate too, then
+    /// resumes the panic, so a host that catches it (the C ABI answers `RESULT_INTERNAL`) keeps
+    /// the candidate whose revisions it acked. Under `panic = "abort"` nothing unwinds and this
+    /// changes nothing. A panic after the commit, which has taken the candidate, is not covered.
+    /// Nor is a panic between the protocol commit (`prepared.commit`) and `withdrawn.take()`: it
+    /// still republishes the candidate, but over a half-committed controller, which then holds the
+    /// successor's model, revision, monitor overlay, observation and send moves while the
+    /// candidate renders (#2010 R2; a successor issue).
+    fn rebuild_superseding(
+        &mut self,
+        kind: Rebuild,
+        revision: u64,
+        monitor_change: controls::MonitorChange,
+        observation_change: controls::ObservationChange,
+    ) -> Result<usize, CommandError> {
+        let mut withdrawn = self.withdraw_pending_candidate()?;
+        self.rebuild_withdrawn(
+            kind,
+            revision,
+            monitor_change,
+            observation_change,
+            &mut withdrawn,
+        )
+    }
+
+    /// [`Self::rebuild_superseding`] after its withdrawal: rebuilds with `withdrawn` and
+    /// republishes a candidate the rebuild did not take, on a refusal and on a panic before the
+    /// commit, which it then resumes (#2010). The transition fallback (#1397 D2) runs it on the
+    /// candidate it withdrew itself; `withdrawn` is `None` on return.
+    fn rebuild_withdrawn(
+        &mut self,
+        kind: Rebuild,
+        revision: u64,
+        monitor_change: controls::MonitorChange,
+        observation_change: controls::ObservationChange,
+        withdrawn: &mut Option<engine::realtime::UnadoptedCandidate>,
+    ) -> Result<usize, CommandError> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.rebuild(
+                kind,
+                revision,
+                monitor_change,
+                observation_change,
+                withdrawn,
+            )
+        }));
+        if let Some(candidate) = withdrawn.take() {
+            self.publisher.republish(candidate);
+            #[cfg(feature = "test-support")]
+            update_test_owners(|owners| owners.candidate_republished += 1);
+        }
+        result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    }
+
     /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
     /// step the deadline step (`check_prime_deadline`, #1358 D3) runs once W is not ready by its
     /// deadline.
@@ -5102,8 +5197,8 @@ where
     ///
     /// **A refused re-preparation is a defect (D2 step 3).** W is republished whole, its record is
     /// set again unchanged and `transition_reprepare_refusals` rises (counted, not asserted: root
-    /// ruling on #1358). W's revision stays pending and the next step retries. **Acked-batch question (D4): can an ack ever precede a drop?
-    /// No:** W drops only after its replacement is prepared from the committed model, which holds
+    /// ruling on #1358). W's revision stays pending and the next step retries. **Acked-batch
+    /// question (D4): can an ack ever precede a drop? No:** W drops only after its replacement is prepared from the committed model, which holds
     /// every acked edit, and its rings move by a donation checked before anything is published.
     #[cfg_attr(
         not(feature = "test-support"),
@@ -5149,7 +5244,8 @@ where
         }
         #[cfg(feature = "test-support")]
         let injected = TEST_REFUSE_REPREPARE.with(|state| state.replace(false));
-        let result = self.rebuild(
+        // A refusal republishes W whole, as a panic before the commit does (#2010).
+        let result = self.rebuild_withdrawn(
             Rebuild::Transition {
                 model,
                 #[cfg(feature = "test-support")]
@@ -5163,11 +5259,6 @@ where
         match result {
             Ok(_) => Ok(TransitionStep::Published),
             Err(_) => {
-                if let Some(candidate) = withdrawn.take() {
-                    self.publisher.republish(candidate);
-                    #[cfg(feature = "test-support")]
-                    update_test_owners(|owners| owners.candidate_republished += 1);
-                }
                 // W's record stays: the withdrawal of the epoch it names keeps it.
                 debug_assert_eq!(self.primed, Some(record));
                 // Root ruling (#1358): a refusal is counted, never asserted, since a real one
@@ -5603,6 +5694,9 @@ where
                 drop(candidate_provider);
                 drop(kind);
                 return Err(CommandError::Backpressure);
+            }
+            if self.take_test_fault(TestStructuralFaultPhase::PanicAfterWithdrawal) {
+                panic!("test fault: a rebuild panics after the withdrawal");
             }
         }
         // #1398 D4: the candidate beside every plan the control plane holds unreclaimed, a

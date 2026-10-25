@@ -1082,14 +1082,12 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let meter_delivery_bytes = meter_delivery_bytes
             + strips * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>()) as u64;
         let frame_bytes = frame_bytes + meter_delivery_bytes;
-        // The one EQ's dense instance table, its producer-slot word and the IDs it copies, and
-        // its observation index entry with the same IDs again (#1586 D3).
+        // The one EQ's dense instance table, its producer-slot word and the IDs it copies. Its
+        // observation index entry is the epoch's (#1589 R2), in the control plane's row.
         let effect_ids = (model.tracks[0].id.as_str().len()
             + model.console.pre_insert[0].slot.as_str().len()) as u64;
-        let instance_bytes = (size_of::<Option<EffectInstance>>() + 2 * size_of::<u32>()) as u64
-            + effect_ids
-            + size_of::<host_core::observation::ObservationIndexEntry>() as u64
-            + effect_ids;
+        let instance_bytes =
+            (size_of::<Option<EffectInstance>>() + 2 * size_of::<u32>()) as u64 + effect_ids;
         let frame_bytes = frame_bytes + instance_bytes;
         let expected_bridge_metadata = projection
             .report
@@ -4489,14 +4487,14 @@ fn bus_meters_render_and_poll_without_allocating() {
 }
 
 /// The dense effect slot and the tap index one stable selection names, through the plan's
-/// observation index (#1586 D3), so a test reaches the reader the read reads.
+/// observation index (#1586 D3, the epoch's since #1589 R2), so a test reaches the reader the read reads.
 fn resolve_observation(
     ready: &ReadyOwnership,
     selection: &ObservationSelection<'_>,
 ) -> Result<(usize, usize), ObservationReadError> {
     let entry = ready
-        .shape
-        .observation_index
+        .observation_index()
+        .ok_or(ObservationReadError::WrongState)?
         .find(selection.track_id, selection.rack, selection.effect_slot_id)
         .ok_or(ObservationReadError::InvalidSelection)?;
     let handle = entry.handle.ok_or(ObservationReadError::Unsupported)?;
@@ -4883,8 +4881,7 @@ fn observe_key(
 fn armed_mask(host: &mut AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
     let ready = host.ready.as_ref().expect("ready");
     let reader = ready
-        .shape
-        .observation_index
+        .observation_index()?
         .find(strip_id, LiveEffectRack::Inserts, insert_id)?
         .handle?;
     let companions = host
@@ -8935,9 +8932,11 @@ mod structural_apply {
     ///
     /// Test value: red if the swap block's hook does not pair the observation readers (the tap
     /// would read as unarmed and the page's subscription would silently stop after every swap), or
-    /// if it maps the readers to the wrong effect slot after the added strip shifts them, or if
+    /// if it maps the readers to the wrong effect slot after the added strip shifts them, if
     /// the selected read reads readers it took at preparation and not the active plan's (#1586a:
-    /// after the carry those are the successor's fresh slots, which nothing publishes to).
+    /// after the carry those are the successor's fresh slots, which nothing publishes to), or if
+    /// it resolves them through another plan's index than the one that renders (#1589 R2: the
+    /// newest committed plan's, between a rebuild's commit and its adoption).
     #[test]
     fn an_armed_tap_and_its_windows_follow_the_effect_through_a_swap() {
         let mut model =
@@ -8977,6 +8976,15 @@ mod structural_apply {
                 revision
             } if revision == base + 1
         ));
+        // The successor waits for its block: the read resolves through the rendering plan's index.
+        assert!(
+            rig.host
+                .read_observation_addresses(&[address(0)])
+                .expect("a read before the adoption")[0]
+                .window
+                .is_some(),
+            "the rendering plan's tap reads its window before the adoption"
+        );
         rig.step();
         assert_eq!(rig.epoch(), 1);
         assert_eq!(
@@ -8996,6 +9004,88 @@ mod structural_apply {
             .expect("the carried tap kept publishing")
             .sequence;
         assert!(after > before, "the windows continue ({before} to {after})");
+    }
+
+    /// #1589 R1: a boot word that binds no observation queue (`0`) leaves the browser serving
+    /// neither the `Observe` edit nor its read: the edit is refused `observation.unavailable`
+    /// before anything commits, and `CAPABILITIES_GET` lists neither `OBSERVATION_READ` nor bit 15.
+    /// Any nonzero word serves both: preparation refuses an effect with more taps than the word,
+    /// so a word of `1` on a session whose one observed effect has one tap binds its queue.
+    ///
+    /// Test value: red if the session serves the edit on plans with no queue for the tap (an
+    /// acknowledged subscription no render ever applies, or an internal fault in place of the
+    /// typed refusal), if it advertises a read that could answer only `observation.unbound`, or
+    /// if it withholds both from a nonzero word below the widest launch effect's tap count.
+    #[test]
+    fn observe_and_its_read_are_served_for_a_nonzero_boot_word_and_refused_for_zero() {
+        let model = observed_model();
+        for taps in [0, 1] {
+            let mut rig = Rig::boot(
+                &model,
+                WebBootOptions {
+                    live_control_observation_taps: taps,
+                    ..options()
+                },
+                None,
+            );
+            let base = rig.host.committed_revision();
+            let arm = SessionEdit::Observe {
+                strip_id: model.tracks[0].id.clone(),
+                section: controls::TapSection::Inserts(StableId::parse("comp").expect("insert ID")),
+                tap_id: 1,
+                armed: true,
+                window_blocks: 1,
+            };
+            match (taps, rig.apply(&[arm], 1)) {
+                (0, Outcome::Refused(_, codes)) => {
+                    assert_eq!(codes, ["observation.unavailable"]);
+                    assert_eq!(rig.host.committed_revision(), base, "nothing committed");
+                }
+                (0, Outcome::Applied { .. }) => {
+                    panic!("an Observe edit on a plan with no observation queue is accepted")
+                }
+                (_, Outcome::Applied { .. }) => {}
+                (_, Outcome::Refused(_, codes)) => {
+                    panic!("word {taps}: the Observe edit is refused {codes:?}")
+                }
+            }
+
+            let codec = ProtocolCodec::default();
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(
+                    &TypedCommandFrame {
+                        request_id: RequestId::new(2).expect("nonzero request"),
+                        expected_revision: ExpectedRevision::Any,
+                        payload: CommandPayload::CapabilitiesGet,
+                    },
+                    &mut bytes,
+                )
+                .expect("a capabilities frame");
+            let (result, reply) = rig.entry(&bytes[..length]);
+            assert_eq!(result, RESULT_OK);
+            let mut fields = [0_u16; 256];
+            let DecodedTypedResponseFrame::Success {
+                payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
+                ..
+            } = codec
+                .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+                .expect("a capabilities reply")
+            else {
+                panic!("a capabilities reply")
+            };
+            let served = taps != 0;
+            assert_eq!(
+                capabilities.supported_commands.contains(&0x000f),
+                served,
+                "word {taps}: OBSERVATION_READ listed"
+            );
+            assert_eq!(
+                capabilities.flags.0 & protocol::CapabilityFlags::OBSERVATION.0 != 0,
+                served,
+                "word {taps}: capability bit 15"
+            );
+        }
     }
 
     fn meter_loss(rig: &Rig) -> u64 {
