@@ -3,10 +3,13 @@ import { EngineLiveControls } from "../../../sdk/src/core/live-controls.ts";
 import { ControlTransactionQueue } from "../../../sdk/src/core/control-queue.ts";
 import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrder } from "../../../sdk/src/browser/live-controls.ts";
 import {
-  WIRE_BYTES, WIRE_U32, WIRE_U8, commandFrame, concat, controlCallFailure, decodeControlReply, decodeRefusalBody,
+  MESSAGE_SESSION_TRANSACTION_APPLY, WIRE_BYTES, WIRE_U32, WIRE_U8, commandFrame, concat, controlCallFailure,
+  decodeControlReply, decodeRefusalBody, encodeObserveTransaction,
   decodeResponseEnvelope, field, scalar, u32,
 } from "../../../sdk/src/core/control-frame.ts";
+import type { ObserveEdit } from "../../../sdk/src/core/control-frame.ts";
 import { ProtocolClient } from "../../../sdk/src/core/protocol-messages.ts";
+import { decodeResponseTagReply } from "../../../sdk/src/core/response-frame.ts";
 import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
@@ -436,24 +439,6 @@ function serializeTrackResponse(result: TrackResponseResult) {
   };
 }
 
-function countingTrackResponseWorker(stats: { queries: number; initializations: number }) {
-  return (url: URL, options: { readonly type: "module" }) => {
-    const worker = new Worker(url, options);
-    return {
-      postMessage(message: { readonly type?: string }, transfer?: readonly Transferable[]) {
-        if (message.type === "track-response-init") stats.initializations += 1;
-        if (message.type === "track-response-query") stats.queries += 1;
-        worker.postMessage(message, transfer);
-      },
-      terminate: () => worker.terminate(),
-      addEventListener: (type: "message" | "error" | "messageerror", listener: (event: any) => void) =>
-        worker.addEventListener(type, listener),
-      removeEventListener: (type: "message" | "error" | "messageerror", listener: (event: any) => void) =>
-        worker.removeEventListener(type, listener),
-    };
-  };
-}
-
 /**
  * The spectrum operation a request frame names (#1596): its message (`0x0011` capture, `0x0012`
  * stream) and its first field's one-byte value, the operation code, at byte 56 (the 48-byte header,
@@ -838,11 +823,12 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
       onFrame: (frame) => meterFrames.push(frame),
     });
     if (meterLease.result !== 0) throw new Error("continuous spectrum meter lease refused");
-    const response = await browser.queryTrackResponse({
+    // A track response is captured in a rendered block (#1579b): armed now, read after the render.
+    const responseQuery = await armTrackResponse(browser, {
       trackId: "track",
       grid: { kind: "linear", points: 1_025, minimumHz: 0, maximumHz: 24_000 },
       channels: "both",
-      responseLimits: { maximumResultBytes: 1 << 20, requestDeadlineMs: 5_000 },
+      responseLimits: { maximumResultBytes: 1 << 20, requestDeadlineMs: 10_000 },
     });
     subscription = await browser.subscribeSpectrum({
       ...query,
@@ -882,6 +868,7 @@ async function runContinuousSpectrumQualification(): Promise<Record<string, unkn
     } finally {
       releaseReads();
     }
+    const response = await responseQuery.query;
     const firstPcmPeak = Math.max(
       ...[rendered.getChannelData(0), rendered.getChannelData(1)].map((plane) => {
         let peak = 0;
@@ -1529,15 +1516,75 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
   }
 }
 
-async function createTrackResponseSubscriptionBrowser(stats: { queries: number; initializations: number }) {
+/**
+ * Start a track response query on an engine whose offline context has not rendered yet, and
+ * resolve, with the pending query, once the core has armed its capture: the strip request's tag reply has
+ * come back, so the render that follows answers it (#1579b).
+ */
+async function armTrackResponse(
+  browser: SdkEngine,
+  request: Parameters<SdkEngine["queryTrackResponse"]>[0],
+): Promise<{ readonly query: Promise<TrackResponseResult> }> {
+  const host = browser.host;
+  const control = host.control;
+  let armed!: () => void;
+  const tagged = new Promise<void>((resolve) => { armed = resolve; });
+  host.control = async (...args: Parameters<MisoAudioWorkletHost["control"]>) => {
+    const reply = await control.apply(host, args);
+    try {
+      if (reply.result === 0 && decodeResponseTagReply(reply.response).ok) armed();
+    } catch {
+      // Another command's reply.
+    }
+    return reply;
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const query = browser.queryTrackResponse(request);
+    query.catch(() => undefined);
+    await Promise.race([tagged, query, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("the track response capture was not armed")), 10_000);
+    })]);
+    // Wrapped: an async function that returned the promise itself would wait for it to settle.
+    return { query };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    host.control = control;
+  }
+}
+
+/** The workload label of the live track-response engine (#1579b). */
+const TRACK_RESPONSE_LIVE = "track-response-live";
+/** The bound on every wait of the live track-response row that depends on the audio clock. */
+const TRACK_RESPONSE_WAIT_MS = 10_000;
+/** The rendered blocks, and the least wall time, a "no new publication" window spans. */
+const TRACK_RESPONSE_QUIET_BLOCKS = 32n;
+const TRACK_RESPONSE_QUIET_MS = 150;
+
+/** The track's live EQ and input-filter edits the response rows and the PCM parity row submit. */
+function trackResponseEdits(owner: EngineLiveControls) {
+  const builtinPair = { hpfHz: 80, lpfHz: 12_000 } as const;
+  // A value edit names the console slot by its stable ID, which needs no builder.
+  const eq = owner.edit.track("track").console("eq-simd1", "miso.parametric-eq");
+  return [eq.parameter("band-1-gain", -3), eq.parameter("hpf-frequency", 400),
+    eq.parameter("hpf-q", 0.8), eq.parameter("hpf-enabled", true),
+    eq.parameter("lpf-frequency", 6_000), eq.parameter("lpf-q", 0.9),
+    eq.parameter("lpf-enabled", true), owner.edit.track("track").inputFilters(builtinPair, { channel: "left" })];
+}
+
+/**
+ * The live track-response engine (#1579b): a track response is captured in a rendered block, so
+ * its queries run on a real `AudioContext` that renders on its own clock after one declared
+ * trusted click. `stats` counts the response Workers it creates (none: the query is the core's
+ * frames) and every frame it sends through `host.control`.
+ */
+async function createTrackResponseLiveBrowser(stats: { workers: number; controlFrames: number }) {
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
-  const browser = await createSdkEngine("track-response-subscription", {
+  return createSdkEngine(TRACK_RESPONSE_LIVE, {
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      observationTaps: 4,
-    } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: { observationTaps: 4 } },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -1548,42 +1595,61 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
       submixes: [],
     }),
     createContext: () => {
-      const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
-      Object.defineProperty(context, "close", { value: async () => {} });
+      const context = new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" });
+      // Firefox can create a later context already running; the click below starts it.
+      void context.suspend();
       return context;
     },
-    createHost: (request) => createDefaultHost({
-      ...request,
-      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
-    }),
-    createResponseWorker: countingTrackResponseWorker(stats),
+    createHost: async (request) => {
+      const host = await createDefaultHost({
+        ...request,
+        hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+      });
+      return new Proxy(host, {
+        get(target, key) {
+          const value = Reflect.get(target, key, target);
+          if (key === "control") {
+            return (...args: Parameters<MisoAudioWorkletHost["control"]>) => {
+              stats.controlFrames += 1;
+              return target.control(...args);
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    createResponseWorker: (url, options) => {
+      stats.workers += 1;
+      return new Worker(url, options);
+    },
     simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
     responseWorkerModuleUrl: "/sdk/response-worker.js",
   });
-  return browser;
 }
 
-async function runTrackResponseSubscriptionQualification(reference: TrackResponseResult): Promise<Record<string, unknown>> {
-  const stats = { queries: 0, initializations: 0 };
-  const browser = await createTrackResponseSubscriptionBrowser(stats);
-  const document = new Uint8Array(await (await fetch("/qualification/observation-session.json")).arrayBuffer());
-  const asset = await MisoEngineAsset.load(await (await fetch(
-    "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
-  )).arrayBuffer());
-  const headless = await WasmBoundary.boot(asset, document, {
-    sourceRingFrames: OBSERVATION_FRAMES,
-    liveControls: { observationTaps: 4 },
-  });
-  const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), {
-    queue: new ControlTransactionQueue((frame) => headless.controlFrame(frame), {
-      initialRevision: headless.controlRevision(),
-      // The boundary's one allocator: its own strip-order reads at boot drew IDs from the same
-      // endpoint, and the core refuses an ID at or below the highest it has seen.
-      requestIds: headless.controlRequestIds,
-    }),
-    observe: (edits) => headless.submitCommands(encodeLaneEdits(edits), edits.length),
-  });
+/** Wait, bounded, until the live engine has rendered `blocks` more quanta and `ms` have passed. */
+async function renderLiveBlocks(browser: SdkEngine, blocks: bigint, ms: number): Promise<bigint> {
+  const began = performance.now();
+  const from = BigInt((await browser.host.status()).renderedQuanta);
+  for (;;) {
+    const now = BigInt((await browser.host.status()).renderedQuanta);
+    if (now >= from + blocks && performance.now() - began >= ms) return now - from;
+    if (performance.now() - began > TRACK_RESPONSE_WAIT_MS) {
+      throw new Error(`the live track-response context rendered ${now - from} of ${blocks} blocks (state=${browser.context.state})`);
+    }
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 5));
+  }
+}
+
+/**
+ * The browser's track responses on a live context (#1579b, gates 1, 3 and 4): one-shot queries
+ * (two at once settle one after the other) and the managed subscription (no publication while
+ * nothing changes, one publication after an edit).
+ */
+async function runTrackResponseLiveQualification(): Promise<Record<string, unknown>> {
+  const stats = { workers: 0, controlFrames: 0 };
+  const browser = await createTrackResponseLiveBrowser(stats);
   const request = {
     trackId: "track",
     grid: { kind: "logarithmic" as const, points: 5, minimumHz: 20, maximumHz: 20_000 },
@@ -1599,6 +1665,64 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   let resolveCallback: (() => void) | undefined;
   const callbackDelivered = new Promise<void>((resolve) => { resolveCallback = resolve; });
   try {
+    const context = browser.context as AudioContext;
+    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
+      const acknowledgement = await browser.host.submitSource({
+        sourceId: "live-control-source",
+        generation: 1n,
+        startFrame: BigInt(block * 128),
+        sampleRateHz: 48_000,
+        planes: observationPlanes(block),
+        frames: 128,
+        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1,
+      });
+      if (acknowledgement.result !== 0) throw new Error("live track-response source submission refused");
+    }
+    const resumeButton = document.createElement("button");
+    resumeButton.id = "track-response-resume";
+    resumeButton.textContent = "Start track response qualification audio";
+    document.body.append(resumeButton);
+    let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+    let resumeGesture = false;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        resumeTimer = setTimeout(() => reject(new Error(
+          `track response audio resume timed out (gesture=${resumeGesture}, state=${context.state})`,
+        )), TRACK_RESPONSE_WAIT_MS);
+        resumeButton.addEventListener("click", () => {
+          resumeGesture = true;
+          void context.resume().then(resolve, reject);
+        }, { once: true });
+      });
+    } finally {
+      if (resumeTimer !== undefined) clearTimeout(resumeTimer);
+      resumeButton.remove();
+    }
+    await renderLiveBlocks(browser, 4n, 0);
+
+    // One-shot queries. Two at once settle in turn: the second is captured in a later block.
+    const live = await browser.queryTrackResponse(request);
+    const [first, second] = await Promise.all([
+      browser.queryTrackResponse(request),
+      browser.queryTrackResponse(request),
+    ]);
+    const serialized = second.snapshotToken > first.snapshotToken
+      && second.capturedSample > first.capturedSample
+      && first.capturedSample > live.capturedSample
+      && responseValuesEqual(first, live) && responseValuesEqual(second, live);
+    const liveAgain = await browser.queryTrackResponse(request);
+    const liveLeft = live.leftDb === undefined ? [] : Array.from(live.leftDb);
+    const liveRight = live.rightDb === undefined ? [] : Array.from(live.rightDb);
+    const liveFinite = live.frequenciesHz.length === request.grid.points
+      && liveLeft.length === request.grid.points
+      && liveRight.length === request.grid.points
+      && Array.from(live.frequenciesHz).every(Number.isFinite)
+      && liveLeft.every(Number.isFinite)
+      && liveRight.every(Number.isFinite);
+    const liveOwnedAfterSecondQuery = liveFinite && responseValuesEqual(live, liveAgain)
+      && live.leftDb !== liveAgain.leftDb;
+
+    // The managed subscription.
     const subscription = await browser.subscribeTrackResponse({
       ...request,
       cadenceMs: 10,
@@ -1614,85 +1738,39 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     });
     const initial = subscription.readLatest();
     if (initial === undefined) throw new Error("track response subscription returned no initial result");
-    const initialQueries = stats.queries;
-    const liveControls = await browser.liveControls();
-    const builtinPair = { hpfHz: 80, lpfHz: 12_000 } as const;
-    const edits = (owner: EngineLiveControls) => {
-      // A value edit names the console slot by its stable ID, which needs no builder.
-      const eq = owner.edit.track("track").console("eq-simd1", "miso.parametric-eq");
-      return [eq.parameter("band-1-gain", -3), eq.parameter("hpf-frequency", 400),
-        eq.parameter("hpf-q", 0.8), eq.parameter("hpf-enabled", true),
-        eq.parameter("lpf-frequency", 6_000), eq.parameter("lpf-q", 0.9),
-        eq.parameter("lpf-enabled", true), owner.edit.track("track").inputFilters(builtinPair, { channel: "left" })];
-    };
-    const command = await liveControls.submit(...edits(liveControls));
-    const headlessCommand = await headlessLiveControls.submit(...edits(headlessLiveControls));
-    if (!headlessCommand.ok || command.path !== headlessCommand.path
-        || command.revision !== headlessCommand.revision) {
-      throw new Error("browser/headless live EQ and builtin-filter acknowledgements disagree");
-    }
-    // Seven EQ parameter edits and the two input-filter cutoffs: nine edits in one transaction.
-    if (!command.ok || command.appliedOperations !== 9 || headlessCommand.appliedOperations !== 9) {
-      throw new Error("queued response subscription EQ and builtin-filter edits were refused or split");
-    }
-    const beforeRender = subscription.readLatest();
-    const unchangedBeforeRender = beforeRender !== undefined
-      && responseValuesEqual(initial, beforeRender)
-      && stats.queries === initialQueries;
+    // No edit: renders publish nothing new.
+    await renderLiveBlocks(browser, TRACK_RESPONSE_QUIET_BLOCKS, TRACK_RESPONSE_QUIET_MS);
+    await subscription.pump();
+    const unchangedOverRenders = subscription.revision === 1n
+      && responseValuesEqual(subscription.readLatest()!, initial);
     const unchangedNotificationCount = callbackCount;
 
-    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
-      const planes = observationPlanes(block);
-      const headlessSource = headless.submitSource({ sourceId: "live-control-source", generation: 1n,
-        startFrame: BigInt(block * 128), planes,
-        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1 });
-      if (!headlessSource.ok) throw new Error("headless live EQ source refused");
-      const acknowledgement = await browser.host.submitSource({
-        sourceId: "live-control-source",
-        generation: 1n,
-        startFrame: BigInt(block * 128),
-        sampleRateHz: 48_000,
-        planes,
-        frames: 128,
-        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1,
-      });
-      if (acknowledgement.result !== 0) throw new Error("SDK response subscription source submission refused");
+    const liveControls = await browser.liveControls();
+    const command = await liveControls.submit(...trackResponseEdits(liveControls));
+    // Seven EQ parameter edits and the two input-filter cutoffs: nine edits in one transaction.
+    if (!command.ok || command.appliedOperations !== 9) {
+      throw new Error("live track-response EQ and builtin-filter edits were refused or split");
     }
-    const rendered = await browser.context.startRendering();
-    let postRampMaximumDifference = 0;
-    let postRampComparedFrames = 0;
-    // Both transactions were committed before the first render, so every block is post-edit; the
-    // comparison starts after the 64-sample parameter ramp.
-    const settledAt = APPLIED_BEFORE_FIRST_SAMPLE + 64;
-    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
-      const expected = headless.render(128);
-      for (let frame = 0; frame < 128; frame += 1) {
-        const absolute = block * 128 + frame;
-        if (absolute < settledAt) continue;
-        postRampComparedFrames += 1;
-        for (const [channel, plane] of [expected.left, expected.right].entries()) {
-          const difference = Math.abs(rendered.getChannelData(channel)[absolute]! - plane[frame]!);
-          if (!Number.isFinite(difference)) throw new Error("live EQ produced nonfinite PCM");
-          postRampMaximumDifference = Math.max(postRampMaximumDifference, difference);
-        }
-      }
-    }
+    const appliedAtSample = (await browser.applied(command.revision)).sample;
     const timerDelivered = await Promise.race([
       callbackDelivered.then(() => true),
-      new Promise<boolean>((resolve) => globalThis.setTimeout(() => resolve(false), 500)),
+      new Promise<boolean>((resolve) => globalThis.setTimeout(() => resolve(false), TRACK_RESPONSE_WAIT_MS)),
     ]);
     let pumped = false;
     if (!timerDelivered) pumped = (await subscription.pump())?.available === true;
     const afterRender = subscription.readLatest();
-    if (afterRender === undefined) throw new Error("track response subscription lost its result after render");
+    if (afterRender === undefined) throw new Error("track response subscription lost its result after the edit");
     const changedPublication = !responseValuesEqual(initial, afterRender)
-      && subscription.revision > 1n
-      && stats.queries >= initialQueries + 1;
+      && subscription.revision === 2n
+      // A capture is stamped with its block's exclusive end, so the block that applied the edit
+      // reports appliedAt + 128: equality would be a read of the committed model, not the audio.
+      && afterRender.capturedSample > appliedAtSample;
     const callbackMatches = callbackResult !== undefined && responseValuesEqual(callbackResult, afterRender);
-    const queriesAfterChange = stats.queries;
+    // After the edit: one publication, however many blocks render.
+    await renderLiveBlocks(browser, TRACK_RESPONSE_QUIET_BLOCKS, TRACK_RESPONSE_QUIET_MS);
     await subscription.pump();
-    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 30));
-    const unchangedPollSuppressed = stats.queries === queriesAfterChange;
+    const publishedOnce = subscription.revision === 2n && callbackCount === 1
+      && responseValuesEqual(subscription.readLatest()!, afterRender);
 
     const shared = await browser.subscribeTrackResponse({ ...request, cadenceMs: 25 });
     const sharedJob = shared.job === subscription.job
@@ -1713,27 +1791,18 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     const oldResult = shared.readLatest();
     let invalidUpdateRefused = false;
     try {
-      await shared.update({
-        ...request,
-        cadenceMs: 10,
-        grid: { ...request.grid, points: 1 },
-      });
+      await shared.update({ ...request, cadenceMs: 10, grid: { ...request.grid, points: 1 } });
     } catch {
       invalidUpdateRefused = true;
     }
     const invalidUpdatePreserved = shared.job === oldJob
       && oldResult !== undefined && responseValuesEqual(shared.readLatest()!, oldResult);
-    const updatedReceipt = await shared.update({
-      ...request,
-      cadenceMs: 10,
-      grid: { ...request.grid, points: 7 },
-    });
+    const updatedReceipt = await shared.update({ ...request, cadenceMs: 10, grid: { ...request.grid, points: 7 } });
     const updated = shared.readLatest();
     const gridUpdated = updated !== undefined
       && updatedReceipt.job === shared.job
       && shared.configuration.grid.points === 7
-      && updated.frequenciesHz.length === 7
-      && stats.queries === queriesAfterChange + 1;
+      && updated.frequenciesHz.length === 7;
     const leftOnly = await browser.subscribeTrackResponse({
       ...request,
       cadenceMs: 10,
@@ -1745,66 +1814,209 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
       && leftOnlyResult?.leftDb !== undefined && leftOnlyResult.rightDb === undefined;
     await shared.close();
     await leftOnly.close();
-    const queriesAtLastClose = stats.queries;
-    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 40));
-    const lastCloseStoppedCapture = stats.queries === queriesAtLastClose;
+    // A poll that began before the last close may still send; after that, nothing does.
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 20));
+    const framesAtLastClose = stats.controlFrames;
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 60));
+    const lastCloseStoppedCapture = stats.controlFrames === framesAtLastClose;
     let staleReadRefused = false;
     try {
       shared.readLatest();
     } catch {
       staleReadRefused = true;
     }
+    await closeSdkEngine(browser);
+    let liveClosedRefused = false;
+    try {
+      await browser.queryTrackResponse(request);
+    } catch {
+      liveClosedRefused = true;
+    }
     return {
-      liveEq: {
-        appliedAtSample: APPLIED_BEFORE_FIRST_SAMPLE.toString(),
-        capturedSample: afterRender.capturedSample.toString(),
-        postRampComparedFrames,
-        postRampMaximumDifference,
+      liveResponse: {
+        trackId: live.trackId,
+        mode: live.mode,
+        meaning: live.meaning,
+        sampleRateHz: live.sampleRateHz,
+        points: live.frequenciesHz.length,
+        firstFrequency: live.frequenciesHz[0],
+        lastFrequency: live.frequenciesHz[live.frequenciesHz.length - 1],
+        left: liveLeft,
+        right: liveRight,
+        finite: liveFinite,
+        members: live.members.map((member) => ({
+          nativeId: member.nativeId,
+          stableId: member.stableId,
+          rack: member.rack,
+          rackValue: member.rackValue,
+          slot: member.slot,
+          kind: member.kind,
+          available: member.available,
+          bypassed: member.bypassed,
+          enabledLeft: member.enabledLeft.length,
+          enabledRight: member.enabledRight.length,
+        })),
+        excludedMemberCount: live.excludedMemberCount,
+        capturedSample: live.capturedSample.toString(),
+        snapshotToken: live.snapshotToken.toString(),
+        resultBytes: live.resultBytes.toString(),
+        ownedAfterSecondQuery: liveOwnedAfterSecondQuery,
+        serialized,
+        closedRefused: liveClosedRefused,
       },
+      managedResponse: {
+        initial: serializeTrackResponse(initial),
+        afterRender: serializeTrackResponse(afterRender),
+        updated: updated === undefined ? null : serializeTrackResponse(updated),
+        leftOnly: leftOnlyResult === undefined ? null : serializeTrackResponse(leftOnlyResult),
+        responseWorkersCreated: stats.workers,
+        appliedAtSample: appliedAtSample.toString(),
+        unchangedOverRenders,
+        unchangedNotificationCount,
+        changedPublication,
+        publishedOnce,
+        callbackCount,
+        callbackOwner,
+        callbackEpoch,
+        callbackJob,
+        callbackRevision,
+        callbackMatches,
+        automaticDelivery: timerDelivered,
+        pumpDelivered: pumped,
+        sharedJob,
+        arraysIsolated,
+        firstCloseKeepsJob,
+        invalidUpdateRefused,
+        invalidUpdatePreserved,
+        gridUpdated,
+        independentChannelJob,
+        lastCloseStoppedCapture,
+        staleReadRefused,
+        parityWithOneShot: responseValuesEqual(initial, live),
+        owner: subscription.owner.toString(),
+        epoch: subscription.epoch.toString(),
+        job: subscription.job.toString(),
+        revision: subscription.revision.toString(),
+        snapshotToken: initial.snapshotToken.toString(),
+        bounds: subscription.bounds,
+      },
+    };
+  } catch (error) {
+    throw sdkEngineFailed(browser, error);
+  } finally {
+    await closeSdkEngine(browser);
+  }
+}
+
+/**
+ * The live EQ cuts on an offline context (`sdk-live-eq-cuts`): the edits are committed before the
+ * render, and the browser's PCM equals the headless engine's after the parameter ramp.
+ */
+async function runLiveEqCutsQualification(): Promise<Record<string, unknown>> {
+  const document = new TextEncoder().encode(
+    await (await fetch("/qualification/observation-session.json")).text(),
+  );
+  const browser = await createSdkEngine("live-eq-cuts", {
+    document,
+    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: { observationTaps: 4 } },
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: OBSERVATION_FRAMES,
+      backend: "simd128" as const,
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
+      tracks: ["track"],
+      submixes: [],
+    }),
+    createContext: () => {
+      const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
+      Object.defineProperty(context, "close", { value: async () => {} });
+      return context;
+    },
+    createHost: (request) => createDefaultHost({
+      ...request,
+      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+    }),
+    simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+    responseWorkerModuleUrl: "/sdk/response-worker.js",
+  });
+  const asset = await MisoEngineAsset.load(await (await fetch(
+    "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+  )).arrayBuffer());
+  const headless = await WasmBoundary.boot(asset, document, {
+    sourceRingFrames: OBSERVATION_FRAMES,
+    liveControls: { observationTaps: 4 },
+  });
+  const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), {
+    queue: new ControlTransactionQueue((frame) => headless.controlFrame(frame), {
+      initialRevision: headless.controlRevision(),
+      // The boundary's one allocator: its own strip-order reads at boot drew IDs from the same
+      // endpoint, and the core refuses an ID at or below the highest it has seen.
+      requestIds: headless.controlRequestIds,
+    }),
+    observe: (edits) => headless.submitCommands(encodeLaneEdits(edits), edits.length),
+  });
+  try {
+    const liveControls = await browser.liveControls();
+    const command = await liveControls.submit(...trackResponseEdits(liveControls));
+    const headlessCommand = await headlessLiveControls.submit(...trackResponseEdits(headlessLiveControls));
+    if (!headlessCommand.ok || command.path !== headlessCommand.path
+        || command.revision !== headlessCommand.revision) {
+      throw new Error("browser/headless live EQ and builtin-filter acknowledgements disagree");
+    }
+    // Seven EQ parameter edits and the two input-filter cutoffs: nine edits in one transaction.
+    if (!command.ok || command.appliedOperations !== 9 || headlessCommand.appliedOperations !== 9) {
+      throw new Error("queued live EQ and builtin-filter edits were refused or split");
+    }
+    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
+      const planes = observationPlanes(block);
+      const headlessSource = headless.submitSource({ sourceId: "live-control-source", generation: 1n,
+        startFrame: BigInt(block * 128), planes,
+        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1 });
+      if (!headlessSource.ok) throw new Error("headless live EQ source refused");
+      const acknowledgement = await browser.host.submitSource({
+        sourceId: "live-control-source",
+        generation: 1n,
+        startFrame: BigInt(block * 128),
+        sampleRateHz: 48_000,
+        planes,
+        frames: 128,
+        endOfRegion: block === OBSERVATION_FRAMES / 128 - 1,
+      });
+      if (acknowledgement.result !== 0) throw new Error("SDK live EQ source submission refused");
+    }
+    const rendered = await (browser.context as unknown as OfflineAudioContext).startRendering();
+    let postRampMaximumDifference = 0;
+    let postRampComparedFrames = 0;
+    // Both transactions were committed before the first render, so every block is post-edit; the
+    // comparison starts after the 64-sample parameter ramp.
+    const settledAt = APPLIED_BEFORE_FIRST_SAMPLE + 64;
+    for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
+      const expected = headless.render(128);
+      for (let frame = 0; frame < 128; frame += 1) {
+        const absolute = block * 128 + frame;
+        if (absolute < settledAt) continue;
+        postRampComparedFrames += 1;
+        for (const [channel, plane] of [expected.left, expected.right].entries()) {
+          const difference = Math.abs(rendered.getChannelData(channel)[absolute]! - plane[frame]!);
+          if (!Number.isFinite(difference)) throw new Error("live EQ produced nonfinite PCM");
+          postRampMaximumDifference = Math.max(postRampMaximumDifference, difference);
+        }
+      }
+    }
+    return {
+      appliedAtSample: APPLIED_BEFORE_FIRST_SAMPLE.toString(),
+      postRampComparedFrames,
+      postRampMaximumDifference,
       liveInputFilters: {
-        appliedAtSample: APPLIED_BEFORE_FIRST_SAMPLE.toString(),
-        hpfHz: builtinPair.hpfHz,
-        lpfHz: builtinPair.lpfHz,
+        hpfHz: 80,
+        lpfHz: 12_000,
         channel: "left",
         mixedBatchAdmitted: command.appliedOperations === 9 && headlessCommand.appliedOperations === 9,
         browserHeadlessAckParity: command.path === headlessCommand.path
           && command.revision === headlessCommand.revision,
       },
-      initial: serializeTrackResponse(initial),
-      afterRender: serializeTrackResponse(afterRender),
-      updated: updated === undefined ? null : serializeTrackResponse(updated),
-      leftOnly: leftOnlyResult === undefined ? null : serializeTrackResponse(leftOnlyResult),
-      workerInitializations: stats.initializations,
-      workerQueries: stats.queries,
-      unchangedBeforeRender,
-      changedPublication,
-      callbackCount,
-      callbackOwner,
-      callbackEpoch,
-      callbackJob,
-      callbackRevision,
-      callbackMatches,
-      automaticDelivery: timerDelivered,
-      pumpDelivered: pumped,
-      unchangedPollSuppressed,
-      unchangedNotificationCount,
-      sharedJob,
-      arraysIsolated,
-      firstCloseKeepsJob,
-      invalidUpdateRefused,
-      invalidUpdatePreserved,
-      gridUpdated,
-      independentChannelJob,
-      lastCloseStoppedCapture,
-      staleReadRefused,
-      parityWithOneShot: responseValuesEqual(initial, reference),
-      owner: subscription.owner.toString(),
-      epoch: subscription.epoch.toString(),
-      job: subscription.job.toString(),
-      revision: subscription.revision.toString(),
-      capturedSample: initial.capturedSample.toString(),
-      snapshotToken: initial.snapshotToken.toString(),
-      bounds: subscription.bounds,
     };
   } catch (error) {
     throw sdkEngineFailed(browser, error);
@@ -1813,11 +2025,15 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   }
 }
 
-/** One `host.command` call of the observation wait instances (#1530 D4): its ack and its records. */
+/**
+ * One `Observe` transaction of the observation wait instances (#1530 D4, on the core's frames since
+ * #1589b): the `host.control` call's result, the reply's status (`null` for a failed call, which
+ * carries no reply frame) and the frame's edits (its payload, without the header's request ID and
+ * revision), as hex.
+ */
 interface ObservationWaitCommand {
   readonly result: number;
-  readonly reason: number;
-  /** `request.commands` as JSON, with each bigint spelled `<digits>n`. */
+  readonly status: string | null;
   readonly records: string;
 }
 
@@ -1862,23 +2078,24 @@ async function createResidentObservationBrowser(
         hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
       });
       if (commandLog !== undefined) {
-        // D4: log each command batch and its ack; nothing else in the host is wrapped.
-        const command = Object.getPrototypeOf(host).command as (this: typeof host, ...args: never[]) => Promise<{
+        // D4: log each `Observe` transaction and its answer; nothing else in the host is wrapped.
+        const control = Object.getPrototypeOf(host).control as (this: typeof host, ...args: never[]) => Promise<{
           readonly result: number;
-          readonly reason: number;
+          readonly response: Uint8Array;
         }>;
-        Object.defineProperty(host, "command", {
+        Object.defineProperty(host, "control", {
           configurable: true,
           writable: true,
-          value: async (commandRequest: { readonly commands: unknown }) => {
-            const ack = await command.call(host, commandRequest as never);
-            commandLog.push({
-              result: ack.result,
-              reason: ack.reason,
-              records: JSON.stringify(commandRequest.commands, (_key, item) =>
-                typeof item === "bigint" ? `${item}n` : item),
-            });
-            return ack;
+          value: async (frame: Uint8Array, ...rest: unknown[]) => {
+            const answer = await control.call(host, frame as never, ...rest as never[]);
+            if (frame.length >= 48 && (frame[16]! | (frame[17]! << 8)) === MESSAGE_SESSION_TRANSACTION_APPLY) {
+              commandLog.push({
+                result: answer.result,
+                status: answer.result === 0 ? decodeControlReply(answer.response).status : null,
+                records: Array.from(frame.subarray(48), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+              });
+            }
+            return answer;
           },
         });
       }
@@ -2091,6 +2308,12 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
     const ready = subscription.readLatest();
     const repeated = subscription.readLatest();
     const firstSnapshot = ready.map(observationRowKey);
+    // #1589 D4: the reads above saw both taps armed, so `armed()` has settled; the guard turns a
+    // pending one into a named red gate, never a page timeout.
+    const armedSample = await Promise.race([
+      subscription.armed().then((sample) => sample.toString(), (error: unknown) => `rejected: ${String(error)}`),
+      new Promise<null>((resolve) => globalThis.setTimeout(() => resolve(null), 1_000)),
+    ]);
 
     const shared = await browser.subscribeObservations({
       selections,
@@ -2160,7 +2383,7 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
       subscriptionId: subscription.id.toString(),
       owner: subscription.owner.toString(),
       epoch: subscription.epoch.toString(),
-      appliedAtSample: subscription.appliedAtSample.toString(),
+      armedSample,
       bounds: subscription.bounds,
       sharedBinding,
       firstCloseKeepsLive,
@@ -2184,6 +2407,10 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
 async function runSdkObservationQualification(): Promise<Record<string, unknown>> {
   const resident = await runResidentObservationQualification();
   const wait = await runObservationWaitQualification();
+  // Issue #1579b: the browser's track responses run on a live context after this file's first
+  // declared click; the live EQ PCM parity keeps its offline render.
+  const trackResponse = await runTrackResponseLiveQualification();
+  const liveEq = await runLiveEqCutsQualification();
   const document = new TextEncoder().encode(
     await (await fetch("/qualification/observation-session.json")).text(),
   );
@@ -2241,55 +2468,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     const ready = await browser.readObservations(selections);
     const projected = await browser.readObservations([observationSelection("comp", "left")]);
     const repeated = await browser.readObservations(selections);
-    const liveRequest = {
-      trackId: "track",
-      grid: { kind: "logarithmic" as const, points: 5, minimumHz: 20, maximumHz: 20_000 },
-      channels: "both" as const,
-      responseLimits: { maximumResultBytes: 1 << 20, requestDeadlineMs: 5_000 },
-    };
-    const livePromise = browser.queryTrackResponse(liveRequest);
-    let livePendingRefused = false;
-    try {
-      await browser.queryTrackResponse(liveRequest);
-    } catch {
-      livePendingRefused = true;
-    }
-    const live = await livePromise;
-    const liveAgain = await browser.queryTrackResponse(liveRequest);
-    const liveLeft = live.leftDb === undefined ? [] : Array.from(live.leftDb);
-    const liveRight = live.rightDb === undefined ? [] : Array.from(live.rightDb);
-    const liveAgainLeft = liveAgain.leftDb === undefined ? [] : Array.from(liveAgain.leftDb);
-    const liveAgainRight = liveAgain.rightDb === undefined ? [] : Array.from(liveAgain.rightDb);
-    const liveFinite = live.frequenciesHz.length === liveRequest.grid.points
-      && liveLeft.length === liveRequest.grid.points
-      && liveRight.length === liveRequest.grid.points
-      && Array.from(live.frequenciesHz).every(Number.isFinite)
-      && liveLeft.every(Number.isFinite)
-      && liveRight.every(Number.isFinite);
-    const liveOwnedAfterSecondQuery = liveFinite
-      && liveAgain.frequenciesHz.length === live.frequenciesHz.length
-      && Array.from(live.frequenciesHz).every((value, index) => value === liveAgain.frequenciesHz[index])
-      && liveLeft.every((value, index) => value === liveAgainLeft[index])
-      && liveRight.every((value, index) => value === liveAgainRight[index]);
-    const liveMembers = live.members.map((member) => ({
-      nativeId: member.nativeId,
-      stableId: member.stableId,
-      rack: member.rack,
-      slot: member.slot,
-      kind: member.kind,
-      available: member.available,
-      bypassed: member.bypassed,
-      enabledLeft: member.enabledLeft.length,
-      enabledRight: member.enabledRight.length,
-    }));
-    const managedResponse = await runTrackResponseSubscriptionQualification(live);
     await closeSdkEngine(browser);
-    let liveClosedRefused = false;
-    try {
-      await browser.queryTrackResponse(liveRequest);
-    } catch {
-      liveClosedRefused = true;
-    }
     const first = ready[0];
     const projectedRow = projected[0];
     return {
@@ -2319,29 +2498,10 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       projectedChannels: projected.map((row) => row.channels),
       distinctChannelProjection: first?.left !== undefined && first?.right !== undefined
         && projectedRow?.left !== undefined && projectedRow?.right === undefined,
-      liveResponse: {
-        trackId: live.trackId,
-        mode: live.mode,
-        meaning: live.meaning,
-        sampleRateHz: live.sampleRateHz,
-        points: live.frequenciesHz.length,
-        firstFrequency: live.frequenciesHz[0],
-        lastFrequency: live.frequenciesHz[live.frequenciesHz.length - 1],
-        left: liveLeft,
-        right: liveRight,
-        finite: liveFinite,
-        members: liveMembers,
-        excludedMemberCount: live.excludedMemberCount,
-        capturedSample: live.capturedSample.toString(),
-        snapshotToken: live.snapshotToken.toString(),
-        resultBytes: live.resultBytes.toString(),
-        ownedAfterSecondQuery: liveOwnedAfterSecondQuery,
-        pendingRefused: livePendingRefused,
-        closedRefused: liveClosedRefused,
-      },
       resident,
       wait,
-      managedResponse,
+      ...trackResponse,
+      liveEq,
     };
   } catch (error) {
     throw sdkEngineFailed(browser, error);
@@ -2758,6 +2918,34 @@ export async function sourceUnderrunBlocksThroughSdk(host: MisoAudioWorkletHost)
   const row = snapshot.values.find((value) => value.id === "sourceUnderrunBlocks");
   if (row === undefined) throw new Error("the counter snapshot holds no sourceUnderrunBlocks");
   return String(row.value);
+}
+
+/**
+ * One `Observe` edit as a `SESSION_TRANSACTION_APPLY` (#1589b), posted as the host's `control`
+ * message with the host's one request-ID allocator: the #1535 run arms and disarms its tap with it.
+ * A failed call (a full tap queue) reports its result with no status; an answered one reports the
+ * reply's status and, when applied, its edit path and the edit's arm tag.
+ */
+export async function observeThroughSdk(
+  host: MisoAudioWorkletHost,
+  edit: ObserveEdit,
+): Promise<{ result: number; status: string | null; path: string | null; armTag: string | null }> {
+  const queue = await createBrowserControlQueue(host);
+  const frame = encodeObserveTransaction({
+    requestId: queue.requestIds.next(),
+    expectedRevision: queue.revision,
+    edits: [edit],
+  });
+  const reply = await host.control(frame);
+  queue.noteCommit(reply.revision);
+  if (reply.result !== 0) return { result: reply.result, status: null, path: null, armTag: null };
+  const decoded = decodeControlReply(reply.response);
+  return {
+    result: 0,
+    status: decoded.status,
+    path: decoded.applied?.editPath ?? null,
+    armTag: decoded.applied?.observeArmTags[0]?.toString() ?? null,
+  };
 }
 
 /**

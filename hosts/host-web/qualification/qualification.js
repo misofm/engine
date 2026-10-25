@@ -954,13 +954,13 @@ async function runObservationRun(createHost, sessionDocument, armed) {
 /// (batch-verdict 2, B2; root 2026-10-12). The page declares this plan and nothing else may resume a
 /// real `AudioContext`: `run.mjs` clicks exactly these controls under one deadline and fails by name
 /// when the page resumed a context any other way, offered another control, or did not offer one.
-/// The two SDK controls belong to `sdk-response-entry.ts`'s collection and hop workloads, which run
-/// first and only when the SDK qualification does; the last is the unsubscribe run's one
+/// The three SDK controls belong to `sdk-response-entry.ts`'s live track-response, collection and
+/// hop workloads, which run first and only when the SDK qualification does; the last is the unsubscribe run's one
 /// [`resumeThroughClick`] button (#1535).
 export function resumeClickPlan(sdkEnabled) {
   if (!WebAssembly.validate(SIMD128_PROBE)) return [];
   return [
-    ...(sdkEnabled ? ["#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
+    ...(sdkEnabled ? ["#track-response-resume", "#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
     resumeControlSelector(UNSUBSCRIBE_RESUME),
   ];
 }
@@ -1300,16 +1300,18 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   topUp();
   await bounded("await", "the first source blocks", context, () => Promise.all([...submits]));
   requireFeed();
+  // #1589b: the core's `Observe` edit, through the host's `control` message.
+  const { observeThroughSdk } = await import("/sdk/sdk-response-client.js");
   const subscription = {
     stripId: "track",
-    rack: 1,
+    rack: "inserts",
     effectId: "comp",
     tapId: OBSERVATION_TAP_ID,
     windowBlocks: Number(UNSUBSCRIBE_METER_BLOCKS),
     armed: true,
   };
   const subscribed = await request("observe (subscribe)", "observe",
-    () => host.observe({ subscriptions: [subscription] }));
+    () => observeThroughSdk(host, subscription));
   // R1: read after the subscribe resolved. The unsubscribe goes out only after a render beyond it.
   const renderedAfterSubscribe = (await status("status (R1)")).renderedQuanta;
 
@@ -1329,9 +1331,8 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   );
   const armedList = frames.slice();
 
-  const unsubscribed = await request("observe (unsubscribe)", "observe", () => host.observe({
-    subscriptions: [{ ...subscription, armed: false }],
-  }));
+  const unsubscribed = await request("observe (unsubscribe)", "observe",
+    () => observeThroughSdk(host, { ...subscription, armed: false }));
   // Everything received from here on was polled after the tap was disarmed: the same port, in order.
   const acknowledgedAt = performance.now();
   const acknowledgedAtFrame = frames.length;
@@ -1373,8 +1374,9 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     contextStateBeforeBoot: stateBeforeBoot,
     meterLeaseResult: meterLease.result,
     subscribeResult: subscribed.result,
+    subscribePath: subscribed.path,
     unsubscribeResult: unsubscribed.result,
-    unsubscribeBindings: unsubscribed.bindings.length,
+    unsubscribePath: unsubscribed.path,
     renderedAfterSubscribe: String(renderedAfterSubscribe),
     renderedBeforeUnsubscribe: String(renderedBeforeUnsubscribe),
     boundary: String(boundary),
@@ -1403,7 +1405,8 @@ export function unsubscribeFailures(run) {
   const wholeNumber = (value) => typeof value === "string" && /^[0-9]+$/.test(value);
   const failures = [];
   if (run.contextStateBeforeBoot !== "suspended") failures.push("context");
-  if (run.meterLeaseResult !== RESULT_OK || run.subscribeResult !== RESULT_OK
+  // An `Observe`-only transaction is a monitor edit: an applied one replies `monitor` (#1584 D1).
+  if (run.meterLeaseResult !== RESULT_OK || run.subscribeResult !== RESULT_OK || run.subscribePath !== "monitor"
       || !(run.armedFrames >= UNSUBSCRIBE_ARMED_FRAMES) || !(run.armedMaximumTrackGrDb > 0)) {
     failures.push("armed");
   }
@@ -1411,7 +1414,7 @@ export function unsubscribeFailures(run) {
       || BigInt(run.renderedBeforeUnsubscribe) <= BigInt(run.renderedAfterSubscribe)) {
     failures.push("render-between");
   }
-  if (run.unsubscribeResult !== RESULT_OK || run.unsubscribeBindings !== 0) failures.push("unsubscribe-ack");
+  if (run.unsubscribeResult !== RESULT_OK || run.unsubscribePath !== "monitor") failures.push("unsubscribe-ack");
   if (run.maximumTrackGrDbAfterAcknowledgement !== 0 || !(run.framesAfterAcknowledgement >= 1)) {
     failures.push("reduction");
   }

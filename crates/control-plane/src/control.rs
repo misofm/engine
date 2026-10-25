@@ -857,6 +857,10 @@ pub enum TestStructuralFaultPhase {
     /// A panic inside a rebuild, after the pending candidate was withdrawn and the successor
     /// prepared, before admission (#2010).
     PanicAfterWithdrawal,
+    /// A panic just after a rebuild publishes a warm candidate's `Primed` schedule, before the
+    /// protocol commit (#2044): it stands in for every step there that can panic (that
+    /// publication's `expect`, the commit's own), the last before the candidate is taken.
+    PanicAtPrimedPublication,
 }
 
 /// How many of each owner the structural and live paths constructed, published and disposed.
@@ -5221,11 +5225,12 @@ where
     /// #2010: a panic inside the rebuild before its commit republishes the candidate too, then
     /// resumes the panic, so a host that catches it (the C ABI answers `RESULT_INTERNAL`) keeps
     /// the candidate whose revisions it acked. Under `panic = "abort"` nothing unwinds and this
-    /// changes nothing. A panic after the commit, which has taken the candidate, is not covered.
-    /// Nor is a panic between the protocol commit (`prepared.commit`) and `withdrawn.take()`: it
-    /// still republishes the candidate, but over a half-committed controller, which then holds the
-    /// successor's model, revision, monitor overlay, observation and send moves while the
-    /// candidate renders (#2010 R2; a successor issue).
+    /// changes nothing. #2044: every step of the rebuild that can panic runs before the protocol
+    /// commit (`prepared.commit`), and the candidate is taken right after it, before any write to
+    /// the controller's own fields; only `take_displaced`, which cannot panic, runs between them.
+    /// So `withdrawn` is still `Some` exactly when the protocol commit did not happen, and a
+    /// republished candidate always meets the controller it was published under. A panic after
+    /// the take, which has taken the candidate, is not covered.
     fn rebuild_superseding(
         &mut self,
         kind: Rebuild,
@@ -5265,11 +5270,49 @@ where
             )
         }));
         if let Some(candidate) = withdrawn.take() {
+            // #2044: a panic after the successor's `publish_primed` wrote its prime flags (the
+            // protocol commit's own steps) leaves the flags of the rings the candidate carries
+            // as the successor set them. A `Primed` candidate is judged by them, so every
+            // republished one gets its own flags back first (idempotent: a refusal before
+            // `publish_primed` writes the same values again).
+            let epoch = candidate.epoch().0;
+            if self.primed.is_some_and(|record| record.epoch == epoch) {
+                self.restore_prime_flags(epoch);
+            }
             self.publisher.republish(candidate);
             #[cfg(feature = "test-support")]
             update_test_owners(|owners| owners.candidate_republished += 1);
         }
         result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    }
+
+    /// Sets the prime flags of the newest pending candidate's carry again, as its own
+    /// `publish_primed` set them (#1403 D3, #2044), before it is republished.
+    ///
+    /// Its publication moved every producer it held vacant in from the epoch it succeeds, which
+    /// then holds those entries vacant. So the candidate carries exactly the rings whose
+    /// producers it holds and whose IDs that epoch holds vacant (a redeclared source's entry
+    /// there keeps its own producer); every producer that epoch still holds is of a ring the
+    /// candidate does not carry. No allocation.
+    fn restore_prime_flags(&self, epoch: u64) {
+        let len = self.pending_providers.len();
+        let Some(candidate) = self.pending_providers.last() else {
+            return;
+        };
+        debug_assert_eq!(
+            candidate.epoch, epoch,
+            "the republished candidate is the newest pending epoch"
+        );
+        let holder = match len {
+            0 | 1 => &self.providers,
+            _ => &self.pending_providers[len - 2],
+        };
+        holder
+            .sources
+            .set_prime_flags(|id| candidate.sources.holds_vacant(id));
+        candidate
+            .sources
+            .set_prime_flags(|id| holder.sources.holds_vacant(id));
     }
 
     /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
@@ -6076,29 +6119,33 @@ where
         };
         let epoch = reservation.epoch();
         candidate_provider.epoch = epoch;
-        let mut reports = self
-            .shared
-            .reports
-            .lock()
-            .map_err(|_| CommandError::Internal)?;
         // #1398 D3: the report table and the pending list hold every row a candidate can meet
         // (#1398 D1), so a full one is an accounting fault. A superseded candidate's row and
-        // entry leave before B's arrive (#1310 D5).
-        let freed = usize::from(superseding);
-        if reports.len().saturating_sub(freed) >= reports.capacity()
-            || self.pending_providers.len().saturating_sub(freed)
-                >= self.pending_providers.capacity()
+        // entry leave before B's arrive (#1310 D5). #2044: the lock is held for this check only,
+        // so no step that can panic before the commit runs under it, and is taken again for the
+        // row's push after the take; only the control plane writes the table (through `&mut
+        // self`), so the check still holds there.
         {
-            debug_assert!(
-                false,
-                "#1398 D1 sizes the report table and the pending list"
-            );
-            return Err(CommandError::Internal);
+            let reports = self
+                .shared
+                .reports
+                .lock()
+                .map_err(|_| CommandError::Internal)?;
+            let freed = usize::from(superseding);
+            if reports.len().saturating_sub(freed) >= reports.capacity()
+                || self.pending_providers.len().saturating_sub(freed)
+                    >= self.pending_providers.capacity()
+            {
+                debug_assert!(
+                    false,
+                    "#1398 D1 sizes the report table and the pending list"
+                );
+                return Err(CommandError::Internal);
+            }
         }
 
         #[cfg(feature = "test-support")]
         if take_test_fault_state(TestStructuralFaultPhase::BeforeProtocolCommit) {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -6115,7 +6162,6 @@ where
         // #1594 D6: a monitor rebuild takes no stamp: it spends no revision, and the committed
         // one may be 0, which a gate never stamps.
         if !monitor && candidate_provider.revision_gate.stamp(revision).is_err() {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -6129,7 +6175,6 @@ where
             &observation_change.bindings,
             self.observation_wire,
         ) else {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -6172,28 +6217,16 @@ where
             }
             None => None,
         };
-        let (committed, displaced) = match kind {
-            Rebuild::Transaction(prepared) => {
-                // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
-                let mut committed = prepared
-                    .commit(&mut self.controller, protocol::EditPath::Rebuild)
-                    .map_err(|_| CommandError::Internal)?;
-                // #1310 D3: the model the commit displaced, never one committed in place (#1613).
-                let displaced = committed.take_displaced();
-                debug_assert!(displaced.is_some(), "a rebuild displaces a compiled model");
-                (Some(committed), displaced)
-            }
-            // #1323 D4: nothing is committed. The copy of the committed model is the base the
-            // epoch this successor displaces keeps (the model that epoch renders), or, across a
-            // withdrawn candidate, drops below as a commit's displaced model does.
-            Rebuild::Discontinuity(model)
-            | Rebuild::Monitor { model, .. }
-            | Rebuild::Transition { model, .. } => (None, Some(*model)),
-        };
-        // #1403 D3: a warm candidate's flags and `Primed` schedule, after the last fallible step
-        // and before its set takes any producer or donated ring: each entry it holds vacant is
-        // then a ring it carries from the plan it displaces, whose producer is still in that
-        // plan's set, or, across a withdrawn candidate, in the withdrawn candidate's.
+        // #1403 D3: a warm candidate's flags and `Primed` schedule, before its set takes any
+        // producer or donated ring: each entry it holds vacant is then a ring it carries from the
+        // plan it displaces, whose producer is still in that plan's set, or, across a withdrawn
+        // candidate, in the withdrawn candidate's. It sets the prime flags of rings render reads,
+        // so it runs after the last refusal: the commit below cannot refuse once its predicate
+        // passed above, with no controller write between. #2044: it runs before the protocol
+        // commit, so a panic here or in the commit (no lock is held) leaves the controller as it
+        // was and republishes the withdrawn candidate (#2010). Its flags are then the
+        // successor's: `rebuild_withdrawn` sets a `Primed` candidate's again before it republishes
+        // it (`restore_prime_flags`).
         let mut primed = warm_lead_blocks.map(|lead_blocks| {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();
@@ -6219,6 +6252,35 @@ where
                 lead_blocks,
             )
         });
+        #[cfg(feature = "test-support")]
+        if take_test_fault_state(TestStructuralFaultPhase::PanicAtPrimedPublication) {
+            panic!("test fault: a rebuild panics after it publishes the primed schedule");
+        }
+        let (committed, displaced) = match kind {
+            Rebuild::Transaction(prepared) => {
+                // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
+                let mut committed = prepared
+                    .commit(&mut self.controller, protocol::EditPath::Rebuild)
+                    .map_err(|_| CommandError::Internal)?;
+                // #1310 D3: the model the commit displaced, never one committed in place (#1613).
+                // `take_displaced` is `Option::take`, the one step between the commit and the
+                // candidate's take (#2044), and it cannot panic. It is `Some`: the preparation
+                // refused a token without a compilation (`compiled().ok_or`), a compiled token
+                // always displaces the committed model, and a monitor-only token, which displaces
+                // none, never takes this arm: it commits live (`commit_live`, #1603 D7).
+                let displaced = committed.take_displaced();
+                (Some(committed), displaced)
+            }
+            // #1323 D4: nothing is committed. The copy of the committed model is the base the
+            // epoch this successor displaces keeps (the model that epoch renders), or, across a
+            // withdrawn candidate, drops below as a commit's displaced model does.
+            Rebuild::Discontinuity(model)
+            | Rebuild::Monitor { model, .. }
+            | Rebuild::Transition { model, .. } => (None, Some(*model)),
+        };
+        // #2044: the candidate is taken first, so no write below precedes the step after which a
+        // panic no longer republishes it.
+        let withdrawn = withdrawn.take();
         // B19-R7: the rebuild's own send moves ramp from its successor's first block.
         fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
@@ -6228,7 +6290,7 @@ where
         self.observation = observation_change.bindings;
         // From here on nothing fails.
         let mut superseded = None;
-        let superseded_revisions = match withdrawn.take() {
+        let superseded_revisions = match withdrawn {
             Some(candidate) => {
                 // #1310 D5 step 2: the checked donation, then the producers of the sources B
                 // carries from P0, which A's commit had moved into A's set. A's own model, which
@@ -6456,6 +6518,16 @@ where
             // transaction on an overflow, so the count is `Some` here.
             .unwrap_or(usize::MAX),
         );
+        // #2044: the report lock again, held to the publication so the row is in the table
+        // before render can adopt B. A poisoned lock is taken as it is: only the control plane
+        // writes the table (through `&mut self`), and no write of it can stop half done; every
+        // other holder only reads it (`active_resources`, the admissions' reads), so a panic that
+        // poisoned it left the rows whole. The step after the take must not fail.
+        let mut reports = self
+            .shared
+            .reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((_, donor)) = superseded.as_ref() {
             // #1310 D5 step 6: A's report row leaves; `retain` shrinks in place.
             let donor_epoch = donor.epoch;
@@ -10580,6 +10652,62 @@ mod tests {
                 ),
                 (revision, OUTCOME_EXACT, 0)
             );
+        }
+
+        /// #2044: a warm B that does not carry W's [`UNUSED`] ring panics after its primed
+        /// publication wrote that ring's flag, before its commit. W is republished and, its own
+        /// flags set again, waits while that ring is not fed, as it does when no B ran; once fed,
+        /// it is adopted.
+        ///
+        /// Test value: red if the republish keeps B's flags: W is then judged without the ring
+        /// it carries, so it is adopted before that ring is primed.
+        #[test]
+        fn a_republished_warm_candidate_keeps_its_own_prime_flags() {
+            let mut b: Vec<SessionEdit> = muted_track("t4", 0).into();
+            b.push(SessionEdit::RemoveSource {
+                source_id: sid(UNUSED),
+            });
+            let run = |panics: bool| {
+                let mut rig = Rig::with_unused(Some(CONFIG));
+                rig.ahead = 1;
+                rig.render(BEFORE);
+                assert!(matches!(
+                    rig.rebuild(&growth()),
+                    PlanAdoption::Primed { .. }
+                ));
+                let record = rig.primed().expect("W's record");
+                if panics {
+                    rig.children.session.test_set_structural_faults([
+                        Some(super::super::TestStructuralFaultPhase::PanicAtPrimedPublication),
+                        None,
+                    ]);
+                    let caught =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.transact(&b)));
+                    assert!(caught.is_err(), "B panics");
+                    assert_eq!(rig.primed(), Some(record), "W keeps its record");
+                    assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+                }
+                let unused = rig
+                    .feeds
+                    .iter()
+                    .find(|(id, ..)| *id == UNUSED)
+                    .map(|(.., next)| *next)
+                    .expect("fed");
+                rig.stop_at = Some((UNUSED, unused));
+                rig.ahead = AHEAD;
+                rig.render(6);
+                let held = rig.swaps();
+                rig.stop_at = None;
+                rig.render(6);
+                (held, rig.swaps().len())
+            };
+            let reference = run(false);
+            assert_eq!(
+                reference,
+                (Vec::new(), 1),
+                "W waits for the ring, then is adopted"
+            );
+            assert_eq!(run(true), reference, "the republished W");
         }
 
         /// Gate 4, the record's lifecycle: each step that ends W's pendency drops W's record,

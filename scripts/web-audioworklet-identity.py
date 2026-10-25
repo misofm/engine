@@ -35,8 +35,9 @@ This script reads it:
   push.
 
   The report fails (exit 1) when
-  - the twin module, built in the same run from another checkout path and ``CARGO_HOME``, differs
-    from the bytes the `artifact` job built: the build is not a function of the source alone; or
+  - the twin module, built in the same run from another checkout path, ``CARGO_HOME`` and
+    ``RUSTUP_HOME`` (a fresh install of the toolchain, #2045), differs from the bytes the
+    `artifact` job built: the build is not a function of the source alone; or
   - the change is a release change (relative to its base it edits the committed pin, or
     `npm-publish.yml`'s ``PACKAGE_VERSION`` or ``EXPECTED_WORKLET_SHA256``) and the pin,
     ``EXPECTED_WORKLET_SHA256``, `npm-publish.yml`'s ``BROWSER_ARTIFACT_TOOLCHAIN`` (against the
@@ -354,14 +355,15 @@ def report(root: pathlib.Path, event: str, before: str, repository: str, built: 
                      f"`{record['toolchain']}`{moved}. Record: {record['url'] or 'no run link'}.")
     twin = digest(twin_module)
     if twin == built:
-        lines.append("- Reproducible: a second build from another checkout path and `CARGO_HOME` "
-                     "produced the same bytes.")
+        lines.append("- Reproducible: a second build from another checkout path, `CARGO_HOME` "
+                     "and `RUSTUP_HOME` produced the same bytes.")
     else:
         ok = False
-        lines.append(f"- **FAIL** NOT REPRODUCIBLE: a second build from another checkout path and "
-                     f"`CARGO_HOME` produced `{twin}`. The module is not a function of the source "
-                     "alone; an absolute path is the usual cause (`build-web-audioworklet.sh` "
-                     "remaps `CARGO_HOME` and the repository root, not `env!` values).")
+        lines.append(f"- **FAIL** NOT REPRODUCIBLE: a second build from another checkout path, "
+                     f"`CARGO_HOME` and `RUSTUP_HOME` produced `{twin}`. The module is not a "
+                     "function of the source alone; an absolute path is the usual cause "
+                     "(`build-web-audioworklet.sh` remaps `CARGO_HOME`, the repository root and "
+                     "the toolchain sysroot, not `env!` values).")
     pin = (show(root, "HEAD", PIN) or "").strip()
     state = "are" if pin == built else "are not"
     edited = release_change(root, base) if base is not None else []

@@ -535,6 +535,14 @@ ARTIFACT_BUILD_LINES = (
     "          " + ARTIFACT_CLOSURE_DIGEST,
     '          echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"\n',
 )
+# Issue #2045: the artifact job ties the shipped bytes to the compiler they name, before upload.
+PRODUCERS_CHECK_LINES = (
+    "          TOOLCHAIN: ${{ steps.build.outputs.toolchain }}\n",
+    "          python3 -B scripts/check-wasm-producers.py --self-test\n",
+    "          python3 -B scripts/check-wasm-producers.py "
+    "target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm "
+    '--toolchain "$TOOLCHAIN"\n',
+)
 RECORD_JOB = "artifact-record"
 RECORD_HEAD = (
     "    needs: [route, artifact]\n"
@@ -556,12 +564,16 @@ WRITE_PERMISSION = re.compile(r"^\s+[a-z-]+: write\s*$|^\s*permissions: write-al
 IDENTITY_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: read\n"
 IDENTITY_CHECKOUT = re.compile(
     r"      - uses: actions/checkout@[0-9a-f]{40} # v\S+\n        with:\n          fetch-depth: 0\n\Z")
-IDENTITY_INSTALL = "      - name: Install pinned Rust toolchain and Wasm standard library\n"
-IDENTITY_TWIN_STEP = """      - name: Rebuild the module from another checkout path and CARGO_HOME
+# Issue #2045: the twin also builds under a freshly installed second RUSTUP_HOME, so its digest
+# equals the shipped one only if the sysroot remap holds (a shared RUSTUP_HOME let a dropped remap
+# stay green).
+IDENTITY_TWIN_STEP = """      - name: Rebuild the module from another checkout path, CARGO_HOME and RUSTUP_HOME
         run: |
           git worktree add --detach "$RUNNER_TEMP/twin" HEAD
           mkdir "$RUNNER_TEMP/twin-module"
-          CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
+          channel="$(bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --print-toolchain)"
+          RUSTUP_HOME="$RUNNER_TEMP/twin-rustup" rustup toolchain install "$channel" --profile minimal --component rust-src
+          RUSTUP_HOME="$RUNNER_TEMP/twin-rustup" CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
 """
 IDENTITY_REPORT_STEP = """      - name: Report ARTIFACT CHANGED or UNCHANGED against the base's recorded digest, and hold a release change to its pin
         env:
@@ -614,6 +626,13 @@ def check_qualification_artifact_digest(text: str) -> None:
     for line in ARTIFACT_BUILD_LINES:
         require(line in steps[build[0]],
                 f"qualification.yml: the artifact build step is missing {line.strip()!r}")
+    upload = [index for index, step in enumerate(steps)
+              if step.startswith("      - name: Upload shipped artifact\n")]
+    producers = [index for index, step in enumerate(steps)
+                 if all(line in step for line in PRODUCERS_CHECK_LINES)]
+    require(len(upload) == 1 and len(producers) == 1 and build[0] < producers[0] < upload[0],
+            "qualification.yml: the artifact job must check the shipped module's producers "
+            "section (check-wasm-producers.py) between its build and its upload (#2045)")
     for name in ARTIFACT_READERS:
         reader = job(text, name)
         require(re.search(r"^    needs: \[route, artifact\]$", reader, re.MULTILINE) is not None,
@@ -679,15 +698,13 @@ def check_qualification_artifact_identity(text: str) -> None:
             "qualification.yml: artifact-identity must carry no job-level continue-on-error, "
             "defaults or env")
     steps = job_steps(identity)
-    require(len(steps) == 4,
-            "qualification.yml: artifact-identity must be exactly checkout, toolchain, twin and "
-            "report steps")
+    require(len(steps) == 3,
+            "qualification.yml: artifact-identity must be exactly checkout, twin and report steps "
+            "(#2045: the twin installs its own toolchain into its own RUSTUP_HOME)")
     require(IDENTITY_CHECKOUT.fullmatch(steps[0]) is not None,
             "qualification.yml: artifact-identity must check out full history (fetch-depth: 0), "
             "or no run finds its base")
-    require(steps[1].startswith(IDENTITY_INSTALL),
-            "qualification.yml: artifact-identity's second step must install the toolchain")
-    for step, pinned in zip(steps[2:], IDENTITY_STEPS):
+    for step, pinned in zip(steps[1:], IDENTITY_STEPS):
         require(step == pinned,
                 "qualification.yml: artifact-identity step differs from its pin: "
                 f"{pinned.splitlines()[0].strip()!r} (scripts/check-ci-path-routing.py "

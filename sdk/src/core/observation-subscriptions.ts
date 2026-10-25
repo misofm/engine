@@ -1,26 +1,46 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { constantValue } from "./abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
-import type { CommandReport } from "./boundary.ts";
-import { EngineLiveControls, observationEdit } from "./live-controls.ts";
+import {
+  decodeControlReply,
+  decodeObservationReadReply,
+  encodeObservationRead,
+  encodeObserveTransaction,
+  malformed,
+  OBSERVATION_READ_BASE_BYTES,
+  OBSERVATION_READ_MAXIMUM_SELECTIONS,
+  OBSERVATION_READ_ROW_BYTES,
+} from "./control-frame.ts";
+import type {
+  ControlStatusName,
+  ObservationFrameRow,
+  ObservationFrameSelection,
+  ObservationReadPage,
+  ObserveEdit,
+} from "./control-frame.ts";
+import type { ControlRequestIds } from "./control-queue.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
+import type { MisoDiagnostic } from "./errors.ts";
 import {
   MAXIMUM_OBSERVATION_READS,
   validateObservationSelections,
   type ObservationBinding,
   type ObservationChannels,
+  type ObservationDescriptor,
   type ObservationMap,
   type ObservationReadResult,
   type ObservationSelection,
 } from "./observation.ts";
 import type { LaneEdit } from "./writer.ts";
 import type { ObservationEnded } from "./observation-ended.ts";
-import { TRACK_RESPONSE_MAXIMUM_RESULT_BYTES, normalizeTrackResponseQuery } from "./live-response.ts";
+import {
+  TRACK_RESPONSE_MAXIMUM_RESULT_BYTES,
+  normalizeTrackResponseQuery,
+  sameTrackResponseResult,
+} from "./live-response.ts";
 import type {
   TrackResponseLimits,
-  TrackResponseObservedState,
   TrackResponseQuery,
-  TrackResponseRead,
   TrackResponseResult,
 } from "./live-response.ts";
 import {
@@ -28,6 +48,7 @@ import {
   cloneSpectrumStreamMetadata,
   spectrumCaptureWindowBytes,
   SPECTRUM_MAXIMUM_CAPTURE_BYTES,
+  spectrumRefusalResult,
 } from "./spectrum.ts";
 import { SPECTRUM_FRAME_BIN_COUNT } from "./spectrum-frame.ts";
 import type {
@@ -108,7 +129,6 @@ export interface ObservationSubscriptionBounds {
   readonly maximumWindowBlocks: number;
   readonly maximumCadenceMs: number;
   readonly maximumReadSelections: number;
-  readonly maximumCommandRecords: number;
 }
 
 export interface ObservationSubscriptionNotification {
@@ -127,8 +147,9 @@ export interface ObservationSubscriptionReceipt {
   readonly owner: bigint;
   readonly epoch: bigint;
   readonly configuration: ObservationSubscriptionConfiguration;
-  readonly appliedAtSample: bigint;
   readonly bounds: ObservationSubscriptionBounds;
+  /** The handle's `armed()` for the configuration this receipt reports. */
+  armed(): Promise<bigint>;
 }
 
 export interface ObservationSubscription {
@@ -138,22 +159,36 @@ export interface ObservationSubscription {
   readonly owner: bigint;
   readonly epoch: bigint;
   readonly configuration: ObservationSubscriptionConfiguration;
-  readonly appliedAtSample: bigint;
   readonly bounds: ObservationSubscriptionBounds;
   /** Every selection of this subscription the engine has ended so far, in the order it ended them. */
   readonly ended: readonly ObservationSelection[];
+  /**
+   * The first sample at which every selection of the current configuration is in effect (#1057
+   * design note 8.4): it resolves once a read reports, for every selection, the tap armed with the
+   * arm tag of the `Observe` edit that armed its binding, with the largest of their arm samples. A
+   * read is made by `pump()` and, in the browser, by the delivery timer; the headless engine reads
+   * only when its caller pumps, so `armed()` stays pending until a render applied the arm and a
+   * pump read it. It settles once per configuration (`update` that changes the selections or the
+   * window starts a new one) and rejects with `MisoEngineError`: `wrongState`
+   * `sdk.observation.closed` when the handle is closed or updated away first (or the engine
+   * reboots), `wrongState` `sdk.engine.disposed` when the engine is disposed, `wrongState`
+   * `sdk.observation.owner_removed` when a commit removed the effect that owns a selection, and
+   * `internal` `sdk.observation.superseded` when a read shows a newer arm on a pending binding.
+   */
+  armed(): Promise<bigint>;
   readLatest(): readonly ObservationReadResult[];
   pump(): Promise<ObservationSubscriptionNotification | undefined>;
   /**
    * Replace the selections and the window. A window change on a tap this handle alone holds is one
-   * re-arm. Like `close()`, it meets a typed, retryable `backpressure` error when an earlier
-   * subscription still holds the tap's queue slot and no render has drained it yet. The headless
-   * engine refuses at once, so the caller renders and calls again. The browser engine first waits
-   * for a render, up to `requestDeadlineMs`, and ends in the same error when none comes.
+   * re-arm: a disarm of the old window and an arm of the new one in one transaction. Like
+   * `close()`, it meets a typed, retryable `backpressure` error when an earlier `Observe` of the
+   * tap still holds its queue slot and no render has drained it yet. The headless engine refuses at
+   * once, so the caller renders and calls again. The browser engine first waits for a render, up to
+   * `requestDeadlineMs`, and ends in the same error when none comes.
    *
-   * A record names its tap by stable key (the strip, the effect and the tap), and the core resolves
-   * it on the newest committed plan, so a record sent between a rebuild's commit and the block that
-   * adopts the replacement plan arms the tap it names.
+   * An `Observe` edit names its tap by stable key (the strip, the effect and the tap), and the core
+   * resolves it on the newest committed plan, so an edit sent between a rebuild's commit and the
+   * block that adopts the replacement plan arms the tap it names.
    */
   update(request: ObservationSubscriptionRequest): Promise<ObservationSubscriptionReceipt>;
   close(): Promise<void>;
@@ -166,11 +201,34 @@ export interface ObservationSubscriptionScheduler {
   clearInterval(handle: unknown): void;
 }
 
-/** Small transport seam shared by the browser and direct Wasm entries. */
+/** What one applied transaction of `Observe` edits reports (`TransactionApplied`, #1585 D5). */
+export interface ObserveApplied {
+  /** The committed revision the reply reports; an `Observe` transaction does not advance it. */
+  readonly revision: bigint;
+  /** The arm tag of each `Observe` edit, in edit order. */
+  readonly observeArmTags: readonly bigint[];
+  /** The tags of the subscriptions the commit ended. */
+  readonly removedArmTags: readonly bigint[];
+}
+
+/**
+ * Small transport seam shared by the browser and direct Wasm entries (#1589 D3): the core's own
+ * frames, through the engine's one command entry. {@link observationFrameTransport} builds `apply`
+ * and `read` from a frame endpoint, the same on both engines.
+ */
 export interface ObservationSubscriptionTransport {
+  /** The map of the plan that renders: it checks a selection and names its effect before any edit. */
   observationMap(): MaybePromise<ObservationMap>;
-  readObservations(selections: readonly ObservationSelection[]): MaybePromise<readonly ObservationReadResult[]>;
-  liveControls(): MaybePromise<EngineLiveControls>;
+  /**
+   * Send one `SESSION_TRANSACTION_APPLY` of `Observe` edits. A refusal rejects with
+   * `MisoEngineError`: `code` the result class, `diagnosticCode` the core's code; a full tap queue
+   * is `code: "backpressure"`.
+   */
+  apply(edits: readonly ObserveEdit[]): Promise<ObserveApplied>;
+  /** Read the selections with `OBSERVATION_READ`: one row per selection, in order. */
+  read(selections: readonly ObservationFrameSelection[]): Promise<ObservationReadPage>;
+  /** The running session's sample rate, which a read row reports. */
+  sampleRateHz(): number;
   /**
    * Subscribe to the core's `OBSERVATION_ENDED` events (#1584): the listener gets each one, once,
    * as decoded from the reliable lane. Returns the unsubscribe function. A transport that cannot
@@ -179,8 +237,8 @@ export interface ObservationSubscriptionTransport {
    */
   observationEnded?(listener: (ended: ObservationEnded) => void): () => void;
   /**
-   * A transport whose renders run on their own clock (a browser's audio thread) lets a managed
-   * submission that was refused with `backpressure` wait for a render and be sent again. A
+   * A transport whose renders run on their own clock (a browser's audio thread) lets an `Observe`
+   * transaction that was refused with `backpressure` wait for a render and be sent again. A
    * transport whose caller drives the renders leaves this absent: the refusal is thrown at once,
    * typed and retryable, and the caller renders and submits again.
    */
@@ -200,11 +258,11 @@ export interface ObservationSubscriptionTransport {
      */
     next(timeoutMs: number, since: bigint): Promise<boolean>;
   };
-  /** Optional live-response capture/evaluation seam owned by the same lifetime. */
-  readonly responseRead?: (
-    request: TrackResponseQuery,
-    previousState?: TrackResponseObservedState,
-  ) => MaybePromise<TrackResponseRead>;
+  /**
+   * Optional live track response read owned by the same lifetime: one `queryTrackResponse` of the
+   * engine (#1579 D4). The owner compares each result with the one it published last.
+   */
+  readonly responseRead?: (request: TrackResponseQuery) => MaybePromise<TrackResponseResult>;
   /** Optional managed spectrum stream owned by this same engine lifetime. */
   readonly spectrumPrepared?: () => SpectrumQuery | undefined;
   /** Optional collection of exact targets available to the same managed spectrum owner. */
@@ -236,26 +294,60 @@ interface ResolvedSelection {
   readonly windowBlocks: number;
   readonly baseKey: string;
   readonly key: string;
-  readonly nativeSelection: ObservationSelection;
 }
 
 interface BindingState {
   readonly key: string;
   readonly baseKey: string;
   readonly selection: ObservationSelection;
-  readonly nativeSelection: ObservationSelection;
   readonly windowBlocks: number;
+  readonly nativeEffectId: string;
+  readonly descriptor: ObservationDescriptor;
   refs: number;
   latest: ObservationReadResult | undefined;
   lastSequence: bigint | undefined;
   nativeMissed: bigint;
-  appliedAtSample: bigint;
+  /** The arm tag the `Observe` edit that armed this binding was given (#1585 D5). */
+  readonly armTag: bigint;
+  /** The arm sample a read reported with {@link armTag} armed; `undefined` until one did. */
+  armSample: bigint | undefined;
   /**
-   * The revision the core had committed when this arm was sent, or `undefined` when the transport
-   * cannot read it. An `OBSERVATION_ENDED` event of a commit at or before it belongs to an earlier
-   * arm of the same tap (a late event), and does not end this one.
+   * The revision the arm's reply reported. An `OBSERVATION_ENDED` event of a commit at or before it
+   * belongs to an earlier arm of the same tap (a late event), and does not end this one.
    */
-  readonly armRevision: bigint | undefined;
+  readonly armRevision: bigint;
+}
+
+/** One settle-once `armed()` promise (#1057 design note 8.4). */
+interface ArmedWait {
+  readonly promise: Promise<bigint>;
+  readonly resolve: (sample: bigint) => void;
+  readonly reject: (error: MisoEngineError) => void;
+  settled: boolean;
+}
+
+function armedWait(): ArmedWait {
+  let resolve!: (sample: bigint) => void;
+  let reject!: (error: MisoEngineError) => void;
+  const promise = new Promise<bigint>((ok, fail) => { resolve = ok; reject = fail; });
+  // A wait nobody asked for is not an unhandled rejection; a caller's `armed()` still sees it.
+  promise.catch(() => undefined);
+  const wait: ArmedWait = {
+    promise,
+    resolve: (sample) => { if (!wait.settled) { wait.settled = true; resolve(sample); } },
+    reject: (error) => { if (!wait.settled) { wait.settled = true; reject(error); } },
+    settled: false,
+  };
+  return wait;
+}
+
+function armedRefusal(code: "wrongState" | "internal", diagnostic: string, message: string): MisoEngineError {
+  return new MisoEngineError(message, {
+    phase: "lifecycle",
+    code,
+    result: constantValue("resultCodes", code),
+    diagnostics: [{ code: diagnostic, path: "" }],
+  });
 }
 
 interface HandleState {
@@ -268,7 +360,8 @@ interface HandleState {
   ended: readonly ObservationSelection[];
   callback: ((notification: ObservationSubscriptionNotification) => void) | undefined;
   onEnd: ((end: ObservationSubscriptionEnd) => void) | undefined;
-  appliedAtSample: bigint;
+  /** The `armed()` of the current configuration. */
+  armed: ArmedWait;
   readonly cursor: Map<string, bigint>;
   readonly nativeMissedSeen: Map<string, bigint>;
   nextDeliveryAt: number;
@@ -373,6 +466,16 @@ function normalizedRequest(
 }
 
 function mapSelection(map: ObservationMap, selection: ObservationSelection, windowBlocks: number): ResolvedSelection {
+  // A session whose plans bind no observation tap (#1589 R1: booted with no observation taps) has
+  // an empty map; its refusal is the core's `observation.unavailable`, before any edit is sent.
+  if (map.bindings.length === 0) {
+    throw new MisoEngineError("this session binds no observation tap", {
+      phase: "output",
+      code: "unsupported",
+      result: constantValue("resultCodes", "unsupported"),
+      diagnostics: [{ code: "observation.unavailable", path: "" }],
+    });
+  }
   const binding = map.bindings.find((candidate) => candidate.trackId === selection.trackId
     && candidate.rack === selection.rack && candidate.effectSlotId === selection.effectSlotId);
   if (binding === undefined || !binding.tapIds.includes(selection.tapId)) {
@@ -389,11 +492,10 @@ function mapSelection(map: ObservationMap, selection: ObservationSelection, wind
     windowBlocks,
     baseKey: keyFor(selection),
     key: bindingKey(selection, windowBlocks),
-    nativeSelection: cloneSelection(selection, "both"),
   });
 }
 
-function tapName(binding: ObservationBinding, tapId: number): string {
+function tapDescriptor(binding: ObservationBinding, tapId: number): ObservationDescriptor {
   const effect = CATALOG.effects.find((candidate) => candidate.id === binding.nativeEffectId);
   const tap = effect?.observations.find((candidate) => candidate.id === tapId);
   if (tap === undefined || tap.subscribable !== true) {
@@ -404,20 +506,54 @@ function tapName(binding: ObservationBinding, tapId: number): string {
       diagnostics: [{ code: "sdk.observation.descriptor", path: `${binding.nativeEffectId}/${tapId}` }],
     });
   }
-  return tap.name;
+  return tap;
 }
 
-function pendingRow(row: ObservationReadResult): ObservationReadResult {
-  if (row.status !== "unarmed") return row;
+/** The read selection of a binding: its tap with both lanes, which each handle then projects. */
+function frameSelection(selection: ObservationSelection): ObservationFrameSelection {
   return Object.freeze({
-    trackId: row.trackId,
-    rack: row.rack,
-    effectSlotId: row.effectSlotId,
-    tapId: row.tapId,
-    nativeEffectId: row.nativeEffectId,
-    descriptor: row.descriptor,
-    channels: row.channels,
-    sampleRateHz: row.sampleRateHz,
+    stripId: selection.trackId,
+    rack: selection.rack,
+    effectId: selection.effectSlotId,
+    tapId: selection.tapId,
+    channels: "both" as const,
+  });
+}
+
+/**
+ * The public row of one `OBSERVATION_READ` row for a binding. A window of another arm of the tap
+ * (another tag) is never given to the binding: it reads `pending` (#1057 design note 8.4).
+ */
+function bindingRow(binding: BindingState, row: ObservationFrameRow, sampleRateHz: number): ObservationReadResult {
+  const own = row.status !== "ready" || row.armTag === binding.armTag;
+  const status = own ? row.status : "pending";
+  return Object.freeze({
+    trackId: binding.selection.trackId,
+    rack: binding.selection.rack,
+    effectSlotId: binding.selection.effectSlotId,
+    tapId: binding.selection.tapId,
+    nativeEffectId: binding.nativeEffectId,
+    descriptor: binding.descriptor,
+    channels: "both" as const,
+    sampleRateHz,
+    status,
+    ...(status === "ready" && row.left !== undefined ? { left: row.left } : {}),
+    ...(status === "ready" && row.right !== undefined ? { right: row.right } : {}),
+    ...(status === "ready" && row.window !== undefined ? { window: row.window } : {}),
+  });
+}
+
+/** The row a new binding holds until its first read: its arm is in flight. */
+function pendingBindingRow(binding: BindingState, sampleRateHz: number): ObservationReadResult {
+  return Object.freeze({
+    trackId: binding.selection.trackId,
+    rack: binding.selection.rack,
+    effectSlotId: binding.selection.effectSlotId,
+    tapId: binding.selection.tapId,
+    nativeEffectId: binding.nativeEffectId,
+    descriptor: binding.descriptor,
+    channels: "both" as const,
+    sampleRateHz,
     status: "pending" as const,
   });
 }
@@ -447,20 +583,136 @@ function projectRow(row: ObservationReadResult, channels: ObservationChannels): 
   });
 }
 
-function commandFailure(message: string, report: CommandReport): MisoEngineError {
-  // The result code alone does not say which rule refused the record, so the error carries the
-  // reason as its diagnostic code and the message names the reason and the record. `observationLimit`
-  // (#1676, #1685) is a full frame: the one event that would end every armed tap no longer fits one
-  // control frame. No render makes room, so it is never resent, and the message says what does.
-  const hint = report.reasonName === "observationLimit"
-    ? " (the control frame that would end the armed observation taps is full; unsubscribe another tap first)"
-    : "";
-  return new MisoEngineError(`${message}: ${report.reasonName} at record ${report.rejectedIndex}${hint}`, {
-    phase: report.code === "wrongState" ? "lifecycle" : "output",
-    code: report.code,
-    result: report.result,
-    diagnostics: [{ code: report.reasonName, path: "" }],
+/** How many times an `Observe` transaction is sent again after another sender committed first. */
+const MAXIMUM_REVISION_RETRIES = 8;
+
+/** The error a refused observation frame raises, as the spectrum and response codecs map it (#1596b). */
+function observationRefusal(
+  message: string,
+  status: Exclude<ControlStatusName, "ok">,
+  diagnostics: readonly { readonly code: string; readonly operationIndex?: number | undefined }[],
+): MisoEngineError {
+  const code = spectrumRefusalResult(status);
+  const rows: MisoDiagnostic[] = diagnostics.length === 0
+    ? [{ code: status, path: "" }]
+    : diagnostics.map((row) => ({
+      code: row.code,
+      path: row.operationIndex === undefined ? "" : `edits[${row.operationIndex}]`,
+    }));
+  return new MisoEngineError(message, {
+    phase: "output",
+    code,
+    result: constantValue("resultCodes", code),
+    diagnostics: rows,
   });
+}
+
+/**
+ * An `Observe`-only transaction the core refuses as a resource limit (`capi.resource.limit`) is
+ * the full frame (#1676, #1685): the one event that would end every armed tap no longer fits one
+ * control frame. No render makes room, so it is never resent; the error keeps its named diagnostic
+ * `observationLimit` and says what does make room.
+ */
+function fullFrameRefusal(error: unknown): unknown {
+  if (!(error instanceof MisoEngineError) || error.diagnosticCode !== "capi.resource.limit") return error;
+  return new MisoEngineError(
+    "the observation transaction was refused: observationLimit (the control frame that would end the armed observation taps is full; unsubscribe another tap first)",
+    { phase: "output", code: error.code, result: error.result, diagnostics: [{ code: "observationLimit", path: "" }] },
+  );
+}
+
+/** The engine's one command entry, as the observation owner sends frames through it (#1589 D3). */
+export interface ObservationFrameEndpoint {
+  /** Send one command frame and return its reply; a failed call throws (`controlCallFailure`). */
+  send(frame: Uint8Array): MaybePromise<Uint8Array>;
+  /** The endpoint's one request-ID allocator. */
+  readonly requestIds: ControlRequestIds;
+  /** The revision an `Observe` transaction is built against: the core's committed revision. */
+  committedRevision(): MaybePromise<bigint>;
+  /** The endpoint's frame ceiling in bytes, when it reports one. */
+  maximumFrameBytes(): number | undefined;
+}
+
+/**
+ * `apply` and `read` over an engine's command entry: one `SESSION_TRANSACTION_APPLY` of `Observe`
+ * edits, and `OBSERVATION_READ` (#1589 D3). Both engines build their transport from this.
+ *
+ * An `Observe` transaction is refused `revision_conflict` when another sender committed between the
+ * revision read and the send (the browser's live controls, a structural edit). An `Observe` writes
+ * no model value, so the same edits at the revision the refusal reports are the same request; it is
+ * sent again, at most {@link MAXIMUM_REVISION_RETRIES} times. Every other refusal rejects.
+ *
+ * A read of more selections than one reply frame can carry (`64 + 192 n` bytes, #1586 D4) is sent
+ * as several reads, in order; the rows are one page.
+ */
+export function observationFrameTransport(
+  endpoint: ObservationFrameEndpoint,
+): Pick<ObservationSubscriptionTransport, "apply" | "read"> {
+  const apply = async (edits: readonly ObserveEdit[]): Promise<ObserveApplied> => {
+    let expectedRevision = await endpoint.committedRevision();
+    for (let attempt = 0; ; attempt += 1) {
+      const requestId = endpoint.requestIds.next();
+      const frame = encodeObserveTransaction({ requestId, expectedRevision, edits });
+      const limit = endpoint.maximumFrameBytes();
+      if (limit !== undefined && frame.length > limit) {
+        throw new MisoUsageError(
+          `the observation transaction needs ${frame.length} bytes and one control frame holds ${limit}; subscribe fewer taps at once`,
+        );
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = await endpoint.send(frame);
+      } catch (error) {
+        throw fullFrameRefusal(error);
+      }
+      const reply = decodeControlReply(bytes);
+      if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+      const applied = reply.applied;
+      if (applied !== undefined) {
+        if (applied.observeArmTags.length !== edits.length) {
+          throw malformed("an Observe transaction's reply holds no arm tag per edit");
+        }
+        return Object.freeze({
+          revision: reply.revision,
+          observeArmTags: applied.observeArmTags,
+          removedArmTags: applied.removedArmTags,
+        });
+      }
+      if (reply.status === "revision_conflict" && reply.revision !== expectedRevision
+          && attempt < MAXIMUM_REVISION_RETRIES) {
+        expectedRevision = reply.revision;
+        continue;
+      }
+      throw observationRefusal(
+        "the engine refused the observation transaction",
+        reply.status as Exclude<ControlStatusName, "ok">,
+        reply.diagnostics,
+      );
+    }
+  };
+  const read = async (selections: readonly ObservationFrameSelection[]): Promise<ObservationReadPage> => {
+    const limit = endpoint.maximumFrameBytes();
+    const perRead = limit === undefined
+      ? OBSERVATION_READ_MAXIMUM_SELECTIONS
+      : Math.max(1, Math.min(
+        OBSERVATION_READ_MAXIMUM_SELECTIONS,
+        Math.floor((limit - OBSERVATION_READ_BASE_BYTES) / OBSERVATION_READ_ROW_BYTES),
+      ));
+    const rows: ObservationFrameRow[] = [];
+    let observedSample = 0n;
+    for (let start = 0; start < selections.length; start += perRead) {
+      const chunk = selections.slice(start, start + perRead);
+      const requestId = endpoint.requestIds.next();
+      const reply = decodeObservationReadReply(await endpoint.send(encodeObservationRead(requestId, chunk)));
+      if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+      if (!reply.ok) throw observationRefusal("the engine refused the observation read", reply.status, reply.diagnostics);
+      if (reply.value.rows.length !== chunk.length) throw malformed("an observation page holds the wrong row count");
+      rows.push(...reply.value.rows);
+      observedSample = reply.value.observedSample;
+    }
+    return Object.freeze({ observedSample, rows: Object.freeze(rows) });
+  };
+  return { apply, read };
 }
 
 class ObservationSubscriptionImpl implements ObservationSubscription {
@@ -480,9 +732,12 @@ class ObservationSubscriptionImpl implements ObservationSubscription {
   get owner(): bigint { return this.#state.owner; }
   get epoch(): bigint { return this.#state.epoch; }
   get configuration(): ObservationSubscriptionConfiguration { return this.#state.configuration; }
-  get appliedAtSample(): bigint { return this.#state.appliedAtSample; }
   get bounds(): ObservationSubscriptionBounds { return this.#owner.bounds; }
   get ended(): readonly ObservationSelection[] { return this.#state.ended; }
+
+  armed(): Promise<bigint> {
+    return this.#state.armed.promise;
+  }
 
   readLatest(): readonly ObservationReadResult[] {
     return this.#owner.readLatest(this.#state);
@@ -587,7 +842,6 @@ export class ObservationSubscriptionOwner {
     return Object.freeze({
       ...this.#subscriptionLimits,
       maximumReadSelections: MAXIMUM_OBSERVATION_READS,
-      maximumCommandRecords: ABI_LAYOUT.constants.maximumCommandRecords,
     });
   }
 
@@ -626,55 +880,34 @@ export class ObservationSubscriptionOwner {
         throw new MisoUsageError(`observation subscriptions are capped at ${this.#subscriptionLimits.maximumHandles}`);
       }
       await this.#waitForPoll();
-      const settled = await this.#prepare(epoch, (map) => {
-        const entries = normalized.configuration.selections.map((selection) =>
-          mapSelection(map, selection, normalized.configuration.windowBlocks));
-        if (entries.some((entry) => {
-          const managed = [...this.#bindings.values()].find((binding) => binding.baseKey === entry.baseKey);
-          return managed !== undefined && managed.key !== entry.key;
-        })) {
-          throw new MisoUsageError("observation window conflicts with a managed subscriber");
-        }
-        const newEntries = this.#newEntries(entries);
-        if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
-          throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
-        }
-        this.#assertCommandSize(newEntries.length);
-        return { entries, newEntries, records: newEntries.length };
-      });
-      const { entries, newEntries } = settled.resolved;
-      const { liveControls } = settled;
-      const preflight = await this.#preflight(newEntries, epoch);
-      const edits = newEntries.map((entry) =>
-        this.#edit(entry, true, normalized.configuration.windowBlocks));
-      const armRevision = await this.#committedRevision(liveControls);
-      const report = await this.#submit(liveControls, edits, epoch);
+      const map = await this.#map(epoch);
+      const entries = normalized.configuration.selections.map((selection) =>
+        mapSelection(map, selection, normalized.configuration.windowBlocks));
+      if (entries.some((entry) => {
+        const managed = [...this.#bindings.values()].find((binding) => binding.baseKey === entry.baseKey);
+        return managed !== undefined && managed.key !== entry.key;
+      })) {
+        throw new MisoUsageError("observation window conflicts with a managed subscriber");
+      }
+      const newEntries = this.#newEntries(entries);
+      if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
+        throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
+      }
+      const edits = newEntries.map((entry) => this.#edit(entry, true, normalized.configuration.windowBlocks));
+      await this.#preflight(newEntries, epoch);
+      const applied = await this.#apply(edits, epoch);
       this.#assertEpoch(epoch);
-      const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
-      const state = this.#newHandle(
-        normalized.configuration, entries, normalized.callback, normalized.onEnd, appliedAtSample,
-      );
-      newEntries.forEach((entry) => {
-        const row = preflight.get(entry.key);
-        this.#bindings.set(entry.key, {
-          key: entry.key,
-          baseKey: entry.baseKey,
-          selection: entry.selection,
-          nativeSelection: entry.nativeSelection,
-          windowBlocks: normalized.configuration.windowBlocks,
-          refs: 1,
-          latest: row === undefined ? undefined : pendingRow(row),
-          lastSequence: undefined,
-          nativeMissed: 0n,
-          appliedAtSample: report?.appliedAtSample ?? 0n,
-          armRevision,
-        });
+      const state = this.#newHandle(normalized.configuration, entries, normalized.callback, normalized.onEnd);
+      newEntries.forEach((entry, index) => {
+        this.#bindings.set(entry.key, this.#newBinding(entry, applied!, applied!.observeArmTags[index]!));
       });
       entries.filter((entry) => !newEntries.includes(entry)).forEach((entry) => {
         const held = this.#bindings.get(entry.key);
         if (held !== undefined) held.refs += 1;
       });
       this.#handles.set(state.id, state);
+      // A subscription that joins bindings already armed resolves with their arm sample at once.
+      this.#settleArmed(state);
       this.#startTimer();
       return this.#receipt(state);
     });
@@ -686,86 +919,70 @@ export class ObservationSubscriptionOwner {
       this.#assertHandle(state);
       const epoch = this.#epoch;
       await this.#waitForPoll();
-      const settled = await this.#prepare(epoch, (map) => {
-        const entries = normalized.configuration.selections.map((selection) =>
-          mapSelection(map, selection, normalized.configuration.windowBlocks));
-        const currentByKey = new Map(state.entries.map((entry) => [entry.key, entry] as const));
-        const desiredByKey = new Map(entries.map((entry) => [entry.key, entry] as const));
-        const remove = state.entries.filter((entry) => !desiredByKey.has(entry.key));
-        const add = entries.filter((entry) => !currentByKey.has(entry.key));
-        const conflicts = entries.filter((entry) => {
-          const base = [...this.#bindings.values()].find((binding) => binding.baseKey === entry.baseKey);
-          if (base === undefined || base.key === entry.key) return false;
-          const ownedByThisHandle = state.entries.some((current) => current.key === base.key);
-          return !ownedByThisHandle || base.refs > 1;
-        });
-        if (conflicts.length > 0) {
-          throw new MisoUsageError("observation window conflicts with a managed subscriber");
-        }
-        const newEntries = add.filter((entry) => !this.#bindings.has(entry.key));
-        if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
-          throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
-        }
-        // The bindings this handle alone holds and drops.
-        const release = remove.filter((entry) => {
-          const binding = this.#bindings.get(entry.key);
-          return binding !== undefined && binding.refs === 1;
-        });
-        // A window change moves one tap from one key to another. A submission names a tap once: an
-        // `Observe` record overwrites the tap's whole state at the block that drains it, so the
-        // arm with the new window is the re-arm, and the old key sends no disarm (#1345 D2).
-        const disarm = release.filter((entry) => !newEntries.some((added) => added.baseKey === entry.baseKey));
-        this.#assertCommandSize(newEntries.length + disarm.length);
-        return { entries, remove, add, newEntries, release, disarm, records: disarm.length + newEntries.length };
+      const map = await this.#map(epoch);
+      const entries = normalized.configuration.selections.map((selection) =>
+        mapSelection(map, selection, normalized.configuration.windowBlocks));
+      const currentByKey = new Map(state.entries.map((entry) => [entry.key, entry] as const));
+      const desiredByKey = new Map(entries.map((entry) => [entry.key, entry] as const));
+      const remove = state.entries.filter((entry) => !desiredByKey.has(entry.key));
+      const add = entries.filter((entry) => !currentByKey.has(entry.key));
+      const conflicts = entries.filter((entry) => {
+        const base = [...this.#bindings.values()].find((binding) => binding.baseKey === entry.baseKey);
+        if (base === undefined || base.key === entry.key) return false;
+        const ownedByThisHandle = state.entries.some((current) => current.key === base.key);
+        return !ownedByThisHandle || base.refs > 1;
       });
-      const { entries, remove, add, newEntries, release, disarm } = settled.resolved;
-      const { liveControls } = settled;
-      const preflightEntries = newEntries.filter((entry) => !state.entries.some((current) => {
-        const binding = this.#bindings.get(current.key);
-        return current.baseKey === entry.baseKey && binding?.refs === 1;
-      }));
-      const preflight = await this.#preflight(preflightEntries, epoch);
-      const edits: LaneEdit[] = [
-        ...disarm.map((entry) => this.#edit(entry, false, entry.windowBlocks)),
+      if (conflicts.length > 0) {
+        throw new MisoUsageError("observation window conflicts with a managed subscriber");
+      }
+      const newEntries = add.filter((entry) => !this.#bindings.has(entry.key));
+      if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
+        throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
+      }
+      // The bindings this handle alone holds and drops: each holds one core reference, which a
+      // disarm ends. A window change is the disarm of the old window and the arm of the new one in
+      // one transaction, which the core applies as one re-arm (#1584 gate 1).
+      const release = remove.filter((entry) => {
+        const binding = this.#bindings.get(entry.key);
+        return binding !== undefined && binding.refs === 1;
+      });
+      const edits: ObserveEdit[] = [
+        ...release.map((entry) => this.#edit(entry, false, entry.windowBlocks)),
         ...newEntries.map((entry) => this.#edit(entry, true, normalized.configuration.windowBlocks)),
       ];
-      const armRevision = await this.#committedRevision(liveControls);
-      const report = await this.#submit(liveControls, edits, epoch);
+      // A tap this handle alone re-arms with another window reads armed now; only the others must
+      // read unarmed before they are acquired.
+      await this.#preflight(newEntries.filter((entry) => !release.some((released) => released.baseKey === entry.baseKey)), epoch);
+      const applied = await this.#apply(edits, epoch);
       this.#assertEpoch(epoch);
-      const appliedAtSample = report?.appliedAtSample ?? this.#existingSample(entries);
       release.forEach((entry) => this.#bindings.delete(entry.key));
       remove.filter((entry) => !release.includes(entry)).forEach((entry) => {
         const binding = this.#bindings.get(entry.key);
         if (binding !== undefined) binding.refs -= 1;
       });
-      newEntries.forEach((entry) => {
-        const row = preflight.get(entry.key);
-        this.#bindings.set(entry.key, {
-          key: entry.key,
-          baseKey: entry.baseKey,
-          selection: entry.selection,
-          nativeSelection: entry.nativeSelection,
-          windowBlocks: normalized.configuration.windowBlocks,
-          refs: 1,
-          latest: row === undefined ? undefined : pendingRow(row),
-          lastSequence: undefined,
-          nativeMissed: 0n,
-          appliedAtSample: report?.appliedAtSample ?? 0n,
-          armRevision,
-        });
+      newEntries.forEach((entry, index) => {
+        this.#bindings.set(entry.key, this.#newBinding(entry, applied!, applied!.observeArmTags[release.length + index]!));
       });
       add.filter((entry) => !newEntries.includes(entry)).forEach((entry) => {
         const held = this.#bindings.get(entry.key);
         if (held !== undefined) held.refs += 1;
       });
+      // `armed()` follows the selections: a configuration that removed or added one is another wait,
+      // and a wait still pending on the old one is closed.
+      if (remove.length !== 0 || add.length !== 0) {
+        state.armed.reject(armedRefusal(
+          "wrongState", "sdk.observation.closed", "the observation subscription was updated before it was armed",
+        ));
+        state.armed = armedWait();
+      }
       state.configuration = normalized.configuration;
       state.entries = entries;
       state.callback = normalized.callback;
       state.onEnd = normalized.onEnd;
-      state.appliedAtSample = appliedAtSample;
       state.cursor.clear();
       state.nativeMissedSeen.clear();
       state.nextDeliveryAt = 0;
+      this.#settleArmed(state);
       this.#restartTimer();
       return this.#receipt(state);
     });
@@ -792,13 +1009,9 @@ export class ObservationSubscriptionOwner {
         const binding = this.#bindings.get(entry.key);
         return binding !== undefined && binding.refs === 1;
       });
-      this.#assertCommandSize(disarm.length);
-      const liveControls = disarm.length === 0 ? undefined : await this.#transport.liveControls();
-      this.#assertEpoch(epoch);
       const edits = disarm.map((entry) => this.#edit(entry, false, entry.windowBlocks));
-      const report = await this.#submit(liveControls, edits, epoch);
+      await this.#apply(edits, epoch);
       this.#assertEpoch(epoch);
-      if (report !== undefined && !report.ok) throw commandFailure("observation close was refused", report);
       disarm.forEach((entry) => this.#bindings.delete(entry.key));
       state.entries.filter((entry) => !disarm.includes(entry)).forEach((entry) => {
         const binding = this.#bindings.get(entry.key);
@@ -806,6 +1019,9 @@ export class ObservationSubscriptionOwner {
       });
       this.#handles.delete(state.id);
       state.closed = true;
+      state.armed.reject(armedRefusal(
+        "wrongState", "sdk.observation.closed", "the observation subscription was closed before it was armed",
+      ));
       this.#stopTimerIfIdle();
     });
     const retryable = pending.catch((error: unknown) => {
@@ -826,10 +1042,20 @@ export class ObservationSubscriptionOwner {
     return Object.freeze(rows);
   }
 
-  /** Invalidate all old handles at a headless replacement or browser disposal. */
+  /**
+   * Invalidate all old handles at a headless replacement or browser disposal. A pending `armed()`
+   * rejects: `sdk.engine.disposed` when the engine is gone, `sdk.observation.closed` when a reboot
+   * closed the handles.
+   */
   invalidate(disposed = false): void {
     this.#epoch += 1n;
-    for (const state of this.#handles.values()) state.closed = true;
+    const ended = disposed
+      ? armedRefusal("wrongState", "sdk.engine.disposed", "the engine was disposed before the subscription was armed")
+      : armedRefusal("wrongState", "sdk.observation.closed", "the engine was rebooted before the subscription was armed");
+    for (const state of this.#handles.values()) {
+      state.closed = true;
+      state.armed.reject(ended);
+    }
     for (const state of this.#responseHandles.values()) state.closed = true;
     for (const state of this.#spectrumHandles.values()) state.closed = true;
     if (this.#spectrumJob !== undefined && this.#spectrumJob.refs > 0) {
@@ -855,7 +1081,12 @@ export class ObservationSubscriptionOwner {
    * The engine ended taps (`OBSERVATION_ENDED`): the commit removed the effect that owned them, or
    * the ID now names an effect without that tap. The core decided it and has already dropped the
    * arms, so nothing is sent; the owner forgets the bindings and tells each subscription once what
-   * it lost (#1562b-K). A subscription left with no selection is closed.
+   * it lost (#1562b-K). A subscription left with no selection is closed, and one that lost a
+   * selection before it was armed rejects its `armed()` with `sdk.observation.owner_removed`.
+   *
+   * The event, not the reply's `removedArmTags`, settles it: the commit that removes an effect is
+   * any sender's (a structural edit, a replace, a frame the app sent itself), and only the event
+   * reaches this owner for every one of them.
    */
   #onEnded(ended: ObservationEnded): void {
     if (this.#disposed) return;
@@ -869,9 +1100,9 @@ export class ObservationSubscriptionOwner {
     const gone = new Set<string>();
     for (const binding of [...this.#bindings.values()]) {
       if (!lost.has(binding.baseKey)) continue;
-      // An event of a commit at or before this arm was sent ended an earlier arm of the tap (the
+      // An event of a commit at or before this arm's reply ended an earlier arm of the tap (the
       // event came late, behind a removal and a re-add); this arm is the core's now.
-      if (binding.armRevision !== undefined && ended.revision <= binding.armRevision) continue;
+      if (ended.revision <= binding.armRevision) continue;
       this.#bindings.delete(binding.key);
       gone.add(binding.baseKey);
     }
@@ -879,6 +1110,9 @@ export class ObservationSubscriptionOwner {
     for (const state of [...this.#handles.values()]) {
       const dropped = state.entries.filter((entry) => gone.has(entry.baseKey));
       if (dropped.length === 0) continue;
+      state.armed.reject(armedRefusal(
+        "wrongState", "sdk.observation.owner_removed", "a commit removed the effect of a subscription before it was armed",
+      ));
       const remaining = state.entries.filter((entry) => !gone.has(entry.baseKey));
       for (const entry of dropped) {
         state.cursor.delete(entry.key);
@@ -918,9 +1152,11 @@ export class ObservationSubscriptionOwner {
     return this.#spectrumHandles.size !== 0;
   }
 
-  /** Guard the public live controls' observation edits while this owner has managed bindings. */
-  beforeLiveControlSubmit(edits: readonly LaneEdit[], managed = false): void {
-    if (managed) return;
+  /**
+   * Guard the public live controls' observation records (kinds 7 and 8) while this owner has
+   * managed bindings: a record and an `Observe` edit of one tap would share its queue slot.
+   */
+  beforeLiveControlSubmit(edits: readonly LaneEdit[]): void {
     if (!this.#mutationBusy && this.#bindings.size === 0) return;
     if (edits.some((edit) => edit.kind === "observeSubscribe" || edit.kind === "observeUnsubscribe")) {
       throw new MisoUsageError("manual observation edits conflict with managed subscriptions");
@@ -932,7 +1168,6 @@ export class ObservationSubscriptionOwner {
     entries: readonly ResolvedSelection[],
     callback: ((notification: ObservationSubscriptionNotification) => void) | undefined,
     onEnd: ((end: ObservationSubscriptionEnd) => void) | undefined,
-    appliedAtSample: bigint,
   ): HandleState {
     const state: HandleState = {
       id: this.#nextHandle++,
@@ -943,7 +1178,7 @@ export class ObservationSubscriptionOwner {
       ended: Object.freeze([]),
       callback,
       onEnd,
-      appliedAtSample,
+      armed: armedWait(),
       cursor: new Map(),
       nativeMissedSeen: new Map(),
       nextDeliveryAt: 0,
@@ -955,14 +1190,35 @@ export class ObservationSubscriptionOwner {
     return state;
   }
 
+  #newBinding(entry: ResolvedSelection, applied: ObserveApplied, armTag: bigint): BindingState {
+    const binding: BindingState = {
+      key: entry.key,
+      baseKey: entry.baseKey,
+      selection: entry.selection,
+      windowBlocks: entry.windowBlocks,
+      nativeEffectId: entry.binding.nativeEffectId,
+      descriptor: tapDescriptor(entry.binding, entry.selection.tapId),
+      refs: 1,
+      latest: undefined,
+      lastSequence: undefined,
+      nativeMissed: 0n,
+      armTag,
+      armSample: undefined,
+      armRevision: applied.revision,
+    };
+    binding.latest = pendingBindingRow(binding, this.#transport.sampleRateHz());
+    return binding;
+  }
+
   #receipt(state: HandleState): ObservationSubscriptionReceipt {
+    const armed = state.armed.promise;
     return Object.freeze({
       handle: state.publicHandle!,
       owner: state.owner,
       epoch: state.epoch,
       configuration: state.configuration,
-      appliedAtSample: state.appliedAtSample,
       bounds: this.bounds,
+      armed: () => armed,
     });
   }
 
@@ -970,94 +1226,72 @@ export class ObservationSubscriptionOwner {
     return entries.filter((entry) => !this.#bindings.has(entry.key));
   }
 
-  #existingSample(entries: readonly ResolvedSelection[]): bigint {
-    return entries.reduce((sample, entry) => {
-      const value = this.#bindings.get(entry.key)?.appliedAtSample ?? 0n;
-      return value > sample ? value : sample;
-    }, 0n);
+  /** Resolve `state.armed` once every selection's binding read armed with its own tag. */
+  #settleArmed(state: HandleState): void {
+    if (state.armed.settled) return;
+    let sample = 0n;
+    for (const entry of state.entries) {
+      const armSample = this.#bindings.get(entry.key)?.armSample;
+      if (armSample === undefined) return;
+      if (armSample > sample) sample = armSample;
+    }
+    if (state.entries.length !== 0) state.armed.resolve(sample);
   }
 
-  async #preflight(
-    newEntries: readonly ResolvedSelection[],
-    epoch: bigint,
-  ): Promise<ReadonlyMap<string, ObservationReadResult>> {
-    if (newEntries.length === 0) return new Map();
-    const rows = await this.#transport.readObservations(newEntries.map((entry) => entry.nativeSelection));
+  /**
+   * A new binding's tap must read unarmed: one armed already is held by someone else (a manual
+   * record of kinds 7 and 8, or another sender's `Observe`), whose window this owner cannot share.
+   */
+  async #preflight(newEntries: readonly ResolvedSelection[], epoch: bigint): Promise<void> {
+    if (newEntries.length === 0) return;
+    const page = await this.#transport.read(newEntries.map((entry) => frameSelection(entry.selection)));
     this.#assertEpoch(epoch);
-    if (rows.length !== newEntries.length) {
+    if (page.rows.length !== newEntries.length) {
       throw new MisoEngineError("the observation preflight returned the wrong row count", {
         phase: "output", code: "abiMismatch", result: 2,
       });
     }
-    const result = new Map<string, ObservationReadResult>();
-    rows.forEach((row, index) => {
-      if (row.status !== "unarmed") {
-        throw new MisoUsageError("the observation is already manually armed and cannot be acquired");
-      }
-      result.set(newEntries[index]!.key, row);
-    });
-    return result;
+    if (page.rows.some((row) => row.status !== "unarmed")) {
+      throw new MisoUsageError("the observation is already armed by another subscriber and cannot be acquired");
+    }
   }
 
-  #edit(entry: ResolvedSelection, armed: boolean, windowBlocks: number): LaneEdit {
-    // The record names its tap by stable key, which the selection already is: the strip, the
-    // console slot or insert, the tap. The core resolves it on the plan it admits the record
-    // against, so nothing here can address another effect after a rebuild (#1677). The catalog
-    // says whether the tap is subscribable at all, which is refused before anything is sent.
-    tapName(entry.binding, entry.selection.tapId);
-    return observationEdit(armed, {
+  #edit(entry: ResolvedSelection, armed: boolean, windowBlocks: number): ObserveEdit {
+    // The edit names its tap by stable key, which the selection already is: the strip, the console
+    // slot or insert, the tap. The core resolves it on the newest committed plan, so nothing here can
+    // address another effect after a rebuild (#1677). The catalog says whether the tap is
+    // subscribable at all, which is refused before anything is sent.
+    tapDescriptor(entry.binding, entry.selection.tapId);
+    return Object.freeze({
       stripId: entry.selection.trackId,
       rack: entry.selection.rack,
       effectId: entry.selection.effectSlotId,
       tapId: entry.selection.tapId,
-    }, windowBlocks);
+      armed,
+      windowBlocks,
+    });
   }
 
   /**
-   * Read the map of the plan that renders and resolve the request against it. `resolve` says how
-   * many records the request needs; one that needs none returns at once, with no live controls.
-   *
-   * The map describes the plan that renders and validates the selection (the effect and its tap
-   * exist, a read can reach them). It does not address a record: the record names the tap by stable
-   * key and the core resolves it on the newest committed plan (#1677).
+   * The map of the plan that renders. It validates the selection (the effect and its tap exist, a
+   * read can reach them) and names its effect. It does not address an edit: the edit names the tap
+   * by stable key and the core resolves it on the newest committed plan (#1677).
    */
-  async #prepare<T extends { readonly records: number }>(
-    epoch: bigint,
-    resolve: (map: ObservationMap) => T,
-  ): Promise<{ readonly resolved: T; readonly liveControls: EngineLiveControls | undefined }> {
+  async #map(epoch: bigint): Promise<ObservationMap> {
     const map = await this.#transport.observationMap();
     this.#assertEpoch(epoch);
-    const resolved = resolve(map);
-    if (resolved.records === 0) return { resolved, liveControls: undefined };
-    const liveControls = await this.#transport.liveControls();
-    this.#assertEpoch(epoch);
-    return { resolved, liveControls };
+    return map;
   }
 
   /**
-   * The revision the core has committed now, read just before an arm is sent, or `undefined` when
-   * the transport cannot read it. A commit that lands after the read is later than the arm's
-   * revision, so its end event is applied to the arm (never ignored by mistake).
+   * Send one transaction of `Observe` edits; none sends nothing. A refusal for room
+   * (`backpressure`) means an earlier `Observe` of a tap still holds its queue slot, and a render
+   * drains it: that refusal alone is flow control, typed and retryable. Anything else, a malformed
+   * or unbound request or one past a full frame of armed taps included, never succeeds on resend
+   * and is thrown at once.
    */
-  async #committedRevision(liveControls: EngineLiveControls | undefined): Promise<bigint | undefined> {
-    const queue = liveControls?.queue;
-    if (queue === undefined || typeof queue.readCommittedRevision !== "function") return undefined;
-    try {
-      return await queue.readCommittedRevision();
-    } catch {
-      return undefined;
-    }
-  }
-
-  async #submit(
-    liveControls: EngineLiveControls | undefined,
-    edits: readonly LaneEdit[],
-    epoch: bigint,
-  ): Promise<CommandReport | undefined> {
+  async #apply(edits: readonly ObserveEdit[], epoch: bigint): Promise<ObserveApplied | undefined> {
     if (edits.length === 0) return undefined;
-    const managedSubmit = (liveControls as EngineLiveControls & {
-      readonly submitManaged?: (...edits: readonly LaneEdit[]) => Promise<CommandReport>;
-    } | undefined)?.submitManaged;
     const wait = this.#transport.renderWait;
     let deadline: number | undefined;
     for (let attempt = 0; ; attempt += 1) {
@@ -1066,36 +1300,23 @@ export class ObservationSubscriptionOwner {
       // answers it first. A block rendered after it and before the refusal returns is then seen.
       const since = wait?.mark();
       since?.catch(() => undefined);
-      const report = managedSubmit === undefined
-        ? await liveControls!.submit(...edits)
-        : await managedSubmit.call(liveControls, ...edits);
-      if (report.ok) return report;
-      // A submission names each tap once, so a refusal for room means a record of an earlier
-      // submission still holds the tap's slot, and a render drains it. That refusal alone is flow
-      // control: it is typed and retryable. Anything else, a malformed or unbound request or one
-      // past a full frame of armed taps (`observationLimit`, #1676, #1685) included, never succeeds on resend
-      // and is thrown at once.
-      if (report.reasonName !== "backpressure" || wait === undefined
-          || attempt >= MAXIMUM_ADMISSION_RETRIES) {
-        throw commandFailure("observation transaction was refused", report);
+      try {
+        return await this.#transport.apply(edits);
+      } catch (error) {
+        if (!(error instanceof MisoEngineError) || error.code !== "backpressure" || wait === undefined
+            || attempt >= MAXIMUM_ADMISSION_RETRIES) {
+          throw error;
+        }
+        // Renders on their own clock: wait for one within the bound, then send the same edits
+        // again. When the bound passes without a render the refusal stands, so a context that does
+        // not render ends in the typed error and never in an endless wait.
+        deadline ??= Date.now() + wait.boundMs;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw error;
+        const rendered = await wait.next(remaining, await since!);
+        this.#assertEpoch(epoch);
+        if (!rendered) throw error;
       }
-      // Renders on their own clock: wait for one within the bound, then send the same edits again.
-      // When the bound passes without a render the refusal stands, so a context that does not
-      // render ends in the typed error and never in an endless wait.
-      deadline ??= Date.now() + wait.boundMs;
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw commandFailure("observation transaction was refused", report);
-      const rendered = await wait.next(remaining, await since!);
-      this.#assertEpoch(epoch);
-      if (!rendered) throw commandFailure("observation transaction was refused", report);
-    }
-  }
-
-  #assertCommandSize(count: number): void {
-    if (count > ABI_LAYOUT.constants.maximumCommandRecords) {
-      throw new MisoUsageError(
-        `observation transaction needs ${count} records, maximum is ${ABI_LAYOUT.constants.maximumCommandRecords}`,
-      );
     }
   }
 
@@ -1105,26 +1326,42 @@ export class ObservationSubscriptionOwner {
     if (bindings.length > MAXIMUM_OBSERVATION_READS) {
       throw new MisoUsageError(`managed observation reads are capped at ${MAXIMUM_OBSERVATION_READS}`);
     }
-    const rows = await this.#transport.readObservations(bindings.map((binding) => binding.nativeSelection));
+    const page = await this.#transport.read(bindings.map((binding) => frameSelection(binding.selection)));
     this.#assertEpoch(epoch);
-    if (rows.length !== bindings.length) {
+    if (page.rows.length !== bindings.length) {
       throw new MisoEngineError("the observation read returned the wrong row count", {
         phase: "output", code: "abiMismatch", result: 2,
       });
     }
-    rows.forEach((row, index) => {
+    const sampleRateHz = this.#transport.sampleRateHz();
+    const superseded = new Set<string>();
+    page.rows.forEach((row, index) => {
       const binding = bindings[index]!;
-      const previous = binding.lastSequence;
-      if (row.status === "ready" && row.window !== undefined) {
-        if (previous !== undefined && row.window.sequence > previous + 1n) {
-          binding.nativeMissed += row.window.sequence - previous - 1n;
-        }
-        if (previous === undefined || row.window.sequence > previous) binding.lastSequence = row.window.sequence;
+      if (binding.armSample === undefined) {
+        if (row.armed && row.armTag === binding.armTag) binding.armSample = row.armSample;
+        // By the reference rule a newer `Observe` of the tap is sent only after this binding's last
+        // subscription closed, so a newer tag on a pending binding is an inconsistent state.
+        else if (row.armTag > binding.armTag) superseded.add(binding.key);
       }
-      binding.latest = row;
+      const result = bindingRow(binding, row, sampleRateHz);
+      const previous = binding.lastSequence;
+      if (result.status === "ready" && result.window !== undefined) {
+        if (previous !== undefined && result.window.sequence > previous + 1n) {
+          binding.nativeMissed += result.window.sequence - previous - 1n;
+        }
+        if (previous === undefined || result.window.sequence > previous) binding.lastSequence = result.window.sequence;
+      }
+      binding.latest = result;
     });
+    for (const state of this.#handles.values()) {
+      if (state.entries.some((entry) => superseded.has(entry.key))) {
+        state.armed.reject(armedRefusal(
+          "internal", "sdk.observation.superseded", "a read showed a newer arm on a pending observation binding",
+        ));
+      }
+      this.#settleArmed(state);
+    }
   }
-
   async #poll(): Promise<void> {
     if (this.#polling !== undefined) return this.#polling;
     const epoch = this.#epoch;
@@ -1982,18 +2219,12 @@ export class ObservationSubscriptionOwner {
     }
     const read = await responseRead(query);
     this.#assertEpoch(epoch);
-    if (read.result === undefined) {
-      throw new MisoEngineError("the first live response capture did not produce a result", {
-        phase: "output", code: "abiMismatch", result: 2,
-      });
-    }
-    const state = copyObservedState(read.state);
-    const result = copyTrackResponseResult(read.result);
-    this.#assertResponseResultBounds(result, state);
+    const result = copyTrackResponseResult(read);
+    this.#assertResponseResultBounds(result);
     const job: ResponseJobState = {
-      id: this.#nextResponseJob++, key, query, refs: 0, state, result,
+      id: this.#nextResponseJob++, key, query, refs: 0, result,
       revision: 1n, publicationSequence: 1n,
-      retainedBytes: responseRetainedBytes(result, state),
+      retainedBytes: responseRetainedBytes(result),
       fastestCadenceMs: configuration.cadenceMs,
       nextCaptureAt: Date.now() + configuration.cadenceMs,
     };
@@ -2023,14 +2254,14 @@ export class ObservationSubscriptionOwner {
     });
   }
 
-  #assertResponseResultBounds(result: TrackResponseResult, state: TrackResponseObservedState): void {
+  #assertResponseResultBounds(result: TrackResponseResult): void {
     const subscriptionLimits = this.#responseSubscriptionLimits!;
     if (result.frequenciesHz.length > this.responseBounds.maximumPoints
         || (result.leftDb?.length ?? 0) > this.responseBounds.maximumPoints
         || (result.rightDb?.length ?? 0) > this.responseBounds.maximumPoints) {
       throw new MisoUsageError("the live response points exceed the subscription bound");
     }
-    if (responseRetainedBytes(result, state) > subscriptionLimits.maximumRetainedBytes) {
+    if (responseRetainedBytes(result) > subscriptionLimits.maximumRetainedBytes) {
       throw new MisoUsageError("the live response retained bytes exceed the subscription bound");
     }
   }
@@ -2103,24 +2334,18 @@ export class ObservationSubscriptionOwner {
     for (const job of jobs) {
       if (this.#responseJobs.get(job.key) !== job || job.refs === 0) continue;
       if (Date.now() < job.nextCaptureAt) continue;
-      const read = await responseRead(job.query, job.state);
+      const read = await responseRead(job.query);
       this.#assertEpoch(epoch);
       job.nextCaptureAt = Date.now() + job.fastestCadenceMs;
-      if (!read.changed) continue;
-      if (read.result === undefined) {
-        throw new MisoEngineError("the changed live response capture did not produce a result", {
-          phase: "output", code: "abiMismatch", result: 2,
-        });
-      }
-      const state = copyObservedState(read.state);
-      const result = copyTrackResponseResult(read.result);
-      this.#assertResponseResultBounds(result, state);
+      // Unchanged: nothing is published (#1579 D4).
+      if (sameTrackResponseResult(job.result, read)) continue;
+      const result = copyTrackResponseResult(read);
+      this.#assertResponseResultBounds(result);
       this.#assertResponseDeliveryBudget(job, undefined, undefined, result);
-      this.#assertResponseRetainedBytes(responseRetainedBytes(result, state), job);
+      this.#assertResponseRetainedBytes(responseRetainedBytes(result), job);
       if (this.#responseJobs.get(job.key) !== job || job.refs === 0) continue;
-      job.state = state;
       job.result = result;
-      job.retainedBytes = responseRetainedBytes(result, state);
+      job.retainedBytes = responseRetainedBytes(result);
       job.revision += 1n;
       job.publicationSequence += 1n;
     }
@@ -2325,10 +2550,7 @@ export interface SpectrumSubscription {
 
 /** One capture/evaluation seam shared by browser and headless managed response owners. */
 export interface TrackResponseSubscriptionTransport {
-  responseRead(
-    request: TrackResponseQuery,
-    previousState?: TrackResponseObservedState,
-  ): MaybePromise<TrackResponseRead>;
+  responseRead(request: TrackResponseQuery): MaybePromise<TrackResponseResult>;
   readonly scheduler?: ObservationSubscriptionScheduler;
 }
 
@@ -2346,7 +2568,6 @@ interface ResponseJobState {
   readonly key: string;
   readonly query: TrackResponseQuery;
   refs: number;
-  state: TrackResponseObservedState;
   result: TrackResponseResult;
   revision: bigint;
   publicationSequence: bigint;
@@ -2607,23 +2828,6 @@ function responseJobKey(query: TrackResponseQuery): string {
   ]);
 }
 
-function copyObservedState(state: TrackResponseObservedState): TrackResponseObservedState {
-  if (state === null || typeof state !== "object" || !Array.isArray(state.words)) {
-    throw new MisoEngineError("the response state read was malformed", {
-      phase: "output", code: "abiMismatch", result: 2,
-    });
-  }
-  const words = state.words.map((word) => {
-    if (!Number.isSafeInteger(word) || word < 0 || word > 0xffff_ffff) {
-      throw new MisoEngineError("the response state read contained an invalid word", {
-        phase: "output", code: "abiMismatch", result: 2,
-      });
-    }
-    return word;
-  });
-  return Object.freeze({ words: Object.freeze(words) });
-}
-
 function responseVectorBytes(result: TrackResponseResult): number {
   return result.frequenciesHz.byteLength
     + (result.leftDb?.byteLength ?? 0)
@@ -2639,16 +2843,14 @@ function responseDeliveryRate(result: TrackResponseResult, cadenceMs: number): n
   return rate;
 }
 
-function responseRetainedBytes(result: TrackResponseResult, state: TrackResponseObservedState): number {
+function responseRetainedBytes(result: TrackResponseResult): number {
   const resultBytes = Number(result.resultBytes);
-  const keyBytes = state.words.length * 4;
-  if (!Number.isSafeInteger(resultBytes) || resultBytes < 0
-      || !Number.isSafeInteger(keyBytes) || resultBytes + keyBytes > Number.MAX_SAFE_INTEGER) {
+  if (!Number.isSafeInteger(resultBytes) || resultBytes < 0) {
     throw new MisoEngineError("the response subscription retained bytes exceeded its bound", {
       phase: "output", code: "refusedBudget", result: 8,
     });
   }
-  return resultBytes + keyBytes;
+  return resultBytes;
 }
 
 function copyTrackResponseResult(result: TrackResponseResult): TrackResponseResult {

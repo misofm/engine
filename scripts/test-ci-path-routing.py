@@ -1498,9 +1498,8 @@ def main() -> int:
     )  # a step slipped in before the report
     workflow_mutation_fails(
         "qualification.yml",
-        "        with:\n          fetch-depth: 0\n"
-        "      - name: Install pinned Rust toolchain and Wasm standard library\n",
-        "      - name: Install pinned Rust toolchain and Wasm standard library\n",
+        "        with:\n          fetch-depth: 0\n      # No toolchain in the runner's RUSTUP_HOME",
+        "      # No toolchain in the runner's RUSTUP_HOME",
     )  # the identity job's full history dropped: no base is reachable
     workflow_mutation_fails(
         "qualification.yml", 'git worktree add --detach "$RUNNER_TEMP/twin" HEAD\n',
@@ -1511,6 +1510,21 @@ def main() -> int:
         'CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/',
         'bash "$RUNNER_TEMP/twin/',
     )  # a twin sharing the artifact job's CARGO_HOME proves nothing about it
+    workflow_mutation_fails(
+        "qualification.yml",
+        'RUSTUP_HOME="$RUNNER_TEMP/twin-rustup" CARGO_HOME=',
+        "CARGO_HOME=",
+    )  # #2045: a twin sharing the artifact job's RUSTUP_HOME lets a dropped sysroot remap pass
+    for line in checker.PRODUCERS_CHECK_LINES:
+        workflow_mutation_fails("qualification.yml", line, "")  # #2045: the producers check gone
+    text = (ROOT / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
+    producers_step = text[text.index("      - name: Check the shipped module names the browser "
+                                     "artifact toolchain's compiler\n"):
+                          text.index("      - name: Upload shipped artifact\n")]
+    upload_step = text[text.index("      - name: Upload shipped artifact\n"):
+                       text.index("      # Issue #1109: the named twin is not shipped.")]
+    workflow_mutation_fails("qualification.yml", producers_step + upload_step,
+                            upload_step + producers_step)  # #2045: the check runs after upload
     workflow_mutation_fails(
         "qualification.yml",
         "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
