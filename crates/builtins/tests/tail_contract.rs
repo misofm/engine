@@ -8,6 +8,8 @@
 //! domain extreme (gate 2) runs in release only. Evidence lines are printed with `--nocapture`.
 #![allow(missing_docs)]
 
+use std::sync::OnceLock;
+
 use builtins::INPUT_FILTER_RAMP_SAMPLES;
 #[cfg(feature = "test-support")]
 use builtins::input_section_bound_charged;
@@ -29,6 +31,41 @@ use math::tail::{
 };
 
 const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
+/// `compute` at `rate`, from `table`, which holds its value at each launch rate: the first call
+/// computes all four on their own threads, and every later call in the binary reads them (#1972).
+/// The live bound's composition costs seconds per rate in a debug build, and a dozen tests read
+/// it; each value is a pure function of the rate, so sharing it changes no tested value.
+fn per_launch_rate<T: Clone + Send + Sync>(
+    table: &OnceLock<[T; 4]>,
+    rate: u32,
+    compute: fn(u32) -> T,
+) -> T {
+    let index = LAUNCH_RATES
+        .iter()
+        .position(|launch| *launch == rate)
+        .expect("a launch rate");
+    table.get_or_init(|| {
+        std::thread::scope(|scope| {
+            LAUNCH_RATES
+                .map(|rate| scope.spawn(move || compute(rate)))
+                .map(|handle| handle.join().expect("a launch-rate computation"))
+        })
+    })[index]
+        .clone()
+}
+
+/// [`input_section_live_bound`] at a launch rate, computed once per binary ([`per_launch_rate`]).
+fn computed_live_bound(rate: u32) -> Option<NodeTailBound> {
+    static ALL: OnceLock<[Option<NodeTailBound>; 4]> = OnceLock::new();
+    per_launch_rate(&ALL, rate, input_section_live_bound)
+}
+
+/// [`input_section_live_cascade`] at a launch rate, computed once per binary ([`per_launch_rate`]).
+fn computed_live_cascade(rate: u32) -> Option<CascadeBound> {
+    static ALL: OnceLock<[Option<CascadeBound>; 4]> = OnceLock::new();
+    per_launch_rate(&ALL, rate, input_section_live_cascade)
+}
 
 /// The stated exact-rest bound of `rest`; panics with `message` when it is unstated.
 fn stated_rest(rest: RestBound, message: &str) -> RestSamples {
@@ -551,7 +588,7 @@ fn live_bound_table_is_the_computed_live_bound_at_every_launch_rate() {
     for rate in LAUNCH_RATES {
         assert_eq!(
             input_section_live_bound_table(rate),
-            input_section_live_bound(rate),
+            computed_live_bound(rate),
             "{rate} Hz"
         );
         assert!(input_section_live_bound_table(rate).is_some(), "{rate} Hz");
@@ -651,7 +688,7 @@ fn live_bound_covers_every_scanned_design_and_ramp_word() {
         let terms = input_section_live_envelope(rate).expect("launch rate");
         let envelope = terms.envelope;
         let zones = live_zones(&terms).expect("live zones");
-        let live = input_section_live_bound(rate).expect("launch rate");
+        let live = computed_live_bound(rate).expect("launch rate");
         assert!(envelope.rho_settled <= envelope.rho_ramp && envelope.rho_ramp < 1.0);
         let top = maximum(rate);
         // The release scale is the gate's; debug runs a tenth of it (48 kHz only).
@@ -966,8 +1003,8 @@ fn tail_every_peak_is_the_rest_at_the_flush_floor_and_holds_on_the_real_kernel()
 fn live_tail_every_peak_is_the_rest_at_the_flush_floor() {
     for rate in LAUNCH_RATES {
         let law = input_section_flush_law(rate);
-        let cascade = input_section_live_cascade(rate).expect("launch rate");
-        let live = input_section_live_bound(rate).expect("launch rate");
+        let cascade = computed_live_cascade(rate).expect("launch rate");
+        let live = computed_live_bound(rate).expect("launch rate");
         let terms = input_section_live_envelope(rate).expect("launch rate");
         let p_star = cascade.flush_floor;
         let at_floor = live_cascade(
@@ -1864,8 +1901,8 @@ fn live_bound_carries_every_term_an_independent_recomputation_requires() {
             "{rate} Hz: the live envelope's output row omits a term the derivation requires"
         );
         let oracle = live_oracle(rate);
-        let cascade = input_section_live_cascade(rate).expect("launch rate");
-        let live = input_section_live_bound(rate).expect("launch rate");
+        let cascade = computed_live_cascade(rate).expect("launch rate");
+        let live = computed_live_bound(rate).expect("launch rate");
         let rest = stated_rest(live.rest, "live rest");
         let t_rest = oracle.t_decay.max(oracle.rest_at_p_star);
         eprintln!(
@@ -2088,7 +2125,7 @@ fn extreme_response(rate: u32, frames: usize) -> Vec<f64> {
 fn live_bound_holds_on_the_real_kernel_at_the_domain_extreme() {
     const HISTORY: usize = 1_000_000;
     for &rate in rates() {
-        let live = input_section_live_bound(rate).expect("launch rate");
+        let live = computed_live_bound(rate).expect("launch rate");
         let rest = stated_rest(live.rest, "live rest");
         let t_decay = finite(live.tail);
         let (hpf, lpf) = input_section_worst_case_pair(rate).expect("launch rate");
@@ -2318,8 +2355,8 @@ const CRUDE_ANY_SANITIZED_INPUT: [u64; 4] = [2_583_197, 2_569_016, 2_587_000, 2_
 #[test]
 fn live_rest_bounds_are_within_the_restated_contract_figures() {
     for (index, rate) in LAUNCH_RATES.into_iter().enumerate() {
-        let cascade = input_section_live_cascade(rate).expect("launch rate");
-        let live = input_section_live_bound(rate).expect("launch rate");
+        let cascade = computed_live_cascade(rate).expect("launch rate");
+        let live = computed_live_bound(rate).expect("launch rate");
         let rest = stated_rest(live.rest, "live rest");
         eprintln!(
             "3 {rate} Hz: T_decay {} (crude {}), T_rest {}, peak_plus_24_dbfs {} (crude {}), \
@@ -2354,7 +2391,7 @@ fn live_rest_bounds_are_within_the_restated_contract_figures() {
 fn live_bounds_leave_headroom_to_the_tail_cap() {
     const CAP: u64 = 10_000_000;
     for rate in LAUNCH_RATES {
-        let live = input_section_live_bound(rate).expect("launch rate");
+        let live = computed_live_bound(rate).expect("launch rate");
         let rest = stated_rest(live.rest, "live rest");
         for (name, value) in [
             ("T_decay", finite(live.tail)),
@@ -2747,8 +2784,14 @@ fn fixed_design_stall_is_the_module_stall_rounded_up_and_covers_the_flush_floor(
 // ---- #1466: the live input section's decay, peak gain and stalls (gate 1, L4; L3 above) -----
 
 /// The live composition values at `rate`, as the gates read them: `math::tail`'s accessor at the
-/// +24 dB trim word, the flush law and the ramp the live bound uses.
+/// +24 dB trim word, the flush law and the ramp the live bound uses. Computed once per launch rate
+/// for the whole binary ([`per_launch_rate`]).
 fn live_composition(rate: u32) -> LiveComposition {
+    static ALL: OnceLock<[LiveComposition; 4]> = OnceLock::new();
+    per_launch_rate(&ALL, rate, computed_live_composition)
+}
+
+fn computed_live_composition(rate: u32) -> LiveComposition {
     live_cascade_composition(
         &input_section_live_envelope(rate).expect("launch rate"),
         rest_peaks()[0],
@@ -3062,7 +3105,7 @@ fn live_peak_gain_bounds_the_real_kernel_on_its_worst_histories() {
         }
         // Gate 2: never below the measured peak, within `F_p` of it.
         let (_, peak_gain, ..) = composition_values(
-            input_section_live_bound(rate).expect("launch rate"),
+            computed_live_bound(rate).expect("launch rate"),
             "live bound",
         );
         let stated_gain = linear(peak_gain);
@@ -3103,7 +3146,7 @@ fn live_decay_covers_the_module_crossings_and_its_floor() {
         let ramp = u64::from(INPUT_FILTER_RAMP_SAMPLES);
         let composition = live_composition(rate);
         let decay = composition.decay;
-        let tail = input_section_live_cascade(rate).expect("launch rate").tail;
+        let tail = computed_live_cascade(rate).expect("launch rate").tail;
         let mut worst = 0.0_f64;
         let mut previous = tail;
         for k in 0..=64_u64 {
@@ -3795,7 +3838,7 @@ fn live_tail_gain_covers_the_exact_supremum_of_a_late_input_over_the_scanned_ram
 fn l2_at_rate(rate: u32, trim: f64) -> Vec<String> {
     const THREADS: usize = 6;
     let (_, _, tail_gain, _, _) = composition_values(
-        input_section_live_bound(rate).expect("launch rate"),
+        computed_live_bound(rate).expect("launch rate"),
         "live bound",
     );
     let g_t = linear(tail_gain);
@@ -4042,7 +4085,7 @@ fn live_bound_states_the_composition_rounded_up_with_its_orders() {
     for &rate in rates() {
         let composition = live_composition(rate);
         let (decay, peak_gain, tail_gain, peak_stall, tail_stall) = composition_values(
-            input_section_live_bound(rate).expect("launch rate"),
+            computed_live_bound(rate).expect("launch rate"),
             "live bound",
         );
         eprintln!(

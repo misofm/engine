@@ -84,8 +84,8 @@
       "properties": { "pre_insert": { "type": "array", "items": { "$ref": "#/$defs/console_slot" } }, "post_insert": { "type": "array", "items": { "$ref": "#/$defs/console_slot" } } }
     },
     "console_entry": {
-      "type": "object", "additionalProperties": false, "required": ["slot", "bypass", "params"],
-      "properties": { "slot": { "$ref": "#/$defs/id" }, "bypass": { "type": "boolean" }, "params": { "type": "array", "items": { "$ref": "#/$defs/effect_param" } } }
+      "type": "object", "additionalProperties": false, "required": ["slot", "bypass", "link_mode", "params"],
+      "properties": { "slot": { "$ref": "#/$defs/id" }, "bypass": { "type": "boolean" }, "link_mode": { "enum": ["slot", "dual_mono", "maximum", "average"] }, "params": { "type": "array", "items": { "$ref": "#/$defs/effect_param" } } }
     },
     "rack": {
       "type": "object", "additionalProperties": false, "required": ["effects"],

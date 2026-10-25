@@ -215,6 +215,18 @@ fn the_kernel_meets_the_stated_tail_and_rests_by_the_stated_bound() {
             if cfg!(debug_assertions) && peak < 1.0e28 {
                 continue;
             }
+            // `Z` and the reference noise: a fresh instance with the settled parameters fed zeros
+            // from `N` to `N + R(P)`, then the noise. It does not depend on the glide, so both
+            // glides compare against one render of it (#1972).
+            let noise = signal(4 * QUANTUM, u64::from(rate));
+            let after = LOUD + rest as usize;
+            let (z, reference) = {
+                let (mut fresh, fresh_sizes) = prepare(rate, &worst_values(minimum(CROSSOVER)));
+                render(fresh.as_mut(), |_| 0.0, LOUD, rest as usize, QUANTUM);
+                let z = snapshot(fresh.as_ref(), fresh_sizes);
+                let reference = render(fresh.as_mut(), |n| noise[n], after, noise.len(), QUANTUM);
+                (z, reference)
+            };
             for glide in [false, true] {
                 let start = if glide {
                     maximum(CROSSOVER)
@@ -253,17 +265,12 @@ fn the_kernel_meets_the_stated_tail_and_rests_by_the_stated_bound() {
                     last_loud.is_none_or(|frame| (frame as u64) < tail),
                     "{rate} Hz, P = {peak:e}, glide {glide}: |y| >= P eps at N + {last_loud:?}, T = {tail}"
                 );
-                let (mut fresh, fresh_sizes) = prepare(rate, &worst_values(minimum(CROSSOVER)));
-                render(fresh.as_mut(), |_| 0.0, LOUD, rest as usize, QUANTUM);
                 assert_eq!(
                     snapshot(effect.as_ref(), sizes),
-                    snapshot(fresh.as_ref(), fresh_sizes),
+                    z,
                     "{rate} Hz, P = {peak:e}, glide {glide}: not at Z by N + {rest}"
                 );
-                let noise = signal(4 * QUANTUM, u64::from(rate));
-                let after = LOUD + rest as usize;
                 let rendered = render(effect.as_mut(), |n| noise[n], after, noise.len(), QUANTUM);
-                let reference = render(fresh.as_mut(), |n| noise[n], after, noise.len(), QUANTUM);
                 let bits = |out: &(Vec<f32>, Vec<f32>)| -> Vec<u32> {
                     out.0.iter().chain(&out.1).map(|y| y.to_bits()).collect()
                 };

@@ -99,7 +99,15 @@ fn m3_corpus_is_nan_free() {
 /// underflow threshold and a one-ulp change to a polynomial coefficient left every digest
 /// unchanged. Counting *distinct* result words is the metric that catches that: a corpus stuck in
 /// its saturation branches produces a handful of values however many points it has.
+///
+/// Release only (#1972): the count is a property of the corpus, the same bits in every profile,
+/// and the release job runs this crate's tests on every PR. The digest gate above still replays
+/// every case in debug, under overflow checks.
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a corpus property, the same in every profile; the per-PR release job runs it"
+)]
 fn m3_corpus_exercises_each_domain() {
     let mut out = vec![0u64; POINTS];
     for (case, name) in CASE_NAMES.iter().enumerate() {

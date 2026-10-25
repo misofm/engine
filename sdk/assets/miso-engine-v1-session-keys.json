@@ -47,6 +47,7 @@
       "keys": [
         ["slot", "id"],
         ["bypass", "boolean"],
+        ["link_mode", "token"],
         ["params", "array"]
       ]
     },

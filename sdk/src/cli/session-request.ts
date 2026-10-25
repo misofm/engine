@@ -21,8 +21,8 @@ import type {
  * One `enginectl session build` request.
  *
  * `console` is the session console (`{ preInsert, postInsert }` of `{ slot, effectId, quality?,
- * linkMode? }`), and each track spec carries its `console` entries (`{ slot, bypass?, parameters?,
- * channel? }`, one per slot in slot order) and its `inserts` (effect declarations). The retired
+ * linkMode? }`), and each track spec carries its `console` entries (`{ slot, bypass?, linkMode?,
+ * parameters?, channel? }`, one per slot in slot order) and its `inserts` (effect declarations). The retired
  * `simd1`, `dynamic` and `simd2` track keys are refused by name. A `submixes` entry is a bare ID,
  * the transparent strip, or `{ id, builtins?, console?, inserts?, fader?, pan? }`, a submix strip
  * with a track's strip keys. A route or sidechain source is `{ kind: "track", trackId, tap }` or
@@ -270,7 +270,7 @@ function consoleRequest(value: unknown): ConsoleSpec {
 
 function consoleEntryRequest(value: unknown, path: string): ConsoleEntrySpec {
   const raw = record(value, path);
-  keys(raw, ["slot", "bypass", "parameters", "channel"], ["slot"], path, UNKNOWN_FIELD);
+  keys(raw, ["slot", "bypass", "linkMode", "parameters", "channel"], ["slot"], path, UNKNOWN_FIELD);
   // A null-prototype record for the same reason as `effectDecl`'s: `__proto__` is a member name.
   const parameters: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   if (raw.parameters !== undefined) {
@@ -282,6 +282,7 @@ function consoleEntryRequest(value: unknown, path: string): ConsoleEntrySpec {
   return {
     slot: string(raw.slot, `${path}.slot`),
     ...(raw.bypass === undefined ? {} : { bypass: raw.bypass as boolean }),
+    ...(raw.linkMode === undefined ? {} : { linkMode: raw.linkMode as ConsoleEntrySpec["linkMode"] & string }),
     ...(raw.parameters === undefined ? {} : { parameters: parameters as never }),
     ...(raw.channel === undefined ? {} : { channel: raw.channel as ConsoleEntrySpec["channel"] & string }),
   };
