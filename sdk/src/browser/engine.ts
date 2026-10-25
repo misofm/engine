@@ -875,10 +875,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const getLiveControls = (): Promise<EngineLiveControls> => {
       // Every value edit is a SET_CONTROL transaction, so the semantic controls need no boot word.
       if (semanticLiveControls === undefined) {
-        const pending: Promise<EngineLiveControls> = createBrowserLiveControls(host, (edits) =>
-          observationSubscriptions?.beforeLiveControlSubmit(edits),
-        liveSession,
-        liveDocument);
+        const pending: Promise<EngineLiveControls> = createBrowserLiveControls(
+          host,
+          liveSession,
+          liveDocument,
+        );
         semanticLiveControls = pending;
         pending.then((controls) => { editQueue = controls.queue; }, () => undefined);
         // A probe that failed is not the answer for good: the next call asks the host again.

@@ -5936,8 +5936,6 @@ export type SidechainPortName<E extends EffectId> =
 export type EffectObservation<E extends EffectId> =
   Extract<EffectDescriptor, { readonly id: E }>["observations"][number];
 export type TapName<E extends EffectId> = EffectObservation<E>["name"];
-export type CommandKindName = Catalog["commandKinds"][number]["name"];
-export type CommandReasonName = Catalog["commandReasons"][number]["name"];
 /** The lattice declaration every parameter row carries (issue #242). */
 export type StepDeclaration = EffectParameter<EffectId>["step"];
 export type StepSizeName = keyof StepDeclaration["ladder"];

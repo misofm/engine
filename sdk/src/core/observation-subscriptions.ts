@@ -31,7 +31,6 @@ import {
   type ObservationReadResult,
   type ObservationSelection,
 } from "./observation.ts";
-import type { LaneEdit } from "./writer.ts";
 import type { ObservationEnded } from "./observation-ended.ts";
 import {
   TRACK_RESPONSE_MAXIMUM_RESULT_BYTES,
@@ -1152,17 +1151,6 @@ export class ObservationSubscriptionOwner {
     return this.#spectrumHandles.size !== 0;
   }
 
-  /**
-   * Guard the public live controls' observation records (kinds 7 and 8) while this owner has
-   * managed bindings: a record and an `Observe` edit of one tap would share its queue slot.
-   */
-  beforeLiveControlSubmit(edits: readonly LaneEdit[]): void {
-    if (!this.#mutationBusy && this.#bindings.size === 0) return;
-    if (edits.some((edit) => edit.kind === "observeSubscribe" || edit.kind === "observeUnsubscribe")) {
-      throw new MisoUsageError("manual observation edits conflict with managed subscriptions");
-    }
-  }
-
   #newHandle(
     configuration: ObservationSubscriptionConfiguration,
     entries: readonly ResolvedSelection[],
@@ -1239,8 +1227,8 @@ export class ObservationSubscriptionOwner {
   }
 
   /**
-   * A new binding's tap must read unarmed: one armed already is held by someone else (a manual
-   * record of kinds 7 and 8, or another sender's `Observe`), whose window this owner cannot share.
+   * A new binding's tap must read unarmed: one armed already is held by someone else (another
+   * sender's `Observe`), whose window this owner cannot share.
    */
   async #preflight(newEntries: readonly ResolvedSelection[], epoch: bigint): Promise<void> {
     if (newEntries.length === 0) return;

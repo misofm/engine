@@ -925,7 +925,6 @@ export type AbiStructureName = keyof AbiLayout["structures"];
 export type AbiStructure = AbiLayout["structures"][AbiStructureName];
 export type AbiField = AbiStructure["fields"][number];
 export type AbiConstantName = keyof AbiLayout["constants"];
-export type AbiCommandField = AbiLayout["commandRecord"]["fields"][number];
 /** Where a typed SDK refusal was raised. Replaces the dead two-phase "compile". */
 export type ErrorPhase = AbiLayout["errorPhases"][number];
 export type ResultCodeName = AbiLayout["constants"]["resultCodes"][number]["name"];

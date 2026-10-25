@@ -1,6 +1,5 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { BufferKindName, ExportName, ResultCodeName } from "../generated/abi.ts";
-import type { CommandReasonName } from "../generated/catalog.ts";
 import {
   StructView,
   constantValue,
@@ -1490,55 +1489,6 @@ export class WasmBoundary {
   }
 
   /**
-   * Stage `count` already-encoded command records (`ABI_LAYOUT.commandRecord.bytes` each) and submit them as one transaction.
-   *
-   * Only the observation records (kinds 7 and 8) are command records any more; a value edit is a
-   * `SET_CONTROL` transaction (`controlFrame`).
-   */
-  submitCommands(records: Uint8Array, count: number): CommandReport {
-    const handle = this.#live();
-    const recordBytes = ABI_LAYOUT.commandRecord.bytes;
-    const staging = this.#buffer("command");
-    if (staging.pointer === 0 || staging.capacity === 0) {
-      throw new MisoUsageError(
-        "this engine booted with no observation taps attached; set liveControls.observationTaps",
-      );
-    }
-    if (records.byteLength !== count * recordBytes) {
-      throw new MisoUsageError(
-        `${count} records is ${count * recordBytes} bytes, got ${records.byteLength}`,
-      );
-    }
-    if (records.byteLength > staging.capacity) {
-      throw new MisoUsageError(
-        `${count} records exceed the ${staging.capacity / recordBytes}-record staging buffer`,
-      );
-    }
-    new Uint8Array(this.#exports.memory.buffer, staging.pointer, records.byteLength).set(records);
-    const result = Number(this.#exports.miso_engine_web_v1_command_submit(handle, count));
-    return this.#readCommandReport(handle, result);
-  }
-
-  #readCommandReport(handle: number, result: number): CommandReport {
-    const report = new StructView(
-      this.#exports.memory,
-      "commandReport",
-      Number(this.#exports.miso_engine_web_v1_command_report_ptr(handle)),
-    );
-    const reason = report.u32("reason");
-    return Object.freeze({
-      ok: result === constantValue("resultCodes", "ok"),
-      result,
-      code: resultName(result, "call"),
-      reason,
-      reasonName: commandReasonName(reason),
-      rejectedIndex: report.u32("rejectedIndex"),
-      admitted: report.u32("admitted"),
-      appliedAtSample: report.u64("appliedAtSample"),
-    });
-  }
-
-  /**
    * Release the session.
    *
    * The module is re-bootable afterwards: dispose resets the staging block to its zero defaults,
@@ -1594,26 +1544,6 @@ function reportAsynchronously(error: unknown): void {
       throw error;
     });
   }
-}
-
-export interface CommandReport {
-  /** Whole-batch admission. A refusal admits nothing and names the first offending record. */
-  readonly ok: boolean;
-  readonly result: number;
-  readonly code: ResultCodeName;
-  readonly reason: number;
-  readonly reasonName: CommandReasonName;
-  readonly rejectedIndex: number;
-  readonly admitted: number;
-  readonly appliedAtSample: bigint;
-}
-
-export function commandReasonName(value: number): CommandReasonName {
-  const name = ABI_LAYOUT.constants.commandReasons.find((row) => row.value === value)?.name;
-  if (name === undefined) {
-    throw new MisoUsageError(`the engine reported an unknown command reason ${value}`);
-  }
-  return name;
 }
 
 /**
