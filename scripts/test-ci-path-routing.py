@@ -1459,7 +1459,7 @@ def main() -> int:
         workflow_mutation_fails("qualification.yml", anchor, grant)
     for line in checker.ARTIFACT_BUILD_LINES:
         workflow_mutation_fails("qualification.yml", line, "")
-    workflow_mutation_fails("qualification.yml", "      rustc: ${{ steps.build.outputs.rustc }}\n", "")
+    workflow_mutation_fails("qualification.yml", "      toolchain: ${{ steps.build.outputs.toolchain }}\n", "")
     workflow_mutation_fails(
         "qualification.yml", checker.IDENTITY_PERMISSIONS,
         "    permissions:\n      contents: read\n",
