@@ -137,6 +137,25 @@ describe("the reply decoder reads the codec's replies", () => {
     }
   });
 
+  test("an arm-tag field that is empty or not whole tags is refused", () => {
+    const good = bytesOf(FIXTURE.replies.find((row) => row.name === "applied_with_arm_tags").hex);
+    // Field 4 (`removed_arm_tags`, one tag) is the frame's last 16 bytes: its 8-byte field header,
+    // whose length is at offset 4, then the tag.
+    const field = good.length - 16;
+    assert.equal(new DataView(good.buffer).getUint16(field, true), 4);
+    const empty = Uint8Array.from(good.subarray(0, good.length - 8));
+    const view = new DataView(empty.buffer);
+    view.setUint32(20, view.getUint32(20, true) - 8, true);
+    view.setUint32(field + 4, 0, true);
+    // Four bytes of tag and four of padding: the frame keeps its length.
+    const ragged = Uint8Array.from(good);
+    new DataView(ragged.buffer).setUint32(field + 4, 4, true);
+    ragged.fill(0, field + 12);
+    for (const [name, bytes] of Object.entries({ empty, ragged })) {
+      assert.throws(() => decodeControlReply(bytes), MisoEngineError, name);
+    }
+  });
+
   test("a frame that is not a valid reply to this command is refused, never guessed at", () => {
     const good = bytesOf(FIXTURE.replies[0].hex);
     const mutated = (change) => {

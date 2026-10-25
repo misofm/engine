@@ -273,6 +273,11 @@ re-pin in #1585a.
   `SESSION_REPLACE` too. Per-edit rule (D5 made exact): an edit that keeps the binding the
   transaction began with reports its tag; every other edit reports the tap's record's tag, or,
   when the transaction leaves the tap as it found it, the initial binding's tag (`0` if unbound).
+  Root ruling (verifier finding 2): a record whose tap's target the prospective model lacks (the
+  `has_target` rule of `ObservationBindings::after` and `removed_arm_tags`) is not tagged and does
+  not count, and every edit on that tap reports `0`: no record is published for that edit. (Before,
+  `[Observe disarm X, RemoveTrackEffect X's effect]` replied with a tag the successor push skipped.)
+  `removed_arm_tags` omits a `0` tag (a binding created on a target the same transaction removes).
 - **SDK.** `decodeControlReply` returns `applied.observeArmTags` / `removedArmTags` (`bigint[]`,
   type `ControlApplied`); the SET_CONTROL fixture gains `applied_with_arm_tags`.
 - **Re-pin.** After #1369a: `COMPLETE_SCHEMA_HASH` `06bb3b6f65f39eec` -> `5b6cbc157a1f6154`; only

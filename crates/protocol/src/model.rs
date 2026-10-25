@@ -994,13 +994,20 @@ struct ObservePrepared {
 /// table needs, tagged from the host's counter in key order; the table with each armed tap's
 /// binding carrying the tag of the record in effect for it; and one reply tag per edit (`touched`
 /// and `kept` are per edit, in transaction order). `None` when the counter would overflow.
+///
+/// A tap whose target `next` (the prospective model) lacks gets no record and no tag, and its
+/// edits report `0` (#1585 D5): the commit ends its binding (`ObservationBindings::after`, the same
+/// `has_target` rule), so no record for it is ever published.
 fn tag_observe_records(
     observe: ObserveContext<'_>,
+    next: &SessionModel,
     mut bindings: controls::ObservationBindings,
     touched: &[controls::TapKey],
     kept: &[Option<u64>],
 ) -> Option<ObservePrepared> {
+    let has_target = |key: &controls::TapKey| controls::ObservationBindings::has_target(next, key);
     let mut writes = observe.bindings.writes_to(&bindings, touched);
+    writes.retain(|write| has_target(&write.key));
     let mut next = observe.next_arm_tag;
     for write in &mut writes {
         write.arm_tag = next;
@@ -1036,6 +1043,9 @@ fn tag_observe_records(
         .iter()
         .zip(kept)
         .map(|(key, kept)| {
+            if !has_target(key) {
+                return 0;
+            }
             kept.unwrap_or_else(|| {
                 record_tag(key).map_or_else(|| initial_tag(key), |write| write.arm_tag)
             })
@@ -1231,7 +1241,8 @@ impl PreparedSessionTransaction {
     /// the transaction began with (a join, or a disarm that leaves a subscriber) reports that
     /// binding's tag; every other edit reports the tag of the tap's record, or, when the
     /// transaction leaves the tap as it found it, the tag of the binding it began with (`0` when
-    /// it began unbound).
+    /// it began unbound). An edit on a tap whose target the transaction removes reports `0`: no
+    /// record is published for it.
     pub(crate) fn take_observe_arm_tags(&mut self) -> Vec<u64> {
         self.observation
             .as_mut()
@@ -1694,8 +1705,14 @@ impl SessionStore {
         }
         let observation = match observation {
             Some((bindings, touched, kept)) => Some(
-                tag_observe_records(observe, bindings, &touched, &kept)
-                    .ok_or(SessionStoreError::ArmTagsExhausted)?,
+                tag_observe_records(
+                    observe,
+                    compiled.normalized_model(),
+                    bindings,
+                    &touched,
+                    &kept,
+                )
+                .ok_or(SessionStoreError::ArmTagsExhausted)?,
             ),
             None => None,
         };

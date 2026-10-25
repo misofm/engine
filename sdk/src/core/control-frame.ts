@@ -518,7 +518,9 @@ export interface ControlApplied {
   /**
    * The arm tag of each `Observe` edit, in transaction order (#1585): the tag of the tap's
    * subscription after that edit. Empty when the transaction held no `Observe` edit. An `Observe`
-   * is in effect when a read reports its tap armed with this tag, not when the reply returns.
+   * is in effect when a read reports its tap armed with this tag, not when the reply returns. A tag
+   * of `0` means no record is published for that edit: the tap was never subscribed, or the same
+   * transaction removed its target.
    */
   readonly observeArmTags: readonly bigint[];
   /** The tags of the subscriptions the commit ended, in key order (#1585); empty when none. */

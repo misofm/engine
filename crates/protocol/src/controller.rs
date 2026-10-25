@@ -4769,6 +4769,9 @@ fn removed_arm_tags(
         .iter()
         .filter(|binding| !controls::ObservationBindings::has_target(next, &binding.key))
         .map(|binding| binding.arm_tag)
+        // A binding the transaction created on a target it also removes never had a published
+        // record (tag `0`): nothing ends for render.
+        .filter(|tag| *tag != 0)
         .collect()
 }
 

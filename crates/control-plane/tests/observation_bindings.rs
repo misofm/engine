@@ -1798,10 +1798,14 @@ fn refusals_change_nothing() {
 #[test]
 fn a_full_queue_refuses_the_disarm_with_backpressure_and_changes_nothing() {
     let mut rig = Rig::new();
+    let length = rig
+        .apply(&[observe("comp1", true, WINDOW_BLOCKS)])
+        .expect("a reply");
     assert_eq!(
-        rig.transact(&[observe("comp1", true, WINDOW_BLOCKS)]),
+        rig.reply(length),
         Reply::Applied(protocol::EditPath::Monitor)
     );
+    let armed = rig.observe_arm_tags(length);
     let revision = rig.revision();
     let bindings = rig.session.observation_bindings().clone();
     let request = rig.next_request;
@@ -1822,6 +1826,11 @@ fn a_full_queue_refuses_the_disarm_with_backpressure_and_changes_nothing() {
     assert_eq!(
         rig.reply(length),
         Reply::Applied(protocol::EditPath::Monitor)
+    );
+    assert_eq!(
+        rig.observe_arm_tags(length),
+        [armed[0] + 1],
+        "the refused attempt issued no tag"
     );
     assert_eq!(rig.queued("comp1"), 2);
     assert!(rig.session.observation_bindings().is_empty());
@@ -1965,6 +1974,32 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
         later.len() == 1 && later[0] > replied[1],
         "a later record's tag {later:?} follows {replied:?}"
     );
+    // #1585 D5 (root ruling): a disarm of a tap whose effect the same transaction removes has no
+    // record to publish, so it replies `0` and issues no tag: the next record takes the next one.
+    rig.render();
+    let length = rig
+        .apply(&[
+            observe("comp1", false, WINDOW_BLOCKS),
+            remove_insert("comp1"),
+        ])
+        .expect("a reply");
+    assert_eq!(
+        rig.reply(length),
+        Reply::Applied(protocol::EditPath::Rebuild)
+    );
+    assert_eq!(
+        rig.observe_arm_tags(length),
+        [0],
+        "no record follows the disarm"
+    );
+    let length = rig
+        .apply(&[observe("comp2", true, WINDOW_BLOCKS)])
+        .expect("a reply");
+    assert_eq!(
+        rig.observe_arm_tags(length),
+        [later[0] + 1],
+        "the disarm consumed no tag"
+    );
 }
 
 /// #1584 gate 4, supersession (#1310 with T2): a structural transaction subscribes `comp3`'s
@@ -1994,11 +2029,13 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
             second.push(observe("comp3", false, WINDOW_BLOCKS));
             second.push(observe("comp3", true, 8));
         }
+        let length = rig.apply(&second).expect("a reply");
         assert_eq!(
-            rig.transact(&second),
+            rig.reply(length),
             Reply::Applied(protocol::EditPath::Rebuild),
             "rearm {rearm}: the second rebuild supersedes the first candidate"
         );
+        let replied = rig.observe_arm_tags(length);
         assert_eq!(
             rig.session.test_pending_providers().len(),
             1,
@@ -2010,7 +2047,7 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
         );
         let adopted_at = rig.block * 128;
         rig.render_blocks(u64::from(window));
-        let published = rig
+        let reader = &rig
             .session
             .test_providers()
             .test_observations()
@@ -2019,7 +2056,9 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
                 &*handle.track_id == "comp3" && handle.address == LiveEffectAddress::insert(0)
             })
             .expect("comp3's reader")
-            .readers[0]
+            .readers[0];
+        let queued = reader.read_state().expect("a whole read").arm_tag;
+        let published = reader
             .read()
             .unwrap_or_else(|| panic!("rearm {rearm}: comp3 publishes after the adoption"));
         assert_eq!(
@@ -2027,6 +2066,15 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
             (1, adopted_at, window),
             "rearm {rearm}"
         );
+        if rearm {
+            // #1585 D4: the forward carries the transaction's record's tag, which the reply names
+            // and render publishes.
+            assert_eq!(
+                replied,
+                [queued, queued],
+                "the reply names the forwarded tag"
+            );
+        }
     }
 }
 
