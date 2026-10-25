@@ -198,8 +198,16 @@ tracks, input filters, an EQ insert and an EQ console slot:
   52,076 bytes for the nine-track fixture; capi's reference ceiling moves 212,288 -> 275,584
   (measured 250,475, plus 10 %). capi's completeness oracle adds the row as a bound;
   `a_capture_at_the_bound_stays_within_its_charge` holds a capture at the bound within it.
-  Stated limit: the row follows the newest committed model, so a request armed under the model a
-  rebuild displaced is bounded by that model, which the row charged until the rebuild.
+  Attempt 3 (root ruling): the ceiling is taken at the session's owner high-water, the most
+  owners one strip of any committed model of this session has had (`capture_owners_high_water`,
+  the `observation_slots_high_water` precedent: set at boot, raised after each rebuild's commit,
+  passed to every successor's preparation), so a job or result sized under a model a rebuild
+  displaced (deferred adoption, a full retirement queue, a render finishing an older block) stays
+  charged. `ResponseCaptureCeiling` is split into `job_bytes` and `result_bytes`; the result
+  charges two strip IDs (`ResponseReady::strip_id` and `TrackResponse::strip_id`), and
+  `compose_track_response` reserves its member table exactly. The nine-track fixture's row is
+  52,203 bytes; capi's reference row measures 248,532 against its 275,584 ceiling after the merge
+  of `main` at attempt 3, so the ceiling stays.
 - **Browser call-graph gate.** `scripts/check-web-audioworklet.sh` fails on two pins, outside this
   issue's paths: `ResponseCaptureServer::after_block` is a new trap owner with 2 sites (the
   inlined SPSC `slots[...]` index of its pop and push, the class `enter_block` is admitted for),
@@ -235,8 +243,11 @@ tracks, input filters, an EQ insert and an EQ console slot:
 - `render_step_allocates_nothing` (gate 5, the root comment): red if the render step, the
   collector's copy or the job's move allocates or frees on render, or a job is lost; a structural
   push between an arm and its render drives the stale path under the count.
-- `a_capture_at_the_bound_stays_within_its_charge`: red if the charge leaves out a part of the
-  job or of the result that persists across calls.
+- `a_capture_at_the_bound_stays_within_its_charge`: red if the job's charge leaves out a part of
+  the job (the collector's table or its three identities per owner), or the result's leaves out a
+  part of the result that persists across calls.
+- `a_capture_held_across_a_shrinking_rebuild_stays_within_its_charge`: red if the charge follows
+  the newest committed model alone, not the most owners any committed model has had.
 
 Red first, each mutant restored by `git checkout`: step before the block (follows and applied red);
 no newest-epoch record at the push (follows red); a refusal that takes a tag (follows red);
@@ -245,3 +256,6 @@ allocates its track ID (allocates red only). Attempt 2: the keep branch deleted 
 delivered at sample 128, before the adoption at 640); `Pending` checked before `UnknownStrip`
 (follows red); a stale job armed again at its old epoch (follows and allocates red); the curves
 left out of the charge (bound red: delivered 49,455 bytes against a 4,199-byte charge).
+Attempt 3: the high-water ignored (shrinking red: a held job of 5,072 bytes against a 2,177-byte
+job charge); the member table, the member identities and the collector's 3 x 127 identities left
+out (bound red: a 3,142-byte job against 1,999; shrinking red: 5,072 against 3,167).
