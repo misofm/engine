@@ -1265,17 +1265,63 @@ pub(crate) struct ProspectivePlan {
 /// the session's fixed rows once, every older held epoch's own rows, and the candidate's epoch and
 /// prepared-protocol rows). The largest-allocation check folds every held row.
 ///
+/// With [`AdmissionPeak::WithReprepare`] (a warm candidate, #1403 D2) a second peak is checked
+/// beside the first: the candidate counted twice beside the held plans that are not candidates,
+/// so the transition re-preparation a warm candidate may later need (#1358, #1397) fits beside it
+/// and the plan it displaces. Both must fit; the first refusal is returned.
+///
 /// Nothing is committed on a refusal.
 pub(crate) fn validate_replacement_peak(
     held: &[LiveEpochResources],
     prospective: ProspectivePlan,
     compiled_models: CompiledModelAdmission,
     limits: ControlLimits,
+    admission: AdmissionPeak,
+) -> Result<(), CompileFailure> {
+    replacement_peak_fits(held, prospective, 1, compiled_models, limits)?;
+    match admission {
+        AdmissionPeak::Single => Ok(()),
+        AdmissionPeak::WithReprepare { running } => {
+            let rows = held
+                .get(..running)
+                .filter(|rows| !rows.is_empty())
+                .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+            replacement_peak_fits(rows, prospective, 2, compiled_models, limits)
+        }
+    }
+}
+
+/// Which peaks the replacement admission checks (#1398 D4, #1403 D2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdmissionPeak {
+    /// The candidate once beside every held plan: an ordinary candidate.
+    Single,
+    /// That peak, and the candidate twice beside the first `running` held plans (every parked
+    /// epoch and the running plan, no candidate): a warm candidate, which a later transition may
+    /// re-prepare while it waits (the reprepare peak, #1398's former D4 row). Each copy charges
+    /// the candidate's allocated source bytes and its epoch and prepared-protocol capi rows; the
+    /// model terms are the same.
+    WithReprepare {
+        /// How many of the oldest held rows are not candidates.
+        running: usize,
+    },
+}
+
+/// One peak of [`validate_replacement_peak`]: `held` beside `copies` copies of the candidate,
+/// each charged its allocated rows (a carried ring stays its source plan's, counted once).
+fn replacement_peak_fits(
+    held: &[LiveEpochResources],
+    prospective: ProspectivePlan,
+    copies: u64,
+    compiled_models: CompiledModelAdmission,
+    limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
     let newest = held.last().ok_or_else(arithmetic)?;
-    // Each held row's `field`, summed, plus the candidate's `candidate`.
+    let times = |value: u64| value.checked_mul(copies).ok_or_else(arithmetic);
+    // Each held row's `field`, summed, plus the candidate's `candidate` per copy.
     let peak = |field: fn(&PlanResources) -> u64, candidate: u64| {
+        let candidate = times(candidate)?;
         held.iter()
             .try_fold(0_u64, |total, epoch| {
                 total.checked_add(field(&epoch.report))
@@ -1293,6 +1339,7 @@ pub(crate) fn validate_replacement_peak(
     let source_peak = |field: fn(&PlanResources) -> u64,
                        carried: fn(&CarriedSourceBytes) -> u64,
                        candidate: u64| {
+        let candidate = times(candidate)?;
         held.iter()
             .enumerate()
             .try_fold(0_u64, |total, (index, epoch)| {
@@ -1368,44 +1415,47 @@ pub(crate) fn validate_replacement_peak(
             total.checked_add(epoch.capi.epoch_retained)
         })
         .ok_or_else(arithmetic)?;
-    let capi_peak = prospective
-        .capi
-        .epoch_retained
-        .checked_add(prospective.capi.prepared_protocol_retained)
-        .and_then(|candidate| candidate.checked_add(newest.report.control_retained_bytes))
-        .and_then(|value| value.checked_add(older_epochs))
-        // #1696: the kept base this commit stores holds ramps at the candidate's model, which the
-        // newest row charges at its own.
-        .and_then(|value| {
-            value.checked_add(
-                prospective
-                    .capi
-                    .edit_ramps
-                    .saturating_sub(newest.capi.edit_ramps),
-            )
-        })
-        // #1594 R6: the spectrum service the candidate's promotion makes, when the newest plan
-        // has none.
-        .and_then(|value| {
-            value.checked_add(
-                prospective
-                    .capi
-                    .spectrum_service
-                    .saturating_sub(newest.capi.spectrum_service),
-            )
-        })
-        // #1577: the response capture is charged once per session, at its owner high-water; a
-        // capture armed under the committed model is sized by the candidate's row, which can be
-        // larger than the newest's.
-        .and_then(|value| {
-            value.checked_add(
-                prospective
-                    .capi
-                    .response_capture
-                    .saturating_sub(newest.capi.response_capture),
-            )
-        })
-        .ok_or_else(arithmetic)?;
+    let capi_peak = times(
+        prospective
+            .capi
+            .epoch_retained
+            .checked_add(prospective.capi.prepared_protocol_retained)
+            .ok_or_else(arithmetic)?,
+    )?
+    .checked_add(newest.report.control_retained_bytes)
+    .and_then(|value| value.checked_add(older_epochs))
+    // #1696: the kept base this commit stores holds ramps at the candidate's model, which the
+    // newest row charges at its own.
+    .and_then(|value| {
+        value.checked_add(
+            prospective
+                .capi
+                .edit_ramps
+                .saturating_sub(newest.capi.edit_ramps),
+        )
+    })
+    // #1594 R6: the spectrum service the candidate's promotion makes, when the newest plan
+    // has none.
+    .and_then(|value| {
+        value.checked_add(
+            prospective
+                .capi
+                .spectrum_service
+                .saturating_sub(newest.capi.spectrum_service),
+        )
+    })
+    // #1577: the response capture is charged once per session, at its owner high-water; a
+    // capture armed under the committed model is sized by the candidate's row, which can be
+    // larger than the newest's.
+    .and_then(|value| {
+        value.checked_add(
+            prospective
+                .capi
+                .response_capture
+                .saturating_sub(newest.capi.response_capture),
+        )
+    })
+    .ok_or_else(arithmetic)?;
     if capi_peak > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
     }
@@ -1929,9 +1979,27 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 /// without. It is monitor state: no revision, model or snapshot holds it.
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
+    limits: ControlLimits,
+    preparer: Box<dyn RuntimePreparer>,
+    spectrum: Option<host_core::SpectrumConfiguration>,
+) -> Result<CompiledChildren<A>, CompileFailure>
+where
+    A::Row: Send + 'static,
+{
+    compile_children_warm(document, limits, preparer, spectrum, None)
+}
+
+/// [`compile_children`] with the session's warm-successor bounds (#1403 D1): with
+/// `Some(config)`, every structural rebuild is classified with [`host_core::warm_lead`] and a
+/// latency growth that ducks no strip is published `Primed`; with `None`, every rebuild takes
+/// today's path. Every product session passes `None` until #1360 (the C ABI) and #1361 (the
+/// browser) build the production bounds; the gates set both bounds directly.
+pub(crate) fn compile_children_warm<A: ControlAdapter>(
+    document: &str,
     mut limits: ControlLimits,
     preparer: Box<dyn RuntimePreparer>,
     spectrum: Option<host_core::SpectrumConfiguration>,
+    warm: Option<host_core::WarmConfig>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
     A::Row: Send + 'static,
@@ -2218,6 +2286,8 @@ where
         output_meter,
         meters: session_meters,
         response_ready: None,
+        warm,
+        primed: None,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,
@@ -2423,7 +2493,17 @@ mod admission_tests {
         models: CompiledModelAdmission,
         limits: ControlLimits,
     ) -> Result<(), String> {
-        validate_replacement_peak(held, prospective, models, limits)
+        verdict_at(held, prospective, models, limits, AdmissionPeak::Single)
+    }
+
+    fn verdict_at(
+        held: &[LiveEpochResources],
+        prospective: ProspectivePlan,
+        models: CompiledModelAdmission,
+        limits: ControlLimits,
+        admission: AdmissionPeak,
+    ) -> Result<(), String> {
+        validate_replacement_peak(held, prospective, models, limits, admission)
             .map_err(|failure| String::from_utf8(failure.diagnostic().into_owned()).expect("UTF-8"))
     }
 
@@ -2458,22 +2538,99 @@ mod admission_tests {
         models: CompiledModelAdmission,
         expected: [u64; 9],
     ) {
+        assert_each_cap_at(
+            label,
+            held,
+            prospective,
+            models,
+            expected,
+            AdmissionPeak::Single,
+        );
+    }
+
+    fn assert_each_cap_at(
+        label: &str,
+        held: &[LiveEpochResources],
+        prospective: ProspectivePlan,
+        models: CompiledModelAdmission,
+        expected: [u64; 9],
+        admission: AdmissionPeak,
+    ) {
         for (index, (cap, code)) in CAPS.iter().enumerate().take(8) {
             assert_eq!(
-                verdict(held, prospective, models, with_cap(index, expected[index])),
+                verdict_at(
+                    held,
+                    prospective,
+                    models,
+                    with_cap(index, expected[index]),
+                    admission
+                ),
                 Ok(()),
                 "{label}, {cap}: accepted at the peak {}",
                 expected[index]
             );
             assert_eq!(
-                verdict(
+                verdict_at(
                     held,
                     prospective,
                     models,
-                    with_cap(index, expected[index] - 1)
+                    with_cap(index, expected[index] - 1),
+                    admission
                 ),
                 Err((*code).to_owned()),
                 "{label}, {cap}: refused one byte below"
+            );
+        }
+    }
+
+    /// #1403 (the reprepare peak, #1398's former gate 3): a warm candidate C beside the running
+    /// plan R is admitted against `R + 2C` -- each cap one byte below refuses with its diagnostic,
+    /// at the peak it passes -- while an ordinary candidate passes at `R + C`, where the warm one
+    /// is refused. With a withdrawn candidate A also held, both peaks are checked and the larger
+    /// decides, cap by cap: `R + 2C` while A is small, `R + A + C` once A outweighs C. Test value:
+    /// an admission that checks a warm candidate at the single peak lets a later transition
+    /// re-preparation exceed the caps (red at `R + 2C - 1`); one that drops the held-plan check
+    /// for a warm candidate admits one byte below `R + A + C`; one that counts the withdrawn
+    /// candidate in the reprepare row refuses at the peak.
+    #[test]
+    fn a_warm_candidate_is_admitted_against_its_reprepare_peak() {
+        let models =
+            compiled_model_admission_over(&[model(1 << 20, 3)], model(1 << 22, 7)).expect("models");
+        let warm = AdmissionPeak::WithReprepare { running: 1 };
+        let prospective = candidate(1_000);
+        let running = [epoch(1)];
+        assert_each_cap_at(
+            "R + 2C",
+            &running,
+            prospective,
+            models,
+            peaks(&[1], 2_000, models.retained_bytes, (0, 0)),
+            warm,
+        );
+        let single = peaks(&[1], 1_000, models.retained_bytes, (0, 0));
+        for (index, (cap, code)) in CAPS.iter().enumerate().take(8) {
+            let limits = with_cap(index, single[index]);
+            assert_eq!(
+                (
+                    verdict(&running, prospective, models, limits),
+                    verdict_at(&running, prospective, models, limits, warm),
+                ),
+                (Ok(()), Err((*code).to_owned())),
+                "R + C, {cap}: an ordinary candidate passes, a warm one is refused"
+            );
+        }
+        for withdrawn in [10, 5_000] {
+            let held = [epoch(1), epoch(withdrawn)];
+            let beside = peaks(&[1, withdrawn], 1_000, models.retained_bytes, (0, 0));
+            let reprepare = peaks(&[1], 2_000, models.retained_bytes, (0, 0));
+            let larger = core::array::from_fn(|index| beside[index].max(reprepare[index]));
+            assert_each_cap_at(
+                &format!("a withdrawn candidate of base {withdrawn}"),
+                &held,
+                prospective,
+                models,
+                larger,
+                warm,
             );
         }
     }
