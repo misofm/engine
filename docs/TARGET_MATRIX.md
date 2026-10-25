@@ -75,7 +75,10 @@ that the pinned set compiles; they are not deployment defaults.
 ## Reproducible checks
 
 The pinned `rust-toolchain.toml` installs Rust 1.99.1 with `clippy`, `rustfmt`, and the browser
-Wasm standard library. The relevant commands are:
+Wasm standard library. The shipped browser module alone builds on a second toolchain, the dated
+nightly in its `[browser-artifact]` table, with `-Zbuild-std` (decision 15, D15-10; install it with
+`rustup toolchain install "$(bash scripts/build-web-audioworklet.sh --print-toolchain)" --profile
+minimal --component rust-src`); G5's wasm guest builds on the same nightly. The relevant commands are:
 
 ```bash
 cargo check --locked --workspace --all-targets

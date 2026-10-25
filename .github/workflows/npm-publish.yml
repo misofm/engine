@@ -32,6 +32,7 @@ env:
   PACKAGE_VERSION: "0.4.3"
   EXPECTED_WORKLET_SHA256: "47e9c6991cc23b3960d7d24bff1eef4590e13e89599a024e5df788f534ac6eb7"
   RUSTUP_TOOLCHAIN: "1.99.1"
+  BROWSER_ARTIFACT_TOOLCHAIN: "nightly-2026-08-20"
   NPM_CONFIG_REGISTRY: "https://registry.npmjs.org"
 
 jobs:
@@ -138,13 +139,17 @@ jobs:
           [[ "$(npm --version)" == "11.19.0" ]]
           node --version
 
-      - name: Install Rust 1.99.1 and the Wasm target
+      - name: Install the browser artifact toolchain and Rust 1.99.1
         if: inputs.mode == 'qualify'
         run: |
           set -euo pipefail
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
           rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown
           rustup run "$RUSTUP_TOOLCHAIN" rustc --version
+          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          [[ "$channel" == "$BROWSER_ARTIFACT_TOOLCHAIN" ]] || { echo "rust-toolchain.toml's browser artifact channel $channel is not BROWSER_ARTIFACT_TOOLCHAIN $BROWSER_ARTIFACT_TOOLCHAIN" >&2; exit 1; }
+          rustup toolchain install "$channel" --profile minimal --component rust-src
+          rustup run "$channel" rustc --version
 
       - name: Install locked SDK dependencies
         working-directory: sdk
