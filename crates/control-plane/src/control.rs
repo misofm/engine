@@ -1036,6 +1036,10 @@ pub struct SessionState<A: ControlAdapter> {
     /// The most observation slots any committed plan has had; the ended-event cells and the
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
+    /// The most owners one strip of any model this session committed has had (#1577): the
+    /// response capture is charged at it, since a job or result sized under a displaced model can
+    /// outlive the rebuild that displaced it.
+    pub(crate) capture_owners_high_water: usize,
     /// The observation records the last rebuild queued again on the plan it published, taken
     /// from the candidate it superseded (#1310, root ruling B15-Q4); empty after a rebuild that
     /// superseded nothing.
@@ -2738,6 +2742,21 @@ where
         )
     }
 
+    /// Test seam (#1577): the response capture charge a successor prepared now is given, at the
+    /// committed model and the session's owner high-water (`response_capture_bytes`).
+    ///
+    /// # Panics
+    ///
+    /// If the charge cannot be represented.
+    #[cfg(feature = "test-support")]
+    pub fn test_response_capture_charge(&self) -> host_core::ResponseCaptureCeiling {
+        crate::compile::response_capture_bytes(
+            self.controller.session().compiled().normalized_model(),
+            self.capture_owners_high_water,
+        )
+        .unwrap_or_else(|_| panic!("the capture charge fits"))
+    }
+
     /// Test seam (#1577 D5): take the delivered capture result and release the capture, as #1578
     /// does when the host dequeues its event.
     #[cfg(feature = "test-support")]
@@ -3870,6 +3889,7 @@ where
             Some(base),
             &self.live_values_superseded,
             self.observation_slots_high_water,
+            self.capture_owners_high_water,
         )
         .map_err(spectrum_invariant)?;
         let PreparedRuntime {
@@ -4414,6 +4434,14 @@ where
         self.observation_slots_high_water = self
             .observation_slots_high_water
             .max(self.observation_pending.len());
+        // #1577: the committed model's owners join the capture's high-water; the successor's
+        // charge already counted them (`response_capture_bytes`), so this can only hold or rise.
+        self.capture_owners_high_water = self.capture_owners_high_water.max(
+            host_core::response_capture_owners(
+                self.controller.session().compiled().normalized_model(),
+            )
+            .unwrap_or(usize::MAX),
+        );
         if let Some((_, donor)) = superseded.as_ref() {
             // #1310 D5 step 6: A's report row leaves; `retain` shrinks in place.
             let donor_epoch = donor.epoch;

@@ -1750,11 +1750,11 @@ pub fn compose_track_response(
     if !(2..=RESPONSE_MAXIMUM_POINTS).contains(&points) {
         return Err(ResponseSnapshotQueryError::InvalidGrid);
     }
-    let members = snapshot
-        .owners
-        .iter()
-        .map(|owner| response_member(strip_id, owner))
-        .collect::<Result<Vec<_>, _>>()?;
+    // Exactly one member per owner, reserved once: #1577 charges the table at that length.
+    let mut members = Vec::with_capacity(snapshot.owners.len());
+    for owner in &snapshot.owners {
+        members.push(response_member(strip_id, owner)?);
+    }
     let mut frequencies_hz = vec![0.0_f32; points];
     let mut left = vec![0.0_f32; points];
     let mut right = vec![0.0_f32; points];

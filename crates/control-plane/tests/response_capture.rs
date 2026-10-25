@@ -494,44 +494,46 @@ fn render_step_allocates_nothing() {
     assert_eq!(delivered, 50, "every armed capture is delivered");
 }
 
-/// #1577 attempt 2 (root ruling on the charge): a capture at the session's bounds stays within
-/// `response_capture_bytes`. `eq0` has the most owners (its input filters, the console slot and
-/// the one insert), and the grid is the largest accepted one, both sides. The bytes left live
-/// after `arm` (the job) and after the `service` that delivers it (the held result, the job freed)
-/// are each within the charge.
+/// The largest accepted grid, both sides.
+const LARGEST: ResponsePreviewGrid = ResponsePreviewGrid::Logarithmic {
+    points: host_core::RESPONSE_MAXIMUM_POINTS,
+    minimum_hz: 20.0,
+    maximum_hz: 20_000.0,
+};
+
+fn live(used: bench_support::alloc::Counters) -> u64 {
+    used.requested_bytes - used.released_bytes
+}
+
+/// The charge (root rulings, attempts 2 and 3): a capture at the session's bounds stays within
+/// it, the job within `job_bytes` and the result within `result_bytes`. `eq0` has the most owners
+/// (its input filters, the console slot and the one insert), and the grid is the largest accepted
+/// one, both sides. The job is the bytes `arm` leaves live; the result the bytes left live after
+/// the `service` that delivers it, the job freed.
 ///
-/// Test value: red if the charge leaves out a part of the job or of the result that persists
-/// across calls (the curves, the members, the collector's table or its identities).
+/// Test value: red if the job's charge leaves out a part of the job (the collector's table or its
+/// three identities per owner), or the result's leaves out a part of the result that persists
+/// across calls (the curves, the member table, the member identities or a strip ID).
 #[test]
 fn a_capture_at_the_bound_stays_within_its_charge() {
     bench_support::alloc::assert_installed();
     let mut rig = Rig::new(None);
     rig.block();
     rig.session.service().expect("service");
-    let model = session::parse_session_json(&document(None).0).expect("model");
-    let charge = control_plane::response_capture_bytes(&model)
-        .expect("the charge")
-        .total_bytes;
-    let live = |used: bench_support::alloc::Counters| used.requested_bytes - used.released_bytes;
+    let charge = rig.session.test_response_capture_charge();
     let mark = bench_support::alloc::current_thread_counters();
     rig.session
-        .test_arm_track_response(
-            "eq0",
-            ResponsePreviewGrid::Logarithmic {
-                points: host_core::RESPONSE_MAXIMUM_POINTS,
-                minimum_hz: 20.0,
-                maximum_hz: 20_000.0,
-            },
-            ResponseChannels::Both,
-        )
+        .test_arm_track_response("eq0", LARGEST, ResponseChannels::Both)
         .expect("arm");
     let armed = live(bench_support::alloc::current_thread_delta_since(mark));
     rig.block();
     rig.session.service().expect("service");
     let delivered = live(bench_support::alloc::current_thread_delta_since(mark));
     assert!(
-        armed <= charge && delivered <= charge,
-        "armed {armed} and delivered {delivered} bytes, charged {charge}"
+        armed <= charge.job_bytes && delivered <= charge.result_bytes,
+        "armed {armed} of {} and delivered {delivered} of {} bytes",
+        charge.job_bytes,
+        charge.result_bytes
     );
     assert_eq!(
         rig.session
@@ -542,5 +544,64 @@ fn a_capture_at_the_bound_stays_within_its_charge() {
             .frequencies_hz
             .len(),
         host_core::RESPONSE_MAXIMUM_POINTS
+    );
+}
+
+/// The charge's high-water (root ruling, attempt 3): `eq0` grows to three inserts (five owners),
+/// a capture of it is armed, and a rebuild then removes every insert, adopted four blocks later.
+/// The job and then the result, both sized under the larger model and held after the smaller one
+/// commits, stay within the charge the session gives its successor.
+///
+/// Test value: red if the charge follows the newest committed model alone, not the most owners
+/// any committed model of the session has had.
+#[test]
+fn a_capture_held_across_a_shrinking_rebuild_stays_within_its_charge() {
+    bench_support::alloc::assert_installed();
+    let mut rig = Rig::new(None);
+    for (name, position) in [("eq-second", 1), ("eq-third", 2)] {
+        assert_eq!(
+            rig.transact(&[add_insert(name, position)]),
+            EditPath::Rebuild
+        );
+        rig.block();
+        rig.session.service().expect("service");
+    }
+    let mark = bench_support::alloc::current_thread_counters();
+    rig.session
+        .test_arm_track_response("eq0", LARGEST, ResponseChannels::Both)
+        .expect("arm");
+    let armed = live(bench_support::alloc::current_thread_delta_since(mark));
+    rig.session
+        .test_set_next_adoption(engine::realtime::PlanAdoption::NoEarlierThan(
+            rig.at + 4 * QUANTUM as u64,
+        ));
+    let path = rig.transact(&[SessionEdit::SetTrackRack {
+        track_id: id("eq0"),
+        rack_name: RackName::Inserts,
+        rack: session::Rack {
+            effects: Vec::new(),
+        },
+    }]);
+    assert_eq!(path, EditPath::Rebuild);
+    let charge = rig.session.test_response_capture_charge();
+    assert!(
+        armed <= charge.job_bytes,
+        "the held job: {armed} of {} bytes",
+        charge.job_bytes
+    );
+    let mark = bench_support::alloc::current_thread_counters();
+    rig.block();
+    rig.session.service().expect("service");
+    let delivered = armed + live(bench_support::alloc::current_thread_delta_since(mark));
+    assert!(
+        delivered <= charge.result_bytes,
+        "the held result: {delivered} of {} bytes",
+        charge.result_bytes
+    );
+    let ready = rig.session.test_take_track_response().expect("delivered");
+    assert_eq!(
+        ready.result.expect("a track response").members.len(),
+        5,
+        "captured from the plan with three inserts"
     );
 }

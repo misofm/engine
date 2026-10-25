@@ -461,7 +461,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         host_core::response_capture_retained_bytes()
             .map_err(|_| failure(ResourceFault::Arithmetic))?,
         // #1577 (root ruling, attempt 2): one armed job and one delivered result, which outlive a
-        // call, at the model's bounds (`host_core::response_capture_ceiling_bytes`).
+        // call, at the session's bounds (`response_capture_bytes`).
         response_capture.total_bytes,
     ];
     // The affine token (#1615): the response frame it stages (the measured length, never more than
@@ -535,6 +535,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     observation: ObservationResources,
     limits: ControlLimits,
     strip_heap_bytes: u64,
+    capture_owners_high_water: usize,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
@@ -575,12 +576,14 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         route_controls,
         observation,
         monitor,
-        response_capture_bytes(compiled.normalized_model())?,
+        response_capture_bytes(compiled.normalized_model(), capture_owners_high_water)?,
     )
 }
 
-/// The response capture's control-side charge under `model` (#1577):
-/// [`host_core::response_capture_ceiling_bytes`], a bound and not an allocation.
+/// The response capture's control-side charge (#1577): [`host_core::response_capture_ceiling`]
+/// at the most owners of `model` and of every model the session committed before it
+/// (`owners_high_water`, 0 at boot), since a job or result sized under a displaced model can
+/// still be held. A bound, not an allocation.
 ///
 /// Public only to the adapters' tests, under `test-support`; crate-private otherwise.
 ///
@@ -590,8 +593,10 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
 #[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
 pub fn response_capture_bytes(
     model: &session::SessionModel,
+    owners_high_water: usize,
 ) -> Result<host_core::ResponseCaptureCeiling, CompileFailure> {
-    host_core::response_capture_ceiling_bytes(model)
+    host_core::response_capture_owners(model)
+        .and_then(|owners| host_core::response_capture_ceiling(owners.max(owners_high_water)))
         .ok_or_else(|| failure(ResourceFault::Arithmetic))
 }
 
@@ -1436,6 +1441,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     successor: Option<SuccessorBase<'_>>,
     superseded: &host_core::LiveValuesSuperseded,
     observation_slots_high_water: usize,
+    capture_owners_high_water: usize,
 ) -> Result<PreparedRuntime, CompileFailure> {
     check_output_meter_caps(limits)?;
     let caps = prepare_caps(limits);
@@ -1526,6 +1532,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         )?,
         limits,
         strip_heap_bytes,
+        capture_owners_high_water,
     )?;
     // #1594 R6, #1595 R7: a plan with spectrum captures has a session spectrum service, analysis
     // and one-shot result beside it (made at boot or at the promotion that installs the first
@@ -1674,6 +1681,7 @@ where
             .map(|configuration| &configuration.preparation),
         None,
         &live_values_superseded,
+        0,
         0,
     )?;
     // #1689 D3: a boot designates no master; the app writes the strip's `master` row after boot.
@@ -1875,6 +1883,7 @@ where
         observation_wire: observation_wire(limits.maximum_control_frame_bytes)?,
         observation_armed_bytes: 0,
         observation_slots_high_water: 0,
+        capture_owners_high_water: 0,
         observation_forwarded: Vec::new(),
         send_moves: None,
         spectrum,
@@ -1894,6 +1903,11 @@ where
     session.observation_armed = armed;
     session.observation_armed_bytes = armed_bytes;
     session.observation_slots_high_water = session.observation_pending.len();
+    // #1577: the boot model's owners start the response capture's high-water.
+    session.capture_owners_high_water = host_core::response_capture_owners(
+        session.controller.session().compiled().normalized_model(),
+    )
+    .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     Ok(CompiledChildren {
         session,
         plan: PlanState::new(owner, shared, output_observer, output_gate, capture_server),

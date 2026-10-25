@@ -848,7 +848,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
             .expect("the monitor and ramp rows");
     let monitor_and_ramps = overlay_row + ramp_row;
     let response_capture =
-        control_plane::response_capture_bytes(store.compiled().normalized_model())
+        control_plane::response_capture_bytes(store.compiled().normalized_model(), 0)
             .expect("the response capture row")
             .total_bytes;
     let host_core::PreparedHost {

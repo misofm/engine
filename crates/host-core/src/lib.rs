@@ -194,7 +194,8 @@ pub use response::{
 pub use response_capture::{
     ResponseCaptureCeiling, ResponseCaptureClient, ResponseCaptureFailure, ResponseCaptureJob,
     ResponseCaptureRefusal, ResponseCaptureServer, ResponseCaptureSetupError, ResponseReady,
-    response_capture_ceiling_bytes, response_capture_channel, response_capture_retained_bytes,
+    response_capture_ceiling, response_capture_channel, response_capture_owners,
+    response_capture_retained_bytes,
 };
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
