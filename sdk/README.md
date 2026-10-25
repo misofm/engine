@@ -162,11 +162,20 @@ engine reads the watermark after each `render()`, so `applied` stays pending unt
 
 ```ts
 import { transaction } from "@misofm/engine/headless";
-import type { OfflineEngine, SessionBuilder } from "@misofm/engine/headless";
+import type { OfflineEngine, SessionBuilder, TransactionBuilder } from "@misofm/engine/headless";
 
-export async function lowerTrack(engine: OfflineEngine, base: SessionBuilder, track: string) {
+type TrackSpec = Parameters<TransactionBuilder["upsertTrack"]>[1];
+
+// `upsertTrack` writes the whole track record. Pass the track's full spec from `base` and change
+// only its fader, so that the edit stays a live fader move.
+export async function lowerTrack(
+  engine: OfflineEngine,
+  base: SessionBuilder,
+  trackId: string,
+  spec: TrackSpec,
+) {
   const edit = transaction(base)
-    .upsertTrack(track, { source: "drums", fader: { leftDb: -6, rightDb: -6 } })
+    .upsertTrack(trackId, { ...spec, fader: { ...spec.fader, leftDb: -6, rightDb: -6 } })
     .build();
   const { revision, path } = await engine.apply(edit);
   const audible = engine.applied(revision);

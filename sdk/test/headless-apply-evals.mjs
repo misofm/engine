@@ -31,8 +31,8 @@ const route = (trackId) => ({
 });
 
 /** Four tracks on two sources, each with an EQ insert, plus `extra` (id, spec) tracks. */
-function declare(extra = []) {
-  let builder = session({ id: "headless.apply", sampleRateHz: 48_000, quantumFrames: QUANTUM })
+function declare(extra = [], sampleRateHz = 48_000) {
+  let builder = session({ id: "headless.apply", sampleRateHz, quantumFrames: QUANTUM })
     .source("a", SOURCE("a"))
     .source("b", SOURCE("b"));
   const tracks = [
@@ -146,8 +146,8 @@ describe("headless session edits", () => {
     // Red if replaceSession reboots instead of editing (the sources restart at frame 0), or if the
     // successor plan restarts an unchanged node's state: the blocks then differ from a fresh engine
     // booted from the new session and fed the same PCM from frame 0. Red too if the SDK cannot read
-    // the `unchanged` path of a replace by the committed document, or if `withSession()` stays held to
-    // the booted document after a replace.
+    // the `unchanged` path of a replace by the committed document, if `withSession()` stays held to
+    // the booted document after a replace, or if a refused replace rebinds it.
     const engine = await boot(base());
     const reference = await boot(withFifth());
     try {
@@ -168,6 +168,12 @@ describe("headless session edits", () => {
       // The committed document again: nothing to commit, and the revision stays.
       assert.deepEqual(await engine.replaceSession(withFifth()), { revision: outcome.revision, path: "unchanged" });
       // D4: live controls now hold a session to the replacement, not to the booted document.
+      assert.doesNotThrow(() => engine.liveControls().withSession(withFifth()));
+      // A refused replace (a new rate needs a new engine) commits nothing and rebinds nothing.
+      const refused = declare([["t5", { source: "a", inserts: [EQ()], fader: { leftMute: true, rightMute: true } }]], 96_000);
+      await assert.rejects(engine.replaceSession(refused));
+      assert.equal(engine.revision, outcome.revision);
+      assert.throws(() => engine.liveControls().withSession(refused), MisoUsageError);
       assert.doesNotThrow(() => engine.liveControls().withSession(withFifth()));
     } finally {
       engine.dispose();

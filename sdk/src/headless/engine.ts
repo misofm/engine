@@ -160,6 +160,8 @@ export class OfflineEngine {
   #highestGeneration = 1n;
   /** The pending `applied(revision)` promises, settled from the watermark after each `render()`. */
   readonly #applied = new AppliedLedger();
+  /** Bumped by every `loadSession`, so a replace that awaited across one rebinds nothing. */
+  #sessionEpoch = 0;
 
   private constructor(
     asset: MisoEngineAsset,
@@ -500,10 +502,14 @@ export class OfflineEngine {
   async replaceSession(document: SessionDocument): Promise<EditOutcome> {
     // A copy: the digest is awaited, and a caller's array may change before the bytes are staged.
     const bytes = documentBytes(document).slice();
+    const epoch = this.#sessionEpoch;
     const outcome = await this.#protocolClient().replaceSession(bytes);
-    // The committed model is now `document`'s: live controls resolve against it.
-    this.#session = builtSession(document);
-    this.#booted = bytes;
+    // The committed model is now `document`'s: live controls resolve against it. A `loadSession`
+    // while the digest was awaited booted another session, which this replace does not describe.
+    if (epoch === this.#sessionEpoch) {
+      this.#session = builtSession(document);
+      this.#booted = bytes;
+    }
     return outcome;
   }
 
@@ -526,17 +532,20 @@ export class OfflineEngine {
    * one rejects with `MisoUsageError`, and so does every pending one at `loadSession` or `dispose`.
    */
   applied(revision: bigint): Promise<WatermarkSnapshot> {
-    if (typeof revision !== "bigint" || revision < 0n) {
-      return Promise.reject(new MisoUsageError("applied() takes a non-negative bigint revision"));
+    try {
+      if (typeof revision !== "bigint" || revision < 0n) {
+        throw new MisoUsageError("applied() takes a non-negative bigint revision");
+      }
+      // A disposed engine throws here: every error is a rejection, never a synchronous throw.
+      const committed = this.revision;
+      if (revision > committed) {
+        throw new MisoUsageError(`revision ${revision} is not committed; the committed revision is ${committed}`);
+      }
+      this.watermark();
+      return this.#applied.applied(revision);
+    } catch (error: unknown) {
+      return Promise.reject(error);
     }
-    const committed = this.revision;
-    if (revision > committed) {
-      return Promise.reject(new MisoUsageError(
-        `revision ${revision} is not committed; the committed revision is ${committed}`,
-      ));
-    }
-    this.watermark();
-    return this.#applied.applied(revision);
   }
 
   /**
@@ -676,6 +685,7 @@ export class OfflineEngine {
    * reboot verb; this is it.
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
+    this.#sessionEpoch += 1;
     this.#observationSubscriptions?.invalidate();
     // Revisions restart with the new session: a pending revision of the old one never applies.
     this.#applied.rejectAll(new MisoUsageError(

@@ -157,8 +157,14 @@ All behavioural gates run in `sdk/test/headless-apply-evals.mjs` against the rea
   `controlFrame(frame, document?)`; apply and replace run through the existing control entry, and
   `committedDocument` already exists (#1571). No `service()` method: the core's `dequeue_event` runs the
   service step first (`crates/control-plane/src/control.rs`, `dequeue_event`), and the boundary drains events
-  after every control frame and every render, so D3's service calls already happen and an explicit export
-  call would be redundant and untestable.
+  after every control frame and every render, so the core is serviced after each control frame (`apply`,
+  `replaceSession`, every `SET_CONTROL`) and each `render()`. It is not serviced after `submitCommands`,
+  `submitSource` or `seekSource`: they commit nothing and displace no plan, so a service step there would
+  reclaim nothing, and the next render's drain services first. An explicit export call would be redundant
+  and untestable.
+- **`submitCommands` commits no revision.** Its observation records are admitted to the newest plan
+  (`AudioWorkletEngineHost::submit_commands`, `admit_on_newest_plan`) and never pass the control plane's
+  commit, so it needs no `noteCommit`.
 - **D3.** The watermark is read after each `render()` and on `watermark()`/`applied()`, and settles the
   ledger. `revision` is the core's committed revision word, read on demand.
 - **D4.** `replaceSession` rebinds `liveControls()`/`withSession` to the replacement document; after an
