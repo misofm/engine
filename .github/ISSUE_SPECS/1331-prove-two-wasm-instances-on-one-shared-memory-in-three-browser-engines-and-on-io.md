@@ -223,7 +223,7 @@ memory; `single-plain` = D5; `single-iso` = the same module's single-instance re
 | Engine | D4.1 COI | D4.2 digest (two, single-iso, single-plain) | D4.3 Worker cycles: total / inside window | D4.3 glitches | D4.4 growth | D5 shared memory in worklet, non-isolated |
 |---|---|---|---|---|---|---|
 | Chromium 151.0.7922.34 | true | = native, all three | 32 / 31 | no trap, hang, render error, non-finite or render allocation; one 5-quantum skip at the 2nd `process()` call (before the window) and one 23 ms first rendered block: the same pair appears in both single legs | 2 explicit grows of 16 MiB inside the window plus allocator growth (6.5 -> 45.5 MiB); worklet saw 14 buffer changes | succeeds (`SharedArrayBuffer` undefined on page and in worklet), digest = native |
-| Firefox 153.0 | true | = native, all three | 20 / 5 (boot ~150 ms; the worklet kept rendering, 1197 blocks, until the 20th) | none of the above; 0 skipped quanta; about 44 % of calls inside the window (155/350) read 3-5 ms by `Date.now()` (1 ms resolution), 36 % over the whole run (436/1216), and 47-48 % in both single legs: the session's own cost, not the Worker's | as Chromium, 14 changes | succeeds, digest = native |
+| Firefox 153.0 | true | = native, all three | 20 / 5 (boot ~150 ms; the worklet kept rendering, 1197 blocks, until the 20th) | none of the above; 0 skipped quanta; about 44 % of calls inside the window (155/350) read 3-5 ms by `Date.now()` (1 ms resolution), 36 % over the whole run (436/1216), and 47-48 % in both single legs: not the Worker's; cause open (see D7) | as Chromium, 14 changes | succeeds, digest = native |
 | WebKit 26.5 | true | = native, all three | 57 / 56 | none; one 6 ms first rendered block (single legs: 5 ms + one 3 ms call, and 4 ms) | as Chromium, 13 changes | succeeds, digest = native |
 
 D4.3 is judged as no increase over the same engine's single-instance legs; the glitch proxy has 1 ms
@@ -319,8 +319,9 @@ block (1/h). About 43 % of the worklet's calls during the spans read over 2 ms (
 #1331a-1 saw 44 % in `two` and 47-48 % in both single legs, with one instance and no Worker (the
 memory is still shared), so the slowdown is not specific to the Worker or to the second instance.
 Every #1331a-1 and #1331a-2 browser leg that recorded a late-call share ran the atomic module on a
-shared memory, so shared memory itself is not ruled out as the cause; the diagnosis issue checks
-it. The cause is not investigated, and the slowdown can be a property of the Playwright Firefox
+shared memory, and no browser leg measured late calls on the plain module, so shared memory or
+the atomic build (`+atomics` codegen) is not ruled out as the cause; the diagnosis issue tests
+both. The cause is not investigated, and the slowdown can be a property of the Playwright Firefox
 build only. Firefox h = 1.10 gives m·h = 0.77 ≤ 1,
 which triggers #1286 D3's stop: #1286 D3 derives no browser value and its slice stops for an
 owner ruling. These
@@ -367,7 +368,7 @@ named twin.
 atomic shape as written (runner; green under the shim). The nightly keeps every committed native,
 G5 and browser pin on the plain shape, so #1334 may adopt the plain D2 command as recorded. Open:
 (1) the cause of Firefox's slow render (every mode, also with one instance and no Worker (the
-memory is still shared); shared memory itself not ruled out; maybe the Playwright build only). Owner: root routes it as an owner question and a successor diagnosis issue; until
+memory is still shared); shared memory or the atomic build is not ruled out; maybe the Playwright build only). Owner: root routes it as an owner question and a successor diagnosis issue; until
 then #1286 D3 derives no browser value and its slice stops for an owner ruling. (2) G5 for the atomic shape needs the runner change, in #1380.
 #1331b (iPhone) stays owner-gated, and D7 on iOS is part of it.
 
