@@ -503,7 +503,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     // Issue #1406b: the ring the boot resolved, which a zero override leaves to the engine. The
     // host bounds its in-flight source chunks by it, so no JavaScript holds a copy of the rule.
-    const sourceRingFrames = this.exports.miso_engine_web_v1_source_ring_frames(this.handle);
+    const sourceRingFrames = this.exports.miso_engine_web_v1_resolved_source_ring_frames(this.handle);
     if (!u32(sourceRingFrames) || sourceRingFrames === 0
         || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
     this.memoryBytes = this.memoryBuffer.byteLength;

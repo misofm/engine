@@ -142,7 +142,7 @@
 // `sourceRingFrames / quantumFrames` chunks may be unsettled per source ID at once -- there is
 // nowhere for a further chunk to go -- plus one unsettled seek per source. With a zero
 // `sourceRingFrames` the bound is the ring the engine reports it resolved at boot (the default ring
-// below; the engine's `miso_engine_web_v1_source_ring_frames`). A request over its bound
+// below; the engine's `miso_engine_web_v1_resolved_source_ring_frames`). A request over its bound
 // rejects locally with `RESULT_BACKPRESSURE` (6) before any transfer, so the caller keeps its planes
 // and can retry. Status is never refused for being in flight: see `status()`.
 //

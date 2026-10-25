@@ -318,6 +318,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
   miso_engine_web_v1_replace_document_ptr \
+  miso_engine_web_v1_resolved_source_ring_frames \
   miso_engine_web_v1_response_frame_close \
   miso_engine_web_v1_response_frame_ptr \
   miso_engine_web_v1_response_frame_reply_bytes \
@@ -331,7 +332,6 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_count \
   miso_engine_web_v1_source_frames \
   miso_engine_web_v1_source_id \
-  miso_engine_web_v1_source_ring_frames \
   miso_engine_web_v1_source_seek \
   miso_engine_web_v1_source_seek_at \
   miso_engine_web_v1_source_seek_report \

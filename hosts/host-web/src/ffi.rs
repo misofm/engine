@@ -4173,7 +4173,7 @@ pub extern "C" fn miso_engine_web_v1_source_frames(handle: u32, index: u32) -> u
 /// A zero `sourceRingFrames` boot option selects the engine's default ring; this is the one place
 /// a host reads the ring it got, so no host holds a copy of the rule.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_source_ring_frames(handle: u32) -> u32 {
+pub extern "C" fn miso_engine_web_v1_resolved_source_ring_frames(handle: u32) -> u32 {
     render_locked(|| with_host(handle, 0, AudioWorkletEngineHost::source_ring_frames))
 }
 
@@ -5318,7 +5318,7 @@ mod spectrum_ffi_tests {
     #[test]
     fn source_ring_frames_export_reports_the_resolved_ring() {
         no_live_host();
-        assert_eq!(miso_engine_web_v1_source_ring_frames(0), 0);
+        assert_eq!(miso_engine_web_v1_resolved_source_ring_frames(0), 0);
         for (override_frames, expected) in [
             (0, crate::default_source_ring_frames(48_000, 128)),
             (1_280, 1_280),
@@ -5328,9 +5328,12 @@ mod spectrum_ffi_tests {
                 .with(|slot| slot.borrow_mut().options.source_ring_frames = override_frames);
             let handle = miso_engine_web_v1_boot(document.len() as u32);
             assert_ne!(handle, 0, "boot with ring override {override_frames}");
-            assert_eq!(miso_engine_web_v1_source_ring_frames(handle), expected);
+            assert_eq!(
+                miso_engine_web_v1_resolved_source_ring_frames(handle),
+                expected
+            );
             assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
-            assert_eq!(miso_engine_web_v1_source_ring_frames(handle), 0);
+            assert_eq!(miso_engine_web_v1_resolved_source_ring_frames(handle), 0);
         }
     }
 

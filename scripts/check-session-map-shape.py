@@ -137,9 +137,7 @@ def rust_introspection_exports(text: str) -> dict[str, str]:
     The PCM feed path (`source_submit`, `source_seek`) shares the `source_` prefix and is
     deliberately excluded by *signature*: an introspection query takes the handle and at most an
     index, which is what makes it answerable without touching the render plane. A record-pointer
-    export (a name ending in `_ptr`) has a query's signature and is excluded by that name rule, as
-    is `source_ring_frames` (#1406b): it answers the boot's resolved ring, one value for every
-    source, which the worklet posts in its ready message rather than in the session map.
+    export (a name ending in `_ptr`) has a query's signature and is excluded by that name rule.
     """
     found: dict[str, str] = {}
     for name, params, width in re.findall(
@@ -147,9 +145,6 @@ def rust_introspection_exports(text: str) -> dict[str, str]:
     ):
         if name.endswith("_ptr"):
             # A record pointer (#1293 D6), not a source-map query.
-            continue
-        if name == "miso_engine_web_v1_source_ring_frames":
-            # The boot's resolved ring (#1406b), not a per-source row of the map.
             continue
         signature = [part.strip() for part in params.split(",") if part.strip()]
         if signature in (["handle: u32"], ["handle: u32", "index: u32"]):

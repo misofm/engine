@@ -3030,7 +3030,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       return 1;
     },
     miso_engine_web_v1_source_count: () => sourceRows.length,
-    miso_engine_web_v1_source_ring_frames: () => 40 * quantum,
+    miso_engine_web_v1_resolved_source_ring_frames: () => 40 * quantum,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
       if (id === undefined) return 0;
