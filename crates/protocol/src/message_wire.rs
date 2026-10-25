@@ -64,8 +64,7 @@ impl CapabilityFlags {
     /// `OBSERVATION_READ` and the `Observe` edit (#1586 D6): set exactly when `0x000f` is listed,
     /// which rides the session family.
     pub const OBSERVATION: Self = Self(1 << 15);
-    const KNOWN: u64 =
-        (((1 << 15) - 1) & !(1 << 5)) | Self::OBSERVATION.0 | Self::SPECTRUM.0;
+    const KNOWN: u64 = (((1 << 15) - 1) & !(1 << 5)) | Self::OBSERVATION.0 | Self::SPECTRUM.0;
 }
 
 /// All 23 fields of a successful `CAPABILITIES_GET` response.

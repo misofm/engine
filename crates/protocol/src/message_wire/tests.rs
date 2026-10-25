@@ -4839,7 +4839,12 @@ fn ready_row(left: Option<f32>, right: Option<f32>) -> ObservationReadRow {
 }
 
 fn encode_observation_page(codec: &ProtocolCodec, page: &ObservationReadPage<'_>) -> Vec<u8> {
-    let mut bytes = vec![0; codec.encoded_observation_read_page_len(page).expect("length")];
+    let mut bytes = vec![
+        0;
+        codec
+            .encoded_observation_read_page_len(page)
+            .expect("length")
+    ];
     codec
         .encode_observation_read_page(page, &mut bytes)
         .expect("encode");
@@ -5075,7 +5080,11 @@ fn observation_read_round_trips_and_refuses_malformed_frames_both_ways() {
             &bytes,
             Box::new(|f| set(nth(f, 2, 0), 3, &2_000_u64.to_le_bytes())),
         ),
-        ("no row", &bytes, Box::new(|f| f.retain(|field| field.id != 2))),
+        (
+            "no row",
+            &bytes,
+            Box::new(|f| f.retain(|field| field.id != 2)),
+        ),
         (
             "257 rows",
             &many,

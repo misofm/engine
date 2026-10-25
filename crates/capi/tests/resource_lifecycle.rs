@@ -711,7 +711,16 @@ impl HostHalf {
             + self.monitor_and_ramp_rows().0
             // #1325 D6: the duck overlay a kept base of the epoch holds, at its model's bounds.
             + control_plane::duck_overlay_bytes(self.store.compiled().normalized_model())
-                .expect("the duck overlay row");
+                .expect("the duck overlay row")
+            // #1586 D6: the epoch's observation index, one entry per effect producer and a copy
+            // of its two IDs.
+            + (self.effects.len() * size_of::<host_core::observation::ObservationIndexEntry>())
+                as u64
+            + self
+                .effects
+                .iter()
+                .map(|producer| (producer.track_id.len() + producer.effect_id.len()) as u64)
+                .sum::<u64>();
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =

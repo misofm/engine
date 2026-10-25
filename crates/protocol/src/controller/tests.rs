@@ -4476,7 +4476,9 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
     assert_eq!(
         ids(&mut endpoint, 1),
         (
-            vec![1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x000f, 0x0010, 0x0011, 0x0012],
+            vec![
+                1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x000f, 0x0010, 0x0011, 0x0012
+            ],
             true
         )
     );
