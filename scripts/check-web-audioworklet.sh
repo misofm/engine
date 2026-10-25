@@ -571,37 +571,17 @@ fi
 # reviewed change.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 named_disassembly=$(wasm-objdump -d "$named")
-# Issue #1381a D4: the browser renders through the plan owner, so the render closure holds
-# `RealtimePlanOwner::enter_block`, which inlines the bounded SPSC endpoints' checked slot index
-# (the retirement queue's and the mailbox's), unreachable by their cursor invariant like the one
-# `meter_poll` admits below. It is named as the one owner, and nothing the block boundary calls
-# may trap. Issue #1581 D4 admits `OutputPeakObserver::observe`, the core output meter, for the
-# same site only: it inlines the engine SPSC producer's checked `slots[local]` index when it
-# pushes a closed window, unreachable by the cursor invariant, the site `enter_block` is admitted
-# for. It is pinned to that one site (`=1`), so another checked index inlined into the fold is
-# red. No other rule of the gate is loosened.
-# #1577: the SPSC slots[...] index of after_block's one pop and one push (panic_bounds_check), the
-# same class as enter_block. Pinned to those two sites (`=2`).
-# #1588b: the render export also applies the meter level word before each block and, with the
-# protocol's meter table alone, runs the meter fold after it. Each admitted site is a
-# `panic_bounds_check` on an engine SPSC ring's `slots[cursor]`, which cannot fire: every cursor
-# is advanced only by `wrap_increment(cursor, slots_len)`, so it stays below `slots_len`, the
-# slot table's length. `MeterDelivery::poll=3`: the strip meters' `try_pop` and the output
-# meter's `try_pop` and `peek`, as on `meter_poll` below. `MeterDelivery::begin_generation=1`:
-# the output meter's `try_pop` that pops the windows of the old generation unread (a level
-# change or a restart). `MeterFrameProducer::publish_frame=2`: the frame ring's free-queue
-# `try_pop` and published-queue `try_push`. The push's refusal, unreachable because the published
-# queue has room for every frame the free queue does not hold, is forgotten rather than dropped,
-# so no free joins the closure.
+# Issue #2041: no render closure admits a trap owner. #1381a, #1577, #1581 and #1588b each pinned
+# an engine SPSC ring's or the plan mailbox's checked `slots[cursor]` / `cells[cell]` index here (a
+# `panic_bounds_check` that could not fire); `spsc.rs` now reads both without a bounds check under
+# its unsafe charter, so a checked index inlined into the render closure again is red.
+# #1588b: `MeterFrameProducer::publish_frame`'s published-queue push refusal, unreachable because
+# that queue has room for every frame the free queue does not hold, is forgotten rather than
+# dropped, so no free joins the closure.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render \
-    --trap-owner 17RealtimePlanOwner11enter_block \
-    --trap-owner 18OutputPeakObserver7observe=1 \
-    --trap-owner 21ResponseCaptureServer11after_block=2 \
-    --trap-owner 13MeterDelivery4poll=3 \
-    --trap-owner 13MeterDelivery16begin_generation=1 \
-    --trap-owner 18MeterFrameProducer13publish_frame=2 --render-thread || exit 1
+    --render-thread || exit 1
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||
@@ -611,21 +591,12 @@ printf '%s
 # gate. `miso_engine_web_v1_meter_poll` runs on the render thread after every rendered block, and
 # `miso_engine_web_v1_command_submit` runs in `port.onmessage`, which the user agent dispatches
 # between quanta on that same thread; neither may reach an allocator or drop glue.
-# Each export's own symbol is the only admitted trap owner: the bounded SPSC endpoints inline
-# their checked slot indexing into the caller, and that index is unreachable by the queue's own
-# cursor invariant. The allocation half of the gate is not relaxed at all -- an allocator, a
-# deallocator or drop glue in either closure still fails. Issue #1582 R3: the meter poll's fold is
-# the core's `MeterDelivery::poll` (never inlined into the export), so it is the poll's one admitted
-# owner, pinned at its three sites: the strip meters' `try_pop`, and the output meter's `try_pop`
-# and `peek`, each the ring's checked `slots[..]` index. The export itself may hold none. #1588b
-# admits `MeterFrameProducer::publish_frame` at its two sites, the frame ring's free-queue
-# `try_pop` and published-queue `try_push` (the same `slots[cursor]` bound, see the render export
-# above): while the protocol's meter table is on, the poll pushes each published frame there.
+# Neither closure admits a trap owner (#2041, as for the render export above). The allocation
+# half of the gate is absolute: an allocator, a deallocator or drop glue in either closure fails.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
-    --trap-owner 13MeterDelivery4poll=3 \
-    --trap-owner 18MeterFrameProducer13publish_frame=2 --render-thread || exit 1
+    --render-thread || exit 1
 # `command_submit` runs in `port.onmessage`, not in `process()`, and since #1565A it carries only
 # the observation subscribe and unsubscribe records (the value kinds are deleted; every value goes
 # through `control_command`). The engine's rule for the control path is "never allocate on the
