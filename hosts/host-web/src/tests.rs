@@ -3220,8 +3220,10 @@ fn the_counters_get_reply_counts_each_block_a_source_underran() {
 /// Issue #1699 gates 1-3: `COUNTERS_GET` reports `SOURCE_FRAMES_DISCARDED`, the accepted
 /// frames render never read because the caller's own transaction removed their source. The one
 /// source is fed three blocks and render plays one, so two (256 frames) are unread when the
-/// removal commits; the block after the commit adopts the plan without the source and the service
-/// step after it counts them. Case "empty" plays every fed block first and counts 0. Case
+/// removal commits. Until the plan without the source is adopted at `S`, after the removed
+/// strip's ramp (#1325 D3, D4), the source feeds the ramp one block a block and nothing is
+/// counted; the adoption retires the two unread blocks, and the service step after it counts
+/// them. Case "empty" plays every fed block first, feeds nothing more, and counts 0. Case
 /// "supersede" commits an unrelated rebuild first, which carries the source unchanged and waits
 /// unrendered, then a removal that supersedes it: it counts the same as the direct removal.
 ///
@@ -3338,9 +3340,44 @@ fn the_counters_get_reply_counts_the_frames_a_source_removal_discards() {
         } else {
             commit(&mut host, 2, &removal);
         }
-        assert_eq!(host.render_next(), RESULT_OK, "{case}: the adoption block");
+        let committed = host.committed_revision();
+        let mut next_block = 3_u64;
+        let mut request = 4;
+        loop {
+            assert_eq!(host.render_next(), RESULT_OK);
+            assert_eq!(host.read_watermark(), RESULT_OK);
+            if host.watermark().revision >= committed {
+                break;
+            }
+            assert!(
+                next_block < 8,
+                "{case}: the removal is adopted inside the region"
+            );
+            assert_eq!(
+                served_counter(&mut host, request, CounterId::SourceFramesDiscarded),
+                0,
+                "{case}: nothing is discarded before S"
+            );
+            request += 1;
+            if expected > 0 {
+                assert_eq!(
+                    host.submit_source(
+                        b"fixture-source",
+                        1,
+                        next_block * u64::from(QUANTUM),
+                        48_000,
+                        &planes,
+                        QUANTUM,
+                        next_block + 1 == 8,
+                    ),
+                    RESULT_OK,
+                    "{case}: the removed source feeds the ramp"
+                );
+                next_block += 1;
+            }
+        }
         assert_eq!(
-            served_counter(&mut host, 4, CounterId::SourceFramesDiscarded),
+            served_counter(&mut host, request, CounterId::SourceFramesDiscarded),
             expected,
             "{case}"
         );
@@ -7191,7 +7228,21 @@ mod structural_apply {
                 .status,
             SpectrumStreamStatus::Ready
         );
+        // The removed strip ramps out, then render adopts the successor at `S` (#1325 D3); until
+        // then a service step keeps the running plan's service.
         rig.step();
+        while rig.epoch() == 0 {
+            assert_eq!(rig.host.service(None), RESULT_OK);
+            assert_eq!(
+                rig.host
+                    .spectrum_stream_metadata()
+                    .expect("the running plan's service reads until adoption")
+                    .status,
+                SpectrumStreamStatus::Ready
+            );
+            assert!(rig.block < 64, "render adopts the successor");
+            rig.step();
+        }
         assert_eq!(rig.epoch(), 1, "render adopted the successor");
         assert_eq!(rig.host.service(None), RESULT_OK);
         assert_eq!(rig.spectrum_promotions_waiting(), 0);
@@ -7694,10 +7745,13 @@ mod structural_apply {
                 }
             ));
             if swap {
-                for _ in 0..4 {
+                // The removed strip ramps out, then the removal is adopted at `S` (#1325 D3).
+                let mut blocks = 0;
+                while rig.pending() {
                     rig.step();
+                    blocks += 1;
+                    assert!(blocks <= 64, "swap {swap}: the removal was adopted");
                 }
-                assert!(!rig.pending(), "swap {swap}: the removal was adopted");
             } else {
                 assert!(
                     rig.pending(),
@@ -8475,16 +8529,24 @@ mod structural_apply {
     /// are matched by position instead of identity (the frame would name other strips' peaks).
     #[test]
     fn a_window_closed_before_a_handle_shift_is_published_by_its_carried_strip() {
-        let model = gate_model();
+        // A zero mute ramp and no compensation line: phase 1 of the removal (#1325 D3) is the one
+        // block `q`, so a transaction before block 5 is adopted at block 6, the swap this row
+        // needs after a closed, unpolled window. The removed strip is muted throughout, so its
+        // ramp would sound nothing.
+        let mut model = gate_model();
+        model.control_smoothing = Some(session::ControlSmoothing {
+            mute_ms: 0.0,
+            ..session::CONTROL_SMOOTHING_DEFAULT
+        });
         let with_added = with_muted_track(&model, ADDED);
         let reference = fresh_windows(&model, 10);
 
         let mut rig = Rig::boot(&with_added, options(), None);
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         // Windows close after the odd blocks; polling after the even blocks leaves each window
-        // queued for one block. The transaction runs before block 6, which adopts the successor
-        // and is polled: the window that closed after block 5 is polled after the swap.
-        let before = poll_cadence(&mut rig, 6, 2, 0);
+        // queued for one block. The transaction runs before block 5, so block 6 adopts the
+        // successor and is polled: the window that closed after block 5 is polled after the swap.
+        let before = poll_cadence(&mut rig, 5, 2, 0);
         let last = before.last().expect("the boot plan published windows");
         assert_eq!(last.0.track_count, 10);
         assert_eq!(last.0.first_sample, 256, "the window of blocks 2 and 3");
@@ -8506,8 +8568,14 @@ mod structural_apply {
                 revision: base + 1
             }
         );
-        let after = poll_cadence(&mut rig, 4, 2, 0);
+        let after = poll_cadence(&mut rig, 5, 2, 0);
         assert_eq!(rig.epoch(), 1);
+        let watermark = rig.watermark();
+        assert_eq!(
+            (watermark.revision, watermark.first_sample),
+            (base + 1, 6 * u64::from(QUANTUM)),
+            "the removal is adopted at block 6, the first polled block after the closed window"
+        );
         assert_eq!(
             after.len(),
             2,
@@ -9595,8 +9663,19 @@ mod structural_apply {
             "the rendering plan keeps its master until adoption"
         );
         assert_eq!(rig.listed_masters(3), Vec::<String>::new());
-        assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
-        assert!(!rig.pending());
+        // The removed strip ramps out, then the rebuild is adopted at `S` (#1325 D3); every block
+        // before it still renders the plan with the master.
+        let mut blocks = 0;
+        while rig.pending() {
+            assert_eq!(
+                rig.host.meter_header().master_track_plus_one,
+                1,
+                "the rendering plan keeps its master until adoption"
+            );
+            assert_eq!(rig.host.render_next(), RESULT_OK, "the rebuild is adopted");
+            blocks += 1;
+            assert!(blocks <= 64, "the rebuild is adopted");
+        }
         assert_eq!(
             rig.host.meter_header().master_track_plus_one,
             0,
