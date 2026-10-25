@@ -79,6 +79,10 @@ pub struct CapiResources {
     /// row: a successor that keeps spectrum keeps the same service, so the replacement peak adds
     /// only a candidate's bytes beyond the newest plan's.
     pub spectrum_service: u64,
+    /// The response capture's armed job and delivered result (#1577), part of `active_retained`:
+    /// [`host_core::response_capture_ceiling`] at the session's owner high-water, the row
+    /// `capi_resources` charges.
+    pub response_capture: u64,
 }
 
 /// Source-ring bytes a successor plan carries from the plan it displaces (issue #1273 D5).
@@ -525,6 +529,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         largest,
         edit_ramps: monitor.edit_ramps,
         spectrum_service: 0,
+        response_capture: response_capture.total_bytes,
     })
 }
 
@@ -2029,6 +2034,7 @@ mod admission_tests {
                 largest: base,
                 edit_ramps: 0,
                 spectrum_service: 0,
+                response_capture: 0,
             },
             carried: CarriedSourceBytes::default(),
         }

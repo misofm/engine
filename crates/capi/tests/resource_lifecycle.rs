@@ -794,7 +794,8 @@ struct CompileObservation {
     monitor_and_ramps: u64,
     /// The response capture's armed job and delivered result (#1577), from
     /// `control_plane::response_capture_bytes` over the compiled model: a bound, not an
-    /// allocation, since a boot arms nothing. `response_capture.rs` in control-plane holds a
+    /// allocation, since a boot arms nothing. It passes owner high-water 0 because
+    /// `observe_compile` compiles fresh at boot; a rebuild oracle must pass the session's high-water. `response_capture.rs` in control-plane holds a
     /// capture at the bound within it.
     response_capture: u64,
 }

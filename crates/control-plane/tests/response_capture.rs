@@ -529,7 +529,10 @@ fn a_capture_at_the_bound_stays_within_its_charge() {
     let mut rig = Rig::new(None);
     rig.block();
     rig.session.service().expect("service");
-    let charge = rig.session.test_response_capture_charge();
+    let model = session::parse_session_json(&document(None).0).expect("model");
+    let charge = host_core::response_capture_owners(&model)
+        .and_then(host_core::response_capture_ceiling)
+        .expect("the charge");
     let mark = bench_support::alloc::current_thread_counters();
     rig.session
         .test_arm_track_response("eq0", LARGEST, ResponseChannels::Both)
@@ -592,7 +595,12 @@ fn a_capture_held_across_a_shrinking_rebuild_stays_within_its_charge() {
         },
     }]);
     assert_eq!(path, EditPath::Rebuild);
-    let charge = rig.session.test_response_capture_charge();
+    // The row the pending successor was charged: at five owners, not the two of its own model.
+    let charge = host_core::response_capture_ceiling(5).expect("the charge");
+    assert_eq!(
+        rig.session.test_response_capture_charge(),
+        charge.total_bytes
+    );
     assert!(
         armed <= charge.job_bytes,
         "the held job: {armed} of {} bytes",

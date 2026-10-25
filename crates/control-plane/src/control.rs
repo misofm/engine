@@ -2868,19 +2868,15 @@ where
         )
     }
 
-    /// Test seam (#1577): the response capture charge a successor prepared now is given, at the
-    /// committed model and the session's owner high-water (`response_capture_bytes`).
-    ///
-    /// # Panics
-    ///
-    /// If the charge cannot be represented.
+    /// Test seam (#1577): the response capture row the newest epoch's plan was charged
+    /// (`CapiResources::response_capture`), the pending candidate's when one is pending.
     #[cfg(feature = "test-support")]
-    pub fn test_response_capture_charge(&self) -> host_core::ResponseCaptureCeiling {
-        crate::compile::response_capture_bytes(
-            self.controller.session().compiled().normalized_model(),
-            self.capture_owners_high_water,
-        )
-        .unwrap_or_else(|_| panic!("the capture charge fits"))
+    pub fn test_response_capture_charge(&self) -> u64 {
+        self.pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .capi
+            .response_capture
     }
 
     /// Test seam (#1577 D5): take the delivered capture result and release the capture, as #1578
@@ -4673,6 +4669,9 @@ where
             host_core::response_capture_owners(
                 self.controller.session().compiled().normalized_model(),
             )
+            // Unreachable: the successor's preparation counted this model's owners before the
+            // commit (`prepared_capi_resources` -> `response_capture_bytes`) and refused the
+            // transaction on an overflow, so the count is `Some` here.
             .unwrap_or(usize::MAX),
         );
         if let Some((_, donor)) = superseded.as_ref() {
