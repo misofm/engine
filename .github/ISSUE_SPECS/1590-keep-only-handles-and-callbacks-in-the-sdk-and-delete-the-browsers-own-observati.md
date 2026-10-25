@@ -133,3 +133,38 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record (attempt 1, 2026-10-25)
+
+- **R1 (root).** One PR, three checkpoints in order: D5 (the boot word and the launch maximum),
+  #1590a (the SDK), #1590b (the export deletions); each compiles and passes its focused tests.
+- **D5 name (root Q1).** D5 predates #1689, which took the name `reserved2` for offset 56 (the
+  master word). Offset 48 is therefore `reserved3`, refused `web.options.reserved3`; offset 56
+  keeps `reserved2`. The names follow retirement order: `reserved1` #1565, `reserved2` #1689,
+  `reserved3` #1590. Offsets, `BOOT_OPTIONS_BYTES` and `ABI_VERSION` do not change (R4).
+- **D5 scope.** `MAXIMUM_OBSERVATION_TAPS` (and the layout's `maximumObservationTaps`) goes with
+  the word it bounded, in checkpoint 1, and so does the SDK's `liveControls.observationTaps`
+  option: a caller that still passes it is refused with a `MisoUsageError`, as #1689 refuses
+  `masterTrackPlusOne`. The browser asks `host_core::launch_maximum_observation_taps()` and
+  always enables the effect lanes, as the C ABI does. The master-needs-taps rule was already gone
+  (#1689).
+- **Q2 (root).** The public `readObservations()` stays and moves onto `OBSERVATION_READ` in both
+  engines in checkpoint 2, with no change in behaviour; the export path goes in checkpoint 3.
+  `effectIndex`/`trackIndex` leave the `ObservationMap` bindings (D3, C2).
+- **expected.json.** Regenerated through `direct-oracle.mjs` (print mode) on the checkpoint-1
+  module: the only change is the deleted `observationTimeline.unavailableStatus` key (its leg
+  is gone). No resource row and no ceiling moved: the identity fixture has no effect, so
+  observation capacity attaching on every boot adds nothing to its plan; every budgeted row is
+  inside its unchanged ceiling.
+
+### Deleted or rewritten tests and their holders
+
+| Deleted / rewritten | Claim now held by |
+|---|---|
+| host-web `observation_configuration_words_are_validated` (taps cap, `reserved1`) | the cap is gone with the word; `reserved1` and the new `reserved3` refusal: host-web `the_retired_boot_words_are_reserved` (renamed from `the_boot_words_at_offsets_32_and_56_are_reserved`, extended per R3) |
+| host-web `observe_and_its_read_are_served_for_a_nonzero_boot_word_and_refused_for_zero`, its zero leg | the zero-word claim no longer exists; the served half stays as `observe_and_its_read_are_served_on_every_boot` |
+| host-web `native_observation_timeline_digest_pins_the_wasm_parity`, the `observation.unavailable` leg; `direct-oracle.mjs` `unavailableStatus` | the claim no longer exists; both legs now boot alike and the bit-identity (armed vs. never armed) stays in the same test and in `direct-oracle.mjs` |
+| host-web `bridge_resource_rows_are_exact_for_the_taps_off_and_on_modes` | one mode now: `bridge_resource_rows_are_exact` |
+| sdk `observation-subscription-evals` "a session booted with no observation taps refuses a subscription observation.unavailable" | the claim no longer exists; every boot serves the edit: host-web `observe_and_its_read_are_served_on_every_boot` |
+| sdk `browser-defaults-evals` "observation attachment uses captured boot policy" | rewritten over the meter word: "the live-control word uses captured boot policy" |
+| `test-web-audioworklet.mjs` "observation taps bound" refusal | "reserved3 nonzero" refusal row |

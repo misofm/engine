@@ -240,7 +240,7 @@ test("the browser engine meters and observes a bus by its submix ID", async () =
     },
   });
   const engine = await openBrowser(host, {
-    liveControls: { meterBlocks: 1, observationTaps: 1 },
+    liveControls: { meterBlocks: 1 },
   }, ["bus"]);
   try {
     const map = await engine.observationMap();

@@ -27,7 +27,7 @@ const SESSION = JSON.parse(FIXTURE.session);
 const TRACKS = SESSION.tracks.map((track) => track.id);
 const SUBMIXES = SESSION.submixes.map((submix) => submix.id);
 // Four taps: the fixture's dynamic EQ declares one per band (#17 S2).
-const OPTIONS = { liveControls: { meterBlocks: 1, observationTaps: 4 } };
+const OPTIONS = { liveControls: { meterBlocks: 1 } };
 
 let asset;
 

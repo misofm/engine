@@ -252,8 +252,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * `requestDeadlineMs` (5,000 ms by default) and ends in the same typed `backpressure` error, so a
    * context that does not render never holds the caller. Any other refusal is thrown at once, as
    * `MisoEngineError` whose `diagnosticCode` is the core's code. A session that binds no
-   * observation tap (booted with no observation taps) refuses with `observation.unavailable`
-   * before any edit is sent; a full frame of armed taps is `observationLimit`.
+   * observation tap (no effect declares one) refuses with `observation.unavailable` before any
+   * edit is sent; a full frame of armed taps is `observationLimit`.
    */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription>;
   /**
@@ -892,7 +892,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     // A managed subscription is the core's `Observe` edit and its reads are `OBSERVATION_READ`,
     // both posted as the worklet's `control` message (#1589 D3) with the host's one request-ID
     // allocator. A reply's revision is noted for the transaction queue, as every frame beside it
-    // is. A session booted with no observation taps binds none, so its map is empty and the
+    // is. A session with no effect that declares a tap binds none, so its map is empty and the
     // subscription is refused `observation.unavailable` before any edit (#1589 R1).
     const observationFrames = async () => {
       const queue = await createBrowserControlQueue(host);

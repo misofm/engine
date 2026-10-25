@@ -145,7 +145,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "liveControlObservationTaps",
+          "name": "reserved3",
           "offset": 48,
           "type": "u64"
         },
@@ -889,7 +889,6 @@ export const ABI_LAYOUT = deepFreeze(
     "maximumSourceChannels": 2,
     "diagnosticBytes": 16384,
     "defaultMeterBlocks": 12,
-    "maximumObservationTaps": 16,
     "maximumResponsePoints": 4096,
     "defaultMaximumMemoryBytes": 536870912,
     "sourceRing": {

@@ -421,11 +421,10 @@ Observation subscriptions (`engine.subscribeObservations(...)`) send the core's 
 through the same control queue, naming each tap by stable key (the strip's ID, the console slot's or
 insert's ID, the tap's ID), which the core resolves on the newest committed plan and refuses with a
 typed `MisoEngineError` when it has no such tap. A subscription's `armed()` resolves with the sample
-at which render applied every arm, from the core's `OBSERVATION_READ` rows. They need
-`liveControls.observationTaps` at boot, passed to `createOfflineEngine` directly or under
-`policy` to `createEngine`. The cap must be at least the largest tap count of any effect in the
-session (4 for `miso.dynamic-eq`, one tap per band): a lower positive cap refuses the boot with
-`effect.observation.taps`, even with no subscription. Value edits are `SET_CONTROL` transactions and need no boot word.
+at which render applied every arm, from the core's `OBSERVATION_READ` rows. They need no boot
+option: every plan binds every declared tap of every effect, on both hosts (issue #1590), and the
+retired `liveControls.observationTaps` is refused with `MisoUsageError`. Value edits are
+`SET_CONTROL` transactions and need no boot word either.
 
 ### List every control, read their values, and set any of them
 
@@ -549,9 +548,8 @@ render has drained the first. An identical second subscribe, and a close of a bi
 handles still share, send no record and need no render. In a headless engine the refused
 operation rejects at once: render, then retry. In a browser engine it waits for a render and sends
 again, up to `requestDeadlineMs` and at most 8 resends (one render drains the tap, so more means
-another writer keeps refilling it), and then ends in typed `backpressure`. Prepare `liveControls.observationTaps` for resident effect taps: at least the largest tap
-count of any effect in the session (4 for `miso.dynamic-eq`): a lower positive cap refuses the
-boot with `effect.observation.taps`, even with no subscription.
+another writer keeps refilling it), and then ends in typed `backpressure`. Resident effect taps
+need no boot option: every plan binds every declared tap (issue #1590).
 
 Use the recorded sample spans to compare observations with the first block after a transaction. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling

@@ -126,8 +126,8 @@ const SOURCE_RING_FRAMES = (() => {
 // the proxy this measures (decision D1) for four documents: the nine-track EQ session and the three
 // sixty-four-track console documents. Each timed boot is on a fresh instance of the shipped module
 // (its linear memory grows inside the clock, as a first boot in the worklet does), with the
-// browser's boot options: no meters, observation taps, master or spectrum (and the retired
-// command-queue word, `reserved1`, zero). Only the boot export is inside the clock; the dispose that follows is
+// browser's boot options: no meters, master or spectrum (and the retired command-queue and
+// observation-taps words, `reserved1` and `reserved3`, zero). Only the boot export is inside the clock; the dispose that follows is
 // timed on its own and stated beside it, and after every timed boot the session is fed and must
 // render an audible block, outside the clock.
 //
@@ -286,11 +286,11 @@ function rebuildInstance(wasmModule) {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // The browser's boot: the retired command-queue and master words are `reserved1` and
-  // `reserved2` and must be zero, and nothing else is attached.
+  // The browser's boot: the retired command-queue, observation-taps and master words are
+  // `reserved1`, `reserved3` and `reserved2` and must be zero, and no meter word is set.
   u64("reserved1", 0n);
   u64("liveControlMeterBlocks", 0n);
-  u64("liveControlObservationTaps", 0n);
+  u64("reserved3", 0n);
   u64("reserved2", 0n);
   return e;
 }
@@ -868,11 +868,12 @@ function boot(document = mixingDocument) {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // No meters, observation or master, as the native row prepares its plan (`control: true`,
-  // nothing else); the control plane is always attached, and `reserved1`/`reserved2` must be zero.
+  // No meters or master, as the native row prepares its plan (`control: true`, nothing else);
+  // the control plane and every declared observation tap are always attached (#1590 D5), and
+  // `reserved1`/`reserved3`/`reserved2` must be zero.
   u64("reserved1", 0n);
   u64("liveControlMeterBlocks", 0n);
-  u64("liveControlObservationTaps", 0n);
+  u64("reserved3", 0n);
   u64("reserved2", 0n);
   const pointer = e.miso_engine_web_v1_document_ptr(documentBytes.byteLength);
   new Uint8Array(e.memory.buffer, pointer, documentBytes.byteLength).set(documentBytes);

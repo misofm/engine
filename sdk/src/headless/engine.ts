@@ -272,8 +272,8 @@ export class OfflineEngine {
    * close that finds the slot taken by an earlier one is refused at once with the typed, retryable
    * `backpressure` error. It never waits: this engine renders only when the caller does, so the
    * caller calls `render()` and submits again. A core refusal rejects with `MisoEngineError` whose
-   * `diagnosticCode` is the core's code. A session that binds no observation tap (booted with no
-   * observation taps) refuses with `observation.unavailable` before any edit is sent; a full frame
+   * `diagnosticCode` is the core's code. A session that binds no observation tap (no effect
+   * declares one) refuses with `observation.unavailable` before any edit is sent; a full frame
    * of armed taps is `observationLimit`. `armed()` settles at the `pump()` that reads the arm.
    */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription> {

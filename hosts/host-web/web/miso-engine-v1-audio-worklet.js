@@ -58,7 +58,7 @@ const TELEMETRY_WINDOW_BLOCKS = 128;
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "reserved2",
+  "reserved3", "reserved2",
 ];
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
@@ -691,7 +691,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       BUFFER_METER_FRAME,
     );
     this.metersAttached = init.options.liveControlMeterBlocks !== 0n;
-    this.observationAttached = init.options.liveControlObservationTaps !== 0n;
     if (this.metersAttached) {
       const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
       if (!u32(headerPointer) || headerPointer === 0) return false;
@@ -746,14 +745,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     const liveControlWords = [
       options.reserved1, options.liveControlMeterBlocks,
-      options.liveControlObservationTaps, options.reserved2,
+      options.reserved3, options.reserved2,
     ];
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // Offsets 32 and 56 are reserved and must be zero (issue #1565a D4, issue #1689 D2): a
-    // writer that still sets a retired word is refused, never ignored.
-    if (options.reserved1 !== 0n || options.reserved2 !== 0n) {
+    // Offsets 32, 48 and 56 are reserved and must be zero (issue #1565a D4, #1590 D5, #1689 D2):
+    // a writer that still sets a retired word is refused, never ignored.
+    if (options.reserved1 !== 0n || options.reserved3 !== 0n || options.reserved2 !== 0n) {
       throw new RangeError("Invalid observation boot option");
     }
     const view = new DataView(this.exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);
@@ -784,8 +783,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
       "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes", "graphMetadataBytes",
       "graphDelayBytes", "largestNamedAllocationBytes",
-      // Issue #143: carved from the report's first reserved word; zero for a session prepared
-      // with `liveControlObservationTaps === 0n`.
+      // Issue #143: carved from the report's first reserved word.
       "observationRetainedBytes",
     ];
     const resources = {

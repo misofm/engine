@@ -211,7 +211,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     maximum_memory_bytes: 0,
     reserved1: 0,
     live_control_meter_blocks: 0,
-    live_control_observation_taps: 0,
+    reserved3: 0,
     reserved2: 0,
 };
 
@@ -2216,7 +2216,6 @@ mod observation_alias_tests {
                 require_sample_rate_hz: 48_000,
                 require_quantum_frames: 128,
                 live_control_meter_blocks: 1,
-                live_control_observation_taps: 4,
                 ..WebBootOptions::explicit_defaults()
             };
             let handle = test_boot(document, options);
@@ -2309,7 +2308,6 @@ mod observation_alias_tests {
             require_sample_rate_hz: 48_000,
             require_quantum_frames: 128,
             live_control_meter_blocks: 1,
-            live_control_observation_taps: 4,
             ..WebBootOptions::explicit_defaults()
         };
         let handle = test_boot(&bytes, options);

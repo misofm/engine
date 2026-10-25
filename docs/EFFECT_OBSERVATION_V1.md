@@ -54,7 +54,9 @@ zero with no way for the caller to learn why.
 (`observation_taps == 0`) has no observation state in the compiled plan *at all*: no lane, no
 accumulator, no conflating cell. Not a disabled one — none. `attach_effect_observation` is the
 only thing that creates one and it is never called. `observation_retained_bytes` is `0`, and that
-zero is **walked over the built runtime** rather than computed from the request.
+zero is **walked over the built runtime** rather than computed from the request. Both shipped
+hosts always ask for the launch maximum (#1590 D5), so only a preparer that asks for none, such
+as a benchmark arm, reaches level 1.
 
 **Level 2 — arm/disarm.** Inside a capable plan, subscribe and unsubscribe are
 `EffectControlRecord::Observe` records on the effect's observation queue, applied at the block
@@ -185,9 +187,9 @@ contract or transport change to arrive.
 `miso.dynamic-eq` declares four taps, one per band: ids `1` to `4`, "Band N Gain Change" (N = 1
 to 4), `GainChangeDb`, `Resident`, `PerBlock`, `PeakSigned`, `PerLane`, `-24 .. 24` dB. It is the
 first declarer of the signed kind (#1918), so an upward band reads as a boost, not as a reduction
-(#17). It is also the first effect with more than one tap: the boot's per-effect cap
-(`live_control_observation_taps`, the SDK's `liveControls.observationTaps`) must be at least `4`
-for a session that holds it, because a cap below an effect's tap count refuses the boot with
-`effect.observation.taps`.
+(#17). It is also the first effect with more than one tap. Both hosts ask preparation for
+`host_core::launch_maximum_observation_taps()` taps per effect, so every declared tap is bound on
+every plan; a preparer that asked for fewer taps than an effect declares would refuse the plan with
+`effect.observation.taps` (the browser's boot word that once set the cap is reserved since #1590).
 
 No computed tap ships. The other launch effects declare no tap.

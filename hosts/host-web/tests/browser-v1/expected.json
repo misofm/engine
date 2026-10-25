@@ -125,7 +125,6 @@
       "unobservedMasterGrDb": null,
       "subscribeStatus": 0,
       "unknownTapStatus": 12,
-      "unavailableStatus": 12,
       "pcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5"
     },
     "nativeObservationPcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5",

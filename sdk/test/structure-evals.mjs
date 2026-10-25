@@ -27,7 +27,7 @@ const FIXTURE = JSON.parse(readFileSync(
   new URL("../../hosts/host-web/tests/fixtures/control-list.json", import.meta.url),
   "utf8",
 ));
-const OPTIONS = { liveControls: { meterBlocks: 1, observationTaps: 8 } };
+const OPTIONS = { liveControls: { meterBlocks: 1 } };
 const STRIP = (id) => ({ kind: "strip", id });
 
 let asset;

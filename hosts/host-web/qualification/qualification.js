@@ -17,7 +17,6 @@ const LIVE_CONTROL_METER_BLOCKS = 2n;
 // rather than a single point.
 const OBSERVATION_BLOCKS = 16;
 const OBSERVATION_FRAMES = OBSERVATION_BLOCKS * QUANTUM_FRAMES;
-const OBSERVATION_TAPS = 4n;
 const OBSERVATION_TAP_ID = 1;
 const OBSERVATION_LEVEL = 0.5;
 // Issue #1535: the real-context unsubscribe run, over its own session document
@@ -68,11 +67,7 @@ const SIMD128_PROBE = new Uint8Array([
 // is refused as `miso.error.v1` requestId 0 result 1 before a module is even fetched. The quantum
 // now comes from the context's own `renderQuantumSize`, and the ceilings are the engine's, not the
 // caller's; `sourceRingFrames` is the one word that survived the change and it keeps its meaning.
-function bootOptions(
-  sourceRingFrames,
-  liveControlMeterBlocks = 0n,
-  liveControlObservationTaps = 0n,
-) {
+function bootOptions(sourceRingFrames, liveControlMeterBlocks = 0n) {
   return {
     sourceRingFrames,
     // Zero is "no caller-imposed memory ceiling", the same word `tests/browser-v1` sends and the
@@ -81,9 +76,9 @@ function bootOptions(
     // Issue #1565: offset 32 is reserved and must be zero.
     reserved1: 0n,
     liveControlMeterBlocks,
-    // Issue #143 D3: zero is the pre-#143 shape, which is what every row but the observation
-    // ones keeps using.
-    liveControlObservationTaps,
+    // Issue #1590 D5: offset 48 was the observation-taps word; it is reserved and must be zero.
+    // Every plan binds every declared tap.
+    reserved3: 0n,
     // Issue #1689: offset 56 was the master boot word; it is reserved and must be zero. The
     // observation row designates its master with the strip's `master` row after boot.
     reserved2: 0n,
@@ -870,7 +865,6 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     options: bootOptions(
       OBSERVATION_FRAMES,
       LIVE_CONTROL_METER_BLOCKS,
-      OBSERVATION_TAPS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
@@ -1219,7 +1213,6 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     options: bootOptions(
       STALL_RING_FRAMES,
       UNSUBSCRIBE_METER_BLOCKS,
-      OBSERVATION_TAPS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
@@ -1536,7 +1529,6 @@ async function runStagingReadRun(createHost, sessionDocument) {
     options: bootOptions(
       STAGING_READ_FRAMES,
       LIVE_CONTROL_METER_BLOCKS,
-      OBSERVATION_TAPS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,

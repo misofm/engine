@@ -3791,7 +3791,6 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
             require_quantum_frames: QUANTUM,
             source_ring_frames: QUANTUM * 2,
             live_control_meter_blocks: host_web::DEFAULT_METER_BLOCKS.into(),
-            live_control_observation_taps: 1,
             ..host_web::WebBootOptions::explicit_defaults()
         },
     )

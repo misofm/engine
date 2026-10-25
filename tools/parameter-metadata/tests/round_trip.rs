@@ -432,7 +432,6 @@ fn every_metadata_observation_tap_resolves_through_an_observe_edit() {
         require_quantum_frames: 128,
         source_ring_frames: 128,
         live_control_meter_blocks: 4,
-        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");

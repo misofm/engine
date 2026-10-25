@@ -1583,7 +1583,7 @@ async function createTrackResponseLiveBrowser(stats: { workers: number; controlF
   );
   return createSdkEngine(TRACK_RESPONSE_LIVE, {
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: { observationTaps: 4 } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -1917,7 +1917,7 @@ async function runLiveEqCutsQualification(): Promise<Record<string, unknown>> {
   );
   const browser = await createSdkEngine("live-eq-cuts", {
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: { observationTaps: 4 } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -1945,7 +1945,6 @@ async function runLiveEqCutsQualification(): Promise<Record<string, unknown>> {
   )).arrayBuffer());
   const headless = await WasmBoundary.boot(asset, document, {
     sourceRingFrames: OBSERVATION_FRAMES,
-    liveControls: { observationTaps: 4 },
   });
   const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), {
     queue: new ControlTransactionQueue((frame) => headless.controlFrame(frame), {
@@ -2053,9 +2052,7 @@ async function createResidentObservationBrowser(
     document,
     ...(residentOptions.requestDeadlineMs === undefined
       ? {} : { requestDeadlineMs: residentOptions.requestDeadlineMs }),
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      observationTaps: 4,
-    } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -2414,9 +2411,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   );
   const browser = await createSdkEngine("sdk-observation", {
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      observationTaps: 4,
-    } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,

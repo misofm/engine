@@ -41,7 +41,6 @@ const POLICY = Object.freeze({
   maximumMemoryBytes: 64n << 20n,
   liveControls: Object.freeze({
     meterBlocks: 6,
-    observationTaps: 2,
   }),
 });
 
@@ -140,7 +139,6 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
       sourceRingFrames: 512,
       maximumMemoryBytes: 64n << 20n,
       liveControlMeterBlocks: 6n,
-      liveControlObservationTaps: 2n,
     };
     assert.deepEqual(
       [...POLICY_WORDS].sort(),
@@ -166,12 +164,12 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
     // red, which is A-1's actual hazard: the scratch instance would size a different plan and
     // answer a question about a session nobody is going to run.
     const divergent = bootOptionsAgree(
-      { ...POLICY, liveControls: { ...POLICY.liveControls, observationTaps: 0 } },
+      { ...POLICY, liveControls: { ...POLICY.liveControls, meterBlocks: 0 } },
       PHYSICAL,
     );
     assert.notEqual(
-      wordAt(divergent.scratch, "liveControlObservationTaps"),
-      wordAt(scratch, "liveControlObservationTaps"),
+      wordAt(divergent.scratch, "liveControlMeterBlocks"),
+      wordAt(scratch, "liveControlMeterBlocks"),
       "the mutation must actually change a shared word",
     );
   });
@@ -185,28 +183,36 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
       assert.equal(wordAt(block, "abiVersion"), ABI_LAYOUT.abiVersion);
       assert.equal(wordAt(block, "reserved0"), 0, "the reserved word must be zero or boot refuses");
       assert.equal(wordAt(block, "reserved1"), 0n, "reserved1 must be zero or boot refuses web.options.reserved1");
+      assert.equal(wordAt(block, "reserved3"), 0n, "reserved3 must be zero or boot refuses web.options.reserved3");
       assert.equal(wordAt(block, "reserved2"), 0n, "reserved2 must be zero or boot refuses web.options.reserved2");
     }
     assert.equal(bootOptionsAgree({}, PHYSICAL).maskedEqual, true);
   });
 
-  test("reserved1 and reserved2 stay zero whatever live controls the caller sets", () => {
-    // Offset 32 was the live-command queue size and offset 56 the master boot word (#1689); the
-    // host now refuses a nonzero word. Red if the writer ever puts a policy value back into either.
+  test("reserved1, reserved3 and reserved2 stay zero whatever live controls the caller sets", () => {
+    // Offset 32 was the live-command queue size, offset 48 the observation-taps word (#1590) and
+    // offset 56 the master boot word (#1689); the host now refuses a nonzero word. Red if the
+    // writer ever puts a policy value back into any of them.
     const { scratch, worklet } = bootOptionsAgree(POLICY, PHYSICAL);
-    for (const word of ["reserved1", "reserved2"]) {
+    for (const word of ["reserved1", "reserved3", "reserved2"]) {
       assert.equal(wordAt(scratch, word), 0n, `scratch ${word}`);
       assert.equal(wordAt(worklet, word), 0n, `worklet ${word}`);
     }
   });
 
-  test("a caller's retired masterTrackPlusOne is refused and points to strip.master", () => {
-    // Issue #1689, root decision: refused, never ignored. Red if an untyped caller's leftover word
-    // is silently dropped (its app would boot with no master and never be told).
+  test("a caller's retired masterTrackPlusOne or observationTaps is refused and says why", () => {
+    // Issue #1689, root decision, and #1590 D5: refused, never ignored. Red if an untyped caller's
+    // leftover word is silently dropped (its app would boot with no master and never be told, or
+    // believe it had sized the observation capacity).
     const stale = { ...POLICY, liveControls: { ...POLICY.liveControls, masterTrackPlusOne: 1 } };
     assert.throws(
       () => bootOptionsAgree(stale, PHYSICAL),
       (error) => error instanceof MisoUsageError && /strip\.master\(true\)/.test(error.message),
+    );
+    const taps = { ...POLICY, liveControls: { ...POLICY.liveControls, observationTaps: 4 } };
+    assert.throws(
+      () => bootOptionsAgree(taps, PHYSICAL),
+      (error) => error instanceof MisoUsageError && /observationTaps was retired \(issue #1590\)/.test(error.message),
     );
   });
 });

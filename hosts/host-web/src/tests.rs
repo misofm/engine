@@ -264,15 +264,10 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebBootOptions, maximum_memory_bytes), 24);
     assert_eq!(offset_of!(WebBootOptions, reserved1), 32);
     assert_eq!(offset_of!(WebBootOptions, live_control_meter_blocks), 40);
-    // Issue #143 D3/D6: the configuration's remaining two reserved words, carved exactly as #137
-    // carved the first two. Since #1689 the second is `reserved2` (it was the master boot word)
-    // and must be zero; every offset is where it was.
-    assert_eq!(
-        offset_of!(WebBootOptions, live_control_observation_taps),
-        48
-    );
+    // Issue #143 D3/D6 carved the configuration's remaining two reserved words; #1590 D5 and
+    // #1689 retired them again (`reserved3`, `reserved2`), and every offset is where it was.
+    assert_eq!(offset_of!(WebBootOptions, reserved3), 48);
     assert_eq!(offset_of!(WebBootOptions, reserved2), 56);
-    assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
     // The meter header is a new fixed structure, not a change to an existing one.
     // Issue #1209 D2 appended `submix_count` and its pad: 64 bytes became 72, nothing moved.
     // Issue #1290d1 turned the pad into `retired` and appended the frame and successor pointers:
@@ -871,15 +866,15 @@ fn extended_rates_refuse_typed_at_browser_boot() {
     }
 }
 
-/// The bridge rows are charged exactly with the boot's observation taps off and on, and the taps
-/// word adds no bridge staging (#1589c deleted the observation-command staging and its decode
-/// array: an `Observe` edit rides the control frame staging every boot has).
+/// The bridge rows are charged exactly, and observation adds no bridge staging (#1589c deleted the
+/// observation-command staging and its decode array: an `Observe` edit rides the control frame
+/// staging every boot has; since #1590 D5 every plan binds every declared tap).
 ///
 /// Test value: red if the browser keeps the retired mirrors' bytes (input-filter shadows, ramp
 /// table, VCA and strip-value mirrors, the command staging) in the bridge rows, or if the plan's
 /// observation index (#1586 D3) is not charged.
 #[test]
-fn bridge_resource_rows_are_exact_for_the_taps_off_and_on_modes() {
+fn bridge_resource_rows_are_exact() {
     // One console EQ, which declares no tap: its instance and its observation index entry are
     // charged to the bridge rows (#1586a) while the engine's observation row stays zero.
     let document = one_track_session(128);
@@ -915,218 +910,198 @@ fn bridge_resource_rows_are_exact_for_the_taps_off_and_on_modes() {
         shape.quantum_frames,
     )
     .expect("bridge projection");
-    for (name, options) in [
-        ("off", boot_options(128)),
-        (
-            "on",
-            WebBootOptions {
-                live_control_meter_blocks: 0,
-                live_control_observation_taps: 1,
-                ..boot_options(128)
-            },
-        ),
-    ] {
-        let source_ring_frames = if options.source_ring_frames == 0 {
-            default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
-        } else {
-            options.source_ring_frames
-        };
-        let caps = prepare_caps(&compiled, options, source_ring_frames, u64::MAX);
-        let live_controls =
-            live_control_request(options, shape.quantum_frames).expect("live-control request");
-        // The browser's own entry: a boot word of `0` binds the core's strip meters at the default
-        // window (#1581 D2).
-        let (engine, _) = host_core::prepare_host_runtime_with_live_lanes(
-            &compiled,
-            &caps,
-            &live_controls,
-            HostLiveLanes {
-                effects: options.live_control_observation_taps != 0,
-                ..controls::live_lanes(compiled.normalized_model()).into()
-            },
-            &host_core::LiveValuesSuperseded::default(),
-        )
-        .expect("independent engine preparation");
-        assert_eq!(
-            engine.report.control_retained_bytes, source_control_bytes,
-            "{name}: source-control table and ID arena are exact"
-        );
-        assert_eq!(
-            engine.report.session_model_bytes, session_model_bytes,
-            "{name}: compiled model retention is exact"
-        );
-        assert_eq!(engine.report.observation_retained_bytes, 0);
-        assert!(
-            engine.report.builtin_meter_payload_bytes > 0,
-            "{name}: the strip meters"
-        );
-        // The prepared plan's state inventory the browser keeps for a successor (#1272), walked
-        // from the inventory itself rather than read from the report row.
-        let inventory_bytes = engine.inventory.retained_bytes();
-        assert!(inventory_bytes > 0, "{name}: the inventory holds its rows");
-        // The control catalog the preparation builds and `ReadyOwnership.host` keeps (#1400
-        // amendment).
-        let catalog_bytes = engine.control_catalog.resources().retained_bytes;
-        assert!(catalog_bytes > 0, "{name}: the catalog holds its rows");
+    let (name, options) = ("boot", boot_options(128));
+    let source_ring_frames = if options.source_ring_frames == 0 {
+        default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
+    } else {
+        options.source_ring_frames
+    };
+    let caps = prepare_caps(&compiled, options, source_ring_frames, u64::MAX);
+    let live_controls =
+        live_control_request(options, shape.quantum_frames).expect("live-control request");
+    // The browser's own entry: a boot word of `0` binds the core's strip meters at the default
+    // window (#1581 D2).
+    let (engine, _) = host_core::prepare_host_runtime_with_live_lanes(
+        &compiled,
+        &caps,
+        &live_controls,
+        HostLiveLanes {
+            effects: true,
+            ..controls::live_lanes(compiled.normalized_model()).into()
+        },
+        &host_core::LiveValuesSuperseded::default(),
+    )
+    .expect("independent engine preparation");
+    assert_eq!(
+        engine.report.control_retained_bytes, source_control_bytes,
+        "{name}: source-control table and ID arena are exact"
+    );
+    assert_eq!(
+        engine.report.session_model_bytes, session_model_bytes,
+        "{name}: compiled model retention is exact"
+    );
+    assert_eq!(engine.report.observation_retained_bytes, 0);
+    assert!(
+        engine.report.builtin_meter_payload_bytes > 0,
+        "{name}: the strip meters"
+    );
+    // The prepared plan's state inventory the browser keeps for a successor (#1272), walked
+    // from the inventory itself rather than read from the report row.
+    let inventory_bytes = engine.inventory.retained_bytes();
+    assert!(inventory_bytes > 0, "{name}: the inventory holds its rows");
+    // The control catalog the preparation builds and `ReadyOwnership.host` keeps (#1400
+    // amendment).
+    let catalog_bytes = engine.control_catalog.resources().retained_bytes;
+    assert!(catalog_bytes > 0, "{name}: the catalog holds its rows");
 
-        let host =
-            AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
-                panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
-            });
-        let ready = host.ready.as_ref().expect("ready ownership");
-        assert_eq!(
-            ready.shape.effect_instances.len(),
-            1,
-            "{name}: one effect slot"
-        );
-        assert_eq!(
-            ready.meters.tables().meter_count(),
-            ready.shape.tracks.len() + ready.shape.submixes.len(),
-            "{name}: one meter per strip"
-        );
-        assert_eq!(&*ready.shape.rack_effects, &[[1, 0, 0]], "{name}");
-        assert_eq!(host.resources().observation_retained_bytes, 0);
+    let host =
+        AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+            panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
+        });
+    let ready = host.ready.as_ref().expect("ready ownership");
+    assert_eq!(
+        ready.shape.effect_instances.len(),
+        1,
+        "{name}: one effect slot"
+    );
+    assert_eq!(
+        ready.meters.tables().meter_count(),
+        ready.shape.tracks.len() + ready.shape.submixes.len(),
+        "{name}: one meter per strip"
+    );
+    assert_eq!(&*ready.shape.rack_effects, &[[1, 0, 0]], "{name}");
+    assert_eq!(host.resources().observation_retained_bytes, 0);
 
-        // The control plane's own retained row (its catalog, producers, protocol queues, replay
-        // cache, the plan's inventory and the superseded count) is charged once, and holds the
-        // rows an independent preparation of the same session reports.
-        let control_retained = host
-            .ready
-            .as_ref()
-            .expect("ready ownership")
-            .queries
-            .resources()
-            .control_retained_bytes;
-        assert!(
-            control_retained
-                >= source_control_bytes
-                    + inventory_bytes
-                    + catalog_bytes
-                    + host_core::LiveValuesSuperseded::retained_bytes(),
-            "{name}: the control plane's row holds the rows an independent preparation reports"
-        );
-        // The published meter frame is part of the plan's tables, charged with them (#1290d1):
-        // `3(T + S) + 3` words, held whether or not metering is on.
-        let model = compiled.normalized_model();
-        let frame_bytes = (3 * (model.tracks.len() + model.submixes.len()) as u64 + 3) * 4;
-        // The strip meters' delivery rows, bound with the boot word `0` too (#1581 D2): per strip
-        // a pending snapshot, a remaining count and a carried-from handle. The master windows are
-        // the control plane's output meter, in its retained row (#1581 D5).
-        let strips = (model.tracks.len() + model.submixes.len()) as u64;
-        let meter_delivery_bytes = strips
-            * (size_of::<Option<MeterSnapshot>>() + size_of::<usize>() + size_of::<u64>()) as u64;
-        // #1582 D2: the core meter frame's per-strip tables, a peak pair, a gain-reduction word
-        // and its presence.
-        let meter_delivery_bytes = meter_delivery_bytes
-            + strips * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>()) as u64;
-        let frame_bytes = frame_bytes + meter_delivery_bytes;
-        // The one EQ's dense instance table, its observation-strip word and the IDs it copies. Its
-        // observation index entry is the epoch's (#1589 R2), in the control plane's row.
-        let effect_ids = (model.tracks[0].id.as_str().len()
-            + model.console.pre_insert[0].slot.as_str().len()) as u64;
-        let instance_bytes =
-            (size_of::<Option<EffectInstance>>() + size_of::<u32>()) as u64 + effect_ids;
-        let frame_bytes = frame_bytes + instance_bytes;
-        let expected_bridge_metadata = projection
-            .report
-            .bridge_metadata_bytes
-            .checked_add(frame_bytes)
-            .and_then(|bytes| bytes.checked_add(control_retained))
-            .and_then(|bytes| bytes.checked_add(session_model_bytes))
-            .expect("bridge metadata arithmetic");
-        let expected_bridge_retained = projection
-            .report
-            .bridge_retained_bytes
-            .checked_add(frame_bytes)
-            .and_then(|bytes| bytes.checked_add(control_retained))
-            .and_then(|bytes| bytes.checked_add(session_model_bytes))
-            .expect("bridge retained arithmetic");
-        assert_eq!(
-            host.resources().bridge_metadata_bytes,
-            expected_bridge_metadata
-        );
-        assert_eq!(
-            host.resources().bridge_retained_bytes,
-            expected_bridge_retained
-        );
+    // The control plane's own retained row (its catalog, producers, protocol queues, replay
+    // cache, the plan's inventory and the superseded count) is charged once, and holds the
+    // rows an independent preparation of the same session reports.
+    let control_retained = host
+        .ready
+        .as_ref()
+        .expect("ready ownership")
+        .queries
+        .resources()
+        .control_retained_bytes;
+    assert!(
+        control_retained
+            >= source_control_bytes
+                + inventory_bytes
+                + catalog_bytes
+                + host_core::LiveValuesSuperseded::retained_bytes(),
+        "{name}: the control plane's row holds the rows an independent preparation reports"
+    );
+    // The published meter frame is part of the plan's tables, charged with them (#1290d1):
+    // `3(T + S) + 3` words, held whether or not metering is on.
+    let model = compiled.normalized_model();
+    let frame_bytes = (3 * (model.tracks.len() + model.submixes.len()) as u64 + 3) * 4;
+    // The strip meters' delivery rows, bound with the boot word `0` too (#1581 D2): per strip
+    // a pending snapshot, a remaining count and a carried-from handle. The master windows are
+    // the control plane's output meter, in its retained row (#1581 D5).
+    let strips = (model.tracks.len() + model.submixes.len()) as u64;
+    let meter_delivery_bytes = strips
+        * (size_of::<Option<MeterSnapshot>>() + size_of::<usize>() + size_of::<u64>()) as u64;
+    // #1582 D2: the core meter frame's per-strip tables, a peak pair, a gain-reduction word
+    // and its presence.
+    let meter_delivery_bytes = meter_delivery_bytes
+        + strips * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>()) as u64;
+    let frame_bytes = frame_bytes + meter_delivery_bytes;
+    // The one EQ's dense instance table, its observation-strip word and the IDs it copies. Its
+    // observation index entry is the epoch's (#1589 R2), in the control plane's row.
+    let effect_ids = (model.tracks[0].id.as_str().len()
+        + model.console.pre_insert[0].slot.as_str().len()) as u64;
+    let instance_bytes =
+        (size_of::<Option<EffectInstance>>() + size_of::<u32>()) as u64 + effect_ids;
+    let frame_bytes = frame_bytes + instance_bytes;
+    let expected_bridge_metadata = projection
+        .report
+        .bridge_metadata_bytes
+        .checked_add(frame_bytes)
+        .and_then(|bytes| bytes.checked_add(control_retained))
+        .and_then(|bytes| bytes.checked_add(session_model_bytes))
+        .expect("bridge metadata arithmetic");
+    let expected_bridge_retained = projection
+        .report
+        .bridge_retained_bytes
+        .checked_add(frame_bytes)
+        .and_then(|bytes| bytes.checked_add(control_retained))
+        .and_then(|bytes| bytes.checked_add(session_model_bytes))
+        .expect("bridge retained arithmetic");
+    assert_eq!(
+        host.resources().bridge_metadata_bytes,
+        expected_bridge_metadata
+    );
+    assert_eq!(
+        host.resources().bridge_retained_bytes,
+        expected_bridge_retained
+    );
 
-        // The largest assertion includes the independent projection and then folds the engine's
-        // own largest allocation into the named maximum.
-        let bridge_largest = projection
-            .report
-            .largest_named_allocation_bytes
-            .max(control_table_bytes(shape.source_count as usize).expect("table largest"))
-            .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
-            .max(compiled.resource_estimate().single_allocation_bytes);
-        assert_eq!(
-            host.resources().largest_bridge_allocation_bytes,
-            bridge_largest
-        );
-        assert_eq!(
-            host.resources().largest_named_allocation_bytes,
-            bridge_largest.max(engine.report.largest_engine_allocation_bytes)
-        );
-    }
+    // The largest assertion includes the independent projection and then folds the engine's
+    // own largest allocation into the named maximum.
+    let bridge_largest = projection
+        .report
+        .largest_named_allocation_bytes
+        .max(control_table_bytes(shape.source_count as usize).expect("table largest"))
+        .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
+        .max(compiled.resource_estimate().single_allocation_bytes);
+    assert_eq!(
+        host.resources().largest_bridge_allocation_bytes,
+        bridge_largest
+    );
+    assert_eq!(
+        host.resources().largest_named_allocation_bytes,
+        bridge_largest.max(engine.report.largest_engine_allocation_bytes)
+    );
 }
 
 #[test]
 fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     let document = one_track_session(128);
     let source_ring_frames = 1 << 20;
-    for options in [
+    let options = WebBootOptions {
+        source_ring_frames,
+        ..boot_options(128)
+    };
+    let baseline =
+        AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
+    let ready = baseline.ready.as_ref().expect("ready ownership");
+    let dense_effect_table_bytes = size_of_val(ready.shape.effect_instances.as_ref()) as u64;
+    assert_eq!(
+        ready.shape.effect_instances.len(),
+        1,
+        "one-track fixture has one effect"
+    );
+    assert!(
+        baseline.resources().bridge_retained_bytes >= dense_effect_table_bytes,
+        "the bridge rows charge the dense effect table"
+    );
+    let exact = exact_retained_report_total(baseline.resources());
+    drop(baseline);
+    AudioWorkletEngineHost::boot(
+        document.as_bytes(),
         WebBootOptions {
-            source_ring_frames,
-            ..boot_options(128)
+            maximum_memory_bytes: exact,
+            ..options
         },
+    )
+    .expect("exact aggregate budget must accept");
+    let failure = AudioWorkletEngineHost::boot(
+        document.as_bytes(),
         WebBootOptions {
-            source_ring_frames,
-            live_control_meter_blocks: 0,
-            live_control_observation_taps: 1,
-            ..boot_options(128)
+            maximum_memory_bytes: exact - 1,
+            ..options
         },
-    ] {
-        let baseline =
-            AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
-        let ready = baseline.ready.as_ref().expect("ready ownership");
-        let dense_effect_table_bytes = size_of_val(ready.shape.effect_instances.as_ref()) as u64;
-        assert_eq!(
-            ready.shape.effect_instances.len(),
-            1,
-            "one-track fixture has one effect"
-        );
-        assert!(
-            baseline.resources().bridge_retained_bytes >= dense_effect_table_bytes,
-            "the bridge rows charge the dense effect table in both modes"
-        );
-        let exact = exact_retained_report_total(baseline.resources());
-        drop(baseline);
-        AudioWorkletEngineHost::boot(
-            document.as_bytes(),
-            WebBootOptions {
-                maximum_memory_bytes: exact,
-                ..options
-            },
+    )
+    .err()
+    .expect("one byte below exact aggregate must refuse");
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+    assert_eq!(
+        failure.diagnostic(),
+        format!(
+            "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
+            exact - 1
         )
-        .expect("exact aggregate budget must accept");
-        let failure = AudioWorkletEngineHost::boot(
-            document.as_bytes(),
-            WebBootOptions {
-                maximum_memory_bytes: exact - 1,
-                ..options
-            },
-        )
-        .err()
-        .expect("one byte below exact aggregate must refuse");
-        assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
-        assert_eq!(
-            failure.diagnostic(),
-            format!(
-                "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
-                exact - 1
-            )
-            .as_bytes()
-        );
-    }
+        .as_bytes()
+    );
 }
 
 #[test]
@@ -2510,15 +2485,16 @@ fn observed_compressor_insert() -> session::Effect {
         .clone()
 }
 
-/// #1565A gate 2, #1689 gate 2: the boot words at offsets 32 and 56 are reserved. A nonzero
-/// value is refused `web.options.reserved1` (the word was the command-queue size until the
-/// browser's own value commands were deleted) or `web.options.reserved2` (the word was the master
-/// boot word until the `master` row replaced it).
+/// #1565A gate 2, #1689 gate 2, #1590 gate 4: the boot words at offsets 32, 48 and 56 are
+/// reserved. A nonzero value is refused `web.options.reserved1` (the word was the command-queue
+/// size until the browser's own value commands were deleted), `web.options.reserved3` (the word
+/// was the observation-taps word until every plan bound every declared tap) or
+/// `web.options.reserved2` (the word was the master boot word until the `master` row replaced it).
 ///
 /// Test value: red if a deleted word still changes behaviour (a writer that still sets it is
 /// accepted and ignored).
 #[test]
-fn the_boot_words_at_offsets_32_and_56_are_reserved() {
+fn the_retired_boot_words_are_reserved() {
     const QUANTUM: u32 = 128;
     let document = include_str!("../tests/browser-v1/command-session.json");
     let refusal = |options: WebBootOptions| {
@@ -2536,8 +2512,14 @@ fn the_boot_words_at_offsets_32_and_56_are_reserved() {
         ),
         (
             WebBootOptions {
+                reserved3: 4,
+                ..boot_options(QUANTUM)
+            },
+            &b"web.options.reserved3\t$\n"[..],
+        ),
+        (
+            WebBootOptions {
                 reserved2: 1,
-                live_control_observation_taps: 4,
                 ..boot_options(QUANTUM)
             },
             &b"web.options.reserved2\t$\n"[..],
@@ -3424,7 +3406,6 @@ fn observation_host(
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         live_control_meter_blocks: meter_blocks,
-        live_control_observation_taps: 4,
         ..boot_options(quantum)
     };
     let mut host =
@@ -3463,7 +3444,6 @@ fn same_track_observation_host_metered(quantum: u32, meter_blocks: u64) -> Audio
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         live_control_meter_blocks: meter_blocks,
-        live_control_observation_taps: 4,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("two-effect observation boot")
@@ -3545,7 +3525,6 @@ fn bus_effect_host(quantum: u32) -> AudioWorkletEngineHost {
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         live_control_meter_blocks: 2,
-        live_control_observation_taps: 1,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
@@ -4761,39 +4740,16 @@ fn a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window() {
     drive(&mut host, &mut block, rearmed, 8);
 }
 
-/// The observation words are validated at configuration time: more taps than the cap and the
-/// reserved word are refused.
-#[test]
-fn observation_configuration_words_are_validated() {
-    let document = one_track_session(128);
-    for options in [
-        WebBootOptions {
-            live_control_observation_taps: u64::from(MAXIMUM_OBSERVATION_TAPS) + 1,
-            ..boot_options(128)
-        },
-        WebBootOptions {
-            reserved1: 1,
-            ..boot_options(128)
-        },
-    ] {
-        let failure = AudioWorkletEngineHost::boot(document.as_bytes(), options)
-            .err()
-            .expect("invalid live-control options");
-        assert_eq!(failure.result(), RESULT_REFUSED_OPTIONS);
-    }
-    AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::live_control_defaults())
-        .expect("zero observation words remain valid");
-}
-
 /// Issue #143 E1/E12, native leg: the observation timeline's determinism digest.
 ///
 /// The native twin of `direct-oracle.mjs`'s `runObservationTimeline`. Both legs read this exact
 /// fixture file, run this exact twelve-block timeline, and their digests are asserted equal to one
 /// pin -- so a change to the audio makes them move together, which is the point.
 ///
-/// Two runs, one timeline: with observation capacity and every declared tap armed, and with
-/// `live_control_observation_taps == 0`. They must render **identical bits**. That is E1's leg (b)
-/// against leg (d) on the browser ABI, and it is checked here rather than asserted about.
+/// Two runs, one timeline: with every declared tap armed and the master designated, and with no
+/// frame sent at all. Since #1590 D5 both plans bind every declared tap. They must render
+/// **identical bits**. That is E1 on the browser ABI, and it is checked here rather than asserted
+/// about.
 ///
 /// Red mutation: fold the observation read into the compressor's inner loop -> the two digests
 /// diverge and both stop matching the pin.
@@ -4808,17 +4764,17 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
 
     let document = include_str!("../tests/browser-v1/observation-session.json");
     type Reply = (u16, Vec<String>);
-    let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, Reply, Reply) {
+    type Run = (String, f32, Option<f32>, f32, u64, Option<(Reply, Reply)>);
+    let run = |observe: bool| -> Run {
         let options = WebBootOptions {
             source_ring_frames: QUANTUM,
             live_control_meter_blocks: u64::from(WINDOW_BLOCKS),
-            live_control_observation_taps: taps,
             ..boot_options(QUANTUM)
         };
         let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
-        // The oracle designates the master by the committed `master.bin` frame when it asked for
-        // taps (#1689 D6); this leg sends the same frame.
-        if taps != 0 {
+        // The oracle designates the master by the committed `master.bin` frame in its observing
+        // leg (#1689 D6); this leg sends the same frame.
+        if observe {
             let frame = master_designation_frame("track", 1, 1);
             host.control_request_mut(frame.len() as u32)
                 .expect("the control staging")[..frame.len()]
@@ -4826,10 +4782,9 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
             assert_eq!(host.control_command(frame.len() as u32), RESULT_OK);
         }
         assert_eq!(host.live_control_tracks().len(), 1);
-        assert_eq!(
-            host.resources().observation_retained_bytes == 0,
-            taps == 0,
-            "the retained row follows the request, and is walked over the built runtime"
+        assert!(
+            host.resources().observation_retained_bytes > 0,
+            "every plan binds the compressor's declared tap (#1590 D5)"
         );
         assert_eq!(host.set_meter_lease(true), RESULT_OK);
 
@@ -4843,8 +4798,11 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
             assert_eq!(host.control_command(frame.len() as u32), RESULT_OK);
             reply_status(host.control_response())
         };
-        let unknown_tap = send(&mut host, &unknown_tap.1);
-        let subscribed = send(&mut host, &arm.1);
+        let replies = observe.then(|| {
+            let unknown_tap = send(&mut host, &unknown_tap.1);
+            let subscribed = send(&mut host, &arm.1);
+            (unknown_tap, subscribed)
+        });
 
         let plane = vec![0.5_f32; QUANTUM as usize];
         let mut blocks: Vec<Vec<f32>> = Vec::new();
@@ -4875,7 +4833,9 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
         let master =
             (host.meter_header().master_gr_present == 1).then(|| host.meter_frame()[base + tracks]);
         let window_samples = host.meter_header().end_sample - host.meter_header().first_sample;
-        let _ = send(&mut host, &disarm.1);
+        if observe {
+            let _ = send(&mut host, &disarm.1);
+        }
         for block in 8..BLOCKS {
             step(&mut host, block);
         }
@@ -4892,19 +4852,12 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
             }
         }
         let hex = engine::hex_lower(&digest.finalize());
-        (
-            hex,
-            armed,
-            master,
-            disarmed,
-            window_samples,
-            unknown_tap,
-            subscribed,
-        )
+        (hex, armed, master, disarmed, window_samples, replies)
     };
 
-    let (observed, armed, master, disarmed, window, unknown_tap, subscribed) = run(4);
-    let (unobserved, quiet, quiet_master, _, _, _, unbound) = run(0);
+    let (observed, armed, master, disarmed, window, replies) = run(true);
+    let (unobserved, quiet, quiet_master, _, _, _) = run(false);
+    let (unknown_tap, subscribed) = replies.expect("the observing leg's replies");
 
     assert_eq!(
         observed, unobserved,
@@ -4927,15 +4880,8 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
         )
     );
     assert_eq!(subscribed, (protocol::StatusCode::Ok as u16, Vec::new()));
-    assert_eq!(quiet, 0.0, "no capacity means no reading");
+    assert_eq!(quiet, 0.0, "no arm means no reading");
     assert_eq!(quiet_master, None, "and no master reading either");
-    assert_eq!(
-        unbound,
-        (
-            protocol::StatusCode::ValidationFailed as u16,
-            vec!["observation.unavailable".to_owned()]
-        )
-    );
 
     let expected: serde_pin::Pin =
         serde_pin::read(include_str!("../tests/browser-v1/expected.json"));
@@ -5568,7 +5514,6 @@ fn strip_options(meter_blocks: u64) -> WebBootOptions {
     WebBootOptions {
         source_ring_frames: STRIP_QUANTUM * 4,
         live_control_meter_blocks: meter_blocks,
-        live_control_observation_taps: 1,
         ..boot_options(STRIP_QUANTUM)
     }
 }
@@ -6138,7 +6083,6 @@ fn web_runtime_preparer_attaches_the_companions_on_every_branch() {
     let document = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
     let options = WebBootOptions {
         source_ring_frames: 512,
-        live_control_observation_taps: 4,
         ..WebBootOptions::live_control_defaults()
     };
     let options = WebBootOptions {
@@ -6422,7 +6366,6 @@ mod structural_apply {
     fn options() -> WebBootOptions {
         WebBootOptions {
             live_control_meter_blocks: 2,
-            live_control_observation_taps: 4,
             ..WebBootOptions::explicit_defaults()
         }
     }
@@ -8075,85 +8018,59 @@ mod structural_apply {
         assert!(after > before, "the windows continue ({before} to {after})");
     }
 
-    /// #1589 R1: a boot word that binds no observation queue (`0`) leaves the browser serving
-    /// neither the `Observe` edit nor its read: the edit is refused `observation.unavailable`
-    /// before anything commits, and `CAPABILITIES_GET` lists neither `OBSERVATION_READ` nor bit 15.
-    /// Any nonzero word serves both: preparation refuses an effect with more taps than the word,
-    /// so a word of `1` on a session whose one observed effect has one tap binds its queue.
+    /// #1590 D5: every boot binds every declared tap, as the C ABI does, so the browser serves
+    /// the `Observe` edit and lists `OBSERVATION_READ` and capability bit 15 with no boot word.
     ///
-    /// Test value: red if the session serves the edit on plans with no queue for the tap (an
-    /// acknowledged subscription no render ever applies, or an internal fault in place of the
-    /// typed refusal), if it advertises a read that could answer only `observation.unbound`, or
-    /// if it withholds both from a nonzero word below the widest launch effect's tap count.
+    /// Test value: red if a boot binds no queue for a declared tap (the edit refused
+    /// `observation.unavailable`) or if the session withholds the read from its capabilities.
     #[test]
-    fn observe_and_its_read_are_served_for_a_nonzero_boot_word_and_refused_for_zero() {
+    fn observe_and_its_read_are_served_on_every_boot() {
         let model = observed_model();
-        for taps in [0, 1] {
-            let mut rig = Rig::boot(
-                &model,
-                WebBootOptions {
-                    live_control_observation_taps: taps,
-                    ..options()
-                },
-            );
-            let base = rig.host.committed_revision();
-            let arm = SessionEdit::Observe {
-                strip_id: model.tracks[0].id.clone(),
-                section: controls::TapSection::Inserts(StableId::parse("comp").expect("insert ID")),
-                tap_id: 1,
-                armed: true,
-                window_blocks: 1,
-            };
-            match (taps, rig.apply(&[arm], 1)) {
-                (0, Outcome::Refused(_, codes)) => {
-                    assert_eq!(codes, ["observation.unavailable"]);
-                    assert_eq!(rig.host.committed_revision(), base, "nothing committed");
-                }
-                (0, Outcome::Applied { .. }) => {
-                    panic!("an Observe edit on a plan with no observation queue is accepted")
-                }
-                (_, Outcome::Applied { .. }) => {}
-                (_, Outcome::Refused(_, codes)) => {
-                    panic!("word {taps}: the Observe edit is refused {codes:?}")
-                }
-            }
-
-            let codec = ProtocolCodec::default();
-            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
-            let length = codec
-                .encode_command_frame_into(
-                    &TypedCommandFrame {
-                        request_id: RequestId::new(2).expect("nonzero request"),
-                        expected_revision: ExpectedRevision::Any,
-                        payload: CommandPayload::CapabilitiesGet,
-                    },
-                    &mut bytes,
-                )
-                .expect("a capabilities frame");
-            let (result, reply) = rig.entry(&bytes[..length]);
-            assert_eq!(result, RESULT_OK);
-            let mut fields = [0_u16; 256];
-            let DecodedTypedResponseFrame::Success {
-                payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
-                ..
-            } = codec
-                .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
-                .expect("a capabilities reply")
-            else {
-                panic!("a capabilities reply")
-            };
-            let served = taps != 0;
-            assert_eq!(
-                capabilities.supported_commands.contains(&0x000f),
-                served,
-                "word {taps}: OBSERVATION_READ listed"
-            );
-            assert_eq!(
-                capabilities.flags.0 & protocol::CapabilityFlags::OBSERVATION.0 != 0,
-                served,
-                "word {taps}: capability bit 15"
-            );
+        let mut rig = Rig::boot(&model, options());
+        let arm = SessionEdit::Observe {
+            strip_id: model.tracks[0].id.clone(),
+            section: controls::TapSection::Inserts(StableId::parse("comp").expect("insert ID")),
+            tap_id: 1,
+            armed: true,
+            window_blocks: 1,
+        };
+        match rig.apply(&[arm], 1) {
+            Outcome::Applied { .. } => {}
+            Outcome::Refused(_, codes) => panic!("the Observe edit is refused {codes:?}"),
         }
+
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(2).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::CapabilitiesGet,
+                },
+                &mut bytes,
+            )
+            .expect("a capabilities frame");
+        let (result, reply) = rig.entry(&bytes[..length]);
+        assert_eq!(result, RESULT_OK);
+        let mut fields = [0_u16; 256];
+        let DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
+            ..
+        } = codec
+            .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+            .expect("a capabilities reply")
+        else {
+            panic!("a capabilities reply")
+        };
+        assert!(
+            capabilities.supported_commands.contains(&0x000f),
+            "OBSERVATION_READ listed"
+        );
+        assert!(
+            capabilities.flags.0 & protocol::CapabilityFlags::OBSERVATION.0 != 0,
+            "capability bit 15"
+        );
     }
 
     fn meter_loss(rig: &Rig) -> u64 {
@@ -8519,7 +8436,6 @@ mod structural_apply {
         let options = WebBootOptions {
             source_ring_frames: QUANTUM * 4,
             live_control_meter_blocks: WINDOW,
-            live_control_observation_taps: 4,
             ..boot_options(QUANTUM)
         };
         let mut rig = Rig::boot(&empty, options);
@@ -8871,7 +8787,6 @@ mod structural_apply {
         let options = WebBootOptions {
             source_ring_frames: QUANTUM * 4,
             live_control_meter_blocks: 2,
-            live_control_observation_taps: 4,
             ..boot_options(QUANTUM)
         };
         let mut rig = Rig::boot(&model, options);

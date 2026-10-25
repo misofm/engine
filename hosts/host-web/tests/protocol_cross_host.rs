@@ -567,16 +567,9 @@ impl Legs {
         model.sources[0].frames = 16_384;
         let document = canonical_session_json(&model).expect("canonical session");
         let browser = Browser {
-            host: AudioWorkletEngineHost::boot(
-                document.as_bytes(),
-                WebBootOptions {
-                    live_control_observation_taps: u64::from(
-                        host_core::launch_maximum_observation_taps(),
-                    ),
-                    ..options()
-                },
-            )
-            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic()))),
+            host: AudioWorkletEngineHost::boot(document.as_bytes(), options()).unwrap_or_else(
+                |failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic())),
+            ),
         };
         let limits = browser
             .host
@@ -1254,7 +1247,6 @@ fn both_hosts_read_one_observation_tap_alike() {
             document.as_bytes(),
             WebBootOptions {
                 live_control_meter_blocks: u64::from(WINDOW_BLOCKS),
-                live_control_observation_taps: 4,
                 ..options()
             },
         )

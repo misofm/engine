@@ -115,12 +115,12 @@ export interface BootOptions {
   /** The stream hop of the boot's spectrum taps, sent in the boot's `SPECTRUM_CONFIGURE`. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   /**
-   * The two live-control words. Absent attaches no live controls at all. The master strip is not a
-   * boot option (issue #1689): designate it after boot with `strip.master(enabled)`.
+   * The live-control meter word. The master strip is not a boot option (issue #1689): designate
+   * it after boot with `strip.master(enabled)`. Observation capacity is not one either (#1590
+   * D5): every plan binds every declared tap of every effect.
    */
   readonly liveControls?: {
     readonly meterBlocks?: number;
-    readonly observationTaps?: number;
   };
   /**
    * One spectrum tap for the session, set by the boot's one `SPECTRUM_CONFIGURE` before the first
@@ -143,7 +143,6 @@ export const POLICY_WORDS = Object.freeze([
   "sourceRingFrames",
   "maximumMemoryBytes",
   "liveControlMeterBlocks",
-  "liveControlObservationTaps",
 ] as const);
 
 /** The two words whose values are defined by the boot's role rather than shared. */
@@ -171,6 +170,12 @@ export function writeBootOptions(
       "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
     );
   }
+  // Issue #1590 D5: the retired observation-taps word is refused the same way.
+  if ((options.liveControls as { observationTaps?: unknown } | undefined)?.observationTaps !== undefined) {
+    throw new MisoUsageError(
+      "liveControls.observationTaps was retired (issue #1590): every plan binds every declared observation tap",
+    );
+  }
   const bytes = structBytes("bootOptions");
   if (pointer === 0) {
     throw new MisoUsageError("the engine returned a null boot options pointer");
@@ -193,7 +198,7 @@ export function writeBootOptions(
   u64("maximumMemoryBytes", options.maximumMemoryBytes ?? 0n);
   u64("reserved1", 0n);
   u64("liveControlMeterBlocks", BigInt(options.liveControls?.meterBlocks ?? 0));
-  u64("liveControlObservationTaps", BigInt(options.liveControls?.observationTaps ?? 0));
+  u64("reserved3", 0n);
   u64("reserved2", 0n);
 
   // A detached copy, so a caller can compare two boots' option blocks after the fact without

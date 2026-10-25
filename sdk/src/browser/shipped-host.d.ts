@@ -23,8 +23,8 @@
 // `Observe` edit in a `SESSION_TRANSACTION_APPLY`, and read with an `OBSERVATION_READ` frame: the
 // edit names its tap by the stable key the engine's `OBSERVATION_ENDED` event uses (the strip's ID,
 // the insert's or the console slot's ID, and the effect-local tap ID), and the reply carries its
-// arm tag. A host booted with `liveControlObservationTaps === 0n` binds no observation queue, and
-// the engine refuses an `Observe` edit there with `observation.unavailable`.
+// arm tag. Every plan binds a queue for every declared tap of every effect (issue 1590), as on the
+// C ABI.
 //
 // ## What metering costs
 //
@@ -56,9 +56,7 @@
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
 // `subscribable`, a `computed` tap is an analysis pass that does not ship in V1 and is refused by
-// the engine's `Observe` edit. A session that never asks for observation
-// (`liveControlObservationTaps === 0n`) allocates none of it and renders byte-identical audio;
-// inside a session that does, an unarmed tap costs one predicted branch per driven effect per
+// the engine's `Observe` edit. An unarmed tap costs one predicted branch per driven effect per
 // block.
 //
 // ## What a frame costs the render callback
@@ -352,13 +350,11 @@ export interface MisoWebBootOptions {
   /// Meter window in render blocks, or `0n` for the engine's default window with no delivery
   /// (issues 137, 1581).
   liveControlMeterBlocks: bigint;
-  /// Maximum declared observation taps to bind per effect, or `0n` for none at all (issue 143).
-  ///
-  /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
-  /// in the compiled plan, `observationRetainedBytes` is `0n`, and an `Observe` edit is refused
-  /// `observation.unavailable`. A nonzero value binds a queue for every declared tap, so the
-  /// session serves the `Observe` edit and `OBSERVATION_READ` (issue 1589).
-  liveControlObservationTaps: bigint;
+  /// Reserved (offset 48 of the boot options): must be exactly `0n`. It was the observation-taps
+  /// word until issue 1590 retired it: every plan binds a queue for every declared tap of every
+  /// effect, as on the C ABI, so the session always serves the `Observe` edit and
+  /// `OBSERVATION_READ`.
+  reserved3: bigint;
   /// Reserved (offset 56 of the boot options): must be exactly `0n`. It was the master boot word
   /// until issue 1689 retired it: the app designates the master with the strip's `master` monitor
   /// row (`SET_CONTROL`), as on every host, and the core holds it by strip ID. With no tap on the
@@ -392,8 +388,8 @@ export interface MisoWebResourceReport {
   readonly largestNamedAllocationBytes: bigint;
   /// Engine-owned bytes the plan's observation lanes and conflating cells retain (issue 143).
   ///
-  /// Exactly `0n` for a session prepared with `liveControlObservationTaps === 0n`, and that zero is
-  /// walked over the built runtime rather than computed from the configuration.
+  /// Walked over the built runtime rather than computed from the configuration; `0n` for a session
+  /// with no effect that declares a tap.
   readonly observationRetainedBytes: bigint;
 }
 

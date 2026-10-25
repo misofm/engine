@@ -160,7 +160,6 @@ fn an_empty_session_boots_and_grows_by_a_structural_transaction() {
                 require_sample_rate_hz: rate,
                 require_quantum_frames: QUANTUM_FRAMES,
                 live_control_meter_blocks: 1,
-                live_control_observation_taps: 4,
                 ..WebBootOptions::explicit_defaults()
             };
             let document = canonical_session_json(&model).expect("canonical session");

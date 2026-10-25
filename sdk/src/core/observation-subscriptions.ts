@@ -465,8 +465,8 @@ function normalizedRequest(
 }
 
 function mapSelection(map: ObservationMap, selection: ObservationSelection, windowBlocks: number): ResolvedSelection {
-  // A session whose plans bind no observation tap (#1589 R1: booted with no observation taps) has
-  // an empty map; its refusal is the core's `observation.unavailable`, before any edit is sent.
+  // A session whose plans bind no observation tap (no effect declares one; #1590 D5) has an
+  // empty map; its refusal is the core's `observation.unavailable`, before any edit is sent.
   if (map.bindings.length === 0) {
     throw new MisoEngineError("this session binds no observation tap", {
       phase: "output",

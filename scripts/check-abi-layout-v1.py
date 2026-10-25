@@ -178,14 +178,14 @@ STRUCTURES = {
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
     "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
-    "liveControlMeterBlocks", "liveControlObservationTaps", "reserved2",
+    "liveControlMeterBlocks", "reserved3", "reserved2",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
     "sourceRingFrames", "maximumMemoryBytes",
-    "liveControlMeterBlocks", "liveControlObservationTaps",
+    "liveControlMeterBlocks",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 
@@ -348,7 +348,7 @@ def validate(document: object) -> None:
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
         "maximumDocumentBytes", "maximumSourceChannels", "diagnosticBytes", "defaultMeterBlocks",
-        "maximumObservationTaps", "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
+        "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
         "observationChannels", "observationStatuses", "racks",
     }, f"constants keys are exact: {sorted(constants)}")
 
@@ -382,7 +382,6 @@ def validate(document: object) -> None:
         ("maximumSourceChannels", 2),
         ("diagnosticBytes", 1 << 14),
         ("defaultMeterBlocks", 12),
-        ("maximumObservationTaps", 16),
         ("maximumResponsePoints", 4096),
         ("defaultMaximumMemoryBytes", 512 << 20),
     ):

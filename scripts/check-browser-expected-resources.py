@@ -20,7 +20,7 @@ resource row belongs to exactly one class:
 * `EXACT_ROWS` are contract facts, not layout: the boot options and status structures, the staged
   document, the configured diagnostic, ID and PCM staging capacities, the two largest-allocation
   rows (24,576 bytes since #1580 deleted the 1 MiB live-response capture), the four rows this identity fixture drives to zero (no delay, no scalar effect, no
-  observation capacity), and the compile's shape and backend. They must equal `expected.json`.
+  tap-declaring effect), and the compile's shape and backend. They must equal `expected.json`.
 * `CEILING_ROWS` are retained production memory: `size_of` sums over pointer-bearing structures
   and AoSoA bank payloads. Each must be positive and at most its ceiling in `expected.json`'s
   `directOracle.simd128.resourceCeilings`. A ceiling is the row's value plus 10 %, rounded up to
@@ -397,8 +397,8 @@ def check_limits_vocabulary(worklet: str, fixture: str) -> None:
     """The fixture's boot `options` object and the worklet's guard are one vocabulary.
 
     The same staleness class as the resource rows, on the other half of the fixture, and it had
-    already bitten: issue #143 carved `liveControlObservationTaps` and the master word (now
-    `reserved2`, issue #1689) out of the configuration's last two reserved words and added
+    already bitten: issue #143 carved the observation-taps word (now `reserved3`, issue #1590)
+    and the master word (now `reserved2`, issue #1689) out of the configuration's last two reserved words and added
     both to the old guard, and the fixture's policy object was never extended. The field list is
     checked with `exactFields`, so the browser leg refused the fixture at boot with
     `RESULT_INVALID_ARGUMENT` from #143 until #217.
@@ -601,7 +601,7 @@ def self_test() -> int:
     def add_worklet_limit(name: str):
         def apply(pair: tuple) -> tuple:
             actual, expected, worklet, fixture = pair
-            anchor = '"liveControlObservationTaps", "reserved2",'
+            anchor = '"reserved3", "reserved2",'
             require(anchor in worklet, "self-test mutation matched nothing")
             return actual, expected, worklet.replace(
                 anchor, f'{anchor} "{name}",', 1
@@ -729,8 +729,8 @@ def self_test() -> int:
         ("the oracle prints a different schema", with_schema("miso.web.browser.v1"), None),
         # The boot-options vocabulary, and the exact #143 regression this fixture shipped with.
         (
-            "the fixture's bootOptions() drops the #143 observation-taps word again",
-            drop_fixture_limit("liveControlObservationTaps"),
+            "the fixture's bootOptions() drops the #1590 reserved3 word (the #143 regression)",
+            drop_fixture_limit("reserved3"),
             None,
         ),
         (

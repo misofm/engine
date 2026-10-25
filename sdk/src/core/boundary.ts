@@ -181,10 +181,15 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
         "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
       );
     }
-    const { meterBlocks, observationTaps } = options.liveControls!;
+    // Issue #1590 D5: the retired observation-taps word is refused the same way.
+    if ((options.liveControls as { observationTaps?: unknown }).observationTaps !== undefined) {
+      throw new MisoUsageError(
+        "liveControls.observationTaps was retired (issue #1590): every plan binds every declared observation tap",
+      );
+    }
+    const { meterBlocks } = options.liveControls!;
     return Object.freeze({
       ...(meterBlocks === undefined ? {} : { meterBlocks }),
-      ...(observationTaps === undefined ? {} : { observationTaps }),
     });
   })();
   const bootOptions: BootOptions = Object.freeze({

@@ -67,7 +67,7 @@ const OPTION_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "reserved2",
+  "reserved3", "reserved2",
 ];
 
 const SOURCE_FIELDS = [
@@ -94,8 +94,6 @@ const SEEK_REPORT_FIELDS = [
 const MAXIMUM_CONTROL_IN_FLIGHT = 64;
 // The engine's `maximum_control_frame_bytes` (`CONTROL_FRAME_BYTES` in the Rust host).
 const MAXIMUM_CONTROL_FRAME_BYTES = 16384;
-// Issue #143: the largest `liveControlObservationTaps` the frozen configuration accepts.
-const MAXIMUM_OBSERVATION_TAPS = 16;
 const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
 const MAXIMUM_OBSERVATION_READS = 256;
 const OBSERVATION_CHANNELS = new Set([1, 2, 3]);
@@ -238,7 +236,7 @@ function snapshotBootOptions(value) {
     maximumMemoryBytes: captured.descriptors.get("maximumMemoryBytes").value,
     reserved1: captured.descriptors.get("reserved1").value,
     liveControlMeterBlocks: captured.descriptors.get("liveControlMeterBlocks").value,
-    liveControlObservationTaps: captured.descriptors.get("liveControlObservationTaps").value,
+    reserved3: captured.descriptors.get("reserved3").value,
     reserved2: captured.descriptors.get("reserved2").value,
   };
   return validBootOptions(snapshot) ? snapshot : undefined;
@@ -299,8 +297,7 @@ function validBootOptions(options) {
     && options.reserved1 === 0n
     && validU64(options.liveControlMeterBlocks)
     && options.liveControlMeterBlocks <= 0xffffffffn
-    && validU64(options.liveControlObservationTaps)
-    && options.liveControlObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
+    && options.reserved3 === 0n
     && options.reserved2 === 0n;
 }
 

@@ -30,8 +30,8 @@ const RESOURCE_NAMES = [
   "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
   "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes", "graphMetadataBytes",
   "graphDelayBytes", "largestNamedAllocationBytes",
-  // Issue #143: carved from the report's first reserved word. Zero on this transcript, which
-  // asks for no observation capacity at all.
+  // Issue #143: carved from the report's first reserved word. Zero on this transcript, whose
+  // session has no effect that declares a tap.
   "observationRetainedBytes",
 ];
 function exactKeys(value, keys, label) {
@@ -340,24 +340,24 @@ async function runSetControlTimeline(modulePath, sessionDocument, sourceId, fram
 /// eleven blocks whether or not a tap is armed, so the two legs' PCM digests must be identical --
 /// that is E1 on the browser, and it is checked here rather than asserted about.
 ///
-/// `taps` of `0n` is the level-1 zero leg: no lane, no accumulator, no conflating cell, and
-/// `observationRetainedBytes` is `0`. The `Observe` frames it still sends are refused
-/// `observation.unavailable` rather than silently ignored (#1589 R1). The frames are the committed
-/// `set-control-frames/observe-*.bin` the native twin sends (#1589c).
-async function runObservationTimeline(modulePath, sessionDocument, sourceId, taps, masterFrame, observeFrames) {
+/// Both legs boot with the same words (#1590 D5: every plan binds every declared tap, and the
+/// word at offset 48 is reserved). With `observe` the leg designates the master and sends the
+/// committed `set-control-frames/observe-*.bin` frames the native twin sends (#1589c); without it
+/// the leg sends no frame at all.
+async function runObservationTimeline(modulePath, sessionDocument, sourceId, observe, masterFrame, observeFrames) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
-  const handle = boot(exports, sessionDocument, [0n, BigInt(OBSERVATION_WINDOW_BLOCKS), taps, 0n]);
+  const handle = boot(exports, sessionDocument, [0n, BigInt(OBSERVATION_WINDOW_BLOCKS), 0n, 0n]);
   // Issue #1689 D6: the master is the track's `master` row, the committed `master.bin` frame the
-  // native twin sends too, written after boot (offset 56 is reserved). The capable leg designates.
-  if (taps !== 0n) {
+  // native twin sends too, written after boot (offset 56 is reserved). The observing leg designates.
+  if (observe) {
     assert.equal(sendControlFrame(exports, handle, masterFrame).result, 0);
   }
   const resourceReport = resources(exports, handle);
-  assert.equal(
-    resourceReport.observationRetainedBytes === "0",
-    taps === 0n,
-    "a session that asked for no observation retains none, and one that asked retains some",
+  assert.notEqual(
+    resourceReport.observationRetainedBytes,
+    "0",
+    "every plan binds the compressor's declared tap (#1590 D5)",
   );
 
   const framePointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_METER_FRAME);
@@ -376,7 +376,7 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   assert.equal(header.getUint32(72, true), framePointer, "the header names its frame");
   assert.equal(header.getUint32(76, true), 0, "no replacement plan waits");
   assert.equal(header.getBigUint64(80, true), 1n, "the boot list is the first structure");
-  assert.equal(header.getUint32(40, true), taps === 0n ? 0 : 1);
+  assert.equal(header.getUint32(40, true), observe ? 1 : 0);
   assert.equal(exports.miso_engine_web_v1_meter_lease(handle, 1), 0);
 
   const feed = (block) => {
@@ -410,15 +410,17 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
     return meterViews();
   };
   const reports = {};
-  reports.unknownTap = sendObserveFrame(exports, handle, observeFrames.unknownTap);
-  reports.subscribe = sendObserveFrame(exports, handle, observeFrames.arm);
+  if (observe) {
+    reports.unknownTap = sendObserveFrame(exports, handle, observeFrames.unknownTap);
+    reports.subscribe = sendObserveFrame(exports, handle, observeFrames.arm);
+  }
   const afterArm = renderBlocks(0, 8);
   const armed = {
     trackGrDb: afterArm.frame[4],
     masterGrDb: afterArm.header.getUint32(44, true) === 1 ? afterArm.frame[5] : null,
     windowSamples: (afterArm.header.getBigUint64(24, true) - afterArm.header.getBigUint64(16, true)).toString(),
   };
-  reports.unsubscribe = sendObserveFrame(exports, handle, observeFrames.disarm);
+  if (observe) reports.unsubscribe = sendObserveFrame(exports, handle, observeFrames.disarm);
   const afterDisarm = renderBlocks(8, 12);
   const disarmed = {
     trackGrDb: afterDisarm.frame[4],
@@ -427,7 +429,6 @@ async function runObservationTimeline(modulePath, sessionDocument, sourceId, tap
   const pcm = [blocks.flatMap((block) => block[0]), blocks.flatMap((block) => block[1])];
   assert.equal(exports.miso_engine_web_v1_dispose(handle), 0);
   return {
-    observationRetainedBytesIsZero: resourceReport.observationRetainedBytes === "0",
     reports,
     armed,
     disarmed,
@@ -561,7 +562,7 @@ async function main() {
     "native and simd128 must render this SET_CONTROL timeline to identical bits",
   );
   // Issue #143 E1/E4/E12: the observation timeline. Both legs render the *same* eleven blocks;
-  // only the observation capacity and the subscription differ. Their PCM digests are compared to
+  // only the master designation and the subscription differ (#1590 D5). Their PCM digests are compared to
   // each other and to the native pin before anything is printed, so the pin can only ever be the
   // value three independent runs already agree on.
   const observationSession = await readFile(
@@ -576,28 +577,24 @@ async function main() {
     disarm: await observeFrame("disarm"),
   };
   const observed = await runObservationTimeline(
-    artifact, observationSession, source.sourceId, 4n, masterFrame, observeFrames,
+    artifact, observationSession, source.sourceId, true, masterFrame, observeFrames,
   );
   const unobserved = await runObservationTimeline(
-    artifact, observationSession, source.sourceId, 0n, masterFrame, observeFrames,
+    artifact, observationSession, source.sourceId, false, masterFrame, observeFrames,
   );
   assert.equal(
     observed.pcmF32leSha256,
     unobserved.pcmF32leSha256,
     "arming every declared tap renders the identical bits",
   );
-  assert.equal(observed.observationRetainedBytesIsZero, false);
-  assert.equal(unobserved.observationRetainedBytesIsZero, true);
   // A tap the effect does not declare is refused (`VALIDATION_FAILED`, 12, with
-  // `observation.tap.unknown`), the arm is applied (`OK`, 0), and an arm against a boot with no
-  // taps is refused (12, `observation.unavailable`), never silence. The native twin asserts the
+  // `observation.tap.unknown`) and the arm is applied (`OK`, 0). The native twin asserts the
   // codes; every call itself is answered (result 0).
-  for (const report of [observed.reports.unknownTap, observed.reports.subscribe, unobserved.reports.subscribe]) {
+  for (const report of [observed.reports.unknownTap, observed.reports.subscribe]) {
     assert.equal(report.result, 0);
   }
   assert.equal(observed.reports.unknownTap.status, 12);
   assert.equal(observed.reports.subscribe.status, 0);
-  assert.equal(unobserved.reports.subscribe.status, 12);
   assert.ok(observed.armed.trackGrDb > 0, "an armed tap publishes a positive magnitude");
   assert.equal(observed.armed.masterGrDb, observed.armed.trackGrDb);
   assert.equal(observed.disarmed.trackGrDb, 0, "an unsubscribed tap publishes nothing");
@@ -611,7 +608,6 @@ async function main() {
     unobservedMasterGrDb: unobserved.armed.masterGrDb,
     subscribeStatus: observed.reports.subscribe.status,
     unknownTapStatus: observed.reports.unknownTap.status,
-    unavailableStatus: unobserved.reports.subscribe.status,
     pcmF32leSha256: observed.pcmF32leSha256,
   };
   const nativeObservation = expected.directOracle?.nativeObservationPcmF32leSha256;

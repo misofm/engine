@@ -252,7 +252,7 @@ function vcaDocument() {
 }
 
 
-const OPTIONS = { liveControls: { observationTaps: 1 } };
+const OPTIONS = {};
 
 async function boot(document, extra = {}) {
   return createOfflineEngine(document, { asset, ...OPTIONS, ...extra });

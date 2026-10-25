@@ -167,13 +167,6 @@ pub const BUFFER_OUTPUT_PCM: u32 = 5;
 /// Fixed decimated meter-frame buffer (issue #137 D2).
 pub const BUFFER_METER_FRAME: u32 = 7;
 
-/// Largest `live_control_observation_taps` the browser configuration accepts.
-///
-/// The frame carries one gain-reduction slot per track, so a session cannot usefully bind more
-/// taps per effect than a consumer can read; the cap keeps a mistyped configuration from asking
-/// preparation for an unbounded menu. Every launch effect declares one tap.
-pub const MAXIMUM_OBSERVATION_TAPS: u32 = 16;
-
 /// Largest number of selected observation rows one bounded read may resolve.
 ///
 /// A selected read is a control-plane snapshot, not a subscription or a history, so the host never
@@ -608,13 +601,11 @@ pub struct WebBootOptions {
     /// refused, the output meter's gate stays shut, and the strip meters still fold. `12` is ~31
     /// frames per second at 48 kHz with a 128-frame quantum.
     pub live_control_meter_blocks: u64,
-    /// Maximum declared observation taps to bind per effect, or `0` for no observation capacity
-    /// at all (issue #143 D3, level 1).
-    ///
-    /// A nonzero value binds a queue for every declared tap, so the session serves the `Observe`
-    /// edit and `OBSERVATION_READ` (#1589 R1): a subscription rides the effect's own observation
-    /// queue. With zero, an `Observe` edit is refused `observation.unavailable`.
-    pub live_control_observation_taps: u64,
+    /// Must be zero. This was the observation-taps word until #1590 D5 retired it: every plan
+    /// binds a queue for every declared tap of every effect, as on the C ABI
+    /// ([`host_core::launch_maximum_observation_taps`]). The offset keeps its place and the word
+    /// is refused when nonzero (`web.options.reserved3`).
+    pub reserved3: u64,
     /// Must be zero. This was the master boot word (the designated master strip index plus one)
     /// until #1689 retired it: the master is the strip's `master` row, written by `SET_CONTROL`
     /// after boot, as on every host. The offset keeps its place and the word is refused when
@@ -636,7 +627,7 @@ impl WebBootOptions {
             maximum_memory_bytes: 0,
             reserved1: 0,
             live_control_meter_blocks: 0,
-            live_control_observation_taps: 0,
+            reserved3: 0,
             reserved2: 0,
         }
     }
@@ -851,9 +842,9 @@ pub struct WebResourceReport {
     pub largest_named_allocation_bytes: u64,
     /// Engine-owned bytes the plan's observation lanes and conflating cells retain (issue #143).
     ///
-    /// Carved out of the report's first reserved word. Exactly zero for a session prepared with
-    /// `live_control_observation_taps == 0`, and that zero is *walked* over the built runtime
-    /// rather than computed from the configuration. The 224-byte layout is unchanged.
+    /// Carved out of the report's first reserved word. The row is *walked* over the built runtime
+    /// rather than computed from the configuration; it is zero for a session with no effect that
+    /// declares a tap (#1590 D5). The 224-byte layout is unchanged.
     pub observation_retained_bytes: u64,
     /// Required-zero expansion words.
     pub reserved: [u64; 3],
@@ -3435,9 +3426,14 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.reserved2",
         ));
     }
-    if options.live_control_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
-        || options.live_control_meter_blocks > u64::from(u32::MAX)
-    {
+    // #1590 D5: the word at offset 48 was the observation-taps word, reserved the same way.
+    if options.reserved3 != 0 {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.options.reserved3",
+        ));
+    }
+    if options.live_control_meter_blocks > u64::from(u32::MAX) {
         return Err(BootFailure::fixed(
             RESULT_REFUSED_OPTIONS,
             "web.options.live_controls",
@@ -3641,8 +3637,8 @@ impl ControlAdapter for WebAdapter {
     const METER_DELIVERY: bool = true;
     const RENDER_METER_FOLD: bool = true;
     /// #1589a: the session serves the `Observe` edit and `OBSERVATION_READ` (with capability bit
-    /// 15) for a boot whose observation taps bind every declared tap
-    /// ([`control_plane::RuntimePreparer::observation_queues`], R1). The edit's records ride the
+    /// 15): every plan binds every declared tap (#1590 D5,
+    /// [`control_plane::RuntimePreparer::observation_queues`]). The edit's records ride the
     /// effects' producers through the one control plane, the only writer of each queue since
     /// #1589c deleted kinds 7 and 8; the read reads the readers the render half keeps, which the
     /// control entry lends with their plan's epoch (R2).
@@ -3955,15 +3951,6 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
             .host_attachment_mut::<RenderCompanions>()
             .map_or(&[], |companions| &companions.effect_observations)
     }
-
-    /// #1589 R1: the boot word keeps its meaning until #1590 D5, so the session serves `Observe`
-    /// only for a nonzero word. Preparation refuses an effect that declares more taps than the
-    /// word (`effect.observation.taps`), so every plan binds a queue for every declared tap. With
-    /// `0` no plan has a queue, and the edit is refused `observation.unavailable` rather than
-    /// acknowledged and never applied.
-    fn observation_queues(&self) -> bool {
-        self.options.live_control_observation_taps != 0
-    }
 }
 
 impl WebRuntimePreparer {
@@ -3990,9 +3977,9 @@ impl WebRuntimePreparer {
             live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
                 PrepareDiagnostics::fixed(PrepareRejection::Session, "web.live_controls.config")
             })?;
-        // Observation taps ride the effect lanes (#1254 D2): an app that asked for taps gets the
-        // effect lanes whatever the session's live rows chose, as before the control plane chose
-        // the lanes, so a session with no effect to observe still boots.
+        // Observation taps ride the effect lanes (#1254 D2): every plan binds every declared tap
+        // (#1590 D5), so the effect lanes are always on, as on the C ABI, whatever the session's
+        // live rows chose; a session with no effect to observe still boots.
         let lanes = HostLiveLanes {
             effects: lanes.effects || live_controls.observation_taps != 0,
             ..lanes
@@ -4485,8 +4472,7 @@ fn compile_ready(
     report.graph_metadata_bytes = engine.graph_metadata_bytes;
     report.graph_delay_bytes = engine.graph_delay_bytes;
     report.largest_named_allocation_bytes = largest_named;
-    // Issue #143 R7: the engine's walked row, carried through unchanged. Zero for a session
-    // prepared with `live_control_observation_taps == 0`.
+    // Issue #143 R7: the engine's walked row, carried through unchanged.
     report.observation_retained_bytes = engine.observation_retained_bytes;
     // #1290a: the tables were built by the boot plan's own preparation (`build_plan_shape`), the
     // same function every replacement plan's preparation runs. The boot plan has no spectrum
@@ -4607,8 +4593,7 @@ fn compile_ready(
     Ok((ready, plan, report))
 }
 
-/// Translate the browser configuration's two live-control words into the facade's live-control
-/// request.
+/// Translate the browser configuration's meter word into the facade's live-control request.
 ///
 /// The meter word passes unchanged (issue #1581 D2): `live_control_meter_blocks == 0` binds the
 /// strip meters at host-core's default window, and the lease over such a host is still refused
@@ -4623,8 +4608,8 @@ fn live_control_request(
     Some(HostLiveControlRequest {
         meter_window_blocks,
         meter_queue_depth: NonZeroUsize::new(METER_QUEUE_DEPTH)?,
-        // Issue #143 D3: a carved browser configuration word, translated once, here.
-        observation_taps: u32::try_from(options.live_control_observation_taps).ok()?,
+        // #1590 D5: every declared tap of every effect, as the C ABI asks.
+        observation_taps: host_core::launch_maximum_observation_taps(),
     })
 }
 
