@@ -63,6 +63,8 @@ export const WIRE_PACKED_U16 = 12;
 /** @internal */
 export const WIRE_PACKED_U32 = 13;
 /** @internal */
+export const WIRE_PACKED_U64 = 14;
+/** @internal */
 export const WIRE_PACKED_F32 = 15;
 
 /** The stable address of one lane of one control, by the row's numeric ID. */
@@ -509,6 +511,20 @@ export interface ControlBackpressure {
   readonly occupancy: bigint;
 }
 
+/** What a successful `SESSION_TRANSACTION_APPLY` reply reports (`TransactionApplied`). */
+export interface ControlApplied {
+  readonly appliedOperations: number;
+  readonly editPath: ControlEditPath;
+  /**
+   * The arm tag of each `Observe` edit, in transaction order (#1585): the tag of the tap's
+   * subscription after that edit. Empty when the transaction held no `Observe` edit. An `Observe`
+   * is in effect when a read reports its tap armed with this tag, not when the reply returns.
+   */
+  readonly observeArmTags: readonly bigint[];
+  /** The tags of the subscriptions the commit ended, in key order (#1585); empty when none. */
+  readonly removedArmTags: readonly bigint[];
+}
+
 /** A decoded reply to a `SESSION_TRANSACTION_APPLY` command. */
 export interface ControlReply {
   readonly requestId: bigint;
@@ -516,7 +532,7 @@ export interface ControlReply {
   /** The session revision the reply reports: committed on success, observed on a refusal. */
   readonly revision: bigint;
   /** Present exactly when `status` is `ok`. */
-  readonly applied: { readonly appliedOperations: number; readonly editPath: ControlEditPath } | undefined;
+  readonly applied: ControlApplied | undefined;
   /** The leading diagnostics of a refusal, in the core's order. */
   readonly diagnostics: readonly ControlDiagnostic[];
   readonly omittedDiagnostics: number;
@@ -584,6 +600,21 @@ export function scalar(fields: readonly RawField[], id: number, wire: number, wi
   if (row === undefined) return undefined;
   if (row.wire !== wire || row.value.length !== width) throw malformed(`field ${id} has the wrong type`);
   return new DataView(row.value.buffer, row.value.byteOffset, row.value.byteLength);
+}
+
+/** A reply's optional arm-tag list (#1585 D5): absent is empty, and a present list is not. */
+function armTags(fields: readonly RawField[], id: number): readonly bigint[] {
+  const found = fields.filter((row) => row.id === id);
+  if (found.length > 1) throw malformed(`field ${id} repeats`);
+  const row = found[0];
+  if (row === undefined) return Object.freeze([]);
+  if (row.wire !== WIRE_PACKED_U64 || row.value.length === 0 || row.value.length % 8 !== 0) {
+    throw malformed(`field ${id} has the wrong type`);
+  }
+  const view = new DataView(row.value.buffer, row.value.byteOffset, row.value.byteLength);
+  const tags: bigint[] = [];
+  for (let at = 0; at < row.value.length; at += 8) tags.push(view.getBigUint64(at, true));
+  return Object.freeze(tags);
 }
 
 function textOf(row: RawField): string {
@@ -756,11 +787,13 @@ export function decodeControlReply(bytes: Uint8Array): ControlReply {
     if (appliedOperations === undefined || editPath === undefined) {
       throw malformed("a successful reply holds no applied-operations count and known edit path");
     }
+    const observeArmTags = armTags(fields, 3);
+    const removedArmTags = armTags(fields, 4);
     return Object.freeze({
       requestId,
       status,
       revision,
-      applied: Object.freeze({ appliedOperations, editPath }),
+      applied: Object.freeze({ appliedOperations, editPath, observeArmTags, removedArmTags }),
       diagnostics: Object.freeze([]),
       omittedDiagnostics: 0,
       backpressure: undefined,

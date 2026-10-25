@@ -202,11 +202,32 @@ impl EditPath {
 }
 
 /// Typed successful transaction response payload.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(missing_docs)] // Exact two-field wire schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionApplied {
+    /// The number of edits the transaction applied.
     pub applied_operations: u32,
+    /// How the host applied the transaction (#1313).
     pub edit_path: EditPath,
+    /// The arm tag of each `Observe` edit, in transaction order (#1585 D5): the tag of the tap's
+    /// binding after the edit. Empty (the field absent) exactly when the transaction holds no
+    /// `Observe` edit.
+    pub observe_arm_tags: Vec<u64>,
+    /// The tags of the subscriptions the commit ended, in key order (#1585 D5). Empty (the field
+    /// absent) exactly when the commit ended none.
+    pub removed_arm_tags: Vec<u64>,
+}
+
+impl TransactionApplied {
+    /// A reply with no arm tags.
+    #[must_use]
+    pub const fn new(applied_operations: u32, edit_path: EditPath) -> Self {
+        Self {
+            applied_operations,
+            edit_path,
+            observe_arm_tags: Vec::new(),
+            removed_arm_tags: Vec::new(),
+        }
+    }
 }
 
 /// Bytes of a `SESSION_REPLACE` document digest: a SHA-256.
@@ -1573,10 +1594,10 @@ impl ProtocolCodec {
         })
     }
 
-    /// Encode/decode helpers for the two-field transaction success payload.
+    /// Encode/decode helpers for the transaction success payload.
     pub fn encode_transaction_applied(
         &self,
-        value: TransactionApplied,
+        value: &TransactionApplied,
         output: &mut [u8],
     ) -> Result<usize, EncodeError> {
         let mut sizing = CountSink::new(self.limits());
@@ -1590,7 +1611,7 @@ impl ProtocolCodec {
         checked_writer_len(&writer, required)
     }
 
-    /// Strictly decode the two-field transaction success payload.
+    /// Strictly decode the transaction success payload: a present tag list is not empty.
     pub fn decode_transaction_applied(
         &self,
         payload: &[u8],
@@ -1608,6 +1629,14 @@ impl ProtocolCodec {
                 schema::transaction_applied::EDIT_PATH
             )?)?)
             .ok_or(DecodeError::InvalidTlv)?,
+            observe_arm_tags: decode_arm_tags(optional_spec!(
+                message,
+                schema::transaction_applied::OBSERVE_ARM_TAGS
+            )?)?,
+            removed_arm_tags: decode_arm_tags(optional_spec!(
+                message,
+                schema::transaction_applied::REMOVED_ARM_TAGS
+            )?)?,
         })
     }
 
@@ -2761,9 +2790,19 @@ pub(crate) fn write_snapshot(
 
 pub(crate) fn write_transaction_applied(
     sink: &mut dyn Sink,
-    value: TransactionApplied,
+    value: &TransactionApplied,
 ) -> Result<(), EncodeError> {
-    sink.check_field_count(schema::transaction_applied::SPEC.field_count(&[])?)?;
+    use schema::transaction_applied::{OBSERVE_ARM_TAGS, REMOVED_ARM_TAGS};
+    sink.check_field_count(schema::transaction_applied::SPEC.field_count(&[
+        (
+            OBSERVE_ARM_TAGS,
+            usize::from(!value.observe_arm_tags.is_empty()),
+        ),
+        (
+            REMOVED_ARM_TAGS,
+            usize::from(!value.removed_arm_tags.is_empty()),
+        ),
+    ])?)?;
     write_spec!(
         sink,
         schema::transaction_applied::APPLIED_OPERATIONS,
@@ -2773,7 +2812,31 @@ pub(crate) fn write_transaction_applied(
         sink,
         schema::transaction_applied::EDIT_PATH,
         &[value.edit_path.code()]
-    )
+    )?;
+    for (spec, tags) in [
+        (OBSERVE_ARM_TAGS, &value.observe_arm_tags),
+        (REMOVED_ARM_TAGS, &value.removed_arm_tags),
+    ] {
+        if !tags.is_empty() {
+            write_packed_u64(sink, spec, tags)?;
+        }
+    }
+    Ok(())
+}
+
+/// A `TransactionApplied` arm-tag list (#1585 D5): absent is empty, and a present list holds at
+/// least one tag.
+fn decode_arm_tags(bytes: Option<&[u8]>) -> Result<Vec<u64>, DecodeError> {
+    let Some(bytes) = bytes else {
+        return Ok(Vec::new());
+    };
+    if bytes.is_empty() || bytes.len() % 8 != 0 {
+        return Err(DecodeError::InvalidTlv);
+    }
+    Ok(bytes
+        .chunks_exact(8)
+        .map(|word| u64::from_le_bytes(word.try_into().expect("an eight-byte chunk")))
+        .collect())
 }
 
 pub(crate) fn write_session_replace_request(
@@ -4217,6 +4280,23 @@ pub(crate) fn write_capabilities(
         &value.flags.0.to_le_bytes()
     )?;
     Ok(())
+}
+
+fn write_packed_u64(
+    sink: &mut dyn Sink,
+    spec: schema::FieldSpec,
+    values: &[u64],
+) -> Result<(), EncodeError> {
+    let value_len = values
+        .len()
+        .checked_mul(8)
+        .ok_or(EncodeError::LimitExceeded)?;
+    sink.stream_field_spec(spec, value_len, &mut |sink| {
+        for value in values {
+            sink.raw(&value.to_le_bytes())?;
+        }
+        Ok(())
+    })
 }
 
 fn write_packed_u16(

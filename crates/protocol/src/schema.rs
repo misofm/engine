@@ -323,9 +323,18 @@ pub(crate) mod transaction_applied {
     use super::*;
     pub(crate) const APPLIED_OPERATIONS: FieldSpec = FieldSpec::req(1, Wire::U32);
     pub(crate) const EDIT_PATH: FieldSpec = FieldSpec::req(2, Wire::U8);
+    /// #1585 D5: one arm tag per `Observe` edit, present exactly when the transaction holds one.
+    pub(crate) const OBSERVE_ARM_TAGS: FieldSpec = FieldSpec::opt(3, Wire::PackedU64);
+    /// #1585 D5: the tags of the subscriptions the commit ended, present exactly when it ended one.
+    pub(crate) const REMOVED_ARM_TAGS: FieldSpec = FieldSpec::opt(4, Wire::PackedU64);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "TransactionApplied",
-        fields: &[APPLIED_OPERATIONS, EDIT_PATH],
+        fields: &[
+            APPLIED_OPERATIONS,
+            EDIT_PATH,
+            OBSERVE_ARM_TAGS,
+            REMOVED_ARM_TAGS,
+        ],
     };
 }
 

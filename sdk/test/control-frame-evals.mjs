@@ -109,7 +109,12 @@ describe("the reply decoder reads the codec's replies", () => {
       if (expect.status === "ok") {
         assert.deepEqual(
           { ...decoded.applied },
-          { appliedOperations: expect.appliedOperations, editPath: expect.editPath },
+          {
+            appliedOperations: expect.appliedOperations,
+            editPath: expect.editPath,
+            observeArmTags: expect.observeArmTags.map(BigInt),
+            removedArmTags: expect.removedArmTags.map(BigInt),
+          },
         );
       } else {
         assert.equal(decoded.applied, undefined);

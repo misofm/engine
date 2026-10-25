@@ -968,7 +968,11 @@ pub enum ConformanceDecoder {
 /// `response.telemetry` the same table and the meter window (field 8), and `event.meter_batch` the
 /// window's span and sequence (fields 5 and 6). Only those three frames move; the 51 others are
 /// byte-equal. Re-pinned from `c146e8fad0b26299`; the frame count stays 54.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x480f_fcf5_46be_a7fb;
+/// #1585 gives `TransactionApplied` its optional arm-tag lists (`observe_arm_tags` 3 and
+/// `removed_arm_tags` 4, packed `u64`), and `response.session_transaction` carries both. Only that
+/// frame moves; the 53 others are byte-equal. Re-pinned from `480ffcf546bea7fb`; the frame count
+/// stays 54.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xfccf_6305_0a60_0b2f;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1228,25 +1232,25 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
     );
     success!(
         "response.session_transaction",
+        // #1585 D5: both optional arm-tag lists, so the response carries every field.
         SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
             applied_operations: 42,
-            edit_path: EditPath::Rebuild
+            edit_path: EditPath::Rebuild,
+            observe_arm_tags: vec![3, 3, 1 << 40],
+            removed_arm_tags: vec![2],
         })
     );
     success!(
         "response.session_transaction_monitor",
-        SuccessResponsePayload::SessionTransactionApplied(TransactionApplied {
-            applied_operations: 1,
-            edit_path: EditPath::Monitor
-        })
+        SuccessResponsePayload::SessionTransactionApplied(TransactionApplied::new(
+            1,
+            EditPath::Monitor
+        ))
     );
     // #1386: an identical document, so the fifth path (`unchanged`, 5) is covered too.
     success!(
         "response.session_replace",
-        SuccessResponsePayload::SessionReplaced(TransactionApplied {
-            applied_operations: 0,
-            edit_path: EditPath::Unchanged
-        })
+        SuccessResponsePayload::SessionReplaced(TransactionApplied::new(0, EditPath::Unchanged))
     );
     let (control_page, state_page) = control_corpus_pages();
     success!(

@@ -957,6 +957,11 @@ pub struct ObserveContext<'a> {
     /// Whether the host serves `Observe`: when it does not, every `Observe` edit is refused
     /// `observation.unavailable`.
     pub enabled: bool,
+    /// The next arm tag the host issues (#1585 D4, R3): its own counter, read here. The
+    /// preparation tags the transaction's records from it, in key order, and the host installs
+    /// [`PreparedSessionTransaction::next_arm_tag_after`] when it commits, so a dropped token
+    /// issues no tag.
+    pub next_arm_tag: u64,
 }
 
 /// The empty table [`ObserveContext::NONE`] borrows.
@@ -968,6 +973,7 @@ impl ObserveContext<'static> {
     pub const NONE: Self = Self {
         bindings: &NO_OBSERVATION_BINDINGS,
         enabled: false,
+        next_arm_tag: 1,
     };
 }
 
@@ -977,6 +983,70 @@ impl ObserveContext<'static> {
 struct ObservePrepared {
     bindings: controls::ObservationBindings,
     writes: Vec<controls::ObserveWrite>,
+    /// The reply's `observe_arm_tags` (#1585 D5): one tag per `Observe` edit, in transaction
+    /// order.
+    edit_tags: Vec<u64>,
+    /// The host's counter after the records' tags.
+    next_arm_tag_after: u64,
+}
+
+/// The records of a transaction's `Observe` edits and their tags (#1585 D4, D5): the records the
+/// table needs, tagged from the host's counter in key order; the table with each armed tap's
+/// binding carrying the tag of the record in effect for it; and one reply tag per edit (`touched`
+/// and `kept` are per edit, in transaction order). `None` when the counter would overflow.
+fn tag_observe_records(
+    observe: ObserveContext<'_>,
+    mut bindings: controls::ObservationBindings,
+    touched: &[controls::TapKey],
+    kept: &[Option<u64>],
+) -> Option<ObservePrepared> {
+    let mut writes = observe.bindings.writes_to(&bindings, touched);
+    let mut next = observe.next_arm_tag;
+    for write in &mut writes {
+        write.arm_tag = next;
+        next = next.checked_add(1)?;
+    }
+    let record_tag = |key: &controls::TapKey| {
+        writes
+            .binary_search_by(|write| write.key.cmp(key))
+            .ok()
+            .map(|index| &writes[index])
+    };
+    // The tag of the record in effect when the transaction leaves the tap as it found it.
+    let initial_tag = |key: &controls::TapKey| {
+        observe
+            .bindings
+            .binding(key)
+            .map_or(0, |binding| binding.arm_tag)
+    };
+    // A binding the edits created (tag `0`) takes its arm record's tag, or, when the transaction
+    // released and re-bound it with its window, keeps the tag of the binding it began with.
+    for key in touched {
+        if bindings
+            .binding(key)
+            .is_some_and(|binding| binding.arm_tag == 0)
+        {
+            let tag = record_tag(key)
+                .filter(|write| write.armed)
+                .map_or_else(|| initial_tag(key), |write| write.arm_tag);
+            bindings.set_arm_tag(key, tag);
+        }
+    }
+    let edit_tags = touched
+        .iter()
+        .zip(kept)
+        .map(|(key, kept)| {
+            kept.unwrap_or_else(|| {
+                record_tag(key).map_or_else(|| initial_tag(key), |write| write.arm_tag)
+            })
+        })
+        .collect();
+    Some(ObservePrepared {
+        bindings,
+        writes,
+        edit_tags,
+        next_arm_tag_after: next,
+    })
 }
 
 /// A committed transaction result.
@@ -1144,6 +1214,30 @@ impl PreparedSessionTransaction {
             .as_ref()
             .map_or(&[], |observation| &observation.writes)
     }
+
+    /// The host's arm-tag counter after this transaction's records (#1585 D4), or `None` when the
+    /// transaction holds no `Observe` edit. The host installs it when it commits the token; each
+    /// record of [`Self::observe_writes`] carries its tag, issued from the counter the
+    /// preparation read ([`ObserveContext::next_arm_tag`]).
+    #[must_use]
+    pub fn next_arm_tag_after(&self) -> Option<u64> {
+        self.observation
+            .as_ref()
+            .map(|observation| observation.next_arm_tag_after)
+    }
+
+    /// The reply's `observe_arm_tags` (#1585 D5), moved out: one tag per `Observe` edit in
+    /// transaction order, empty when the transaction holds none. An edit that keeps the binding
+    /// the transaction began with (a join, or a disarm that leaves a subscriber) reports that
+    /// binding's tag; every other edit reports the tag of the tap's record, or, when the
+    /// transaction leaves the tap as it found it, the tag of the binding it began with (`0` when
+    /// it began unbound).
+    pub(crate) fn take_observe_arm_tags(&mut self) -> Vec<u64> {
+        self.observation
+            .as_mut()
+            .map(|observation| core::mem::take(&mut observation.edit_tags))
+            .unwrap_or_default()
+    }
 }
 
 /// Atomic transaction rejection with a precise resolving operation index when one exists.
@@ -1161,6 +1255,9 @@ pub enum SessionStoreError {
     /// The model revision is at the plan revision gate's ceiling, `GATE_REVISION_MAX`, so a
     /// further commit would be unrepresentable in the gate.
     RevisionExhausted,
+    /// The host's arm-tag counter cannot tag the transaction's observation records (#1585 D4):
+    /// an internal error, refused before anything is written.
+    ArmTagsExhausted,
     /// One edit could not resolve against the candidate. Index is in wire order.
     Edit {
         /// Zero-based operation index.
@@ -1474,7 +1571,13 @@ impl SessionStore {
         let mut set_control_rows: Option<Vec<controls::ControlAddress>> = Some(Vec::new());
         // #1584 D3: the copy of the host's binding table the `Observe` edits apply to, made at the
         // first one, and the taps they named.
-        let mut observation: Option<(controls::ObservationBindings, Vec<controls::TapKey>)> = None;
+        // #1585 D5: for each of them, the tag of the binding it kept when it kept the one the
+        // transaction began with (a binding the edits create has no tag yet), else `None`.
+        let mut observation: Option<(
+            controls::ObservationBindings,
+            Vec<controls::TapKey>,
+            Vec<Option<u64>>,
+        )> = None;
         // #1561 D3: `SetTrackConsole` is structural, so it is accepted only after a `SetConsole`
         // of the same transaction actually changed the console: the candidate's console, with the
         // earlier edits applied, must differ from the committed one.
@@ -1509,11 +1612,17 @@ impl SessionStore {
                 };
                 controls::observe_target(&candidate, &key, *window_blocks)
                     .map_err(observe_refused)?;
-                let (bindings, touched) =
-                    observation.get_or_insert_with(|| (observe.bindings.clone(), Vec::new()));
+                let (bindings, touched, kept) = observation
+                    .get_or_insert_with(|| (observe.bindings.clone(), Vec::new(), Vec::new()));
                 bindings
                     .observe(&key, *armed, *window_blocks)
                     .map_err(observe_refused)?;
+                kept.push(
+                    bindings
+                        .binding(&key)
+                        .map(|binding| binding.arm_tag)
+                        .filter(|tag| *tag != 0),
+                );
                 touched.push(key);
                 set_control_rows = None;
                 continue;
@@ -1583,10 +1692,13 @@ impl SessionStore {
                 error: SessionEditError::RampOutOfRange,
             });
         }
-        let observation = observation.map(|(bindings, touched)| ObservePrepared {
-            writes: observe.bindings.writes_to(&bindings, &touched),
-            bindings,
-        });
+        let observation = match observation {
+            Some((bindings, touched, kept)) => Some(
+                tag_observe_records(observe, bindings, &touched, &kept)
+                    .ok_or(SessionStoreError::ArmTagsExhausted)?,
+            ),
+            None => None,
+        };
         Ok(PreparedSessionTransaction {
             base_revision: current,
             form: TransactionForm::Compiled(compiled),
@@ -1988,6 +2100,7 @@ mod tests {
         let disabled = ObserveContext {
             bindings: &bindings,
             enabled: false,
+            next_arm_tag: 1,
         };
         for prepared in [
             store.prepare_transaction(revision, &edits),

@@ -128,6 +128,7 @@ export {
   validateControlEdit,
 } from "./core/control-frame.ts";
 export type {
+  ControlApplied,
   ControlBackpressure,
   ControlDiagnostic,
   ControlEditPath,
