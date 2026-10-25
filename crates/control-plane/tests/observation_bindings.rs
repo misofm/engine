@@ -40,9 +40,9 @@ struct Adapter;
 impl ControlAdapter for Adapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
-    // #1584: the core's `Observe` edit, as both hosts serve it. The admission-rule tests here push
-    // through the test hook `test_admit_and_push_observation_batch` (an edit nets each tap to one
-    // change, so it cannot reach every rule); the others send the edit.
+    // #1584: the core's `Observe` edit, as both hosts serve it. Every test here sends the edit; the
+    // admission rules an edit cannot reach (it nets each tap to one change) are the
+    // `observation_admission` unit test in `control.rs`.
     const OBSERVE_EDIT: bool = true;
 }
 
