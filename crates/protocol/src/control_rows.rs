@@ -13,8 +13,8 @@ use crate::SessionEdit;
 /// the owner and section have no such row.
 ///
 /// `name` is the row's name in its table (`fader_db`, `trim_db`, `gain_db`, `offset_db`,
-/// `fader_ms`, ...). In an insert section `bypass` and `link_mode` name the effect's two fixed
-/// rows; an effect parameter has no name here, its row is its parameter ID, so a caller builds that
+/// `fader_ms`, ...). In an insert or console section `bypass` and `link_mode` name the effect's
+/// two fixed rows; an effect parameter has no name here, its row is its parameter ID, so a caller builds that
 /// address from [`ControlAddress`] directly.
 #[must_use]
 pub fn row_address(
@@ -31,7 +31,7 @@ pub fn row_address(
         (Owner::Session, Section::Own) => table_id(RowSource::SessionOwn, name)?,
         (Owner::Strip(_), Section::Inserts(_) | Section::Console(_)) => match name {
             "bypass" => BYPASS_CONTROL,
-            "link_mode" if matches!(section, Section::Inserts(_)) => LINK_MODE_CONTROL,
+            "link_mode" => LINK_MODE_CONTROL,
             _ => return None,
         },
         _ => return None,

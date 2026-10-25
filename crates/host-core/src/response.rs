@@ -171,8 +171,9 @@ const INPUT_FILTER_CONTROLS: [u32; 2] = [3, 4];
 /// The values are the committed model's: a builtins section reads its four cutoffs with
 /// [`controls::get`]; a console slot or an insert resolves its entry's parameters with
 /// [`effect_compiler::resolve_initial_values`], the function a rebuild prepares them with, and takes
-/// its quality and link mode from the slot or the insert and its bypass from the entry. The
-/// overrides then replace the values they name.
+/// its quality from the slot or the insert, its link mode from the insert or the entry as the slot
+/// resolves it, and its bypass from the entry. The overrides then replace the values they name; a
+/// console entry's link-mode override `0` (`slot`) names the slot's declared mode.
 ///
 /// # Errors
 ///
@@ -308,11 +309,25 @@ pub fn resolve_response_target(
         .map_err(ResponseQueryError::Committed)?;
     let mut bypass = bypass;
     let mut link_mode = contract_link_mode(link_mode);
+    let slot_link_mode = match section {
+        ResponseAddressSection::Console(slot) => model
+            .console
+            .slots()
+            .find(|candidate| candidate.slot.as_str() == slot)
+            .map(|candidate| candidate.link_mode),
+        _ => None,
+    };
     for row in overrides {
         // The validator has accepted every value: the bypass is exactly 0 or 1 and the link mode
         // one of the effect's codes.
         match row.parameter_id {
             controls::BYPASS_CONTROL => bypass = row.value.to_bits() == 1.0_f32.to_bits(),
+            // A console entry's `slot` (code 0) runs the slot's declared mode (#1369).
+            controls::LINK_MODE_CONTROL if row.value == 0.0 => {
+                link_mode = slot_link_mode.map(contract_link_mode).ok_or(
+                    ResponseQueryError::OverrideControl(controls::ControlError::Domain),
+                )?;
+            }
             controls::LINK_MODE_CONTROL => {
                 link_mode = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
                     .into_iter()

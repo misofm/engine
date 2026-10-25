@@ -1667,6 +1667,58 @@ export const CONTROLS = deepFreeze(
         "reasonIssue": null,
         "reopen": "decision 15 E2, #1368-#1371",
         "automatable": false
+      },
+      "consoleLinkMode": {
+        "control": 2147483648,
+        "name": "link_mode",
+        "displayName": "Link Mode",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "enumeration",
+        "minimum": 0,
+        "maximum": 3,
+        "disabledValue": null,
+        "default": 0,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [
+          {
+            "value": 0,
+            "label": "slot"
+          },
+          {
+            "value": 1,
+            "label": "dual_mono"
+          },
+          {
+            "value": 2,
+            "label": "maximum"
+          },
+          {
+            "value": 3,
+            "label": "average"
+          }
+        ],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "rebuildOnly",
+        "reason": "optimisation",
+        "reasonIssue": null,
+        "reopen": "#1371",
+        "automatable": false
       }
     },
     "miso.de-esser": {
@@ -2122,6 +2174,58 @@ export const CONTROLS = deepFreeze(
         "reasonIssue": null,
         "reopen": "decision 15 E2, #1368-#1371",
         "automatable": false
+      },
+      "consoleLinkMode": {
+        "control": 2147483648,
+        "name": "link_mode",
+        "displayName": "Link Mode",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "enumeration",
+        "minimum": 0,
+        "maximum": 3,
+        "disabledValue": null,
+        "default": 0,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [
+          {
+            "value": 0,
+            "label": "slot"
+          },
+          {
+            "value": 1,
+            "label": "dual_mono"
+          },
+          {
+            "value": 2,
+            "label": "maximum"
+          },
+          {
+            "value": 3,
+            "label": "average"
+          }
+        ],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "rebuildOnly",
+        "reason": "optimisation",
+        "reasonIssue": null,
+        "reopen": "#1371",
+        "automatable": false
       }
     },
     "miso.delay": {
@@ -2337,7 +2441,8 @@ export const CONTROLS = deepFreeze(
           "automatable": true
         }
       ],
-      "linkMode": null
+      "linkMode": null,
+      "consoleLinkMode": null
     },
     "miso.dynamic-eq": {
       "bypass": {
@@ -4176,6 +4281,58 @@ export const CONTROLS = deepFreeze(
         "reasonIssue": null,
         "reopen": "decision 15 E2, #1368-#1371",
         "automatable": false
+      },
+      "consoleLinkMode": {
+        "control": 2147483648,
+        "name": "link_mode",
+        "displayName": "Link Mode",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "enumeration",
+        "minimum": 0,
+        "maximum": 3,
+        "disabledValue": null,
+        "default": 0,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [
+          {
+            "value": 0,
+            "label": "slot"
+          },
+          {
+            "value": 1,
+            "label": "dual_mono"
+          },
+          {
+            "value": 2,
+            "label": "maximum"
+          },
+          {
+            "value": 3,
+            "label": "average"
+          }
+        ],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "rebuildOnly",
+        "reason": "optimisation",
+        "reasonIssue": null,
+        "reopen": "#1371",
+        "automatable": false
       }
     },
     "miso.gate-expander": {
@@ -4507,6 +4664,58 @@ export const CONTROLS = deepFreeze(
         "reason": "optimisation",
         "reasonIssue": null,
         "reopen": "decision 15 E2, #1368-#1371",
+        "automatable": false
+      },
+      "consoleLinkMode": {
+        "control": 2147483648,
+        "name": "link_mode",
+        "displayName": "Link Mode",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "enumeration",
+        "minimum": 0,
+        "maximum": 3,
+        "disabledValue": null,
+        "default": 0,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [
+          {
+            "value": 0,
+            "label": "slot"
+          },
+          {
+            "value": 1,
+            "label": "dual_mono"
+          },
+          {
+            "value": 2,
+            "label": "maximum"
+          },
+          {
+            "value": 3,
+            "label": "average"
+          }
+        ],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "rebuildOnly",
+        "reason": "optimisation",
+        "reasonIssue": null,
+        "reopen": "#1371",
         "automatable": false
       }
     },
@@ -4958,6 +5167,58 @@ export const CONTROLS = deepFreeze(
           }
         },
         "choices": [
+          {
+            "value": 1,
+            "label": "dual_mono"
+          },
+          {
+            "value": 2,
+            "label": "maximum"
+          },
+          {
+            "value": 3,
+            "label": "average"
+          }
+        ],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "rebuildOnly",
+        "reason": "ruledLiveNotBuilt",
+        "reasonIssue": 1367,
+        "reopen": "decision 15 E2, #1367 makes the link mode live",
+        "automatable": false
+      },
+      "consoleLinkMode": {
+        "control": 2147483648,
+        "name": "link_mode",
+        "displayName": "Link Mode",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "enumeration",
+        "minimum": 0,
+        "maximum": 3,
+        "disabledValue": null,
+        "default": 0,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [
+          {
+            "value": 0,
+            "label": "slot"
+          },
           {
             "value": 1,
             "label": "dual_mono"
@@ -6170,7 +6431,8 @@ export const CONTROLS = deepFreeze(
           "automatable": true
         }
       ],
-      "linkMode": null
+      "linkMode": null,
+      "consoleLinkMode": null
     },
     "miso.soft-clip": {
       "bypass": {
@@ -6315,7 +6577,8 @@ export const CONTROLS = deepFreeze(
           "automatable": true
         }
       ],
-      "linkMode": null
+      "linkMode": null,
+      "consoleLinkMode": null
     },
     "miso.transient-shaper": {
       "bypass": {
@@ -6507,6 +6770,58 @@ export const CONTROLS = deepFreeze(
         "reasonIssue": null,
         "reopen": "decision 15 E2, #1368-#1371",
         "automatable": false
+      },
+      "consoleLinkMode": {
+        "control": 2147483648,
+        "name": "link_mode",
+        "displayName": "Link Mode",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "enumeration",
+        "minimum": 0,
+        "maximum": 3,
+        "disabledValue": null,
+        "default": 0,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [
+          {
+            "value": 0,
+            "label": "slot"
+          },
+          {
+            "value": 1,
+            "label": "dual_mono"
+          },
+          {
+            "value": 2,
+            "label": "maximum"
+          },
+          {
+            "value": 3,
+            "label": "average"
+          }
+        ],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "rebuildOnly",
+        "reason": "optimisation",
+        "reasonIssue": null,
+        "reopen": "#1371",
+        "automatable": false
       }
     },
     "miso.true-peak-limiter": {
@@ -6695,6 +7010,54 @@ export const CONTROLS = deepFreeze(
         "reasonIssue": null,
         "reopen": "decision 15 E2, #1368-#1371",
         "automatable": false
+      },
+      "consoleLinkMode": {
+        "control": 2147483648,
+        "name": "link_mode",
+        "displayName": "Link Mode",
+        "displayUnit": "",
+        "unit": "linear",
+        "kind": "enumeration",
+        "minimum": 0,
+        "maximum": 2,
+        "disabledValue": null,
+        "default": 0,
+        "taper": "stepped",
+        "step": {
+          "unit": "index",
+          "size": "1",
+          "precision": 0,
+          "ladder": {
+            "xs": 1,
+            "sm": 3,
+            "md": 5,
+            "lg": 10,
+            "xl": 30
+          }
+        },
+        "choices": [
+          {
+            "value": 0,
+            "label": "slot"
+          },
+          {
+            "value": 1,
+            "label": "dual_mono"
+          },
+          {
+            "value": 2,
+            "label": "maximum"
+          }
+        ],
+        "ramp": "fixed",
+        "scope": "model",
+        "family": "effect",
+        "lanes": "shared",
+        "class": "rebuildOnly",
+        "reason": "optimisation",
+        "reasonIssue": null,
+        "reopen": "#1371",
+        "automatable": false
       }
     }
   }
@@ -6711,7 +7074,8 @@ export type ControlRow =
   | Controls["sessionOwn"][number]
   | Controls["effects"][EffectId]["bypass"]
   | Controls["effects"][EffectId]["parameters"][number]
-  | NonNullable<Controls["effects"][EffectId]["linkMode"]>;
+  | NonNullable<Controls["effects"][EffectId]["linkMode"]>
+  | NonNullable<Controls["effects"][EffectId]["consoleLinkMode"]>;
 export type StripOwnControlName = Controls["stripOwn"][number]["name"];
 export type BuiltinControlName = Controls["builtins"][number]["name"];
 export type RouteControlName = Controls["routeOwn"][number]["name"];
@@ -6741,11 +7105,13 @@ export type ControlSection =
   | { readonly kind: "console"; readonly slot: string }
   | { readonly kind: "own" };
 
-/** The rows an effect section lists: a console slot has no link-mode row. */
+/** The rows an effect section lists: a console entry's link-mode row adds the `slot` choice. */
 type EffectRow<E extends EffectId, K extends "console" | "inserts"> =
   | Controls["effects"][E]["bypass"]
   | Controls["effects"][E]["parameters"][number]
-  | (K extends "inserts" ? NonNullable<Controls["effects"][E]["linkMode"]> : never);
+  | (K extends "inserts"
+    ? NonNullable<Controls["effects"][E]["linkMode"]>
+    : NonNullable<Controls["effects"][E]["consoleLinkMode"]>);
 
 /**
  * One row as an address: its machine name, and the lanes its `lanes` allows. A shared row
@@ -6765,7 +7131,7 @@ type Addressed<O, S, Row> = Row extends { readonly name: infer N; readonly lanes
  * The stable address of one control: owner kind and ID, section kind and slot or effect ID,
  * the control's machine name and the lane. The `control` name must be a row of that owner and
  * section in the core's tables and the `lane` one that row allows, so an unknown name, a
- * `left` lane on a shared row and a link mode on a console slot do not compile.
+ * `left` lane on a shared row and a link mode on an effect with one mode do not compile.
  */
 export type ControlAddress<E extends EffectId = EffectId> =
   | Addressed<
