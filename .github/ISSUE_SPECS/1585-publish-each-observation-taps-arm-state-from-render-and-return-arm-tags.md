@@ -181,8 +181,12 @@ re-pin in #1585a.
   for an inactive bank lane, the drain never is. A bank lane with an armed tap is never at rest,
   so the whole-bank silent skip (#1107) does not pass it by either. `disarm_all` publishes nothing;
   only tests call it.
-- **Status contract (root, attempt 2; R4 withdrawn).** The browser's selected read reports
-  `Pending` while the slot's published tag is below the tap's last issued tag (tags are monotone,
+- **Status contract (root, attempt 2; R4 withdrawn; amended on #1977's SDK failure).** A disarm is
+  in effect when it is accepted: when the tap's last issued record is a disarm
+  (`SessionState::observation_issued` returns the tag and the record's kind), the read reports
+  `Unarmed` at once, since no later window belongs to the subscription it ends. Otherwise the
+  browser's selected read reports `Pending` while the slot's published tag is below the tap's last
+  issued tag (tags are monotone,
   so `<` and not `!=`: a carried tap whose last record was a disarm keeps its slot's tag after
   a rebuild rebuilds the slot entries from the bindings, and must not read `Pending` for ever), and
   while every attempt of the read tears; otherwise the slot's state is the answer. The issued tag
@@ -224,6 +228,10 @@ re-pin in #1585a.
   `arm_prepared` publishing off render; the drain's publication removed. Not red on the attempt-1
   design (publish in `accumulate`) for this fixture: the compressor reads a resident sample on
   silence, so the silent assertion guards the drain placement against regression, not that case.
+- Disarm: `selected_observation_reads_are_bounded_stable_and_non_consuming` arms, renders,
+  disarms and reads `Unarmed` before render; red when the read ignores the issued record's kind
+  (it read `Pending`). The SDK eval "close disarms the bus tap" (`sdk/test/capability-evals.mjs`)
+  passes under `scripts/check-sdk-headless.sh` (616 pass, 0 fail).
 - Tags and status: `selected_observation_reads_are_bounded_stable_and_non_consuming` is red when
   `push_effect_observe` issues no tag and when the read ignores the tag.
   `an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carried_one` asserts
