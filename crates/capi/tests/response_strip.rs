@@ -57,7 +57,19 @@ fn document() -> (String, u64) {
     model.routes.retain(|route| {
         matches!(&route.source, session::RouteSource::Track { track_id, .. } if kept.contains(track_id))
     });
-    let eq_params = model.tracks[0].console[0].params.clone();
+    let mut eq_params = model.tracks[0].console[0].params.clone();
+    // Band 2 on the left only, so the insert's two enabled masks differ.
+    for (channel, value) in [
+        (session::ParameterChannel::Left, 1.0),
+        (session::ParameterChannel::Right, 0.0),
+    ] {
+        eq_params.push(session::EffectParam {
+            parameter_id: 17,
+            channel,
+            unit: session::ParameterUnit::Linear,
+            value,
+        });
+    }
     let track = &mut model.tracks[0];
     track.builtins.left.hpf_hz = 80.0;
     track.builtins.left.lpf_hz = 12_000.0;
@@ -500,6 +512,10 @@ fn end_to_end_then_removed_strip() {
                 ResponseMemberKind::Unavailable
             ),
         ]
+    );
+    assert_ne!(
+        capture.members[2].enabled_left, capture.members[2].enabled_right,
+        "the insert's masks differ by side"
     );
     for (member, core) in capture.members.iter().zip(&expected.members) {
         assert_eq!(
