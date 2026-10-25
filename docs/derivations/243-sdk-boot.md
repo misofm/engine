@@ -56,10 +56,12 @@ side without a red.
 ## 3. `SOURCE_RING_RESERVE_QUANTA = 2`, and eval 2's `9906 = 78 × 127`
 
 `miso-engine-v1-abi-layout.json` publishes the default source-ring rule as its two inputs rather
-than as a rate-specific answer, because the ring is **not readable back** across the ABI: it is an
-input word at boot-options offset 16 and no export reports the effective value. A consumer that
-must size its own producer therefore has to apply the rule, and publishing the rule is what keeps
-it from holding a private copy of `100`.
+than as a rate-specific answer, because the ring was **not readable back** across the ABI: it is an
+input word at boot-options offset 16. Since issue #1406b the export
+`miso_engine_web_v1_source_ring_frames(handle)` reports the effective value after a boot, and the
+browser host bounds its sources by it. A consumer that must size its own producer before it boots
+still applies the published rule, and publishing the rule is what keeps it from holding a private
+copy of `100`.
 
 The engine's rule, `host_core::default_source_ring_frames` (`prepare.rs:49-61`):
 

@@ -305,6 +305,10 @@ async function testMainRealm() {
           backend: "simd128",
           resources: resourceReport(1, this.constructionQuantumFrames),
           memoryBytes: 65536,
+          // Issue #1406b: the ring the engine resolved. The fake engine reports an override as
+          // given and, for a zero override, 110 quanta: the engine's default ring at 48 kHz / 64.
+          sourceRingFrames: options.processorOptions.options.sourceRingFrames
+            || 110 * this.constructionQuantumFrames,
         };
         if (readyGate !== null) {
           const gate = readyGate;
@@ -1140,7 +1144,9 @@ async function testMainRealm() {
 
           mixedSuccess = true;
           holdAll = true;
-          const heldSources = Array.from({ length: 77 }, (_value, index) => {
+          // Issue #1406b: with a zero override the bound is the ring the engine reports at boot,
+          // 110 quanta at 48 kHz / 64 (the old host rule gave 77).
+          const heldSources = Array.from({ length: 110 }, (_value, index) => {
             const buffer = new ArrayBuffer(4);
             const request = hostValue.submitSource({
               sourceId: "single-source", generation: 1n, startFrame: BigInt(index),
@@ -1153,7 +1159,7 @@ async function testMainRealm() {
           const beforeSourceOverflow = events.length;
           const overflowBuffer = new ArrayBuffer(4);
           await localErrorResult(hostValue.submitSource({
-            sourceId: "single-source", generation: 1n, startFrame: 77n,
+            sourceId: "single-source", generation: 1n, startFrame: 110n,
             sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 1,
             endOfRegion: false,
           }), 6);
@@ -1165,7 +1171,7 @@ async function testMainRealm() {
           assert(sourceAcks.every((ack) => ack.result === 0), "all default-depth sources accepted");
           const nextSourceBuffer = new ArrayBuffer(4);
           const nextSource = hostValue.submitSource({
-            sourceId: "single-source", generation: 1n, startFrame: 78n,
+            sourceId: "single-source", generation: 1n, startFrame: 111n,
             sampleRateHz: 48000, planes: [new Float32Array(nextSourceBuffer)], frames: 1,
             endOfRegion: false,
           });
@@ -3024,6 +3030,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       return 1;
     },
     miso_engine_web_v1_source_count: () => sourceRows.length,
+    miso_engine_web_v1_source_ring_frames: () => 40 * quantum,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
       if (id === undefined) return 0;
@@ -3745,7 +3752,7 @@ async function testProcessor() {
       const processor = construct(fake);
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
-        resources: processor.resources, memoryBytes: 196608,
+        resources: processor.resources, memoryBytes: 196608, sourceRingFrames: 40 * 64,
       });
       return { processor, fake };
     };
