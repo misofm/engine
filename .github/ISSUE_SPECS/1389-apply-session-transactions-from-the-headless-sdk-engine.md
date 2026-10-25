@@ -167,10 +167,15 @@ All behavioural gates run in `sdk/test/headless-apply-evals.mjs` against the rea
   the stale-list refusal in `sdk/test/control-list-evals.mjs`; gate 1 adds only the replace's own claim
   (`withSession` of the replacement document succeeds). A mutant caching the boot's session map stays green
   because edits resolve through the control list's strip order, so no headless map rebinding exists to test.
-- **Found, not fixed (outside the authorized paths): a `ControlTransactionQueue` made before an `apply` or
-  `replaceSession` refuses its next `SET_CONTROL` with `revision_conflict`.** The queue expects the revision
-  of its own last reply and retries nothing on a refusal (`control-queue.ts`, `#transact`), so the second
-  half of gate 4 ("after gate 2's live reply, an edit object resolved before it still submits") fails once;
-  the submit after it succeeds. R3's premise of an existing retry does not hold. Fix needs
-  `sdk/src/core/control-queue.ts` (a retry of a `revision_conflict` at the observed revision, values being
-  absolute, or a revision the engine hands the queue after a sibling commit): reported to root.
+- **R3's assumed retry did not exist; root ruling (b) replaces it.** A `ControlTransactionQueue` made before an
+  `apply` refused its next `SET_CONTROL` with `revision_conflict`: the queue expects the revision of its own
+  last reply and retries nothing (`control-queue.ts`, `#transact`). Root ruled (b), no blind retry (it would
+  hide a real conflict with another writer): the queue gains `noteCommit(revision)`, and the headless engine
+  calls it with the core's committed revision in the same call as every frame it sends beside the queue
+  (the `ProtocolClient` transport: `apply`, `replaceSession`, `setTransport`, `configureTelemetry`, the
+  snapshot reads; and the raw `controlFrame`). A noted revision also outlives the older reply of a
+  transaction that flew while it was noted. #1296 reuses the hook in the browser. Gate 4's second half is
+  restored in gate 2 (a live controls object resolved before the apply submits first try, at revision 2).
+- **`SESSION_REPLACE` bytes.** `crates/protocol/tests/set_control_frames.rs` writes one `replace` row into
+  `fixtures/set-control-frames.json` (root ruling 2); the SDK encoder is held to it byte for byte. No source
+  or schema changed, and the built module's digest is unchanged.

@@ -394,7 +394,11 @@ export class OfflineEngine {
    * `controlTransactions().requestIds`, the one allocator that serves this endpoint.
    */
   controlFrame(frame: Uint8Array): Uint8Array {
-    return this.#boundary.controlFrame(frame);
+    try {
+      return this.#boundary.controlFrame(frame);
+    } finally {
+      this.#noteCommit();
+    }
   }
 
   /** The committed session revision the core reports (`miso_engine_web_v1_control_revision`). */
@@ -535,9 +539,33 @@ export class OfflineEngine {
     return this.#applied.applied(revision);
   }
 
+  /**
+   * Hand the transaction queue the core's committed revision right after a frame sent beside it
+   * (#1389, root ruling (b)): a structural `apply` or a `replaceSession` would otherwise make the
+   * queue's next `SET_CONTROL` expect an old revision and be refused. It runs in the same call as
+   * the frame, so no queued transaction can be sent between the commit and the note.
+   */
+  #noteCommit(): void {
+    if (this.#controlQueue === undefined || this.#boundary.disposed) return;
+    let revision: bigint;
+    try {
+      revision = this.#boundary.controlRevision();
+    } catch {
+      // The core cannot be read: the queue's next transaction reports what is wrong.
+      return;
+    }
+    this.#controlQueue.noteCommit(revision);
+  }
+
   #protocolClient(): ProtocolClient {
     return this.#protocol ??= new ProtocolClient({
-      send: (frame, document) => this.#boundary.controlFrame(frame, document),
+      send: (frame, document) => {
+        try {
+          return this.#boundary.controlFrame(frame, document);
+        } finally {
+          this.#noteCommit();
+        }
+      },
       // The one allocator of this endpoint, which the transaction queue and the control list share.
       requestIds: this.#boundary.controlRequestIds,
       // The core's own committed revision: the queue's, and also a commit another sender made.
