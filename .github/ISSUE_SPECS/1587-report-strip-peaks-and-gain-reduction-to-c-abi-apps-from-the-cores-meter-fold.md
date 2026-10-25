@@ -164,7 +164,8 @@ Commands: `cargo test --locked -p host-core --all-features`,
   ceiling 285,568 (+10 %, to 64), for the 32,512 B strip-ID reserve and the meter lane.
   Attempt 2 (verifier m2): the lane is sized by the adapter, 256 for a `METER_DELIVERY` adapter
   (the C ABI) and 2 otherwise, so the browser's capability record does not change; #1588 sizes
-  the browser's lane.
+  the browser's lane. `protocol_cross_host` gains a third documented exception (the C ABI's
+  256-slot meter lane), removed by #1588.
 - **Root ruling 2 (depth).** The C ABI's strip meter queues are as deep as the output meter's,
   `METER_QUEUE_DEPTH` (8, was 1): at depth 1 every frame after a service lag of more than one
   window was lost. Caps now charge 8 meter items per strip, so a session near
