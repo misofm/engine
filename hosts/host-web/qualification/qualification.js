@@ -1620,7 +1620,7 @@ export async function runQualification() {
       fetch("/qualification/empty-boot-frame.json"),
       fetch("/qualification/unsubscribe-session.json"),
       fetch("/fixture/structural-edit-session.json"),
-      import("/qualification/worst-replace-document.mjs"),
+      import("/qualification/worst-replace-document.js"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
       || !liveControlResponse.ok || !observationResponse.ok || !emptyResponse.ok

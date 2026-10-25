@@ -163,7 +163,7 @@ instance, whose structural edit is the blocking rebuild, reported and counted, D
   `boot` and `sendControlFrame` are restated there. `run.mjs` renders three references per
   browser: the replace before block 0 (the gate), one block late (`structural-edit-adoption-shifted`)
   and none (`structural-edit-skipped`). No digest is committed.
-- **The 1 MiB document** is built in JS (`qualification/worst-replace-document.mjs`): the browser
+- **The 1 MiB document** is built in JS (`qualification/worst-replace-document.js`): the browser
   job has no Rust toolchain. It equals `cargo run -p host-web --example worst_boot_document`
   byte for byte (compared once on 2026-10-25, 1,048,576 bytes, `Buffer.compare` 0).
 - **The matrix** gains prose, not a column: a new row gate would make the old `results.json` rows
