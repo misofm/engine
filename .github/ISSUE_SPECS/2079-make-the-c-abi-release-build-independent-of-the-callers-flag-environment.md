@@ -36,3 +36,22 @@ Decide, and record, whether the AArch64 targets need explicit flags; if none, sa
 
 ## Paths
 `scripts/build-capi-release.sh`, this spec.
+
+## Decision record (attempt 1, 2026-10-25)
+- Root R1: after the preflight, before `cargo rustc`, the script unsets `CARGO_ENCODED_RUSTFLAGS`,
+  `RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and every `CARGO_TARGET_*_RUSTFLAGS`. The `cargo rustc` line
+  keeps its spelling (`docs/C_ABI_V1_QUALIFICATION.md:16` quotes its shape; no script greps it).
+- Root R2: it also unsets every `CARGO_PROFILE_RELEASE_*`: the manifest's release profile is the
+  shipped profile. No CI job that runs this script sets one (nightly's `CARGO_PROFILE_RELEASE_LTO`
+  job runs `run-release-workspace-tests.sh`, not this script).
+- Root R3: unset, never refuse.
+- AArch64: no explicit flags. NEON is in the `aarch64-apple-ios` and `aarch64-linux-android`
+  baselines and `lane` keys on `target_feature = "neon"`.
+- Stated limit: a `build.rustflags` or `[profile.release]` in a caller's own `~/.cargo/config.toml`
+  (not an environment variable) still applies; this issue covers the flag environment only.
+- Self-test: one new case, a preflight refusal with `RUSTFLAGS` exported.
+- PR evidence (host staticlib, x86-64, separate scratch `CARGO_TARGET_DIR`s): with
+  `RUSTFLAGS='-C target-feature=+avx2,+fma -C target-cpu=native'` and, separately,
+  `CARGO_ENCODED_RUSTFLAGS=$'-C\x1fopt-level=1'` exported, `libcapi.a` is byte-identical to the clean
+  build (sha256 `044ad68e...bb8a9`). At base `609ccf399` the first gives a different archive
+  (`7b00b0c0...ad74`) and the second fails at `lane`'s `compile_error!`.
