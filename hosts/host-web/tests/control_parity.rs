@@ -3940,6 +3940,7 @@ fn arm_master_reading(browser: &mut Rig, c_abi: &mut CAbi) {
         tap_id: 1,
         armed: true,
         window_blocks: 4,
+        arm_tag: 0,
     }];
     let (b, _) = browser.transaction_reply(&arm);
     assert!(

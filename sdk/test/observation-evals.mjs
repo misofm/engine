@@ -169,7 +169,10 @@ describe("issue 777 -- selected resident observations", () => {
       // The prior resident cell survives a re-arm, but is historical for that new arm. The disarm of
       // the old window and the arm of a new one in one transaction is the core's one re-arm: it
       // restarts the window.
-      const rearmed = observeTaps(engine, [insertTap("t", "comp", false, 2), insertTap("t", "comp", true, 1)]);
+      const rearmed = observeTaps(engine, [
+        insertTap("t", "comp", false, 2, 1, armed.applied.observeArmTags[0]),
+        insertTap("t", "comp", true, 1),
+      ]);
       assert.equal(rearmed.status, "ok");
       assert.equal(engine.readObservations([comp])[0].status, "pending");
       feed(engine, 2); engine.render();

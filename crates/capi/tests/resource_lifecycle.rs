@@ -2926,6 +2926,9 @@ struct RaceEdits {
     soloed: Option<usize>,
     /// Whether the race compressor's gain-reduction tap is subscribed (#1584).
     observed: bool,
+    /// The tag of the race compressor's tap arm the race's disarms name (#2087): the arm made before
+    /// the race, which the race's own arms join.
+    observe_tag: u64,
 }
 
 impl RaceEdits {
@@ -2944,11 +2947,12 @@ impl RaceEdits {
             extra: false,
             soloed: None,
             observed: false,
+            observe_tag: 0,
         }
     }
 
     /// An `Observe` of the race compressor's gain-reduction tap: an arm with a four-block window,
-    /// then its disarm (#1584 gate 8).
+    /// then its disarm (#1584 gate 8), which names the arm's tag.
     fn observe_edit(&mut self) -> SessionEdit {
         self.observed = !self.observed;
         SessionEdit::Observe {
@@ -2959,6 +2963,7 @@ impl RaceEdits {
             tap_id: 1,
             armed: self.observed,
             window_blocks: 4,
+            arm_tag: if self.observed { 0 } else { self.observe_tag },
         }
     }
 
@@ -3449,12 +3454,27 @@ fn race_live_edits(run: usize) -> RaceCounts {
             tap_id: 1,
             armed: true,
             window_blocks: 4,
+            arm_tag: 0,
         }],
     );
     // SAFETY: The session and the caller-owned buffers are live; no other thread uses it yet.
     let armed = unsafe { submit(session, &arm, &mut response) };
     assert_eq!(armed, RESULT_OK);
     assert_eq!(&response[18..20], &[0, 0], "the tap is armed");
+    let length = protocol::OUTER_HEADER_BYTES
+        + u32::from_le_bytes(response[20..24].try_into().expect("a length word")) as usize;
+    let mut fields = [0_u16; 64];
+    let Ok(protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+        ..
+    }) = ProtocolCodec::default().decode_typed_response(
+        &response[..length],
+        &mut protocol::DecodeScratch::new(&mut fields),
+    )
+    else {
+        panic!("the arm is applied")
+    };
+    edits.observe_tag = applied.observe_arm_tags[0];
 
     let (control, (render_observed, render_failure)) = std::thread::scope(|scope| {
         let render = scope.spawn(|| {

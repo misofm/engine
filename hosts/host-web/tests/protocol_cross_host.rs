@@ -921,6 +921,7 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         tap_id: 1,
         armed: true,
         window_blocks: 1,
+        arm_tag: 0,
     }];
     let response = legs.command("16 observe", CommandPayload::SessionTransactionApply(&arm));
     let Verdict::Applied { revision, .. } = decode_verdict(&response) else {
@@ -1272,6 +1273,7 @@ fn both_hosts_read_one_observation_tap_alike() {
             tap_id: 1,
             armed: true,
             window_blocks: WINDOW_BLOCKS,
+            arm_tag: 0,
         }]),
     );
     let (result, reply) = browser.send(&arm);

@@ -194,7 +194,12 @@ export function observeTaps(engine, edits) {
   return decodeControlReply(engine.controlFrame(frame));
 }
 
-/** One insert tap's `Observe` edit for {@link observeTaps}: tap 1 of insert `effectId` of `stripId`. */
-export function insertTap(stripId, effectId, armed, windowBlocks, tapId = 1) {
-  return { stripId, rack: "inserts", effectId, tapId, armed, windowBlocks };
+/**
+ * One insert tap's `Observe` edit for {@link observeTaps}: tap 1 of insert `effectId` of `stripId`.
+ * A disarm names the arm it ends by `armTag`, the tag its arm's reply gave (#2087).
+ */
+export function insertTap(stripId, effectId, armed, windowBlocks, tapId = 1, armTag = undefined) {
+  return armed
+    ? { stripId, rack: "inserts", effectId, tapId, armed, windowBlocks }
+    : { stripId, rack: "inserts", effectId, tapId, armed, windowBlocks, armTag };
 }
