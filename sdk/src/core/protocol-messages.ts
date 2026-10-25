@@ -11,8 +11,11 @@ import {
   WIRE_U64,
   WIRE_U8,
   WIRE_UTF8,
+  MESSAGE_SESSION_REPLACE,
   commandFrame,
   concat,
+  decodeAppliedReply,
+  decodeControlReply,
   decodeProtocolDiagnostic,
   decodeRefusalFields,
   decodeResponseEnvelope,
@@ -33,6 +36,10 @@ import type { ControlBackpressure, ControlStatusName, RawField } from "./control
 import type { ControlRequestIds } from "./control-queue.ts";
 import { MisoControlRefusal, MisoUsageError } from "./errors.ts";
 import { decodeObservationEnded } from "./observation-ended.ts";
+import { documentSha256, editOutcome, encodeSessionReplaceRequest } from "./session-edit.ts";
+import type { EditOutcome } from "./session-edit.ts";
+import { encodeSessionTransaction } from "./session-transaction.ts";
+import type { SessionTransaction } from "./session-transaction.ts";
 import type { ObservationEndedKey } from "./observation-ended.ts";
 
 /**
@@ -788,8 +795,11 @@ export function decodeProtocolEvent(frame: Uint8Array): ProtocolEvent {
 
 /** How a `ProtocolClient` reaches one engine's core. */
 export interface ProtocolTransport {
-  /** Send one command frame and resolve with its reply frame. */
-  readonly send: (frame: Uint8Array) => Uint8Array | PromiseLike<Uint8Array>;
+  /**
+   * Send one command frame and resolve with its reply frame. `document`, when present, is the
+   * document a `SESSION_REPLACE` frame names, passed beside the frame (#1386 D7).
+   */
+  readonly send: (frame: Uint8Array, document?: Uint8Array) => Uint8Array | PromiseLike<Uint8Array>;
   /** The endpoint's one request-ID allocator: the core's replay cache refuses a reused ID. */
   readonly requestIds: ControlRequestIds;
   /** The core's committed revision, which `TRANSPORT_SET` and `TELEMETRY_CONFIGURE` must expect exactly. */
@@ -832,6 +842,48 @@ export class ProtocolClient {
 
   constructor(transport: ProtocolTransport) {
     this.#transport = transport;
+  }
+
+  /**
+   * Apply one structural transaction (`SESSION_TRANSACTION_APPLY`) at the core's committed revision
+   * and resolve with the committed revision and the path the core chose (#1389). A refusal rejects
+   * with `MisoControlRefusal`, and nothing is committed. There is no retry: the transaction was
+   * built against one session, and a conflict means the session moved under it.
+   */
+  async applyTransaction(transaction: SessionTransaction): Promise<EditOutcome> {
+    const expectedRevision = await this.#transport.committedRevision();
+    const requestId = this.#transport.requestIds.next();
+    const reply = decodeControlReply(await this.#transport.send(
+      encodeSessionTransaction(transaction, { requestId, expectedRevision }),
+    ));
+    if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+    return editOutcome(reply);
+  }
+
+  /**
+   * Replace the session with `document` (`SESSION_REPLACE`, #1386): the core diffs it against the
+   * committed model into one transaction. The frame names the document by its length and SHA-256
+   * and the transport passes the bytes beside it. Resolves with the committed revision and the path,
+   * `unchanged` when the document equals the committed model; a refusal rejects with
+   * `MisoControlRefusal`, and nothing is committed.
+   */
+  async replaceSession(document: Uint8Array<ArrayBuffer>): Promise<EditOutcome> {
+    if (!(document instanceof Uint8Array) || document.length === 0) {
+      throw new MisoUsageError("a replacement document must be non-empty bytes");
+    }
+    const digest = await documentSha256(document);
+    // Read after the digest, right before the send: the revision the frame expects is current.
+    const expectedRevision = await this.#transport.committedRevision();
+    const requestId = this.#transport.requestIds.next();
+    const frame = encodeSessionReplaceRequest({
+      requestId,
+      expectedRevision,
+      documentBytes: document.length,
+      documentSha256: digest,
+    });
+    const reply = decodeAppliedReply(await this.#transport.send(frame, document), MESSAGE_SESSION_REPLACE);
+    if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+    return editOutcome(reply);
   }
 
   async #call<T>(encode: (requestId: bigint) => Uint8Array, decode: (bytes: Uint8Array) => ProtocolReply<T>): Promise<ProtocolReply<T>> {

@@ -29,6 +29,14 @@ const STATE_READY = 2;
 const WATERMARK_BYTES = 96;
 // The outcome flag each of the record's three counts (exact, transition fallback, superseded) names.
 const WATERMARK_COUNT_FLAGS = [1n, 2n, 4n];
+// Issue #1297a: the 64-byte seek report record `miso_engine_web_v1_source_seek_report_ptr` names,
+// in the C ABI's order: struct size, a reserved word, then generation, first sample, source frame,
+// cumulative underrun frames and cumulative held frames at these offsets.
+const SEEK_REPORT_BYTES = 64;
+const SEEK_REPORT_WORDS = [
+  ["generation", 8], ["firstSample", 16], ["sourceFrame", 24],
+  ["cumulativeUnderrunFrames", 32], ["cumulativeHeldFrames", 40],
+];
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
 // Issue #137 D1/D2/D3.
@@ -98,6 +106,9 @@ const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"
 // Issue #1644 D1 (root R1): one session seek message for both exports. `anchorSample` is always
 // present; `-1n` is a plain seek, any other value the absolute render sample of the anchored form.
 const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample"];
+// Issue #1297a: the anchored source seek and the seek report, both control work of the handler.
+const SEEK_AT_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame", "anchorSample"];
+const SEEK_REPORT_FIELDS = ["tag", "requestId", "sourceId"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
 /// Issue #1697: a `SESSION_REPLACE` frame carries its document beside it.
@@ -480,6 +491,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const watermarkPointer = this.exports.miso_engine_web_v1_watermark_ptr(this.handle);
     if (!u32(watermarkPointer) || watermarkPointer === 0) return RESULT_INTERNAL;
     this.bindView("watermarkView", DataView, watermarkPointer, WATERMARK_BYTES);
+    // Issue #1297a: the seek report record is at a stable address, bound once here.
+    const seekReportPointer = this.exports.miso_engine_web_v1_source_seek_report_ptr(this.handle);
+    if (!u32(seekReportPointer) || seekReportPointer === 0) return RESULT_INTERNAL;
+    this.bindView("seekReportView", DataView, seekReportPointer, SEEK_REPORT_BYTES);
     // The boot watermark is the baseline, not an advance: only a later change is posted.
     if (this.exports.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
       this.watermarkRevision = this.watermarkView.getBigUint64(8, true);
@@ -1203,6 +1218,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else if (message?.tag === "miso.session-seek.v1"
         && exactFields(message, SESSION_SEEK_FIELDS)) {
       this.receiveSessionSeek(message);
+    } else if (message?.tag === "miso.seek-at.v1" && exactFields(message, SEEK_AT_FIELDS)) {
+      this.receiveSeekAt(message);
+    } else if (message?.tag === "miso.seek-report.v1"
+        && exactFields(message, SEEK_REPORT_FIELDS)) {
+      this.receiveSeekReport(message);
     } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
       this.receiveCommand(message);
     } else if (message?.tag === "miso.control.v1"
@@ -1960,6 +1980,74 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       result,
       generation: message.generation,
     });
+  }
+
+  /// Issue #1297a, `single` mode: one anchored source seek, applied by the message handler between
+  /// blocks and never in `process()`: `source_seek_at` runs the service step. It calls the export
+  /// once; a refusal is the reply's result and is not sticky. A malformed message calls nothing.
+  receiveSeekAt(message) {
+    if (typeof message.sourceId !== "string"
+        || typeof message.generation !== "bigint" || message.generation <= 0n
+        || message.generation > 0xffffffffffffffffn
+        || typeof message.sourceFrame !== "bigint" || message.sourceFrame < 0n
+        || message.sourceFrame > 0xffffffffffffffffn
+        || typeof message.anchorSample !== "bigint" || message.anchorSample < 0n
+        || message.anchorSample > 0xffffffffffffffffn) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
+      return;
+    }
+    const idLength = this.stageSourceId(message.sourceId);
+    if (idLength < 0) {
+      this.sticky(4, message.requestId);
+      return;
+    }
+    this.acknowledge(
+      message.requestId,
+      this.exports.miso_engine_web_v1_source_seek_at(
+        this.handle, idLength, message.generation, message.sourceFrame, message.anchorSample,
+      ),
+    );
+  }
+
+  /// Issue #1297a, `single` mode: read where one source landed after its newest seek. The handler
+  /// calls `source_seek_report` once (it runs the service step, so never in `process()`) and copies
+  /// the record's words into the reply; a refusal is the reply's result with a null report, and is
+  /// not sticky. The worklet computes nothing from the words.
+  receiveSeekReport(message) {
+    if (typeof message.sourceId !== "string") {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
+      return;
+    }
+    const idLength = this.stageSourceId(message.sourceId);
+    if (idLength < 0) {
+      this.sticky(4, message.requestId);
+      return;
+    }
+    const result = this.exports.miso_engine_web_v1_source_seek_report(this.handle, idLength);
+    let report = null;
+    if (result === RESULT_OK) {
+      this.rebindMemoryViews();
+      const view = this.seekReportView;
+      if (view.getUint32(0, true) !== SEEK_REPORT_BYTES) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      report = {};
+      for (const [field, offset] of SEEK_REPORT_WORDS) {
+        report[field] = view.getBigUint64(offset, true);
+      }
+    }
+    this.port.postMessage({
+      tag: "miso.seek-report.v1",
+      requestId: message.requestId,
+      result,
+      report,
+    });
+  }
+
+  /// Copy one source ID into the staging; the byte count, or `-1` when it does not fit.
+  stageSourceId(sourceId) {
+    return writeBoundedUtf8(sourceId, this.memoryBuffer, this.sourceIdPointer, this.sourceIdCapacity);
   }
 
   // PROCESS_POLICY_BEGIN

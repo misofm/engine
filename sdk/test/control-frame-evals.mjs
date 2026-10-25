@@ -130,7 +130,8 @@ describe("the reply decoder reads the codec's replies", () => {
     const monitor = Uint8Array.from(live);
     monitor[at] = 4;
     assert.equal(decodeControlReply(monitor).applied.editPath, "monitor");
-    for (const code of [0, 5, 255]) {
+    // 5 is `unchanged`, a `SESSION_REPLACE` reply's (#1386); the replace evals read it from the core.
+    for (const code of [0, 6, 255]) {
       const bad = Uint8Array.from(live);
       bad[at] = code;
       assert.throws(() => decodeControlReply(bad), MisoEngineError, `code ${code}`);
