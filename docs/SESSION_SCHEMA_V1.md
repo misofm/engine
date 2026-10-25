@@ -219,9 +219,10 @@ with `effect.link_mode.unsupported` at the entry's own path
 (`$.tracks[id=<id>].console[slot=<slot>].link_mode`, or the submix strip's prefix); an entry on
 `slot` whose slot declares an unsupported mode refuses at the lowered effect, as before. An
 override that differs from the slot's mode on an effect whose bank does not hold the link mode per
-lane (the multiband compressor today) refuses with `console.link_mode.override_unbanked` at the
-same path, because that strip would leave the slot's one bank. The strip still binds the slot's
-one bank.
+lane (no launch effect today; the guard is kept as an invariant, #1367a) refuses with
+`console.link_mode.override_unbanked` at the same path, because that strip would leave the slot's
+one bank. An unsupported resolved mode refuses first; the bank guard applies only to a supported
+mode. The strip still binds the slot's one bank.
 
 **Latency grows with bus depth.** A console slot's latency is paid on every strip that carries it,
 bypassed or not, so a signal that passes through a track and then `n` nested buses pays a latent

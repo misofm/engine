@@ -426,6 +426,8 @@ fn prepare_with_console_eligibility(
                 // #1369 R3: an effect whose bank does not hold the link mode per lane would split
                 // the slot's bank into two cohorts on a differing override, and a console slot
                 // binds one bank (decision 12). Refused until that effect holds it per lane.
+                // An unsupported resolved mode refuses first; the bank guard applies only to a
+                // supported mode.
                 if let Some((entry_path, declared)) = &console_override
                     && effect.link_mode != *declared
                     && !descriptor.lane_link

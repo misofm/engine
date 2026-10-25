@@ -692,7 +692,8 @@ fn an_entry_whose_capacity_is_below_its_live_cells_is_refused_at_attach() {
 /// #1369 gate 2: a console entry's override is checked as the mode it resolves to, at the entry's
 /// own path, on a track and on a submix strip: `maximum` on the EQ slot and `average` on the
 /// limiter slot refuse with `effect.link_mode.unsupported`, while `maximum` on the compressor slot
-/// prepares at `maximum` with the slot left at `dual_mono`.
+/// prepares at `maximum` with the slot left at `dual_mono`. An unsupported resolved mode refuses
+/// first; the bank guard applies only to a supported mode.
 ///
 /// Red if the check reads the slot's declared mode instead of the resolved one (both overrides
 /// then prepare), or if the refusal keeps the lowered effect's path.

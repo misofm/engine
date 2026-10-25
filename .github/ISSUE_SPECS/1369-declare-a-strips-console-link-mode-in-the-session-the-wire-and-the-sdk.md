@@ -198,6 +198,10 @@ console link row, `crates/controls` logic, `AGENTS.md`, rulings, SKILL.md and DE
   one key: `hosts/host-web/tests/fixtures/control-list.json` (rows unchanged) and
   `structural-frames.json`; the C ABI snapshot length re-pin is 279 bytes (nine entries).
   `scripts/derive-intended-console-fixture.py` writes the key (needed by `check-console-fixtures.sh`).
+  The key or its encoder also touches, outside the authorized list: `crates/controls/tests/common/mod.rs`
+  (one literal), `hosts/host-web/src/ffi.rs` (one embedded entry), `sdk/src/core/session-transaction.ts`
+  (field 4), `sdk/assets/miso-engine-v1-session-keys.json` (generated) and
+  `sdk/src/cli/session-request.ts` (the request key).
 - **Hash.** `COMPLETE_SCHEMA_HASH` re-pinned from `480ffcf546bea7fb` (after #1583) to
   `06bb3b6f65f39eec`; only `command.session_transaction_apply` carries a console entry.
 
@@ -222,3 +226,7 @@ prepare checks the declared mode -> gate 2 red; R3 guard off -> gate 3 red; deco
 missing field -> gate 4 red; comp slot forced to `maximum` on every strip -> gate 5 red;
 `program_key` keeps the link mode for `lane_link` -> gate 5 red (two comp banks); SDK writes
 `"slot"` always or omits the key -> gate 6 red.
+
+For #1369b (from the #1369a verify): add `console.link_mode.override_unbanked` to the Stable
+diagnostics list in `docs/EFFECT_CONTRACT_V1.md`. The SDK builder does not mirror the R3 guard: no
+launch table reaches it.
