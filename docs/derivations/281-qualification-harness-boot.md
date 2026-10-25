@@ -168,7 +168,7 @@ shorthand beside a parameter still spelled `sessionToml` would have quietly hand
 page's `Document` object instead of the session bytes.
 
 Not one boot-relevant *value* changes. Every call site keeps the `sourceRingFrames` it had —
-`frames` for the corpus segments, `LIVE_CONTROL_FRAMES`, `OBSERVATION_FRAMES`, `DEFAULT_RING_FRAMES`
+`frames` for the corpus segments, `LIVE_CONTROL_FRAMES`, `OBSERVATION_FRAMES`, `DEFAULT_RING_FRAMES` (renamed `STALL_RING_FRAMES` by #1406b)
 for stall — and the four live-control words are unchanged per row.
 
 ## 5. Why no digest and no byte-length pin moves
