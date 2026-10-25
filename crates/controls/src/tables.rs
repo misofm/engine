@@ -155,7 +155,7 @@ pub fn effect_table_rows(effect_id: &str) -> Option<EffectTableRows> {
         effect_rows::link_choices(descriptor, row).map(|choices| {
             TableRow::plain(
                 effect_rows::LINK_MODE_CONTROL,
-                effect_rows::link_mode_descriptor(effect_id, choices, row),
+                effect_rows::link_mode_descriptor(effect_id, choices),
             )
         })
     };
