@@ -795,14 +795,17 @@ impl EffectControlProducer {
     /// # Errors
     ///
     /// [`ObservePushError`], with nothing queued.
+    ///
+    /// `arm_tag` is the edit's tag (#1585 D4), `0` for none; render publishes it with the arm.
     pub fn try_push_observe(
         &mut self,
         tap_index: u32,
         armed: bool,
         window_blocks: u32,
+        arm_tag: u64,
     ) -> Result<(), ObservePushError> {
         self.writer
-            .try_push_observe(tap_index, armed, window_blocks)
+            .try_push_observe(tap_index, armed, window_blocks, arm_tag)
     }
 
     /// The observation queue's capacity: the number of taps the effect declares, `0` for a lane
@@ -1752,13 +1755,9 @@ pub struct EffectObservationHandle {
     /// The effect's declared menu, so an admitting host maps a wire `tap_id` to a `tap_index` and
     /// checks the cost class without a second copy of the registry.
     pub descriptor: &'static EffectDescriptor,
-    /// One reader per declared tap, in declaration order.
+    /// One reader per declared tap, in declaration order. Each tap's arm state is in its slot,
+    /// which render writes ([`ObservationReader::read_state`], #1585 D6).
     pub readers: Box<[ObservationReader]>,
-    /// The taps this instance was prepared with armed (#1584 D6a), one bit per declared tap: bit
-    /// `i` is `descriptor.observations[i]`, the effect-local tap index `push_observe` sets. This is
-    /// the one place a binding is matched to a tap, so a host reads the arming from here and does
-    /// not repeat the match. A tap past bit 31 has no bit.
-    pub armed_taps: u32,
 }
 
 /// One observation tap a successor plan is prepared with armed (#1584 D6a): the host acknowledged
@@ -1779,6 +1778,9 @@ pub struct ObservationArm<'a> {
     pub tap_id: u32,
     /// The window length in blocks; `0` is the plan's meter window.
     pub window_blocks: u32,
+    /// The tag of the record that armed the tap (#1585 D4), which the plan's first block publishes
+    /// with the arm; `0` for none.
+    pub arm_tag: u64,
 }
 
 /// Attach observation capacity to every prepared effect that declares at least one tap.
@@ -1811,14 +1813,14 @@ pub fn attach_effect_observation(
 ) -> Result<Vec<EffectObservationHandle>, EffectDiagnosticSet> {
     let declared = declared_live_addresses(&prepared.session);
     // The arms by instance, so each entry finds its own in one lookup.
-    // (strip, console, instance ID) -> (tap ID, window blocks) of each armed tap.
-    type ArmedTaps<'a> = BTreeMap<(&'a str, bool, &'a str), Vec<(u32, u32)>>;
+    // (strip, console, instance ID) -> (tap ID, window blocks, arm tag) of each armed tap.
+    type ArmedTaps<'a> = BTreeMap<(&'a str, bool, &'a str), Vec<(u32, u32, u64)>>;
     let mut armed = ArmedTaps::new();
     for arm in arms {
         armed
             .entry((arm.strip_id, arm.console, arm.effect_id))
             .or_default()
-            .push((arm.tap_id, arm.window_blocks));
+            .push((arm.tap_id, arm.window_blocks, arm.arm_tag));
     }
     let mut handles = Vec::new();
     let mut diagnostics = Vec::new();
@@ -1866,19 +1868,16 @@ pub fn attach_effect_observation(
         // first window at its first rendered block. An arm for a tap the effect does not declare
         // is ignored: the host drops such a binding before it reaches here.
         let console = !matches!(entry.rack, EffectRack::Dynamic);
-        let mut armed_taps = 0_u32;
         if let Some(taps) = armed.get(&(entry.track_id.as_str(), console, entry.effect_id.as_str()))
         {
-            for &(tap_id, window) in taps {
+            for &(tap_id, window, arm_tag) in taps {
                 if let Some(index) = descriptor
                     .observations
                     .iter()
                     .position(|tap| tap.id.0 == tap_id)
                     && let Ok(index) = u32::try_from(index)
-                    && lane.arm_prepared(index, window)
-                    && let Some(bit) = 1_u32.checked_shl(index)
                 {
-                    armed_taps |= bit;
+                    lane.arm_prepared(index, window, arm_tag);
                 }
             }
         }
@@ -1888,7 +1887,6 @@ pub fn attach_effect_observation(
             effect_id: entry.effect_id.as_str().into(),
             descriptor,
             readers: readers.into_boxed_slice(),
-            armed_taps,
         });
         entry.observation = Some(Box::new(lane));
     }

@@ -6992,12 +6992,12 @@ fn admit_observes(plan: &mut LivePlan, strips: &[&str], pending: PendingObserve)
         };
         for _ in 0..records {
             producer
-                .try_push_observe(0, true, 1)
+                .try_push_observe(0, true, 1, 0)
                 .expect("room in the queue");
         }
         if let PendingObserve::FullQueues = pending {
             assert!(
-                producer.try_push_observe(0, true, 1).is_err(),
+                producer.try_push_observe(0, true, 1, 0).is_err(),
                 "{strip}: the queue is full"
             );
         }
@@ -8783,7 +8783,7 @@ mod observation_carry {
             plan.handles
                 .effect_control_mut(strip, LiveEffectAddress::insert(0))
                 .expect("a control channel for the insert")
-                .try_push_observe(0, true, WINDOW_BLOCKS)
+                .try_push_observe(0, true, WINDOW_BLOCKS, 0)
                 .expect("room in the queue");
         }
     }
@@ -8794,7 +8794,7 @@ mod observation_carry {
             plan.handles
                 .effect_control_mut(strip, LiveEffectAddress::insert(0))
                 .expect("a control channel for the insert")
-                .try_push_observe(0, false, WINDOW_BLOCKS)
+                .try_push_observe(0, false, WINDOW_BLOCKS, 0)
                 .expect("room in the queue");
         }
     }
@@ -8853,6 +8853,8 @@ mod observation_carry {
         restarted: Vec<Box<str>>,
         /// Armed taps of the successor and of the predecessor after the swap block.
         armed: [u64; 2],
+        /// Each successor tap's published state at the end of the run, by strip (#1585 D2).
+        states: BTreeMap<String, engine::realtime::ObservationState>,
         /// The allocator's `(allocations, reallocations, deallocations)` and the render audit's
         /// `(allocations, deallocations)` over the swap block: hand-over, hook and render.
         allocator: ((u64, u64, u64), (u64, u64)),
@@ -8885,6 +8887,9 @@ mod observation_carry {
         /// Subscribes pushed into B's own queue before its first block: the reference for a tap
         /// armed at preparation.
         successor_records: &'a [String],
+        /// Disarms pushed into B's own queue before the swap (#1585): the browser's unsubscribe
+        /// admitted against the successor between its commit and its adoption block.
+        successor_disarms: &'a [String],
         /// The taps the host's table holds (#1584 D6a); none by default.
         bindings: Option<&'a controls::ObservationBindings>,
     }
@@ -8914,6 +8919,7 @@ mod observation_carry {
             backend,
         );
         subscribe(&mut successor, swap.successor_records);
+        unsubscribe(&mut successor, swap.successor_disarms);
         attach(&mut successor);
         assert_eq!(
             successor
@@ -8963,6 +8969,18 @@ mod observation_carry {
                 successor.prepared.plan.observation_binding_counts()[2],
                 plan.prepared.plan.observation_binding_counts()[2],
             ],
+            states: successor
+                .prepared
+                .plan
+                .host_attachment_mut::<Rig>()
+                .expect("attachment")
+                .observations
+                .iter()
+                .map(|handle| {
+                    let state = handle.readers[0].read_state().expect("a whole read");
+                    (handle.track_id.to_string(), state)
+                })
+                .collect(),
             allocator: (
                 (delta.allocations, delta.reallocations, delta.deallocations),
                 (audit.allocations, audit.deallocations),
@@ -9286,10 +9304,14 @@ mod observation_carry {
     }
 
     /// #1584 D6a gate 3: a disarm still waiting in the predecessor's queue at the swap leaves the
-    /// restarted effect's successor tap unarmed: the host's table no longer holds it.
+    /// restarted effect's successor tap unarmed: the host's table no longer holds it. And #1585: a
+    /// disarm queued on the successor before the swap leaves a carried tap the predecessor had
+    /// armed unarmed, in its slot and in the armed count: the carry's state comes first, the
+    /// successor's own record after it.
     ///
     /// Red mutation: arm every tap the predecessor had armed -> eq1's successor tap is armed and
-    /// publishes after the swap.
+    /// publishes after the swap. Drain the successor's own queue in the carry, before the taps
+    /// exchange -> the carried tap comes back armed over the successor's disarm.
     fn a_pending_disarm_leaves_the_restarted_tap_unarmed(backend: Backend) {
         let what = format!("{backend:?}");
         let (a, b) = restarted_pair(backend);
@@ -9297,6 +9319,8 @@ mod observation_carry {
         let restarted = vec!["eq1".to_owned()];
         let others: Vec<String> = all.iter().filter(|s| *s != "eq1").cloned().collect();
         let bindings = bindings_of(&others);
+        // A carried tap the predecessor armed early, disarmed in the successor's own queue.
+        let carried_disarm = vec![others[0].clone()];
         let run = swapped_with(
             backend,
             &a,
@@ -9304,6 +9328,7 @@ mod observation_carry {
             &Swap {
                 early: &all,
                 late_disarm: &restarted,
+                successor_disarms: &carried_disarm,
                 bindings: Some(&bindings),
                 ..Swap::default()
             },
@@ -9311,8 +9336,12 @@ mod observation_carry {
         assert_eq!(run.restarted, vec![Box::<str>::from("eq1")], "{what}");
         assert_eq!(
             run.armed[0],
-            others.len() as u64,
-            "{what}: the disarmed tap starts unarmed"
+            others.len() as u64 - 1,
+            "{what}: the disarmed taps start unarmed"
+        );
+        assert!(
+            !run.states[&carried_disarm[0]].armed,
+            "{what}: the successor's disarm of a carried tap is in its slot"
         );
         assert!(
             run.streams["eq1"]

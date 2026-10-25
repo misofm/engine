@@ -215,7 +215,7 @@ fn bypass_and_observe_records_fold_in_place_around_a_pair() {
         left(0, -6.0),
         right(0, -6.0),
     ]);
-    rig.writer.try_push_observe(0, true, 4).expect("room");
+    rig.writer.try_push_observe(0, true, 4, 0).expect("room");
     rig.stage();
     assert_eq!(
         rig.lane.drain_observations(0, None),

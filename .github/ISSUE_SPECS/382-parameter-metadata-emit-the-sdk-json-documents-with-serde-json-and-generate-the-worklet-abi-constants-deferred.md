@@ -9,3 +9,45 @@ Child of #377 (Part 2, finding 3, plus finding 8). **Deferred past launch** by t
 ## Not scheduled
 
 Do not claim before launch without an owner comment here.
+
+## Decision record (2026-10-24, backlog sprint)
+
+- Pulled forward by the backlog sprint (owner goal of 2026-10-24); the launch hold is discharged.
+- Root decisions: byte identity of every generated document, no re-pin; part 2 is one assertion
+  in an existing gate, not a generated constants prelude. No new test.
+- Emission: `Serialize` models (serde derive) written by `serde_json` as compact JSON
+  (`to_string` plus a trailing newline).
+  `preserve_order` is not used: struct field order is the schema order, and the feature would
+  unify into every workspace `serde_json` user. `raw_value` carries each `f32` in `number()`'s
+  spelling. New direct dependency `serde =1.0.228` (already in `Cargo.lock`; one lock line).
+- Change of decision (root, after the attempt-1 verifier PASS): attempt 1 kept the bytes with a
+  custom block formatter (continuation keys, one-line wrappers). Nothing pins the asset bytes by
+  digest, and the owner's rule is that fragile machinery is not worth a small gain, so the
+  simpler shape wins: the standard pretty printer and one whitespace-only re-pin of the
+  generated documents. The verifier's minor finding on non-string keys in that formatter goes
+  away with it. The tests that scanned the old line layout (`tests/abi_layout.rs`,
+  `tests/round_trip.rs`) now read the parsed JSON; their claims are unchanged.
+- Second change (root): the pretty print made the shipped metadata 54 % larger, a real cost for the
+  browser SDK, so both documents are compact JSON: no formatter at all and the smallest asset. The
+  regeneration check guards these generated files, not a human diff.
+- Layout-dependent readers (root-authorized search of `scripts/`, `.github/`, `sdk/`, `hosts/` for
+  sed, grep, awk, regex or line edits of the two documents): one found and fixed.
+  `scripts/test-web-audioworklet.sh` mutated the metadata with `s/"liveUpdatable": true/.../`,
+  which matched nothing in compact JSON (CI red on #1978). It is now `"liveUpdatable": *true`, and
+  the script fails if the edit leaves the file unchanged. Every other reader parses the JSON
+  (`json.load`, `JSON.parse`, `serde_json`) or names the file only; the schema gates' self-tests
+  mutate parsed values.
+- Part 2: `scripts/check-web-audioworklet.sh` requires each shipped JS file to declare
+  `COMMAND_RECORD_BYTES` exactly once, equal to the shipped layout's `commandRecord.bytes`.
+
+## Evidence
+
+- Whitespace-only re-pin: each document on main and its compact successor, parsed with keys in
+  order and numbers kept as text, are equal. Bytes (main, pretty, compact):
+  `miso-engine-v1-parameter-metadata.json` 217,854 / 335,632 / 171,526;
+  `miso-engine-v1-abi-layout.json` and `scripts/fixtures/abi-layout-v1-self-test.json`
+  27,915 / 39,863 / 21,804. Session keys and response frame are unchanged; `sdk/src/generated` is
+  unchanged; the built artifact's two JSON documents equal `sdk/assets`. Both schema gates'
+  self-tests mutate the parsed value, so they apply to compact JSON unchanged.
+- Red first: `COMMAND_RECORD_BYTES = 273` in the worklet JS (tree and artifact) passes the gate
+  before the assertion and fails it after; the same mutant in the host JS fails it too.

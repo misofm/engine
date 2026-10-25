@@ -80,6 +80,49 @@ macro_rules! append {
     };
 }
 
+/// JSON emission for the SDK documents (#382).
+///
+/// The documents are `Serialize` models written by `serde_json` as compact JSON, so
+/// escaping, separators, nesting and whitespace are the serializer's, never a hand-placed comma.
+/// [`Num`] writes a finite `f32` in [`super::number`]'s spelling through a raw value, so a
+/// number's bytes never depend on the serializer's float printer.
+mod json {
+    use serde::ser::{Error as _, SerializeMap as _};
+    use serde::{Serialize, Serializer};
+    use serde_json::value::RawValue;
+
+    /// A finite `f32`, spelled by [`super::number`].
+    pub(crate) struct Num(pub(crate) f32);
+
+    impl Serialize for Num {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            RawValue::from_string(super::number(self.0))
+                .map_err(S::Error::custom)?
+                .serialize(serializer)
+        }
+    }
+
+    /// An object whose keys are data (an effect ID, a sample rate), in the given order.
+    pub(crate) struct Entries<V>(pub(crate) Vec<(String, V)>);
+
+    impl<V: Serialize> Serialize for Entries<V> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(self.0.len()))?;
+            for (key, value) in &self.0 {
+                map.serialize_entry(key, value)?;
+            }
+            map.end()
+        }
+    }
+
+    /// Write `value` as one line of compact JSON with a trailing newline.
+    pub(crate) fn document<T: Serialize>(value: &T) -> String {
+        let mut text = serde_json::to_string(value).expect("an in-memory JSON write cannot fail");
+        text.push('\n');
+        text
+    }
+}
+
 pub mod abi_layout;
 pub mod response_frame;
 pub mod session_keys;
@@ -87,7 +130,6 @@ pub mod session_keys;
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use bench_support::json::escape;
 use builtins::{
     BUILTIN_PARAMETER_DESCRIPTORS, BuiltinParameterDescriptor, BuiltinParameterDomain,
     BuiltinParameterMapping, BuiltinParameterReset, BuiltinParameterScope,
@@ -117,6 +159,8 @@ use host_web::{
     COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
     COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
 };
+use json::{Entries, Num};
+use serde::Serialize;
 
 /// The emitted file name, shipped beside the Wasm artifact.
 pub const OUTPUT_NAME: &str = "miso-engine-v1-parameter-metadata.json";
@@ -142,23 +186,60 @@ fn usage() -> ! {
     std::process::exit(2)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Document<'a> {
+    schema: &'a str,
+    abi_version: u32,
+    command_record_bytes: u32,
+    maximum_command_records: u32,
+    command_kinds: Vec<CommandKindRow<'a>>,
+    command_reasons: Vec<NamedValue<'a>>,
+    observation_vocabularies: ObservationVocabularies<'a>,
+    builtins: Builtins<'a>,
+    effects: Vec<Effect<'a>>,
+    controls: Controls<'a>,
+}
+
+#[derive(Serialize)]
+struct CommandKindRow<'a> {
+    value: u32,
+    name: &'a str,
+    applied: bool,
+    plane: &'a str,
+}
+
+#[derive(Serialize)]
+struct NamedValue<'a> {
+    value: u32,
+    name: &'a str,
+}
+
+#[derive(Serialize)]
+struct ObservationVocabularies<'a> {
+    kinds: Vec<NamedValue<'a>>,
+    costs: Vec<NamedValue<'a>>,
+    cadences: Vec<NamedValue<'a>>,
+    folds: Vec<NamedValue<'a>>,
+    channels: Vec<NamedValue<'a>>,
+}
+
+#[derive(Serialize)]
+struct Builtins<'a> {
+    response: Response<'a>,
+    parameters: Vec<BuiltinParameter<'a>>,
+}
+
+fn named<'a>(rows: &[(u32, &'a str)]) -> Vec<NamedValue<'a>> {
+    rows.iter()
+        .map(|&(value, name)| NamedValue { value, name })
+        .collect()
+}
+
 /// Render the whole document. Deterministic: registry order is `EffectId` order.
 #[must_use]
 pub fn render() -> String {
     let registry = launch_native_effect_registry().expect("launch effect registry");
-    let mut out = String::with_capacity(1 << 16);
-    out.push_str("{\n");
-    append!(&mut out, "  \"schema\": \"{SCHEMA}\",\n");
-    append!(&mut out, "  \"abiVersion\": {ABI_VERSION},\n");
-    append!(
-        &mut out,
-        "  \"commandRecordBytes\": {COMMAND_RECORD_BYTES},\n"
-    );
-    append!(
-        &mut out,
-        "  \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
-    );
-    out.push_str("  \"commandKinds\": [\n");
     let kinds = [
         (
             COMMAND_OBSERVE_SUBSCRIBE,
@@ -173,16 +254,6 @@ pub fn render() -> String {
             PLANE_OBSERVATION,
         ),
     ];
-    for (index, (value, name, applied, plane)) in kinds.iter().enumerate() {
-        append!(
-            &mut out,
-            "    {{ \"value\": {value}, \"name\": \"{name}\", \"applied\": {applied}, \
-             \"plane\": \"{plane}\" }}{}\n",
-            comma(index, kinds.len())
-        );
-    }
-    out.push_str("  ],\n");
-    out.push_str("  \"commandReasons\": [\n");
     let reasons = [
         (COMMAND_REASON_NONE, "none"),
         (COMMAND_REASON_MALFORMED, "malformed"),
@@ -204,88 +275,69 @@ pub fn render() -> String {
         // 12-14 are retired with the value kinds (#1565A) and never reallocated; #1676 added 15.
         (COMMAND_REASON_OBSERVATION_LIMIT, "observationLimit"),
     ];
-    for (index, (value, name)) in reasons.iter().enumerate() {
-        append!(
-            &mut out,
-            "    {{ \"value\": {value}, \"name\": \"{name}\" }}{}\n",
-            comma(index, reasons.len())
-        );
-    }
-    out.push_str("  ],\n");
-    // Issue #143 D1: the observation vocabularies, so a consumer resolves a tap's raw `u32`s the
-    // same way it resolves a parameter's -- from this document, never from a hand-written table.
-    out.push_str("  \"observationVocabularies\": {\n");
-    let vocabularies: [(&str, &[(u32, &str)]); 5] = [
-        (
-            "kinds",
-            &[
+    let document = Document {
+        schema: SCHEMA,
+        abi_version: ABI_VERSION,
+        command_record_bytes: COMMAND_RECORD_BYTES,
+        maximum_command_records: MAXIMUM_COMMAND_RECORDS,
+        command_kinds: kinds
+            .iter()
+            .map(|&(value, name, applied, plane)| CommandKindRow {
+                value,
+                name,
+                applied,
+                plane,
+            })
+            .collect(),
+        command_reasons: reasons
+            .iter()
+            .map(|&(value, name)| NamedValue { value, name })
+            .collect(),
+        // Issue #143 D1: the observation vocabularies, so a consumer resolves a tap's raw `u32`s
+        // the same way it resolves a parameter's -- from this document, never from a hand-written
+        // table.
+        observation_vocabularies: ObservationVocabularies {
+            kinds: named(&[
                 (ObservationKind::GainReductionDb as u32, "gainReductionDb"),
                 (ObservationKind::GainChangeDb as u32, "gainChangeDb"),
-            ],
-        ),
-        (
-            "costs",
-            &[
+            ]),
+            costs: named(&[
                 (ObservationCost::Resident as u32, "resident"),
                 (ObservationCost::Computed as u32, "computed"),
-            ],
-        ),
-        (
-            "cadences",
-            &[
+            ]),
+            cadences: named(&[
                 (ObservationCadence::PerBlock as u32, "perBlock"),
                 (ObservationCadence::PerWindow as u32, "perWindow"),
-            ],
-        ),
-        (
-            "folds",
-            &[
+            ]),
+            folds: named(&[
                 (ObservationFold::Latest as u32, "latest"),
                 (ObservationFold::PeakMagnitude as u32, "peakMagnitude"),
                 (ObservationFold::PeakSigned as u32, "peakSigned"),
-            ],
-        ),
-        (
-            "channels",
-            &[
+            ]),
+            channels: named(&[
                 (ObservationChannels::Shared as u32, "shared"),
                 (ObservationChannels::PerLane as u32, "perLane"),
-            ],
-        ),
-    ];
-    for (index, (name, rows)) in vocabularies.iter().enumerate() {
-        append!(&mut out, "    \"{name}\": [");
-        for (row, (value, label)) in rows.iter().enumerate() {
-            append!(
-                &mut out,
-                "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
-                if row + 1 == rows.len() { "" } else { ", " }
-            );
-        }
-        append!(&mut out, "]{}\n", comma(index, vocabularies.len()));
-    }
-    out.push_str("  },\n");
-    out.push_str("  \"builtins\": {\n    \"response\": ");
-    response_descriptor(&mut out, builtins::input_filter_response_descriptor());
-    out.push_str(",\n    \"parameters\": [\n");
-    let builtins = BUILTIN_PARAMETER_DESCRIPTORS;
-    for (index, parameter) in builtins.iter().enumerate() {
-        builtin_parameter(&mut out, parameter);
-        append!(&mut out, "{}\n", comma(index, builtins.len()));
-    }
-    out.push_str("    ]\n  },\n");
-    out.push_str("  \"effects\": [\n");
-    for (index, descriptor) in registry.descriptors().enumerate() {
-        let response = registry
-            .get_ascii(descriptor.id.as_str())
-            .and_then(|factory| factory.response_analysis());
-        effect(&mut out, descriptor, response);
-        append!(&mut out, "{}\n", comma(index, registry.len()));
-    }
-    out.push_str("  ],\n");
-    controls_object(&mut out, registry);
-    out.push_str("}\n");
-    out
+            ]),
+        },
+        builtins: Builtins {
+            response: response_descriptor(builtins::input_filter_response_descriptor()),
+            parameters: BUILTIN_PARAMETER_DESCRIPTORS
+                .iter()
+                .map(|parameter| builtin_parameter(parameter))
+                .collect(),
+        },
+        effects: registry
+            .descriptors()
+            .map(|descriptor| {
+                let response = registry
+                    .get_ascii(descriptor.id.as_str())
+                    .and_then(|factory| factory.response_analysis());
+                effect(descriptor, response)
+            })
+            .collect(),
+        controls: controls_object(registry),
+    };
+    json::document(&document)
 }
 
 /// The `controls` object (decision 17, slice S2b): the row tables of the `controls` crate, one
@@ -295,197 +347,262 @@ pub fn render() -> String {
 /// `controls::effect_table_rows`, so a row added to a table reaches this document, and from it the
 /// SDK's `controls.ts`, when the metadata is regenerated. A row's `name` is the declared machine
 /// name; `displayName` is the label a person reads.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Controls<'a> {
+    address: Address<'a>,
+    strip_own: Vec<ControlRow<'a>>,
+    builtins: Vec<ControlRow<'a>>,
+    route_own: Vec<ControlRow<'a>>,
+    vca_own: Vec<ControlRow<'a>>,
+    session_own: Vec<ControlRow<'a>>,
+    effects: Entries<EffectControls<'a>>,
+}
+
 /// The address vocabulary (decision 17, C2): the owner kinds, section kinds and lanes of a control
 /// address, each with its stable code. The SDK builds its address types from it, so a kind the
 /// core gains reaches the SDK when the assets are regenerated and not by a hand edit.
-fn address_object(out: &mut String) {
-    fn list(out: &mut String, key: &str, entries: &[(&str, u8)], last: bool) {
-        append!(out, "      \"{key}\": [");
-        for (index, (name, code)) in entries.iter().enumerate() {
-            append!(
-                out,
-                "{{ \"name\": \"{}\", \"code\": {code} }}{}",
-                escape(name),
-                if index + 1 == entries.len() { "" } else { ", " }
-            );
-        }
-        append!(out, "]{}\n", if last { "" } else { "," });
-    }
-    out.push_str("    \"address\": {\n");
-    let owners = OwnerKind::ALL.map(|kind| (kind.name(), kind.code()));
-    list(out, "ownerKinds", &owners, false);
-    let sections = SectionKind::ALL.map(|kind| (kind.name(), kind.code()));
-    list(out, "sectionKinds", &sections, false);
-    let lanes: Vec<(&str, u8)> = Lane::ALL
-        .iter()
-        .map(|(lane, name)| (*name, lane.wire()))
-        .collect();
-    list(out, "lanes", &lanes, true);
-    out.push_str("    },\n");
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Address<'a> {
+    owner_kinds: Vec<NamedCode<'a>>,
+    section_kinds: Vec<NamedCode<'a>>,
+    lanes: Vec<NamedCode<'a>>,
 }
 
-fn controls_object(out: &mut String, registry: &effect_contract::NativeEffectRegistry) {
-    out.push_str("  \"controls\": {\n");
-    address_object(out);
-    let sources = [
-        ("stripOwn", RowSource::StripOwn),
-        ("builtins", RowSource::Builtins),
-        ("routeOwn", RowSource::RouteOwn),
-        ("vcaOwn", RowSource::VcaOwn),
-        ("sessionOwn", RowSource::SessionOwn),
-    ];
-    for (name, source) in sources {
-        append!(out, "    \"{name}\": [\n");
-        let rows = table_rows(source);
-        for (index, row) in rows.iter().enumerate() {
-            out.push_str("      ");
-            control_row(out, row);
-            append!(out, "{}\n", comma(index, rows.len()));
-        }
-        out.push_str("    ],\n");
-    }
-    out.push_str("    \"effects\": {\n");
-    for (index, descriptor) in registry.descriptors().enumerate() {
-        let EffectTableRows {
-            bypass,
-            parameters,
-            link_mode,
-        } = effect_table_rows(descriptor.id.as_str()).expect("a registry effect has rows");
-        append!(out, "      \"{}\": {{\n", escape(descriptor.id.as_str()));
-        out.push_str("        \"bypass\": ");
-        control_row(out, &bypass);
-        out.push_str(",\n        \"parameters\": [\n");
-        for (row, parameter) in parameters.iter().enumerate() {
-            out.push_str("          ");
-            control_row(out, parameter);
-            append!(out, "{}\n", comma(row, parameters.len()));
-        }
-        out.push_str("        ],\n        \"linkMode\": ");
-        match &link_mode {
-            Some(row) => control_row(out, row),
-            None => out.push_str("null"),
-        }
-        append!(out, "\n      }}{}\n", comma(index, registry.len()));
-    }
-    out.push_str("    }\n  }\n");
+#[derive(Serialize)]
+struct NamedCode<'a> {
+    name: &'a str,
+    code: u8,
 }
 
-/// One row of a table as one line of JSON.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EffectControls<'a> {
+    bypass: ControlRow<'a>,
+    parameters: Vec<ControlRow<'a>>,
+    link_mode: Option<ControlRow<'a>>,
+}
+
+fn controls_object(registry: &effect_contract::NativeEffectRegistry) -> Controls<'static> {
+    let codes = |entries: &[(&'static str, u8)]| {
+        entries
+            .iter()
+            .map(|&(name, code)| NamedCode { name, code })
+            .collect()
+    };
+    let rows = |source| {
+        table_rows(source)
+            .iter()
+            .map(|row| control_row(row))
+            .collect()
+    };
+    Controls {
+        address: Address {
+            owner_kinds: codes(&OwnerKind::ALL.map(|kind| (kind.name(), kind.code()))),
+            section_kinds: codes(&SectionKind::ALL.map(|kind| (kind.name(), kind.code()))),
+            lanes: codes(
+                &Lane::ALL
+                    .iter()
+                    .map(|(lane, name)| (*name, lane.wire()))
+                    .collect::<Vec<_>>(),
+            ),
+        },
+        strip_own: rows(RowSource::StripOwn),
+        builtins: rows(RowSource::Builtins),
+        route_own: rows(RowSource::RouteOwn),
+        vca_own: rows(RowSource::VcaOwn),
+        session_own: rows(RowSource::SessionOwn),
+        effects: Entries(
+            registry
+                .descriptors()
+                .map(|descriptor| {
+                    let EffectTableRows {
+                        bypass,
+                        parameters,
+                        link_mode,
+                    } = effect_table_rows(descriptor.id.as_str())
+                        .expect("a registry effect has rows");
+                    let effect = EffectControls {
+                        bypass: control_row(&bypass),
+                        parameters: parameters.iter().map(|row| control_row(row)).collect(),
+                        link_mode: link_mode.as_ref().map(|row| control_row(row)),
+                    };
+                    (descriptor.id.as_str().to_owned(), effect)
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// One row of a table.
 ///
 /// The fields that depend on the rate are emitted per launch rate when they differ across the four
 /// (`maximum`); the fields that depend on a route's destination and tap are emitted per case
 /// (`intoSubmix`; `intoOutputBeforeFader`, a route into the output from a tap before the fader,
 /// #1391; `intoOutput`, from `post_fader` or `post_pan`), each case carrying the class and whether
 /// the row applies.
-fn control_row(out: &mut String, row: &TableRow) {
-    let descriptor = &row.descriptor;
-    append!(
-        out,
-        "{{ \"control\": {}, \"name\": \"{}\", \"displayName\": \"{}\", \"displayUnit\": \"{}\", \
-\"unit\": \"{}\", \"kind\": \"{}\", \"minimum\": {}, \"maximum\": ",
-        row.control,
-        escape(descriptor.name),
-        escape(descriptor.display_name),
-        escape(descriptor.display_unit),
-        unit_name(descriptor.unit),
-        control_kind_name(descriptor.kind),
-        number(descriptor.minimum),
-    );
-    let maxima = LAUNCH_RATES_HZ.map(|rate| row.at_rate(rate).maximum);
-    if maxima
-        .iter()
-        .all(|maximum| maximum.to_bits() == maxima[0].to_bits())
-    {
-        out.push_str(&number(maxima[0]));
-    } else {
-        out.push_str("{ ");
-        for (index, (rate, maximum)) in LAUNCH_RATES_HZ.iter().zip(maxima).enumerate() {
-            append!(
-                out,
-                "\"{rate}\": {}{}",
-                number(maximum),
-                if index + 1 == LAUNCH_RATES_HZ.len() {
-                    ""
-                } else {
-                    ", "
-                }
-            );
-        }
-        out.push_str(" }");
-    }
-    append!(
-        out,
-        ", \"disabledValue\": {}, \"default\": {}, \"taper\": \"{}\", \"step\": ",
-        optional_number(descriptor.disabled_value),
-        number(descriptor.default),
-        taper_name(descriptor.taper),
-    );
-    step_object(out, descriptor.lattice);
-    out.push_str(", \"choices\": [");
-    for (index, choice) in descriptor.choices.iter().enumerate() {
-        append!(
-            out,
-            "{{ \"value\": {}, \"label\": \"{}\" }}{}",
-            number(choice.value),
-            escape(choice.label),
-            if index + 1 == descriptor.choices.len() {
-                ""
-            } else {
-                ", "
-            }
-        );
-    }
-    append!(
-        out,
-        "], \"ramp\": \"{}\", \"scope\": \"{}\", \"family\": \"{}\", \"lanes\": \"{}\"",
-        match descriptor.motion {
-            Motion::Ramp(ramp) => ramp_name(ramp),
-            Motion::Fixed => "fixed",
-        },
-        match descriptor.scope {
-            ControlScope::Model => "model",
-            ControlScope::Monitor => "monitor",
-        },
-        family_name(descriptor.family),
-        match descriptor.lanes {
-            controls::Lanes::PerLane => "perLane",
-            controls::Lanes::Shared => "shared",
-        },
-    );
-    if let (Some(output), Some(before_fader)) = (row.into_output, row.into_output_before_fader) {
-        out.push_str(", \"intoSubmix\": ");
-        class_case(out, descriptor, descriptor.class, true);
-        out.push_str(", \"intoOutputBeforeFader\": ");
-        class_case(out, descriptor, before_fader.class, before_fader.active);
-        out.push_str(", \"intoOutput\": ");
-        class_case(out, descriptor, output.class, output.active);
-    } else {
-        out.push_str(", ");
-        class_fields(out, descriptor, descriptor.class);
-        if !row.on_submix {
-            out.push_str(", \"onSubmix\": false");
-        }
-    }
-    out.push_str(" }");
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlRow<'a> {
+    control: u32,
+    name: &'a str,
+    display_name: &'a str,
+    display_unit: &'a str,
+    unit: &'a str,
+    kind: &'a str,
+    minimum: Num,
+    maximum: RowMaximum,
+    disabled_value: Option<Num>,
+    default: Num,
+    taper: &'a str,
+    step: Step<'a>,
+    choices: Vec<Choice<'a>>,
+    ramp: &'a str,
+    scope: &'a str,
+    family: &'a str,
+    lanes: &'a str,
+    #[serde(flatten)]
+    class: RowClass<'a>,
+}
+
+/// One `maximum`, or one per launch rate when they differ.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RowMaximum {
+    One(Num),
+    ByRate(Entries<Num>),
+}
+
+/// A route row carries its class per destination; every other row carries it in place.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RowClass<'a> {
+    #[serde(rename_all = "camelCase")]
+    Route {
+        into_submix: ClassCase<'a>,
+        into_output_before_fader: ClassCase<'a>,
+        into_output: ClassCase<'a>,
+    },
+    #[serde(rename_all = "camelCase")]
+    InPlace {
+        #[serde(flatten)]
+        fields: ClassFields<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        on_submix: Option<bool>,
+    },
 }
 
 /// A route row's class under one destination.
-fn class_case(out: &mut String, descriptor: &ControlDescriptor, class: ControlClass, active: bool) {
-    out.push_str("{ ");
-    class_fields(out, descriptor, class);
-    append!(out, ", \"active\": {active} }}");
+#[derive(Serialize)]
+struct ClassCase<'a> {
+    #[serde(flatten)]
+    fields: ClassFields<'a>,
+    active: bool,
 }
 
-/// `class`, `reason`, `reasonIssue`, `reopen` and `automatable` of a row under `class`.
+/// `class`, `reason`, `reasonIssue`, `reopen` and `automatable` of a row under one class.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClassFields<'a> {
+    class: &'a str,
+    reason: Option<&'a str>,
+    reason_issue: Option<u32>,
+    reopen: Option<&'a str>,
+    automatable: bool,
+}
+
+#[derive(Serialize)]
+struct Choice<'a> {
+    value: Num,
+    label: &'a str,
+}
+
+fn control_row(row: &TableRow) -> ControlRow<'static> {
+    let descriptor = &row.descriptor;
+    let maxima = LAUNCH_RATES_HZ.map(|rate| row.at_rate(rate).maximum);
+    let maximum = if maxima
+        .iter()
+        .all(|maximum| maximum.to_bits() == maxima[0].to_bits())
+    {
+        RowMaximum::One(Num(maxima[0]))
+    } else {
+        RowMaximum::ByRate(Entries(
+            LAUNCH_RATES_HZ
+                .iter()
+                .zip(maxima)
+                .map(|(rate, maximum)| (rate.to_string(), Num(maximum)))
+                .collect(),
+        ))
+    };
+    let class = match (row.into_output, row.into_output_before_fader) {
+        (Some(output), Some(before_fader)) => RowClass::Route {
+            into_submix: ClassCase {
+                fields: class_fields(descriptor, descriptor.class),
+                active: true,
+            },
+            into_output_before_fader: ClassCase {
+                fields: class_fields(descriptor, before_fader.class),
+                active: before_fader.active,
+            },
+            into_output: ClassCase {
+                fields: class_fields(descriptor, output.class),
+                active: output.active,
+            },
+        },
+        _ => RowClass::InPlace {
+            fields: class_fields(descriptor, descriptor.class),
+            on_submix: (!row.on_submix).then_some(false),
+        },
+    };
+    ControlRow {
+        control: row.control,
+        name: descriptor.name,
+        display_name: descriptor.display_name,
+        display_unit: descriptor.display_unit,
+        unit: unit_name(descriptor.unit),
+        kind: control_kind_name(descriptor.kind),
+        minimum: Num(descriptor.minimum),
+        maximum,
+        disabled_value: descriptor.disabled_value.map(Num),
+        default: Num(descriptor.default),
+        taper: taper_name(descriptor.taper),
+        step: step_object(descriptor.lattice),
+        choices: descriptor
+            .choices
+            .iter()
+            .map(|choice| Choice {
+                value: Num(choice.value),
+                label: choice.label,
+            })
+            .collect(),
+        ramp: match descriptor.motion {
+            Motion::Ramp(ramp) => ramp_name(ramp),
+            Motion::Fixed => "fixed",
+        },
+        scope: match descriptor.scope {
+            ControlScope::Model => "model",
+            ControlScope::Monitor => "monitor",
+        },
+        family: family_name(descriptor.family),
+        lanes: match descriptor.lanes {
+            controls::Lanes::PerLane => "perLane",
+            controls::Lanes::Shared => "shared",
+        },
+        class,
+    }
+}
+
+/// The class fields of a row under `class`.
 ///
 /// `automatable` is the descriptor's own computation, never a second rule (a live model value that
 /// render reads).
-fn class_fields(out: &mut String, descriptor: &ControlDescriptor, class: ControlClass) {
+fn class_fields(descriptor: &ControlDescriptor, class: ControlClass) -> ClassFields<'static> {
     let under = ControlDescriptor {
         class,
         ..*descriptor
     };
-    let (name, reason, issue, reopen) = match class {
+    let (name, reason, reason_issue, reopen) = match class {
         ControlClass::Live => ("live", None, None, None),
         ControlClass::Derived => ("derived", None, None, None),
         ControlClass::RebuildOnly { reason, reopen } => {
@@ -493,15 +610,13 @@ fn class_fields(out: &mut String, descriptor: &ControlDescriptor, class: Control
             ("rebuildOnly", Some(name), issue, Some(reopen))
         }
     };
-    append!(
-        out,
-        "\"class\": \"{name}\", \"reason\": {}, \"reasonIssue\": {}, \"reopen\": {}, \
-\"automatable\": {}",
-        reason.map_or_else(|| "null".to_owned(), |text| format!("\"{text}\"")),
-        issue.map_or_else(|| "null".to_owned(), |issue| issue.to_string()),
-        reopen.map_or_else(|| "null".to_owned(), |text| format!("\"{}\"", escape(text))),
-        under.automatable(),
-    );
+    ClassFields {
+        class: name,
+        reason,
+        reason_issue,
+        reopen,
+        automatable: under.automatable(),
+    }
 }
 
 const fn rebuild_reason(reason: RebuildReason) -> (&'static str, Option<u32>) {
@@ -566,10 +681,6 @@ const fn ramp_name(ramp: LiveRampRow) -> &'static str {
     }
 }
 
-fn comma(index: usize, total: usize) -> &'static str {
-    if index + 1 == total { "" } else { "," }
-}
-
 /// Finite `f32` as JSON. Non-finite values cannot occur: every descriptor field is validated
 /// finite by `validate_descriptor` before a factory may enter the registry.
 fn number(value: f32) -> String {
@@ -582,119 +693,104 @@ fn number(value: f32) -> String {
     }
 }
 
-fn optional_number(value: Option<f32>) -> String {
-    value.map_or_else(|| "null".to_owned(), number)
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Effect<'a> {
+    id: &'a str,
+    display_name: &'a str,
+    contract_major: u16,
+    contract_minor: u16,
+    state_layout_version: u32,
+    parameters: Vec<EffectParameter<'a>>,
+    /// Issue #278: the declared port table, in the descriptor's own order (role ascending), and
+    /// never absent -- `[]` for an effect that declares no port at all, for the same reason
+    /// `observations` is never absent. Until this shipped, the document published every effect's
+    /// parameters and taps but nothing about its ports, so `sidechain.port_id` was the one session
+    /// field an SDK builder could not check before boot: a misspelling parsed, validated, compiled
+    /// and then failed preparation with `effect.sidechain.unknown_port`. The engine's refusal is
+    /// unmoved; this is what lets an authoring layer refuse the same thing first, by name.
+    ports: Vec<Port<'a>>,
+    /// Issue #143: never absent. An effect that declares no tap emits `[]`, so a consumer reads one
+    /// shape for every effect and "this build has no menu for that effect" is impossible to
+    /// confuse with "this document predates observation".
+    observations: Vec<Observation<'a>>,
+    response: Option<Response<'a>>,
 }
 
-fn effect(
-    out: &mut String,
-    descriptor: &EffectDescriptor,
+fn effect<'a>(
+    descriptor: &'a EffectDescriptor,
     response: Option<&dyn NativeEffectResponseFactory>,
-) {
-    out.push_str("    {\n");
-    append!(
-        out,
-        "      \"id\": \"{}\",\n",
-        escape(descriptor.id.as_str())
-    );
-    append!(
-        out,
-        "      \"displayName\": \"{}\",\n",
-        escape(descriptor.display_name)
-    );
-    append!(
-        out,
-        "      \"contractMajor\": {}, \"contractMinor\": {}, \"stateLayoutVersion\": {},\n",
-        descriptor.contract_major,
-        descriptor.contract_minor,
-        descriptor.state_layout_version
-    );
-    out.push_str("      \"parameters\": [\n");
-    for (index, parameter) in descriptor.parameters.iter().enumerate() {
-        effect_parameter(out, parameter);
-        append!(out, "{}\n", comma(index, descriptor.parameters.len()));
+) -> Effect<'a> {
+    Effect {
+        id: descriptor.id.as_str(),
+        display_name: descriptor.display_name,
+        contract_major: descriptor.contract_major,
+        contract_minor: descriptor.contract_minor,
+        state_layout_version: descriptor.state_layout_version,
+        parameters: descriptor.parameters.iter().map(effect_parameter).collect(),
+        ports: descriptor
+            .ports
+            .iter()
+            .map(|port| effect_port(port))
+            .collect(),
+        observations: descriptor
+            .observations
+            .iter()
+            .map(|observation| effect_observation(observation))
+            .collect(),
+        response: response.map(|factory| response_descriptor(factory.analysis_descriptor())),
     }
-    out.push_str("      ],\n");
-    // Issue #278: the declared port table, in the descriptor's own order (role ascending), and
-    // never absent -- `[]` for an effect that declares no port at all, for the same reason
-    // `observations` is never absent. Until this shipped, the document published every effect's
-    // parameters and taps but nothing about its ports, so `sidechain.port_id` was the one session
-    // field an SDK builder could not check before boot: a misspelling parsed, validated, compiled
-    // and then failed preparation with `effect.sidechain.unknown_port`. The engine's refusal is
-    // unmoved; this is what lets an authoring layer refuse the same thing first, by name.
-    out.push_str("      \"ports\": [");
-    for (index, port) in descriptor.ports.iter().enumerate() {
-        out.push('\n');
-        effect_port(out, port);
-        out.push_str(comma(index, descriptor.ports.len()));
-    }
-    if descriptor.ports.is_empty() {
-        out.push_str("],\n");
-    } else {
-        out.push_str("\n      ],\n");
-    }
-    // // Issue #143: never absent. An effect that declares no tap emits `[]`, so a consumer reads one
-    // shape for every effect and "this build has no menu for that effect" is impossible to
-    // confuse with "this document predates observation".
-    out.push_str("      \"observations\": [");
-    for (index, observation) in descriptor.observations.iter().enumerate() {
-        out.push('\n');
-        effect_observation(out, observation);
-        out.push_str(comma(index, descriptor.observations.len()));
-    }
-    if descriptor.observations.is_empty() {
-        out.push_str("],\n");
-    } else {
-        out.push_str("\n      ],\n");
-    }
-    out.push_str("      \"response\": ");
-    match response {
-        Some(factory) => response_descriptor(out, factory.analysis_descriptor()),
-        None => out.push_str("null"),
-    }
-    out.push_str("\n    }");
 }
 
-fn response_descriptor(out: &mut String, descriptor: &ResponseAnalysisDescriptor) {
-    out.push_str("{ ");
-    append!(
-        out,
-        "\"id\": {}, \"name\": \"{}\", \"axisUnit\": \"{}\", \"unit\": \"{}\", ",
-        descriptor.id,
-        escape(descriptor.name),
-        response_axis_unit(descriptor.axis_unit),
-        response_axis_unit(descriptor.unit),
-    );
-    append!(
-        out,
-        "\"amplitudeReference\": \"{}\", \"channels\": \"{}\", \"mode\": \"{}\", ",
-        response_amplitude_reference(descriptor.amplitude_reference),
-        response_channels(descriptor.channels),
-        response_mode(descriptor.mode),
-    );
-    append!(
-        out,
-        "\"cadence\": \"{}\", \"sectionOutput\": \"{}\", \"cost\": \"computed\", ",
-        response_cadence(descriptor.cadence),
-        response_section_output(descriptor.section_output),
-    );
-    append!(
-        out,
-        "\"floorDb\": {}, \"totalScope\": \"{}\", \"bypass\": \"{}\", \"sections\": [",
-        number(descriptor.floor_db),
-        response_scope(descriptor.total_scope),
-        response_bypass(descriptor.bypass),
-    );
-    for (index, section) in descriptor.sections.iter().enumerate() {
-        append!(
-            out,
-            "{{ \"id\": {}, \"name\": \"{}\" }}{}",
-            section.id,
-            escape(section.name),
-            comma(index, descriptor.sections.len()),
-        );
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Response<'a> {
+    id: u32,
+    name: &'a str,
+    axis_unit: &'a str,
+    unit: &'a str,
+    amplitude_reference: &'a str,
+    channels: &'a str,
+    mode: &'a str,
+    cadence: &'a str,
+    section_output: &'a str,
+    cost: &'a str,
+    floor_db: Num,
+    total_scope: &'a str,
+    bypass: &'a str,
+    sections: Vec<ResponseSection<'a>>,
+}
+
+#[derive(Serialize)]
+struct ResponseSection<'a> {
+    id: u32,
+    name: &'a str,
+}
+
+fn response_descriptor(descriptor: &ResponseAnalysisDescriptor) -> Response<'static> {
+    Response {
+        id: descriptor.id,
+        name: descriptor.name,
+        axis_unit: response_axis_unit(descriptor.axis_unit),
+        unit: response_axis_unit(descriptor.unit),
+        amplitude_reference: response_amplitude_reference(descriptor.amplitude_reference),
+        channels: response_channels(descriptor.channels),
+        mode: response_mode(descriptor.mode),
+        cadence: response_cadence(descriptor.cadence),
+        section_output: response_section_output(descriptor.section_output),
+        cost: "computed",
+        floor_db: Num(descriptor.floor_db),
+        total_scope: response_scope(descriptor.total_scope),
+        bypass: response_bypass(descriptor.bypass),
+        sections: descriptor
+            .sections
+            .iter()
+            .map(|section| ResponseSection {
+                id: section.id,
+                name: section.name,
+            })
+            .collect(),
     }
-    out.push_str("] }");
 }
 
 const fn response_axis_unit(unit: ParameterUnit) -> &'static str {
@@ -749,23 +845,31 @@ const fn response_bypass(bypass: ResponseBypassSemantics) -> &'static str {
     }
 }
 
-/// Emit one declared port row.
+/// One declared port row.
 ///
 /// Both the raw scalar and its name ride, exactly as they do on a parameter's `unit` and an
 /// observation's `kind`: the descriptor wire and the C inspect record carry the `u32`, and a
 /// consumer that resolves it from this document never keeps a second table of its own.
-fn effect_port(out: &mut String, port: &PortDescriptor) {
-    append!(
-        out,
-        "        {{ \"id\": \"{}\", \"role\": {}, \"roleName\": \"{}\", \
-\"required\": {}, \"layout\": {}, \"layoutName\": \"{}\" }}",
-        escape(port.id.as_str()),
-        port.role as u32,
-        port_role_name(port.role),
-        port.required,
-        port.layout as u32,
-        port_layout_name(port.layout),
-    );
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Port<'a> {
+    id: &'a str,
+    role: u32,
+    role_name: &'a str,
+    required: bool,
+    layout: u32,
+    layout_name: &'a str,
+}
+
+fn effect_port(port: &PortDescriptor) -> Port<'_> {
+    Port {
+        id: port.id.as_str(),
+        role: port.role as u32,
+        role_name: port_role_name(port.role),
+        required: port.required,
+        layout: port.layout as u32,
+        layout_name: port_layout_name(port.layout),
+    }
 }
 
 const fn port_role_name(role: PortRole) -> &'static str {
@@ -782,7 +886,30 @@ const fn port_layout_name(layout: PortLayout) -> &'static str {
     }
 }
 
-fn effect_observation(out: &mut String, observation: &ObservationDescriptor) {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Observation<'a> {
+    id: u32,
+    name: &'a str,
+    display_unit: &'a str,
+    kind: u32,
+    kind_name: &'a str,
+    unit: u32,
+    unit_name: &'a str,
+    cost: u32,
+    cost_name: &'a str,
+    cadence: u32,
+    cadence_name: &'a str,
+    fold: u32,
+    fold_name: &'a str,
+    channels: u32,
+    channels_name: &'a str,
+    minimum: Num,
+    maximum: Num,
+    subscribable: bool,
+}
+
+fn effect_observation(observation: &ObservationDescriptor) -> Observation<'static> {
     // `subscribable` is derived from the cost class exactly as `liveUpdatable` is derived from
     // `automatable`: a `Resident` tap is a copy out of state the block already wrote and the
     // subscribe path binds it; a `Computed` tap has no implementation in V1 and the subscribe path
@@ -790,32 +917,26 @@ fn effect_observation(out: &mut String, observation: &ObservationDescriptor) {
     // derived rather than written down -- and why the schema gate refuses a computed tap that
     // claims to be subscribable.
     let subscribable = matches!(observation.cost, ObservationCost::Resident);
-    append!(
-        out,
-        "        {{ \"id\": {}, \"name\": \"{}\", \"displayUnit\": \"{}\", \
-\"kind\": {}, \"kindName\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \
-\"cost\": {}, \"costName\": \"{}\", \"cadence\": {}, \"cadenceName\": \"{}\", \
-\"fold\": {}, \"foldName\": \"{}\", \"channels\": {}, \"channelsName\": \"{}\", \
-\"minimum\": {}, \"maximum\": {}, \"subscribable\": {} }}",
-        observation.id.0,
-        escape(observation.display_name),
-        escape(observation.display_unit),
-        observation.kind as u32,
-        observation_kind_name(observation.kind),
-        observation.unit as u32,
-        unit_name(observation.unit),
-        observation.cost as u32,
-        observation_cost_name(observation.cost),
-        observation.cadence as u32,
-        observation_cadence_name(observation.cadence),
-        observation.fold as u32,
-        observation_fold_name(observation.fold),
-        observation.channels as u32,
-        observation_channels_name(observation.channels),
-        number(observation.minimum),
-        number(observation.maximum),
+    Observation {
+        id: observation.id.0,
+        name: observation.display_name,
+        display_unit: observation.display_unit,
+        kind: observation.kind as u32,
+        kind_name: observation_kind_name(observation.kind),
+        unit: observation.unit as u32,
+        unit_name: unit_name(observation.unit),
+        cost: observation.cost as u32,
+        cost_name: observation_cost_name(observation.cost),
+        cadence: observation.cadence as u32,
+        cadence_name: observation_cadence_name(observation.cadence),
+        fold: observation.fold as u32,
+        fold_name: observation_fold_name(observation.fold),
+        channels: observation.channels as u32,
+        channels_name: observation_channels_name(observation.channels),
+        minimum: Num(observation.minimum),
+        maximum: Num(observation.maximum),
         subscribable,
-    );
+    }
 }
 
 const fn observation_kind_name(kind: ObservationKind) -> &'static str {
@@ -854,26 +975,42 @@ const fn observation_channels_name(channels: ObservationChannels) -> &'static st
     }
 }
 
-/// Emit one parameter's `step` declaration.
+/// One parameter's `step` declaration.
 ///
 /// This is the #242 lattice authority as it crosses the agent/SDK boundary: a decimal string, not
 /// a float, so a catalog round-trip is lossless. `size` is the shortest spelling that names the
 /// declared `f32` exactly -- a ratio row's authority really is the decimal `1.02`, and rendering
 /// it at the row's own eight-decimal value precision would spell it `1.01999998`.
-fn step_object(out: &mut String, lattice: ParameterLattice) {
-    append!(
-        out,
-        "{{ \"unit\": \"{}\", \"size\": \"{}\", \"precision\": {}, \"ladder\": \
-{{ \"xs\": {}, \"sm\": {}, \"md\": {}, \"lg\": {}, \"xl\": {} }} }}",
-        step_unit_name(lattice.step_unit),
-        lattice.step,
-        lattice.precision,
-        lattice.ladder.multiple(StepSize::Xs),
-        lattice.ladder.multiple(StepSize::Sm),
-        lattice.ladder.multiple(StepSize::Md),
-        lattice.ladder.multiple(StepSize::Lg),
-        lattice.ladder.multiple(StepSize::Xl),
-    );
+#[derive(Serialize)]
+struct Step<'a> {
+    unit: &'a str,
+    size: String,
+    precision: u8,
+    ladder: Ladder,
+}
+
+#[derive(Serialize)]
+struct Ladder {
+    xs: u8,
+    sm: u8,
+    md: u8,
+    lg: u8,
+    xl: u8,
+}
+
+fn step_object(lattice: ParameterLattice) -> Step<'static> {
+    Step {
+        unit: step_unit_name(lattice.step_unit),
+        size: lattice.step.to_string(),
+        precision: lattice.precision,
+        ladder: Ladder {
+            xs: lattice.ladder.multiple(StepSize::Xs),
+            sm: lattice.ladder.multiple(StepSize::Sm),
+            md: lattice.ladder.multiple(StepSize::Md),
+            lg: lattice.ladder.multiple(StepSize::Lg),
+            xl: lattice.ladder.multiple(StepSize::Xl),
+        },
+    }
 }
 
 const fn step_unit_name(unit: StepUnit) -> &'static str {
@@ -885,106 +1022,105 @@ const fn step_unit_name(unit: StepUnit) -> &'static str {
     }
 }
 
-fn effect_parameter(out: &mut String, parameter: &ParameterDescriptor) {
-    out.push_str("        {\n");
-    append!(out, "          \"id\": {},\n", parameter.id.0);
-    append!(
-        out,
-        "          \"name\": \"{}\",\n",
-        escape(parameter.display_name)
-    );
-    append!(
-        out,
-        "          \"displayUnit\": \"{}\",\n",
-        escape(parameter.display_unit)
-    );
-    append!(
-        out,
-        "          \"unit\": {}, \"unitName\": \"{}\",\n",
-        parameter.unit as u32,
-        unit_name(parameter.unit)
-    );
-    append!(
-        out,
-        "          \"domain\": {}, \"domainName\": \"{}\",\n",
-        parameter.domain as u32,
-        domain_name(parameter.domain)
-    );
-    append!(
-        out,
-        "          \"minimum\": {}, \"maximum\": {}, \"default\": {},\n",
-        optional_number(parameter.minimum),
-        optional_number(parameter.maximum),
-        number(parameter.default_value)
-    );
-    append!(
-        out,
-        "          \"mapping\": {}, \"mappingName\": \"{}\",\n",
-        parameter.mapping as u32,
-        mapping_name(parameter.mapping)
-    );
-    append!(
-        out,
-        "          \"automationRate\": {}, \"automationRateName\": \"{}\",\n",
-        parameter.automation_rate as u32,
-        automation_rate_name(parameter.automation_rate)
-    );
-    append!(
-        out,
-        "          \"channelPolicy\": {}, \"channelPolicyName\": \"{}\",\n",
-        parameter.channel_policy as u32,
-        channel_policy_name(parameter.channel_policy)
-    );
-    append!(
-        out,
-        "          \"smoothing\": {}, \"smoothingName\": \"{}\", \"smoothingSamples\": {},\n",
-        parameter.smoothing as u32,
-        smoothing_name(parameter.smoothing),
-        parameter.smoothing_samples
-    );
-    append!(
-        out,
-        "          \"readable\": {}, \"automatable\": {},\n",
-        parameter.readable,
-        parameter.automatable
-    );
-    // Issue #140 A: the live-control command path now feeds an admitted parameter into the
-    // running plan as a `PreparedAutomationSpan`, so a parameter is live exactly when its own
-    // descriptor says it can be automated. The two statements are the same statement, which is
-    // why this is derived from `automatable` rather than written down. A parameter that declares
-    // `AutomationRate::None` has no span the effect would accept and stays `false`.
-    append!(
-        out,
-        "          \"liveUpdatable\": {},\n",
-        parameter.automatable
-    );
-    out.push_str("          \"enumChoices\": [");
-    for (index, choice) in parameter.enum_choices.iter().enumerate() {
-        append!(
-            out,
-            "{{ \"value\": {}, \"label\": \"{}\" }}{}",
-            number(choice.value),
-            escape(choice.label),
-            if index + 1 == parameter.enum_choices.len() {
-                ""
-            } else {
-                ", "
-            }
-        );
-    }
-    out.push_str("],\n");
-    // Issue #242: the lattice declaration this row's legal persisted values are generated from.
-    out.push_str("          \"step\": ");
-    step_object(out, parameter.lattice);
-    out.push_str("\n        }");
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EffectParameter<'a> {
+    id: u32,
+    name: &'a str,
+    display_unit: &'a str,
+    unit: u32,
+    unit_name: &'a str,
+    domain: u32,
+    domain_name: &'a str,
+    minimum: Option<Num>,
+    maximum: Option<Num>,
+    default: Num,
+    mapping: u32,
+    mapping_name: &'a str,
+    automation_rate: u32,
+    automation_rate_name: &'a str,
+    channel_policy: u32,
+    channel_policy_name: &'a str,
+    smoothing: u32,
+    smoothing_name: &'a str,
+    smoothing_samples: u32,
+    readable: bool,
+    automatable: bool,
+    /// Issue #140 A: the live-control command path feeds an admitted parameter into the running
+    /// plan as a `PreparedAutomationSpan`, so a parameter is live exactly when its own descriptor
+    /// says it can be automated. The two statements are the same statement, which is why this is
+    /// derived from `automatable` rather than written down. A parameter that declares
+    /// `AutomationRate::None` has no span the effect would accept and stays `false`.
+    live_updatable: bool,
+    enum_choices: Vec<Choice<'a>>,
+    /// Issue #242: the lattice declaration this row's legal persisted values are generated from.
+    step: Step<'a>,
 }
 
-fn builtin_parameter(out: &mut String, parameter: &BuiltinParameterDescriptor) {
+fn effect_parameter(parameter: &ParameterDescriptor) -> EffectParameter<'static> {
+    EffectParameter {
+        id: parameter.id.0,
+        name: parameter.display_name,
+        display_unit: parameter.display_unit,
+        unit: parameter.unit as u32,
+        unit_name: unit_name(parameter.unit),
+        domain: parameter.domain as u32,
+        domain_name: domain_name(parameter.domain),
+        minimum: parameter.minimum.map(Num),
+        maximum: parameter.maximum.map(Num),
+        default: Num(parameter.default_value),
+        mapping: parameter.mapping as u32,
+        mapping_name: mapping_name(parameter.mapping),
+        automation_rate: parameter.automation_rate as u32,
+        automation_rate_name: automation_rate_name(parameter.automation_rate),
+        channel_policy: parameter.channel_policy as u32,
+        channel_policy_name: channel_policy_name(parameter.channel_policy),
+        smoothing: parameter.smoothing as u32,
+        smoothing_name: smoothing_name(parameter.smoothing),
+        smoothing_samples: parameter.smoothing_samples,
+        readable: parameter.readable,
+        automatable: parameter.automatable,
+        live_updatable: parameter.automatable,
+        enum_choices: parameter
+            .enum_choices
+            .iter()
+            .map(|choice| Choice {
+                value: Num(choice.value),
+                label: choice.label,
+            })
+            .collect(),
+        step: step_object(parameter.lattice),
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuiltinParameter<'a> {
+    id: u32,
+    name: &'a str,
+    unit: u32,
+    unit_name: &'a str,
+    scope: &'a str,
+    mapping: &'a str,
+    domain: &'a str,
+    minimum: Option<Num>,
+    maximum: Option<Num>,
+    maximum_by_rate: Option<Entries<Option<Num>>>,
+    default: Num,
+    update_rate: &'a str,
+    smoothing: &'a str,
+    reset: &'a str,
+    disabled_value: Option<Num>,
+    live_updatable: bool,
+    step: Step<'a>,
+}
+
+fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> BuiltinParameter<'static> {
     let unit = builtin_parameter_unit(parameter);
     // A rate-keyed cutoff has no single maximum: `builtin_filter_cutoff_maximum_hz` gives one
     // per launch rate, so the row carries the exact `f32` for each rather than a number that would
     // be wrong at three of the four.
-    let (minimum, maximum, domain_name) = match parameter.domain {
+    let (minimum, maximum, domain) = match parameter.domain {
         BuiltinParameterDomain::BooleanExact => (None, None, "booleanExact"),
         BuiltinParameterDomain::FiniteInclusive { minimum, maximum } => {
             (Some(minimum), Some(maximum), "finiteInclusive")
@@ -993,79 +1129,67 @@ fn builtin_parameter(out: &mut String, parameter: &BuiltinParameterDescriptor) {
             (Some(minimum_hz), None, "disabledOrRateKeyedHertz")
         }
     };
-    // `matrix_ll/lr/rl/rr` are the only builtin parameters the ABI declares as `BlockTarget`, and
-    // they are exactly the ones the live-control command path applies. The two statements are the
-    // same statement, which is why this is derived from the descriptor rather than written down.
-    let live = matches!(
-        parameter.update_rate,
-        BuiltinParameterUpdateRate::BlockTarget
-    );
-    append!(
-        out,
-        "      {{ \"id\": {}, \"name\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \"scope\": \"{}\", \"mapping\": \"{}\", \
-\"domain\": \"{}\", \"minimum\": {}, \"maximum\": {}, \"maximumByRate\": ",
-        parameter.id,
-        escape(parameter.name),
-        unit as u32,
-        unit_name(unit),
-        match parameter.scope {
+    let maximum_by_rate = matches!(
+        parameter.domain,
+        BuiltinParameterDomain::DisabledOrRateKeyedHertz { .. }
+    )
+    .then(|| {
+        Entries(
+            LAUNCH_RATES_HZ
+                .iter()
+                .map(|rate| {
+                    (
+                        rate.to_string(),
+                        builtin_filter_cutoff_maximum_hz(*rate).map(Num),
+                    )
+                })
+                .collect(),
+        )
+    });
+    BuiltinParameter {
+        id: parameter.id,
+        name: parameter.name,
+        unit: unit as u32,
+        unit_name: unit_name(unit),
+        scope: match parameter.scope {
             BuiltinParameterScope::PerLane => "perLane",
             BuiltinParameterScope::MatrixShared => "matrixShared",
         },
-        match parameter.mapping {
+        mapping: match parameter.mapping {
             BuiltinParameterMapping::Boolean => "boolean",
             BuiltinParameterMapping::DecibelAmplitude => "decibelAmplitude",
             BuiltinParameterMapping::Hertz => "hertz",
             BuiltinParameterMapping::Linear => "linear",
         },
-        domain_name,
-        optional_number(minimum),
-        optional_number(maximum),
-    );
-    if matches!(
-        parameter.domain,
-        BuiltinParameterDomain::DisabledOrRateKeyedHertz { .. }
-    ) {
-        out.push_str("{ ");
-        for (index, rate) in LAUNCH_RATES_HZ.iter().enumerate() {
-            append!(
-                out,
-                "\"{rate}\": {}{}",
-                optional_number(builtin_filter_cutoff_maximum_hz(*rate)),
-                if index + 1 == LAUNCH_RATES_HZ.len() {
-                    ""
-                } else {
-                    ", "
-                },
-            );
-        }
-        out.push_str(" }");
-    } else {
-        out.push_str("null");
-    }
-    append!(
-        out,
-        ", \"default\": {}, \"updateRate\": \"{}\", \"smoothing\": \"{}\", \"reset\": \"{}\", \"disabledValue\": {}, \
-\"liveUpdatable\": {}, \"step\": ",
-        number(parameter.default),
-        match parameter.update_rate {
+        domain,
+        minimum: minimum.map(Num),
+        maximum: maximum.map(Num),
+        maximum_by_rate,
+        default: Num(parameter.default),
+        update_rate: match parameter.update_rate {
             BuiltinParameterUpdateRate::PreparedOnly => "preparedOnly",
             BuiltinParameterUpdateRate::BlockTarget => "blockTarget",
         },
-        match parameter.smoothing {
+        smoothing: match parameter.smoothing {
             BuiltinSmoothingPolicy::None => "none",
             BuiltinSmoothingPolicy::LinearNUpdates => "linearNUpdates",
             BuiltinSmoothingPolicy::Linear64CoefficientUpdates => "linear64CoefficientUpdates",
         },
-        match parameter.reset {
+        reset: match parameter.reset {
             BuiltinParameterReset::RestorePreparedValue => "restorePreparedValue",
             BuiltinParameterReset::KeepTargetResetCurrent => "keepTargetResetCurrent",
         },
-        optional_number(parameter.disabled_value),
-        live,
-    );
-    step_object(out, parameter.lattice);
-    out.push_str(" }");
+        disabled_value: parameter.disabled_value.map(Num),
+        // `matrix_ll/lr/rl/rr` are the only builtin parameters the ABI declares as `BlockTarget`,
+        // and they are exactly the ones the live-control command path applies. The two statements
+        // are the same statement, which is why this is derived from the descriptor rather than
+        // written down.
+        live_updatable: matches!(
+            parameter.update_rate,
+            BuiltinParameterUpdateRate::BlockTarget
+        ),
+        step: step_object(parameter.lattice),
+    }
 }
 
 const fn unit_name(unit: ParameterUnit) -> &'static str {
