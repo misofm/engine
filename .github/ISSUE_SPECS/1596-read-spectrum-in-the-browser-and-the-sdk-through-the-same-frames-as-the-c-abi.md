@@ -157,3 +157,20 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
 
 - Amends #1400 D5 and #1381 D3 (the spectrum companion and its swap-block pairing): see the
   amendment entries.
+
+## Decision record
+
+- 2026-10-25, scope (root): split in three. #1596a the browser session serves spectrum (Rust only);
+  #1596b the SDK codec and the headless engine; #1596c the browser SDK and the three-browser
+  qualification. R1: the old spectrum exports read the session's one service through the existing
+  accessors until #1597 (no forwarding export). R2: D2's `compile_children` spectrum parameter
+  deletion moves to #1597 (its last callers are the kept boot exports). R3: the browser's 16 KiB
+  control frame stays. R4: gate 6 lands in #1596a. R5: D3's "RenderCompanions loses its spectrum
+  field" was already true (#1290d2); #1332 is not a dependency (single mode is the product).
+- #1596a facts: the core's session had only test-support accessors to its spectrum monitor, so R1
+  needs `SessionState::spectrum_monitor`/`spectrum_monitor_mut` in
+  `crates/control-plane/src/control.rs` (the two `test_spectrum*` accessors, ungated and renamed).
+  The core promotes at its service step and before a structural edit, never at a plain command, so
+  the #1618 analysis ending now follows the session's stream: the host ends the instance's analysis
+  when the session's running stream (its capture epoch) no longer runs after `service` or a
+  control command, and the staging record keeps the staging analysis's facts.
