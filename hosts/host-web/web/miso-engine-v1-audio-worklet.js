@@ -20,6 +20,7 @@ const COMMAND_REASON_UNSUPPORTED_KIND = 7;
 const RESULT_INTERNAL = 255;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
+const BUFFER_DIAGNOSTIC = 4;
 const BUFFER_OUTPUT_PCM = 5;
 const BUFFER_COMMAND = 6;
 const BUFFER_METER_FRAME = 7;
@@ -94,8 +95,13 @@ const SOURCE_FIELDS = [
   "endOfRegion",
 ];
 const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"];
+// Issue #1644 D1 (root R1): one session seek message for both exports. `anchorSample` is always
+// present; `-1n` is a plain seek, any other value the absolute render sample of the anchored form.
+const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
+/// Issue #1697: a `SESSION_REPLACE` frame carries its document beside it.
+const CONTROL_DOCUMENT_FIELDS = [...CONTROL_FIELDS, "document"];
 // Issue #1570b D4: the two event lanes in drain order (the C ABI's lane codes: reliable, lossy) and
 // the most `control_event` calls one drain makes on a lane. The queues hold at most 2 reliable
 // events, 2 render diagnostics and 1 telemetry event, so a bound of 16 is never the limit.
@@ -290,6 +296,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.watermarkSample = -1n;
     // The record's three outcome counts as of that post: a count that rose since names a flag.
     this.watermarkCounts = [0n, 0n, 0n];
+    // Issue #1644 D2: the generation of the last session seek the engine accepted (undefined:
+    // none). The SDK's feed drain runs on this same object, between the same handler calls, and
+    // consumes a ring seek at exactly this generation without seeking the source again.
+    this.lastSessionSeekGeneration = undefined;
+    // The session diagnostic staging, where a refused call writes its core code (null: none).
+    this.diagnosticView = null;
     this.clock = renderClock();
     // Issue #1381a D6, `single` mode: the instance's control work runs here, in the message
     // handler, outside `process()`. The service step follows every message, the main realm's
@@ -440,6 +452,18 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     this.maximumSourceChannels = sourcePcmCapacity / (this.quantumFrames * 4);
     this.bindView("sourcePcm", Float32Array, this.sourcePcmPointer, sourcePcmCapacity / 4);
+    // Issue #1644 D2 (R4 amended): the feed drain tells a stale-generation seek refusal from any
+    // other `invalidArgument` by the code the refusal wrote here. A module without the staging
+    // leaves the view null, and the drain then handles every refusal as before.
+    const diagnosticPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_DIAGNOSTIC);
+    const diagnosticCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
+      this.handle,
+      BUFFER_DIAGNOSTIC,
+    );
+    if (u32(diagnosticPointer) && diagnosticPointer !== 0
+        && u32(diagnosticCapacity) && diagnosticCapacity > 0) {
+      this.bindView("diagnosticView", Uint8Array, diagnosticPointer, diagnosticCapacity);
+    }
     this.bindView("outputLeft", Float32Array, outputPointer, this.quantumFrames);
     this.bindView("outputRight", Float32Array,
       outputPointer + this.quantumFrames * 4, this.quantumFrames);
@@ -1162,6 +1186,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.disposed = true;
         this.handleDisposed = true;
         this.handle = 0;
+        this.lastSessionSeekGeneration = undefined;
       }
       this.acknowledge(message.requestId, result);
       return;
@@ -1175,9 +1200,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveSource(message);
     } else if (message?.tag === "miso.seek.v1" && exactFields(message, SEEK_FIELDS)) {
       this.receiveSeek(message);
+    } else if (message?.tag === "miso.session-seek.v1"
+        && exactFields(message, SESSION_SEEK_FIELDS)) {
+      this.receiveSessionSeek(message);
     } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
       this.receiveCommand(message);
-    } else if (message?.tag === "miso.control.v1" && exactFields(message, CONTROL_FIELDS)) {
+    } else if (message?.tag === "miso.control.v1"
+        && (exactFields(message, CONTROL_FIELDS)
+          || exactFields(message, CONTROL_DOCUMENT_FIELDS))) {
       this.receiveControl(message);
     } else if (message?.tag === "miso.meters.v1" && exactFields(message, LEASE_FIELDS)) {
       this.receiveMeterLease(message);
@@ -1760,17 +1790,23 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// response frame bytes unchanged (after a failure, the refusal's diagnostic text), and the
   /// committed revision after the call. A frame the staging buffer cannot hold is a typed refusal
   /// of a well-formed request, not a protocol error.
+  ///
+  /// Issue #1697: an optional `document` (the same checks as `frame`) is the document a
+  /// `SESSION_REPLACE` frame names; it is staged beside the frame, here and never in `process()`.
   receiveControl(message) {
+    const wholeBytes = (bytes) => bytes instanceof Uint8Array
+      && bytes.buffer instanceof ArrayBuffer
+      && !(typeof SharedArrayBuffer !== "undefined" && bytes.buffer instanceof SharedArrayBuffer)
+      && bytes.byteLength !== 0 && bytes.byteOffset === 0
+      && bytes.byteLength === bytes.buffer.byteLength;
     const frame = message.frame;
+    const document = message.document;
     if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !(frame instanceof Uint8Array) || !(frame.buffer instanceof ArrayBuffer)
-        || (typeof SharedArrayBuffer !== "undefined" && frame.buffer instanceof SharedArrayBuffer)
-        || frame.byteLength === 0 || frame.byteOffset !== 0
-        || frame.byteLength !== frame.buffer.byteLength) {
+        || !wholeBytes(frame) || ("document" in message && !wholeBytes(document))) {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
       return;
     }
-    const reply = this.readControlCommand(frame);
+    const reply = this.readControlCommand(frame, document);
     this.port.postMessage({
       tag: "miso.control.v1",
       requestId: message.requestId,
@@ -1788,9 +1824,28 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// may have grown under the call: the reply is then read from the fresh buffer, and the caller's
   /// handler re-binds the views (no fault). A frame the staging cannot hold (a zero
   /// pointer) has no response: the previous command's bytes are not its reply.
-  readControlCommand(frame) {
+  ///
+  /// Issue #1697: a `document` is staged through `replace_document_ptr` after the frame's staging
+  /// is known to hold the frame and before the frame is written, so a refused frame never leaves a
+  /// document staged for a later command; a document the staging refuses (a zero pointer, for
+  /// example a length over the boot bound) is the same typed refusal with no response, and runs
+  /// no command. The command frees the staged document, whatever its result. The staging may grow
+  /// the module's memory, so every write cuts its view from the live buffer.
+  readControlCommand(frame, document) {
     const length = frame.byteLength;
-    const pointer = this.exports.miso_engine_web_v1_control_request_ptr(this.handle, length);
+    let pointer = this.exports.miso_engine_web_v1_control_request_ptr(this.handle, length);
+    if (pointer !== 0 && document !== undefined) {
+      const documentPointer = this.exports.miso_engine_web_v1_replace_document_ptr(
+        this.handle,
+        document.byteLength,
+      );
+      if (documentPointer === 0) {
+        pointer = 0;
+      } else {
+        new Uint8Array(this.exports.memory.buffer, documentPointer, document.byteLength)
+          .set(document);
+      }
+    }
     let result = RESULT_INVALID_ARGUMENT;
     if (pointer !== 0) {
       new Uint8Array(this.exports.memory.buffer, pointer, length).set(frame);
@@ -1874,6 +1929,37 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.handle, idLength, message.generation, message.sourceFrame,
       ),
     );
+  }
+
+  /// Issue #1644 D1, `single` mode: seek the timeline and every source under one generation, all
+  /// or nothing, in the message handler and never in `process()`. A plain seek (`anchorSample`
+  /// `-1n`) calls `session_seek`, which declares the discontinuity in the same call; an anchored
+  /// one calls `session_seek_at` once. A refusal is the reply's result and is not sticky; an OK
+  /// records the generation for the feed drain (D2) before the reply.
+  receiveSessionSeek(message) {
+    if (typeof message.generation !== "bigint" || message.generation <= 0n
+        || message.generation > 0xffffffffffffffffn
+        || typeof message.sourceFrame !== "bigint" || message.sourceFrame < 0n
+        || message.sourceFrame > 0xffffffffffffffffn
+        || typeof message.anchorSample !== "bigint" || message.anchorSample < -1n
+        || message.anchorSample > 0xffffffffffffffffn) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
+      return;
+    }
+    const result = message.anchorSample === -1n
+      ? this.exports.miso_engine_web_v1_session_seek(
+        this.handle, message.generation, message.sourceFrame,
+      )
+      : this.exports.miso_engine_web_v1_session_seek_at(
+        this.handle, message.generation, message.sourceFrame, message.anchorSample,
+      );
+    if (result === RESULT_OK) this.lastSessionSeekGeneration = message.generation;
+    this.port.postMessage({
+      tag: "miso.session-seek.v1",
+      requestId: message.requestId,
+      result,
+      generation: message.generation,
+    });
   }
 
   // PROCESS_POLICY_BEGIN

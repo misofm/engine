@@ -224,6 +224,21 @@ extern "C" {
  * others) and changes nothing. An exact replay of a read returns the same bytes and pops nothing;
  * a host gives each read a new request ID.
  *
+ * Observation reads (issue 1586). OBSERVATION_READ (message ID 0x000f, capability flag bit 15,
+ * which also means the OBSERVE edit is served) through miso_engine_v1_submit_command reads the
+ * latest window of 1 to 256 observation taps, each named by its strip, its console slot or insert
+ * and its tap ID. No C symbol or struct is added. The read consumes nothing and arms nothing. Each
+ * row says pending, unarmed or ready, the arm state render applied (armed, arm sample, arm tag;
+ * none until render applies the tap's last record), and, when ready, the window (first and end
+ * sample, sequence, blocks) and the asked-for lanes in the tap's native unit. A tap is ready once
+ * a window that opened at or after its arm has closed; a disarm reads unarmed when it is accepted.
+ * The batch is checked whole first: a reply wider than maximum_control_frame_bytes (64 + 192 bytes
+ * per row; 21 rows fit 4096 bytes) is LIMIT_EXCEEDED (observation.frame), and the first bad
+ * selection is refused at selection[i] (observation.address.unknown, observation.tap.unknown,
+ * observation.tap.unsupported, observation.unbound, observation.selection.duplicate), with no
+ * row. Until issue 1674 pairs carried readers, a tap whose effect a rebuild carried is read from
+ * the new plan's own slot, which the carried tap does not publish to: no window, never a wrong one.
+ *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its
  * publication and retirement credit, commits, and returns; it never waits for a render call or a
@@ -405,13 +420,14 @@ extern "C" {
  * superseded_count grows by the revisions the earlier replacements carried.
  *
  * The source-read clock (issues 1275, 1316). A seek that names a block names it on the plan's
- * source-read clock: the absolute sample of source time the block reads. In this version it is
- * equal to the render clock. A plan's clock is 0 at compile. Each miso_engine_v1_render_f32_planar
- * call must pass the clock's value as absolute_sample, renders one quantum and advances the clock
- * by one quantum; a call at another sample renders nothing, moves nothing and returns
- * MISO_ENGINE_V1_RENDER_REJECTED with "render.time.discontinuity". A plan that a structural
- * transaction swaps in continues the clock of the plan it replaces, so an anchor stays valid
- * across a swap.
+ * source-read clock: the absolute sample of source time the block reads. It is equal to the
+ * render clock until a plan that reads its sources ahead of it is adopted (a warm successor, issue
+ * 1355); no call publishes one in this version (issue 1403). A plan's clock is 0 at compile.
+ * Each miso_engine_v1_render_f32_planar call must pass the clock's value as absolute_sample,
+ * renders one quantum and advances the clock by one quantum; a call at another sample renders
+ * nothing, moves nothing and returns MISO_ENGINE_V1_RENDER_REJECTED with
+ * "render.time.discontinuity". A plan that a structural transaction swaps in continues the clock
+ * of the plan it replaces, so an anchor stays valid across a swap.
  *
  * Seek. miso_engine_v1_source_seek(id, g, F) makes generation g play from source frame F. It
  * takes effect no later than the first block that begins after the call returns; the PCM of the

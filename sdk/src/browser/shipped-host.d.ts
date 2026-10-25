@@ -878,6 +878,24 @@ export interface MisoSeekRequest {
   sourceFrame: bigint;
 }
 
+/// @internal A session seek (issue 1644 D1): the generation every source and the timeline move to,
+/// the session frame, and, for the anchored form, the absolute render sample (a quantum multiple)
+/// of the block that applies it.
+export interface MisoSessionSeekRequest {
+  generation: bigint;
+  frame: bigint;
+  anchorSample?: bigint;
+}
+
+/// @internal The reply to one session seek (issue 1644 D1): the engine's result and the generation
+/// the request named. A result other than `0` changed nothing.
+export interface MisoSessionSeekReply {
+  readonly tag: "miso.session-seek.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly generation: bigint;
+}
+
 export interface MisoAudioWorkletHost {
   readonly node: AudioWorkletNode;
   readonly backend: MisoWebBackend;
@@ -887,6 +905,13 @@ export interface MisoAudioWorkletHost {
   /// Seeks source content while absolute render time remains continuous. Meter peak windows can
   /// straddle this content discontinuity; the seek does not advance the meter generation.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
+  /// @internal Seek the timeline and every source under one new generation, all or nothing
+  /// (issue 1644 D1). A plain seek (no `anchorSample`) declares the discontinuity in the same
+  /// call; an anchored one keeps continuity. Reposition the PCM producers only after a `0` result,
+  /// so a ring seek at this generation is consumed without a second per-source seek. One may be
+  /// unsettled at a time; a second rejects locally with result `6`. The SDK's `engine.seek` is
+  /// the public surface.
+  seekSession(request: MisoSessionSeekRequest): Promise<MisoSessionSeekReply>;
   /// Reads the engine status. Concurrent calls share one read, and a reply reflects every request
   /// the host sent before the call: a call joins the in-flight read while no later request was
   /// sent, and otherwise joins the one follow-up read sent when that read settles. A joined read
@@ -903,8 +928,11 @@ export interface MisoAudioWorkletHost {
   /// handler. The frame is copied. One request-ID allocator must serve every frame sent through
   /// this method, because the engine's replay cache refuses a reused ID with different bytes. A
   /// frame that is empty or over 16384 bytes rejects with `RESULT_INVALID_ARGUMENT` (1), and more
-  /// than 64 frames in flight with `RESULT_BACKPRESSURE` (6), before the port.
-  control(frame: Uint8Array): Promise<MisoControlReply>;
+  /// than 64 frames in flight with `RESULT_BACKPRESSURE` (6), before the port. `document` (issue
+  /// 1697) is the document a `SESSION_REPLACE` frame names, copied and sent beside it, up to the
+  /// boot's 1 MiB document bound; an empty one rejects with `RESULT_INVALID_ARGUMENT` (1) before
+  /// the port, and one over the bound answers `RESULT_INVALID_ARGUMENT` with an empty response.
+  control(frame: Uint8Array, document?: Uint8Array): Promise<MisoControlReply>;
   /// Submit one batch of observation records (kinds 7 and 8) as a single transaction (issue 137
   /// D1). Values go through `control()`.
   command(request: MisoCommandRequest): Promise<MisoCommandAck>;

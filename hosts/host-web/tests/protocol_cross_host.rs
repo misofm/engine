@@ -302,7 +302,11 @@ struct CAbi {
 
 impl CAbi {
     fn new(frames: u64, limits: ControlLimits) -> Self {
-        let document = document(frames);
+        Self::from_document(&document(frames), limits)
+    }
+
+    /// [`Self::new`] for `document`.
+    fn from_document(document: &str, limits: ControlLimits) -> Self {
         let config = EngineConfig {
             struct_size: ENGINE_CONFIG_SIZE,
             abi_version: C_ABI_VERSION,
@@ -669,14 +673,14 @@ fn capabilities_plus(
 fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let mut legs = Legs::new();
 
-    // 1. CAPABILITIES_GET. #1697 removes this exception: until the browser has a document
-    // transport, the C ABI's reply is the browser's plus exactly the `SESSION_REPLACE` (`0x0013`)
-    // entry of the command list (#1386, root decision), and every other step stays byte-equal.
-    // #1596 removes the second: until the browser reads spectrum through the frames, the C ABI
-    // also lists the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1595 R2).
-    // #1588 removes the third: until the browser serves meter batches through the frames, the C
-    // ABI's lossy meter lane holds one whole batch, 256 slots, and the browser's keeps two
-    // (#1587a, root ruling m2).
+    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697). #1596 removes
+    // the first remaining exception: until the browser reads spectrum through the frames, the C
+    // ABI's reply is the browser's plus exactly the three spectrum commands (`0x0010`-`0x0012`)
+    // with flag bit 16 (#1595 R2). #1588 removes the second: until the browser serves meter
+    // batches through the frames, the C ABI's lossy meter lane holds one whole batch, 256 slots,
+    // and the browser's keeps two (#1587a, root ruling m2). #1589 removes the third: until the
+    // browser's session serves `OBSERVATION_READ`, the C ABI also lists `0x000f` with flag bit 15
+    // (#1586 R2). Every other step stays byte-equal.
     let request = legs.next();
     let bytes = frame(
         request,
@@ -701,13 +705,13 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     assert_eq!(
         capabilities_plus(
             &browser_reply,
-            &[0x0010, 0x0011, 0x0012, 0x0013],
-            protocol::CapabilityFlags::SPECTRUM.0,
+            &[0x000f, 0x0010, 0x0011, 0x0012],
+            protocol::CapabilityFlags::OBSERVATION.0 | protocol::CapabilityFlags::SPECTRUM.0,
             Some(host_core::MAXIMUM_METER_BATCH_RECORDS as u64)
         ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x0010-0x0013, bit 16 and \
-         its 256-slot meter lane"
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f-0x0012, bits 15 \
+         and 16 and its 256-slot meter lane"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
@@ -1087,6 +1091,160 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
             c.drain();
         },
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// #1586 gate 5: one tap read alike on both hosts
+// ---------------------------------------------------------------------------------------------
+
+/// The browser observation fixture: one track over `fixture-source` with a compressor insert whose
+/// tap 1 is its gain reduction.
+const OBSERVATION_SESSION: &str = include_str!("browser-v1/observation-session.json");
+
+/// #1586 gate 5 (R4's parity row): both hosts boot the observation fixture, arm the compressor
+/// insert's tap with a window of four blocks (the C ABI by `Observe`, the browser by a kind 7
+/// record), render the same PCM bit-identically, and read the same row: the C ABI by
+/// `OBSERVATION_READ`, the browser by its selected read. Status, window and both lanes' bits agree
+/// pending and ready.
+///
+/// Red if the two hosts read the same tap differently: another slot, another window, a lane
+/// swapped or another status.
+#[test]
+fn both_hosts_read_one_observation_tap_alike() {
+    const WINDOW_BLOCKS: u32 = 4;
+    let mut model = parse_session_json(OBSERVATION_SESSION).expect("the fixture parses");
+    model.sources[0].frames = 8_192;
+    let document = canonical_session_json(&model).expect("canonical session");
+    let mut browser = Browser {
+        host: AudioWorkletEngineHost::boot(
+            document.as_bytes(),
+            WebBootOptions {
+                live_control_meter_blocks: u64::from(WINDOW_BLOCKS),
+                live_control_observation_taps: 4,
+                ..options()
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic()))),
+    };
+    let limits = browser
+        .host
+        .control_limits_for_test()
+        .expect("the control half's limits");
+    let mut c = CAbi::from_document(&document, limits);
+    let strip = StableId::parse(TRACK_ID).expect("track ID");
+    let comp = StableId::parse("comp").expect("insert ID");
+
+    // The browser arms by a kind 7 record; the C ABI by one `Observe` transaction.
+    let mut record = [0_u8; host_web::COMMAND_RECORD_BYTES as usize];
+    record[0] = host_web::COMMAND_OBSERVE_SUBSCRIBE as u8;
+    record[1] = host_web::RACK_INSERTS;
+    record[2] = TRACK_ID.len() as u8;
+    record[3] = 4;
+    record[4..8].copy_from_slice(&1_u32.to_le_bytes());
+    record[8..12].copy_from_slice(&WINDOW_BLOCKS.to_le_bytes());
+    record[16..16 + TRACK_ID.len()].copy_from_slice(TRACK_ID.as_bytes());
+    record[144..148].copy_from_slice(b"comp");
+    browser
+        .host
+        .command_staging_mut()
+        .expect("the command staging")[..record.len()]
+        .copy_from_slice(&record);
+    assert_eq!(
+        browser.host.submit_commands(1),
+        RESULT_OK,
+        "the browser arm"
+    );
+    let revision = browser.host.committed_revision();
+    let arm = frame(
+        1,
+        ExpectedRevision::Exact(SessionRevision(revision)),
+        CommandPayload::SessionTransactionApply(&[SessionEdit::Observe {
+            strip_id: strip.clone(),
+            section: controls::TapSection::Inserts(comp.clone()),
+            tap_id: 1,
+            armed: true,
+            window_blocks: WINDOW_BLOCKS,
+        }]),
+    );
+    let (result, reply) = c.send(&arm);
+    assert_eq!(result, C_RESULT_OK, "{}", String::from_utf8_lossy(&reply));
+    c.drain();
+
+    let read = protocol::ObservationReadRequest {
+        selections: vec![protocol::ObservationReadSelection {
+            strip_id: strip,
+            section: controls::TapSection::Inserts(comp),
+            tap_id: 1,
+            channels: protocol::ParameterChannel::Both,
+        }],
+    };
+    let mut request = 1;
+    let mut ready = false;
+    for block in 0..2 * u64::from(WINDOW_BLOCKS) {
+        let browser_pcm = browser.step(block);
+        assert_eq!(browser_pcm, c.step(block), "block {block}: the same PCM");
+        browser.service();
+        c.service();
+        request += 1;
+        let (result, reply) = c.send(&frame(
+            request,
+            ExpectedRevision::Any,
+            CommandPayload::ObservationRead(&read),
+        ));
+        assert_eq!(result, C_RESULT_OK, "{}", String::from_utf8_lossy(&reply));
+        let mut fields = [0_u16; 64];
+        let protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::ObservationRead(page),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&reply, &mut protocol::DecodeScratch::new(&mut fields))
+            .expect("a response frame")
+        else {
+            panic!("an observation read page");
+        };
+        let c_row = page.rows[0];
+        let browser_row = &browser
+            .host
+            .read_observations(&[host_web::ObservationSelection {
+                track_id: TRACK_ID,
+                rack: host_web::LiveEffectRack::Inserts,
+                effect_slot_id: "comp",
+                tap_id: 1,
+                channels: host_web::ObservationReadChannels::Both,
+            }])
+            .expect("the browser read")[0];
+        let status = match browser_row.status {
+            host_web::ObservationReadStatus::Pending => protocol::ObservationRowStatus::Pending,
+            host_web::ObservationReadStatus::Unarmed => protocol::ObservationRowStatus::Unarmed,
+            host_web::ObservationReadStatus::Ready => protocol::ObservationRowStatus::Ready,
+        };
+        let window =
+            |first: u64, end: u64, sequence: u64, blocks: u32| (first, end, sequence, blocks);
+        assert_eq!(
+            (
+                c_row.status,
+                c_row
+                    .window
+                    .map(|w| window(w.first_sample, w.end_sample, w.sequence, w.blocks)),
+                c_row.left.map(f32::to_bits),
+                c_row.right.map(f32::to_bits),
+            ),
+            (
+                status,
+                browser_row.window.map(|w| window(
+                    w.first_sample,
+                    w.end_sample,
+                    w.sequence,
+                    w.blocks
+                )),
+                browser_row.left.map(f32::to_bits),
+                browser_row.right.map(f32::to_bits),
+            ),
+            "block {block}: the same row"
+        );
+        ready |= c_row.status == protocol::ObservationRowStatus::Ready;
+    }
+    assert!(ready, "vacuous: no window closed");
 }
 
 /// #1588a: until the render half pushes its frames to the control half (#1588b), the browser

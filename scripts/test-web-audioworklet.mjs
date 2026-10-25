@@ -142,9 +142,14 @@ async function testMainRealm() {
   let statusMutation = null;
   let renderAllocationsMutation = null;
   let controlMutation = null;
+  let lastControlDocument;
   let sessionMapMutation = null;
   let planeMutation = null;
   let commandResult = 0;
+  // Issue #1644: every session seek message the fake port received, and the result it answers.
+  const sessionSeekMessages = [];
+  let sessionSeekResult = 0;
+  let sessionSeekGenerationOffset = 0n;
   let mixedSuccess = false;
   let commandMutation = null;
   let compileGate = null;
@@ -205,6 +210,7 @@ async function testMainRealm() {
           // Issue #1562a D1: the frame comes back reversed as the response, so the test can see
           // that the host sent the caller's bytes and returns the engine's unchanged.
           const frame = received.frame;
+          lastControlDocument = received.document;
           response = {
             tag: "miso.control.v1", requestId: received.requestId, result: 0,
             response: new Uint8Array([...frame].reverse()), revision: 2n,
@@ -236,6 +242,12 @@ async function testMainRealm() {
             metersAttached: true,
           };
           if (sessionMapMutation !== null) response = sessionMapMutation(response);
+        } else if (received.tag === "miso.session-seek.v1") {
+          sessionSeekMessages.push(received);
+          response = {
+            tag: "miso.session-seek.v1", requestId: received.requestId,
+            result: sessionSeekResult, generation: received.generation + sessionSeekGenerationOffset,
+          };
         } else {
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
         }
@@ -1363,6 +1375,22 @@ async function testMainRealm() {
       );
       const largest = await host.control(new Uint8Array(16384));
       assert.equal(largest.response.byteLength, 16384, "the largest frame is sent");
+      // Issue #1697: a document is copied and posted beside the frame, both buffers transferred;
+      // an empty or non-array document is refused before the port.
+      const document = new Uint8Array([1, 2, 3, 4]);
+      await host.control(new Uint8Array([7]), document);
+      const withDocument = events.filter((event) => event[1] === "miso.control.v1");
+      assert.equal(withDocument.length, 3);
+      assert.equal(withDocument[2][3], 2, "the frame's and the document's buffers are transferred");
+      assert.deepEqual([...lastControlDocument], [1, 2, 3, 4], "the document is posted");
+      assert.equal(document.byteLength, 4, "the caller keeps its document: the host sends a copy");
+      await localErrorResult(host.control(new Uint8Array([7]), new Uint8Array(0)), 1);
+      await localErrorResult(host.control(new Uint8Array([7]), [1]), 1);
+      assert.equal(
+        events.filter((event) => event[1] === "miso.control.v1").length,
+        3,
+        "a refused document never reaches the port",
+      );
     }
 
     // Issue #1570b D5, gate 4's host half: an engine event reaches every listener as
@@ -1873,6 +1901,35 @@ async function testMainRealm() {
     const again = chunk("source", 9);
     assert.equal(again.buffer.byteLength, 0);
     assert.equal((await again.request).requestId, 7, "source saturation does not burn an ID");
+
+    // Issue #1644 gate 2, the host half: one session seek message per call, with the plain form's
+    // `-1n` anchor, and one unsettled at a time; a second is refused locally and posts nothing.
+    holdAll = true;
+    const firstSessionSeek = pipelineHost.seekSession({ generation: 2n, frame: 480n });
+    const beforeSessionSeekOverflow = events.length;
+    await localErrorResult(pipelineHost.seekSession({
+      generation: 3n, frame: 0n, anchorSample: 128n,
+    }), 6);
+    assert.equal(events.length, beforeSessionSeekOverflow, "a second session seek posts nothing");
+    holdAll = false;
+    for (const respond of heldAll) respond();
+    heldAll.length = 0;
+    assert.deepEqual(await firstSessionSeek, {
+      tag: "miso.session-seek.v1", requestId: 8, result: 0, generation: 2n,
+    });
+    sessionSeekResult = 1;
+    assert.equal((await pipelineHost.seekSession({
+      generation: 3n, frame: 0n, anchorSample: 128n,
+    })).result, 1, "a refused session seek resolves with the engine's result");
+    sessionSeekResult = 0;
+    sessionSeekGenerationOffset = 1n;
+    await errorResult(pipelineHost.seekSession({ generation: 4n, frame: 0n }), 255);
+    sessionSeekGenerationOffset = 0n;
+    sessionSeekMessages.pop();
+    assert.deepEqual(sessionSeekMessages, [
+      { tag: "miso.session-seek.v1", generation: 2n, sourceFrame: 480n, anchorSample: -1n, requestId: 8 },
+      { tag: "miso.session-seek.v1", generation: 3n, sourceFrame: 0n, anchorSample: 128n, requestId: 9 },
+    ]);
     await pipelineHost.dispose();
 
     // W4-D1: a browser that cannot validate simd128 is refused with the typed record, before any
@@ -2624,6 +2681,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   for (let index = 0; index < 21; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
   const calls = {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
+    sessionSeek: [], sessionSeekResult: 0,
     sourceResult: 0, bootResult: 0, boot: [], bootWithSpectrumHop: [], spectrumHopCapability: 0,
     spectrumHopCapabilityResult: 1,
     // Issue #1381a: the service step's handles and result, and the control counter's value.
@@ -2632,6 +2690,9 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     // response it leaves, the committed revision, and whether it grows its memory under a command.
     control: [], controlResult: 0, controlResponse: new Uint8Array([9, 8, 7]), controlRevision: 4n,
     controlGrowsMemory: false, controlRequestRefusals: 0, growths: 0,
+    // Issue #1697: every `replace_document_ptr` length, how many the staging refuses next, and
+    // the length staged for the next command (which frees it, as the export does).
+    replaceDocument: [], replaceDocumentRefusals: 0, stagedDocumentBytes: 0,
     // Issue #1570b D1: the lanes' queued event frames (lane 0 reliable, lane 1 lossy), every
     // `control_event` call the fake received, and the result it answers with.
     events: [[], []], eventCalls: [], eventResult: 0,
@@ -2650,6 +2711,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   let currentEvent = null;
   const controlRequestPointer = 50000;
   const controlResponsePointer = 56000;
+  const documentPointer = 150000;
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
   const commandPointer = 70000;
   const meterFramePointer = 40000;
@@ -2710,10 +2772,11 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
   const pointers = {
-    2: 4096, 3: 5000, 5: 8192, 6: liveControlsAttached ? commandPointer : 0, 7: meterFramePointer,
+    2: 4096, 3: 5000, 4: 150000, 5: 8192, 6: liveControlsAttached ? commandPointer : 0,
+    7: meterFramePointer,
   };
   const capacities = {
-    2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4,
+    2: 64, 3: 2 * quantum * 4, 4: 256, 5: 2 * quantum * 4,
     6: liveControlsAttached ? 256 * 272 : 0,
     7: meterFrameFloats * 4,
   };
@@ -2793,6 +2856,19 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       calls.source.push(args);
       calls.sourceIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return calls.sourceResult;
+    },
+    // Issue #1644: both session seek exports and the declaration record into one list, in order.
+    miso_engine_web_v1_session_seek: (...args) => {
+      calls.sessionSeek.push(["session_seek", ...args]);
+      return calls.sessionSeekResult;
+    },
+    miso_engine_web_v1_session_seek_at: (...args) => {
+      calls.sessionSeek.push(["session_seek_at", ...args]);
+      return calls.sessionSeekResult;
+    },
+    miso_engine_web_v1_declare_discontinuity: (...args) => {
+      calls.sessionSeek.push(["declare_discontinuity", ...args]);
+      return 0;
     },
     miso_engine_web_v1_source_seek: (...args) => {
       calls.seek.push(args);
@@ -2904,10 +2980,25 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       }
       return controlRequestPointer;
     },
+    miso_engine_web_v1_replace_document_ptr: (_handle, length) => {
+      calls.replaceDocument.push(length);
+      calls.stagedDocumentBytes = 0;
+      if (calls.replaceDocumentRefusals > 0 || length === 0 || length > 40000) {
+        calls.replaceDocumentRefusals = Math.max(0, calls.replaceDocumentRefusals - 1);
+        return 0;
+      }
+      calls.stagedDocumentBytes = length;
+      return documentPointer;
+    },
     miso_engine_web_v1_control_command: (handle, length) => {
+      const documentBytes = calls.stagedDocumentBytes;
+      calls.stagedDocumentBytes = 0;
       calls.control.push({
         handle,
         frame: new Uint8Array(memory.buffer, controlRequestPointer, length).slice(),
+        document: documentBytes === 0
+          ? null
+          : new Uint8Array(memory.buffer, documentPointer, documentBytes).slice(),
       });
       new Uint8Array(memory.buffer, controlResponsePointer, calls.controlResponse.length)
         .set(calls.controlResponse);
@@ -3929,6 +4020,59 @@ async function testProcessor() {
       }
     }
     {
+      // Issue #1697: a `document` beside the frame is staged through `replace_document_ptr` and
+      // reaches the command with the frame; a document the staging refuses answers a typed
+      // refusal with no response (never the previous command's) and runs no command; a frame the
+      // staging refuses stages no document, so none is left for a later command.
+      const { processor, fake } = makeProcessor();
+      const document = new Uint8Array([123, 34, 97, 34, 125]);
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1, 2]), document },
+      });
+      assert.deepEqual(fake.calls.replaceDocument, [5]);
+      assert.equal(fake.calls.control.length, 1);
+      assert.deepEqual([...fake.calls.control[0].frame], [1, 2]);
+      assert.deepEqual([...fake.calls.control[0].document], [...document], "the document is staged");
+      assert.deepEqual([...processor.port.posts.at(-1).message.response], [9, 8, 7]);
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([3]) },
+      });
+      assert.equal(fake.calls.control[1].document, null, "a frame alone carries no document");
+      fake.calls.replaceDocumentRefusals = 1;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 3, frame: new Uint8Array([4]), document },
+      });
+      const refused = processor.port.posts.at(-1).message;
+      assert.equal(refused.tag, "miso.control.v1");
+      assert.equal(refused.requestId, 3);
+      assert.equal(refused.result, 1);
+      assert.equal(refused.response.byteLength, 0, "a refused document has no response");
+      assert.equal(fake.calls.control.length, 2, "a refused document runs no command");
+      fake.calls.controlRequestRefusals = 1;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 4, frame: new Uint8Array([5]), document },
+      });
+      assert.equal(processor.port.posts.at(-1).message.result, 1);
+      assert.deepEqual(fake.calls.replaceDocument, [5, 5], "a refused frame stages no document");
+      assert.equal(fake.calls.control.length, 2);
+      assert.equal(processor.ready, true, "a refused staging is not sticky");
+      for (const bad of [
+        new Uint8Array(0),
+        [1, 2],
+        new Uint8Array(new ArrayBuffer(8), 2, 4),
+        undefined,
+      ]) {
+        const { processor, fake } = makeProcessor();
+        processor.port.onmessage({
+          data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]), document: bad },
+        });
+        assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+        assert.equal(fake.calls.replaceDocument.length, 0, "a malformed document reaches no export");
+        assert.equal(fake.calls.control.length, 0, "a malformed document runs no command");
+        assert.equal(processor.ready, false);
+      }
+    }
+    {
       // Root ruling A (#1332 D5, "growth is not a fault"): the module's memory moving under a
       // command detaches every cached view, and the handler re-cuts them all before it ends. The
       // reply is posted whole, the worklet stays ready, a later request is served, and the next
@@ -4229,6 +4373,46 @@ async function testProcessor() {
       processor.receive({ tag: "miso.dispose.v1", requestId: 3 });
       assert.equal(fake.calls.dispose, 1);
       assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
+    }
+
+    {
+      // Issue #1644 gate 2, the worklet half: a plain session seek calls `session_seek` once and an
+      // anchored one `session_seek_at` once, never the declaration; an OK records the generation
+      // for the feed drain before the reply, a refusal is the reply's result, records nothing and
+      // is not sticky, and a malformed message calls no export.
+      const { processor, fake } = makeProcessor();
+      const handle = processor.handle;
+      const seek = (requestId, generation, sourceFrame, anchorSample) => {
+        processor.receive({
+          tag: "miso.session-seek.v1", requestId, generation, sourceFrame, anchorSample,
+        });
+        return processor.port.posts.at(-1).message;
+      };
+      assert.deepEqual(seek(1, 2n, 480n, -1n), {
+        tag: "miso.session-seek.v1", requestId: 1, result: 0, generation: 2n,
+      });
+      assert.equal(processor.lastSessionSeekGeneration, 2n);
+      // The feed drain reads a refused seek's code through this boot-time view (#1644 D2).
+      assert.deepEqual(
+        [processor.diagnosticView.byteOffset, processor.diagnosticView.length,
+          processor.diagnosticView.buffer === processor.memoryBuffer],
+        [150000, 256, true],
+      );
+      assert.deepEqual(seek(2, 3n, 0n, 128n).result, 0);
+      fake.calls.sessionSeekResult = 1;
+      assert.deepEqual(seek(3, 4n, 0n, -1n), {
+        tag: "miso.session-seek.v1", requestId: 3, result: 1, generation: 4n,
+      });
+      assert.equal(processor.lastSessionSeekGeneration, 3n, "a refused seek records nothing");
+      assert.deepEqual(fake.calls.sessionSeek, [
+        ["session_seek", handle, 2n, 480n],
+        ["session_seek_at", handle, 3n, 0n, 128n],
+        ["session_seek", handle, 4n, 0n],
+      ]);
+      assert.equal(processor.stickyResult, 0, "a refused session seek is not sticky");
+      seek(4, 0n, 0n, -1n);
+      assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+      assert.equal(fake.calls.sessionSeek.length, 3, "a malformed session seek calls no export");
     }
 
     {

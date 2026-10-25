@@ -1601,13 +1601,14 @@ impl ReadyOwnership {
     fn run_command(
         &mut self,
         request: &[u8],
+        document: &[u8],
         output_capacity: u64,
         analysis: Option<&mut SpectrumAnalysis>,
     ) -> Result<usize, control_plane::CommandError> {
         self.run_control(
             analysis,
             control_plane::CommandError::Backpressure,
-            |control| control.command(request, output_capacity),
+            |control| control.command_with_document(request, document, output_capacity),
         )
     }
 
@@ -2392,7 +2393,25 @@ impl AudioWorkletEngineHost {
     /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
     /// stream (see [`Self::service`]); a plan this command's reclaim promotes ends it when the
     /// stream is not kept.
+    ///
+    /// It is [`Self::control_command_with_document`] with an empty document, so a
+    /// `SESSION_REPLACE` frame sent here is refused `session.replace.document_length`.
     pub fn control_command(&mut self, len: u32, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
+        self.control_command_with_document(len, &[], analysis)
+    }
+
+    /// [`Self::control_command`] with the document a `SESSION_REPLACE` frame names (#1697, #1386
+    /// D7), borrowed for this call only: the core checks its length and SHA-256, parses it and
+    /// diffs it against the committed model, exactly as for the C ABI's
+    /// `miso_engine_v1_submit_document_command`, and every other command ignores it. The browser
+    /// decodes nothing in it either. `miso_engine_web_v1_control_command` passes the document
+    /// `miso_engine_web_v1_replace_document_ptr` staged. Results as [`Self::control_command`].
+    pub fn control_command_with_document(
+        &mut self,
+        len: u32,
+        document: &[u8],
+        analysis: Option<&mut SpectrumAnalysis>,
+    ) -> u32 {
         self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -2404,7 +2423,7 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis) {
+        match ready.run_command(request, document, CONTROL_FRAME_BYTES, analysis) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -4920,6 +4939,10 @@ pub struct WebAdapter;
 impl ControlAdapter for WebAdapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+    /// #1697: `miso_engine_web_v1_replace_document_ptr` stages the document a `SESSION_REPLACE`
+    /// names, and [`AudioWorkletEngineHost::control_command_with_document`] passes it beside the
+    /// frame.
+    const DOCUMENT_TRANSPORT: bool = true;
     // #1588 R1: the browser's meter batches come from its render half's fold. Its
     // `METER_DELIVERY` stays off (meter tables refused `meter.unavailable`) until #1588b lands
     // the render half's ring push in the same commit that turns it on: a table accepted with no

@@ -178,8 +178,10 @@ pub struct WarmLead {
 impl WarmLead {
     /// The bytes render writes and reads in the adoption block to prime this lead (#1354 D3):
     /// `4 · (P · Σ channels(s)` over the carried sources `+ Σ 2 · λ'` over every source-claim
-    /// line of the successor`)`. Exact. No L3 line (an `input`-tap line from a restarted strip,
-    /// #1354b) exists in this slice, so that term is empty.
+    /// line the prime's fill writes`)`. **Limit (#1354b):** the L3 term is not counted yet: the
+    /// fill writes every `input`-tap sidechain line from a restarted track into a carried node
+    /// (#1355 D5), and those words are left out, so the count is exact only for a successor with
+    /// no such line.
     #[must_use]
     pub const fn prime_bytes(&self) -> u64 {
         self.prime_bytes
@@ -2113,13 +2115,57 @@ fn source_carries(
     *committed == *source && row.ring == ring
 }
 
-/// D3's prime byte count: `4 · (lead · channels + Σ 2 · λ')` over `lines`, `None` on overflow.
-fn prime_bytes_of(lead: u64, channels: u64, lines: &[graph::SourceClaimLine]) -> Option<u64> {
-    let lines = lines.iter().try_fold(0_u64, |total, line| {
-        total.checked_add(line.samples.0.checked_mul(2)?)
-    })?;
+/// D3's prime byte count (#1355 D5 narrows it to the lines the fill writes): `4 · (lead ·
+/// channels + Σ words)`, with `words` the words the prime's fill writes into each track line of
+/// `lines` (the successor's compiled strip delays, claim lines included) on a source of `carried`:
+/// a lane that grew by the lead takes its whole ring (the predecessor's pending words, then the
+/// lead), and a lane that moves takes the lead, up to its ring. An added track's line, a line on a
+/// source that does not carry, and a restarted lane take nothing. `before` is the predecessor's
+/// strip delay rows, sorted by strip ID. `None` on overflow.
+///
+/// **Limit (#1354b).** The `Input`-tap sidechain lines (L3) the fill writes are not counted; D3's
+/// L3 term is #1354b's.
+fn prime_bytes_of(
+    lead: u64,
+    channels: u64,
+    committed: &SessionModel,
+    model: &SessionModel,
+    carried: &BTreeSet<&str>,
+    before: &[graph::GraphStripDelayLine],
+    lines: &[graph::PreparedTrackDelay],
+) -> Option<u64> {
+    let mut words = 0_u64;
+    for join in join_strip_delays(committed, model, carried) {
+        if !(join.track && join.same_source) {
+            continue;
+        }
+        let node = claim_node(join.id);
+        let Some(after) = lines.iter().find(|line| line.node == node) else {
+            continue;
+        };
+        let after = [after.left_samples, after.right_samples];
+        let before = before
+            .binary_search_by(|row| (*row.strip).cmp(join.id))
+            .ok()
+            .map(|index| before[index].samples);
+        let (moved, grown) = strip_delay_lanes(join.equal, before, after, lead);
+        for (lane, bit) in [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
+            .into_iter()
+            .enumerate()
+        {
+            let ring = u64::from(after[lane]);
+            let written = if grown & bit != 0 {
+                ring
+            } else if moved & bit != 0 {
+                ring.min(lead)
+            } else {
+                0
+            };
+            words = words.checked_add(written)?;
+        }
+    }
     lead.checked_mul(channels)?
-        .checked_add(lines)?
+        .checked_add(words)?
         .checked_mul(4)
 }
 
@@ -2265,8 +2311,17 @@ pub fn warm_lead(
     }
     // Step 8, C3: the prime.
     let channels = rings.iter().map(|(_, channels)| u64::from(*channels)).sum();
-    let prime_bytes = prime_bytes_of(lead, channels, artifact.graph().source_claim_lines())
-        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let carried: BTreeSet<&str> = rings.iter().map(|(row, _)| &*row.id).collect();
+    let prime_bytes = prime_bytes_of(
+        lead,
+        channels,
+        base.committed,
+        model,
+        &carried,
+        &base.inventory.strip_delays,
+        artifact.graph().track_delays(),
+    )
+    .ok_or_else(|| resource("host.resource.arithmetic"))?;
     if prime_bytes > config.prime_bytes_max {
         return Ok(WarmDecision::Unavailable(WarmUnavailable::PrimeBudget));
     }
@@ -3092,6 +3147,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             index,
         });
     }
+    // #1402 R-B, #1355 D5: the sources whose rings carry under #1272 D3, by ID.
+    let carried_ids: BTreeSet<&str> = carried_sources
+        .iter()
+        .map(|&(index, _)| model.sources[index as usize].id.as_str())
+        .collect();
     // #1354 D3: the channels of the carried sources a warm successor's prime replays.
     let carried_channels: u64 = carried_sources
         .iter()
@@ -3200,13 +3260,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let delay_joins: Vec<StripDelayJoin<'_>> = match successor {
         None => Vec::new(),
         // #1402 R-B: the sources whose rings carry under #1272 D3.
-        Some(base) => {
-            let carried: BTreeSet<&str> = carried_sources
-                .iter()
-                .map(|&(index, _)| model.sources[index as usize].id.as_str())
-                .collect();
-            join_strip_delays(base.committed, model, &carried)
-        }
+        Some(base) => join_strip_delays(base.committed, model, &carried_ids),
     };
     let route_joins: Vec<RouteJoin<'_>> = match (successor, &level_diff) {
         (Some(base), Some(diff)) => join_routes(base.committed, model, base.edit_ramps, diff),
@@ -3691,7 +3745,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 prime_bytes_of(
                     lead.lead_samples,
                     carried_channels,
-                    artifact.graph().source_claim_lines(),
+                    base.committed,
+                    model,
+                    &carried_ids,
+                    &base.inventory.strip_delays,
+                    artifact.graph().track_delays(),
                 )
                 .ok_or_else(|| resource("host.resource.arithmetic"))?
             }
@@ -4427,6 +4485,25 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         ),
         None => StripDelayCarry::default(),
     };
+    // #1355 D5, L3: a warm successor's `Input`-tap sidechain lines from a restarted track on a
+    // moved source into a carried strip.
+    let sidechain_fills = match (successor, warm) {
+        (Some(base), Some(lead)) if lead.lead_samples != 0 => {
+            let restarted: BTreeSet<&str> = strip_carry
+                .restarted
+                .iter()
+                .chain(&effect_carry.restarted)
+                .chain(&strip_delay_carry.restarted)
+                .map(|id| &**id)
+                .chain(lead.restart_whole.iter().map(String::as_str))
+                .collect();
+            sidechain_fills(&base, &delay_lines, &delay_joins, &restarted)
+        }
+        _ => Vec::new(),
+    };
+    let prime_carry_bytes =
+        graph::prime_carry_retained_bytes(strip_delay_carry.fills.len(), sidechain_fills.len())
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let route_carry = match successor {
         Some(base) => resolve_route_carry(&base.inventory.live_routes, &live_routes, &route_joins),
         None => RouteCarry::default(),
@@ -4465,6 +4542,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .and_then(|bytes| bytes.checked_add(meter_carry_bytes))
         .and_then(|bytes| bytes.checked_add(delay_carry_bytes))
         .and_then(|bytes| bytes.checked_add(strip_delay_carry_bytes))
+        .and_then(|bytes| bytes.checked_add(prime_carry_bytes))
         .and_then(|bytes| bytes.checked_add(route_carry_bytes))
         .and_then(|bytes| bytes.checked_add(fade_arm_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?
@@ -4579,6 +4657,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .map_err(|_| graph_failure("host.carry.install"))?;
         }
     }
+    // #1355 D5: a warm successor fills its grown lines whenever it is adopted with a carry, so
+    // none of its lines can stay at rest. Its prime replays `P / q` blocks.
+    if let Some(lead) = warm.filter(|lead| lead.lead_samples != 0) {
+        let blocks = u32::try_from(lead.lead_samples / u64::from(compiled.quantum().0))
+            .map_err(|_| resource("host.resource.arithmetic"))?;
+        graph::install_prime_carry(&mut plan, blocks, strip_delay_carry.fills, sidechain_fills)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
     debug_assert_eq!(
         carry_program_retained_bytes,
@@ -4588,6 +4674,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             + meter_carry_bytes
             + delay_carry_bytes
             + strip_delay_carry_bytes
+            + prime_carry_bytes
             + route_carry_bytes
     );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
@@ -4618,7 +4705,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // predecessor does, so the source-read clock never moves backwards across a rebuild. A first
     // plan reads on its render clock, and so does a discontinuity successor, whose base inventory
     // is `at_discontinuity`'s.
-    let source_read_offset = successor.map_or(0, |base| base.inventory.source_read_offset);
+    // #1355 D1: a warm successor reads its sources its lead further ahead, `O + P`.
+    let source_read_offset = successor.map_or(0, |base| {
+        base.inventory.source_read_offset + warm.map_or(0, |lead| lead.lead_samples)
+    });
     plan.set_source_read_offset(source_read_offset);
     let inventory = PlanStateInventory {
         plan_identity: graph::plan_identity(&mut plan)
@@ -7276,6 +7366,9 @@ struct StripDelayJoin<'a> {
     /// source-claim line), so a track that reads another source, or a source redeclared under its
     /// ID (a fresh ring from frame 0), carries no lane.
     same_source: bool,
+    /// Whether the strip is a track: only a track's line holds source frames, so only a track's
+    /// line takes a warm successor's prime (#1355 D5).
+    track: bool,
 }
 
 /// The model half of the strip delay join (#1284 D1): for every strip of `model` that `committed`
@@ -7314,6 +7407,7 @@ fn join_strip_delays<'a>(
                 id: strip.id.as_str(),
                 equal,
                 same_source,
+                track: matches!(strip.kind, session::StripKind::Track(_)),
             })
         })
         .collect()
@@ -7324,6 +7418,36 @@ fn join_strip_delays<'a>(
 struct StripDelayCarry {
     moves: Vec<graph::GraphStripDelayMove>,
     restarted: Vec<Box<str>>,
+    /// A warm successor's source-claim fills (#1355 D5): every track line on a moved source with
+    /// a lane that moves or grew by the lead. Empty without a lead.
+    fills: Vec<graph::GraphClaimFill>,
+}
+
+/// The lanes of one strip's delay line that continue across a swap (#1284 D1, #1354a ruling 3):
+/// `(moved, grown)`. A needed lane (equal declared delay, a nonempty ring in the successor) moves
+/// when the predecessor holds the line with a ring of the same length, and grew when its ring is
+/// exactly `lead` longer than the predecessor's (0 for a line it does not hold). `before` is
+/// `None` when the predecessor holds no line; `lead` is 0 for every successor but a warm one.
+fn strip_delay_lanes(equal: u8, before: Option<[u32; 2]>, after: [u32; 2], lead: u64) -> (u8, u8) {
+    let mut moved = 0;
+    let mut grown = 0;
+    for (lane, bit) in [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
+        .into_iter()
+        .enumerate()
+    {
+        if equal & bit == 0 || after[lane] == 0 {
+            continue;
+        }
+        if before.is_some_and(|before| before[lane] == after[lane]) {
+            moved |= bit;
+        }
+        if lead != 0
+            && u64::from(after[lane]) == u64::from(before.map_or(0, |before| before[lane])) + lead
+        {
+            grown |= bit;
+        }
+    }
+    (moved, grown)
 }
 
 /// The line half of the strip delay join (#1284 D1, #1402 D1): a lane carries when its
@@ -7333,13 +7457,14 @@ struct StripDelayCarry {
 /// line, so a lane that declares no delay can still hold `P` pending frames. A strip with a needed
 /// lane that cannot carry (its delay, its ring length or its source changed) starts that lane at
 /// rest and is listed in `restarted` (decision 15, D15-9): the duck-swap removes the click of the
-/// alignment that moves. A grown claim line, filled at adoption, is #1355's. Both slices are
-/// sorted by strip ID.
+/// alignment that moves. Both slices are sorted by strip ID.
 ///
 /// `lead` is a warm successor's `P` (#1354a ruling 3), 0 for every other successor: a needed lane
 /// whose declared delay is equal, whose source is unchanged and whose ring grew by exactly `lead`
-/// (from a lane the predecessor did not hold, too) keeps its strip carried and moves nothing; its
-/// fill and the program entry for it are #1355's (#1402 R-A).
+/// (from a lane the predecessor did not hold, too) keeps its strip carried and moves nothing. With
+/// a lead, every track line on a moved source with a lane that moves or grew is a fill of the
+/// prime (#1355 D5, `fills`): the grown lanes take the predecessor's pending words, and every such
+/// lane then takes the prime.
 fn resolve_strip_delay_carry(
     predecessor: &[graph::GraphStripDelayLine],
     own: &[graph::GraphStripDelayLine],
@@ -7365,43 +7490,38 @@ fn resolve_strip_delay_carry(
                 .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
                 .fold(0, |mask, (bit, _)| mask | bit)
         });
-        // The lanes of `after` that grew by exactly the lead from `before` lanes (0 for a line
-        // the predecessor did not hold): carried, with nothing to move (#1354a ruling 3).
-        let grown = |before: [u32; 2], after: &graph::GraphStripDelayLine| {
-            [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
-                .into_iter()
-                .enumerate()
-                .filter(|&(lane, bit)| {
-                    lead != 0
-                        && needed & bit != 0
-                        && u64::from(after.samples[lane]) == u64::from(before[lane]) + lead
-                })
-                .fold(0, |mask, (_, bit)| mask | bit)
-        };
         if needed != 0 {
-            match (
-                row(predecessor, join.id).filter(|_| join.same_source),
-                after,
-            ) {
-                (Some(before), Some(after)) => {
-                    let lanes = [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
-                        .into_iter()
-                        .enumerate()
-                        .filter(|&(lane, bit)| {
-                            needed & bit != 0 && before.samples[lane] == after.samples[lane]
-                        })
-                        .fold(0, |mask, (_, bit)| mask | bit);
-                    restarts |= lanes | grown(before.samples, &after) != needed;
-                    if lanes != 0 {
+            match (after, join.same_source) {
+                (Some(after), true) => {
+                    let before = row(predecessor, join.id);
+                    let (moved, grown) = strip_delay_lanes(
+                        join.equal,
+                        before.as_ref().map(|before| before.samples),
+                        after.samples,
+                        lead,
+                    );
+                    restarts |= moved | grown != needed;
+                    if let Some(before) = &before
+                        && moved != 0
+                    {
                         carry.moves.push(graph::GraphStripDelayMove {
                             successor: after.line,
                             predecessor: before.line,
-                            lanes,
+                            lanes: moved,
                         });
                     }
-                }
-                (None, Some(after)) if join.same_source => {
-                    restarts |= grown([0; 2], &after) != needed;
+                    // #1355 D5: a warm successor's track line on a moved source takes the prime
+                    // on every lane that continues, and the predecessor's pending words first on
+                    // the lanes that grew.
+                    if lead != 0 && join.track && moved | grown != 0 {
+                        carry.fills.push(graph::GraphClaimFill {
+                            line: after.line,
+                            claim: claim_node(join.id),
+                            predecessor: before.as_ref().map(|before| before.line),
+                            pending_lanes: grown & !moved,
+                            lanes: moved | grown,
+                        });
+                    }
                 }
                 _ => restarts = true,
             }
@@ -7411,6 +7531,78 @@ fn resolve_strip_delay_carry(
         }
     }
     carry
+}
+
+/// The `Input`-tap sidechain lines a warm successor fills (#1355 D5, L3): every compensation line
+/// of a sidechain edge from the `Input` stage of a track of `restarted` that reads a moved source
+/// (its join's `same_source`) into a strip outside `restarted`, with the predecessor's line of
+/// the same edge and the track's strip delay line in the predecessor, when it held them.
+fn sidechain_fills(
+    base: &SuccessorBase<'_>,
+    lines: &[graph::GraphDelayLine],
+    joins: &[StripDelayJoin<'_>],
+    restarted: &BTreeSet<&str>,
+) -> Vec<graph::GraphSidechainFill> {
+    fn strip_of(node: &graph::GraphNodeId) -> Option<&str> {
+        match node {
+            graph::GraphNodeId::TrackStage { track_id, .. } => Some(track_id.as_str()),
+            graph::GraphNodeId::Effect(effect) => Some(effect.track_id.as_str()),
+            _ => None,
+        }
+    }
+    lines
+        .iter()
+        .filter_map(|line| {
+            let graph::GraphEdgeId::EffectSidechain { .. } = &line.edge else {
+                return None;
+            };
+            let graph::GraphNodeId::TrackStage {
+                track_id,
+                stage: graph::TrackStage::Input,
+            } = &line.source
+            else {
+                return None;
+            };
+            let track = track_id.as_str();
+            let into = strip_of(&line.destination)?;
+            let moved = joins
+                .iter()
+                .any(|join| join.id == track && join.track && join.same_source);
+            if !restarted.contains(track) || restarted.contains(into) || !moved {
+                return None;
+            }
+            let predecessor = base
+                .inventory
+                .delay_lines
+                .binary_search_by(|earlier| earlier.edge.cmp(&line.edge))
+                .ok()
+                .map(|index| &base.inventory.delay_lines[index])
+                .filter(|earlier| {
+                    earlier.source == line.source && earlier.destination == line.destination
+                })
+                .map(|earlier| earlier.line);
+            let claim_line = base
+                .inventory
+                .strip_delays
+                .binary_search_by(|row| (*row.strip).cmp(track))
+                .ok()
+                .map(|index| base.inventory.strip_delays[index].line);
+            Some(graph::GraphSidechainFill {
+                line: line.line,
+                claim: line.source.clone(),
+                predecessor,
+                claim_line,
+            })
+        })
+        .collect()
+}
+
+/// Track `id`'s `Input` node, the node its source claim feeds.
+fn claim_node(id: &str) -> graph::GraphNodeId {
+    graph::GraphNodeId::TrackStage {
+        track_id: graph::StableGraphId::parse(id).expect("a strip ID is a stable graph ID"),
+        stage: graph::TrackStage::Input,
+    }
 }
 
 /// One send present in both models whose source and destination are the same and whose values the
@@ -8363,30 +8555,35 @@ mod tests {
                 id: "eq0",
                 equal: left,
                 same_source: true,
+                track: true,
             },
             // Unchanged, with no delay on the left: only the right takes its ring.
             StripDelayJoin {
                 id: "eq2",
                 equal: left | right,
                 same_source: true,
+                track: true,
             },
             // Unchanged and undelayed: no line on either side, nothing to do.
             StripDelayJoin {
                 id: "eq3",
                 equal: left | right,
                 same_source: true,
+                track: true,
             },
             // Equal lines, but the track reads another source: it restarts and takes nothing.
             StripDelayJoin {
                 id: "eq4",
                 equal: left | right,
                 same_source: false,
+                track: true,
             },
             // Unchanged, but the predecessor has no line: it restarts.
             StripDelayJoin {
                 id: "eq5",
                 equal: left | right,
                 same_source: true,
+                track: true,
             },
             // Equal declared delays, but the right ring grew (a claim line on one lane): the left
             // carries and the strip restarts.
@@ -8394,6 +8591,7 @@ mod tests {
                 id: "eq6",
                 equal: left | right,
                 same_source: true,
+                track: true,
             },
         ];
         let carry = resolve_strip_delay_carry(&before, &own, &joins, 0);

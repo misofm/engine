@@ -317,6 +317,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_plan_latency_read \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
+  miso_engine_web_v1_replace_document_ptr \
   miso_engine_web_v1_response_frame_close \
   miso_engine_web_v1_response_frame_ptr \
   miso_engine_web_v1_response_frame_reply_bytes \
@@ -531,9 +532,12 @@ fi
 #   true-peak-limiter dual  1139/0     true-peak-limiter mono    537/0   [448/0, 224/0]
 #   compressor dual         1359/0     compressor mono           733/0   [267/0, 138/0]
 #   parametric-eq dual      1352/1     parametric-eq mono        748/1   [168/0, 84/0]
-#   dynamic-eq dual          626/0     dynamic-eq mono           316/0
-#   de-esser dual            561/0     de-esser mono             283/0
+#   dynamic-eq dual         1014/0     dynamic-eq mono           511/0   [626/0, 316/0 before #1969]
+#   de-esser dual            893/0     de-esser mono             450/0   [561/0, 283/0 before #1969]
 #   soft-clip f32x4           55/0     route-mix-ramp f32x4       22/0   [25/0 soft-clip]
+#
+# The dynamic-eq and de-esser rows were re-measured after #1969 (its detector link glide), on the
+# named twin built from `e3e7cdab3`; the other rows are the #1970 build's.
 #
 # The parametric EQ's one scalar operation per body is a once-per-block `f32.sub` of two splats in
 # `lane::silence_armable_holding`, inside the 0.10 ceiling's budget; the derivation table in the
