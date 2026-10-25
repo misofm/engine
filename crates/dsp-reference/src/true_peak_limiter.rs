@@ -264,6 +264,41 @@ impl ReferenceTruePeakLimiter {
         })
     }
 
+    /// Retargets the ceiling and the release over `updates` samples, as a live parameter change
+    /// does: each linear coefficient ramps from its value in force to its new design, one step a
+    /// sample, and lands on it exactly (issue #1370's glide oracle crosses a live change).
+    ///
+    /// # Errors
+    ///
+    /// [`ReferenceTruePeakLimiterError::InvalidInput`] for a value outside the launch domain or
+    /// zero updates.
+    pub fn retarget(
+        &mut self,
+        ceiling_db: f64,
+        release_ms: f64,
+        sample_rate_hz: f64,
+        updates: u32,
+    ) -> Result<(), ReferenceTruePeakLimiterError> {
+        if !(-24.0..=0.0).contains(&ceiling_db) || !(10.0..=2000.0).contains(&release_ms) {
+            return Err(ReferenceTruePeakLimiterError::InvalidInput);
+        }
+        if updates == 0 {
+            return Err(ReferenceTruePeakLimiterError::InvalidInput);
+        }
+        for (ramp, target) in [
+            (&mut self.limit, reference_true_peak_limit(ceiling_db)),
+            (
+                &mut self.release,
+                reference_release_coefficient(release_ms, sample_rate_hz),
+            ),
+        ] {
+            ramp.target = target;
+            ramp.step = (target - ramp.current) / f64::from(updates);
+            ramp.remaining = updates;
+        }
+        Ok(())
+    }
+
     /// The immutable reported latency, `Fs/100 + 6` samples.
     #[must_use]
     pub const fn latency_samples(&self) -> usize {

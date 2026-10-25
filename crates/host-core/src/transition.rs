@@ -17,160 +17,36 @@
 use builtins_compiler::{FaderOffsetsRecord, TrackFaderRecord};
 use session::{EditRamps, Route, RouteSource, SessionModel, StableId};
 
+use crate::duck::DuckOverlay;
 use crate::live_delta::classify_live_delta_with_monitor;
 use crate::prepare::{LiveRamps, LiveRebuild, MonitorBase, SendRecord, SuccessorBase};
 
-/// What phase 1 wrote to a running plan while its successor waits (#1325 D6): kept with that
-/// plan's epoch and dropped when the epoch stops running.
-///
-/// Every list is sorted and holds no duplicate. An empty overlay is "not in phase 1".
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DuckOverlay {
-    strips: Vec<Box<str>>,
-    routes: Vec<Box<str>>,
-    sources: Vec<Box<str>>,
-    not_before: u64,
-}
-
 impl DuckOverlay {
-    /// The empty overlay: nothing ducks.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            strips: Vec::new(),
-            routes: Vec::new(),
-            sources: Vec::new(),
-            not_before: 0,
-        }
-    }
-
-    /// The most an overlay of a plan of a session with `strips` strips, `routes` routes and
-    /// `sources` sources can retain, whose IDs total `strip_id_bytes`, `route_id_bytes` and
-    /// `source_id_bytes` (#1325): the three ID vectors at those counts and one copy of each ID's
-    /// text. An overlay names only that plan's strips, routes and sources, each once, and its
-    /// vectors are kept at their length. A ceiling of the session's shape, not of its edits.
-    #[must_use]
-    pub fn retained_ceiling(
-        [strips, routes, sources]: [usize; 3],
-        [strip_id_bytes, route_id_bytes, source_id_bytes]: [usize; 3],
-    ) -> Option<usize> {
-        strips
-            .checked_add(routes)?
-            .checked_add(sources)?
-            .checked_mul(size_of::<Box<str>>())?
-            .checked_add(strip_id_bytes)?
-            .checked_add(route_id_bytes)?
-            .checked_add(source_id_bytes)
-    }
-
-    /// The heap bytes the overlay retains: its three vectors at their capacity and their ID text.
-    #[must_use]
-    pub fn retained_bytes(&self) -> usize {
-        [&self.strips, &self.routes, &self.sources]
-            .into_iter()
-            .map(|ids| {
-                ids.capacity() * size_of::<Box<str>>()
-                    + ids.iter().map(|id| id.len()).sum::<usize>()
-            })
-            .sum()
-    }
-
-    /// Whether the overlay holds nothing.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.strips.is_empty() && self.routes.is_empty() && self.sources.is_empty()
-    }
-
-    /// The strips whose mute phase 1 wrote, sorted.
-    #[must_use]
-    pub fn strips(&self) -> &[Box<str>] {
-        &self.strips
-    }
-
-    /// The routes whose mute or gate phase 1 wrote, sorted.
-    #[must_use]
-    pub fn routes(&self) -> &[Box<str>] {
-        &self.routes
-    }
-
-    /// The sources the successor removes that still feed the running plan (#1325 D4), sorted.
-    #[must_use]
-    pub fn sources(&self) -> &[Box<str>] {
-        &self.sources
-    }
-
-    /// `S`, the earliest block start at which a successor may be adopted, or `None` for an empty
-    /// overlay.
-    #[must_use]
-    pub fn not_before(&self) -> Option<u64> {
-        (!self.is_empty()).then_some(self.not_before)
-    }
-
-    /// Whether `id` names a strip in the overlay.
-    #[must_use]
-    pub fn has_strip(&self, id: &str) -> bool {
-        self.strips
-            .binary_search_by(|held| (**held).cmp(id))
-            .is_ok()
-    }
-
-    /// Whether `id` names a route in the overlay.
-    #[must_use]
-    pub fn has_route(&self, id: &str) -> bool {
-        self.routes
-            .binary_search_by(|held| (**held).cmp(id))
-            .is_ok()
-    }
-
-    /// Whether `id` names a source in the overlay: one binary search, no allocation, so a source
-    /// call may route by it on any thread the facade runs on.
-    #[must_use]
-    pub fn has_source(&self, id: &[u8]) -> bool {
-        self.sources
-            .binary_search_by(|held| held.as_bytes().cmp(id))
-            .is_ok()
-    }
-
-    /// Lay the overlay over `model`: each overlay strip's two channels muted and each overlay
-    /// route muted, which is what the running plan's cells hold once the ramps settle. A name
-    /// the model does not hold is skipped.
-    pub fn apply_to(&self, model: &mut SessionModel) {
-        for track in &mut model.tracks {
-            if self.has_strip(track.id.as_str()) {
-                track.fader.left_mute = true;
-                track.fader.right_mute = true;
-            }
-        }
-        for submix in &mut model.submixes {
-            if self.has_strip(submix.id.as_str()) {
-                submix.fader.left_mute = true;
-                submix.fader.right_mute = true;
-            }
-        }
-        for route in &mut model.routes {
-            if self.has_route(route.id.as_str()) {
-                route.mute = true;
-            }
-        }
-    }
-
     /// The overlay after `transition`'s writes join it, with `S` unchanged; the caller sets the
     /// new `S` with [`Self::raise_not_before`] once it has read `p`. Built before the commit, so
     /// the commit only moves it.
+    ///
+    /// A source the transaction restores leaves the overlay (#1325 D6): its producer moves into
+    /// the successor's set with the commit, so a source call for it goes to the newest committed
+    /// session again. A restored strip or route stays: the running plan's cells still hold its
+    /// duck, so a later transaction of the same phase 1 writes it no second ramp, and the
+    /// successor's base keeps composing it.
     #[must_use]
     pub fn joined(&self, transition: &StripTransition) -> Self {
+        let mut sources = merged(&self.sources, &transition.sources);
+        sources.retain(|id| {
+            transition
+                .restored_sources
+                .binary_search_by(|held| (**held).cmp(id))
+                .is_err()
+        });
+        sources.shrink_to_fit();
         Self {
             strips: merged(&self.strips, &transition.strips),
             routes: merged(&self.routes, &transition.routes),
-            sources: merged(&self.sources, &transition.sources),
+            sources,
             not_before: self.not_before,
         }
-    }
-
-    /// Raise `S` to `not_before` if it is later (#1325 D6: the overlay's `S` is the maximum of its
-    /// own and the one the new writes give).
-    pub fn raise_not_before(&mut self, not_before: u64) {
-        self.not_before = self.not_before.max(not_before);
     }
 }
 
@@ -222,6 +98,7 @@ pub struct StripTransition {
     routes: Vec<Box<str>>,
     route_records: Vec<SendRecord>,
     sources: Vec<Box<str>>,
+    restored_sources: Vec<Box<str>>,
     strip_records: Vec<DuckStripRecords>,
     ramp: u32,
     compensation: u64,
@@ -250,6 +127,14 @@ impl StripTransition {
     #[must_use]
     pub fn sources(&self) -> &[Box<str>] {
         &self.sources
+    }
+
+    /// The sources of the running plan's [`DuckOverlay`] that the transaction keeps (#1325 D6):
+    /// a restore. Each leaves the overlay ([`DuckOverlay::joined`]); one declared as the running
+    /// plan declares it carries that plan's ring and producer. Sorted.
+    #[must_use]
+    pub fn restored_sources(&self) -> &[Box<str>] {
+        &self.restored_sources
     }
 
     /// The strip records phase 1 writes, in normalized strip order.
@@ -329,13 +214,14 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// What phase 1 of a structural transaction to `next` writes on the plan `base` describes (#1325
 /// D1, D2, D7).
 ///
-/// `base.committed` is the running plan's committed model and `base.monitor.committed` the
-/// monitor overlay its cells hold; `overlay` is the running plan's [`DuckOverlay`], empty outside
-/// phase 1. The strips to duck are every strip of `base.committed` that `next` does not hold and
-/// `overlay` does not list. The records are the classifier's for the running plan's base with
-/// `overlay` laid over it, against the same with each strip to duck muted on both channels and
-/// each of its routes whose tap precedes the fader muted, all at `next`'s mute ramp: exactly the
-/// records a value-only transaction making those mutes would write, so a strip or route
+/// `base.committed` is the running plan's committed model and `base.monitor.committed` the monitor
+/// overlay its cells hold; `overlay` is the running plan's [`DuckOverlay`], empty outside phase 1.
+/// The strips to duck are every strip of `base.committed` that `next` does not hold and `overlay`
+/// does not list; the sources `overlay` lists that `next` keeps are restored
+/// ([`StripTransition::restored_sources`]). The records are the classifier's for the running plan's
+/// base with `overlay` laid over it, against the same with each strip to duck muted on both
+/// channels and each of its routes whose tap precedes the fader muted, all at `next`'s mute ramp:
+/// exactly the records a value-only transaction making those mutes would write, so a strip or route
 /// already in the overlay gets no second write. `C` reads the running plan's compensation lines
 /// (`base.inventory`), keyed by the route's two edges, which add.
 ///
@@ -369,11 +255,19 @@ pub fn plan_strip_transition(
                     && !overlay.has_source(id.as_bytes())
             }),
     );
+    let restored_sources = sorted_ids(
+        overlay
+            .sources()
+            .iter()
+            .map(|id| &**id)
+            .filter(|id| next.sources.iter().any(|kept| kept.id.as_str() == *id)),
+    );
     let mut transition = StripTransition {
         strips,
         routes: Vec::new(),
         route_records: Vec::new(),
         sources,
+        restored_sources,
         strip_records: Vec::new(),
         ramp,
         compensation: 0,
@@ -676,6 +570,7 @@ mod tests {
             routes: names(&mut committed.routes.iter().map(|route| &route.id)),
             route_records: Vec::new(),
             sources: names(&mut committed.sources.iter().map(|source| &source.id)),
+            restored_sources: Vec::new(),
             strip_records: Vec::new(),
             ramp: n,
             compensation: 0,

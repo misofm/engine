@@ -100,9 +100,11 @@ pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+pub mod duck;
 #[cfg(feature = "control-provider")]
 pub mod live_delta;
 pub mod meters;
+pub mod observation;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
     EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
@@ -112,6 +114,7 @@ pub use control_preparation::{
 pub mod prepare;
 pub mod render_session;
 pub mod response;
+pub mod response_capture;
 pub mod route_controls;
 pub mod shape;
 pub mod source;
@@ -138,6 +141,7 @@ pub use control_provider::{
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
+pub use duck::DuckOverlay;
 pub use engine::LAUNCH_SAMPLE_RATES;
 pub use engine::realtime::{
     ObserverCarry, ObserverKind, ResponseSnapshotAvailability, ResponseSnapshotCapture,
@@ -193,6 +197,12 @@ pub use response::{
     compose_track_response, generate_response_grid, input_filter_target, prepare_response_preview,
     prepare_response_query, query_response_snapshot_into, resolve_response_target,
 };
+pub use response_capture::{
+    ResponseCaptureCeiling, ResponseCaptureClient, ResponseCaptureFailure, ResponseCaptureJob,
+    ResponseCaptureRefusal, ResponseCaptureServer, ResponseCaptureSetupError, ResponseReady,
+    response_capture_ceiling, response_capture_channel, response_capture_owners,
+    response_capture_retained_bytes,
+};
 pub use route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
     route_producer_position, route_record,
@@ -231,8 +241,7 @@ pub use spectrum_service::{
 };
 #[cfg(feature = "control-provider")]
 pub use transition::{
-    DuckOverlay, DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError,
-    plan_strip_transition,
+    DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError, plan_strip_transition,
 };
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).

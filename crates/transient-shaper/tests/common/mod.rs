@@ -20,7 +20,7 @@ use transient_shaper::{TRANSIENT_SHAPER_PARAMETERS, TransientShaperFactory};
 pub(crate) const PARAMETER_COUNT: usize = 3;
 
 /// Words in one lane's state section, and its byte length.
-pub(crate) const STATE_WORDS: usize = 14;
+pub(crate) const STATE_WORDS: usize = 22;
 
 /// Byte length of one lane's state section.
 pub(crate) const LANE_STATE_BYTES: usize = STATE_WORDS * 4;
@@ -88,7 +88,7 @@ pub(crate) fn request_full<'a>(
         },
         initial_values: values,
         limits: PrepareEffectLimits {
-            maximum_total_state_bytes: 112,
+            maximum_total_state_bytes: 176,
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
