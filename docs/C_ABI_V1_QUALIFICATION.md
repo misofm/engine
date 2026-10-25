@@ -453,7 +453,7 @@ counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSE
 the frame-derived telemetry configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
 queue (#1629).
 
-**Meter batches (#1583, #1587a, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
+**Meter batches (#1583, #1587a, #1587b, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
 table of stable targets: entry `i` (handle `i + 1`) is the output or a strip by its ID, with a
 metric (peak or gain reduction). A handle is the table's, so a structural commit never moves it.
 The C ABI session owns one meter delivery from boot over the session's output meter and the
@@ -467,16 +467,20 @@ computed from an older render clock, or on a grid render has since restarted, is
 so the gate moves only between blocks and the render call stays allocation-, lock- and
 syscall-free. The configure is all or nothing: an unknown strip is `NOT_FOUND`
 `meter.strip.unknown` (`meters[i]`); a period that is not a positive multiple of the window is
-`INVALID_FIELD` `meter.period`; until #1587b a gain-reduction entry is `UNAVAILABLE`
-`meter.gain_reduction.unavailable`; and a table whose peak entries need more than one batch's 256
-records is `INVALID_FIELD` `meter.records` at its 129th entry. Each `METER_BATCH` is
+`INVALID_FIELD` `meter.period`; and a table of more than 128 entries is `INVALID_FIELD`
+`meter.records` at its 129th entry, so a batch never needs more than its 256 records. Each `METER_BATCH` is
 `meter_period_blocks / meter_window_blocks` consecutive windows: `first_sample` is the first
 window's start, `observed_sample` the last one's end, `window_sequence` counts batches from 1
 after each accepted configure, and each peak entry, in table order, gives a left and a right
 record: the output's planes' maxima over the batch, or its strip's post-matrix maxima. A record is
 `VALID`, and `CLIPPED` above 1.0; an entry whose strip the plan that rendered the batch does not
 have has flags 0 and value 0.0, and is `VALID` again under its handle once a commit brings the
-strip back. Entries resolve to strips at each configure and each adoption, against the plan whose
+strip back. A strip's gain-reduction entry gives one `AGGREGATE` record in non-negative decibels
+(#1587b): the strip's reading from the batch's last window that has one, `VALID` when any window
+has one, else flags 0 and value 0.0. A strip's reading is the deepest reduction among its
+observation taps that an `Observe` edit armed (#1584), each from its newest window that opened at
+or after the tap's arm sample, which render publishes in the tap's slot (#1585); a tap never armed,
+or disarmed, gives none, and a window from before a re-arm is none. Entries resolve to strips at each configure and each adoption, against the plan whose
 frames the delivery folds, so a pending rebuild never relabels a record. Readings continue across
 a swap that carries the strip meters; a swap that carries none restarts the grid at its adoption
 block, where render restarts the gate and the control thread's adoption asks for the same value.

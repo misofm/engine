@@ -5844,8 +5844,9 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
 /// first window.
 ///
 /// Test value: red if a window from before the tap's arm sample reaches a record (the fold
-/// ignores `arm_sample`), if a disarmed tap still reports (it ignores `armed`), if a record carries
-/// another value than its tap's window's reduction, or if gain reduction is still refused.
+/// ignores `arm_sample`), if a disarmed tap still reports (it ignores the slot's arm state), if a
+/// record carries another value than its tap's window's reduction, or if gain reduction is still
+/// refused.
 #[test]
 fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
     let mut model = stateless_session(48_000);

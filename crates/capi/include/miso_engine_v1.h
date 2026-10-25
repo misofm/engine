@@ -264,12 +264,16 @@ extern "C" {
  * record per peak entry: for the output, its two planes' maxima over the batch, and for a strip,
  * that strip's post-matrix maxima. A record is VALID, and CLIPPED above 1.0; an entry whose strip
  * the rendering plan does not have (removed, not yet added) has flags 0 and value 0.0, and is
- * VALID again under the same handle once a commit brings the strip back. Readings continue across
- * a plan swap that carries the strip; a swap that carries no strip meter restarts the window grid
- * at its first block. A configure is all or nothing: an unknown strip is NOT_FOUND
- * (meter.strip.unknown), a period that is not a whole number of windows INVALID_FIELD
- * (meter.period), a table needing more than one batch's 256 records INVALID_FIELD (meter.records,
- * at its 129th entry), and a gain-reduction entry UNAVAILABLE until a later issue serves it. Each
+ * VALID again under the same handle once a commit brings the strip back. A strip's gain-reduction
+ * entry gives one AGGREGATE record in non-negative dB: the strip's reading from the batch's last
+ * window that has one, VALID when any window has one, else flags 0 and value 0.0. A strip's
+ * reading is the deepest reduction among its observation taps that an Observe edit armed, each
+ * from its newest window that opened at or after the tap's arm; a tap not armed, or disarmed,
+ * gives none. Readings continue across a plan swap that carries the strip; a swap that carries no
+ * strip meter restarts the window grid at its first block. A configure is all or nothing: an
+ * unknown strip is NOT_FOUND (meter.strip.unknown), a period that is not a whole number of windows
+ * INVALID_FIELD (meter.period), and a table of more than 128 entries INVALID_FIELD (meter.records,
+ * at its 129th entry), so a batch never needs more than its 256 records. Each
  * meter queues eight windows; a window that reaches no batch (dropped while the host did not call
  * into the session, or in a partial batch a gap or a swap discarded) is counted by
  * METER_WINDOWS_LOST (protocol counter 22), and the sequence never skips.
