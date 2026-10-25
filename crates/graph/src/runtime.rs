@@ -19893,7 +19893,10 @@ mod follow_route_op_tests {
                 );
                 let (mut left, mut right) = input(AFTER);
                 if rearmed {
-                    assert!(from.route.armed.is_some(), "(b) the displaced arm is not fired");
+                    assert!(
+                        from.route.armed.is_some(),
+                        "(b) the displaced arm is not fired"
+                    );
                     assert!(
                         !into.block(&mut left, &mut right),
                         "(b) the re-armed successor waits silent"

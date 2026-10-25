@@ -4071,7 +4071,11 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
     for (case, second, prepared_at) in [
         ("(b) scheduled", SWAP_BLOCK + 2, None),
         ("(c) fired", fire_block + 1, None),
-        ("(c) fired after its successor's preparation", fire_block + 1, Some(SWAP_BLOCK + 2)),
+        (
+            "(c) fired after its successor's preparation",
+            fire_block + 1,
+            Some(SWAP_BLOCK + 2),
+        ),
     ] {
         let swaps = [
             FadeSwap {
@@ -4093,7 +4097,11 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
             None,
             "{backend:?} {case}: a second swap at block {second} moves no bit"
         );
-        assert_eq!(run.allocator, (0, 0, 0), "{backend:?} {case}: allocator calls");
+        assert_eq!(
+            run.allocator,
+            (0, 0, 0),
+            "{backend:?} {case}: allocator calls"
+        );
     }
     // (d) A transition route.
     let aux = Feed::new(AUX_SOURCE, 2);

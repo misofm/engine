@@ -3876,7 +3876,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             let mut joins = route_joins;
             for fade in route_fades.iter().filter(|fade| fade.carried.is_some()) {
                 let id = fade.route.id.as_str();
-                let unchanged = base.committed.routes.iter().any(|before| before == fade.route);
+                let unchanged = base
+                    .committed
+                    .routes
+                    .iter()
+                    .any(|before| before == fade.route);
                 if unchanged && !joins.iter().any(|join| join.id == id) {
                     joins.push(RouteJoin { id, retarget: None });
                 }
@@ -4881,9 +4885,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             graph::install_fade_arm_carry(&mut plan, pairs)
                 .map_err(|_| graph_failure("host.carry.install"))?;
         }
-        fade_arm_rows.sort_unstable_by(|left, right| {
-            (&left.id, left.owner).cmp(&(&right.id, right.owner))
-        });
+        fade_arm_rows
+            .sort_unstable_by(|left, right| (&left.id, left.owner).cmp(&(&right.id, right.owner)));
     }
     // #1674 R1: the meter readers the control side pairs at promotion, in the swap block's record
     // order, read before the moves go to the plan.
