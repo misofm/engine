@@ -84,3 +84,17 @@ After #1370 (both slices). Before #1371 flips the link row to live for these two
 - `glide_tests::a_collapsed_glide_matches_the_dual_glide_and_survives_the_disengage`: a disengage
   copy that drops the weights, or a collapsed block that skips the glide, parts from the dual
   bank once the channels differ.
+
+## Review fold (verifier PASS, minors, 2026-10-25)
+
+- **MINOR-1.** The snapshot test now also holds that resets leave no glide in flight: a
+  discontinuity reset mid-glide snaps the weights to the target, a full reset seats them at rest
+  at the lane's (retargeted) mode, and `exchange_lane_defaults` rests them at the incoming mode.
+  Red in both crates with the discontinuity snap removed, with the full-reset `rest_link`
+  removed, and with the exchange's `rest_link` removed.
+- **MINOR-2.** The forgery list adds a `-0.0` current and a moving `w_link` with a zero step.
+  Red in both crates with the `-0.0` check removed and with the zero-step check removed.
+- **MINOR-3 (root-authorized, outside this issue's paths).** `gate-expander`'s
+  `a_glide_moves_no_bank_mates_bit_and_allocates_nothing` targets `LINKS[(seed + 2) % 3]`, a mode
+  neither lane 0 nor lane 1 holds. A "retarget reaches lane 1" mutant in
+  `PreparedGate::retarget_link` is red after the change and green before it.
