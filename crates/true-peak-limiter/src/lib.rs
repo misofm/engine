@@ -2194,6 +2194,59 @@ impl<L: Lane> HotChannel<L> {
         self.limit.scatter(&mut state.limit);
         self.release.scatter(&mut state.release);
     }
+
+    /// [`load`](Self::load) for the stationary dispatch of the uniform bodies (issue #991).
+    ///
+    /// `history`, `reduction` and `box_sum` as `load`. The window is one splat of lane 0's,
+    /// because [`lanes_uniform`] holds on every uniform body. Each ramp gathers `current` only:
+    /// under `DISPATCH_STATIONARY` the frame bodies read a ramp through
+    /// [`RampLanes::resting_value`] alone, so `target`, `step` and `remaining` are never read and
+    /// are left `+0.0`. A link glide never reaches this path: its frames render through
+    /// [`limiter_block_glide`] under the ramping dispatch, and the uniform bodies read no link
+    /// weight.
+    #[inline(always)]
+    fn load_stationary(state: &ChannelState) -> Self {
+        debug_assert!(lanes_uniform(state));
+        debug_assert!(ramps_are_stationary(&state.limit) && ramps_are_stationary(&state.release));
+        let mut limit = [0.0_f32; MAXIMUM_WIDTH];
+        let mut release = [0.0_f32; MAXIMUM_WIDTH];
+        for (lane, (limit_ramp, release_ramp)) in
+            state.limit.iter().zip(state.release.iter()).enumerate()
+        {
+            limit[lane] = limit_ramp.current;
+            release[lane] = release_ramp.current;
+        }
+        let zero = L::zero();
+        Self {
+            history: History::<L>::load(state),
+            reduction: L::load(&state.reduction),
+            box_sum: L::load(&state.box_sum),
+            window: L::splat(state.lane[0].window as f32),
+            limit: RampLanes {
+                current: L::load(&limit),
+                target: zero,
+                step: zero,
+                remaining: zero,
+            },
+            release: RampLanes {
+                current: L::load(&release),
+                target: zero,
+                step: zero,
+                remaining: zero,
+            },
+        }
+    }
+
+    /// [`store`](Self::store) for the stationary dispatch (issue #991): `history`, `reduction`
+    /// and `box_sum` only. No stationary frame advances a ramp, so `store`'s scatter would write
+    /// back the bits it gathered (`remaining` is `0` at rest, exact through the `u16`/`f32`
+    /// round trip); skipping it leaves every ramp word as it was.
+    #[inline(always)]
+    fn store_stationary(self, state: &mut ChannelState) {
+        self.history.store(state);
+        self.reduction.store(&mut state.reduction);
+        self.box_sum.store(&mut state.box_sum);
+    }
 }
 
 /// Everything one channel does with one frame, after the peak has been linked.
@@ -3397,8 +3450,15 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
     debug_assert_eq!(left_io.len(), frames * width);
     debug_assert_eq!(right_io.len(), frames * width);
 
-    let mut hot_left = HotChannel::<L>::load(left);
-    let mut hot_right = HotChannel::<L>::load(right);
+    // Issue #991: the stationary dispatch loads only the words its frames read.
+    let (mut hot_left, mut hot_right) = if DISPATCH == DISPATCH_STATIONARY {
+        (
+            HotChannel::<L>::load_stationary(left),
+            HotChannel::<L>::load_stationary(right),
+        )
+    } else {
+        (HotChannel::<L>::load(left), HotChannel::<L>::load(right))
+    };
     #[cfg(test)]
     observe_dispatch::<DISPATCH>(DispatchRoute::DualUniform);
     #[cfg(test)]
@@ -3838,11 +3898,20 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
         // the doc comment above. Its detector history is its own and is stored as computed.
         hot_right.box_sum = hot_left.box_sum;
         hot_right.reduction = hot_left.reduction;
-        hot_right.limit = hot_left.limit;
-        hot_right.release = hot_left.release;
+        // Issue #991: the stationary store writes no ramp, and the right ramps already equal the
+        // left's word for word (`designed_gain_agree`), so only the advancing dispatches copy them.
+        if DISPATCH != DISPATCH_STATIONARY {
+            hot_right.limit = hot_left.limit;
+            hot_right.release = hot_left.release;
+        }
     }
-    hot_left.store(left);
-    hot_right.store(right);
+    if DISPATCH == DISPATCH_STATIONARY {
+        hot_left.store_stationary(left);
+        hot_right.store_stationary(right);
+    } else {
+        hot_left.store(left);
+        hot_right.store(right);
+    }
     cursors.main = main_cursor as u32;
     cursors.ring = ring_cursor as u32;
 }
@@ -5595,29 +5664,31 @@ impl<L: Lane> PreparedTruePeakLimiterBank<L> {
         // the `ramps_are_stationary` leg alone would not notice it. Withdraw the claim whenever
         // this block carries automation at all, valid or not; the next settled silent block earns
         // it back. This is the compressor's rule and it is the same hole at both effects.
+        let mut report = BankProcessReport::empty(self.width);
+        // Issue #991: with no spans `apply_automation` reads and writes nothing, so the per-lane
+        // walk runs only for a block that carries automation.
         if !block.automation.is_empty() {
             self.core.silent_fixed_point = false;
-        }
-        let mut report = BankProcessReport::empty(self.width);
-        for track in 0..L::WIDTH {
-            let start = block.automation_offsets[track] as usize;
-            let end = block.automation_offsets[track + 1] as usize;
-            // Issue #1091: a padded lane carries no track. The caller routes it no automation, and
-            // none is applied or charged to it, so its report entry stays empty and its clone
-            // parameters stay the member's.
-            if self.core.active & (1 << track) == 0 {
-                continue;
+            for track in 0..L::WIDTH {
+                let start = block.automation_offsets[track] as usize;
+                let end = block.automation_offsets[track + 1] as usize;
+                // Issue #1091: a padded lane carries no track. The caller routes it no automation,
+                // and none is applied or charged to it, so its report entry stays empty and its
+                // clone parameters stay the member's.
+                if self.core.active & (1 << track) == 0 {
+                    continue;
+                }
+                apply_automation(
+                    &block.automation[start..end],
+                    self.core.automation_capacity,
+                    self.core.sample_rate,
+                    block.first_sample,
+                    &mut self.core.left,
+                    &mut self.core.right,
+                    track,
+                    &mut report.reports[track],
+                );
             }
-            apply_automation(
-                &block.automation[start..end],
-                self.core.automation_capacity,
-                self.core.sample_rate,
-                block.first_sample,
-                &mut self.core.left,
-                &mut self.core.right,
-                track,
-                &mut report.reports[track],
-            );
         }
         let [left, right] = if MONO {
             self.core
@@ -5836,7 +5907,12 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
     debug_assert_eq!(left.width, width);
     debug_assert_eq!(left_io.len(), frames * width);
 
-    let mut hot_left = HotChannel::<L>::load(left);
+    // Issue #991: the stationary dispatch loads only the words its frames read.
+    let mut hot_left = if DISPATCH == DISPATCH_STATIONARY {
+        HotChannel::<L>::load_stationary(left)
+    } else {
+        HotChannel::<L>::load(left)
+    };
     #[cfg(test)]
     observe_dispatch::<DISPATCH>(DispatchRoute::MonoUniform);
     let all = L::zero().eq(L::zero());
@@ -5926,7 +6002,11 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
     left_prefix.store(&mut left.prefix);
     left.phase.fill(left_phase);
 
-    hot_left.store(left);
+    if DISPATCH == DISPATCH_STATIONARY {
+        hot_left.store_stationary(left);
+    } else {
+        hot_left.store(left);
+    }
     cursors.main = main_cursor as u32;
     cursors.ring = ring_cursor as u32;
 }
