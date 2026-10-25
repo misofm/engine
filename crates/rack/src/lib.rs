@@ -2455,6 +2455,16 @@ impl LiveControlEffectBankStage {
         if snapshot == LiveSnapshot::ALL || self.quiet_at != Some(snapshot.publication()) {
             self.read_cells(first_sample, snapshot);
         }
+        // #1585 R2: a prepared arm reaches its slot in the plan's first block drain, before the
+        // block's records; one load per lane on every later block.
+        for observation in self
+            .observations
+            .iter_mut()
+            .flat_map(|lanes| lanes.iter_mut())
+            .flatten()
+        {
+            observation.publish_prepared_arms(first_sample);
+        }
         self.drain_observe_queues(first_sample, u8::MAX);
         Ok(())
     }
