@@ -37,6 +37,7 @@
 //! Live writes (a mid-ramp fader or trim edit, a bypass edge) are not attached here: this level
 //! compiles without live controls. The #1781 rest tests in the stage crates cover them.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
@@ -46,7 +47,11 @@ use builtins_compiler::{
 use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
-use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime};
+use engine::realtime::{
+    PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime, ResponseSnapshotError,
+    ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
+    ResponseSnapshotSink,
+};
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
     GraphObservationBlock, GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
@@ -607,7 +612,9 @@ fn gate_one(layout: RightNegative) {
 // ---- Gate 2 -------------------------------------------------------------------------------------
 
 /// Gate 2. Test value: red if a skipped block -- the input test, the rest query, the scratch
-/// zeroing, the clock advance or the silent fold -- allocates or frees on the render thread.
+/// zeroing, the clock advance or the silent fold -- allocates or frees on the render thread; and
+/// (#1782a) if a forced lane move, or a block of a displaced group -- the deferred epilogues, the
+/// home-tile re-materialisation and the group fold, skipping or not -- does.
 #[test]
 fn a_skipping_block_allocates_nothing() {
     let blocks = 400;
@@ -627,22 +634,318 @@ fn a_skipping_block_allocates_nothing() {
         })
         .collect();
     let mut bound = bind(&session(first_four), &schedules, false);
+    let mut placement = Placement::of(&bound.plan);
     let mut pcm = vec![0.0_f32; bound.frames * 2];
     assert_installed();
     let mut measured = 0;
     for block in 0..blocks as u64 {
+        // #1782a: moves while the tracks play, and again once every bank skips.
+        if block == 10 || block == 100 {
+            let mark = current_thread_counters();
+            for (x, y) in [(0, 5), (9, 17), (12, 16)] {
+                placement.swap(&mut bound.plan, x, y);
+            }
+            let delta = current_thread_delta_since(mark);
+            assert_eq!(
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (0, 0, 0),
+                "block {block}: a lane move allocated or freed"
+            );
+        }
         let before = bound.skips();
         let mark = current_thread_counters();
         bound.render(block, true, &mut pcm);
         let delta = current_thread_delta_since(mark);
-        if block >= 2 && bound.skips() > before {
-            measured += 1;
+        if block >= 10 || (block >= 2 && bound.skips() > before) {
+            measured += usize::from(bound.skips() > before);
             assert_eq!(
                 (delta.allocations, delta.reallocations, delta.deallocations),
                 (0, 0, 0),
-                "block {block}: a skipping block allocated or freed"
+                "block {block}: a skipping or displaced block allocated or freed"
             );
         }
     }
     assert!(measured > 0, "some block skipped");
+}
+
+// ---- Gate 3 (issue #1782a) ----------------------------------------------------------------------
+
+/// Where each track renders in a plan whose one pack group holds every track, as `(unit, lane)`:
+/// home `track / W, track % W` from the group's first unit until a forced move trades two.
+struct Placement {
+    at: Vec<(usize, usize)>,
+}
+
+impl Placement {
+    fn of(plan: &PreparedRenderPlan) -> Self {
+        let groups = graph::test_only_pack_groups(plan);
+        let &[(first, last, width)] = groups.as_slice() else {
+            panic!("one pack group: {groups:?}");
+        };
+        let (first, width) = (first as usize, width as usize);
+        assert!(
+            (last as usize - first + 1) * width >= TRACKS,
+            "the group holds every track: {groups:?}"
+        );
+        Self {
+            at: (0..TRACKS)
+                .map(|track| (first + track / width, track % width))
+                .collect(),
+        }
+    }
+
+    /// Trade the lanes tracks `x` and `y` render at.
+    fn swap(&mut self, plan: &mut PreparedRenderPlan, x: usize, y: usize) {
+        assert!(
+            graph::test_only_swap_bank_lanes(plan, self.at[x], self.at[y]),
+            "ch{x:02} at {:?} and ch{y:02} at {:?} trade lanes",
+            self.at[x],
+            self.at[y]
+        );
+        self.at.swap(x, y);
+    }
+}
+
+/// The forced permutation, as `(block, x, y)`: tracks `x` and `y` trade lanes before `block`
+/// renders. Every move is legal at both widths (each track pair shares a collapse arming, and the
+/// automated `ch11` stays in its own bank): the store lane `ch00` leaves lane 0 and comes back,
+/// strips cross between the stereo banks and the padded one, moves land inside a window where every
+/// bank skips (230..360) and inside the padded bank's (400..530), and the successor is moved after
+/// it took the carry.
+const MOVES: [(u64, usize, usize); 11] = [
+    (0, 0, 5),
+    (0, 9, 17),
+    (0, 12, 16),
+    (0, 8, 15),
+    (120, 0, 3),
+    (120, 10, 11),
+    (250, 17, 19),
+    (250, 9, 17),
+    (410, 5, 0),
+    (480, 1, 6),
+    (480, 13, 18),
+];
+
+/// The swap block: the successor takes the carry from the predecessor, which is displaced.
+const SWAP: u64 = 450;
+
+/// Blocks before which every track's response snapshot is read from both plans.
+const SNAPSHOTS: [u64; 4] = [100, 300, SWAP, 500];
+
+/// Every owner's identity, bypass and section words, in graph order.
+struct SnapshotWords(Vec<u32>);
+impl ResponseSnapshotSink for SnapshotWords {
+    fn copy_owner(
+        &mut self,
+        owner: ResponseSnapshotOwnerInfo<'_>,
+        left: &[ResponseSnapshotSection],
+        right: &[ResponseSnapshotSection],
+    ) -> Result<(), ResponseSnapshotError> {
+        self.0.extend(owner.track_id.bytes().map(u32::from));
+        self.0.extend([
+            u32::from(owner.rack),
+            owner.slot,
+            owner.kind,
+            u32::from(owner.bypassed),
+        ]);
+        for section in left.iter().chain(right) {
+            self.0.extend([
+                section.id,
+                section.kind,
+                u32::from(section.enabled),
+                u32::from(section.word_count),
+            ]);
+            self.0.extend(section.words);
+        }
+        Ok(())
+    }
+}
+
+fn snapshot(plan: &mut PreparedRenderPlan, track: usize) -> Vec<u32> {
+    let id = format!("ch{track:02}");
+    let mut sink = SnapshotWords(Vec::new());
+    plan.copy_response_snapshot(ResponseSnapshotRequest {
+        track_id: &id,
+        sink: &mut sink,
+    })
+    .unwrap_or_else(|error| panic!("{id}: snapshot {error:?}"));
+    sink.0
+}
+
+/// A predecessor and the successor built to displace it, with the carry host-core installs: every
+/// strip input section, fader and matrix lane, and console effect lane, joined by strip ID.
+struct Pair {
+    before: Bound,
+    after: Bound,
+}
+
+fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
+    let mut before = bind(model, schedules, true);
+    let mut after = bind(model, schedules, true);
+    graph::install_carry_program(
+        &mut after.plan,
+        graph::GraphCarryProgram {
+            predecessor: graph::plan_identity(&mut before.plan).expect("a graph plan"),
+            sources: Box::default(),
+            timeline: false,
+        },
+    )
+    .expect("carry program");
+    let inputs: BTreeMap<_, _> = graph::builtin_input_lanes(&mut before.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .collect();
+    let input_moves: Vec<_> = graph::builtin_input_lanes(&mut after.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, successor)| graph::GraphLaneMove {
+            successor,
+            predecessor: inputs[&strip],
+        })
+        .collect();
+    assert_eq!(input_moves.len(), TRACKS, "every input section carries");
+    graph::install_builtin_input_carry(&mut after.plan, input_moves).expect("input carry");
+    let strips: BTreeMap<_, _> = graph::builtin_strip_lanes(&mut before.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, lane)| ((strip, lane.owner), lane.location))
+        .collect();
+    let strip_moves: Vec<_> = graph::builtin_strip_lanes(&mut after.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, lane)| graph::GraphStripMove {
+            owner: lane.owner,
+            successor: lane.location,
+            predecessor: strips[&(strip, lane.owner)],
+            continued_cells: 0,
+        })
+        .collect();
+    assert_eq!(
+        strip_moves.len(),
+        2 * TRACKS,
+        "every fader and matrix carries"
+    );
+    graph::install_builtin_strip_carry(&mut after.plan, strip_moves).expect("strip carry");
+    let effects: BTreeMap<_, _> = graph::bank_effect_lanes(&mut before.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, lane)| ((strip, lane.effect_id), lane.location))
+        .collect();
+    let effect_moves: Vec<_> = graph::bank_effect_lanes(&mut after.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, lane)| graph::GraphEffectMove {
+            successor: lane.location,
+            predecessor: effects[&(strip, lane.effect_id)],
+        })
+        .collect();
+    assert_eq!(
+        effect_moves.len(),
+        3 * TRACKS,
+        "every console effect carries"
+    );
+    graph::install_effect_carry(&mut after.plan, effect_moves, 0).expect("effect carry");
+    Pair { before, after }
+}
+
+/// Gate 3 (#1782a): a plan whose strips trade bank lanes renders exactly the unmoved plan.
+///
+/// One session, two carried pairs: one pair renders under [`MOVES`], the other never moves. Before
+/// [`SWAP`] the predecessors render; at it each successor takes its predecessor's state, the moved
+/// predecessor displaced; then the successors render, the moved one moved again. Every block's host
+/// output, every track's post-matrix words and every track's response snapshot at [`SNAPSHOTS`]
+/// must agree by `to_bits`, NaNs folded. The tracks' input filters differ, so a snapshot read of
+/// another strip's lane shows.
+///
+/// Test value: red when a move leaves a lane-keyed reader behind -- a member op (gather source,
+/// scatter target, observer), a route fold entry or its store bit, a source-claim bit, a
+/// response-snapshot binding, the carry's predecessor side -- or when a displaced group's master
+/// fold changes its association order or its signed zeros, which no other test reaches.
+#[test]
+fn a_moved_strip_renders_the_bits_of_an_unmoved_one() {
+    let blocks = 560;
+    let schedules = schedules(blocks, 0x1782);
+    let mut model = session(first_sixteen);
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.builtins.left.hpf_hz = 100.0 + index as f32;
+        track.builtins.right.hpf_hz = 100.0 + index as f32;
+    }
+    let mut moved = carried_pair(&model, &schedules);
+    let mut home = carried_pair(&model, &schedules);
+    let mut placement = Placement::of(&moved.before.plan);
+    let frames = moved.before.frames;
+    let mut moved_pcm = vec![0.0_f32; frames * 2];
+    let mut home_pcm = vec![0.0_f32; frames * 2];
+    let mut displaced_skips = 0;
+    for block in 0..blocks as u64 {
+        if block == SWAP {
+            for pair in [&mut moved, &mut home] {
+                assert_eq!(
+                    pair.after
+                        .plan
+                        .adopt_predecessor_plan(&mut pair.before.plan),
+                    engine::realtime::CarryOutcome::Carried,
+                    "the successor takes the carry"
+                );
+            }
+            placement = Placement::of(&moved.after.plan);
+        }
+        let (moved_plan, home_plan) = if block < SWAP {
+            (&mut moved.before, &mut home.before)
+        } else {
+            (&mut moved.after, &mut home.after)
+        };
+        for &(at, x, y) in &MOVES {
+            if at == block {
+                placement.swap(&mut moved_plan.plan, x, y);
+            }
+        }
+        if SNAPSHOTS.contains(&block) {
+            for track in 0..TRACKS {
+                assert_eq!(
+                    snapshot(&mut moved_plan.plan, track),
+                    snapshot(&mut home_plan.plan, track),
+                    "block {block}: ch{track:02}'s response snapshot"
+                );
+            }
+        }
+        let before = moved_plan.skips();
+        moved_plan.render(block, true, &mut moved_pcm);
+        home_plan.render(block, true, &mut home_pcm);
+        displaced_skips += usize::from(moved_plan.skips() > before);
+        for (index, (a, b)) in moved_pcm.iter().zip(&home_pcm).enumerate() {
+            assert_eq!(
+                fold_nan(a.to_bits()),
+                fold_nan(b.to_bits()),
+                "block {block}: host word {index} differs ({a:e} moved, {b:e} unmoved)"
+            );
+        }
+    }
+    assert!(displaced_skips > 0, "a displaced group skipped a bank");
+    for (side, (moved, home)) in [(&moved.before, &home.before), (&moved.after, &home.after)]
+        .into_iter()
+        .enumerate()
+    {
+        for (track, (a, b)) in moved.sinks.iter().zip(&home.sinks).enumerate() {
+            let a = a.lock().expect("capture");
+            let b = b.lock().expect("capture");
+            assert_eq!(
+                a.len(),
+                b.len(),
+                "plan {side}, ch{track:02}: observed lengths"
+            );
+            // The predecessor's 450 blocks reach every track's signal.
+            assert!(
+                side == 1 || a.iter().any(|word| f32::from_bits(*word) != 0.0),
+                "ch{track:02} is audible"
+            );
+            for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    fold_nan(*x),
+                    fold_nan(*y),
+                    "plan {side}, ch{track:02}: observed word {index} differs"
+                );
+            }
+        }
+    }
 }
