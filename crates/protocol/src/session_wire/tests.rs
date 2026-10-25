@@ -753,11 +753,13 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
         session::ConsoleEntry {
             slot: id("desk-eq"),
             bypass: true,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: parameters.clone(),
         },
         session::ConsoleEntry {
             slot: id("desk-limit"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: Vec::new(),
         },
     ];
@@ -993,6 +995,7 @@ fn console_declaration_and_track_entry_opcodes_round_trip_canonically() {
         session::ConsoleEntry {
             slot: id("desk-eq"),
             bypass: true,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: vec![EffectParam {
                 parameter_id: 1,
                 channel: ParameterChannel::Right,
@@ -1003,9 +1006,58 @@ fn console_declaration_and_track_entry_opcodes_round_trip_canonically() {
         session::ConsoleEntry {
             slot: id("desk-comp"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::DualMono,
+            params: Vec::new(),
+        },
+        session::ConsoleEntry {
+            slot: id("desk-max"),
+            bypass: false,
+            link_mode: session::ConsoleLinkMode::Maximum,
+            params: Vec::new(),
+        },
+        session::ConsoleEntry {
+            slot: id("desk-avg"),
+            bypass: true,
+            link_mode: session::ConsoleLinkMode::Average,
             params: Vec::new(),
         },
     ];
+    // #1369 D4: an entry's link mode is required field 4, a closed code table 1 (`slot`) to 4. A
+    // decoder that defaulted a missing field would silently read the pre-#1369 grammar as `slot`.
+    let entry = |link: Option<u8>| {
+        let mut fields = vec![
+            (1, WIRE_UTF8, true, b"desk-eq".to_vec()),
+            (2, WIRE_BOOL, true, vec![1]),
+        ];
+        if let Some(code) = link {
+            fields.push((4, WIRE_U8, true, vec![code]));
+        }
+        parse_console_entry(Message::nested(&raw_message(fields)).expect("nested entry"))
+    };
+    for (code, link_mode) in [
+        (1, session::ConsoleLinkMode::Slot),
+        (2, session::ConsoleLinkMode::DualMono),
+        (3, session::ConsoleLinkMode::Maximum),
+        (4, session::ConsoleLinkMode::Average),
+    ] {
+        assert_eq!(
+            entry(Some(code)).map(|entry| entry.link_mode),
+            Ok(link_mode),
+            "link code {code}"
+        );
+    }
+    assert_eq!(
+        entry(None),
+        Err(DecodeError::InvalidTlv),
+        "a missing link mode refuses"
+    );
+    for code in [0, 5, u8::MAX] {
+        assert_eq!(
+            entry(Some(code)),
+            Err(DecodeError::InvalidTlv),
+            "unknown link code {code}"
+        );
+    }
     let edits = vec![
         SessionEdit::SetConsole {
             console: full.clone(),
@@ -1551,6 +1603,7 @@ fn random_submix(draw: &mut Draw, index: usize) -> Submix {
         .map(|entry| ConsoleEntry {
             slot: id(&format!("slot-{entry}")),
             bypass: draw.bit(),
+            link_mode: session::ConsoleLinkMode::ALL[draw.below(4) as usize].0,
             params: (0..draw.below(3))
                 .map(|param| EffectParam {
                     parameter_id: param as u32 * 2 + draw.below(2) as u32,

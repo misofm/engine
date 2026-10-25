@@ -359,13 +359,18 @@ pub struct ConsoleSlot {
     pub link_mode: LinkMode,
 }
 
-/// One strip's knobs for one console slot. It carries no effect fields.
+/// One strip's knobs for one console slot: its bypass, its link mode and its params. The slot's
+/// identity and quality are declared once on the session slot (decision 12); the link mode is the
+/// slot's unless the entry overrides it (decision 13 Q1, #1369).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConsoleEntry {
     /// The declared slot this entry configures.
     pub slot: StableId,
     /// Latency-preserving bypass for this track.
     pub bypass: bool,
+    /// This strip's detector link mode: `slot` runs the slot's declared mode, any other token
+    /// overrides it for this strip only.
+    pub link_mode: ConsoleLinkMode,
     /// Parameter declarations, canonicalized by parameter ID then channel.
     pub params: Vec<EffectParam>,
 }
@@ -375,8 +380,9 @@ pub struct ConsoleEntry {
 ///
 /// `console.pre_insert` lowers to the first rack (`RackId::Simd1` in the graph), the track's
 /// `inserts` to the second (`Dynamic`) and `console.post_insert` to the third (`Simd2`). Each
-/// console entry becomes an [`Effect`] whose `id` is the slot, whose identity, quality and link
-/// mode come from the session slot, whose bypass and params come from the track, and whose
+/// console entry becomes an [`Effect`] whose `id` is the slot, whose identity and quality come
+/// from the session slot, whose link mode is the entry's resolved against the slot's
+/// ([`ConsoleLinkMode::resolve`]), whose bypass and params come from the track, and whose
 /// sidechain is `none`. An equivalent session therefore compiles to the identical graph.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoweredRacks<'a> {
@@ -537,7 +543,7 @@ fn lower_section(slots: &[ConsoleSlot], entries: &[ConsoleEntry]) -> Vec<Effect>
             identity: slot.identity.clone(),
             quality: slot.quality,
             bypass: entry.bypass,
-            link_mode: slot.link_mode,
+            link_mode: entry.link_mode.resolve(slot.link_mode),
             params: entry.params.clone(),
             sidechain: SidechainDeclaration::None,
         })
@@ -650,6 +656,34 @@ closed_tokens! {
         Maximum => "maximum",
         /// Arithmetic average of lane detector values.
         Average => "average",
+    }
+}
+
+closed_tokens! {
+    /// A console entry's detector link mode (#1369): the slot's declared mode, or an override.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ConsoleLinkMode {
+        /// Run the slot's declared [`LinkMode`].
+        Slot => "slot",
+        /// Override: fully independent dual-mono detectors.
+        DualMono => "dual_mono",
+        /// Override: maximum of lane detector values.
+        Maximum => "maximum",
+        /// Override: arithmetic average of lane detector values.
+        Average => "average",
+    }
+}
+
+impl ConsoleLinkMode {
+    /// The mode this entry runs: the slot's `declared` mode for [`Self::Slot`], else the override.
+    #[must_use]
+    pub const fn resolve(self, declared: LinkMode) -> LinkMode {
+        match self {
+            Self::Slot => declared,
+            Self::DualMono => LinkMode::DualMono,
+            Self::Maximum => LinkMode::Maximum,
+            Self::Average => LinkMode::Average,
+        }
     }
 }
 
@@ -808,6 +842,7 @@ impl Submix {
                 .map(|slot| ConsoleEntry {
                     slot: slot.slot.clone(),
                     bypass: true,
+                    link_mode: ConsoleLinkMode::Slot,
                     params: Vec::new(),
                 })
                 .collect(),

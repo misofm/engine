@@ -89,11 +89,11 @@ fn console_json() -> Value {
 /// order) and a bypassed limiter.
 fn console_entries() -> Value {
     json!([
-        {"slot": "tone", "bypass": false, "params": [
+        {"slot": "tone", "bypass": false, "link_mode": "slot", "params": [
             {"parameter_id": 2, "channel": "left", "unit": "hz", "value": 90.0},
             {"parameter_id": 4, "channel": "both", "unit": "db", "value": 1.5}
         ]},
-        {"slot": "ceiling", "bypass": true, "params": []}
+        {"slot": "ceiling", "bypass": true, "link_mode": "slot", "params": []}
     ])
 }
 

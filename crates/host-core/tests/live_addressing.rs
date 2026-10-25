@@ -118,6 +118,7 @@ fn document(bypassed: Option<(&str, &str)>) -> String {
         let entry = |id: &str, frequency_hz: f32, gain_db: f32| ConsoleEntry {
             slot: StableId::parse(id).expect("slot id"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: eq_params(&params, frequency_hz, gain_db),
         };
         track.console = vec![
