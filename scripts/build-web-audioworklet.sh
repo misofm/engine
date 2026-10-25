@@ -35,6 +35,39 @@ set -euo pipefail
 #                  the output directory (removed on exit), written as
 #                  `miso-engine-v1-render-lock-probe.wasm` and nothing else: never pinned, never a
 #                  twin, never delivered. `scripts/test-render-lock-probe.mjs` reads it.
+#   --print-toolchain  issue #1334: print the browser artifact toolchain and exit, building nothing
+#                  and taking no directory. CI installs exactly what it prints.
+#
+# Issue #1334 (decision 15, D15-10): the module, alone in the repository, builds on a pinned dated
+# nightly with `-Zbuild-std`: `rust-toolchain.toml`'s `[browser-artifact] channel`, which rustup
+# ignores (every other build, the parameter metadata below among them, stays on the stable
+# channel). A missing table or anything but `nightly-YYYY-MM-DD` is refused before anything is
+# built: a floating `nightly` would build with whatever nightly is installed.
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+browser_toolchain() {
+  local channel
+  channel=$(awk '
+    /^[[:space:]]*\[/ { table = ($0 ~ /^\[browser-artifact\][[:space:]]*(#.*)?$/); next }
+    table && /^channel[[:space:]]*=/ {
+      value = $0
+      sub(/^channel[[:space:]]*=[[:space:]]*"/, "", value)
+      sub(/"[[:space:]]*(#.*)?$/, "", value)
+      print value
+      exit
+    }' "$repo_root/rust-toolchain.toml")
+  if [[ ! $channel =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    printf 'rust-toolchain.toml: [browser-artifact] channel must be a dated nightly-YYYY-MM-DD, not %s\n' \
+      "'$channel'" >&2
+    return 1
+  fi
+  printf '%s\n' "$channel"
+}
+if (($# == 1)) && [[ $1 == --print-toolchain ]]; then
+  browser_toolchain
+  exit 0
+fi
+channel=$(browser_toolchain)
+
 mode=delivery
 named_dir=
 features=()
@@ -62,10 +95,10 @@ done
 if (($# != 1)) || [[ $1 == -* ]]; then
   echo "usage: $0 [--module-only | --check-pin] [--named-twin EMPTY_DIRECTORY] EMPTY_OUTPUT_DIRECTORY" >&2
   echo "       $0 --render-lock-probe EMPTY_OUTPUT_DIRECTORY" >&2
+  echo "       $0 --print-toolchain" >&2
   exit 2
 fi
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 output_dir=$1
 for dir in "$output_dir" ${named_dir:+"$named_dir"}; do
   if [[ ! -d "$dir" || -L "$dir" ]]; then
@@ -123,13 +156,23 @@ strip_flag="-C strip=${MISO_ENGINE_WEB_STRIP:-debuginfo}"
 # Verified: with these flags the digest is identical under CARGO_HOME=/root/.cargo
 # and CARGO_HOME=/home/runner/.cargo, which previously produced two different ones,
 # and also under a third repo-path/CARGO_HOME combination.
+#
+# Issue #1334: `-Zbuild-std` compiles std from the toolchain's `rust-src`, so the toolchain's own
+# path (under RUSTUP_HOME) lands in std's panic locations as well; the third remap fixes it. #1331a-1
+# measured the same toolchain at two paths giving two digests without it and one with it. The
+# toolchain is an environment prefix on the cargo line, never `cargo +channel`: it also overrides a
+# caller's RUSTUP_TOOLCHAIN (npm-publish.yml sets the stable one job-wide), and
+# check-artifact-evidence-leak.sh finds this invocation by `cargo build`.
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
+sysroot=$(RUSTUP_TOOLCHAIN="$channel" rustc --print sysroot)
 remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/repo"
+remap+=" --remap-path-prefix=$sysroot=/rustc-sysroot"
 
 (
   cd "$repo_root"
-  CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
-    cargo build --locked --release ${features[@]+"${features[@]}"} --target wasm32-unknown-unknown -p host-web
+  RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$simd_target" \
+    RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
+    cargo build --locked --release -Zbuild-std=std,panic_abort ${features[@]+"${features[@]}"} --target wasm32-unknown-unknown -p host-web
 )
 
 if [[ $mode == probe ]]; then
