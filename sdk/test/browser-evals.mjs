@@ -445,6 +445,9 @@ describe("the browser open sequence", () => {
       }),
     });
 
+    // #1296: a host stand-in that posts no watermark cannot report completion, so applied()
+    // refuses typed instead of waiting forever.
+    await assert.rejects(engine.applied(0n), (error) => error instanceof MisoEngineError && error.code === "unsupported");
     await Promise.all([engine.close(), engine.close()]);
     assert.deepEqual(events, ["host", "context"]);
     await engine.close();
