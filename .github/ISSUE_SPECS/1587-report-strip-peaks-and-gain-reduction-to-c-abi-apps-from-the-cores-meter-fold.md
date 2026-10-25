@@ -280,11 +280,18 @@ Commands: `cargo test --locked -p host-core --all-features`,
   claimed candidate, so a promotion could read the record before render wrote it and pair
   nothing for good. `CarriedTaps::count` now starts at `UNWRITTEN` (`u32::MAX`): a promotion that
   reads it unwritten sets `ProviderEpoch::observations_pending` to the displaced epoch, and
-  `settle_observation_pairings` settles it at each service step once the record reads written
-  (`Acquire` on `count`, paired with render's `Release`), or at the reclaim of the displaced plan
-  (the retirement queue orders the hook before the reclaim), where an unwritten record means
-  nothing carried. A promotion settles the running epoch's own pending pairing first, so the chain
-  pairs in order. Until settled the strip shows no reading, never a wrong one.
+  `settle_observation_pairings` settles it once the record reads written (`Acquire` on `count`,
+  paired with render's `Release`), at each reclaim before the parked epoch drops, at the end of
+  each service step and before each promotion. One mechanism settles an unwritten record as
+  nothing carried: the displaced epoch is gone (its plan was reclaimed, and the retirement queue
+  orders the hook before the reclaim). Pairing keeps adoption order without the claim-order
+  argument (verifier minor 1 after the attempt-4 PASS): a promotion leaves `next` pending while
+  the running epoch's own mark stands, a parked epoch keeps its mark, and the settle skips an
+  epoch whose displaced epoch is itself pending. The narrow race this guards: render carries into
+  B's plan and claims C's between an edit's service step and its `withdraw_pending_candidate`,
+  which promotes B and C in one call. Until settled the strip shows no reading, never a wrong
+  one. (Attempt 4 also passed a `reclaimed` flag to settle an unwritten record at the reclaim; it
+  duplicated the gone-epoch rule and was removed, verifier minor 2.)
   - `a_promotion_before_the_carry_pairs_the_carried_tap_once_render_carries` (capi, direct
     children, `test_promote_pending_before_carry` + reclamation held): red on attempt 3's code
     (the running epoch's reader `None`, want `Some((4, 4608))`); red if the service-step settle is

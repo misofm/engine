@@ -1426,19 +1426,15 @@ impl CarriedTaps {
 }
 
 /// Pair `successor`'s observation readers with `predecessor`'s from `successor`'s carry record
-/// (#1587b), if render has written it; returns whether the pairing is settled. With `reclaimed`
-/// (the predecessor's plan is reclaimed, so the hook has run or never will) an unwritten record
-/// settles as nothing carried.
-fn pair_observations(
-    successor: &mut ProviderEpoch,
-    predecessor: &mut ProviderEpoch,
-    reclaimed: bool,
-) -> bool {
+/// (#1587b), if render has written it; returns whether the pairing is settled. An unwritten
+/// record leaves it pending: [`SessionState::settle_observation_pairings`] settles it once the
+/// record is written, or as nothing carried once the predecessor's epoch is gone.
+fn pair_observations(successor: &mut ProviderEpoch, predecessor: &mut ProviderEpoch) -> bool {
     let Some(record) = successor.carried_taps.as_deref() else {
         return true;
     };
     let Some(carries) = record.carries() else {
-        return reclaimed;
+        return false;
     };
     // One record at a time: `pair_carried_observations` takes a slice, and the record's pairs
     // are atomics, so collecting them would allocate; a one-element slice per pair does not.
@@ -3172,7 +3168,7 @@ where
                 self.promote_pending_provider(replacement)?;
             }
             self.adopt_meters(retired_epoch.0, adoption_sample);
-            self.settle_observation_pairings(Some(retired_epoch.0));
+            self.settle_observation_pairings();
             let index = self
                 .retired_providers
                 .iter()
@@ -3184,7 +3180,7 @@ where
         if active_epoch > self.providers.epoch {
             self.promote_pending_provider(active_epoch)?;
         }
-        self.settle_observation_pairings(None);
+        self.settle_observation_pairings();
 
         // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
         // current provider's, and every pending candidate's. The atomic is read under the lock,
@@ -3205,11 +3201,15 @@ where
         Ok(())
     }
 
-    /// Settle every pending observation pairing whose record render has written, and, when
-    /// `reclaimed` names a parked epoch whose plan was just reclaimed, the one waiting on it
-    /// either way ([`CarriedTaps`]'s three states). A promoted epoch and the parked epoch it
-    /// displaced are paired as at promotion. Bounded by the parked list; allocates nothing.
-    fn settle_observation_pairings(&mut self, reclaimed: Option<u64>) {
+    /// Settle the pending observation pairings ([`CarriedTaps`]'s three states), oldest epoch
+    /// first: one whose record render has written pairs as at promotion, and one whose displaced
+    /// epoch is gone (its plan was reclaimed, so the hook has run or never will) settles as
+    /// nothing carried. An epoch whose displaced epoch is itself still pending waits, so the
+    /// readers always pair in adoption order. Run at each reclaim before the parked epoch drops
+    /// (a record written by then pairs), at the end of each service step (after the drop, an
+    /// unwritten one clears) and before each promotion. Bounded by the parked list; allocates
+    /// nothing.
+    fn settle_observation_pairings(&mut self) {
         for index in 0..=self.retired_providers.len() {
             let (successor, older) = if index == self.retired_providers.len() {
                 (&mut self.providers, &mut self.retired_providers[..])
@@ -3227,9 +3227,9 @@ where
                 .iter_mut()
                 .find(|provider| provider.epoch == displaced)
             {
-                Some(predecessor) => {
-                    pair_observations(successor, predecessor, reclaimed == Some(displaced))
-                }
+                // Its own readers are not paired yet: pairing now would take the wrong ones.
+                Some(predecessor) if predecessor.observations_pending.is_some() => false,
+                Some(predecessor) => pair_observations(successor, predecessor),
                 // The displaced epoch is gone: nothing is left to pair with.
                 None => true,
             };
@@ -3384,13 +3384,16 @@ where
             );
             // #1674's observation half (#1587b): likewise the observation readers of the taps the
             // swap block carried, from its record (what actually carried), so a carried tap's
-            // reader, and its arm state, follow the tap that renders on. The running epoch's own
-            // pending pairing settles first: render carried into its plan before it claimed
-            // `next`'s, so the chain pairs in order. A record render has not written yet leaves
-            // the pairing pending, which a later step settles.
-            self.settle_observation_pairings(None);
-            self.providers.observations_pending = None;
-            if !pair_observations(&mut next, &mut self.providers, false) {
+            // reader, and its arm state, follow the tap that renders on. A record render has not
+            // written yet leaves the pairing pending, which a later step settles. The pending
+            // pairings settle first, and `next` waits while the running epoch's own still stands:
+            // the narrow race is render carrying into B's plan and then claiming C's between an
+            // edit's service step and its `withdraw_pending_candidate`, which promotes B and C in
+            // one call. So the readers pair in adoption order without relying on claim order.
+            self.settle_observation_pairings();
+            if self.providers.observations_pending.is_some()
+                || !pair_observations(&mut next, &mut self.providers)
+            {
                 next.observations_pending = Some(self.providers.epoch);
             }
             let mut previous = core::mem::replace(&mut self.providers, next);
