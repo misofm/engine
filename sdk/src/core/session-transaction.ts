@@ -23,7 +23,10 @@ import { MisoUsageError } from "./errors.ts";
 import {
   SessionBuilder,
   builderContext,
+  automationTargetRecord,
   launchRate,
+  normalizeAutomation,
+  normalizeAutomationSegments,
   normalizeConsoleEntries,
   normalizeConsoleSlots,
   normalizeInsert,
@@ -35,18 +38,32 @@ import {
   normalizeSource,
   normalizeSubmix,
   normalizeTrack,
+  normalizeVca,
   quality,
   quantum,
   refuseOutputFollowsMute,
+  requireSegments,
+  resolveAutomationTarget,
   resolveLanes,
   retargetInsert,
   stableId,
   trackSourceRef,
 } from "./session.ts";
-import type { ConsoleSlotEntry, ModelRecord, ModelValue, RouteGraph, SourceEntry } from "./session.ts";
+import type {
+  AutomationScope,
+  ConsoleSlotEntry,
+  ModelRecord,
+  ModelValue,
+  RouteGraph,
+  SourceEntry,
+} from "./session.ts";
+import { CONTROLS } from "../generated/controls.ts";
 import { CODE, fail, freeze, knownKeys } from "../internal/validation.ts";
 import type { EffectId } from "../generated/catalog.ts";
 import type {
+  AutomationSegment,
+  AutomationSpec,
+  AutomationTarget,
   ConsoleEntrySpec,
   ConsoleSpec,
   EffectDecl,
@@ -59,6 +76,7 @@ import type {
   SubmixSpec,
   TrackSourceSpec,
   TrackSpec,
+  VcaSpec,
 } from "./types.ts";
 
 /**
@@ -118,6 +136,15 @@ import type {
  * endpoints are checked against the working graph, as `SessionBuilder.route` checks them against
  * its declarations; an endpoint a later edit removes is the store's to refuse.
  *
+ * # Automation and VCA edits
+ *
+ * An automation target resolves through `resolveAutomationTarget` against the working strips,
+ * inserts, console slots, routes and VCAs, exactly as `SessionBuilder.automation` resolves it, and
+ * its spans are written in the unit of the row it names. Whether that row is automatable is the
+ * engine's rule (#1566): the store refuses the transaction, as `validate()` refuses the built
+ * session. A VCA's members must be in the working graph and are written in the model's sorted
+ * order; a membership cycle, which only a replaced VCA can make, is the store's to refuse.
+ *
  * `sdk/test/transaction-evals.mjs` compares these bytes to the codec's re-encoding of them and
  * the store's snapshot after them to a `SessionBuilder` declaring the result
  * (`hosts/host-web/examples/sdk_transaction_oracle.rs`).
@@ -152,6 +179,12 @@ const OP_UPSERT_ROUTE = 0x0500;
 const OP_REMOVE_ROUTE = 0x0501;
 const OP_SET_ROUTE_SOURCE = 0x0502;
 const OP_SET_ROUTE_DESTINATION = 0x0503;
+const OP_UPSERT_AUTOMATION = 0x0600;
+const OP_REMOVE_AUTOMATION = 0x0601;
+const OP_SET_AUTOMATION_TARGET = 0x0602;
+const OP_SET_AUTOMATION_SEGMENTS = 0x0603;
+const OP_UPSERT_VCA = 0x0700;
+const OP_REMOVE_VCA = 0x0701;
 
 /** `RackName::Inserts`'s wire code (`schema::parameter_rack_wire`). */
 const RACK_INSERTS = 2;
@@ -183,6 +216,11 @@ const ROUTE_DESTINATION_TAGS = codes(["submix_input", "output_input"]);
 /** `RenderMode::SingleThread` and `SampleFormat::F32Planar`, each its enum's only code. */
 const RENDER_MODE_CODES = codes(["single_thread"]);
 const SAMPLE_FORMAT_CODES = codes(["f32_planar"]);
+const SHAPE_CODES = codes(["step", "linear", "exponential"]);
+/** The control address codes, from the generated control tables (`CONTROLS.address`). */
+const OWNER_KIND_CODES = named(CONTROLS.address.ownerKinds);
+const SECTION_KIND_CODES = named(CONTROLS.address.sectionKinds);
+const LANE_CODES = named(CONTROLS.address.lanes);
 const RENDER_PROFILE_KEYS: ReadonlySet<string> = new Set(["id", "mode"]);
 const OUTPUT_PROFILE_KEYS: ReadonlySet<string> = new Set(["id", "channels", "sampleFormat"]);
 const SIDECHAIN_TAGS = codes(["none", "routed"]);
@@ -192,6 +230,10 @@ const MATRIX_TAG = 2;
 
 function codes(tokens: readonly string[]): ReadonlyMap<ModelValue, number> {
   return new Map<ModelValue, number>(tokens.map((token, index) => [token, index + 1]));
+}
+
+function named(rows: readonly { readonly name: string; readonly code: number }[]): ReadonlyMap<ModelValue, number> {
+  return new Map<ModelValue, number>(rows.map((row) => [row.name, row.code]));
 }
 
 /** A session's render profile: a stable ID and the only V1 render mode, the default. */
@@ -257,7 +299,17 @@ export type SessionEditSpec =
   | { readonly kind: "upsertRoute"; readonly route: RouteSpec }
   | { readonly kind: "removeRoute"; readonly routeId: string }
   | { readonly kind: "setRouteSource"; readonly routeId: string; readonly source: RouteSource }
-  | { readonly kind: "setRouteDestination"; readonly routeId: string; readonly destination: RouteDestination };
+  | { readonly kind: "setRouteDestination"; readonly routeId: string; readonly destination: RouteDestination }
+  | { readonly kind: "upsertAutomation"; readonly automation: AutomationSpec }
+  | { readonly kind: "removeAutomation"; readonly automationId: string }
+  | { readonly kind: "setAutomationTarget"; readonly automationId: string; readonly target: AutomationTarget }
+  | {
+    readonly kind: "setAutomationSegments";
+    readonly automationId: string;
+    readonly segments: readonly AutomationSegment[];
+  }
+  | { readonly kind: "upsertVca"; readonly vcaId: string; readonly vca: VcaSpec }
+  | { readonly kind: "removeVca"; readonly vcaId: string };
 
 
 /**
@@ -297,6 +349,8 @@ interface BuilderState {
   readonly outputs: ReadonlySet<string>;
   /** The routes' records after the edits so far, by ID. */
   readonly routes: ReadonlyMap<string, ModelRecord>;
+  /** The stored automations' records after the edits so far, by ID. */
+  readonly automations: ReadonlyMap<string, ModelRecord>;
   /** Each strip's (track's or submix's) insert records after the edits so far, by strip ID. */
   readonly strips: ReadonlyMap<string, readonly ModelRecord[]>;
   /**
@@ -847,6 +901,124 @@ export class TransactionBuilder {
     }
   }
 
+  /**
+   * Declare a stored automation, or replace the automation with this ID, with the session
+   * builder's rules: the target resolved against the working session, at least one span, the
+   * spans written in the target row's unit.
+   */
+  upsertAutomation(spec: AutomationSpec): TransactionBuilder {
+    stableId(spec?.id, "upsertAutomation().id");
+    const record = normalizeAutomation(spec, this.#automationScope(), "upsertAutomation");
+    const automations = new Map(this.#state.automations);
+    automations.set(spec.id, record);
+    return this.#next(
+      {
+        kind: "upsertAutomation",
+        automation: {
+          ...spec,
+          segments: spec.segments.map((segment) => ({ ...segment })),
+          ...(spec.offset === undefined ? {} : { offset: { ...spec.offset } }),
+        },
+      },
+      OP_UPSERT_AUTOMATION,
+      [message(1, automationFields(record))],
+      { automations },
+    );
+  }
+
+  /** Remove a declared stored automation. */
+  removeAutomation(automationId: string): TransactionBuilder {
+    this.#automation(automationId, `removeAutomation("${String(automationId)}")`);
+    const automations = new Map(this.#state.automations);
+    automations.delete(automationId);
+    return this.#next(
+      { kind: "removeAutomation", automationId },
+      OP_REMOVE_AUTOMATION,
+      [utf8(1, automationId)],
+      { automations },
+    );
+  }
+
+  /**
+   * Point a declared automation at another control, resolved as `upsertAutomation` resolves it.
+   * Its spans keep their unit, so the new row must be in the same unit (`control.domain`
+   * otherwise, as the engine refuses a span in another unit); replace it with `upsertAutomation`.
+   */
+  setAutomationTarget(automationId: string, target: AutomationTarget): TransactionBuilder {
+    const path = `setAutomationTarget("${String(automationId)}")`;
+    const current = this.#automation(automationId, path);
+    const resolved = resolveAutomationTarget(target, this.#automationScope(), `${path}.target`);
+    const unit = String(records(current.segments)[0]?.unit);
+    if (resolved.unit !== unit) {
+      fail(
+        `${path}.target.control`,
+        `the row is in ${resolved.unit} and this automation's spans are in ${unit}; replace it with upsertAutomation`,
+        "control.domain",
+      );
+    }
+    const targetRecord = automationTargetRecord(resolved);
+    const automations = new Map(this.#state.automations);
+    automations.set(automationId, freeze({ ...current, target: targetRecord }));
+    return this.#next(
+      { kind: "setAutomationTarget", automationId, target: { ...target } as AutomationTarget },
+      OP_SET_AUTOMATION_TARGET,
+      [utf8(1, automationId), message(2, automationTargetFields(targetRecord))],
+      { automations },
+    );
+  }
+
+  /**
+   * Replace a declared automation's spans, validated as `SessionBuilder.automation`'s and written
+   * in its target row's unit. An automation keeps at least one span: remove it instead.
+   */
+  setAutomationSegments(automationId: string, segments: readonly AutomationSegment[]): TransactionBuilder {
+    const path = `setAutomationSegments("${String(automationId)}")`;
+    const current = this.#automation(automationId, path);
+    requireSegments(segments, `${path}.segments`);
+    const unit = String(records(current.segments)[0]?.unit);
+    const normalized = normalizeAutomationSegments(segments, unit, `${path}.segments`);
+    const automations = new Map(this.#state.automations);
+    automations.set(automationId, freeze({ ...current, segments: normalized }));
+    return this.#next(
+      { kind: "setAutomationSegments", automationId, segments: segments.map((segment) => ({ ...segment })) },
+      OP_SET_AUTOMATION_SEGMENTS,
+      [utf8(1, automationId), ...normalized.map((segment) => message(2, automationSegmentFields(segment)))],
+      { automations },
+    );
+  }
+
+  /**
+   * Declare a VCA group, or replace the VCA with this ID, with the session builder's rules: each
+   * member a track, submix or other VCA of the working graph, listed once; the offset fader in the
+   * `fader_db` domain, 0 dB unmuted by default.
+   */
+  upsertVca(vcaId: string, spec: VcaSpec): TransactionBuilder {
+    stableId(vcaId, "upsertVca().id");
+    const path = `upsertVca("${vcaId}")`;
+    this.#freeGraphId(vcaId, "vcas", path);
+    const candidates = new Set([...this.#state.tracks, ...this.#state.submixes, ...this.#state.vcas]);
+    candidates.delete(vcaId);
+    const { fader, members } = normalizeVca(spec, candidates, path);
+    const vcas = new Set(this.#state.vcas);
+    vcas.add(vcaId);
+    // The model's member order (`SessionBuilder.toJSON`): stable IDs are ASCII, so code-unit order.
+    const sorted = [...members].sort();
+    return this.#next(
+      { kind: "upsertVca", vcaId, vca: { ...spec, members: [...spec.members] } },
+      OP_UPSERT_VCA,
+      [message(1, [utf8(1, vcaId), message(2, faderFields(fader)), ...sorted.map((member) => utf8(3, member))])],
+      { vcas },
+    );
+  }
+
+  /** Remove a declared VCA. A VCA that still lists it, or automation on it, makes the engine refuse. */
+  removeVca(vcaId: string): TransactionBuilder {
+    this.#declared(this.#state.vcas, vcaId, "VCA", `removeVca("${String(vcaId)}")`);
+    const vcas = new Set(this.#state.vcas);
+    vcas.delete(vcaId);
+    return this.#next({ kind: "removeVca", vcaId }, OP_REMOVE_VCA, [utf8(1, vcaId)], { vcas });
+  }
+
   /** Refuse `id` when another kind of graph entity than `own` already holds it. */
   #freeGraphId(id: string, own: "tracks" | "submixes" | "vcas" | "outputs", path: string): void {
     const kinds = ["tracks", "submixes", "vcas", "outputs"] as const;
@@ -864,6 +1036,24 @@ export class TransactionBuilder {
   #route(routeId: string, path: string): ModelRecord {
     this.#declared(new Set(this.#state.routes.keys()), routeId, "route", path);
     return this.#state.routes.get(routeId) as ModelRecord;
+  }
+
+  #automation(automationId: string, path: string): ModelRecord {
+    this.#declared(new Set(this.#state.automations.keys()), automationId, "automation", path);
+    return this.#state.automations.get(automationId) as ModelRecord;
+  }
+
+  /** The working session an automation target resolves against. */
+  #automationScope(): AutomationScope {
+    return {
+      slots: this.#state.slots,
+      strips: new Map([...this.#state.strips].map(([id, inserts]) => [
+        id,
+        inserts.map((insert) => [String(insert.id), String(record(insert.identity).effect_id)] as const),
+      ] as const)),
+      routes: new Set(this.#state.routes.keys()),
+      vcas: this.#state.vcas,
+    };
   }
 
   #graph(): RouteGraph {
@@ -955,6 +1145,7 @@ export function transaction(base: SessionBuilder): TransactionBuilder {
     vcas: ids(model.vcas),
     outputs: ids(model.outputs),
     routes: new Map(model.routes.map((route) => [String(route.id), route] as const)),
+    automations: new Map(model.automation.map((entry) => [String(entry.id), entry] as const)),
     strips,
     consoleChanged: false,
     edits: Object.freeze([]),
@@ -1013,9 +1204,13 @@ function byte(id: number, value: number): Uint8Array {
 }
 
 function code(id: number, table: ReadonlyMap<ModelValue, number>, value: ModelValue | undefined): Uint8Array {
+  return byte(id, codeOf(table, value));
+}
+
+function codeOf(table: ReadonlyMap<ModelValue, number>, value: ModelValue | undefined): number {
   const found = value === undefined ? undefined : table.get(value);
   if (found === undefined) throw new MisoUsageError(`${String(value)} has no wire code`);
-  return byte(id, found);
+  return found;
 }
 
 function boolean(id: number, value: ModelValue | undefined): Uint8Array {
@@ -1190,6 +1385,43 @@ function routeFields(route: ModelRecord): Uint8Array[] {
     float(5, route.gain_db),
     boolean(6, route.mute),
     boolean(7, route.follows_mute),
+  ];
+}
+
+/** `tx_automation`: the segments repeat as field 3, and the hand-move offset is field 4. */
+function automationFields(automation: ModelRecord): Uint8Array[] {
+  const offset = record(automation.offset);
+  return [
+    utf8(1, automation.id),
+    message(2, automationTargetFields(record(automation.target))),
+    ...records(automation.segments).map((segment) => message(3, automationSegmentFields(segment))),
+    message(4, [float(1, offset.left_db), float(2, offset.right_db)]),
+  ];
+}
+
+/**
+ * `tx_automation_target`: the control list's address message (#1566 D4), its ID, slot, control
+ * and lane fields written optional as the list writes them, and no expected effect.
+ */
+function automationTargetFields(target: ModelRecord): Uint8Array[] {
+  return [
+    code(1, OWNER_KIND_CODES, target.owner),
+    field(2, WIRE_UTF8, false, text(String(target.owner_id))),
+    code(3, SECTION_KIND_CODES, target.section),
+    ...(target.slot_id === undefined ? [] : [field(4, WIRE_UTF8, false, text(String(target.slot_id)))]),
+    field(5, WIRE_U32, false, u32(Number(target.control))),
+    field(6, WIRE_U8, false, u8(codeOf(LANE_CODES, target.lane))),
+  ];
+}
+
+function automationSegmentFields(segment: ModelRecord): Uint8Array[] {
+  return [
+    code(1, SHAPE_CODES, segment.shape),
+    long(2, segment.start_sample),
+    long(3, segment.end_sample),
+    float(4, segment.start_value),
+    float(5, segment.end_value),
+    code(6, UNIT_CODES, segment.unit),
   ];
 }
 

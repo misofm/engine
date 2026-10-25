@@ -185,3 +185,19 @@ Spec corrections (scope note of 2026-10-25, recorded here; they supersede the te
   omitted, 0 and 960 variants of the same console transaction are three different frames.
 - **Gate 1 also owns the `setTrackConsole` byte rows** (root comment of 2026-10-24): `rampSamples` omitted, 0 and
   960, after a `setConsole` in the same transaction.
+- **Slice b (automation, VCA).** `resolveAutomationTarget` takes an `AutomationScope` (console slots, each strip's
+  `[insert ID, effect ID]` list, route and VCA IDs) instead of `session.ts`'s private `BuilderState`; the session
+  builder and the transaction each build one from their own state (R1's intent, without a fake builder state).
+  `normalizeAutomation` (a `verb` parameter), `normalizeAutomationSegments`, `automationTargetRecord`,
+  `requireSegments` and `normalizeVca` are exported `@internal`. VCA members are written in the model's sorted order.
+- **R4 corrected:** the engine refuses an empty span list (`SessionEditError::EmptyAutomationSegments` in
+  `apply_session_edit`, and the validator's "automation must declare at least one segment"), so a 0-segment
+  `setAutomationSegments` is not a clear. The builder refuses it with `SessionBuilder.automation`'s text; gate 1's span
+  counts are 1 and 3, and the 0 case is a refusal row.
+- **Gate 3 corrected:** since #1566 (decision 17 C2) `SessionBuilder.automation` no longer refuses a row the engine
+  will not automate, and the generated control tables mark the EQ band's `enabled` row automatable. Gate 3 is now: each
+  target or span `SessionBuilder.automation` refuses (an insert not on the strip, an unknown row, a missing owner, a
+  VCA owner that is a track, a session owner; an empty, reversed or non-positive exponential span) is refused by the
+  transaction with the same message text after the method's path, and produces no bytes.
+- `setAutomationTarget` keeps the spans, so it refuses a row in another unit (`control.domain`, as the engine refuses
+  a span outside its row's unit, `controls::automation`).

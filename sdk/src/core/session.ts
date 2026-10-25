@@ -8,6 +8,7 @@ import { normalizeControlSmoothing } from "../internal/control-smoothing.ts";
 import { CODE, f32, fail, freeze, knownKeys, nameList } from "../internal/validation.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type {
+  AutomationSegment,
   AutomationSpec,
   AutomationTarget,
   BuiltinsSpec,
@@ -997,33 +998,12 @@ export class SessionBuilder {
     if (this.#graphIds().has(id)) {
       fail(`${path}.id`, "tracks, submixes, VCAs and outputs share one ID namespace", CODE.duplicateId);
     }
-    if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
-      fail(path, "expected { fader?, members }");
-    }
-    knownKeys(spec, VCA_KEYS, path, "a VCA");
-    if (!Array.isArray(spec.members)) fail(`${path}.members`, "expected an array of member IDs", CODE.wrongType);
     const strips = new Set([
       ...this.#state.tracks.map((entry) => entry.id),
       ...this.#state.submixes.map((entry) => entry.id),
       ...this.#state.vcas.map((entry) => entry.id),
     ]);
-    const members: string[] = [];
-    spec.members.forEach((member: unknown, index: number) => {
-      const memberPath = `${path}.members[${index}]`;
-      stableId(member, memberPath);
-      if (members.includes(member as string)) {
-        fail(memberPath, `'${String(member)}' is already a member of this VCA`, CODE.duplicateId);
-      }
-      if (!strips.has(member as string)) {
-        fail(
-          memberPath,
-          `'${String(member)}' is not a declared track, submix or VCA; declare a member before the VCA that lists it`,
-          CODE.missingEntity,
-        );
-      }
-      members.push(member as string);
-    });
-    const fader = normalizeVcaFader(spec.fader, `${path}.fader`);
+    const { fader, members } = normalizeVca(spec, strips, path);
     return this.#next({ vcas: [...this.#state.vcas, freeze({ id, fader, members })] });
   }
 
@@ -1121,10 +1101,8 @@ export class SessionBuilder {
   }
 
   #validateAutomation(spec: AutomationSpec, path: string): void {
-    resolveAutomationTarget(spec.target, this.#state, `${path}.target`);
-    if (spec.segments.length === 0) {
-      fail(`${path}.segments`, "automation must declare at least one segment");
-    }
+    resolveAutomationTarget(spec.target, automationScope(this.#state), `${path}.target`);
+    requireSegments(spec.segments, `${path}.segments`);
     normalizeAutomationOffset(spec.offset, `${path}.offset`);
   }
 
@@ -1289,6 +1267,41 @@ function normalizeBuiltins(
       ),
   });
   return freeze({ left: lane(left ?? {}, "left"), right: lane(right ?? {}, "right") });
+}
+
+/**
+ * A VCA's offset fader and members in declared order, each member one of `strips` (the declared
+ * tracks, submixes and VCAs) and listed once. Shared by `SessionBuilder.vca` and the transaction
+ * builder's `upsertVca` (#1385); `path` is `verb("id")`.
+ * @internal
+ */
+export function normalizeVca(
+  spec: VcaSpec,
+  strips: ReadonlySet<string>,
+  path: string,
+): { readonly fader: ModelRecord; readonly members: readonly string[] } {
+  if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
+    fail(path, "expected { fader?, members }");
+  }
+  knownKeys(spec, VCA_KEYS, path, "a VCA");
+  if (!Array.isArray(spec.members)) fail(`${path}.members`, "expected an array of member IDs", CODE.wrongType);
+  const members: string[] = [];
+  spec.members.forEach((member: unknown, index: number) => {
+    const memberPath = `${path}.members[${index}]`;
+    stableId(member, memberPath);
+    if (members.includes(member as string)) {
+      fail(memberPath, `'${String(member)}' is already a member of this VCA`, CODE.duplicateId);
+    }
+    if (!strips.has(member as string)) {
+      fail(
+        memberPath,
+        `'${String(member)}' is not a declared track, submix or VCA; declare a member before the VCA that lists it`,
+        CODE.missingEntity,
+      );
+    }
+    members.push(member as string);
+  });
+  return { fader: normalizeVcaFader(spec.fader, `${path}.fader`), members };
 }
 
 /**
@@ -1619,8 +1632,8 @@ function normalizeConsole(slots: readonly ConsoleSlotEntry[]): ModelRecord {
   return freeze({ pre_insert: section("pre_insert"), post_insert: section("post_insert") });
 }
 
-/** A stored automation's target, resolved to the keys the session document writes. */
-interface ResolvedAutomationTarget {
+/** A stored automation's target, resolved to the keys the session document writes. @internal */
+export interface ResolvedAutomationTarget {
   readonly owner: "strip" | "route" | "vca";
   readonly ownerId: string;
   readonly section: "own" | "builtins" | "console" | "inserts";
@@ -1640,6 +1653,33 @@ interface ControlTableRow {
 }
 
 /**
+ * What an automation target is resolved against: the console slots, each strip's inserts as
+ * `[insert ID, effect ID]` in rack order, and the route and VCA IDs. Built from the session
+ * builder's declarations, or from a transaction's working copy of them (#1385).
+ * @internal
+ */
+export interface AutomationScope {
+  readonly slots: readonly ConsoleSlotEntry[];
+  readonly strips: ReadonlyMap<string, readonly (readonly [string, string])[]>;
+  readonly routes: ReadonlySet<string>;
+  readonly vcas: ReadonlySet<string>;
+}
+
+function automationScope(state: BuilderState): AutomationScope {
+  const inserts = (decls: readonly EffectDecl[] | undefined): readonly (readonly [string, string])[] =>
+    (decls ?? []).map((decl, position) => [insertId(decl, position), decl.effectId] as const);
+  return {
+    slots: state.console ?? [],
+    strips: new Map([
+      ...state.tracks.map((entry) => [entry.id, inserts(entry.spec.inserts)] as const),
+      ...state.submixes.map((entry) => [entry.id, inserts(entry.spec?.inserts)] as const),
+    ]),
+    routes: new Set(state.routes.map((route) => route.id)),
+    vcas: new Set(state.vcas.map((vca) => vca.id)),
+  };
+}
+
+/**
  * Resolve an automation target (#1566, decision 17 C2) to the keys of the session document.
  *
  * A target is a control address, the one `edit.set` and the control list use. This resolves only
@@ -1649,10 +1689,11 @@ interface ControlTableRow {
  * unit. Whether the row is automatable, takes the lane and accepts the span's values is the
  * engine's rule (`controls::automation_diagnostics`), reported by `validate()` and preparation:
  * a rebuild-only row, a derived row, a monitor row, a setting or a lane the row lacks all build.
+ * @internal
  */
-function resolveAutomationTarget(
+export function resolveAutomationTarget(
   target: AutomationTarget,
-  state: BuilderState,
+  scope: AutomationScope,
   path: string,
 ): ResolvedAutomationTarget {
   if (target === null || typeof target !== "object") {
@@ -1681,19 +1722,18 @@ function resolveAutomationTarget(
   }
 
   // The owner exists, and a route or a VCA has an own section and nothing else.
-  let strip: { readonly inserts: readonly EffectDecl[] } | undefined;
+  let strip: { readonly inserts: readonly (readonly [string, string])[] } | undefined;
   if (owner.kind === "strip") {
-    const track = state.tracks.find((entry) => entry.id === ownerId);
-    const submix = state.submixes.find((entry) => entry.id === ownerId);
-    if (track === undefined && submix === undefined) {
+    const inserts = scope.strips.get(ownerId);
+    if (inserts === undefined) {
       fail(`${path}.owner.id`, `'${ownerId}' is not a declared track or submix`, CODE.missingEntity);
     }
-    strip = { inserts: (track?.spec.inserts ?? submix?.spec?.inserts) ?? [] };
+    strip = { inserts };
   } else if (owner.kind === "route") {
-    if (!state.routes.some((route) => route.id === ownerId)) {
+    if (!scope.routes.has(ownerId)) {
       fail(`${path}.owner.id`, `'${ownerId}' is not a declared route`, CODE.missingEntity);
     }
-  } else if (!state.vcas.some((vca) => vca.id === ownerId)) {
+  } else if (!scope.vcas.has(ownerId)) {
     fail(`${path}.owner.id`, `'${ownerId}' is not a declared VCA`, CODE.missingEntity);
   }
   if (strip === undefined && section.kind !== "own") {
@@ -1708,14 +1748,13 @@ function resolveAutomationTarget(
     let effectId: string | undefined;
     if (section.kind === "console") {
       slotId = stableId(section.slot, `${path}.section.slot`);
-      effectId = (state.console ?? []).find((slot) => slot.slot === slotId)?.effectId;
+      effectId = scope.slots.find((slot) => slot.slot === slotId)?.effectId;
       if (effectId === undefined) {
         fail(`${path}.section.slot`, `'${slotId}' is not a console slot of this session`, CODE.missingEntity);
       }
     } else {
       slotId = stableId(section.effect, `${path}.section.effect`);
-      const inserts = strip.inserts;
-      effectId = inserts.find((decl, position) => insertId(decl, position) === slotId)?.effectId;
+      effectId = strip.inserts.find(([id]) => id === slotId)?.[1];
       if (effectId === undefined) {
         fail(`${path}.section.effect`, `'${slotId}' is not one of ${ownerId}'s inserts`, CODE.missingEntity);
       }
@@ -1760,13 +1799,56 @@ function resolveAutomationTarget(
   };
 }
 
-function normalizeAutomation(spec: AutomationSpec, state: BuilderState): ModelRecord {
-  const path = `automation("${spec.id}")`;
-  const resolved = resolveAutomationTarget(spec.target, state, `${path}.target`);
+/**
+ * One stored automation's record: its target resolved against `scope`, its spans in the row's unit.
+ * Shared by the session builder and the transaction builder's `upsertAutomation` (#1385); refusal
+ * paths start with `verb("id")`.
+ * @internal
+ */
+export function normalizeAutomation(spec: AutomationSpec, scope: AutomationScope, verb = "automation"): ModelRecord {
+  const path = `${verb}("${spec.id}")`;
+  const resolved = resolveAutomationTarget(spec.target, scope, `${path}.target`);
+  requireSegments(spec.segments, `${path}.segments`);
+  return freeze({
+    id: spec.id,
+    target: automationTargetRecord(resolved),
+    segments: normalizeAutomationSegments(spec.segments, resolved.unit, `${path}.segments`),
+    offset: normalizeAutomationOffset(spec.offset, `${path}.offset`),
+  });
+}
+
+/** A resolved target as the session document writes it. @internal */
+export function automationTargetRecord(resolved: ResolvedAutomationTarget): ModelRecord {
+  return freeze({
+    owner: resolved.owner,
+    owner_id: resolved.ownerId,
+    section: resolved.section,
+    ...(resolved.slotId === undefined ? {} : { slot_id: resolved.slotId }),
+    control: resolved.control,
+    lane: resolved.lane,
+  });
+}
+
+/** Refuse an automation with no span, as the engine's validator does. @internal */
+export function requireSegments(segments: readonly AutomationSegment[], path: string): void {
+  if (!Array.isArray(segments)) fail(path, "expected an array of automation segments");
+  if (segments.length === 0) fail(path, "automation must declare at least one segment");
+}
+
+/**
+ * An automation's spans in declared order, each written in `unit`, the unit of the row its target
+ * names. `path` is the `segments` path.
+ * @internal
+ */
+export function normalizeAutomationSegments(
+  raw: readonly AutomationSegment[],
+  unit: string,
+  path: string,
+): readonly ModelRecord[] {
   let previousStart: bigint | undefined;
   let previousEnd: bigint | undefined;
-  const segments = spec.segments.map((segment, index) => {
-    const where = `${path}.segments[${index}]`;
+  return raw.map((segment, index) => {
+    const where = `${path}[${index}]`;
     if (!["step", "linear", "exponential"].includes(segment.shape)) {
       fail(`${where}.shape`, "expected step, linear or exponential");
     }
@@ -1804,21 +1886,8 @@ function normalizeAutomation(spec: AutomationSpec, state: BuilderState): ModelRe
       end_sample: end.toString(),
       start_value: value(segment.startValue, "startValue"),
       end_value: value(segment.endValue, "endValue"),
-      unit: resolved.unit,
+      unit,
     });
-  });
-  return freeze({
-    id: spec.id,
-    target: freeze({
-      owner: resolved.owner,
-      owner_id: resolved.ownerId,
-      section: resolved.section,
-      ...(resolved.slotId === undefined ? {} : { slot_id: resolved.slotId }),
-      control: resolved.control,
-      lane: resolved.lane,
-    }),
-    segments,
-    offset: normalizeAutomationOffset(spec.offset, `${path}.offset`),
   });
 }
 
@@ -1923,8 +1992,9 @@ function normalize(state: BuilderState): SessionModel {
   const routes = state.routes
     .map((spec) => normalizeRoute(spec, graph, `route("${spec.id}")`))
     .sort(byId);
+  const scope = automationScope(state);
   const automation = state.automation
-    .map((spec) => normalizeAutomation(spec, state))
+    .map((spec) => normalizeAutomation(spec, scope))
     .sort(byId);
   return freeze({
     schema_version: 1,

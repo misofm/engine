@@ -246,6 +246,60 @@ describe("session transactions encode as the engine's codec does", () => {
     assert.equal(new Set(frames).size, 3, "omitted, 0 and 960 are three different frames");
   });
 
+  test("automation and VCA edits are the codec's bytes, members and spans at 0, 1 and 3", () => {
+    // Red if any field of an automation, its control-address target (optional ID, slot, control
+    // and lane fields), a span, the offset, or a VCA is out of order, at the wrong width, with the
+    // wrong mandatory flag or miscounted: the codec then decodes other edits, which re-encode to
+    // other bytes, or refuses the frame.
+    const target = (lane) => ({ owner: { kind: "strip", id: "t" }, section: { kind: "inserts", effect: "eq" }, control: "band_1_gain_db", lane });
+    const ramp = { shape: "linear", startSample: 0, endSample: 4800, startValue: -6, endValue: 3 };
+    const base = session({ id: "tx.automation", sampleRateHz: 48_000 })
+      .console({ preInsert: [{ slot: "comp", effectId: "miso.compressor" }] })
+      .source("a", stereo)
+      .track("t", { source: "a", console: [{ slot: "comp" }], inserts: [effect("miso.parametric-eq", {}, { slotId: "eq" })] })
+      .track("u", { source: "a", console: [{ slot: "comp" }] })
+      .submix("bus")
+      .output("main")
+      .route({ id: "send", source: { kind: "track", trackId: "t", tap: "post_fader" }, destination: { kind: "submix_input", submixId: "bus" } })
+      .vca("old", { members: ["u"] })
+      .automation({ id: "a1", target: target("both"), segments: [ramp] });
+    const edits = transaction(base)
+      .upsertVca("empty", { members: [] })
+      .upsertVca("grp", { fader: { leftDb: -3, rightMute: true }, members: ["u", "t", "bus"] })
+      .upsertVca("top", { fader: { rightDb: 2.5 }, members: ["grp"] })
+      .removeVca("old")
+      .upsertAutomation({
+        id: "a2",
+        target: target("left"),
+        segments: [
+          { shape: "step", startSample: 0, endSample: 10, startValue: 1, endValue: 1 },
+          { shape: "linear", startSample: 10, endSample: 480, startValue: 1, endValue: -2 },
+          { shape: "exponential", startSample: 480, endSample: 9_007_199_254_740_991n, startValue: 0.5, endValue: 2 },
+        ],
+      })
+      .upsertAutomation({
+        id: "a3",
+        target: { owner: { kind: "strip", id: "u" }, section: { kind: "builtins" }, control: "fader_db", lane: "both" },
+        segments: [{ shape: "linear", startSample: 0, endSample: 96, startValue: -12, endValue: 0 }],
+        offset: { leftDb: -1.5, rightDb: 0.5 },
+      })
+      .upsertAutomation({
+        id: "a4",
+        target: { owner: { kind: "strip", id: "t" }, section: { kind: "console", slot: "comp" }, control: "threshold_db", lane: "right" },
+        segments: [{ shape: "linear", startSample: 0, endSample: 96, startValue: -20, endValue: -10 }],
+      })
+      .upsertAutomation({
+        id: "a5",
+        target: { owner: { kind: "vca", id: "grp" }, section: { kind: "own" }, control: "offset_db", lane: "left" },
+        segments: [{ shape: "linear", startSample: 0, endSample: 96, startValue: -6, endValue: 0 }],
+      })
+      .setAutomationTarget("a1", target("right"))
+      .setAutomationSegments("a1", [{ shape: "step", startSample: 100, endSample: 200, startValue: 2, endValue: 2 }])
+      .setAutomationSegments("a2", [ramp, { ...ramp, startSample: 4800, endSample: 9600 }, { ...ramp, startSample: 9600, endSample: 9601 }])
+      .removeAutomation("a4");
+    assertCodecBytes(oracle(base, [edits.build()]));
+  });
+
   test("each snapshot after a transaction is the document a session builder declares directly", () => {
     // Red if a byte-valid encoder maps a spec field to the wrong model field (left and right
     // builtins swapped, the fader's or pan's lanes crossed, a parameter on the wrong channel, a
@@ -321,6 +375,41 @@ describe("session transactions encode as the engine's codec does", () => {
       .route(send)
       .route({ id: "out", source: { kind: "submix", submixId: "bus", tap: "post_fader" }, destination: { kind: "output_input", outputId: "alt" } });
     assert.equal(answer.ok, expected.toJson());
+  });
+
+  test("automation and VCA edits land on the entity and field they name", () => {
+    // Red if a byte-valid encoder maps a spec field to the wrong model field (a VCA's members or
+    // its fader lanes crossed, an automation target's lane, slot or row, a span's start and end, or
+    // the offset's lanes swapped): the store's snapshot then differs from the builder's document.
+    const declare = (revision) => session({ id: "tx.automation.semantics", sampleRateHz: 48_000, revision })
+      .source("a", stereo)
+      .track("t", { source: "a", inserts: [effect("miso.parametric-eq", {}, { slotId: "eq" })] })
+      .track("u", { source: "a" });
+    const vca = { fader: { leftDb: -4, rightMute: true }, members: ["u", "t"] };
+    const gain = {
+      id: "gain",
+      target: { owner: { kind: "strip", id: "t" }, section: { kind: "inserts", effect: "eq" }, control: "band_1_gain_db", lane: "left" },
+      segments: [
+        { shape: "linear", startSample: 0, endSample: 4800, startValue: -6, endValue: 3 },
+        { shape: "step", startSample: 4800, endSample: 9600, startValue: 1.5, endValue: 1.5 },
+      ],
+    };
+    const ride = {
+      id: "ride",
+      target: { owner: { kind: "strip", id: "u" }, section: { kind: "builtins" }, control: "fader_db", lane: "right" },
+      segments: [{ shape: "linear", startSample: 96, endSample: 960, startValue: -20, endValue: -2 }],
+      offset: { rightDb: -1.25 },
+    };
+    const base = declare(0).automation({ ...ride, segments: [{ shape: "step", startSample: 0, endSample: 1, startValue: 0, endValue: 0 }] });
+    const edits = transaction(base)
+      .upsertVca("grp", vca)
+      .upsertAutomation(gain)
+      .setAutomationSegments("ride", ride.segments)
+      .setAutomationTarget("ride", ride.target)
+      .removeAutomation("ride")
+      .upsertAutomation(ride);
+    const [answer] = oracle(base, [edits.build()]);
+    assert.equal(answer.ok, declare(1).vca("grp", vca).automation(gain).automation(ride).toJson());
   });
 
   test("rack and effect edits land on the strip, insert and field they name", () => {
@@ -485,6 +574,66 @@ describe("the builder refuses what the engine would refuse, before any byte exis
     refused(() => tx.setRouteDestination("send", { kind: "output_input", outputId: "missing" }), /setRouteDestination\("send"\)\.destination\.outputId: 'missing' is not a declared output/);
     // The base send follows its source's mute by default, so it cannot be pointed at the output.
     refused(() => tx.setRouteDestination("send", { kind: "output_input", outputId: "main" }), /setRouteDestination\("send"\)\.destination: follows_mute applies only/);
+    refused(() => tx.build(), /at least one edit/);
+  });
+
+  test("an automation target or span the session builder refuses, with the builder's own text", () => {
+    // Red if the transaction path skips `resolveAutomationTarget` or the span rules: it then
+    // writes automation the store keeps, aimed at no control, or refuses only after a round trip,
+    // with a message unlike the one `SessionBuilder.automation` gives for the same spec.
+    const base = session({ id: "tx.automation.refusals", sampleRateHz: 48_000 })
+      .source("a", mono)
+      .track("t", { source: "a", inserts: [effect("miso.parametric-eq", {}, { slotId: "eq" })] })
+      .automation({
+        id: "ride",
+        target: { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: "fader_db", lane: "both" },
+        segments: [{ shape: "linear", startSample: 0, endSample: 10, startValue: -6, endValue: 0 }],
+      });
+    const tx = transaction(base);
+    const span = [{ shape: "linear", startSample: 0, endSample: 10, startValue: 0, endValue: 1 }];
+    const targets = [
+      { owner: { kind: "strip", id: "t" }, section: { kind: "inserts", effect: "gone" }, control: "band_1_gain_db", lane: "both" },
+      { owner: { kind: "strip", id: "t" }, section: { kind: "inserts", effect: "eq" }, control: "band_1_gain", lane: "both" },
+      { owner: { kind: "strip", id: "missing" }, section: { kind: "own" }, control: "solo", lane: "both" },
+      { owner: { kind: "vca", id: "t" }, section: { kind: "own" }, control: "offset_db", lane: "both" },
+      { owner: { kind: "session" }, section: { kind: "own" }, control: "master", lane: "both" },
+    ];
+    const builderText = (spec) => {
+      try {
+        base.automation(spec).toJSON();
+      } catch (error) {
+        assert.ok(error instanceof MisoUsageError);
+        return error.message.replace(/^automation\("[^"]*"\)/, "");
+      }
+      assert.fail("the session builder refuses it");
+    };
+    const sameText = (call, prefix, text) => assert.throws(call, (error) => {
+      assert.ok(error instanceof MisoUsageError, `expected a MisoUsageError, got ${error}`);
+      assert.equal(error.message, `${prefix}${text}`);
+      return true;
+    });
+    for (const target of targets) {
+      const text = builderText({ id: "x", target, segments: span });
+      sameText(() => tx.upsertAutomation({ id: "x", target, segments: span }), 'upsertAutomation("x")', text);
+      sameText(() => tx.setAutomationTarget("ride", target), 'setAutomationTarget("ride")', text);
+    }
+    const rideTarget = { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: "fader_db", lane: "both" };
+    for (const segments of [[], [{ ...span[0], endSample: 0 }], [{ ...span[0], shape: "exponential" }]]) {
+      const text = builderText({ id: "x", target: rideTarget, segments });
+      sameText(() => tx.setAutomationSegments("ride", segments), 'setAutomationSegments("ride")', text);
+      sameText(() => tx.upsertAutomation({ id: "x", target: rideTarget, segments }), 'upsertAutomation("x")', text);
+    }
+    // A span keeps its unit: a fader ride in dB cannot be re-pointed at a linear pan.
+    refused(
+      () => tx.setAutomationTarget("ride", { owner: { kind: "strip", id: "t" }, section: { kind: "builtins" }, control: "pan", lane: "both" }),
+      /setAutomationTarget\("ride"\)\.target\.control: the row is in linear and this automation's spans are in db/,
+    );
+    refused(() => tx.removeAutomation("missing"), /removeAutomation\("missing"\)\.id: 'missing' is not a declared automation/);
+    refused(() => tx.upsertVca("grp", { members: ["t", "t"] }), /upsertVca\("grp"\)\.members\[1\]: 't' is already a member/);
+    refused(() => tx.upsertVca("grp", { members: ["nobody"] }), /upsertVca\("grp"\)\.members\[0\]: 'nobody' is not a declared track, submix or VCA/);
+    refused(() => tx.upsertVca("grp", { members: [], fader: { leftDb: 30 } }), /upsertVca\("grp"\)\.fader\.leftDb: a VCA offset is in/);
+    refused(() => tx.upsertVca("t", { members: [] }), /upsertVca\("t"\)\.id: tracks, submixes, VCAs and outputs share one ID namespace/);
+    refused(() => tx.removeVca("missing"), /removeVca\("missing"\)\.id: 'missing' is not a declared VCA/);
     refused(() => tx.build(), /at least one edit/);
   });
 });
