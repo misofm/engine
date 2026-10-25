@@ -100,13 +100,8 @@ fn limits(maximum_document_bytes: u64) -> ControlLimits {
 }
 
 fn boot(document: &str, maximum_document_bytes: u64) -> CompiledChildren<Adapter> {
-    compile_children::<Adapter>(
-        document,
-        limits(maximum_document_bytes),
-        Box::new(Preparer),
-        None,
-    )
-    .expect("boot compile")
+    compile_children::<Adapter>(document, limits(maximum_document_bytes), Box::new(Preparer))
+        .expect("boot compile")
 }
 
 fn model(document: &str) -> SessionModel {

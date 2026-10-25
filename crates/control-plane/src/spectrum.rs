@@ -78,7 +78,7 @@ pub(crate) struct ReadParts<'a> {
 /// spectrum allocates nothing for it (#1593 gate 7).
 pub struct SpectrumMonitor {
     configuration: Option<SpectrumConfiguration>,
-    /// 0 with no configuration at boot; one more at every change.
+    /// 0 at boot; one more at every change.
     configured_epoch: u64,
     /// The configuration epoch of the captures the service reads.
     adopted_epoch: u64,
@@ -132,30 +132,17 @@ pub(crate) struct SpectrumDisplaced {
 }
 
 impl SpectrumMonitor {
-    /// The boot monitor (#1593 D2): `configuration` and the captures the first plan prepared for
-    /// it, at the session's rate and quantum. Both epochs start at 1 with a configuration and at 0
-    /// without one.
-    pub(crate) fn new(
-        configuration: Option<SpectrumConfiguration>,
-        captures: Option<PreparedSpectrumCaptures>,
-        sample_rate_hz: u32,
-        quantum_frames: u32,
-    ) -> Self {
-        let epoch = u64::from(configuration.is_some());
-        let service = configuration.as_ref().and_then(|configuration| {
-            captures.map(|captures| {
-                SpectrumService::new(captures, sample_rate_hz, quantum_frames, configuration.hop)
-            })
-        });
-        let analysis = service.as_ref().map(|_| SpectrumAnalysis::new());
-        let one_shot = service.as_ref().map(|_| OneShot::boxed());
+    /// The boot monitor (#1593 D2, #1597): no configuration, both epochs 0, and no service, at the
+    /// session's rate and quantum. A `SPECTRUM_CONFIGURE` sets the taps; the promotion of its plan
+    /// makes the service ([`Self::adopt`]).
+    pub(crate) const fn new(sample_rate_hz: u32, quantum_frames: u32) -> Self {
         Self {
-            configuration,
-            configured_epoch: epoch,
-            adopted_epoch: epoch,
-            service,
-            analysis,
-            one_shot,
+            configuration: None,
+            configured_epoch: 0,
+            adopted_epoch: 0,
+            service: None,
+            analysis: None,
+            one_shot: None,
             sample_rate_hz,
             quantum_frames,
         }

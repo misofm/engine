@@ -331,6 +331,13 @@ fn spectrum_invariant(failure: CompileFailure) -> CommandError {
     }
 }
 
+/// The plan a host lends one command ([`SessionState::command_with_plan`]), with the reader
+/// list of its running plan.
+struct LentPlan<'a, A: ControlAdapter> {
+    plan: &'a mut PlanState<A>,
+    readers: fn(&mut PlanState<A>) -> &[host_core::EffectObservationHandle],
+}
+
 /// How a `SPECTRUM_CONFIGURE` is refused (#1594 D4): a typed reply, recorded for replay, or a
 /// retryable or internal error that records nothing.
 enum SpectrumRefusal {
@@ -531,26 +538,6 @@ fn tap_fits(channels: protocol::ParameterChannel, target_id_bytes: usize, limit:
         target_id_bytes,
         limit,
     ) && stream_reply_fits(channels, target_id_bytes, limit)
-}
-
-/// #1595 R6 on a boot configuration: whether every tap of `preparation` passes [`tap_fits`].
-pub(crate) fn preparation_fits(preparation: &host_core::SpectrumPreparation, limit: u64) -> bool {
-    match preparation {
-        host_core::SpectrumPreparation::Single(request) => tap_fits(
-            protocol_channels(request.channels),
-            spectrum_target_id(&request.target).len(),
-            limit,
-        ),
-        host_core::SpectrumPreparation::Collection(request) => {
-            request.entries.iter().all(|entry| {
-                tap_fits(
-                    protocol_channels(entry.channels),
-                    spectrum_target_id(&entry.target).len(),
-                    limit,
-                )
-            })
-        }
-    }
 }
 
 const fn protocol_target_kind(target: &host_core::SpectrumTarget) -> protocol::SpectrumTargetKind {
@@ -3303,14 +3290,16 @@ where
     }
 
     /// The session's spectrum monitor (#1593): its configuration, epochs, service and analysis.
+    /// Test support (#1597): every host reads spectrum through the session's frames.
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub const fn spectrum_monitor(&self) -> &crate::spectrum::SpectrumMonitor {
         &self.spectrum
     }
 
-    /// The session's spectrum monitor, for the service's arm, read and stream calls (#1593): the
-    /// browser's own spectrum exports read the session's one service through it until #1597
-    /// deletes them (#1596 R1).
+    /// The session's spectrum monitor, for a test's direct arm, read and stream calls on the
+    /// service (#1593). Test support (#1597): no host calls the service but through the frames.
+    #[cfg(feature = "test-support")]
     pub fn spectrum_monitor_mut(&mut self) -> &mut crate::spectrum::SpectrumMonitor {
         &mut self.spectrum
     }
@@ -4131,22 +4120,38 @@ where
         self.command_with_readers(request, document, output_capacity, None)
     }
 
-    /// [`Self::command_with_document`] for an adapter whose preparer keeps its plans' observation
-    /// readers in the plan (the browser's, [`crate::RuntimePreparer::kept_observations`]):
-    /// `readers` is the reader list of the plan of epoch `epoch`, the one render runs, lent for
-    /// this call only. An `OBSERVATION_READ` reads them through the running plan's index (#1589
-    /// R2) and faults (`Internal`) when `epoch` is any other plan's, so the index and the readers
-    /// are always one plan's, and a tap the swap block carried reads the reader it publishes to.
-    /// Every other command ignores them.
-    pub fn command_with_plan_observations(
+    /// [`Self::command_with_document`] for a host that holds the session's plan beside it, between
+    /// blocks (the browser, whose one instance renders and serves control), lent for this call
+    /// only:
+    ///
+    /// - An adapter whose preparer keeps its plans' observation readers in the plan
+    ///   ([`crate::RuntimePreparer::kept_observations`]) reads them with `readers`, the reader
+    ///   list of the plan render runs. An `OBSERVATION_READ` reads them through the running plan's
+    ///   index (#1589 R2) and faults (`Internal`) when the plan's epoch is any other plan's, so the
+    ///   index and the readers are always one plan's.
+    /// - A `SPECTRUM_CONFIGURE` that prepares a successor before the plan's first block has the
+    ///   plan adopt it in place (#1597, through
+    ///   [`engine::realtime::RealtimePlanOwner::adopt_before_first_block`]) and promotes it, so
+    ///   its reply reports `adopted_epoch == configured_epoch` and a capture armed now covers
+    ///   the first block. No render has adopted anything yet, so this is the plan the first block
+    ///   would have adopted: a boot configures its taps through the command and still gets them in
+    ///   the plan that renders sample 0.
+    ///
+    /// Every other command ignores the plan.
+    pub fn command_with_plan(
         &mut self,
         request: &[u8],
         document: &[u8],
         output_capacity: u64,
-        epoch: u64,
-        readers: &[host_core::EffectObservationHandle],
+        plan: &mut PlanState<A>,
+        readers: fn(&mut PlanState<A>) -> &[host_core::EffectObservationHandle],
     ) -> Result<usize, CommandError> {
-        self.command_with_readers(request, document, output_capacity, Some((epoch, readers)))
+        self.command_with_readers(
+            request,
+            document,
+            output_capacity,
+            Some(LentPlan { plan, readers }),
+        )
     }
 
     /// The `OBSERVATION_READ` index of the plan of epoch `epoch` (#1586 D6, #1589 R2): the
@@ -4164,13 +4169,13 @@ where
             .map(|provider| &provider.observation_index)
     }
 
-    /// The body of [`Self::command_with_document`], with the readers an adapter lends.
+    /// The body of [`Self::command_with_document`], with the plan a host lends.
     fn command_with_readers(
         &mut self,
         request: &[u8],
         document: &[u8],
         output_capacity: u64,
-        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
+        lent: Option<LentPlan<'_, A>>,
     ) -> Result<usize, CommandError> {
         let _canonical = lane::CanonicalFpEnv::enter();
         self.service()?;
@@ -4220,9 +4225,15 @@ where
                 written
             }
             // #1594 D9: a command the session executes.
-            PreparedCommandFrame::Session(prepared) => self.session_command(*prepared),
+            PreparedCommandFrame::Session(prepared) => {
+                self.session_command(*prepared, lent.map(|lent| lent.plan))
+            }
             // #1586 D6: the read, which allocates nothing.
             PreparedCommandFrame::ObservationRead(prepared) => {
+                let readers = lent.map(|lent| {
+                    let epoch = lent.plan.owner().active_epoch().0;
+                    (epoch, (lent.readers)(lent.plan))
+                });
                 self.observation_read(prepared, request, readers)
             }
             PreparedCommandFrame::Structural(prepared) => {
@@ -4448,6 +4459,7 @@ where
     fn session_command(
         &mut self,
         prepared: protocol::PreparedSessionCommand,
+        plan: Option<&mut PlanState<A>>,
     ) -> Result<usize, CommandError> {
         let request = match prepared.command() {
             protocol::SessionCommand::SpectrumConfigure(request) => request,
@@ -4460,7 +4472,7 @@ where
                 return self.complete_spectrum_stream(prepared, outcome);
             }
         };
-        let outcome = self.spectrum_configure(request);
+        let outcome = self.spectrum_configure(request, plan);
         match outcome {
             Ok(reply) => self
                 .controller
@@ -4993,6 +5005,7 @@ where
     fn spectrum_configure(
         &mut self,
         request: &protocol::SpectrumConfigureRequest,
+        plan: Option<&mut PlanState<A>>,
     ) -> Result<protocol::SpectrumConfigured, SpectrumRefusal> {
         use protocol::StatusCode;
         let configuration = spectrum_configuration_of(request)?;
@@ -5085,6 +5098,17 @@ where
             return Ok(reply(&self.spectrum, None));
         }
         let epoch = self.monitor_rebuild(configuration)?;
+        // #1597: before the first block, a lent plan adopts the successor in place, and the
+        // promotion installs its captures now. Not an ack before a drop: the candidate is adopted
+        // and nothing is lost if the promotion below fails, which only an `Internal` invariant
+        // fault can make it do; the reply is then not sent, and the next service step meets the
+        // same fault.
+        if let Some(plan) = plan
+            && plan.adopt_before_first_block()
+        {
+            self.synchronize_plan_epochs()
+                .map_err(SpectrumRefusal::Error)?;
+        }
         Ok(reply(&self.spectrum, Some(epoch)))
     }
 
@@ -8406,13 +8430,9 @@ mod tests {
             selection: Option<Vec<HostMeterRequest>>,
             meters: Vec<MeterEntry>,
         ) -> CompiledChildren<Adapter> {
-            let mut children = compile_children::<Adapter>(
-                SESSION,
-                limits(),
-                Box::new(Preparer { selection }),
-                None,
-            )
-            .expect("boot");
+            let mut children =
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer { selection }))
+                    .expect("boot");
             command(
                 &mut children,
                 1,
@@ -8895,8 +8915,7 @@ mod tests {
         fn declare_after(offset: u64) -> u64 {
             super::super::test_reset_lifecycle_observer();
             let mut children =
-                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer), None)
-                    .expect("boot");
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer)).expect("boot");
             if offset > 0 {
                 children.session.test_set_next_source_read_offset(offset);
             }
@@ -9271,7 +9290,6 @@ mod tests {
                     &document,
                     limits,
                     Box::new(Preparer(backend)),
-                    None,
                     warm,
                 )
                 .expect("boot");

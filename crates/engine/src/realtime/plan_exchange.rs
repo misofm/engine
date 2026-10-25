@@ -207,6 +207,10 @@ pub struct RealtimePlanOwner {
     /// (#882), `true` by default: such a swap restarts the host's meter grid at its adoption
     /// block, so the host's level for that block can differ from [`Self::strip_meters`].
     strip_meters_at_restart: bool,
+    /// Whether a render call reached the block-boundary adoption decision (#1597): `false`
+    /// until the first [`Self::render`] or [`Self::render_contiguous`] call, and so the window in
+    /// which [`Self::adopt_before_first_block`] adopts in place.
+    entered: bool,
     _not_sync: Cell<()>,
 }
 /// Fixed report proving which complete plan owned a rendered block.
@@ -516,6 +520,7 @@ fn plan_exchange_inner(
             clocks,
             strip_meters: true,
             strip_meters_at_restart: true,
+            entered: false,
             _not_sync: Cell::new(()),
         },
         PlanRetirer {
@@ -1018,6 +1023,7 @@ impl RealtimePlanOwner {
             // plan continues. A call at another sample renders nothing, so the clock, not the
             // argument, decides the adoption; a candidate due by the clock is still adopted here,
             // and its first rendered block starts at the clock.
+            self.entered = true;
             let block_start = self.active.1.next_absolute_sample();
             let (swap, carry) = self.enter_block(block_start);
             let active_epoch = self.active.0;
@@ -1065,6 +1071,7 @@ impl RealtimePlanOwner {
     ) -> Result<RealtimeRenderReport, RenderError> {
         super::audit::in_render_scope(|| {
             // The host's explicit time, not the plan's own clock, is the block's start.
+            self.entered = true;
             let (swap, carry) = self.enter_block(time.absolute_sample);
             let active_epoch = self.active.0;
             let (render, watermark) = self.render_active(io, time, swap)?;
@@ -1087,6 +1094,24 @@ impl RealtimePlanOwner {
 /// None renders, advances the clock or changes the plan's topology, and none is called inside a
 /// render call.
 impl RealtimePlanOwner {
+    /// Adopt the published candidate in place, before any block (#1597): the adoption decision
+    /// the first render call would make at the plan's clock, made now, on the owner's thread, by
+    /// the host that holds the owner and has not rendered through it. The candidate's state is
+    /// carried from the never-rendered plan it replaces, which goes to the retirement queue, so
+    /// the first block renders the candidate with no swap: the outcome the first plan would have
+    /// had, had it been prepared as the candidate was.
+    ///
+    /// Returns [`SwapOutcome::Applied`] when it adopted, and [`SwapOutcome::None`] with nothing
+    /// changed when a render call has already reached the owner, no candidate is published, or
+    /// the candidate's schedule does not admit the plan's clock. It allocates nothing.
+    pub fn adopt_before_first_block(&mut self) -> SwapOutcome {
+        if self.entered {
+            return SwapOutcome::None;
+        }
+        let block_start = self.active.1.next_absolute_sample();
+        self.enter_block(block_start).0
+    }
+
     /// [`PreparedRenderPlan::can_prepare_source_seek`] on the active plan.
     #[must_use]
     pub fn can_prepare_source_seek(&self, source_index: usize) -> bool {

@@ -279,7 +279,6 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_boot_diagnostic_bytes \
   miso_engine_web_v1_boot_options_ptr \
   miso_engine_web_v1_boot_result \
-  miso_engine_web_v1_boot_with_spectrum_hop \
   miso_engine_web_v1_buffer_capacity \
   miso_engine_web_v1_buffer_ptr \
   miso_engine_web_v1_command_report_ptr \
@@ -338,40 +337,6 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_seek_report_ptr \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr \
-  miso_engine_web_v1_spectrum_analysis \
-  miso_engine_web_v1_spectrum_arm \
-  miso_engine_web_v1_spectrum_cancel \
-  miso_engine_web_v1_spectrum_capture_bytes \
-  miso_engine_web_v1_spectrum_capture_capacity \
-  miso_engine_web_v1_spectrum_capture_ptr \
-  miso_engine_web_v1_spectrum_capture_set_bytes \
-  miso_engine_web_v1_spectrum_close \
-  miso_engine_web_v1_spectrum_collection_entry_bytes \
-  miso_engine_web_v1_spectrum_collection_entry_capacity \
-  miso_engine_web_v1_spectrum_collection_entry_ptr \
-  miso_engine_web_v1_spectrum_collection_request_bytes \
-  miso_engine_web_v1_spectrum_collection_request_ptr \
-  miso_engine_web_v1_spectrum_collection_target_ids_capacity \
-  miso_engine_web_v1_spectrum_collection_target_ids_ptr \
-  miso_engine_web_v1_spectrum_hop_capability \
-  miso_engine_web_v1_spectrum_read \
-  miso_engine_web_v1_spectrum_request_bytes \
-  miso_engine_web_v1_spectrum_request_ptr \
-  miso_engine_web_v1_spectrum_result_bytes \
-  miso_engine_web_v1_spectrum_result_ptr \
-  miso_engine_web_v1_spectrum_select \
-  miso_engine_web_v1_spectrum_selection_epoch \
-  miso_engine_web_v1_spectrum_stream_analysis \
-  miso_engine_web_v1_spectrum_stream_analysis_configure \
-  miso_engine_web_v1_spectrum_stream_metadata_bytes \
-  miso_engine_web_v1_spectrum_stream_metadata_ptr \
-  miso_engine_web_v1_spectrum_stream_read \
-  miso_engine_web_v1_spectrum_stream_reset \
-  miso_engine_web_v1_spectrum_stream_select \
-  miso_engine_web_v1_spectrum_stream_start \
-  miso_engine_web_v1_spectrum_stream_stop \
-  miso_engine_web_v1_spectrum_target_id_capacity \
-  miso_engine_web_v1_spectrum_target_id_ptr \
   miso_engine_web_v1_track_response_analysis \
   miso_engine_web_v1_track_response_capture \
   miso_engine_web_v1_track_response_close \

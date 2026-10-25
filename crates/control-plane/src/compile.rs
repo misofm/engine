@@ -2063,19 +2063,18 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 /// `preparer` (issue #1400 D2) is the adapter's preparation: the session stores it and prepares
 /// the boot plan and every structural successor through it, and through nothing else.
 ///
-/// `spectrum` is the session's spectrum monitor configuration (#1593 D2): the first plan is
-/// prepared with it, and the session's monitor starts at configuration epoch 1 with one and 0
-/// without. It is monitor state: no revision, model or snapshot holds it.
+/// The first plan has no spectrum taps, and the session's monitor starts at configuration epoch 0
+/// (#1597): a host sets the taps with `SPECTRUM_CONFIGURE`, which before the first block replaces
+/// the boot plan in place ([`crate::SessionState::command_with_plan`]).
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
     limits: ControlLimits,
     preparer: Box<dyn RuntimePreparer>,
-    spectrum: Option<host_core::SpectrumConfiguration>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
     A::Row: Send + 'static,
 {
-    compile_children_warm(document, limits, preparer, spectrum, None)
+    compile_children_warm(document, limits, preparer, None)
 }
 
 /// [`compile_children`] with the session's warm-successor bounds (#1403 D1): with
@@ -2087,7 +2086,6 @@ pub(crate) fn compile_children_warm<A: ControlAdapter>(
     document: &str,
     mut limits: ControlLimits,
     preparer: Box<dyn RuntimePreparer>,
-    spectrum: Option<host_core::SpectrumConfiguration>,
     warm: Option<host_core::WarmConfig>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
@@ -2112,16 +2110,6 @@ where
         .map_err(prepare_failure)?;
     let store =
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
-    // #1595 R6 at boot: every session serves the spectrum reads, so a boot refuses a tap no read
-    // can carry within the frame limit, as `SPECTRUM_CONFIGURE` does.
-    if spectrum.as_ref().is_some_and(|configuration| {
-        !crate::control::preparation_fits(
-            &configuration.preparation,
-            limits.maximum_control_frame_bytes,
-        )
-    }) {
-        return Err(CompileFailure::Diagnostics(b"spectrum.frame\t$\n".to_vec()));
-    }
     // #1312 D2: the session's `live_values_superseded` count, one for every plan it prepares.
     // Made here, with the session's other fixed rows, and charged by `capi_resources`.
     let live_values_superseded = host_core::LiveValuesSuperseded::default();
@@ -2129,9 +2117,7 @@ where
         &*preparer,
         store.compiled(),
         limits,
-        spectrum
-            .as_ref()
-            .map(|configuration| &configuration.preparation),
+        None,
         None,
         &live_values_superseded,
         0,
@@ -2180,14 +2166,11 @@ where
         inventory,
         control_catalog,
         capi,
-        spectrum: captures,
+        // The boot plan is prepared with no spectrum configuration, so it has no captures.
+        spectrum: _,
     } = runtime;
-    let spectrum = crate::spectrum::SpectrumMonitor::new(
-        spectrum,
-        captures,
-        resources.sample_rate_hz,
-        resources.quantum_frames,
-    );
+    let spectrum =
+        crate::spectrum::SpectrumMonitor::new(resources.sample_rate_hz, resources.quantum_frames);
     // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
     // own gate, and the watermark starts there.
     let (publisher, owner, retirer) = plan_exchange_at_revision(

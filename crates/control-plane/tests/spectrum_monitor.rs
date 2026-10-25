@@ -128,6 +128,48 @@ fn configuration() -> SpectrumConfiguration {
     }
 }
 
+/// `configuration` as the `SPECTRUM_CONFIGURE` that sets it.
+fn configure_request_of(configuration: &SpectrumConfiguration) -> SpectrumConfigureRequest {
+    let entry = |target: &SpectrumTarget, channels: SpectrumChannels| {
+        let (target_kind, id) = match target {
+            SpectrumTarget::TrackPostInputBuiltins(id) => (SpectrumTargetKind::TrackPostInput, id),
+            SpectrumTarget::TrackPostMatrix(id) => (SpectrumTargetKind::TrackPostPan, id),
+            SpectrumTarget::Output(id) => (SpectrumTargetKind::Output, id),
+        };
+        SpectrumEntry {
+            target_kind,
+            target_id: id.to_string(),
+            channels: match channels {
+                SpectrumChannels::Left => ParameterChannel::Left,
+                SpectrumChannels::Right => ParameterChannel::Right,
+                SpectrumChannels::Stereo => ParameterChannel::Both,
+            },
+        }
+    };
+    let (form, entries, maximum_capture_bytes) = match &configuration.preparation {
+        SpectrumPreparation::Single(request) => (
+            SpectrumForm::Single,
+            vec![entry(&request.target, request.channels)],
+            request.maximum_capture_bytes,
+        ),
+        SpectrumPreparation::Collection(request) => (
+            SpectrumForm::Collection,
+            request
+                .entries
+                .iter()
+                .map(|item| entry(&item.target, item.channels))
+                .collect(),
+            request.maximum_capture_bytes,
+        ),
+    };
+    SpectrumConfigureRequest {
+        form,
+        entries,
+        maximum_capture_bytes,
+        hop_frames: configuration.hop.map(host_core::SpectrumHop::get),
+    }
+}
+
 /// One quantum of a period-97 sawtooth from `frame` (a rich, exactly computed tone), left at
 /// twice the right's level.
 fn tone(frame: u64) -> ([f32; QUANTUM], [f32; QUANTUM]) {
@@ -177,15 +219,31 @@ impl Rig {
         limits: ControlLimits,
     ) -> Self {
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(document, limits, Box::new(Preparer), spectrum)
+            compile_children::<Adapter>(document, limits, Box::new(Preparer))
                 .expect("boot compile");
-        Self {
+        let mut rig = Self {
             session,
             plan,
             frame: 0,
             request: 0,
             output: Vec::new(),
+        };
+        // #1597: a boot's taps are one configure before the first block, adopted in place.
+        if let Some(configuration) = spectrum {
+            let reply = rig
+                .configure_lent(&configure_request_of(&configuration))
+                .expect("the boot configure");
+            assert_eq!(
+                (reply.configured_epoch, reply.adopted_epoch),
+                (1, 1),
+                "the boot's taps are in the plan of the first block"
+            );
+            assert_eq!(
+                rig.session.spectrum_monitor().configuration(),
+                Some(&configuration)
+            );
         }
+        rig
     }
 
     /// Feed and render one block, then run the session's service step (which promotes an
@@ -262,6 +320,22 @@ impl Rig {
         &mut self,
         request: &SpectrumConfigureRequest,
     ) -> Result<SpectrumConfigured, (StatusCode, String)> {
+        self.configure_with(request, false)
+    }
+
+    /// [`Self::configure`] with the plan lent to the command (#1597), as the browser sends it.
+    fn configure_lent(
+        &mut self,
+        request: &SpectrumConfigureRequest,
+    ) -> Result<SpectrumConfigured, (StatusCode, String)> {
+        self.configure_with(request, true)
+    }
+
+    fn configure_with(
+        &mut self,
+        request: &SpectrumConfigureRequest,
+        lend: bool,
+    ) -> Result<SpectrumConfigured, (StatusCode, String)> {
         self.request += 1;
         let codec = ProtocolCodec::default();
         let frame = TypedCommandFrame {
@@ -273,10 +347,13 @@ impl Rig {
         let length = codec
             .encode_command_frame_into(&frame, &mut bytes)
             .expect("configure command");
-        let length = self
-            .session
-            .command(&bytes[..length], 65_536)
-            .expect("a configure answers a frame");
+        let length = if lend {
+            self.session
+                .command_with_plan(&bytes[..length], &[], 65_536, &mut self.plan, |_| &[])
+        } else {
+            self.session.command(&bytes[..length], 65_536)
+        }
+        .expect("a configure answers a frame");
         let mut fields = [0_u16; 64];
         match codec
             .decode_typed_response(
@@ -523,6 +600,14 @@ impl Rig {
     }
 }
 
+/// Both rigs' `SESSION_SNAPSHOT_GET` frames under the same request IDs, so they compare byte for
+/// byte whatever each rig sent before (a boot's configure is one request more, #1597).
+fn snapshots(a: &mut Rig, b: &mut Rig) -> (Vec<u8>, Vec<u8>) {
+    let next = a.request.max(b.request);
+    (a.request, b.request) = (next, next);
+    (a.snapshot(), b.snapshot())
+}
+
 /// A `SPECTRUM_CAPTURE` response frame: its reply, or the refusal's status and code.
 /// A non-OK response frame's status, first diagnostic code and backpressure record.
 fn refusal_of(frame: &[u8]) -> (StatusCode, String, Option<protocol::Backpressure>) {
@@ -628,38 +713,44 @@ macro_rules! one_window {
     }};
 }
 
-/// Gate 1. Turns red if the session's configuration does not reach the first plan's graph: the
-/// session's window (armed at frame 0, read after 2,048 frames) equals, field by field, the window
-/// of `prepare_host_runtime_with_spectrum` on the same document fed the same PCM.
+/// Gate 1 (#1597: the boot's taps are its first configure). Turns red if a configure before the
+/// first block does not reach the plan that renders sample 0: on a session booted with no taps, a
+/// configure through the lent plan answers `rebuild` with the adopted epoch already the configured
+/// one and no candidate pending; a window armed then, before any block, equals bit for bit the
+/// reference's window armed at frame 0; and every block renders the bits of a session booted with
+/// no taps and never configured.
 #[test]
-fn the_first_plan_reads_the_reference_window() {
-    let mut rig = Rig::new(Some(configuration()));
-    assert_eq!(rig.session.spectrum_monitor().configured_epoch(), 1);
-    assert_eq!(rig.session.spectrum_monitor().adopted_epoch(), 1);
-    let got: SpectrumSnapshot = one_window!(rig.service(), rig.block());
+fn a_configure_before_the_first_block_reaches_sample_zero() {
+    let mut rig = Rig::new(None);
+    let reply = rig.configure_lent(&single_request()).expect("configure");
+    assert!(reply.rebuild);
+    assert_eq!((reply.configured_epoch, reply.adopted_epoch), (1, 1));
+    assert!(rig.session.test_pending_providers().is_empty());
+    let mut plain = Rig::new(None);
     let mut reference = Reference::new();
-    let want: SpectrumSnapshot = one_window!(reference.service, reference.block());
-    assert_eq!(got.target_kind, want.target_kind);
-    assert_eq!(got.sample_rate_hz, want.sample_rate_hz);
-    assert_eq!(got.token, want.token);
-    assert_eq!(got.window.first_sample, want.window.first_sample);
-    assert_eq!(got.window.channels, want.window.channels);
-    assert_eq!(got.window.source_underrun, want.window.source_underrun);
-    for (got, want) in [
-        (&got.window.left, &want.window.left),
-        (&got.window.right, &want.window.right),
-    ] {
-        assert!(
-            got.iter().any(|sample| *sample != 0.0),
-            "a window of signal"
-        );
-        assert!(
-            got.iter()
-                .zip(want)
-                .all(|(got, want)| got.to_bits() == want.to_bits()),
-            "the planes equal the reference's bit for bit"
-        );
+    rig.service().arm().expect("arm before the first block");
+    reference.service.arm().expect("arm the reference");
+    for _ in 0..SPECTRUM_WINDOW_FRAMES / QUANTUM {
+        rig.block();
+        plain.block();
+        reference.block();
+        assert_eq!(rig.output, plain.output, "a block of other bits");
     }
+    let got = rig
+        .service()
+        .read(SpectrumChannels::Stereo)
+        .expect("read")
+        .expect("a complete window");
+    let want = reference
+        .service
+        .read(SpectrumChannels::Stereo)
+        .expect("read")
+        .expect("a complete window");
+    assert_eq!(got.window.first_sample, 0);
+    assert_eq!(got.window.first_sample, want.window.first_sample);
+    assert!(got.window.left.iter().any(|sample| *sample != 0.0));
+    assert!(same_words(&got.window.left, &want.window.left));
+    assert!(same_words(&got.window.right, &want.window.right));
 }
 
 /// Gate 5. Turns red if spectrum state leaks into the model, the revision or the snapshot: a
@@ -682,10 +773,12 @@ fn the_configuration_is_in_no_revision_and_no_snapshot() {
     );
     let revision = |rig: &Rig| rig.session.test_controller().session().revision();
     assert_eq!(revision(&configured), revision(&plain));
-    assert_eq!(configured.snapshot(), plain.snapshot());
+    let (got, want) = snapshots(&mut configured, &mut plain);
+    assert_eq!(got, want);
     let _: SpectrumSnapshot = one_window!(configured.service(), configured.block());
     assert_eq!(revision(&configured), revision(&plain));
-    assert_eq!(configured.snapshot(), plain.snapshot());
+    let (got, want) = snapshots(&mut configured, &mut plain);
+    assert_eq!(got, want);
 }
 
 fn id(text: &str) -> StableId {
@@ -873,11 +966,8 @@ fn a_structural_edit_carries_the_stream() {
         "the successor was promoted"
     );
     assert_continuous(&reads);
-    assert_eq!(
-        rig.snapshot(),
-        plain.snapshot(),
-        "no spectrum in the snapshot"
-    );
+    let (got, want) = snapshots(&mut rig, &mut plain);
+    assert_eq!(got, want, "no spectrum in the snapshot");
 
     let mut reference = Rig::of(&document_after(&edits), Some(collection()));
     reference.select(&eq0, SpectrumChannels::Stereo);
@@ -940,11 +1030,8 @@ fn a_removed_target_drops_its_entry_and_its_arm() {
         (monitor.configured_epoch(), monitor.adopted_epoch()),
         (2, 2)
     );
-    assert_eq!(
-        rig.snapshot(),
-        plain.snapshot(),
-        "no spectrum in the snapshot"
-    );
+    let (got, want) = snapshots(&mut rig, &mut plain);
+    assert_eq!(got, want, "no spectrum in the snapshot");
 
     rig.rebuild(&remove_track("eq0"));
     plain.rebuild(&remove_track("eq0"));
@@ -955,11 +1042,8 @@ fn a_removed_target_drops_its_entry_and_its_arm() {
     let monitor = rig.session.spectrum_monitor();
     assert!(monitor.service().is_none() && monitor.analysis().is_none());
     assert_eq!(monitor.adopted_epoch(), 3);
-    assert_eq!(
-        rig.snapshot(),
-        plain.snapshot(),
-        "no spectrum in the snapshot"
-    );
+    let (got, want) = snapshots(&mut rig, &mut plain);
+    assert_eq!(got, want, "no spectrum in the snapshot");
 
     let mut armed = Rig::new(Some(collection()));
     armed.block();
@@ -2553,16 +2637,4 @@ fn a_stream_read_at_the_frame_limit_delivers_its_gap() {
         let mut exact = Rig::limited(SESSION, None, at(fits));
         assert!(exact.configure(request).is_ok(), "{fits}");
     }
-    let boot = |limit| {
-        compile_children::<Adapter>(
-            SESSION,
-            at(limit),
-            Box::new(Preparer),
-            Some(configuration()),
-        )
-        .map(|_| ())
-        .map_err(|failure| failure.diagnostic().into_owned())
-    };
-    assert_eq!(boot(stereo - 1), Err(b"spectrum.frame\t$\n".to_vec()));
-    assert_eq!(boot(stereo), Ok(()));
 }

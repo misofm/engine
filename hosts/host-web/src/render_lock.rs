@@ -16,11 +16,8 @@
 //! post, and not only the `boot` export: `initialize` calls exports before the `boot` export and
 //! after it returns. "After boot" is after that post. Boot is outside the render-locked rule:
 //!
-//! - Before the `boot` export (or `boot_with_spectrum_hop`), it calls, as its options require,
-//!   `abi_version`, `spectrum_hop_capability`, `boot_options_ptr`, the spectrum request and
-//!   collection accessors (`spectrum_request_*`, `spectrum_collection_*`) and `document_ptr`.
-//!   None of them is wrapped, and neither is the `boot` export: there the collection staging is
-//!   sized and allocated by design.
+//! - Before the `boot` export, it calls `abi_version`, `boot_options_ptr` and `document_ptr`.
+//!   None of them is wrapped, and neither is the `boot` export, which allocates by design.
 //! - After the `boot` export returns a handle, the unwrapped exports it can call are these 18:
 //!   `buffer_ptr`, `buffer_capacity`, `status_ptr`, `resource_ptr`, `command_report_ptr`,
 //!   `source_count`, `source_id`, `source_channels`, `source_frames`,
@@ -29,9 +26,8 @@
 //!   `observation_tap_count`, `observation_tap_id` and `meter_header_ptr`.
 //! - When `document_ptr` or the `boot` export returns 0, it calls `boot_result`, which is not
 //!   wrapped either.
-//! - It can also call render-locked exports, and those calls are counted: `spectrum_target_id_ptr`
-//!   and `spectrum_target_id_capacity` before the `boot` export, and after it eleven staging
-//!   accessors: `observation_id_ptr`, `observation_id_capacity`, `observation_selection_ptr`,
+//! - It can also call render-locked exports, and those calls are counted: after the `boot` export
+//!   eleven staging accessors: `observation_id_ptr`, `observation_id_capacity`, `observation_selection_ptr`,
 //!   `observation_selection_bytes`, `observation_selection_capacity`,
 //!   `track_response_request_ptr`, `track_response_request_bytes`, `track_response_track_id_ptr`,
 //!   `track_response_track_id_capacity`, `track_response_snapshot_ptr` and

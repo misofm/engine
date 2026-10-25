@@ -47,8 +47,10 @@ import {
   cloneSpectrumQuery,
   cloneSpectrumStreamMetadata,
   spectrumCaptureWindowBytes,
+  SPECTRUM_MAXIMUM_CAPTURE_BYTES,
   spectrumRefusalResult,
 } from "./spectrum.ts";
+import { SPECTRUM_FRAME_BIN_COUNT } from "./spectrum-frame.ts";
 import type {
   SpectrumCollection,
   SpectrumQuery,
@@ -863,8 +865,8 @@ export class ObservationSubscriptionOwner {
     const hopFrames = this.#spectrumJob?.metadata.hopFrames ?? 0;
     return Object.freeze({
       ...subscriptionLimits,
-      maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
-      maximumResultBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+      maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES,
+      maximumResultBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES,
       hopFrames,
     });
   }
@@ -1968,7 +1970,7 @@ export class ObservationSubscriptionOwner {
     const prepared = this.#transport.spectrumPrepared?.();
     const maximumCaptureBytes = configuration.spectrumLimits?.maximumCaptureBytes
       ?? prepared?.spectrumLimits?.maximumCaptureBytes
-      ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
+      ?? SPECTRUM_MAXIMUM_CAPTURE_BYTES;
     const requestDeadlineMs = configuration.spectrumLimits?.requestDeadlineMs ?? 5_000;
     return cloneSpectrumQuery({
       target: configuration.target,
@@ -1985,7 +1987,7 @@ export class ObservationSubscriptionOwner {
     const query = this.#spectrumQuery(configuration);
     const maximumCaptureBytes = query.spectrumLimits!.maximumCaptureBytes!;
     const preparedMaximumCaptureBytes = this.#transport.spectrumPrepared?.()?.spectrumLimits?.maximumCaptureBytes
-      ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
+      ?? SPECTRUM_MAXIMUM_CAPTURE_BYTES;
     if (maximumCaptureBytes > preparedMaximumCaptureBytes) {
       throw new MisoUsageError("the spectrum capture limit exceeds the prepared bound");
     }
@@ -2751,7 +2753,7 @@ function spectrumJobKey(configuration: SpectrumSubscriptionConfiguration, query?
     spectrumTargetKey(configuration.target),
     configuration.channels,
     configuration.smoothingMs,
-    effectiveQuery.spectrumLimits?.maximumCaptureBytes ?? ABI_LAYOUT.constants.spectrumCaptureBytes,
+    effectiveQuery.spectrumLimits?.maximumCaptureBytes ?? SPECTRUM_MAXIMUM_CAPTURE_BYTES,
     effectiveQuery.spectrumLimits?.requestDeadlineMs ?? 5_000,
   ]);
 }
@@ -2760,14 +2762,14 @@ function spectrumCaptureKey(query: SpectrumQuery): string {
   return JSON.stringify([
     spectrumTargetKey(query.target),
     query.channels ?? "both",
-    query.spectrumLimits?.maximumCaptureBytes ?? ABI_LAYOUT.constants.spectrumCaptureBytes,
+    query.spectrumLimits?.maximumCaptureBytes ?? SPECTRUM_MAXIMUM_CAPTURE_BYTES,
     query.spectrumLimits?.requestDeadlineMs ?? 5_000,
   ]);
 }
 
 function spectrumVectorBytes(channels: SpectrumSubscriptionConfiguration["channels"]): number {
   const channelCount = channels === "both" ? 2 : 1;
-  return ABI_LAYOUT.constants.spectrumBinCount * Float32Array.BYTES_PER_ELEMENT * (channelCount + 1);
+  return SPECTRUM_FRAME_BIN_COUNT * Float32Array.BYTES_PER_ELEMENT * (channelCount + 1);
 }
 
 function spectrumDeliveryRate(bytes: number, cadenceMs: number): number {
