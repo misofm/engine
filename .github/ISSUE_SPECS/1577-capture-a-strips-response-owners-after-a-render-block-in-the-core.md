@@ -230,6 +230,11 @@ tracks, input filters, an EQ insert and an EQ console slot:
   channel holds one job, and the client pushes a request only when it holds no reply, so the
   reply queue is empty whenever render pushes.
 
+- **Removal after #1325 (attempt 3 merge).** A removal now ducks its strip out and adopts its plan
+  later (`PlanAdoption::NoEarlierThan(S)`), so a capture armed on the running plan before the
+  removal is answered from it, with the strip, as D3 says. `StripRemoved` arises when the job's
+  epoch is never adopted: the test arms on a pending rebuild that the removal then supersedes.
+
 ### Test value (`crates/control-plane/tests/response_capture.rs`)
 
 - `capture_follows_newest_plan` (gates 1, 3, 4): red if the render step captures from a plan older
