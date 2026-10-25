@@ -153,10 +153,18 @@ interface FeedLink {
   readonly host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport">;
   readonly reserveSeekGeneration: () => bigint;
   readonly feeds: Set<LinkedFeed>;
+  /**
+   * Issue 1297c: the newest anchored start each linked feed published, by source ID, with its
+   * ring. Until the engine renders it, the source's seek report still shows the old generation,
+   * so an `alignTo` that names it aligns to this seek instead. Removed with its ring.
+   */
+  readonly starts: Map<string, { readonly seek: FeedStartSeek; readonly ring: SharedArrayBuffer }>;
 }
 interface LinkedFeed {
   /** The source IDs whose rings the feed still delivers. */
   sourceIds(): readonly string[];
+  /** The ring the feed still delivers for `sourceId`. */
+  ring(sourceId: string): SharedArrayBuffer | undefined;
   detachSource(sourceId: string): Promise<void>;
 }
 /** Keyed by the engine's host object, which `FeedEngine.host` names. */
@@ -179,7 +187,7 @@ export function linkFeedEngine(
   host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport">,
   reserveSeekGeneration: () => bigint,
 ): FeedRetirement {
-  const link: FeedLink = { host, reserveSeekGeneration, feeds: new Set() };
+  const link: FeedLink = { host, reserveSeekGeneration, feeds: new Set(), starts: new Map() };
   feedLinks.set(host, link);
   const detachAfter = (owned: readonly (readonly [LinkedFeed, string])[], applied: () => Promise<unknown>): void => {
     if (owned.length === 0) return;
@@ -465,12 +473,14 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   };
   const linked: LinkedFeed = {
     sourceIds: () => [...live.keys()],
+    ring: (sourceId) => live.get(sourceId)?.ring,
     detachSource: (sourceId) => feed.detachSource(sourceId),
   };
   const close = (): void => {
     if (state === "closed") return;
     state = "closed"; release(created);
     link?.feeds.delete(linked);
+    for (const [sourceId, start] of link?.starts ?? []) if (created.includes(start.ring)) link!.starts.delete(sourceId);
     pending?.finish(new PcmFeedError("closed", "Engine feed is closed"));
     for (const finish of [...detaching.values()]) finish(new PcmFeedError("closed", "Engine feed is closed"));
     node.port.onmessage = null;
@@ -484,20 +494,35 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   /** One anchored start (D4): the SDK publishes the seek in the ring once, and the engine's handler applies it once. */
   const startSource = async (host: FeedLink["host"], reserve: () => bigint, entry: { source: FeedSource; start: FeedStart; ring: SharedArrayBuffer }): Promise<void> => {
     const quantum = BigInt(options.quantumFrames);
+    const anchorFrom = (status: Awaited<ReturnType<FeedLink["host"]["status"]>>): bigint => {
+      if (status.result !== 0) throw refusedStart(entry.source.sourceId, status.result);
+      const earliest = status.nextAbsoluteSample + BigInt(capacity) * quantum;
+      return (earliest + quantum - 1n) / quantum * quantum;
+    };
     const { alignTo } = entry.start;
-    // Issue 1297c: the reference's report before the status read, so the frame comes from a
-    // report the second read confirms unchanged around the anchor's computation.
-    const reference = alignTo === undefined ? undefined : await readSeekReport(host, entry.source.sourceId, alignTo);
-    const status = await host.status();
-    if (status.result !== 0) throw refusedStart(entry.source.sourceId, status.result);
-    const earliest = status.nextAbsoluteSample + BigInt(capacity) * quantum;
-    const anchorSample = (earliest + quantum - 1n) / quantum * quantum;
+    let anchorSample: bigint;
     let frame: bigint;
     if (alignTo === undefined) {
+      anchorSample = anchorFrom(await host.status());
       frame = entry.start.frameAt!(anchorSample);
       if (!nonnegativeI64(frame)) throw new MisoUsageError(`frameAt for source ${entry.source.sourceId} must return a nonnegative bigint within the MSB1 frame domain`);
     } else {
-      frame = alignedFrame(entry.source.sourceId, alignTo, reference!, await readSeekReport(host, entry.source.sourceId, alignTo), anchorSample);
+      // Issue 1297c: the reference's report before the one status read, and a second one after it.
+      const refuse = alignRefusal(entry.source.sourceId, alignTo);
+      const before = await readSeekReport(host, entry.source.sourceId, alignTo);
+      const started = pendingStart(link!, alignTo, before.generation, refuse);
+      if (started === undefined && before.generation === 0n) throw refuse("it has not rendered yet", "feed.align.unrendered");
+      anchorSample = anchorFrom(await host.status());
+      if (started !== undefined) {
+        // The reference's own anchored start is not rendered yet: its report is the old
+        // generation's, so the frame comes from that start, exactly.
+        frame = started.frame + (anchorSample - started.anchorSample);
+      } else {
+        const after = await readSeekReport(host, entry.source.sourceId, alignTo);
+        if (pendingStart(link!, alignTo, after.generation, refuse) !== undefined) throw refuse("it seeked while the anchor was computed", "feed.align.reseeked");
+        frame = alignedFrame(refuse, before, after, anchorSample);
+      }
+      if (!nonnegativeI64(frame)) throw refuse("its frame at the anchor is outside the MSB1 frame domain", "feed.align.domain");
     }
     // Closed or detached while the reports were read: nothing is published.
     if (feed.state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
@@ -507,6 +532,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     // handler applied this seek, so the primed PCM at the new generation waits for it.
     new Msb1RingWriter(entry.ring).seek(generation, frame, anchorSample);
     const seek = Object.freeze({ sourceId: entry.source.sourceId, generation, frame, anchorSample });
+    link!.starts.set(seek.sourceId, { seek, ring: entry.ring });
     await entry.start.prime(seek);
     if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
     // Detached during its own prime: the ring is withdrawn, so the engine is not asked to seek it.
@@ -587,6 +613,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new MisoUsageError("detachSource timeoutMs must be finite and positive");
       // The ring leaves the delivered set now, so no prepareSeek or later retirement names it.
       live.delete(sourceId);
+      if (link?.starts.get(sourceId)?.ring === ring) link.starts.delete(sourceId);
       rings = liveRings();
       unstarted = unstarted.filter((entry) => entry.source.sourceId !== sourceId);
       await new Promise<void>((resolve, reject) => {
@@ -622,6 +649,8 @@ const RESULT_BACKPRESSURE = 6;
 /** Issue 1297c: one seek report of the `alignTo` reference, retried while busy. */
 async function readSeekReport(host: FeedLink["host"], sourceId: string, alignTo: string): Promise<MisoSeekReport> {
   for (let attempt = 0; attempt < SEEK_REPORT_ATTEMPTS; attempt += 1) {
+    // One macrotask between reads, so a read of the same source in flight can settle first.
+    if (attempt !== 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     let result: number;
     let report: MisoSeekReport | null = null;
     try {
@@ -634,31 +663,44 @@ async function readSeekReport(host: FeedLink["host"], sourceId: string, alignTo:
     }
     if (result === RESULT_BACKPRESSURE) continue;
     if (result !== 0 || report === null) throw refusedStart(sourceId, result);
-    if (report.generation === 0n) {
-      throw new MisoUsageError(`source ${sourceId} cannot align to ${alignTo}: it has not rendered yet; use frameAt`, "feed.align.unrendered");
-    }
     return report;
   }
-  throw new MisoUsageError(`source ${sourceId} cannot align to ${alignTo}: its seek report stayed busy after ${SEEK_REPORT_ATTEMPTS} reads; use frameAt`, "feed.align.busy");
+  throw alignRefusal(sourceId, alignTo)(`its seek report stayed busy after ${SEEK_REPORT_ATTEMPTS} reads`, "feed.align.busy");
+}
+
+function alignRefusal(sourceId: string, alignTo: string): (cause: string, code: string) => MisoUsageError {
+  return (cause, code) => new MisoUsageError(`source ${sourceId} cannot align to ${alignTo}: ${cause}; use frameAt`, code);
+}
+
+/**
+ * Issue 1297c: the reference's anchored start that a linked feed published and the engine has
+ * not rendered yet (its generation is above the report's), or `undefined`. Any other seek of a fed
+ * reference published above the report's generation (a ring seek the engine has not applied) is
+ * pending too, and the frame it will play is not known here: `feed.align.held`.
+ */
+function pendingStart(link: FeedLink, alignTo: string, reported: bigint, refuse: ReturnType<typeof alignRefusal>): FeedStartSeek | undefined {
+  const start = link.starts.get(alignTo);
+  let ring: SharedArrayBuffer | undefined;
+  for (const feed of link.feeds) ring ??= feed.ring(alignTo);
+  const snapshot = ring === undefined ? undefined : seekSnapshot(ring);
+  const published = snapshot === undefined || snapshot.epoch === 0 ? 0n : snapshot.generation;
+  const pending = start !== undefined && start.seek.generation > reported ? start.seek : undefined;
+  if (published > (pending?.generation ?? reported)) throw refuse("a seek it has not rendered yet is pending", "feed.align.held");
+  return pending;
 }
 
 /**
  * Issue 1297c: the frame the reference reads at `anchorSample`, `sourceFrame + (anchorSample -
- * firstSample)` (source rate equals render rate, D15-12). It holds only while the reference plays
- * its generation's frames one per sample, so the report read after the anchor was computed must
- * equal the one read before it: a new seek, or underrun or held frames counted in between,
- * rejects with the cause, and the app then uses `frameAt`.
+ * firstSample)` (source rate equals render rate, D15-12). The consumer advances its frame on an
+ * underrun too, so an underrun keeps the formula exact; a seek or held frames (an anchored seek
+ * waiting) between the two reads do not, and reject with the cause.
  */
-function alignedFrame(sourceId: string, alignTo: string, before: MisoSeekReport, after: MisoSeekReport, anchorSample: bigint): bigint {
-  const refuse = (cause: string, code: string) => new MisoUsageError(`source ${sourceId} cannot align to ${alignTo}: ${cause}; use frameAt`, code);
+function alignedFrame(refuse: ReturnType<typeof alignRefusal>, before: MisoSeekReport, after: MisoSeekReport, anchorSample: bigint): bigint {
   if (after.generation !== before.generation || after.firstSample !== before.firstSample || after.sourceFrame !== before.sourceFrame) {
     throw refuse("it seeked while the anchor was computed", "feed.align.reseeked");
   }
-  if (after.cumulativeUnderrunFrames !== before.cumulativeUnderrunFrames) throw refuse("it underran since its seek report", "feed.align.underrun");
   if (after.cumulativeHeldFrames !== before.cumulativeHeldFrames) throw refuse("it held frames since its seek report", "feed.align.held");
-  const frame = before.sourceFrame + (anchorSample - before.firstSample);
-  if (!nonnegativeI64(frame)) throw refuse("its frame at the anchor is outside the MSB1 frame domain", "feed.align.domain");
-  return frame;
+  return before.sourceFrame + (anchorSample - before.firstSample);
 }
 
 function refusedStart(sourceId: string, result: number): MisoEngineError {

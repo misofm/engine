@@ -755,19 +755,24 @@ test("an anchored start is applied once by the engine handler, and the drain rea
   assert.deepEqual([controls(direct)[MSB1_CONTROL.SUBMITTED], controls(direct)[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
 });
 
-/** Issue 1297c: an engine host whose seek reports for `alignTo` come from `replies`, cloned as a port does. */
+/**
+ * Issue 1297c: an engine host whose seek reports for `alignTo` come from `replies` (a reply may be
+ * a function that returns one), cloned as a port does. `next` is the status's next sample, or a
+ * function that returns it.
+ */
 function alignHost(run, next, replies) {
   let requestId = 0;
   const reads = [];
   const host = {
-    async status() { return { result: 0, nextAbsoluteSample: next }; },
+    async status() { return { result: 0, nextAbsoluteSample: typeof next === "function" ? next() : next }; },
     async seekSourceAt(request) {
       run.engine.receiveSeekAt({ tag: "miso.seek-at.v1", requestId: (requestId += 1), ...request });
       return structuredClone({ tag: "miso.ack.v1", requestId, result: run.engine.lastAck.result });
     },
     async seekReport(sourceId) {
       reads.push(sourceId);
-      const { result, report = null } = replies.shift();
+      const reply = replies.shift();
+      const { result, report = null } = typeof reply === "function" ? reply() : reply;
       return structuredClone({ tag: "miso.seek-report.v1", requestId: (requestId += 1), result, report });
     },
   };
@@ -779,11 +784,13 @@ const referenceReport = { generation: 3n, firstSample: 1_024n, sourceFrame: 48_0
 
 test("alignTo starts the stem at the reference's frame at the anchor, read from its seek report", async () => {
   // #1297c gate 1a. Red if the SDK adds A to the frame without subtracting first_sample, reads the
-  // frame from anything but the reference's report, or gives up on the first busy read.
+  // frame from anything but the reference's report, gives up on the first busy read, or refuses a
+  // reference that underran (its frame stays exact).
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
   const run = anchoredPrelude(source);
   // A = 4088 + 2 chunks * 4 frames = 4096, a quantum multiple.
-  const { host, reads } = alignHost(run, 4_088n, [{ result: 6 }, { result: 0, report: referenceReport }, { result: 0, report: referenceReport }]);
+  // The consumer advances its frame on an underrun, so an underrun between the reads keeps the frame exact.
+  const { host, reads } = alignHost(run, 4_088n, [{ result: 6 }, { result: 0, report: referenceReport }, { result: 0, report: { ...referenceReport, cumulativeUnderrunFrames: 11n } }]);
   const primed = [];
   const feed = attachEngineFeed({ context, sources: [{ sourceId: "added", channels: 1, start: { alignTo: "X", prime: (seek) => { primed.push(seek); } } }], quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
   await feed.ready();
@@ -793,17 +800,17 @@ test("alignTo starts the stem at the reference's frame at the anchor, read from 
   assert.deepEqual(run.seekAts, [["added", 5n, 51_072n, 4_096n]]);
 });
 
-test("alignTo refuses an unrendered, busy, reseeked, underrun or held reference and publishes nothing", async () => {
+test("alignTo refuses an unrendered, busy, reseeked, held or pending-seek reference and publishes nothing", async () => {
   // #1297c gate 1a. Red if the SDK aligns to a reference that has not rendered (generation 0),
-  // retries a busy report without bound or not at all, or aligns across a seek, an underrun or held
-  // frames the reference counted since the report it computed from.
+  // retries a busy report without bound or not at all, aligns across a seek or held frames the
+  // reference counted since the report it computed from, or aligns to a fed reference whose ring
+  // publishes a seek the engine has not rendered (the report is the old generation's).
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
   const ok = { result: 0, report: referenceReport };
   const cases = [
     ["feed.align.unrendered", [{ result: 0, report: { ...referenceReport, generation: 0n } }], 1],
     ["feed.align.busy", [{ result: 6 }, { result: 6 }, { result: 6 }, { result: 6 }, ok, ok], 4],
     ["feed.align.reseeked", [ok, { result: 0, report: { ...referenceReport, generation: 4n } }], 2],
-    ["feed.align.underrun", [ok, { result: 0, report: { ...referenceReport, cumulativeUnderrunFrames: 11n } }], 2],
     ["feed.align.held", [ok, { result: 0, report: { ...referenceReport, cumulativeHeldFrames: 6n } }], 2],
   ];
   for (const [code, replies, readCount] of cases) {
@@ -814,9 +821,78 @@ test("alignTo refuses an unrendered, busy, reseeked, underrun or held reference 
     await assert.rejects(feed.ready(), (error) => error instanceof MisoUsageError && error.diagnosticCode === code, code);
     assert.deepEqual([reads.length, primed, run.seekAts, controls(feed.rings[0])[MSB1_CONTROL.SEEK_EPOCH], feed.state], [readCount, [], [], 0, "closed"], code);
   }
+  {
+    // A fed reference with a plain ring seek above its report's generation.
+    const run = anchoredPrelude(source);
+    const { host, reads } = alignHost(run, 4_088n, [ok, ok]);
+    const reference = attachEngineFeed({ context, sources: [{ sourceId: "X", channels: 1 }], quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
+    new Msb1RingWriter(reference.rings[0]).seek(referenceReport.generation + 1n, 0n);
+    const feed = attachEngineFeed({ context, sources: [{ sourceId: "added", channels: 1, start: { alignTo: "X", prime() {} } }], quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
+    await assert.rejects(feed.ready(), (error) => error instanceof MisoUsageError && error.diagnosticCode === "feed.align.held");
+    assert.deepEqual([reads.length, run.seekAts, controls(feed.rings[0])[MSB1_CONTROL.SEEK_EPOCH]], [1, [], 0]);
+  }
   const run = anchoredPrelude(source);
   const { host } = alignHost(run, 0n, []);
   assert.throws(() => attachEngineFeed({ context, sources: [{ sourceId: "both", channels: 1, start: { alignTo: "X", frameAt: () => 0n, prime() {} } }], quantumFrames: 4, engine: { host }, createNode: () => run.node }), MisoUsageError);
+});
+
+test("alignTo a source whose own anchored start is not rendered yet takes that start's frame", async () => {
+  // #1297c (several stems added together). Red if the SDK aligns to the reference's report while
+  // the reference's own start is pending (the report still shows generation 1 at frame 0).
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = anchoredPrelude(source);
+  const initial = { result: 0, report: { generation: 1n, firstSample: 0n, sourceFrame: 0n, cumulativeUnderrunFrames: 0n, cumulativeHeldFrames: 0n } };
+  let next = 1_000n;
+  const { host } = alignHost(run, () => { const now = next; next += 100n; return now; }, [initial, initial]);
+  const feed = attachEngineFeed({
+    context,
+    sources: [
+      { sourceId: "X", channels: 1, start: { frameAt: (anchor) => anchor + 50_000n, prime() {} } },
+      { sourceId: "Y", channels: 1, start: { alignTo: "X", prime() {} } },
+    ],
+    quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node,
+  });
+  await feed.ready();
+  // A_X = 1000 + 8 = 1008, F_X = 51008; A_Y = 1100 + 8 = 1108, so F_Y = 51008 + 100.
+  assert.deepEqual(run.seekAts, [["X", 5n, 51_008n, 1_008n], ["Y", 6n, 51_108n, 1_108n]]);
+  assert.deepEqual([...new BigInt64Array(feed.rings[1], MSB1_CONTROL_I64_OFFSET, 3)], [6n, 51_108n, 1_108n]);
+});
+
+test("two feeds that align to one reference at once both start: a locally refused read is retried after a macrotask", async () => {
+  // #1297c. Red if the SDK retries a read the wrapper refused locally (one unsettled read per
+  // source) without yielding, or does not retry it: the second feed then rejects busy.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = anchoredPrelude(source);
+  const { host } = alignHost(run, 4_088n, []);
+  const inFlight = new Set();
+  host.seekReport = (sourceId) => {
+    if (inFlight.has(sourceId)) return Promise.reject(Object.assign(new Error("in flight"), { result: 6 }));
+    inFlight.add(sourceId);
+    return new Promise((resolve) => setTimeout(() => {
+      inFlight.delete(sourceId);
+      resolve(structuredClone({ tag: "miso.seek-report.v1", requestId: 0, result: 0, report: referenceReport }));
+    }, 0));
+  };
+  const feeds = ["one", "two"].map((sourceId) => attachEngineFeed({ context, sources: [{ sourceId, channels: 1, start: { alignTo: "X", prime() {} } }], quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node }));
+  await Promise.all(feeds.map((feed) => feed.ready()));
+  assert.deepEqual(run.seekAts.map(([id, , frame]) => [id, frame]).sort(), [["one", 51_072n], ["two", 51_072n]]);
+});
+
+test("alignTo publishes nothing for a feed closed or a source detached while the reports were read", async () => {
+  // #1297c. Red if a start whose feed closed, or whose source was detached, during its report
+  // reads still reserves a generation, publishes the ring seek or primes.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const ok = { result: 0, report: referenceReport };
+  for (const action of ["close", "detach"]) {
+    const run = anchoredPrelude(source);
+    let feed;
+    const { host } = alignHost(run, 4_088n, [ok, () => { if (action === "close") feed.close(); else void feed.detachSource("added"); return ok; }]);
+    const primed = [];
+    feed = attachEngineFeed({ context, sources: [{ sourceId: "added", channels: 1, start: { alignTo: "X", prime: (seek) => { primed.push(seek); } } }], quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
+    const ring = feed.rings[0];
+    if (action === "close") await assert.rejects(feed.ready(), PcmFeedError); else await feed.ready();
+    assert.deepEqual([primed, run.seekAts, controls(ring)[MSB1_CONTROL.SEEK_EPOCH]], [[], [], 0], action);
+  }
 });
 
 test("the prelude over the real engine worklet class: one miso.seek-at.v1, and the drain consumes the epoch", async () => {

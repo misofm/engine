@@ -243,10 +243,13 @@ plays:
   with `Msb1RingWriter.seek` yourself: without the SDK's message to the engine, that ring stalls.
   To start in time with a playing stem instead of your own mapping, give `start: { alignTo:
   sourceId, prime }` (or `alignTo: "$timeline"`): the SDK reads that source's seek report before
-  and after the anchor is computed and uses `sourceFrame + (A - firstSample)`. A reference that
-  has not rendered yet, whose report stays busy, or that seeked, underran or held frames between
-  the two reads rejects `ready()` with a `MisoUsageError` whose `diagnosticCode` names the cause
-  (`feed.align.*`), publishes nothing and closes the feed; use `frameAt` then.
+  and after the anchor is computed and uses `sourceFrame + (A - firstSample)`. If the reference's
+  own anchored start (another source of a feed of this engine) is not rendered yet, the SDK uses
+  that start's frame at `A` instead, so several stems can be added together. A reference that has
+  not rendered yet, whose report stays busy, that seeked or held frames between the two reads, or
+  whose ring publishes another seek the engine has not rendered rejects `ready()` with a
+  `MisoUsageError` whose `diagnosticCode` names the cause (`feed.align.*`), publishes nothing and
+  closes the feed; use `frameAt` then.
 - **Remove a stem.** When a committed edit removes a source of the feed, keep feeding its ring. The
   SDK detaches it with `feed.detachSource(sourceId)` after `engine.applied(revision)` resolves
   (the strip's ramp-out has then played), and releases its writer.
