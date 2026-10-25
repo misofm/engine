@@ -268,7 +268,9 @@ export class LiveControlEdits {
     this.#order = order;
     this.#context = {
       set: (address, value, options) => this.set(address, value, options),
-      effect: <E extends EffectId>(instance: EffectInstance<E>) => new EffectEdits(
+      effect: <E extends EffectId, R extends LiveControlRack>(
+        instance: EffectInstance<E> & { readonly rack: R },
+      ) => new EffectEdits(
         instance,
         (address, value, options) => this.set(address, value, options),
       ),
@@ -459,11 +461,14 @@ export class LiveControlEdits {
 
 /**
  * Catalog-derived edits for one effect instance: the generated parameter, bypass and link-mode
- * builders over this instance's address, and the observation records.
+ * builders over this instance's address, and the observation records. `R` is its rack where the
+ * caller names it (`console()`, `insert()`), so an insert's `linkMode` refuses `slot` at compile
+ * time; `effect()` takes the rack as a value and keeps the union.
  */
-export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
+export class EffectEdits<E extends EffectId, R extends LiveControlRack = LiveControlRack>
+  extends EffectControlBuilders<E, R> {
   readonly #stripId: string;
-  protected readonly rack: LiveControlRack;
+  protected readonly rack: R;
   readonly #stableId: string | undefined;
   readonly #set: ControlSetter;
   protected readonly effectId: E;
@@ -474,7 +479,7 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
    * session to resolve the index against.
    */
   constructor(
-    instance: EffectInstance<E>,
+    instance: EffectInstance<E> & { readonly rack: R },
     set: ControlSetter,
   ) {
     super();
