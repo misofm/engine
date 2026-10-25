@@ -21,15 +21,16 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     test_only_bank_meter_passes, test_only_bank_sample_peak_passes, test_only_carry_payload_bytes,
-    test_only_disable_bank_skip, test_only_meter_input_counts, test_only_meter_input_reset,
-    test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
-    test_only_reset_carry_payload_bytes, test_only_resident_input_counts,
-    test_only_resident_input_reset, test_only_route_activity_built, test_only_route_drain_calls,
-    test_only_route_drain_snapshots, test_only_route_drained_counts, test_only_route_mix_counts,
-    test_only_route_mix_reset, test_only_set_bank_meter_declined,
-    test_only_set_bank_sample_peak_declined, test_only_set_route_fold_declined,
-    test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
-    test_only_source_plane_counts, test_only_source_plane_reset,
+    test_only_disable_bank_skip, test_only_disable_lane_packing, test_only_meter_input_counts,
+    test_only_meter_input_reset, test_only_observation_dispatch_counts,
+    test_only_observation_dispatch_reset, test_only_reset_carry_payload_bytes,
+    test_only_resident_input_counts, test_only_resident_input_reset,
+    test_only_route_activity_built, test_only_route_drain_calls, test_only_route_drain_snapshots,
+    test_only_route_drained_counts, test_only_route_mix_counts, test_only_route_mix_reset,
+    test_only_set_bank_meter_declined, test_only_set_bank_sample_peak_declined,
+    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
+    test_only_set_source_in_place_declined, test_only_source_plane_counts,
+    test_only_source_plane_reset,
 };
 
 use core::cell::Cell;
@@ -6201,6 +6202,28 @@ pub fn test_only_swap_bank_lanes(
         .is_some_and(|executor| executor.runtime.swap_bank_lanes(a, b).is_ok())
 }
 
+/// Test-only (issue #1981): the lane moves the per-block packer made in a graph plan, packing or
+/// homing; zero for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_lane_moves(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| executor.runtime.lane_moves())
+}
+
+/// Test-only (issue #1981): the strips of a graph plan's pack groups not at their home lane; zero
+/// for any other plan and under the identity map.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_displaced_strips(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| executor.runtime.displaced_strips())
+}
+
 /// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
 /// any other plan.
 pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
@@ -6923,6 +6946,10 @@ impl PreparedPlanExecutor for GraphExecutor {
                 block_time.jump_lengths(),
             );
         }
+        // Issue #1981: pack each pack group's running strips into fewer banks, once, before any
+        // unit runs (never between units: `observe_unit` interleaves with `execute`). One load
+        // per group when nothing is packable or displaced; nothing in a plan with no group.
+        runtime.pack_lanes();
         // Issue #936: only the units bind found to do work. An inert unit's `execute` and
         // `observe_unit` return at once, so skipping it moves no bit.
         #[cfg(any(test, feature = "test-support"))]
