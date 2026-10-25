@@ -2834,8 +2834,10 @@ fn decode_arm_tags(bytes: Option<&[u8]>) -> Result<Vec<u64>, DecodeError> {
         return Err(DecodeError::InvalidTlv);
     }
     Ok(bytes
-        .chunks_exact(8)
-        .map(|word| u64::from_le_bytes(word.try_into().expect("an eight-byte chunk")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|word| u64::from_le_bytes(*word))
         .collect())
 }
 
