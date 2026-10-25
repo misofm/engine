@@ -713,6 +713,121 @@ async function runEmptyBootQualification(createHost, emptyDocument, frameFixture
   };
 }
 
+/// Issue #1295 D1: the structural-edit capture, the swap block and 32 quanta after it.
+const STRUCTURAL_EDIT_BLOCKS = 33;
+const STRUCTURAL_EDIT_FRAMES = STRUCTURAL_EDIT_BLOCKS * QUANTUM_FRAMES;
+/// Issue #1295 (#1697 gate 3): the quanta the 1 MiB replacement renders after its commit. It
+/// replaces the track's source, so the old track ramps out before the swap: the module under Node
+/// adopts it at sample 640 (block 5). Sixteen leaves room and gates nothing on the block.
+const STRUCTURAL_REPLACE_LARGE_BLOCKS = 16;
+
+/// Issue #1295: a structural edit by `SESSION_REPLACE` in a real browser, on this page (no
+/// cross-origin isolation, so the module runs in `single` mode and every control call runs in the
+/// worklet's message handler).
+///
+/// Two boots of the browser fixture's session A. The first gets one `miso.control.v1` with
+/// document B (A plus a track on the same source with an EQ insert and its fader at -6 dB, and its
+/// route) before the first quantum, which is then the swap block, and renders the swap block and 32
+/// quanta after it. The row records the reply (path, revision R), the applied-revision watermark
+/// `(R, S, outcome)` as the host reported it, the source underrun counter, the host status's
+/// `blockingRebuilds` and `singleModeControlAllocations` before the replace and once the watermark
+/// covers R, and the capture's digest, which `run.mjs` holds to the same replace rendered by the
+/// module under Node. The second sends the 1 MiB boot-ceiling document (#1697 gate 3) and records
+/// the module's memory growth across it, which `run.mjs` reports against the boot's projection
+/// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` and does not pin.
+async function runStructuralReplaceQualification(createHost, documentA, documentB, source, largeDocument) {
+  const { replaceSessionThroughSdk, sourceUnderrunBlocksThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const boot = async (frames) => {
+    const context = new OfflineAudioContext(2, frames, SAMPLE_RATE);
+    const host = await createHost({
+      context,
+      document: documentA,
+      options: bootOptions(STRUCTURAL_EDIT_FRAMES),
+      simd128ModuleUrl: ARTIFACT_URL,
+      workletModuleUrl: WORKLET_URL,
+    });
+    host.node.connect(context.destination);
+    return { context, host };
+  };
+  const counters = (status) => ({
+    blockingRebuilds: status.blockingRebuilds,
+    singleModeControlAllocations: status.singleModeControlAllocations,
+    memoryBytes: status.memoryBytes,
+    appliedRevision: status.appliedRevision.toString(),
+    appliedSample: status.appliedSample.toString(),
+    appliedOutcome: status.appliedOutcome.toString(),
+    nextAbsoluteSample: status.nextAbsoluteSample.toString(),
+  });
+
+  // The exact case.
+  const edit = await boot(STRUCTURAL_EDIT_FRAMES);
+  for (const description of source.blocks) {
+    const acknowledgement = await edit.host.submitSource(corpusRequest(description));
+    if (acknowledgement.result !== RESULT_OK) throw new Error("structural-edit prefill rejected");
+  }
+  const watermarks = [];
+  edit.host.onWatermark((watermark) => watermarks.push({
+    revision: watermark.revision.toString(),
+    sample: watermark.sample.toString(),
+    outcome: watermark.outcome.toString(),
+  }));
+  const before = counters(await edit.host.status());
+  const reply = await replaceSessionThroughSdk(edit.host, documentB);
+  const pending = counters(await edit.host.status());
+  const rendered = await edit.context.startRendering();
+  for (let spin = 0; spin < 8 && watermarks.at(-1)?.revision !== reply.revision; spin += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  const after = counters(await edit.host.status());
+  const underrunBlocks = await sourceUnderrunBlocksThroughSdk(edit.host);
+  const editAllocations = await renderAllocationCount(edit.host);
+  await edit.host.dispose();
+  const capture = [rendered.getChannelData(0), rendered.getChannelData(1)];
+
+  // The 1 MiB boot-ceiling document.
+  const large = await boot(STRUCTURAL_REPLACE_LARGE_BLOCKS * QUANTUM_FRAMES);
+  const largeBefore = counters(await large.host.status());
+  const largeReply = await replaceSessionThroughSdk(large.host, largeDocument);
+  const largeCommitted = counters(await large.host.status());
+  await large.context.startRendering();
+  const largeAfter = counters(await large.host.status());
+  const largeAllocations = await renderAllocationCount(large.host);
+  await large.host.dispose();
+
+  return {
+    edit: {
+      replyStatus: reply.status,
+      commandPath: reply.path,
+      commandApplied: reply.appliedOperations,
+      diagnostics: reply.diagnostics,
+      expectedRevision: reply.expectedRevision,
+      committedRevision: reply.revision,
+      frameHex: reply.frameHex,
+      sourceRingFrames: STRUCTURAL_EDIT_FRAMES,
+      blocks: STRUCTURAL_EDIT_BLOCKS,
+      before,
+      pending,
+      after,
+      watermark: watermarks.at(-1) ?? null,
+      watermarks: watermarks.length,
+      underrunBlocks,
+      renderedDigest: await pcmDigest(capture, STRUCTURAL_EDIT_FRAMES),
+      renderAllocations: editAllocations,
+    },
+    large: {
+      documentBytes: largeDocument.byteLength,
+      replyStatus: largeReply.status,
+      commandPath: largeReply.path,
+      diagnostics: largeReply.diagnostics,
+      committedRevision: largeReply.revision,
+      before: largeBefore,
+      committed: largeCommitted,
+      after: largeAfter,
+      renderAllocations: largeAllocations,
+    },
+  };
+}
+
 /// Issue #143 E12: subscribe -> nonzero `trackGrDb` in a real browser, and an unarmed tap publishes none.
 ///
 /// Two offline renders of the same sixteen blocks over the same session, differing only in whether
@@ -1492,6 +1607,7 @@ export async function runQualification() {
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
     liveControlResponse, observationResponse, emptyResponse, emptyFrameResponse, unsubscribeResponse,
+    structuralEditResponse, { worstReplaceDocument },
   ] =
     await Promise.all([
       import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
@@ -1504,10 +1620,12 @@ export async function runQualification() {
       fetch("/qualification/empty-session.json"),
       fetch("/qualification/empty-boot-frame.json"),
       fetch("/qualification/unsubscribe-session.json"),
+      fetch("/fixture/structural-edit-session.json"),
+      import("/qualification/worst-replace-document.js"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
       || !liveControlResponse.ok || !observationResponse.ok || !emptyResponse.ok
-      || !emptyFrameResponse.ok || !unsubscribeResponse.ok) {
+      || !emptyFrameResponse.ok || !unsubscribeResponse.ok || !structuralEditResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
@@ -1525,6 +1643,8 @@ export async function runQualification() {
   const emptyFrame = await emptyFrameResponse.json();
   // #1535: the real-context unsubscribe run's own session, with a 512-block source.
   const unsubscribeDocument = new TextEncoder().encode(await unsubscribeResponse.text());
+  // #1295: the browser fixture's session plus one track with an EQ insert, the replacement document.
+  const structuralEditDocument = new TextEncoder().encode(await structuralEditResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
   const sdkResponse = simd128 && new URL(import.meta.url).searchParams.get("sdk") === "1"
     ? await (await import("/sdk/sdk-response-client.js")).runSdkResponseQualification()
@@ -1547,6 +1667,7 @@ export async function runQualification() {
       liveControls: null,
       structuralApply: null,
       emptyBoot: null,
+      structuralReplace: null,
       observation: null,
       stall: null,
       stagingReads: null,
@@ -1610,6 +1731,21 @@ export async function runQualification() {
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
   }
+  let structuralReplace;
+  try {
+    structuralReplace = await runStructuralReplaceQualification(
+      createMisoAudioWorkletHost,
+      corpusDocument,
+      structuralEditDocument,
+      source,
+      worstReplaceDocument(),
+    );
+  } catch (error) {
+    const diagnostic = await diagnoseReady(corpusDocument);
+    throw new Error(`structural-replace qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error, diagnostic,
+    })}`);
+  }
   let observation;
   try {
     observation = await runObservationQualification(
@@ -1669,6 +1805,7 @@ export async function runQualification() {
     liveControls: live,
     structuralApply: structural,
     emptyBoot,
+    structuralReplace,
     observation,
     stall,
     stagingReads,
@@ -1682,6 +1819,8 @@ export async function runQualification() {
       { workload: "structural-apply", count: structural.renderAllocations },
       { workload: "empty-boot", count: emptyBoot.boot.renderAllocations },
       { workload: "empty-boot-first-stem", count: emptyBoot.firstStem.renderAllocations },
+      { workload: "structural-edit", count: structuralReplace.edit.renderAllocations },
+      { workload: "structural-replace-large", count: structuralReplace.large.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
