@@ -647,8 +647,9 @@ fn a_disarm_that_names_an_ended_arm_changes_nothing() {
     rig.render();
     assert_eq!(rig.session.observation_armed(), 1, "B's arm stays armed");
     assert_eq!(rig.queued("comp1"), 1, "no disarm record");
-    // A tag the host never issued is the caller's misuse.
-    for never in [0, u64::MAX] {
+    // A tag the host never issued is the caller's misuse: B's arm is the last record issued, so
+    // `b + 1` is the host's next tag.
+    for never in [0, b + 1] {
         assert_eq!(
             rig.transact(&[disarm_tagged("comp1", WINDOW_BLOCKS, never)]),
             refused("observation.not_subscribed", 0),
