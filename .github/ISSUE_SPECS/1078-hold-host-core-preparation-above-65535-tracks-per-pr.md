@@ -10,3 +10,11 @@ Prepare a compiled 65,537-track session through `prepare_host_runtime` with a co
 
 1. A planted track cap in host-core preparation goes red per PR (in `test-debug-a` and `aarch64-debug`), green when reverted.
 2. Per-PR cost stated; clippy, fmt, policy scripts pass.
+
+## Evidence and decision record (attempt 1, 2026-10-25)
+
+- Test: `crates/host-core/tests/scale.rs` `prepares_65_537_tracks_until_the_configured_builtin_cap`, beside the release-only nightly kitchen-sink row (#1079/#1947) in the same file. Per PR: it is not ignored, so `test-debug-a` and `aarch64-debug` run it with the workspace tests.
+- Cost: 2.34 s debug on x86 (one run, load average 6.8/11.6/11.1, descriptive), under the 10 s per-PR budget of the scope note; the nightly fallback was not needed.
+- Session built inline from the nine-track fixture, not with `tests/support/edit_sessions.rs::plain_session`: that module needs the `control-provider` feature (it imports `protocol`), and gating `scale.rs` on it would take the nightly row's featureless command down with it.
+- The refusal's kind is `PrepareRejection::Builtin` (the builtin compiler's own resource limit), not `Resource` as the scope note guessed; the bytes are `builtin.resource.limit\t$.builtin_compile_caps\n`.
+- Red first: `check_counts`'s count helper narrowed to `u16` (`u16::try_from(len).map(u64::from)`) refuses with `host.count\t$` and the test goes red; reverted. A narrowing that truncates silently instead of refusing is caught only where it changes the result before the builtin cap.
