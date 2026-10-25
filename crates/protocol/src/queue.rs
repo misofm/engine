@@ -243,8 +243,12 @@ pub struct ProtocolQueueConfig {
     pub reliable_response_slots: NonZeroUsize,
     /// Fixed reliable event capacity.
     pub reliable_event_slots: NonZeroUsize,
-    /// Fixed lossy telemetry SPSC and staging capacity.
+    /// Fixed lossy telemetry SPSC and staging capacity: the meter records' lane, which the
+    /// capabilities report.
     pub telemetry_slots: NonZeroUsize,
+    /// Fixed SPSC and staging capacity of the counter-snapshot lane (#1587a): sized apart from
+    /// the meter lane, so a lane that holds one whole meter batch does not grow it.
+    pub counter_telemetry_slots: NonZeroUsize,
 }
 
 /// Queue creation failure before any caller can enqueue an item.
@@ -363,14 +367,14 @@ impl ProtocolQueues {
         queue!(ReliableSlot, config.reliable_response_slots);
         queue!(ReliableSlot, config.reliable_event_slots);
         queue!(TelemetryRecord, config.telemetry_slots);
-        queue!(CounterTelemetryRecord, config.telemetry_slots);
+        queue!(CounterTelemetryRecord, config.counter_telemetry_slots);
         add(
             Layout::array::<Option<TelemetryRecord>>(config.telemetry_slots.get())
                 .map_err(|_| ProtocolQueueError::CapacityOverflow)?
                 .size(),
         )?;
         add(
-            Layout::array::<Option<CounterTelemetryRecord>>(config.telemetry_slots.get())
+            Layout::array::<Option<CounterTelemetryRecord>>(config.counter_telemetry_slots.get())
                 .map_err(|_| ProtocolQueueError::CapacityOverflow)?
                 .size(),
         )?;
@@ -390,8 +394,9 @@ impl ProtocolQueues {
             events: QueuePair::new(config.reliable_event_slots, QueueGeneration(4))?,
             telemetry: QueuePair::new(config.telemetry_slots, QueueGeneration(5))?,
             telemetry_staging: vec![None; config.telemetry_slots.get()].into_boxed_slice(),
-            counter_telemetry: QueuePair::new(config.telemetry_slots, QueueGeneration(6))?,
-            counter_telemetry_staging: vec![None; config.telemetry_slots.get()].into_boxed_slice(),
+            counter_telemetry: QueuePair::new(config.counter_telemetry_slots, QueueGeneration(6))?,
+            counter_telemetry_staging: vec![None; config.counter_telemetry_slots.get()]
+                .into_boxed_slice(),
             telemetry_counters: TelemetryCounters::default(),
             reliable_event_reservations: Arc::new(AtomicUsize::new(0)),
             config,
@@ -694,6 +699,7 @@ mod tests {
             reliable_response_slots: NonZeroUsize::new(1).expect("response"),
             reliable_event_slots: NonZeroUsize::new(1).expect("event"),
             telemetry_slots: NonZeroUsize::new(2).expect("telemetry"),
+            counter_telemetry_slots: NonZeroUsize::new(2).expect("counter telemetry"),
         }
     }
 

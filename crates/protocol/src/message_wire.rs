@@ -5054,7 +5054,7 @@ fn valid_dotted_code(value: &str) -> bool {
         })
 }
 
-fn valid_stable_id(value: &str) -> bool {
+pub(crate) fn valid_stable_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     (1..=127).contains(&bytes.len())
         && bytes[0].is_ascii_lowercase()
@@ -5097,6 +5097,34 @@ pub struct ObservationReadSelection {
     pub tap_id: u32,
     /// The lanes to return.
     pub channels: ParameterChannel,
+}
+
+/// One selection of an `OBSERVATION_READ`, borrowed from the request bytes (#1586 gate 6): what
+/// [`ProtocolCodec::decode_observation_read_frame`] writes into a caller's table, so a host reads a
+/// request without allocating.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationSelectionRef<'a> {
+    /// The track or submix, by its ID.
+    pub strip_id: &'a str,
+    /// The console slot or the insert section.
+    pub section: ObservationSection,
+    /// The console slot's or the insert's ID.
+    pub slot_id: &'a str,
+    /// The effect-local tap ID.
+    pub tap_id: u32,
+    /// The lanes to return.
+    pub channels: ParameterChannel,
+}
+
+impl ObservationSelectionRef<'_> {
+    /// A placeholder entry of a caller's table, overwritten by the decode.
+    pub const EMPTY: ObservationSelectionRef<'static> = ObservationSelectionRef {
+        strip_id: "",
+        section: ObservationSection::Inserts,
+        slot_id: "",
+        tap_id: 0,
+        channels: ParameterChannel::Both,
+    };
 }
 
 /// An `OBSERVATION_READ` request: 1 to [`OBSERVATION_READ_MAXIMUM_SELECTIONS`] selections.
@@ -5216,36 +5244,67 @@ pub(crate) fn write_observation_read_request(
     Ok(())
 }
 
-fn decode_observation_read_request(
+/// The one decode of an `OBSERVATION_READ` request's selections: into `out`, borrowed from the
+/// request, without allocating. Returns how many it wrote.
+fn decode_observation_selections<'a>(
     codec: &ProtocolCodec,
-    message: Message<'_>,
-) -> Result<ObservationReadRequest, DecodeError> {
+    message: Message<'a>,
+    out: &mut [ObservationSelectionRef<'a>],
+) -> Result<usize, DecodeError> {
     use schema::{observation_read_request as r, observation_selection as s};
     let limits = codec.limits();
     let message = message.schema_spec(&r::SPEC)?;
-    let mut selections = Vec::new();
+    let mut count = 0;
     for selection in values_spec!(message, r::SELECTION)? {
-        if selections.len() == OBSERVATION_READ_MAXIMUM_SELECTIONS {
+        if count == OBSERVATION_READ_MAXIMUM_SELECTIONS {
             return Err(DecodeError::InvalidField);
         }
+        let slot = out.get_mut(count).ok_or(DecodeError::LimitExceeded)?;
         let selection = Message::nested_at_depth(selection, limits, 1)?.schema_spec(&s::SPEC)?;
-        let (strip_id, section) = crate::session_wire::parse_observe_address(
+        let (strip_id, section, slot_id) = crate::session_wire::parse_observe_address_ref(
             selection.nested_value(one_spec!(selection, s::ADDRESS)?)?,
         )?;
-        selections.push(ObservationReadSelection {
+        *slot = ObservationSelectionRef {
             strip_id,
             section,
+            slot_id,
             tap_id: read_u32(one_spec!(selection, s::TAP_ID)?)?,
             channels: schema::parameter_channel_from_wire(read_u8(one_spec!(
                 selection,
                 s::CHANNELS
             )?)?)
             .map_err(|_| DecodeError::InvalidField)?,
-        });
+        };
+        count += 1;
     }
-    if selections.is_empty() {
+    if count == 0 {
         return Err(DecodeError::InvalidField);
     }
+    Ok(count)
+}
+
+fn decode_observation_read_request(
+    codec: &ProtocolCodec,
+    message: Message<'_>,
+) -> Result<ObservationReadRequest, DecodeError> {
+    let mut table = [ObservationSelectionRef::EMPTY; OBSERVATION_READ_MAXIMUM_SELECTIONS];
+    let count = decode_observation_selections(codec, message, &mut table)?;
+    let id = |text: &str| session::StableId::parse(text).ok_or(DecodeError::InvalidField);
+    let selections = table[..count]
+        .iter()
+        .map(|selection| {
+            let slot_id = id(selection.slot_id)?;
+            Ok(ObservationReadSelection {
+                strip_id: id(selection.strip_id)?,
+                section: match selection.section {
+                    ObservationSection::Console => controls::TapSection::Console(slot_id),
+                    ObservationSection::Inserts => controls::TapSection::Inserts(slot_id),
+                },
+                tap_id: selection.tap_id,
+                channels: selection.channels,
+            })
+        })
+        .collect::<Result<Vec<_>, DecodeError>>()?;
     Ok(ObservationReadRequest { selections })
 }
 
@@ -5392,6 +5451,34 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<ObservationReadRequest, DecodeError> {
         decode_observation_read_request(self, Message::top_level(payload, count, self.limits())?)
+    }
+
+    /// Strictly decode a complete `OBSERVATION_READ` command frame's selections into `out`, borrowed
+    /// from `input`, without allocating (#1586 gate 6). `out` holds
+    /// [`OBSERVATION_READ_MAXIMUM_SELECTIONS`] entries; returns how many the request names.
+    ///
+    /// # Errors
+    ///
+    /// Any decode error of the frame or its payload; a frame of another message is
+    /// [`DecodeError::MessageKindMismatch`].
+    pub fn decode_observation_read_frame<'a>(
+        &self,
+        input: &'a [u8],
+        out: &mut [ObservationSelectionRef<'a>],
+    ) -> Result<usize, DecodeError> {
+        let decoded = self.decode_header(input)?;
+        let header = decoded
+            .header
+            .command()
+            .ok_or(DecodeError::MessageKindMismatch)?;
+        if header.message_id != crate::MessageId::ObservationRead {
+            return Err(DecodeError::MessageKindMismatch);
+        }
+        decode_observation_selections(
+            self,
+            Message::top_level(decoded.payload, header.tlv_count, self.limits())?,
+            out,
+        )
     }
 
     /// Return the exact caller-buffer size of an `OBSERVATION_READ` reply.

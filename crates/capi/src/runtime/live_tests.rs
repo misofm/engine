@@ -9649,6 +9649,36 @@ impl Rig {
         applied_of(&response).observe_arm_tags
     }
 
+    /// [`Self::observation_read`] with the calling thread's allocator events inside the
+    /// `miso_engine_v1_submit_command` call alone: the frame and the output are allocated first.
+    fn observation_read_counted(
+        &mut self,
+        selections: Vec<protocol::ObservationReadSelection>,
+    ) -> (u32, bench_support::alloc::Counters) {
+        let request = self.next_request();
+        let bytes = command_bytes_at_revision(
+            request,
+            ExpectedRevision::Any,
+            protocol::CommandPayload::ObservationRead(&protocol::ObservationReadRequest {
+                selections,
+            }),
+        );
+        let mut storage = vec![0_u8; OBSERVATION_FRAME_BYTES as usize];
+        let mut output = crate::BytesOut {
+            struct_size: crate::BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: storage.as_mut_ptr(),
+            capacity_bytes: storage.len() as u64,
+            required_bytes: u64::MAX,
+        };
+        let mark = bench_support::alloc::current_thread_counters();
+        let result = crate::ffi::test_submit_command(self.session, &bytes, &mut output);
+        (
+            result,
+            bench_support::alloc::current_thread_delta_since(mark),
+        )
+    }
+
     /// The rows of one successful `OBSERVATION_READ`.
     fn observation_rows(
         &mut self,
@@ -9656,7 +9686,7 @@ impl Rig {
     ) -> Vec<protocol::ObservationReadRow> {
         let (result, response) = self.observation_read(selections);
         assert_eq!(result, crate::RESULT_OK, "{:?}", self.last_error());
-        let mut fields = [0_u16; 64];
+        let mut fields = [0_u16; 1024];
         let protocol::DecodedTypedResponseFrame::Success {
             payload: protocol::DecodedSuccessResponsePayload::ObservationRead(page),
             ..
@@ -9678,8 +9708,9 @@ impl Rig {
 /// four-block window closes it is ready: the window opened at the arm sample, and its span,
 /// sequence and both lanes are the reader's own window, bit for bit, in dB. A second read with no
 /// render answers the same rows. After a disarm it is unarmed at once, and after one block it is
-/// unarmed with the disarm's tag. A 256-row read of compressor taps after a warm-up read allocates
-/// nothing (the read and the payload encode, without the frame decode).
+/// unarmed with the disarm's tag. A read of 1 and of 256 compressor taps through
+/// `miso_engine_v1_submit_command`, after a warm-up read of each shape, allocates nothing: the
+/// frame decode, the read, the reply's encode and its replay entry.
 ///
 /// Red if a row reports an arm render has not applied, a window from before the arm, another
 /// slot's window or a swapped lane, or a tag other than the record's, or if the read allocates.
@@ -9779,16 +9810,17 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
         .take(protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS)
         .collect::<Vec<_>>();
     assert_eq!(every.len(), protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS);
-    let request = protocol::ObservationReadRequest { selections: every };
-    #[allow(unsafe_code)]
-    // SAFETY: the rig exclusively owns the live session for this call.
-    let state = unsafe { &mut (*rig.session).state };
-    assert!(state.test_read_observations(&request).is_some(), "warm-up");
-    let mark = bench_support::alloc::current_thread_counters();
-    let written = state.test_read_observations(&request);
-    let used = bench_support::alloc::current_thread_delta_since(mark);
-    assert!(written.is_some(), "the 256-row read");
-    assert_eq!(used.allocations, 0, "a 256-row read allocates nothing");
+    for rows in [1, protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS] {
+        let selections = every[..rows].to_vec();
+        // A warm-up read of the same shape, then the counted one, each under its own request ID.
+        let _ = rig.observation_rows(selections.clone());
+        let (result, used) = rig.observation_read_counted(selections);
+        assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
+        assert_eq!(
+            used.allocations, 0,
+            "a {rows}-row read through miso_engine_v1_submit_command allocates nothing"
+        );
+    }
 
     let disarm_tag = rig.observe_tags(&[observe(false)])[0];
     assert!(disarm_tag > arm_tag, "the last disarm is its own record");

@@ -264,9 +264,6 @@ change and no hash re-pin in #1586a.
   (#1674's observation half, which must take the swap record's tap entries). After a rebuild that
   carries a tapped effect, the read reads the successor's own slot, which the carried tap does not
   publish to: the row carries no window, never a wrong one.
-- **Gate 6, race half: not done here.** The existing race test is
-  `crates/capi/tests/resource_lifecycle.rs`, outside this slice's paths; the read is a seqlock
-  reader on the control thread and adds no render-side code.
 
 ### Evidence
 
@@ -275,3 +272,30 @@ change and no hash re-pin in #1586a.
   hash to the old pin (checked once with the two new frames filtered out).
 - Capability vectors in `crates/capi/src/runtime/tests.rs` re-pin: field 25 is 0x20 bytes (the ID
   takes the two padding bytes) and the flags `0x1ffdf`.
+
+### Attempt 2 (verifier MAJORs 1-2, MINOR 3, NIT 4; root ruling option i on MAJOR 1)
+
+- **Gate 6 on the whole submit path.** Attempt 1 measured the read alone; the full
+  `miso_engine_v1_submit_command` path allocated 5 times for 1 row and 521 for 256 (the boxed
+  token, the request copy, the decode's `Vec` and two `StableId`s per selection). Now the
+  controller prepares a served read as `PreparedCommandFrame::ObservationRead`
+  (`PreparedObservationRead`: no box, no request copy; its completions take the request bytes
+  again and record the replay entry from them), and the selections decode onto the stack as
+  `ObservationSelectionRef`, borrowed from the request bytes. One address codec:
+  `session_wire::parse_observe_address_ref` is the rule, and the owned `parse_observe_address`
+  (the `Observe` edit's, and the owned typed decode's) only copies its IDs. No session table is
+  needed, so none is charged. The controller decodes once to check the frame (a malformed one
+  answers as an immediate reply, as before) and the session decodes again to read: two passes
+  over at most 256 selections, no allocation. `SessionCommand::ObservationRead`,
+  `SessionCommandReply::ObservationRead`, `complete_session_command_refused_at` and the
+  test-only `test_read_observations` are deleted. Gate 1 asserts `allocations == 0` on
+  `ffi::test_submit_command` for 1 and 256 rows after a warm-up read of each shape.
+- **Gate 6, race half.** `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`
+  reads the race compressor's tap (revision `Any`) after every edit, on the control thread while
+  render runs, and asserts every read answered a page; render's zero allocations are asserted as
+  before.
+- **Frame check** uses the controller's codec (its limits), not `ProtocolCodec::default()`.
+- **Budget.** After merging #1587a, `capi_retained_bytes` measured 334,046 (312,897 on `main` plus
+  21,149 for the row table and the epoch's index); the ceiling is 367,488 (plus 10 %, rounded up
+  to 64), recorded in `resource_lifecycle.rs`.
+- The schema hash stays `f4c2fe333739f44d`.

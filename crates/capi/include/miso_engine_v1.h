@@ -268,20 +268,26 @@ extern "C" {
  * returns MISO_ENGINE_V1_BACKPRESSURE with out untouched, and the host retries. A host checks
  * MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK before calling the symbol.
  *
- * Meters (issue 1583). TELEMETRY_CONFIGURE takes a meter table: entry i (meter handle i + 1) names
- * the output, or a track or submix by its stable ID, and a metric, so a structural commit never
- * moves a handle. Its reply carries the session's meter window in blocks (meter_window_blocks,
- * about 32 ms). A nonempty table turns the output meter on from the next rendered block, an empty
- * one off; render applies the change before a block, with no allocation, lock or syscall. Each
- * METER_BATCH reports meter_period_blocks / meter_window_blocks consecutive windows: first_sample
- * to observed_sample (exclusive), window_sequence from 1 after each accepted configure, and for the
- * output's peak entry a left and a right record, each the windows' maximum, VALID, and CLIPPED above
- * 1.0. A configure is all or nothing: an unknown strip is NOT_FOUND (meter.strip.unknown), a period
- * that is not a whole number of windows INVALID_FIELD (meter.period), and a strip or gain-reduction
- * entry UNAVAILABLE until a later issue serves it. The output meter queues eight windows; a window
- * that reaches no batch (dropped while the host did not call into the session, or in a partial
- * batch a gap discarded) is counted by METER_WINDOWS_LOST (protocol counter 22), and the sequence
- * never skips.
+ * Meters (issues 1583, 1587). TELEMETRY_CONFIGURE takes a meter table: entry i (meter handle
+ * i + 1) names the output, or a track or submix by its stable ID, and a metric, so a structural
+ * commit never moves a handle. Its reply carries the session's meter window in blocks
+ * (meter_window_blocks, about 32 ms). A nonempty table turns the meters on from the next rendered
+ * block, an empty one off; render applies the change before a block, on the strip meters' window
+ * grid, with no allocation, lock or syscall. Each METER_BATCH reports meter_period_blocks /
+ * meter_window_blocks consecutive windows: first_sample to observed_sample (exclusive),
+ * window_sequence from 1 after each accepted configure, and, in table order, a left and a right
+ * record per peak entry: for the output, its two planes' maxima over the batch, and for a strip,
+ * that strip's post-matrix maxima. A record is VALID, and CLIPPED above 1.0; an entry whose strip
+ * the rendering plan does not have (removed, not yet added) has flags 0 and value 0.0, and is
+ * VALID again under the same handle once a commit brings the strip back. Readings continue across
+ * a plan swap that carries the strip; a swap that carries no strip meter restarts the window grid
+ * at its first block. A configure is all or nothing: an unknown strip is NOT_FOUND
+ * (meter.strip.unknown), a period that is not a whole number of windows INVALID_FIELD
+ * (meter.period), a table needing more than one batch's 256 records INVALID_FIELD (meter.records,
+ * at its 129th entry), and a gain-reduction entry UNAVAILABLE until a later issue serves it. Each
+ * meter queues eight windows; a window that reaches no batch (dropped while the host did not call
+ * into the session, or in a partial batch a gap or a swap discarded) is counted by
+ * METER_WINDOWS_LOST (protocol counter 22), and the sequence never skips.
  *
  * Control service (issue 1348). The engine owns no thread, so the host drives the control work
  * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans

@@ -580,10 +580,30 @@ impl Legs {
     }
 }
 
-/// The `CAPABILITIES_GET` reply `reply` with `added` merged into its ascending command list and
-/// `flags` set, re-encoded by the codec so every length field matches. The browser's list must not
-/// hold an added ID already.
-fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
+/// The lossy lane size a `CAPABILITIES_GET` reply `reply` reports.
+fn capabilities_telemetry_slots(reply: &[u8]) -> u64 {
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::Capabilities(value),
+        ..
+    } = protocol::ProtocolCodec::default()
+        .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
+        .expect("a capabilities reply")
+    else {
+        panic!("a capabilities reply")
+    };
+    value.telemetry_slots
+}
+
+/// The `CAPABILITIES_GET` reply `reply` with `added` merged into its ascending command list,
+/// `flags` set and, when `telemetry_slots` is `Some`, that lossy lane size, re-encoded by the codec
+/// so every length field matches. The browser's list must not hold an added ID already.
+fn capabilities_plus(
+    reply: &[u8],
+    added: &[u16],
+    flags: u64,
+    telemetry_slots: Option<u64>,
+) -> Vec<u8> {
     let codec = protocol::ProtocolCodec::default();
     let mut fields = [0_u16; 64];
     let protocol::DecodedTypedResponseFrame::Success {
@@ -619,7 +639,7 @@ fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
         control_command_bytes: value.control_command_bytes,
         reliable_response_slots: value.reliable_response_slots,
         reliable_event_slots: value.reliable_event_slots,
-        telemetry_slots: value.telemetry_slots,
+        telemetry_slots: telemetry_slots.unwrap_or(value.telemetry_slots),
         replay_entries: value.replay_entries,
         replay_bytes: value.replay_bytes,
         maximum_cached_response_bytes: value.maximum_cached_response_bytes,
@@ -658,8 +678,10 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     // entry of the command list (#1386, root decision), and every other step stays byte-equal.
     // #1596 removes the second: until the browser reads spectrum through the frames, the C ABI
     // also lists the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1595 R2).
-    // #1589 removes the third: until the browser's session serves `OBSERVATION_READ`, the C ABI
-    // also lists `0x000f` with flag bit 15 (#1586 R2).
+    // #1588 removes the third: until the browser serves meter batches through the frames, the C
+    // ABI's lossy meter lane holds one whole batch, 256 slots, and the browser's keeps two
+    // (#1587a, root ruling m2). #1589 removes the fourth: until the browser's session serves
+    // `OBSERVATION_READ`, the C ABI also lists `0x000f` with flag bit 15 (#1586 R2).
     let request = legs.next();
     let bytes = frame(
         request,
@@ -670,19 +692,27 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let (c_result, c_reply) = legs.c.send(&bytes);
     assert_eq!(browser_result, c_result, "1 capabilities: the result codes");
     assert_eq!(
-        capabilities_plus(&browser_reply, &[], 0),
+        capabilities_plus(&browser_reply, &[], 0, None),
         browser_reply,
         "1 capabilities: the browser's reply re-encodes to itself"
+    );
+    // #1588 removes this assertion when it sizes the browser's lane: until then the browser keeps
+    // its two-slot lossy lane, and only the C ABI's grows to one whole meter batch (#1587a).
+    assert_eq!(
+        capabilities_telemetry_slots(&browser_reply),
+        2,
+        "1 capabilities: the browser's lossy lane keeps two slots"
     );
     assert_eq!(
         capabilities_plus(
             &browser_reply,
             &[0x000f, 0x0010, 0x0011, 0x0012, 0x0013],
-            protocol::CapabilityFlags::OBSERVATION.0 | protocol::CapabilityFlags::SPECTRUM.0
+            protocol::CapabilityFlags::OBSERVATION.0 | protocol::CapabilityFlags::SPECTRUM.0,
+            Some(host_core::MAXIMUM_METER_BATCH_RECORDS as u64)
         ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f-0x0013 and bits \
-         15 and 16"
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f-0x0013, bits 15 \
+         and 16 and its 256-slot meter lane"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.

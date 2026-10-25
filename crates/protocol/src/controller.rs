@@ -1311,6 +1311,46 @@ pub enum PreparedCommandFrame {
     /// [`ProtocolController::complete_session_command`] or
     /// [`ProtocolController::complete_session_command_refused`].
     Session(Box<PreparedSessionCommand>),
+    /// An `OBSERVATION_READ` the session executes (#1586 D6, gate 6): validated and planned like
+    /// [`Self::Session`], but neither boxed nor copied, so a read allocates nothing. The session
+    /// decodes the selections from the same request bytes
+    /// ([`ProtocolCodec::decode_observation_read_frame`]) and completes it with
+    /// [`ProtocolController::complete_observation_read`] or a refusal, passing those bytes again.
+    ObservationRead(PreparedObservationRead),
+}
+
+/// An `OBSERVATION_READ` decoded, checked and planned against the replay cache (#1586 D6): affine
+/// and bound to one controller generation as [`PreparedSessionCommand`] is, and holding nothing
+/// on the heap. The completion takes the request bytes again, which must be the prepared ones.
+pub struct PreparedObservationRead {
+    owner: Arc<AtomicU64>,
+    generation: u64,
+    request_id: RequestId,
+    request_len: usize,
+    replay_plan: ReplayPreflightPlan,
+    armed: bool,
+}
+
+impl PreparedObservationRead {
+    /// The request's correlation identity.
+    #[must_use]
+    pub const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+}
+
+impl Drop for PreparedObservationRead {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.owner.compare_exchange(
+                self.generation,
+                self.generation.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            self.armed = false;
+        }
+    }
 }
 
 /// Exact canonical response bytes for a token-free immediate decision.
@@ -1335,8 +1375,6 @@ pub enum SessionCommand {
     SpectrumCapture(SpectrumCaptureRequest),
     /// `SPECTRUM_STREAM` (#1595).
     SpectrumStream(SpectrumStreamRequest),
-    /// `OBSERVATION_READ` (#1586).
-    ObservationRead(ObservationReadRequest),
 }
 
 /// The success reply of a command the session executed. A reply borrows what it carries (a
@@ -1349,8 +1387,6 @@ pub enum SessionCommandReply<'a> {
     SpectrumCaptured(SpectrumCaptureReply<'a>),
     /// The `SPECTRUM_STREAM` reply.
     SpectrumStreamed(SpectrumStreamReply<'a>),
-    /// The `OBSERVATION_READ` reply.
-    ObservationRead(ObservationReadPage<'a>),
 }
 
 /// A command the session executes, decoded and checked, whose replay entry is planned against
@@ -2157,9 +2193,11 @@ impl<P: ControlProvider> ProtocolController<P> {
         if matches!(
             header.message_id,
             MessageId::SpectrumConfigure | MessageId::SpectrumCapture | MessageId::SpectrumStream
-        ) || (header.message_id == MessageId::ObservationRead && self.serves_observation_read())
-        {
+        ) {
             return self.prepare_session_command(input, scratch, output_capacity, header);
+        }
+        if header.message_id == MessageId::ObservationRead && self.serves_observation_read() {
+            return self.prepare_observation_read(input, scratch, output_capacity, header);
         }
         match self.plan_structural_command(
             input,
@@ -2224,9 +2262,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 DecodedCommandPayload::SpectrumStream(request) => {
                     SessionCommand::SpectrumStream(request)
                 }
-                DecodedCommandPayload::ObservationRead(request) => {
-                    SessionCommand::ObservationRead(request)
-                }
                 _ => {
                     let outcome = refusal(self, StatusCode::Internal);
                     return self.prepare_planned_immediate(
@@ -2289,6 +2324,164 @@ impl<P: ControlProvider> ProtocolController<P> {
         )))
     }
 
+    /// Prepare an `OBSERVATION_READ` (#1586 D6) as [`Self::prepare_session_command`] prepares a
+    /// session command, with no allocation: the selections are decoded into a table on the stack
+    /// to check the frame (a malformed one answers as an immediate reply), and neither the request
+    /// nor its decode is kept.
+    fn prepare_observation_read(
+        &mut self,
+        input: &[u8],
+        scratch: &mut DecodeScratch<'_>,
+        output_capacity: usize,
+        header: CommandHeader,
+    ) -> Result<PreparedCommandFrame, CommandFrameProcessError> {
+        let is_new_request = self.replay.is_new_request(header.request_id);
+        if is_new_request && output_capacity < self.replay.config().max_response_bytes {
+            return Err(CommandFrameProcessError::OutputReservationTooSmall {
+                required: self.replay.config().max_response_bytes,
+            });
+        }
+        if !is_new_request || self.replay.reservation.is_some() {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        }
+        let Ok(replay_plan) = self.replay.plan_preflight(header.request_id, input) else {
+            return self.process_immediate_command(input, scratch, output_capacity);
+        };
+        let mut table =
+            [crate::ObservationSelectionRef::EMPTY; crate::OBSERVATION_READ_MAXIMUM_SELECTIONS];
+        if let Err(error) = self.codec.decode_observation_read_frame(input, &mut table) {
+            let outcome = self.non_ok(error.status(), None);
+            return self.prepare_planned_immediate(
+                input,
+                header,
+                replay_plan,
+                outcome,
+                output_capacity,
+            );
+        }
+        if let ExpectedRevision::Exact(expected) = header.expected_revision
+            && expected != self.session.revision()
+        {
+            let outcome = self.non_ok(StatusCode::RevisionConflict, None);
+            return self.prepare_planned_immediate(
+                input,
+                header,
+                replay_plan,
+                outcome,
+                output_capacity,
+            );
+        }
+        let current = self.structural_generation.load(Ordering::Acquire);
+        let generation = current
+            .checked_add(1)
+            .filter(|generation| generation & 1 == 1)
+            .ok_or(CommandFrameProcessError::Internal)?;
+        self.structural_generation
+            .compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| CommandFrameProcessError::PreparedCommandOutstanding)?;
+        Ok(PreparedCommandFrame::ObservationRead(
+            PreparedObservationRead {
+                owner: Arc::clone(&self.structural_generation),
+                generation,
+                request_id: header.request_id,
+                request_len: input.len(),
+                replay_plan,
+                armed: true,
+            },
+        ))
+    }
+
+    /// The codec this endpoint decodes and encodes with, at its limits.
+    #[must_use]
+    pub const fn codec(&self) -> &ProtocolCodec {
+        &self.codec
+    }
+
+    /// Complete an `OBSERVATION_READ` with its page (#1586 D6): encode it at the committed revision
+    /// into `output`, then record the replay entry with `request`, the prepared request's bytes,
+    /// exactly as [`Self::complete_session_command`] does. Allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::complete_session_command`]; also [`CommandFrameProcessError::Internal`] when
+    /// `request` is not the prepared request.
+    pub fn complete_observation_read(
+        &mut self,
+        prepared: PreparedObservationRead,
+        request: &[u8],
+        page: ObservationReadPage<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        let frame = TypedSuccessResponseFrame {
+            request_id: prepared.request_id,
+            revision: self.session.revision(),
+            payload: SuccessResponsePayload::ObservationRead(page),
+        };
+        self.complete_observation_read_encoded(prepared, request, output, |controller, output| {
+            match controller
+                .codec
+                .encode_success_response_frame_into(&frame, output)
+            {
+                Err(EncodeError::OutputTooSmall { required }) => {
+                    Err(EncodeError::OutputTooSmall { required })
+                }
+                Err(_) => {
+                    let fallback = controller.encode_failure_outcome();
+                    controller.encode_outcome_into(
+                        MessageId::ObservationRead,
+                        frame.request_id,
+                        fallback,
+                        output,
+                    )
+                }
+                Ok(written) => Ok(written),
+            }
+        })
+    }
+
+    /// Complete an `OBSERVATION_READ` the session refused with `status` and the one diagnostic
+    /// `code`, at the request's repeated `field[index]` when one is given (#1586 D4), recorded for
+    /// replay as [`Self::complete_observation_read`] records a page.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::complete_observation_read`].
+    pub fn complete_observation_read_refused(
+        &mut self,
+        prepared: PreparedObservationRead,
+        request: &[u8],
+        status: StatusCode,
+        code: &str,
+        at: Option<(&str, u64)>,
+        output: &mut [u8],
+    ) -> Result<usize, CommandFrameProcessError> {
+        debug_assert_ne!(status, StatusCode::Ok);
+        debug_assert_ne!(status, StatusCode::Backpressure);
+        let request_id = prepared.request_id;
+        let mut outcome = self.non_ok(status, None);
+        if let Body::NonOk(payload) = &mut outcome.body
+            && let Some(diagnostic) = payload.diagnostics.first_mut()
+        {
+            code.clone_into(&mut diagnostic.code);
+            if let Some((field, index)) = at {
+                diagnostic.path = vec![
+                    crate::PathSegment::Field(field.to_owned()),
+                    crate::PathSegment::Index(index),
+                ];
+            }
+        }
+        self.complete_observation_read_encoded(prepared, request, output, |controller, output| {
+            controller
+                .encode_outcome_or_internal_into(
+                    MessageId::ObservationRead,
+                    request_id,
+                    outcome,
+                    output,
+                )
+                .map(|(written, _, _)| written)
+        })
+    }
+
     /// Complete a command the session executed with its success reply (#1594 D9): encode the
     /// reply at the committed revision into `output`, then record the replay entry with those
     /// bytes, so an exact replay of the request returns them and reaches the session no second
@@ -2323,13 +2516,6 @@ impl<P: ControlProvider> ProtocolController<P> {
                 return self.complete_session_borrowed(
                     prepared,
                     SuccessResponsePayload::SpectrumStreamed(value),
-                    output,
-                );
-            }
-            SessionCommandReply::ObservationRead(value) => {
-                return self.complete_session_borrowed(
-                    prepared,
-                    SuccessResponsePayload::ObservationRead(value),
                     output,
                 );
             }
@@ -2390,36 +2576,6 @@ impl<P: ControlProvider> ProtocolController<P> {
         self.complete_session_refusal(prepared, outcome, code, output)
     }
 
-    /// [`Self::complete_session_command_refused`] whose one diagnostic names the request's
-    /// repeated `field` at `index` (`field[index]`), as an `OBSERVATION_READ` refusal names the
-    /// selection it found wrong (#1586 D4).
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::complete_session_command`].
-    pub fn complete_session_command_refused_at(
-        &mut self,
-        prepared: PreparedSessionCommand,
-        status: StatusCode,
-        code: &str,
-        field: &str,
-        index: u64,
-        output: &mut [u8],
-    ) -> Result<usize, CommandFrameProcessError> {
-        debug_assert_ne!(status, StatusCode::Ok);
-        debug_assert_ne!(status, StatusCode::Backpressure);
-        let mut outcome = self.non_ok(status, None);
-        if let Body::NonOk(payload) = &mut outcome.body
-            && let Some(diagnostic) = payload.diagnostics.first_mut()
-        {
-            diagnostic.path = vec![
-                crate::PathSegment::Field(field.to_owned()),
-                crate::PathSegment::Index(index),
-            ];
-        }
-        self.complete_session_refusal(prepared, outcome, code, output)
-    }
-
     /// Complete a command the session refused with `BACKPRESSURE`, the one diagnostic `code` and
     /// the `backpressure` record that names the saturated resource (#1944), recorded for replay as
     /// [`Self::complete_session_command_refused`] records a refusal.
@@ -2475,23 +2631,76 @@ impl<P: ControlProvider> ProtocolController<P> {
         output: &mut [u8],
         encode: impl FnOnce(&Self, &mut [u8]) -> Result<usize, EncodeError>,
     ) -> Result<usize, CommandFrameProcessError> {
-        if !Arc::ptr_eq(&self.structural_generation, &prepared.owner)
-            || self.structural_generation.load(Ordering::Acquire) != prepared.generation
+        let request = core::mem::take(&mut prepared.request);
+        let written = self.complete_planned(
+            &prepared.owner,
+            prepared.generation,
+            prepared.request_id,
+            prepared.replay_plan,
+            &request,
+            output,
+            encode,
+        )?;
+        prepared.armed = false;
+        Ok(written)
+    }
+
+    /// [`Self::complete_session_encoded`] for an `OBSERVATION_READ` (#1586 D6), whose request bytes
+    /// the session passes again.
+    fn complete_observation_read_encoded(
+        &mut self,
+        mut prepared: PreparedObservationRead,
+        request: &[u8],
+        output: &mut [u8],
+        encode: impl FnOnce(&Self, &mut [u8]) -> Result<usize, EncodeError>,
+    ) -> Result<usize, CommandFrameProcessError> {
+        let header_id = self
+            .codec
+            .decode_header(request)
+            .ok()
+            .and_then(|decoded| decoded.header.command().map(|header| header.request_id));
+        if request.len() != prepared.request_len || header_id != Some(prepared.request_id) {
+            return Err(CommandFrameProcessError::Internal);
+        }
+        let written = self.complete_planned(
+            &prepared.owner,
+            prepared.generation,
+            prepared.request_id,
+            prepared.replay_plan,
+            request,
+            output,
+            encode,
+        )?;
+        prepared.armed = false;
+        Ok(written)
+    }
+
+    /// Encode a session-executed command's reply with `encode`, then record its replay entry with
+    /// `request`'s bytes (#1594 D9); the token's generation ends here.
+    #[allow(clippy::too_many_arguments)]
+    fn complete_planned(
+        &mut self,
+        owner: &Arc<AtomicU64>,
+        generation: u64,
+        request_id: RequestId,
+        replay_plan: ReplayPreflightPlan,
+        request: &[u8],
+        output: &mut [u8],
+        encode: impl FnOnce(&Self, &mut [u8]) -> Result<usize, EncodeError>,
+    ) -> Result<usize, CommandFrameProcessError> {
+        if !Arc::ptr_eq(&self.structural_generation, owner)
+            || self.structural_generation.load(Ordering::Acquire) != generation
         {
             return Err(CommandFrameProcessError::Internal);
         }
         let written = encode(self, output).map_err(CommandFrameProcessError::Encode)?;
-        self.replay.apply_preflight_plan(
-            prepared.request_id,
-            &prepared.request,
-            prepared.replay_plan,
-        );
         self.replay
-            .complete(prepared.request_id, &prepared.request, &output[..written])
+            .apply_preflight_plan(request_id, request, replay_plan);
+        self.replay
+            .complete(request_id, request, &output[..written])
             .expect("the plan reserved room for a reply of the endpoint's response bound");
         self.structural_generation
-            .store(prepared.generation.saturating_add(1), Ordering::Release);
-        prepared.armed = false;
+            .store(generation.saturating_add(1), Ordering::Release);
         Ok(written)
     }
 

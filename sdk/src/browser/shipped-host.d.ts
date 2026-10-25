@@ -761,6 +761,10 @@ export interface MisoStatus {
   readonly backend: number;
   readonly sampleRateHz: number;
   readonly quantumFrames: number;
+  /// The structural commands this instance rebuilt on the audio thread (issue 1294): a page
+  /// without cross-origin isolation runs each one in the worklet's message handler, outside
+  /// `process()`, as a blocking rebuild that is counted here. Saturates at `2 ** 32 - 1`.
+  readonly blockingRebuilds: number;
   readonly nextAbsoluteSample: bigint;
   readonly renderedQuanta: bigint;
   /// The session's count of live values that a later committed value replaced before a block

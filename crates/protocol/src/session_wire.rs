@@ -1373,6 +1373,24 @@ pub(crate) fn tx_observe_address(
 pub(crate) fn parse_observe_address(
     message: Message<'_>,
 ) -> Result<(StableId, controls::TapSection), DecodeError> {
+    let (strip_id, section, slot_id) = parse_observe_address_ref(message)?;
+    let id = |text: &str| StableId::parse(text).ok_or(DecodeError::InvalidField);
+    let slot_id = id(slot_id)?;
+    Ok((
+        id(strip_id)?,
+        match section {
+            crate::ObservationSection::Console => controls::TapSection::Console(slot_id),
+            crate::ObservationSection::Inserts => controls::TapSection::Inserts(slot_id),
+        },
+    ))
+}
+
+/// [`parse_observe_address`] without allocating (#1586 gate 6): the strip ID, the section and the
+/// slot ID, borrowed from the message and checked as stable IDs. The one rule of the address
+/// shape; the owned form above only copies its IDs.
+pub(crate) fn parse_observe_address_ref<'a>(
+    message: Message<'a>,
+) -> Result<(&'a str, crate::ObservationSection, &'a str), DecodeError> {
     use schema::control_address as a;
     let message = message.schema_spec(&a::SPEC)?;
     let optional = |spec: FieldSpec| message.optional_one(spec.id, spec.wire.raw());
@@ -1386,20 +1404,24 @@ pub(crate) fn parse_observe_address(
     }
     let section =
         crate::ControlSection::from_code(read_u8_exact(one_spec!(message, a::SECTION)?)?)?;
-    let id = |spec: FieldSpec| -> Result<StableId, DecodeError> {
+    let id = |spec: FieldSpec| {
         let value = optional(spec)?.ok_or(DecodeError::InvalidField)?;
         let text = core::str::from_utf8(value).map_err(|_| DecodeError::InvalidUtf8)?;
-        StableId::parse(text).ok_or(DecodeError::InvalidField)
+        if crate::message_wire::valid_stable_id(text) {
+            Ok(text)
+        } else {
+            Err(DecodeError::InvalidField)
+        }
     };
     let strip_id = id(a::OWNER_ID)?;
     let section = match section {
-        crate::ControlSection::Console => controls::TapSection::Console(id(a::SLOT_ID)?),
-        crate::ControlSection::Inserts => controls::TapSection::Inserts(id(a::SLOT_ID)?),
+        crate::ControlSection::Console => crate::ObservationSection::Console,
+        crate::ControlSection::Inserts => crate::ObservationSection::Inserts,
         crate::ControlSection::Builtins | crate::ControlSection::Own => {
             return Err(DecodeError::InvalidField);
         }
     };
-    Ok((strip_id, section))
+    Ok((strip_id, section, id(a::SLOT_ID)?))
 }
 
 /// The control address of a `SetControl` edit: the control list's address fields, in which a set

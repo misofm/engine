@@ -17,6 +17,10 @@ pub(crate) struct PreparedRuntime {
     pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     /// The plan's meter consumers (#1581 D6), one per strip in strip order: kept, not dropped.
     pub(crate) meters: Box<[host_core::MeterConsumer]>,
+    /// The plan's meter tables (#1587a R2) for an adapter whose control plane serves the meter
+    /// batches ([`ControlAdapter::METER_DELIVERY`]): one entry per meter and per strip. Empty, and
+    /// allocating nothing, for any other adapter.
+    pub(crate) meter_tables: host_core::MeterTables,
     /// The plan's effect observation readers (#1584 D7), one per observed effect instance in
     /// `HostLiveControlHandles::effect_observations` order: kept, not dropped. Empty for a host
     /// whose preparer takes them for itself (the browser's).
@@ -234,7 +238,7 @@ pub(crate) fn checked_sum(rows: &[u64]) -> Result<u64, CompileFailure> {
     })
 }
 
-pub(crate) fn protocol_queue_config(
+pub(crate) fn protocol_queue_config<A: ControlAdapter>(
     limits: ControlLimits,
 ) -> Result<ProtocolQueueConfig, CompileFailure> {
     let one = NonZeroUsize::new(1).expect("one is nonzero");
@@ -247,14 +251,28 @@ pub(crate) fn protocol_queue_config(
         .ok_or_else(|| failure(ResourceFault::Limit))?,
         reliable_response_slots: one,
         reliable_event_slots: NonZeroUsize::new(RELIABLE_EVENT_SLOTS).expect("two is nonzero"),
-        telemetry_slots: NonZeroUsize::new(TELEMETRY_SLOTS).expect("two is nonzero"),
+        telemetry_slots: NonZeroUsize::new(telemetry_slots::<A>()).expect("nonzero"),
+        counter_telemetry_slots: NonZeroUsize::new(COUNTER_TELEMETRY_SLOTS)
+            .expect("two is nonzero"),
     })
 }
 
-/// The lossy lane's slots (#1583 D5): one meter batch whole, the output peak entry's left and
-/// right records, so a batch never reaches the caller split or half dropped. The table serves no
-/// other entry until #1587, which sizes the lane for strip entries.
-const TELEMETRY_SLOTS: usize = 2;
+/// The lossy meter lane's slots (#1583 D5, #1587a): one meter batch whole, so a batch never
+/// reaches the caller split or half dropped. For an adapter whose control plane serves the meter
+/// batches (the C ABI) that is [`host_core::MAXIMUM_METER_BATCH_RECORDS`], the most records an
+/// accepted table needs; any other adapter keeps the two slots it had (#1588 sizes the browser's
+/// lane when it adds the browser's delivery).
+const fn telemetry_slots<A: ControlAdapter>() -> usize {
+    if A::METER_DELIVERY {
+        host_core::MAXIMUM_METER_BATCH_RECORDS
+    } else {
+        2
+    }
+}
+
+/// The counter-snapshot lane's slots (#1351, #1587a): two, as before the meter lane grew. A
+/// snapshot that does not fit coalesces or drops with a count.
+const COUNTER_TELEMETRY_SLOTS: usize = 2;
 
 /// The reliable event queue's slots: the transaction's `SESSION_COMMITTED` and its one
 /// `OBSERVATION_ENDED` (#1584 D6a).
@@ -303,9 +321,10 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     route_controls: host_core::RouteControlResources,
     observation: ObservationResources,
     monitor: MonitorRows,
+    meter_tables: MeterTableRows,
     response_capture: host_core::ResponseCaptureCeiling,
 ) -> Result<CapiResources, CompileFailure> {
-    let queue_config = protocol_queue_config(limits)?;
+    let queue_config = protocol_queue_config::<A>(limits)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
         .map_err(|_| failure(ResourceFault::Arithmetic))?;
     let replay_config = ReplayCacheConfig {
@@ -388,6 +407,9 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         monitor.overlay,
         // #1325 D6: the duck overlay a kept base of this epoch holds, and its replacement.
         monitor.duck,
+        // #1587a R2: the epoch's meter tables. They live in the session's meter delivery while
+        // the epoch renders and with the epoch otherwise; each epoch's row charges its own.
+        meter_tables.retained,
     ];
     let ObservationReserve {
         ended_event,
@@ -456,6 +478,10 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         provider.fixed_retained_bytes,
         checked_layout::<protocol::MeterEntry>(maximum_meter_entries)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
+        // #1587a: an adapter whose control plane serves the meter batches resolves each table
+        // entry to a strip and folds its peaks, in two vectors reserved at boot for the most
+        // entries a table holds.
+        meter_resolution_bytes::<A>(limits.maximum_control_frame_bytes)?,
         // #1398 D1: the pending and retired provider lists, and the report table.
         checked_layout::<ProviderEpoch>(PENDING_PROVIDERS)?,
         checked_layout::<ProviderEpoch>(RETIRED_PROVIDERS)?,
@@ -486,6 +512,11 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         // The token holds the commit's one `OBSERVATION_ENDED` event until the commit moves it.
         checked_byte_layout(ended_event)?,
     ];
+    // #1587a, #1325a's rule: the strip-ID text of the two stored meter tables above, at most
+    // `STABLE_ID_MAXIMUM_BYTES` per entry (an accepted entry names a strip of the committed
+    // model), is control-side heap that outlives the configure. One allocation per entry, so it
+    // is no allocation row.
+    let meter_text = meter_text_reserve::<A>(limits.maximum_control_frame_bytes)?;
     let epoch_retained = checked_sum(&epoch_rows)?;
     let fixed_allocations = checked_sum(&fixed_allocation_rows)?
         .checked_add(checked_sum(adapter_allocation_rows)?)
@@ -495,6 +526,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         .and_then(|value| value.checked_add(epoch_retained))
         .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
         .and_then(|value| value.checked_add(monitor.edit_ramps))
+        .and_then(|value| value.checked_add(meter_text))
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     let prepared_protocol_retained = checked_sum(&prepared_protocol_allocation_rows)?
         .checked_add(provider.catalog_retained_bytes)
@@ -509,6 +541,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         strip_table_bytes,
         monitor.overlay_vector,
         monitor.duck_vector,
+        meter_tables.largest,
     ]
     .into_iter()
     .chain([
@@ -549,6 +582,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     limits: ControlLimits,
     strip_heap_bytes: u64,
     capture_owners_high_water: usize,
+    meter_tables: &host_core::MeterTables,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
@@ -589,8 +623,78 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         route_controls,
         observation,
         monitor,
+        MeterTableRows {
+            retained: u64::try_from(meter_tables.heap_bytes())
+                .map_err(|_| failure(ResourceFault::Platform))?,
+            largest: u64::try_from(meter_tables.largest_allocation_bytes())
+                .map_err(|_| failure(ResourceFault::Platform))?,
+        },
         response_capture_bytes(compiled.normalized_model(), capture_owners_high_water)?,
     )
+}
+
+/// One epoch's meter tables (#1587a R2): their heap and its largest allocation.
+#[derive(Clone, Copy)]
+pub(crate) struct MeterTableRows {
+    pub(crate) retained: u64,
+    pub(crate) largest: u64,
+}
+
+/// The most entries an accepted meter table holds under a control frame of
+/// `maximum_control_frame_bytes` (#1587a): every entry the provider serves is a peak entry of two
+/// records, and one batch carries at most [`host_core::MAXIMUM_METER_BATCH_RECORDS`], so the
+/// provider refuses the 129th (`meter.records`). The decoder's own bound is 256 entries.
+fn maximum_meter_entries(maximum_control_frame_bytes: u64) -> Result<usize, CompileFailure> {
+    let items = usize::try_from(maximum_control_frame_bytes)
+        .map_err(|_| failure(ResourceFault::Platform))?
+        / size_of::<u16>();
+    Ok((host_core::MAXIMUM_METER_BATCH_RECORDS / 2)
+        .min(protocol::MAXIMUM_METER_ENTRIES)
+        .min(items))
+}
+
+/// The two per-entry vectors of a control-plane meter delivery (#1587a): each entry's strip
+/// resolution and its peak fold, reserved at boot for the most entries a table holds. Zero for an
+/// adapter whose control plane serves no meter batch.
+pub(crate) fn meter_resolution_bytes<A: ControlAdapter>(
+    maximum_control_frame_bytes: u64,
+) -> Result<u64, CompileFailure> {
+    let entries =
+        maximum_meter_entries(maximum_control_frame_bytes)? * usize::from(A::METER_DELIVERY);
+    checked_sum(&[
+        checked_layout::<Option<u32>>(entries)?,
+        checked_layout::<host_core::meters::StripPeakFold>(entries)?,
+    ])
+}
+
+/// The strip-ID text the controller's and the provider's stored meter tables can own (#1587a,
+/// #1325a's rule), at the model's bound of [`session::STABLE_ID_MAXIMUM_BYTES`] per entry. Zero
+/// for an adapter whose control plane serves no meter batch: its provider refuses every entry.
+fn meter_text_reserve<A: ControlAdapter>(
+    maximum_control_frame_bytes: u64,
+) -> Result<u64, CompileFailure> {
+    if !A::METER_DELIVERY {
+        return Ok(0);
+    }
+    meter_text_reserve_bytes(maximum_control_frame_bytes)
+        .ok_or_else(|| failure(ResourceFault::Arithmetic))
+}
+
+/// The bound the control plane charges for the strip-ID text of the two stored meter tables
+/// (#1587a): two copies of the most entries a table holds under a control frame of
+/// `maximum_control_frame_bytes`, each at [`session::STABLE_ID_MAXIMUM_BYTES`]. `None` on
+/// overflow. Public so the C ABI's completeness oracle adds the same bound it cannot observe at
+/// compile.
+#[must_use]
+#[cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+pub fn meter_text_reserve_bytes(maximum_control_frame_bytes: u64) -> Option<u64> {
+    let entries = maximum_meter_entries(maximum_control_frame_bytes).ok()?;
+    u64::try_from(
+        entries
+            .checked_mul(session::STABLE_ID_MAXIMUM_BYTES)?
+            .checked_mul(2)?,
+    )
+    .ok()
 }
 
 /// The response capture's control-side charge (#1577): [`host_core::response_capture_ceiling`]
@@ -1658,6 +1762,14 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
                 .ok_or_else(|| failure(ResourceFault::Arithmetic))?,
         )
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+    // #1587a R2: the plan's meter tables, built here, on the control thread, so its adoption
+    // exchanges them by pointer. Only a control-plane meter delivery reads them.
+    let meter_tables = if A::METER_DELIVERY {
+        host_core::MeterTables::new(meters.len(), compiled.normalized_model().strips().count())
+            .map_err(|_| failure(ResourceFault::Allocation))?
+    } else {
+        host_core::MeterTables::empty()
+    };
     let mut capi = prepared_capi_resources::<A>(
         compiled,
         &prepared.control_catalog,
@@ -1668,6 +1780,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         limits,
         strip_heap_bytes,
         capture_owners_high_water,
+        &meter_tables,
     )?;
     // #1594 R6, #1595 R7: a plan with spectrum captures has a session spectrum service, analysis
     // and one-shot result beside it (made at boot or at the promotion that installs the first
@@ -1712,6 +1825,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         strips,
         effects,
         meters,
+        meter_tables,
         observations,
         observation_index,
         plan,
@@ -1836,7 +1950,7 @@ where
         max_string_bytes: control_bytes,
         max_nesting: 4,
     });
-    let queues = ProtocolQueues::prepare(protocol_queue_config(limits)?)
+    let queues = ProtocolQueues::prepare(protocol_queue_config::<A>(limits)?)
         .map_err(|_| failure(ResourceFault::ProtocolQueue))?;
     let replay = ReplayCache::try_new(ReplayCacheConfig {
         entries: NonZeroUsize::new(replay_entries).ok_or_else(|| failure(ResourceFault::Limit))?,
@@ -1850,6 +1964,7 @@ where
         strips,
         effects,
         meters,
+        meter_tables,
         observations,
         observation_index,
         plan,
@@ -1922,21 +2037,23 @@ where
     // window. Any other adapter takes the reader and the live gate (`take_output_meter`).
     let mut provider = provider;
     let (output_meter, session_meters, output_gate) = if A::METER_DELIVERY {
-        let (requested, relay) = host_core::meters::output_peak_gate_relay(output_gate);
-        let tables =
-            host_core::MeterTables::new(0, 0).map_err(|_| failure(ResourceFault::Allocation))?;
+        let (requested, relay) =
+            host_core::meters::output_peak_gate_relay(output_gate, u64::from(window_frames.get()));
+        // #1587a R2: the delivery folds the boot plan's strip meters over its tables.
         let delivery = host_core::MeterDelivery::new(
             output_reader,
             requested,
             u64::from(window_frames.get()),
-            tables,
+            meter_tables,
         );
         provider.set_meter_window_blocks(Some(window_blocks));
-        (
-            None,
-            Some(crate::control::SessionMeters::new(delivery, window_blocks)),
-            Some(relay),
+        let session_meters = crate::control::SessionMeters::new(
+            delivery,
+            window_blocks,
+            maximum_meter_entries(limits.maximum_control_frame_bytes)?,
         )
+        .map_err(|_| failure(ResourceFault::Allocation))?;
+        (None, Some(session_meters), Some(relay))
     } else {
         (Some((output_reader, output_gate)), None, None)
     };

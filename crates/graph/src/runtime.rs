@@ -3244,9 +3244,12 @@ fn copy_scalar_response_snapshot(
 }
 
 impl RuntimeUnit {
+    /// `member` is the bank member that holds the owner now: `binding.member` translated through
+    /// the lane map (issue #1782a). Ignored for an op.
     fn copy_response_snapshot(
         &self,
         binding: &ResponseOwnerBinding,
+        member: usize,
         sample_rate_hz: u32,
         sink: &mut dyn ResponseSnapshotSink,
     ) -> Result<(), ResponseSnapshotError> {
@@ -3258,11 +3261,11 @@ impl RuntimeUnit {
                 chain,
                 ..
             } => {
-                if *lanes == 0 || binding.member >= members.len() {
+                if *lanes == 0 || member >= members.len() {
                     return Err(ResponseSnapshotError::Owner);
                 }
-                let slot = binding.member / *lanes;
-                let lane = binding.member % *lanes;
+                let slot = member / *lanes;
+                let lane = member % *lanes;
                 let mut left = [ResponseSnapshotSection {
                     id: 0,
                     kind: 0,
@@ -3572,6 +3575,10 @@ struct ArenaMembers<'a> {
     master: MasterPlanes<'a>,
     /// The played source planes a gather reads in place of an input buffer (issue #918).
     sources: SourceGather<'a>,
+    /// This unit's pack group is displaced (issue #1782a): every fold epilogue writes nothing and
+    /// reports the fold finished, because [`fold_displaced_group`] folds the group's master in home
+    /// order after its last unit. `false` everywhere else, which is every unit under the identity.
+    defer: bool,
 }
 
 /// No source claim is read in place at this arena buffer: the `u32` [`Runtime`]'s
@@ -3724,6 +3731,9 @@ impl BankMembers for ArenaMembers<'_> {
     /// and changes nothing else. The 2x2 above it is irreducibly cross-plane -- that is what a
     /// route *is* (D3) -- and is not something a plane-wise factoring could have separated.
     fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
+        if self.defer {
+            return;
+        }
         let fold = self.fold[lane];
         mix2x2_block::<FrameLane>(left, right, fold.coefficients);
         let (master_left, master_right) = self.master_planes();
@@ -3737,6 +3747,9 @@ impl BankMembers for ArenaMembers<'_> {
     }
 
     fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
+        if self.defer {
+            return;
+        }
         let lane_ids = cohort.lane_ids();
         let count = lane_ids.len();
         let frames = cohort.frames();
@@ -3824,6 +3837,10 @@ impl BankMembers for ArenaMembers<'_> {
     /// nothing, and the chain then takes the staged path -- whose `fold_cohort` applies its own
     /// checks exactly as it always has.
     fn fold_resident(&mut self, cohort: ResidentFoldCohort<'_>) -> bool {
+        if self.defer {
+            // Finished by the group fold, which reads the same resident words (#1782a).
+            return true;
+        }
         effect_contract::match_bank_width!(cohort.width(), |L, W, transpose| {
             self.fold_resident_tiles::<W, L>(cohort, transpose)
         })
@@ -3854,6 +3871,10 @@ impl BankMembers for ArenaMembers<'_> {
     /// Declines, having written nothing, when the lanes are not exactly this chain's fold list in
     /// order, the frames exceed the arena's, a later lane stores, or the master is not writable.
     fn fold_silent(&mut self, lanes: u32, frames: u32) -> bool {
+        if self.defer {
+            // The group fold reads the skip's zeroed resident words (#1782a).
+            return true;
+        }
         let frames = frames as usize;
         let count = self.fold.len();
         if count == 0
@@ -4056,6 +4077,7 @@ pub(crate) fn run_resident_fold(
         fold: &fold[..coefficients.len()],
         master: MasterPlanes::Arena(master),
         sources: SourceGather::NONE,
+        defer: false,
     }
     .fold_resident(cohort)
 }
@@ -4431,6 +4453,9 @@ pub(crate) struct Runtime {
     /// row (its one producer) only when it is such an admitted op some bank row reaches, and
     /// `execute` then maintains its [`Self::channels_agree`] fact.
     input_producers: Box<[Box<[u32]>]>,
+    /// Issue #1782a: the pack groups and which lane renders which strip. Empty, and allocation-free,
+    /// in a plan with no group; the identity until a move ([`Self::swap_bank_lanes`]).
+    lane_map: LaneMap,
     /// Issue #1899: unit -> whether the admitted per-node effect op in it has, on every block
     /// since bind, read identical input planes under words that preserve channel agreement, so
     /// its left and right state are bit-identical and so is the block it last wrote. Sticky: one
@@ -4515,6 +4540,7 @@ impl Runtime {
             .saturating_add(slice(&self.block_end_units))
             .saturating_add(input_producers)
             .saturating_add(slice(&self.channels_agree))
+            .saturating_add(self.lane_map.retained_bytes())
     }
 }
 
@@ -4828,6 +4854,7 @@ impl Runtime {
             block_end_units,
             input_producers: Box::default(),
             channels_agree: Box::default(),
+            lane_map: LaneMap::default(),
         }
     }
 
@@ -4846,11 +4873,10 @@ impl Runtime {
             .iter()
             .filter(|binding| binding.track_id.as_ref() == track_id)
         {
-            let unit = self
-                .units
-                .get(binding.unit)
-                .ok_or(ResponseSnapshotError::Owner)?;
-            unit.copy_response_snapshot(binding, sample_rate_hz, sink)?;
+            // Issue #1782a: the binding names the lane bind gave the owner's strip.
+            let (unit, member) = self.current_member(binding.unit, binding.member);
+            let unit = self.units.get(unit).ok_or(ResponseSnapshotError::Owner)?;
+            unit.copy_response_snapshot(binding, member, sample_rate_hz, sink)?;
             owners = owners
                 .checked_add(1)
                 .ok_or(ResponseSnapshotError::Capacity)?;
@@ -4927,7 +4953,7 @@ impl Runtime {
         index: usize,
         first_sample: u64,
         snapshot: LiveSnapshot,
-        host: HostMaster<'_>,
+        mut host: HostMaster<'_>,
         sources: Option<&dyn crate::GraphSourcePlanes>,
         block_time: &crate::GraphBlockTime<'_>,
     ) -> Result<(), RenderError> {
@@ -4944,6 +4970,7 @@ impl Runtime {
             route_activity,
             input_producers,
             channels_agree,
+            lane_map,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -4983,7 +5010,7 @@ impl Runtime {
         let track_delays: &mut [TrackDelayLine] = track_delays;
         match &mut current[0] {
             RuntimeUnit::Op(op) => {
-                let host = (*output_unit == Some(index)).then_some(host);
+                let host = (*output_unit == Some(index)).then(|| host.reborrow());
                 execute_op(
                     op,
                     arena,
@@ -5054,10 +5081,12 @@ impl Runtime {
                 let frames = arena.frames();
                 let master = match *master {
                     FoldTarget::Arena(buffer) => MasterPlanes::Arena(buffer),
-                    FoldTarget::Output => MasterPlanes::Host(host),
+                    FoldTarget::Output => MasterPlanes::Host(host.reborrow()),
                 };
+                // Issue #1782a: a displaced pack group folds after its last unit, in home order.
+                let defer = lane_map.defers(index);
                 let mut planes = ArenaMembers {
-                    arena,
+                    arena: &mut *arena,
                     inputs: &bank_inputs[..lanes],
                     outputs: &bank_outputs[..lanes],
                     fold,
@@ -5067,6 +5096,7 @@ impl Runtime {
                         of_buffer: source_plane_of_buffer,
                         lanes: identity[index].source_lanes,
                     },
+                    defer,
                 };
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
                 set_block_time(chain, block_time);
@@ -5087,10 +5117,18 @@ impl Runtime {
                         frames,
                         first_sample,
                         snapshot,
-                    )
+                    )?;
                 } else {
-                    chain.run(&mut planes, frames, first_sample, snapshot)
+                    chain.run(&mut planes, frames, first_sample, snapshot)?;
                 }
+                if defer
+                    && let Some((_, pack)) = lane_map.group(index)
+                    && pack.last as usize == index
+                {
+                    let LaneMap { at, staging, .. } = lane_map;
+                    fold_displaced_group(units, pack, at, staging, arena, host);
+                }
+                Ok(())
             }
         }
     }
@@ -9185,6 +9223,7 @@ pub(crate) fn build_sequential(
         &runtime.units,
         &runtime.identity,
     );
+    runtime.bind_lane_map();
     (
         runtime,
         BindIdentities {
@@ -9193,6 +9232,898 @@ pub(crate) fn build_sequential(
         },
     )
 }
+
+// ---- Pack groups and the lane map (issue #1782a) ------------------------------------------------
+
+/// A unit in no pack group: [`LaneMap`]'s `group_of` filler.
+const NO_PACK_GROUP: u32 = u32::MAX;
+
+/// One pack group (issue #1782a): a maximal run of two or more consecutive peer bank units whose
+/// strips may trade lanes ([`Runtime::swap_bank_lanes`]) without any reader keyed by a unit and a
+/// lane being left behind.
+///
+/// Group position `p` names unit `first + p / width`, lane `p % width`. A padded unit's padded
+/// positions never move: a padded lane never swaps.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PackGroup {
+    /// The group's first unit.
+    first: u32,
+    /// Its last unit, inclusive: at least `first + 1`.
+    last: u32,
+    /// The chains' width `W`, the lanes per unit a position counts.
+    width: u32,
+    /// Where this group's positions start in [`LaneMap`]'s `at` and `home`.
+    base: u32,
+    /// Every unit folds its routes into the one master ([`FoldTarget`]); `false`: none folds.
+    folded: bool,
+    /// Where a folded group's master is. Meaningless when `folded` is `false`.
+    master: FoldTarget,
+    /// The strips not at their home position. Zero is the identity map, under which every unit
+    /// folds in its own fused epilogue exactly as before #1782.
+    displaced: u32,
+}
+
+impl PackGroup {
+    /// The local position of unit `unit`, lane `lane`: `None` outside this group.
+    #[inline]
+    fn local(&self, unit: usize, lane: usize) -> Option<usize> {
+        let width = self.width as usize;
+        let offset = unit.checked_sub(self.first as usize)?;
+        (unit <= self.last as usize && lane < width).then(|| offset * width + lane)
+    }
+
+    /// The unit and lane of local position `position`: `None` past this group's span.
+    #[inline]
+    fn unit_lane(&self, position: usize) -> Option<(usize, usize)> {
+        let width = self.width as usize;
+        let unit = self.first as usize + position.checked_div(width)?;
+        (unit <= self.last as usize).then(|| (unit, position % width))
+    }
+}
+
+/// Which bank lane renders which strip (issue #1782a): bind-time pack groups and, per group, the
+/// permutation [`Runtime::swap_bank_lanes`] maintains. Built by [`LaneMap::discover`]; empty, and
+/// allocation-free, in a plan with no group.
+///
+/// A strip is named by its **home** position, the one bind gave it. Every reader keyed by a unit
+/// and a lane that a move does not carry with the strip's member ops translates through this map:
+/// the master fold of a displaced group ([`fold_displaced_group`]), the response-snapshot bindings
+/// ([`Runtime::copy_response_snapshot`]), the unit eligibility rows
+/// ([`Runtime::lane_eligibility_of`]) and the fade arms ([`Runtime::current_location`]). The plan
+/// carry, whose tables group a bank's lanes by home location, takes both plans back to the
+/// identity first ([`Runtime::restore_home_lanes`]).
+#[derive(Default)]
+pub(crate) struct LaneMap {
+    groups: Box<[PackGroup]>,
+    /// Unit -> its group's index, or [`NO_PACK_GROUP`]. Empty when there is no group.
+    group_of: Box<[u32]>,
+    /// Home position -> the position that strip renders at, per group from its `base`.
+    at: Box<[u32]>,
+    /// Position -> the home position of the strip it renders: `at`'s inverse.
+    home: Box<[u32]>,
+    /// Both planes of one re-materialised home tile, `width * frames` words each, for the widest
+    /// folded group; empty when no group folds.
+    staging: Box<[f32]>,
+    /// The scratch [`BankChain::swap_lanes`] needs, the most any grouped chain does.
+    swap_scratch: Box<[u8]>,
+}
+
+/// Why [`Runtime::swap_bank_lanes`] moved nothing. Every refusal leaves the plan as it was.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BankLaneMoveRefusal {
+    /// The two units are not banks of one pack group.
+    Group,
+    /// A lane is past its unit's populated lanes.
+    Lane,
+    /// The chains refused ([`rack::ChainLaneSwapRefusal`]): a different slot program, collapse
+    /// arming or per-lane state (stored automation into a fader bank with no slot, for one).
+    Chain(rack::ChainLaneSwapRefusal),
+}
+
+impl LaneMap {
+    /// The heap the map retains (#1074).
+    fn retained_bytes(&self) -> u64 {
+        use engine::realtime::retained::slice;
+        slice(&self.groups)
+            .saturating_add(slice(&self.group_of))
+            .saturating_add(slice(&self.at))
+            .saturating_add(slice(&self.home))
+            .saturating_add(slice(&self.staging))
+            .saturating_add(slice(&self.swap_scratch))
+    }
+
+    /// The pack groups of `units`, at bind (issue #1782a). Allocates; never on the render thread.
+    ///
+    /// A unit may join a group when it is a bank chain that
+    ///
+    /// * gathers every lane directly from its producer's buffer ([`bank_gather_source`]), so no
+    ///   member op of it runs and a member that moves to a later or an earlier unit of the group
+    ///   reads what it read before: every producer precedes the group, whose units are adjacent;
+    /// * neither takes resident input nor gives it ([`UnitIdentity::resident_input`]), and has no
+    ///   [`input_producer_table`] row and is in none: those relations name a unit's lanes by
+    ///   position;
+    /// * has no armed auxiliary destination, a trailing active mask and at most eight lanes (the
+    ///   width of [`UnitIdentity::source_lanes`]); and
+    /// * folds every populated lane or none (`route_fold`).
+    ///
+    /// Two adjacent such units are peers when their chains have one width and one slot count, they
+    /// fold into one master or neither folds, and some lane of one can trade its whole state with
+    /// some lane of the other in every slot ([`BankStage::can_swap_lanes`]): one slot program. A
+    /// group is a maximal run of two or more peers. The collapse arming is not a group term: it is
+    /// joined after bind (`arm_mono_collapse`), and a move between chains armed differently is
+    /// refused by the chain ([`BankChain::swap_lanes`]).
+    fn discover(
+        units: &mut [RuntimeUnit],
+        identity: &[UnitIdentity],
+        input_producers: &[Box<[u32]>],
+        frames: usize,
+    ) -> Self {
+        let mut referenced = vec![false; units.len()];
+        for row in input_producers {
+            for &producer in row.iter() {
+                if let Some(flag) = referenced.get_mut(producer as usize) {
+                    *flag = true;
+                }
+            }
+        }
+        let eligible: Vec<bool> = (0..units.len())
+            .map(|index| pack_member_eligible(units, identity, input_producers, &referenced, index))
+            .collect();
+        let mut runs = Vec::new();
+        let mut index = 0;
+        while index < units.len() {
+            if !eligible[index] {
+                index += 1;
+                continue;
+            }
+            let first = index;
+            while index + 1 < units.len()
+                && eligible[index + 1]
+                && pack_peers(units, index, index + 1)
+            {
+                index += 1;
+            }
+            if index > first {
+                runs.push((first, index));
+            }
+            index += 1;
+        }
+        if runs.is_empty() {
+            return Self::default();
+        }
+        let mut groups = Vec::with_capacity(runs.len());
+        let mut widest_folded = 0_usize;
+        let mut scratch = 0_usize;
+        for &(first, last) in &runs {
+            let RuntimeUnit::Bank {
+                chain,
+                fold,
+                master,
+                ..
+            } = &units[first]
+            else {
+                continue;
+            };
+            let width = chain.width().lanes() as usize;
+            let folded = !fold.is_empty();
+            if folded {
+                widest_folded = widest_folded.max(width);
+            }
+            let master = *master;
+            for unit in &units[first..=last] {
+                if let RuntimeUnit::Bank { chain, .. } = unit {
+                    scratch = scratch.max(chain.lane_swap_scratch_bytes());
+                }
+            }
+            groups.push(PackGroup {
+                first: u32::try_from(first).expect("a unit index fits"),
+                last: u32::try_from(last).expect("a unit index fits"),
+                width: u32::try_from(width).expect("a bank width fits"),
+                base: 0,
+                folded,
+                master,
+                displaced: 0,
+            });
+        }
+        Self::from_groups(groups, units.len(), 2 * widest_folded * frames, scratch)
+    }
+
+    /// The identity map over `groups` (their `base` and `displaced` are assigned here) for a plan
+    /// of `units` units, with `staging` words of fold staging and `scratch` bytes of swap scratch.
+    /// Bind-time; allocates.
+    ///
+    /// The index spaces, which every reader keeps: `at` and `home` are one table of every group's
+    /// positions, group `g` owning the slots `base(g)..base(g) + span(g)`; the slot `base + p`
+    /// describes the group's **local** position `p` (`0..span`), and the value it holds is a local
+    /// position too: `home[base + p]` is the home of the strip at `p`, `at[base + h]` where the
+    /// strip whose home is `h` renders. Under the identity both hold `p` at `base + p`.
+    fn from_groups(
+        mut groups: Vec<PackGroup>,
+        units: usize,
+        staging: usize,
+        scratch: usize,
+    ) -> Self {
+        let mut group_of = vec![NO_PACK_GROUP; units];
+        let mut local = Vec::new();
+        for (index, group) in groups.iter_mut().enumerate() {
+            group.base = u32::try_from(local.len()).expect("a position fits");
+            group.displaced = 0;
+            let span = (group.last - group.first + 1) as usize * group.width as usize;
+            local.extend(
+                (0..span).map(|position| u32::try_from(position).expect("a position fits")),
+            );
+            for unit in group.first as usize..=group.last as usize {
+                if let Some(slot) = group_of.get_mut(unit) {
+                    *slot = u32::try_from(index).expect("a group index fits");
+                }
+            }
+        }
+        let local: Box<[u32]> = local.into_boxed_slice();
+        Self {
+            groups: groups.into_boxed_slice(),
+            group_of: group_of.into_boxed_slice(),
+            home: local.clone(),
+            at: local,
+            staging: vec![0.0; staging].into_boxed_slice(),
+            swap_scratch: vec![0; scratch].into_boxed_slice(),
+        }
+    }
+
+    /// Unit `unit`'s pack group, if it has one.
+    #[inline]
+    fn group(&self, unit: usize) -> Option<(usize, PackGroup)> {
+        let group = *self.group_of.get(unit)? as usize;
+        Some((group, *self.groups.get(group)?))
+    }
+
+    /// Whether unit `unit` leaves its master fold to [`fold_displaced_group`] this block: its
+    /// group folds and is displaced. One bounds-checked load in a plan with no group.
+    #[inline]
+    fn defers(&self, unit: usize) -> bool {
+        self.group(unit)
+            .is_some_and(|(_, group)| group.folded && group.displaced != 0)
+    }
+
+    /// Where the strip whose home is unit `unit`, lane `lane` renders: itself outside a group.
+    #[inline]
+    fn current(&self, unit: usize, lane: usize) -> (usize, usize) {
+        let Some((_, group)) = self.group(unit) else {
+            return (unit, lane);
+        };
+        match group
+            .local(unit, lane)
+            .and_then(|home| self.at.get(group.base as usize + home))
+            .and_then(|&position| group.unit_lane(position as usize))
+        {
+            Some(current) => current,
+            None => (unit, lane),
+        }
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Record that the strips at `(unit, lane)` `a` and `b` of group `group` traded places: the
+    /// map half of [`Runtime::swap_bank_lanes`]. `false`, having changed nothing, when either
+    /// position is not in the group; panic-free, allocation-free, O(1).
+    fn record_swap(&mut self, group: usize, a: (usize, usize), b: (usize, usize)) -> bool {
+        let Some(pack) = self.groups.get(group).copied() else {
+            return false;
+        };
+        let base = pack.base as usize;
+        let (Some(local_a), Some(local_b)) = (pack.local(a.0, a.1), pack.local(b.0, b.1)) else {
+            return false;
+        };
+        let (Some(&strip_a), Some(&strip_b)) =
+            (self.home.get(base + local_a), self.home.get(base + local_b))
+        else {
+            return false;
+        };
+        let (strip_a, strip_b) = (strip_a as usize, strip_b as usize);
+        let at = &self.at;
+        let away = |strip: usize| {
+            at.get(base + strip)
+                .is_some_and(|&position| position as usize != strip)
+        };
+        let before = u32::from(away(strip_a)) + u32::from(away(strip_b));
+        let (Ok(position_a), Ok(position_b)) = (u32::try_from(local_a), u32::try_from(local_b))
+        else {
+            return false;
+        };
+        if base + strip_a >= self.at.len() || base + strip_b >= self.at.len() {
+            return false;
+        }
+        self.home.swap(base + local_a, base + local_b);
+        self.at[base + strip_a] = position_b;
+        self.at[base + strip_b] = position_a;
+        let at = &self.at;
+        let away = |strip: usize| {
+            at.get(base + strip)
+                .is_some_and(|&position| position as usize != strip)
+        };
+        let after = u32::from(away(strip_a)) + u32::from(away(strip_b));
+        if let Some(group) = self.groups.get_mut(group) {
+            group.displaced = (group.displaced + after).saturating_sub(before);
+        }
+        true
+    }
+    // REALTIME_POLICY_END
+}
+
+/// [`LaneMap::discover`]'s unit term: whether unit `index` may join a pack group.
+fn pack_member_eligible(
+    units: &[RuntimeUnit],
+    identity: &[UnitIdentity],
+    input_producers: &[Box<[u32]>],
+    referenced: &[bool],
+    index: usize,
+) -> bool {
+    let Some(RuntimeUnit::Bank {
+        members,
+        lanes,
+        chain,
+        fold,
+        ..
+    }) = units.get(index)
+    else {
+        return false;
+    };
+    let lanes = *lanes;
+    lanes > 0
+        && lanes <= 8
+        && lanes <= chain.width().lanes() as usize
+        && members.len() >= lanes
+        && members.len().is_multiple_of(lanes)
+        && chain
+            .active()
+            .iter()
+            .enumerate()
+            .all(|(lane, active)| *active == (lane < lanes))
+        && chain.aux_lanes().is_empty()
+        && (fold.is_empty() || fold.len() == lanes)
+        && identity.get(index).is_some_and(|row| !row.resident_input)
+        && identity
+            .get(index + 1)
+            .is_none_or(|row| !row.resident_input)
+        && input_producers.get(index).is_none_or(|row| row.is_empty())
+        && !referenced.get(index).copied().unwrap_or(true)
+        && members[..lanes]
+            .iter()
+            .all(|member| bank_gather_source(member).is_some())
+}
+
+/// The slots `chain` holds.
+fn chain_slot_count(chain: &mut BankChain) -> usize {
+    let mut slots = 0;
+    while chain.slot_stage_mut(slots).is_some() {
+        slots += 1;
+    }
+    slots
+}
+
+/// [`LaneMap::discover`]'s pair term: whether adjacent units `earlier` and `earlier + 1` are peers.
+fn pack_peers(units: &mut [RuntimeUnit], earlier: usize, later: usize) -> bool {
+    let (head, tail) = units.split_at_mut(later);
+    let (
+        Some(RuntimeUnit::Bank {
+            members: own_members,
+            lanes: own_lanes,
+            chain: own,
+            fold: own_fold,
+            master: own_master,
+        }),
+        Some(RuntimeUnit::Bank {
+            members: their_members,
+            lanes: their_lanes,
+            chain: theirs,
+            fold: their_fold,
+            master: their_master,
+        }),
+    ) = (head.get_mut(earlier), tail.first_mut())
+    else {
+        return false;
+    };
+    let slots = own_members.len() / *own_lanes;
+    if own.width() != theirs.width()
+        || slots != their_members.len() / *their_lanes
+        || chain_slot_count(own) != slots
+        || chain_slot_count(theirs) != slots
+        || own_fold.is_empty() != their_fold.is_empty()
+        || (!own_fold.is_empty() && own_master != their_master)
+    {
+        return false;
+    }
+    let scratch = own
+        .lane_swap_scratch_bytes()
+        .max(theirs.lane_swap_scratch_bytes());
+    for lane in 0..*own_lanes {
+        for their_lane in 0..*their_lanes {
+            let swaps = (0..slots).all(|slot| {
+                match (own.slot_stage_mut(slot), theirs.slot_stage_mut(slot)) {
+                    (Some(stage), Some(peer)) => {
+                        stage.can_swap_lanes(lane, LanePeer::Other(&*peer, their_lane), scratch)
+                    }
+                    _ => false,
+                }
+            });
+            if swaps {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The units of `table` that hold a `block_end` observer, widened to every unit of each pack group
+/// any of whose units is listed (issue #1782a): a move carries an observer to another unit of its
+/// group. A unit with no such observer adds a walk and calls nothing. Bind-time.
+fn widen_block_end_units(table: &[u32], map: &LaneMap) -> Box<[u32]> {
+    let listed = |unit: usize| table.iter().any(|&listed| listed as usize == unit);
+    let mut widened: Vec<u32> = Vec::with_capacity(table.len());
+    for unit in 0..map.group_of.len() {
+        let wanted = listed(unit)
+            || map
+                .group(unit)
+                .is_some_and(|(_, group)| (group.first as usize..=group.last as usize).any(listed));
+        if wanted {
+            widened.push(u32::try_from(unit).expect("a unit index fits"));
+        }
+    }
+    widened.into_boxed_slice()
+}
+
+impl Runtime {
+    /// Find this plan's pack groups (issue #1782a), at the end of bind.
+    fn bind_lane_map(&mut self) {
+        let frames = self.arena.frames();
+        self.lane_map = LaneMap::discover(
+            &mut self.units,
+            &self.identity,
+            &self.input_producers,
+            frames,
+        );
+        if !self.lane_map.groups.is_empty() && !self.block_end_units.is_empty() {
+            self.block_end_units = widen_block_end_units(&self.block_end_units, &self.lane_map);
+        }
+    }
+
+    /// `(first unit, last unit, width)` of each pack group, in unit order. Off the render thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn pack_groups(&self) -> Vec<(u32, u32, u32)> {
+        self.lane_map
+            .groups
+            .iter()
+            .map(|group| (group.first, group.last, group.width))
+            .collect()
+    }
+
+    /// Lane -> whether the strip whose home is that lane of unit `unit` holds its runtime
+    /// channel-symmetry witness, for [`PlanUnitEligibility`](engine::realtime::PlanUnitEligibility)
+    /// (issue #1782a): a row keeps describing its home lanes, whose `lane_tracks` are fixed at bind.
+    /// Off the render thread.
+    pub(crate) fn lane_eligibility_of(&self, unit: usize) -> Vec<bool> {
+        let Some(row) = self.units.get(unit) else {
+            return Vec::new();
+        };
+        if self
+            .lane_map
+            .group(unit)
+            .is_none_or(|(_, group)| group.displaced == 0)
+        {
+            return row.lane_eligibility();
+        }
+        let count = row.lane_eligibility().len();
+        (0..count)
+            .map(|lane| {
+                let (holder, holder_lane) = self.lane_map.current(unit, lane);
+                self.units
+                    .get(holder)
+                    .map(RuntimeUnit::lane_eligibility)
+                    .and_then(|lanes| lanes.get(holder_lane).copied())
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+impl Runtime {
+    /// Where the strip bind placed at `at` renders now (issue #1782a): `at` outside a pack group
+    /// and under the identity. The slot is unchanged: a move trades a strip's lanes in every slot.
+    pub(crate) fn current_location(
+        &self,
+        at: crate::GraphLaneLocation,
+    ) -> crate::GraphLaneLocation {
+        let (unit, lane) = self
+            .lane_map
+            .current(at.unit as usize, usize::from(at.lane));
+        match (u32::try_from(unit), u16::try_from(lane)) {
+            (Ok(unit), Ok(lane)) => crate::GraphLaneLocation {
+                unit,
+                slot: at.slot,
+                lane,
+            },
+            _ => at,
+        }
+    }
+
+    /// The member index of unit `unit`'s bank that now holds the strip bind placed at `member`
+    /// (issue #1782a), and its unit: `(unit, member)` outside a pack group.
+    fn current_member(&self, unit: usize, member: usize) -> (usize, usize) {
+        let lanes_of = |unit: usize| match self.units.get(unit) {
+            Some(RuntimeUnit::Bank { lanes, .. }) => *lanes,
+            _ => 0,
+        };
+        let lanes = lanes_of(unit);
+        if lanes == 0 {
+            return (unit, member);
+        }
+        let (holder, lane) = self.lane_map.current(unit, member % lanes);
+        (holder, (member / lanes) * lanes_of(holder) + lane)
+    }
+
+    /// Trade the strips at unit `a.0`, lane `a.1` and unit `b.0`, lane `b.1` of one pack group, at
+    /// a block boundary on the render thread (issue #1782a): #1782b's packing move.
+    ///
+    /// The chains trade the two lanes' whole state first ([`BankChain::swap_lanes`]); every refusal
+    /// is theirs or decided before it, and leaves the plan as it was. Then, in the same call, every
+    /// reader that follows the strip by moving with it: the member op of every slot (its gather
+    /// source, its scatter target or redirect, its observers and meters), the lane's route fold
+    /// entry (`fold`, constants and store bit), and its [`UnitIdentity::source_lanes`] bit. The two
+    /// units' observation rows are derived again from their new members. Last, the lane map, which
+    /// every other reader translates through.
+    ///
+    /// Allocation-free: element swaps, the chains' bounded swaps over the preallocated scratch, and
+    /// a walk of the two units' members.
+    pub(crate) fn swap_bank_lanes(
+        &mut self,
+        a: (usize, usize),
+        b: (usize, usize),
+    ) -> Result<(), BankLaneMoveRefusal> {
+        let (group, _) = self.lane_map.group(a.0).ok_or(BankLaneMoveRefusal::Group)?;
+        if self.lane_map.group(b.0).map(|(other, _)| other) != Some(group) {
+            return Err(BankLaneMoveRefusal::Group);
+        }
+        let populated = |unit: usize| match self.units.get(unit) {
+            Some(RuntimeUnit::Bank { lanes, .. }) => *lanes,
+            _ => 0,
+        };
+        // Every index below is checked here, before the chains change: both positions are in the
+        // group's map, both lanes fit the eight-bit source mask, and both units have identity rows.
+        // So nothing after the chains' swap can fail or panic.
+        let mapped = |(unit, lane): (usize, usize)| {
+            self.lane_map
+                .group(unit)
+                .and_then(|(_, pack)| pack.local(unit, lane))
+                .is_some()
+        };
+        if a.1 >= populated(a.0)
+            || b.1 >= populated(b.0)
+            || a.1 >= 8
+            || b.1 >= 8
+            || !mapped(a)
+            || !mapped(b)
+            || a.0.max(b.0) >= self.identity.len()
+        {
+            return Err(BankLaneMoveRefusal::Lane);
+        }
+        if a == b {
+            return Ok(());
+        }
+        let Self {
+            units,
+            identity,
+            lane_map,
+            ..
+        } = self;
+        if a.0 == b.0 {
+            let Some(RuntimeUnit::Bank {
+                members,
+                lanes,
+                chain,
+                fold,
+                ..
+            }) = units.get_mut(a.0)
+            else {
+                return Err(BankLaneMoveRefusal::Group);
+            };
+            chain
+                .swap_lanes(
+                    a.1,
+                    rack::ChainLanePeer::Same(b.1),
+                    &mut lane_map.swap_scratch,
+                )
+                .map_err(BankLaneMoveRefusal::Chain)?;
+            // `a.1` and `b.1` are below `lanes`, so every index is below `members.len()`.
+            let lanes = *lanes;
+            for slot in 0..members.len() / lanes {
+                members.swap(slot * lanes + a.1, slot * lanes + b.1);
+            }
+            if a.1 < fold.len() && b.1 < fold.len() {
+                fold.swap(a.1, b.1);
+            }
+        } else {
+            let ((low, low_lane), (high, high_lane)) = if a.0 < b.0 { (a, b) } else { (b, a) };
+            let (head, tail) = units.split_at_mut(high);
+            let (
+                Some(RuntimeUnit::Bank {
+                    members: low_members,
+                    lanes: low_lanes,
+                    chain: low_chain,
+                    fold: low_fold,
+                    ..
+                }),
+                Some(RuntimeUnit::Bank {
+                    members: high_members,
+                    lanes: high_lanes,
+                    chain: high_chain,
+                    fold: high_fold,
+                    ..
+                }),
+            ) = (head.get_mut(low), tail.first_mut())
+            else {
+                return Err(BankLaneMoveRefusal::Group);
+            };
+            low_chain
+                .swap_lanes(
+                    low_lane,
+                    rack::ChainLanePeer::Other(high_chain, high_lane),
+                    &mut lane_map.swap_scratch,
+                )
+                .map_err(BankLaneMoveRefusal::Chain)?;
+            let (low_lanes, high_lanes) = (*low_lanes, *high_lanes);
+            for slot in 0..low_members.len() / low_lanes {
+                if let (Some(own), Some(theirs)) = (
+                    low_members.get_mut(slot * low_lanes + low_lane),
+                    high_members.get_mut(slot * high_lanes + high_lane),
+                ) {
+                    core::mem::swap(own, theirs);
+                }
+            }
+            if let (Some(own), Some(theirs)) =
+                (low_fold.get_mut(low_lane), high_fold.get_mut(high_lane))
+            {
+                core::mem::swap(own, theirs);
+            }
+        }
+        // The source-claim bits: lane `a.1` of unit `a.0` now gathers what lane `b.1` of `b.0` did.
+        // Both rows exist and both lanes are below eight (checked above).
+        let bit = |unit: usize, lane: usize| {
+            identity
+                .get(unit)
+                .map_or(0, |row| (row.source_lanes >> lane) & 1)
+        };
+        let (bit_a, bit_b) = (bit(a.0, a.1), bit(b.0, b.1));
+        for ((unit, lane), value) in [(a, bit_b), (b, bit_a)] {
+            if let Some(row) = identity.get_mut(unit) {
+                row.source_lanes = (row.source_lanes & !(1 << lane)) | (value << lane);
+            }
+        }
+        for unit in [a.0, b.0] {
+            if let (Some(row), Some(identity)) = (units.get(unit), identity.get_mut(unit)) {
+                identity.observation = UnitObservation::of(
+                    row.has_observers(),
+                    row.accepts_sample_peak(),
+                    row.accepts_banked_meter(),
+                    row.meters_only(),
+                );
+            }
+        }
+        // The map: the strips at the two positions trade places.
+        let recorded = lane_map.record_swap(group, a, b);
+        debug_assert!(
+            recorded,
+            "a grouped move's positions are in its group's map"
+        );
+        Ok(())
+    }
+
+    /// Take every displaced pack group back to the identity map (issue #1782a): the plan carry's
+    /// predecessor (and successor) side, whose move tables name a strip by the location bind gave
+    /// it and drain a bank's lanes together. A bounded series of [`Self::swap_bank_lanes`], at most
+    /// one per strip; nothing at all under the identity.
+    ///
+    /// Position `P` is fixed by trading it with the position that holds `P`'s home strip. That
+    /// trade can refuse after legal moves, because a fader bank's automation fit is one-way: an
+    /// automated strip goes into a bank with automation slots and never into one without
+    /// (`automation_swap_fits`). Only the strip leaving `P` can be refused (the strip arriving is
+    /// coming home), so it is automated, `P`'s bank has slots, and the trade that sends that
+    /// occupant to its own home instead fits: it goes home, and whatever it displaces lands in
+    /// `P`'s bank, which has slots. Each trade puts one strip home, so the walk ends.
+    ///
+    /// `false` when both trades refuse, which the argument above rules out short of a defect (or a
+    /// refusal this argument does not cover); the map then still names where each strip is, and
+    /// the caller carries nothing.
+    pub(crate) fn restore_home_lanes(&mut self) -> bool {
+        for group in 0..self.lane_map.groups.len() {
+            let Some(pack) = self.lane_map.groups.get(group).copied() else {
+                return false;
+            };
+            if pack.displaced == 0 {
+                continue;
+            }
+            let base = pack.base as usize;
+            let span = (pack.last as usize + 1 - pack.first as usize) * pack.width as usize;
+            for position in 0..span {
+                // Each trade puts one strip home, so a position needs at most `span` of them.
+                for _ in 0..=span {
+                    let (Some(&occupant), Some(&holder)) = (
+                        self.lane_map.home.get(base + position),
+                        self.lane_map.at.get(base + position),
+                    ) else {
+                        return false;
+                    };
+                    let occupant = occupant as usize;
+                    if occupant == position {
+                        break;
+                    }
+                    let (Some(here), Some(holder), Some(occupant_home)) = (
+                        pack.unit_lane(position),
+                        pack.unit_lane(holder as usize),
+                        pack.unit_lane(occupant),
+                    ) else {
+                        return false;
+                    };
+                    if self.swap_bank_lanes(here, holder).is_err()
+                        && self.swap_bank_lanes(here, occupant_home).is_err()
+                    {
+                        return false;
+                    }
+                }
+                if self.lane_map.home.get(base + position).copied() != u32::try_from(position).ok()
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// The master fold of a displaced pack group (issue #1782a), after its last unit has run: for
+/// each unit in schedule order, its home lanes' routed tiles accumulate into the master in home
+/// lane order, through the kernels its own epilogue would have used.
+///
+/// # Why this is the identity map's arithmetic
+///
+/// `route_fold` proved the master's contributors are the group's units in schedule order and
+/// their lanes in ascending order, and a displaced group's units folded nothing in their own
+/// epilogues (`ArenaMembers::defer`). Nothing else writes the master between the group's first
+/// unit and this call: the group's units are adjacent. So the same contributions in the same
+/// order are what remain, and per unit they are:
+///
+/// * the home tile: lane `k` is the resident final output of the lane the strip whose home is
+///   lane `k` renders at ([`LaneMap`]), every word moved unchanged. A unit none of whose home
+///   strips moved uses its own resident block in place;
+/// * the home fold list: entry `k` is that strip's [`FoldLane`], which a move carries with it, so
+///   its route constants and its store bit (only the master's first contributor stores) are the
+///   home lane's;
+/// * a full unit offers [`BankMembers::fold_resident`] first and, declined, takes the staged
+///   [`BankMembers::fold_cohort`] over a planar transpose of the same words, as
+///   `BankChain::scatter_tiled` does; a padded unit takes the staged path, as it does there.
+///
+/// A unit that skipped its block (#1107) left exact `+0.0` resident words, and folding them is
+/// what `BankMembers::fold_silent` is proven to equal. A collapsed block's resident right plane is
+/// its left one after the seam, as its own scatter reads it. So every master word is the word the
+/// identity map writes. Allocation-free: the staging is the map's.
+fn fold_displaced_group(
+    units: &[RuntimeUnit],
+    pack: PackGroup,
+    at: &[u32],
+    staging: &mut [f32],
+    arena: &mut DisjointArena,
+    mut host: HostMaster<'_>,
+) {
+    let width = pack.width as usize;
+    let first = pack.first as usize;
+    let base = pack.base as usize;
+    let frames = arena.frames();
+    let Ok(block) = u32::try_from(frames) else {
+        return;
+    };
+    let words = width * frames;
+    if width > 8 || staging.len() < 2 * words {
+        debug_assert!(false, "a folded pack group's staging holds one home tile");
+        return;
+    }
+    let (tile_left, rest) = staging.split_at_mut(words);
+    let tile_right = &mut rest[..words];
+    let resident = |unit: usize| match units.get(unit) {
+        Some(RuntimeUnit::Bank { chain, .. }) => chain.final_output_block(block),
+        _ => None,
+    };
+    for unit in first..=pack.last as usize {
+        let Some(RuntimeUnit::Bank { lanes, chain, .. }) = units.get(unit) else {
+            continue;
+        };
+        let count = *lanes;
+        if count > width {
+            debug_assert!(false, "a grouped unit's lanes fit its width");
+            return;
+        }
+        let mut fold = [FoldLane {
+            coefficients: [0.0; 4],
+            store: false,
+        }; 8];
+        let mut holders = [(unit, 0_usize); 8];
+        let mut moved = false;
+        for lane in 0..count {
+            let Some(&position) = at.get(base + (unit - first) * width + lane) else {
+                return;
+            };
+            let holder = (first + position as usize / width, position as usize % width);
+            let Some(RuntimeUnit::Bank { fold: list, .. }) = units.get(holder.0) else {
+                return;
+            };
+            let Some(entry) = list.get(holder.1) else {
+                return;
+            };
+            fold[lane] = *entry;
+            holders[lane] = holder;
+            moved |= holder != (unit, lane);
+        }
+        let master = match pack.master {
+            FoldTarget::Arena(buffer) => MasterPlanes::Arena(buffer),
+            FoldTarget::Output => MasterPlanes::Host(host.reborrow()),
+        };
+        let mut members = ArenaMembers {
+            arena: &mut *arena,
+            inputs: &[],
+            outputs: &[],
+            fold: &fold[..count],
+            master,
+            sources: SourceGather::NONE,
+            defer: false,
+        };
+        if count == width {
+            let tile = if moved {
+                for (lane, &(holder, holder_lane)) in holders[..count].iter().enumerate() {
+                    let Some((left, right)) = resident(holder) else {
+                        return;
+                    };
+                    if left.len() < words || right.len() < words || holder_lane >= width {
+                        return;
+                    }
+                    for frame in 0..frames {
+                        tile_left[frame * width + lane] = left[frame * width + holder_lane];
+                        tile_right[frame * width + lane] = right[frame * width + holder_lane];
+                    }
+                }
+                Some((&tile_left[..], &tile_right[..]))
+            } else {
+                chain.final_output_block(block)
+            };
+            if let Some((left, right)) = tile
+                && let Ok(cohort) = ResidentFoldCohort::new(left, right, chain.width(), frames)
+                && members.fold_resident(cohort)
+            {
+                continue;
+            }
+        }
+        // The staged path: each home lane's planar tile, `frames` words apart.
+        for (lane, &(holder, holder_lane)) in holders[..count].iter().enumerate() {
+            let Some((left, right)) = resident(holder) else {
+                return;
+            };
+            if left.len() < words || right.len() < words || holder_lane >= width {
+                return;
+            }
+            for frame in 0..frames {
+                tile_left[lane * frames + frame] = left[frame * width + holder_lane];
+                tile_right[lane * frames + frame] = right[frame * width + holder_lane];
+            }
+        }
+        const LANE_IDS: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+        if let Ok(cohort) = FoldCohort::new(
+            &LANE_IDS[..count],
+            &mut tile_left[..],
+            &mut tile_right[..],
+            frames,
+            frames,
+        ) {
+            members.fold_cohort(cohort);
+        }
+    }
+}
+// REALTIME_POLICY_END
 
 /// What bind knows about the state a successor can take from this plan and the runtime does not
 /// keep (#1284): who owns each strip delay line and each live route. Read once, off the render
@@ -11652,6 +12583,7 @@ mod tests {
                     fold: &[],
                     master: MasterPlanes::Arena(0),
                     sources: SourceGather::NONE,
+                    defer: false,
                 },
                 3,
                 71,
@@ -12398,6 +13330,7 @@ mod tests {
                 fold: if folded { &fold } else { &[] },
                 master: MasterPlanes::Arena(2),
                 sources: SourceGather::NONE,
+                defer: false,
             };
             chain
                 .run(&mut members, FRAMES as u32, 0, LiveSnapshot::ALL)
@@ -12888,6 +13821,7 @@ mod tests {
                 fold: &fold,
                 master: MasterPlanes::Arena(master),
                 sources: SourceGather::NONE,
+                defer: false,
             };
             let mut staged_left: Vec<f32> = tiles
                 .iter()
@@ -12961,6 +13895,7 @@ mod tests {
                 fold: &fold,
                 master: MasterPlanes::Arena(master),
                 sources: SourceGather::NONE,
+                defer: false,
             };
             members.fold_cohort(
                 FoldCohort::new(&[0], &mut left, &mut right, frames, frames)
@@ -13017,6 +13952,7 @@ mod tests {
                 fold: &fold,
                 master: MasterPlanes::Arena(ARENA_BASE),
                 sources: SourceGather::NONE,
+                defer: false,
             };
             members.fold_cohort(
                 FoldCohort::new(ids, &mut left, &mut right, FRAMES, FRAMES)
@@ -13056,6 +13992,7 @@ mod tests {
             fold: &fold,
             master: MasterPlanes::Arena(ARENA_BASE),
             sources: SourceGather::NONE,
+            defer: false,
         };
         members.fold_cohort(
             FoldCohort::new(&[0], &mut left, &mut right, FRAMES + 1, FRAMES + 1)
@@ -13257,6 +14194,7 @@ mod tests {
                                         fold: &fold[members],
                                         master: MasterPlanes::Arena(master),
                                         sources: SourceGather::NONE,
+                                        defer: false,
                                     },
                                     fused,
                                     counts: [0; 3],
@@ -13360,6 +14298,7 @@ mod tests {
                     fold,
                     master: MasterPlanes::Arena(master),
                     sources: SourceGather::NONE,
+                    defer: false,
                 }
                 .fold_resident(cohort);
                 let (master_left, master_right) = arena.read_stereo(ARENA_BASE);
@@ -13417,6 +14356,7 @@ mod tests {
                         fold: &fold,
                         master: MasterPlanes::Arena(ARENA_BASE),
                         sources: SourceGather::NONE,
+                        defer: false,
                     }
                     .fold_resident(cohort)
                 );
@@ -13468,6 +14408,7 @@ mod tests {
             fold: &fold,
             master: MasterPlanes::Arena(ARENA_BASE),
             sources: SourceGather::NONE,
+            defer: false,
         };
         let mut left = vec![-0.0_f32; FRAMES];
         let mut right = vec![-0.0_f32; FRAMES];
@@ -13519,6 +14460,7 @@ mod tests {
             fold: &fold,
             master: MasterPlanes::Arena(ARENA_BASE),
             sources: SourceGather::NONE,
+            defer: false,
         };
         seed_members.fold_plane(0, &mut seed_left, &mut seed_right);
 
@@ -13555,6 +14497,7 @@ mod tests {
             fold: &accumulate_fold,
             master: MasterPlanes::Arena(ARENA_BASE),
             sources: SourceGather::NONE,
+            defer: false,
         };
         accumulate_members.fold_plane(0, &mut added_left, &mut added_right);
         let (master_left, master_right) = arena.read_stereo(ARENA_BASE);
@@ -13586,6 +14529,7 @@ mod tests {
             fold: &fold,
             master: MasterPlanes::Arena(ARENA_BASE),
             sources: SourceGather::NONE,
+            defer: false,
         };
         let mut cohort_left = vec![-0.0_f32; FRAMES];
         let mut cohort_right = vec![-0.0_f32; FRAMES];
@@ -13695,6 +14639,68 @@ mod tests {
     /// `inputs[0] == output` -- the already-in-place case admits, which is a no-op redirect that
     /// hides the clause; widen past `BankMember` -- the `Effect` case admits and the effect's own
     /// processing is skipped along with the copy.
+    /// Issue #1782a: a move in a pack group whose positions do not start the map's table.
+    ///
+    /// Test value: red when the map's index spaces disagree for a group whose `base` is not zero
+    /// -- a table that holds global positions where the readers expect the group's own (the arm64
+    /// leg's out-of-bounds panic on #1991: two four-lane groups, the second at `base` 8) -- which
+    /// the compiled-plan gates reach only at four lanes.
+    #[test]
+    fn a_move_in_a_later_pack_group_trades_exactly_its_two_strips() {
+        let group = |first: u32, last: u32| PackGroup {
+            first,
+            last,
+            width: 4,
+            base: 0,
+            folded: true,
+            master: FoldTarget::Output,
+            displaced: 0,
+        };
+        let mut map = LaneMap::from_groups(vec![group(0, 1), group(2, 4)], 5, 0, 0);
+        assert_eq!(
+            map.groups[1].base, 8,
+            "the second group's slots follow the first's"
+        );
+        for unit in 0..5 {
+            for lane in 0..4 {
+                assert_eq!(map.current(unit, lane), (unit, lane), "the identity");
+            }
+        }
+        assert!(map.record_swap(1, (2, 1), (4, 3)), "the move is recorded");
+        assert_eq!(map.current(2, 1), (4, 3), "ch at (2, 1) renders at (4, 3)");
+        assert_eq!(map.current(4, 3), (2, 1), "and the other way");
+        assert_eq!(map.groups[1].displaced, 2);
+        assert_eq!(map.groups[0].displaced, 0, "the first group is untouched");
+        for (unit, lane) in [(0, 0), (1, 3), (2, 0), (3, 2), (4, 2)] {
+            assert_eq!(
+                map.current(unit, lane),
+                (unit, lane),
+                "({unit}, {lane}) stays"
+            );
+        }
+        assert!(
+            map.record_swap(1, (3, 0), (2, 1)),
+            "a second move, onto a moved strip"
+        );
+        assert_eq!(map.current(4, 3), (3, 0));
+        assert_eq!(map.current(3, 0), (2, 1));
+        assert_eq!(map.current(2, 1), (4, 3));
+        assert_eq!(map.groups[1].displaced, 3);
+        assert!(map.record_swap(1, (3, 0), (2, 1)) && map.record_swap(1, (2, 1), (4, 3)));
+        assert_eq!(
+            map.groups[1].displaced, 0,
+            "both moves undone: the identity again"
+        );
+        assert!(
+            !map.record_swap(1, (0, 0), (2, 0)),
+            "a position of another group refuses"
+        );
+        assert!(
+            !map.record_swap(1, (2, 4), (2, 0)),
+            "a lane past the width refuses"
+        );
+    }
+
     #[test]
     fn bank_gather_source_admits_only_the_dedication_copy() {
         fn member(

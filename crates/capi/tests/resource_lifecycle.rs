@@ -616,7 +616,10 @@ fn host_half_counting(
     let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
         store.compiled(),
         &caps,
+        // As capi asks: #1584 D7's observation taps and #1587a's strip meter queue depth.
         &host_core::HostLiveControlRequest {
+            meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
+                .expect("the meter queue depth"),
             observation_taps: host_core::launch_maximum_observation_taps(),
             ..host_core::HostLiveControlRequest::default()
         },
@@ -712,6 +715,10 @@ impl HostHalf {
             // #1325 D6: the duck overlay a kept base of the epoch holds, at its model's bounds.
             + control_plane::duck_overlay_bytes(self.store.compiled().normalized_model())
                 .expect("the duck overlay row")
+            // #1587a R2: the epoch's meter tables, one entry per meter and per strip.
+            + host_core::MeterTables::new(self.meters.len(), self.strips.len())
+                .expect("the meter tables")
+                .heap_bytes() as u64
             // #1586 D6: the epoch's observation index, one entry per effect producer and a copy
             // of its two IDs.
             + (self.effects.len() * size_of::<host_core::observation::ObservationIndexEntry>())
@@ -807,6 +814,10 @@ struct CompileObservation {
     /// `observe_compile` compiles fresh at boot; a rebuild oracle must pass the session's high-water. `response_capture.rs` in control-plane holds a
     /// capture at the bound within it.
     response_capture: u64,
+    /// The strip-ID text the two stored meter tables can own (#1587a, #1325a's rule), from
+    /// `control_plane::meter_text_reserve_bytes` at the compile's control frame: a bound, not an
+    /// allocation, since a boot configures no table.
+    meter_text_reserve: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -869,6 +880,9 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_plane::response_capture_bytes(store.compiled().normalized_model(), 0)
             .expect("the response capture row")
             .total_bytes;
+    let meter_text_reserve =
+        control_plane::meter_text_reserve_bytes(compile_limits.maximum_control_frame_bytes)
+            .expect("the meter text reserve");
     let host_core::PreparedHost {
         plan,
         sources,
@@ -915,6 +929,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         observation_reserve,
         monitor_and_ramps,
         response_capture,
+        meter_text_reserve,
     }
 }
 
@@ -962,13 +977,14 @@ impl CompileObservation {
                 + self.observation_reserve
                 + self.monitor_and_ramps
                 + self.response_capture
+                + self.meter_text_reserve
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
              observation readers + the decode-field rounding, all observed (left; the send producers' row is the graph \
-             function's total, and the observation reserve, the monitor and ramp rows and the response \
-             capture row are the control plane's bounds), against \
+             function's total, and the observation reserve, the monitor and ramp rows, the response \
+             capture row and the meter tables' text are the control plane's bounds), against \
              `capi_retained_bytes` (right)"
         );
     }
@@ -1387,6 +1403,29 @@ impl Budget {
 /// 10 %, rounded up to 64: 82,790.4 -> 82,816; the effect runtime row gains 512 (12,800, within
 /// 13,568); and the graph ceilings rise by the +38,912 delta plus 10 %: 324,352 + 42,803.2 ->
 /// 367,168 and 324,224 + 42,803.2 -> 367,040, until the next `aarch64-debug` print tightens them.
+///
+/// #1587a serves strip peaks on the C ABI. `capi_retained_bytes` measured 259,662 (x86-64, after
+/// #1325a's duck overlay; the row does not depend on the lane width), above the 212,288 ceiling:
+/// the strip-ID text of the two stored meter tables, charged at the 128 entries an accepted table
+/// holds x 127 B x 2 = 32,512 B (#1325a's rule), the meter lane at 256 slots (one whole batch; the
+/// counter lane stays at 2), each epoch's meter tables and the entry resolution and fold vectors.
+/// So the ceiling is 259,662 plus 10 %, rounded up to 64: 285,628.2 -> 285,632. The C ABI's strip
+/// meter queues are now as deep as the output meter's (8, was 1; root ruling 2), so
+/// `builtin_meter_payload_bytes` measured 20,538 and `builtin_retained_payload_bytes` 56,997,
+/// above 11,520 and 51,648: 22,591.8 -> 22,592 and 62,696.7 -> 62,720.
+///
+/// #1587a with #1577 (both on `main`): the meter rows above and the response capture's are
+/// independent and add up. `capi_retained_bytes` measured 312,897 (x86-64, deterministic: 259,662
+/// plus 52,620 for the capture and 615 from other merged rows), above both slices' ceilings
+/// (285,632 and 275,584), so the ceiling is 312,897 plus 10 %, rounded up to 64: 344,186.7 ->
+/// 344,192.
+///
+/// #1586b with #1587a and #1577 (all on `main`): `capi_retained_bytes` measured 334,046 (x86-64,
+/// deterministic: 312,897 plus 21,149 for the session's 256-row `OBSERVATION_READ` table and each
+/// epoch's observation index, one entry per effect instance and a copy of its two IDs; the read's
+/// selections decode onto the stack, so no selection table is retained). The three slices' rows
+/// are independent and add up, so the ceiling is 334,046 plus 10 %, rounded up to 64: 367,450.6
+/// -> 367,488.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1481,20 +1520,20 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_meter_payload_bytes",
         value: |report| report.builtin_meter_payload_bytes,
-        eight_lanes: 11_520,
-        four_lanes: 11_520,
+        eight_lanes: 22_592,
+        four_lanes: 22_592,
     },
     Budget {
         row: "builtin_retained_payload_bytes",
         value: |report| report.builtin_retained_payload_bytes,
-        eight_lanes: 51_648,
-        four_lanes: 51_648,
+        eight_lanes: 62_720,
+        four_lanes: 62_720,
     },
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 275_584,
-        four_lanes: 275_584,
+        eight_lanes: 367_488,
+        four_lanes: 367_488,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -1933,7 +1972,11 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let successor = host_core::prepare_host_runtime_with_live_lanes_successor(
         prospective_host.store.compiled(),
         &host_caps(&limits()),
-        &host_core::HostLiveControlRequest::default(),
+        &host_core::HostLiveControlRequest {
+            meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
+                .expect("the meter queue depth"),
+            ..host_core::HostLiveControlRequest::default()
+        },
         host_core::HostLiveLanes {
             strip_input: true,
             effects: true,
@@ -3094,6 +3137,8 @@ struct RaceCounts {
     monitor: u64,
     /// `Observe` edits that committed (#1584), also counted in `monitor`.
     observe: u64,
+    /// `OBSERVATION_READ`s answered with a page while render runs (#1586 gate 6).
+    reads: u64,
     structural: u64,
     plan_backpressure: u64,
     event_backpressure: u64,
@@ -3170,6 +3215,41 @@ impl RaceControl<'_> {
 
     /// Submits `edit` once under a new request ID; any outcome but a commit or a typed
     /// backpressure is an error.
+    /// One `OBSERVATION_READ` (revision `Any`) of the race compressor's gain-reduction tap on
+    /// `strip`, which must answer a page (#1586 gate 6).
+    fn read_observation(&mut self, strip: &StableId) -> Result<(), String> {
+        self.request_id += 1;
+        let read = protocol::ObservationReadRequest {
+            selections: vec![protocol::ObservationReadSelection {
+                strip_id: strip.clone(),
+                section: protocol::control_core::TapSection::Inserts(
+                    StableId::parse(RACE_COMPRESSOR).expect("stable id"),
+                ),
+                tap_id: 1,
+                channels: protocol::ParameterChannel::Both,
+            }],
+        };
+        let mut bytes = vec![0_u8; 4_096];
+        let len = ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(self.request_id).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::ObservationRead(&read),
+                },
+                &mut bytes,
+            )
+            .expect("observation read command");
+        // SAFETY: This thread is the session's only control caller.
+        match unsafe { submit_header(self.session, &bytes[..len]) } {
+            (RESULT_OK, Some(header)) if header.status == StatusCode::Ok => {
+                self.counts.reads += 1;
+                Ok(())
+            }
+            (code, header) => Err(format!("the read answered {code} {header:?}")),
+        }
+    }
+
     fn submit_once(&mut self, edits: &[SessionEdit], kind: Kind) -> Result<Submitted, String> {
         use core::sync::atomic::Ordering;
         self.request_id += 1;
@@ -3301,15 +3381,24 @@ fn race_live_edits(run: usize) -> RaceCounts {
         // SAFETY: No other thread uses either handle yet.
         unsafe { fed_render_c(session, plan, &mut feed, block) };
     }
-    // #1583 gate 7: the output's meter table, one batch per window, configured after the warm-up
-    // so the race's first block applies the requested gate, every block folds the output meter,
-    // and the control thread stages the batches.
+    // #1583 gate 7, #1587a gate 5: the output's and two strips' peaks, one batch per window,
+    // configured after the warm-up so the race's first block applies the requested gate, every
+    // block folds the output and strip meters, and the control thread stages the batches and
+    // adopts each swap's strip meters.
     let window = 12_u32;
+    let strip = |id: &str| protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(id.into()),
+        metric: protocol::MeterMetric::Peak,
+    };
     let meters = protocol::TelemetryConfiguration {
-        meters: vec![protocol::MeterEntry {
-            target: protocol::MeterTarget::Output,
-            metric: protocol::MeterMetric::Peak,
-        }],
+        meters: vec![
+            protocol::MeterEntry {
+                target: protocol::MeterTarget::Output,
+                metric: protocol::MeterMetric::Peak,
+            },
+            strip("eq0"),
+            strip("race-bus"),
+        ],
         meter_period_blocks: window,
         meter_window_blocks: None,
         counter_ids: Vec::new(),
@@ -3405,6 +3494,11 @@ fn race_live_edits(run: usize) -> RaceCounts {
                 control
                     .commit(&edit, kind)
                     .map_err(|error| format!("edit {index}: {error}"))?;
+                // #1586 gate 6: a read of the race compressor's tap after every edit, on this
+                // thread while the plan renders on the other.
+                control
+                    .read_observation(&edits.tracks[0])
+                    .map_err(|error| format!("read after edit {index}: {error}"))?;
             }
             // The run ends soloing a track whose left lane is not muted, so the final mix carries
             // signal on both lanes under a non-empty overlay. The last live edits above may have
@@ -3604,7 +3698,10 @@ fn paused_bursts(
 /// may land while the last candidate is pending): none rebuilds or allocates on render, and the
 /// final block equals a fresh plan of the final snapshot with every other track muted.
 ///
-/// Test value: red if a fader or matrix drain allocates or frees on the render thread, if a live
+/// #1586 gate 6 adds an `OBSERVATION_READ` of the compressor's tap after every edit.
+///
+/// Test value: red if a fader or matrix drain allocates or frees on the render thread, or an
+/// observation read on the control thread makes render allocate or fails under the race, if a live
 /// edit that races a plan swap reaches the retiring plan or is lost (the final block differs from
 /// a fresh plan of the final snapshot), if epoch synchronization returns `RESULT_INTERNAL` under
 /// live traffic, if any structural edit is refused as plan backpressure (#1310), or if a live edit
@@ -3628,6 +3725,8 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
             (0..RACE_EDITS).filter(|index| index % 16 == 1).count() as u64,
             "run {run}"
         );
+        // #1586 gate 6: a read after every edit answered a page while render ran.
+        assert_eq!(counts.reads, RACE_EDITS, "run {run}");
         // #1310: a structural edit behind a pending candidate supersedes it; nothing refuses it.
         assert_eq!(counts.plan_backpressure, 0, "run {run}");
         assert!(

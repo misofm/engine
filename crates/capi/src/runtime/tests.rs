@@ -98,12 +98,13 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 10] = [
     // #1595 re-pin: the C ABI advertises the spectrum commands (`0x0010`-`0x0012`) and flag bit 16:
     // field 25's length is 0x1e (two padding bytes follow), the payload 0x190 (was 0x188) and the
     // flags 0x17fdf.
+    // #1587a re-pin: field 15, the lossy lane's slots, is 256 (was 2): one whole meter batch.
     // #1586 re-pin: the C ABI advertises `OBSERVATION_READ` (`0x000f`) and flag bit 15: field 25's
     // length is 0x20 (the ID takes the two padding bytes, so the frame length is unchanged) and the
     // flags 0x1ffdf.
     // #1583 re-pin: the lossy lane holds one meter batch whole, two records: telemetry slots
     // (field 15) is 2, was 1.
-    "4d49534f43544c000100000030000200010000009001000001000000000000002a00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000002000000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01200000000100020003000700080009000a000b000c000d000e000f0010001100120013001a000c010c000000018010801180208021803080000000001b00040108000000dfff010000000000",
+    "4d49534f43544c000100000030000200010000009001000001000000000000002a00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000000010000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01200000000100020003000700080009000a000b000c000d000e000f00100011001200131a000c010c000000018010801180208021803080000000001b00040108000000dfff010000000000",
     // #338 re-pin: canonical JSON snapshot bytes were 16,712 (0x4148), beginning with `{`.
     // #1093 re-pin: 13,729 (0x35a1) after the fixture moved to decision 12's console shape.
     // #1216 re-pin: 13,918 (0x365e), route field `mute` added, value false (21 bytes, 9 routes).
@@ -3460,8 +3461,9 @@ fn all_five_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
         "4d49534f43544c000100000030000200090000008800000005000000000000002b00000000000000070000000000000002000301040000000c0000000000000003000d010000000004000301040000000000000000000000050008010100000000000000000000000600010101000000010000000000000007000b00280000000200000000000000010001010100000001000000000000000300010101000000010000000000000008000300040000000c00000000000000",
         "4d49534f43544c000100000030000200090000008800000006000000000000002b00000000000000070000000000000002000301040000000c0000000000000003000d010000000004000301040000000000000000000000050008010100000000000000000000000600010101000000010000000000000007000b00280000000200000000000000010001010100000001000000000000000300010101000000010000000000000008000300040000000c00000000000000",
         // #1386 re-pin: the capabilities command list adds `0x0013`, as above; #1595 adds the
-        // spectrum commands and bit 16, and #1586 `0x000f` and bit 15, as above.
-        "4d49534f43544c000100000030000200010000009001000007000000000000002b00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000002000000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01200000000100020003000700080009000a000b000c000d000e000f0010001100120013001a000c010c000000018010801180208021803080000000001b00040108000000dfff010000000000",
+        // spectrum commands and bit 16, #1587a field 15's 256 slots, and #1586 `0x000f` and bit 15,
+        // as above.
+        "4d49534f43544c000100000030000200010000009001000007000000000000002b00000000000000170000000000000001000201020000000100000000000000020002010200000000000000000000000300020102000000010000000000000004000201020000000000000000000000050004010800000000100000000000000600030104000000000800000000000007000401080000000010000000000000080001010100000004000000000000000a0004010800000001000000000000000b0004010800000000100000000000000d0004010800000001000000000000000e0004010800000002000000000000000f0004010800000000010000000000001000040108000000100000000000000011000401080000000020000000000000120004010800000000100000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01200000000100020003000700080009000a000b000c000d000e000f00100011001200131a000c010c000000018010801180208021803080000000001b00040108000000dfff010000000000",
         "4d49534f43544c000100000030000200090000006000000008000000000000002b0000000000000006000000000000000200030104000000000000000000000003000d0104000000060000000000000004000301040000000100000000000000050008010100000000000000000000000600010101000000010000000000000008000300040000000c00000000000000",
     ];
     const EVENTS: [&str; 6] = [
@@ -5489,13 +5491,6 @@ fn a_refused_meter_table_is_typed_and_changes_nothing() {
             "meter.gain_reduction.unavailable",
             path(1),
         ),
-        (
-            vec![strip("eq0", protocol::MeterMetric::Peak)],
-            window,
-            StatusCode::Unavailable,
-            "meter.strip.unavailable",
-            path(0),
-        ),
     ];
     for (request, (meters, period, status, code, at)) in (2..).zip(refusals) {
         assert_eq!(
@@ -5523,38 +5518,104 @@ fn a_refused_meter_table_is_typed_and_changes_nothing() {
     crate::ffi::test_session_destroy(c_session);
 }
 
-/// #1583 gates 3 and 4: with the output's peak at twice the window, each batch is two windows:
-/// its span is the first window's start to the second's end, its sequence counts from 1, and its
-/// left and right records are the two windows' maxima of each output plane, `VALID`, with
-/// `CLIPPED` on a plane above 1.0. A track added between two batches does not move the handle,
-/// the span rule or the sequence.
-///
-/// Test value: red on the defect #1583 replaces (one combined block peak per handle, labelled
-/// left), if the fold loses a window's peak (the left peak is the second window's, the right the
-/// first's), if a plane's peak lands on the other plane, or if a structural commit renumbers the
-/// handle or restarts the sequence.
-#[test]
-fn the_output_meter_batch_is_two_windows_of_each_planes_own_peak() {
-    // One track at unity into the output: its identity matrix sends each plane to its own side.
+/// Tracks `eq0` and `eq1` on the fixture source and submix `bus`: `eq0` at unity into the output,
+/// `eq1` with a 0.5 matrix and a post-fader send (route `eq1-main`) into `bus`, and `bus` with a
+/// 0.25 matrix into the output. Every gain is a power of two, so each post-matrix peak is exact:
+/// `eq0` is the source's, `eq1` half of it, `bus` a quarter, and the output one and a quarter.
+fn strip_meter_session() -> session::SessionModel {
+    let matrix = |gain: f32| session::MatrixOrPan::Matrix {
+        ll: gain,
+        lr: 0.0,
+        rl: 0.0,
+        rr: gain,
+        smoothing_samples: 16,
+    };
     let mut model = stateless_session(48_000);
     model.tracks.truncate(1);
     model.routes.truncate(1);
-    model.tracks[0].matrix_or_pan = session::MatrixOrPan::Matrix {
-        ll: 1.0,
-        lr: 0.0,
-        rl: 0.0,
-        rr: 1.0,
-        smoothing_samples: 16,
+    model.tracks[0].matrix_or_pan = matrix(1.0);
+    let bus = session::StableId::parse("bus").expect("bus ID");
+    let mut b = model.tracks[0].clone();
+    b.id = session::StableId::parse("eq1").expect("track ID");
+    b.matrix_or_pan = matrix(0.5);
+    let mut send = model.routes[0].clone();
+    send.id = session::StableId::parse("eq1-main").expect("route ID");
+    send.source = session::RouteSource::Track {
+        track_id: b.id.clone(),
+        tap: session::SendTap::PostFader,
     };
-    let document = session::canonical_session_json(&model).expect("one-track session");
+    send.destination = session::RouteDestination::SubmixInput {
+        submix_id: bus.clone(),
+    };
+    let mut out = model.routes[0].clone();
+    out.id = session::StableId::parse("bus-main").expect("route ID");
+    out.source = session::RouteSource::Submix {
+        submix_id: bus.clone(),
+        tap: session::SendTap::PostPan,
+    };
+    let mut submix = session::Submix::unity(bus, &model.console);
+    submix.matrix_or_pan = matrix(0.25);
+    model.tracks.push(b);
+    model.routes.extend([send, out]);
+    model.submixes.push(submix);
+    model
+}
+
+/// #1583 gates 3 and 4 and #1587a gates 1, 3 and 4: with the table `[{eq0, peak}, {eq1, peak},
+/// {bus, peak}, {output, peak}]` at twice the window, each batch is two windows: its span is the
+/// first window's start to the second's end, its sequence counts from 1, and each entry's left and
+/// right records are its own strip's post-matrix maxima of each plane over the batch, `VALID`, with
+/// `CLIPPED` above 1.0 (`strip_meter_session`'s exact gains are the offline reference). Across
+/// three rebuilds, the batches stay consecutive and nothing is lost: a muted track that sorts first,
+/// adopted in the middle of a batch, shifts every strip's position but no handle; while `eq1` is removed its records have flags 0
+/// (and `bus`, fed by nothing, is a valid 0); when `eq1` returns it is `VALID` again under handle 2.
+///
+/// Test value: red on the defect #1583 replaced (one combined block peak per handle), if a record
+/// carries another strip's or the output's peak (a strip resolved by position, or a frame folded
+/// against the retired epoch's strips after a rebuild), if a plane lands on the other plane, if the
+/// fold loses a window's peak, if adoption drops the carried windows, the peaks a batch folded
+/// before a swap in its middle, or restarts the sequence, if
+/// an absent strip reports a stale value as valid, or if a returned strip moves its handle.
+#[test]
+fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
+    let model = strip_meter_session();
+    let document = session::canonical_session_json(&model).expect("strip meter session");
     let (c_session, c_plan) = boxed_c_children(&document);
     let window = fixture_window_blocks();
+    let strip = |id: &str| protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(id.into()),
+        metric: protocol::MeterMetric::Peak,
+    };
     assert_eq!(
-        configure_meters_c(c_session, 1, vec![output_peak_entry()], 2 * window),
+        configure_meters_c(
+            c_session,
+            1,
+            vec![
+                strip("eq0"),
+                strip("eq1"),
+                strip("bus"),
+                output_peak_entry()
+            ],
+            2 * window
+        ),
         (StatusCode::Ok, None)
     );
-    // Window `w`'s left and right peaks, each at one sample of the window's third block.
-    let peaks = [[0.5_f32, 0.25], [0.75, 0.125], [1.5, 0.5], [0.25, 0.375]];
+    // Window `w`'s source left and right peaks, each at one sample of the window's third block.
+    let peaks = [
+        [0.5_f32, 0.25],
+        [0.75, 0.125],
+        [1.5, 0.5],
+        [0.25, 0.375],
+        // `eq1` ramps out over this batch before its removal swaps in (#1325).
+        [0.5, 0.5],
+        [0.25, 0.25],
+        [0.5, 0.5],
+        [0.25, 0.25],
+        // A returned strip fades in over its first window, so the batch after `eq1` returns
+        // takes its peaks from its second window.
+        [0.25, 0.25],
+        [0.75, 0.75],
+    ];
     let feed = |block: u64| {
         let peak = peaks[(block / window) as usize];
         let mut left = [0.0625_f32; 128];
@@ -5566,55 +5627,223 @@ fn the_output_meter_batch_is_two_windows_of_each_planes_own_peak() {
         submit_c(c_session, 1, block * 128, 48_000, &left, &right, false);
         render_c(c_plan, block);
     };
-    for block in 0..2 * window {
+    // Batch `n`'s source peaks, the maxima of its two windows' peaks.
+    let source = |batch: usize| {
+        let [first, second] = [peaks[2 * batch], peaks[2 * batch + 1]];
+        [first[0].max(second[0]), first[1].max(second[1])]
+    };
+    let records = |handle: u32, peak: Option<[f32; 2]>| {
+        [
+            protocol::MeterComponent::Left,
+            protocol::MeterComponent::Right,
+        ]
+        .into_iter()
+        .zip(peak.unwrap_or([0.0; 2]))
+        .map(move |(component, value)| protocol::MeterRecord {
+            handle,
+            component,
+            flags: match peak {
+                None => 0,
+                Some(_) if value > 1.0 => 1 | 2,
+                Some(_) => 1,
+            },
+            value,
+        })
+    };
+    let scaled = |peak: [f32; 2], gain: f32| [peak[0] * gain, peak[1] * gain];
+    let expected = |batch: usize, eq1_present: bool| {
+        let peak = source(batch);
+        let bus = if eq1_present { 0.25 } else { 0.0 };
+        let span = window * 128;
+        (
+            2 * batch as u64 * span,
+            2 * (batch as u64 + 1) * span,
+            batch as u64 + 1,
+            records(1, Some(peak))
+                .chain(records(2, eq1_present.then(|| scaled(peak, 0.5))))
+                .chain(records(3, Some(scaled(peak, bus))))
+                .chain(records(4, Some(scaled(peak, 1.0 + bus))))
+                .collect::<Vec<_>>(),
+        )
+    };
+    // Each commit is at the revision the one before it left: 42 at boot.
+    let commit = |request: u64, edits: &[protocol::SessionEdit]| {
+        let transaction = command_bytes_at_revision(
+            request,
+            ExpectedRevision::Exact(SessionRevision(40 + request)),
+            protocol::CommandPayload::SessionTransactionApply(edits),
+        );
+        let (result, response) = command_c(c_session, &transaction);
+        assert_eq!(
+            (result, response_status(&response)),
+            (crate::RESULT_OK, StatusCode::Ok),
+            "commit {request}"
+        );
+        // The commit's `SESSION_COMMITTED`, so the reliable lane has room for the next one.
+        while !event_c(c_session, crate::EVENT_LANE_RELIABLE).1.is_empty() {}
+    };
+    let render_batch = |index: usize| {
+        for block in 2 * index as u64 * window..2 * (index as u64 + 1) * window {
+            feed(block);
+        }
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+        meter_batches_c(c_session)
+    };
+    let batch = |index: usize, eq1_present: bool| {
+        assert_eq!(
+            render_batch(index),
+            [expected(index, eq1_present)],
+            "batch {index}"
+        );
+    };
+    batch(0, true);
+    // Gate 3: a rebuild by a muted track whose ID sorts first, so every strip's position shifts,
+    // adopted in the middle of a batch: the batch's first window is folded before the swap, its
+    // second after it.
+    let render_window = |index: u64| {
+        for block in index * window..(index + 1) * window {
+            feed(block);
+        }
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+        meter_batches_c(c_session)
+    };
+    assert_eq!(render_window(2), [], "half a batch");
+    commit(2, &add_muted_track(&model, "a-muted"));
+    assert_eq!(render_window(3), [expected(1, true)], "batch 1");
+    // Gate 4: `eq1` and its send removed, then returned.
+    commit(3, &remove_track("eq1"));
+    // While `eq1` ramps out, `bus` and the output carry its tail; `eq0` and the absent `eq1` are
+    // exact already.
+    let ramping = render_batch(2);
+    let (first, end, sequence, want) = expected(2, false);
+    assert_eq!(
+        ramping
+            .iter()
+            .map(|(first, end, sequence, records)| (*first, *end, *sequence, records[..4].to_vec()))
+            .collect::<Vec<_>>(),
+        [(first, end, sequence, want[..4].to_vec())],
+        "batch 2"
+    );
+    batch(3, false);
+    commit(
+        4,
+        &[
+            protocol::SessionEdit::UpsertTrack {
+                track: model.tracks[1].clone(),
+            },
+            protocol::SessionEdit::UpsertRoute {
+                route: model.routes[1].clone(),
+            },
+        ],
+    );
+    batch(4, true);
+    assert_eq!(meter_windows_lost_c(c_session, 100), 0, "no window lost");
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// #1587a: a rebuild that carries no strip meter (the one track replaced by another ID) restarts
+/// the meter grid at its adoption block, mid-window. Render moves the output meter's gate there
+/// at the swap (`OutputPeakGateRelay::restart_at`), the control thread's adoption asks for the same
+/// value (`MeterDelivery::adopt`, `align` at the adoption sample), and every window after it pairs
+/// with the new plan's strip windows: the batches tile from the adoption sample, `VALID`, with
+/// consecutive sequences, and no window is lost.
+///
+/// Test value: red if render does not restart the gate at an uncarried swap, or the control
+/// thread's request is not the restart's value (either opens the output windows off the new strip
+/// grid, so no batch pairs again), or if the adoption reads a stale adoption sample.
+#[test]
+fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let document = session::canonical_session_json(&model).expect("one-track session");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let window = fixture_window_blocks();
+    assert_eq!(
+        configure_meters_c(c_session, 1, vec![output_peak_entry()], window),
+        (StatusCode::Ok, None)
+    );
+    let feed = |block: u64| {
+        let left = [0.25_f32; 128];
+        let right = [-0.125_f32; 128];
+        submit_c(c_session, 1, block * 128, 48_000, &left, &right, false);
+        render_c(c_plan, block);
+    };
+    let swap_block = window + 2;
+    for block in 0..swap_block {
         feed(block);
     }
-    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
-    let record = |component, flags, value| protocol::MeterRecord {
-        handle: 1,
-        component,
-        flags,
-        value,
+    let mut replacement = model.tracks[0].clone();
+    replacement.id = session::StableId::parse("eq9").expect("track ID");
+    let mut route = model.routes[0].clone();
+    route.id = session::StableId::parse("eq9-main").expect("route ID");
+    route.source = session::RouteSource::Track {
+        track_id: replacement.id.clone(),
+        tap: session::SendTap::PostPan,
     };
-    assert_eq!(
-        meter_batches_c(c_session),
-        [(
-            0,
-            2 * window * 128,
-            1,
-            vec![
-                record(protocol::MeterComponent::Left, 1, 0.75),
-                record(protocol::MeterComponent::Right, 1, 0.25),
-            ]
-        )]
-    );
-    // Gate 4: a structural commit between the batches.
+    let edits = [
+        protocol::SessionEdit::RemoveRoute {
+            route_id: model.routes[0].id.clone(),
+        },
+        protocol::SessionEdit::RemoveTrack {
+            track_id: model.tracks[0].id.clone(),
+        },
+        protocol::SessionEdit::UpsertTrack { track: replacement },
+        protocol::SessionEdit::UpsertRoute { route },
+    ];
     let transaction = command_bytes_at_revision(
         2,
         ExpectedRevision::Exact(SessionRevision(42)),
-        protocol::CommandPayload::SessionTransactionApply(&add_muted_track(&model, "a-muted")),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
     );
     let (result, response) = command_c(c_session, &transaction);
     assert_eq!(
         (result, response_status(&response)),
         (crate::RESULT_OK, StatusCode::Ok)
     );
-    for block in 2 * window..4 * window {
+    // The removed track ramps out first (#1325), so the swap lands a few blocks later.
+    let end_block = swap_block + 5 * window;
+    let mut swapped = None;
+    for block in swap_block..end_block {
         feed(block);
+        let (_, watermark) = crate::ffi::test_plan_watermark(c_plan);
+        if watermark.revision == 43 {
+            swapped.get_or_insert(watermark.first_sample);
+        }
     }
     assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let span = window * 128;
+    let batches: Vec<_> = meter_batches_c(c_session)
+        .into_iter()
+        .map(|(first, end, sequence, records)| {
+            (
+                first,
+                end,
+                sequence,
+                records
+                    .iter()
+                    .map(|record| record.flags)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    // The watermark names the block that adopted the successor (#1325 D4).
+    let adoption = swapped.expect("render adopted the successor");
+    assert_ne!(adoption % span, 0, "the swap lands mid-window");
+    let after = (end_block * 128 - adoption) / span;
     assert_eq!(
-        meter_batches_c(c_session),
-        [(
-            2 * window * 128,
-            4 * window * 128,
-            2,
-            vec![
-                record(protocol::MeterComponent::Left, 1 | 2, 1.5),
-                record(protocol::MeterComponent::Right, 1, 0.5),
-            ]
-        )]
+        batches,
+        core::iter::once((0, span, 1, vec![1, 1]))
+            .chain((0..after).map(|k| (
+                adoption + k * span,
+                adoption + (k + 1) * span,
+                k + 2,
+                vec![1, 1]
+            )))
+            .collect::<Vec<_>>()
     );
+    assert_eq!(meter_windows_lost_c(c_session, 100), 0);
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
 }

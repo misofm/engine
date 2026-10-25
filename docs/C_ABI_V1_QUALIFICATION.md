@@ -453,28 +453,41 @@ counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSE
 the frame-derived telemetry configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
 queue (#1629).
 
-**Meter batches (#1583, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter table of
-stable targets: entry `i` (handle `i + 1`) is the output or a strip by its ID, with a metric (peak
-or gain reduction). A handle is the table's, so a structural commit never moves it. The C ABI
-session owns one meter delivery from boot over the session's output meter, with no strip consumer
-until #1587, and its echo carries the meter window in blocks (`meter_window_blocks`, host-core's
-default of about 32 ms: 12 blocks at 48 kHz and 128 frames). A nonempty table turns the meter
-level on from the next block and an empty one off: the control plane writes a requested gate word,
-and the plan's relay copies it into the output meter's gate on the render thread before a block,
+**Meter batches (#1583, #1587a, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
+table of stable targets: entry `i` (handle `i + 1`) is the output or a strip by its ID, with a
+metric (peak or gain reduction). A handle is the table's, so a structural commit never moves it.
+The C ABI session owns one meter delivery from boot over the session's output meter and the
+running plan's strip meters, one post-matrix meter per strip whose queue is as deep as the output
+meter's (eight), and its echo carries the meter window in blocks (`meter_window_blocks`,
+host-core's default of about 32 ms: 12 blocks at 48 kHz and 128 frames). A nonempty table turns
+the meter level on from the next block and an empty one off: the control plane writes a requested
+gate word, and the plan's relay applies it to the output meter's gate on the render thread before
+a block, on the strip meters' window grid at or after that block (a request the control thread
+computed from an older render clock, or on a grid render has since restarted, is moved onto it),
 so the gate moves only between blocks and the render call stays allocation-, lock- and
 syscall-free. The configure is all or nothing: an unknown strip is `NOT_FOUND`
 `meter.strip.unknown` (`meters[i]`); a period that is not a positive multiple of the window is
-`INVALID_FIELD` `meter.period`; and, until #1587, a gain-reduction entry and a strip peak entry are
-`UNAVAILABLE` (`meter.gain_reduction.unavailable`, `meter.strip.unavailable`), so the table holds
-at most the output's peak. Each `METER_BATCH` is `meter_period_blocks / meter_window_blocks`
-consecutive windows: `first_sample` is the first window's start, `observed_sample` the last one's
-end, `window_sequence` counts batches from 1 after each accepted configure, and the output peak
-entry gives a left and a right record, each the windows' maximum, `VALID`, and `CLIPPED` above
-1.0. The lossy lane holds one batch whole (two telemetry slots). `METER_WINDOWS_LOST` counts every
-closed window that reached no batch: the windows render dropped at a full meter queue (eight), the
-windows of a partial batch a gap discarded or a later configure replaced, and the windows of a
-batch the lane refused to stage; the sequence never skips. A coalesced batch is counted by
-`TELEMETRY_COALESCED`, as any lossy record. The per-block render peak (#1570a) is gone (#1583 D6).
+`INVALID_FIELD` `meter.period`; until #1587b a gain-reduction entry is `UNAVAILABLE`
+`meter.gain_reduction.unavailable`; and a table whose peak entries need more than one batch's 256
+records is `INVALID_FIELD` `meter.records` at its 129th entry. Each `METER_BATCH` is
+`meter_period_blocks / meter_window_blocks` consecutive windows: `first_sample` is the first
+window's start, `observed_sample` the last one's end, `window_sequence` counts batches from 1
+after each accepted configure, and each peak entry, in table order, gives a left and a right
+record: the output's planes' maxima over the batch, or its strip's post-matrix maxima. A record is
+`VALID`, and `CLIPPED` above 1.0; an entry whose strip the plan that rendered the batch does not
+have has flags 0 and value 0.0, and is `VALID` again under its handle once a commit brings the
+strip back. Entries resolve to strips at each configure and each adoption, against the plan whose
+frames the delivery folds, so a pending rebuild never relabels a record. Readings continue across
+a swap that carries the strip meters; a swap that carries none restarts the grid at its adoption
+block, where render restarts the gate and the control thread's adoption asks for the same value.
+The control thread adopts each swap when it reclaims the displaced plan, whose clock gives the
+adoption sample. The lossy meter lane holds one batch whole (256 slots; the counter-snapshot lane keeps
+two). `METER_WINDOWS_LOST` counts every closed window that reached no batch: the windows render
+dropped at a full meter queue (eight), the windows of a partial batch a gap discarded or a later
+configure replaced, and the windows of a batch the lane refused to stage; the sequence never skips.
+A coalesced batch is counted by `TELEMETRY_COALESCED`, as any lossy record. The per-block render
+peak (#1570a) is gone (#1583 D6). The strip-ID text of the stored tables is charged to
+`capi_retained_bytes` at the 128 entries an accepted table can hold, 127 bytes each, twice.
 
 **Served counters and the counter snapshot (#1351).** The provider serves exactly those nine
 counters, each at 0 from construction, so `COUNTERS_GET` with `all` returns all nine and a read of
@@ -1293,8 +1306,10 @@ nine-track session has no tapped effect, so its rows are unchanged. The parity r
 `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` arms and disarms a
 bypassed compressor's tap every sixteenth edit with zero render-thread allocations; the core claims
 are `crates/control-plane/tests/observation_bindings.rs`. A carried tap keeps its publisher across a
-swap (#1327 D2), so its windows go on in the reader of the epoch it was armed on: a read command
-(#1586) must follow carried readers across a swap, as the browser does (`pair_carried_observations`).
+swap (#1327 D2), so its windows go on in the reader of the epoch it was armed on. The read command
+(#1586) reads the running epoch's readers; pairing carried readers across a swap, as the browser
+does (`pair_carried_observations`), is #1674's observation half (see the stated limit under "Issue
+1586 observation read" below).
 
 ## Issue 1586 observation read (slice b)
 
@@ -1307,9 +1322,15 @@ position of its reader set), built in `prepare_runtime` and promoted with the ep
 keeps a 256-row reply table from boot. `capi_retained_bytes` charges the index per epoch (its
 entries and their ID copies) and the row table as a fixed row. The read runs
 `host_core::observation::read_with` on the running epoch's readers, checks the whole batch first
-and never acknowledges. The capability vectors pinned in `crates/capi/src/runtime/tests.rs`
+and never acknowledges. The read allocates nothing on the submit path: the controller prepares it
+without boxing or copying the request (`PreparedCommandFrame::ObservationRead`), and the selections
+are decoded onto the stack, borrowed from the request bytes (`ObservationSelectionRef`), by the
+same address codec as the `Observe` edit's. The capability vectors pinned in `crates/capi/src/runtime/tests.rs`
 re-pin for `000f` and bit 15. The gates are `runtime::live_tests::an_observation_read_follows_the_arm_through_the_c_abi`
-(the arm's status, tag and window, and zero allocations for a 256-row read), `runtime::live_tests::an_observation_read_refuses_a_bad_batch_whole`
+(the arm's status, tag and window, and zero allocations through `miso_engine_v1_submit_command`
+for a 1-row and a 256-row read), the race of
+`live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` with a read
+after every edit and zero render-thread allocations, `runtime::live_tests::an_observation_read_refuses_a_bad_batch_whole`
 and the parity row `protocol_cross_host::both_hosts_read_one_observation_tap_alike`. Stated limit:
 the C ABI does not pair carried observation readers yet (#1674's observation half), so after a
 rebuild that carries a tapped effect the read reads the successor's own slot, which the carried tap

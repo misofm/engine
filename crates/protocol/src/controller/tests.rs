@@ -227,6 +227,7 @@ fn controller_with_event_slots(
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(event_slots).expect("event"),
         telemetry_slots: NonZeroUsize::new(1).expect("telemetry"),
+        counter_telemetry_slots: NonZeroUsize::new(1).expect("counter telemetry"),
     })
     .expect("queues");
     ProtocolController::new(
@@ -350,6 +351,7 @@ fn egress_controller(
         reliable_response_slots: NonZeroUsize::new(1).expect("response"),
         reliable_event_slots: NonZeroUsize::new(reliable_event_slots).expect("events"),
         telemetry_slots: NonZeroUsize::new(telemetry_slots).expect("telemetry"),
+        counter_telemetry_slots: NonZeroUsize::new(telemetry_slots).expect("counter telemetry"),
     })
     .expect("queues");
     ProtocolController::new(
@@ -1127,7 +1129,9 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     };
@@ -1244,7 +1248,9 @@ fn attached_observation_ends_follow_their_commit_in_one_event() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     };
@@ -1342,7 +1348,9 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     };
@@ -1398,7 +1406,9 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     };
@@ -1442,7 +1452,9 @@ fn prepare_at(
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     }
@@ -1500,7 +1512,9 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            PreparedCommandFrame::Immediate(_)
+            | PreparedCommandFrame::Session(_)
+            | PreparedCommandFrame::ObservationRead(_) => {
                 panic!("valid transaction was immediate")
             }
         };
@@ -1559,7 +1573,9 @@ fn a_structural_commit_writes_its_replay_entry_and_evicts_at_the_commit() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            PreparedCommandFrame::Immediate(_)
+            | PreparedCommandFrame::Session(_)
+            | PreparedCommandFrame::ObservationRead(_) => {
                 panic!("expected structural token")
             }
         }
@@ -1724,7 +1740,9 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("expected a token")
         }
     };
@@ -1889,7 +1907,9 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            PreparedCommandFrame::Immediate(_)
+            | PreparedCommandFrame::Session(_)
+            | PreparedCommandFrame::ObservationRead(_) => {
                 panic!("expected structural token")
             }
         }
@@ -4539,10 +4559,9 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
             )
             .expect("prepare");
         match (observation, prepared) {
-            (true, PreparedCommandFrame::Session(prepared)) => assert_eq!(
-                prepared.command(),
-                &crate::SessionCommand::ObservationRead(read.clone())
-            ),
+            (true, PreparedCommandFrame::ObservationRead(prepared)) => {
+                assert_eq!(prepared.request_id().get(), request_id);
+            }
             (false, PreparedCommandFrame::Immediate(response)) => {
                 let mut output = [0_u8; 2048];
                 let written = response.write_into(&mut output).expect("reply");
