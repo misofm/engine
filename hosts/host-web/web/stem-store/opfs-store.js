@@ -1287,8 +1287,9 @@ export class StemSessionLease {
 /**
  * Chromium exposes a real shared-reader mode through `handle.mode`. WebKit
  * ignores the option and remains exclusive; so does any engine that accepts
- * the option but omits that property (Firefox, not a supported browser). Existing-file contention errors have engine-specific
- * names, so every rejection declines this mode and leaves reads on `getFile()`.
+ * the option but omits that property (Firefox, not a supported browser).
+ * Existing-file contention errors have engine-specific names, so every
+ * rejection declines this mode and leaves reads on `getFile()`.
  */
 export async function detectSharedReadOnlyMode(fileHandle) {
   if (typeof fileHandle?.createSyncAccessHandle !== "function") return false

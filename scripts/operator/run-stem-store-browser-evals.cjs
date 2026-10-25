@@ -15,8 +15,9 @@
 //   NODE_PATH=$PWD/node_modules node ../../../scripts/operator/run-stem-store-browser-evals.cjs [leg...]
 //
 // Legs default to chromium and webkit, the two supported browsers (owner ruling 2026-10-25,
-// #2092); any other leg, firefox included, is refused as unknown. A leg whose browser lacks OPFS reports `available: false` with a
-// reason rather than failing: WebKit does that today for `navigator.storage.getDirectory`.
+// #2092); any other leg, firefox included, is refused as unknown. A leg whose browser lacks OPFS
+// reports `available: false` with a reason rather than failing: WebKit does that today for
+// `navigator.storage.getDirectory`.
 //
 // This browser workload is intentionally outside the hermetic qualification/checker boundary:
 // the existing stem-store checker invokes only `--path-self-test`, while a human may invoke the

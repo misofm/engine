@@ -1033,8 +1033,9 @@ export function requestFailure(step, kind, inFlight, cause) {
 
 /// Fail with `suspend timeout at <step>` unless `context.state` is "suspended" within the bound.
 /// The first `suspend()` of a new context is not awaited (an engine may create a later context
-/// already running, as Firefox did before #2092, and the `suspend()` is only a request), so this poll is what keeps the run from going
-/// on with a context that is still running. Returns the state it saw, which the run records.
+/// already running, as Firefox did before #2092, and the `suspend()` is only a request), so this
+/// poll is what keeps the run from going on with a context that is still running. Returns the
+/// state it saw, which the run records.
 async function requireSuspended(context, step) {
   const started = performance.now();
   while (context.state !== "suspended") {

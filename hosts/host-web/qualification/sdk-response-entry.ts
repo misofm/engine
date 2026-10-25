@@ -639,8 +639,9 @@ async function createContinuousSpectrumBrowser(
         ? new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" })
         : new OfflineAudioContext(2, frames, 48_000);
       // An engine may create a later context already running after this page's first trusted
-      // resume (Firefox did; it is not a supported browser since #2092). Keep a suspension pending across addModule so the shipped host observes its
-      // required suspended preparation state, matching the collection qualification below.
+      // resume (Firefox did; it is not a supported browser since #2092). Keep a suspension pending
+      // across addModule so the shipped host observes its required suspended preparation state,
+      // matching the collection qualification below.
       if (live) void (context as AudioContext).suspend();
       else Object.defineProperty(context, "close", { value: async () => {} });
       return context;
@@ -1322,8 +1323,9 @@ async function runSdkSpectrumQualification(): Promise<Record<string, unknown>> {
     });
     const pending = closedBrowser.querySpectrum(SPECTRUM_QUERIES[0]);
     // Settle `pending` before the close rejects it: a rejection with no handler yet is an unhandled
-    // rejection for a turn (a pageerror in both supported browsers). The handler is attached first, so the
-    // refusal this check proves is the only outcome observed (root, 2026-10-12, named #1345 exception).
+    // rejection for a turn (a pageerror in both supported browsers). The handler is attached first,
+    // so the refusal this check proves is the only outcome observed (root, 2026-10-12, named #1345
+    // exception).
     const settled = pending.then(() => false, () => true);
     await armed;
     await closeSdkEngine(closedBrowser);
