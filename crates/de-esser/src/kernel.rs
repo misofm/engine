@@ -240,7 +240,7 @@ fn back<L: Lane, const GLIDE: bool>(
 /// own partner, and only the left state moves, so the left plane and state are bit-identical to a
 /// dual segment whose right plane equals its left. A collapsed bank is never connected.
 ///
-/// `GLIDE` (issue #1969) runs a detector link glide in flight ([`detector_level`]): only a
+/// `GLIDE` (issue #1969) runs a detector link glide in flight (`detector_level`): only a
 /// `RAMPING` segment that has a glide to advance takes it; every other body is the one before.
 #[inline(always)]
 pub fn segment<
