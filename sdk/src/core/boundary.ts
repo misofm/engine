@@ -869,6 +869,8 @@ export class WasmBoundary {
    * through the control entry, then the `RESPONSE_READY` with its tag from the event lane. The core
    * captures in its render step, so the promise settles after the next `render()`, at the latest
    * when the request deadline passes. Queries run one at a time, in call order.
+   * A query made from inside an event callback sends its frame there, which runs a nested event
+   * drain: the events still queued reach the other listeners before the callback returns.
    */
   queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult> {
     try {

@@ -293,6 +293,8 @@ export class OfflineEngine {
    * the core produces in its render step. The promise therefore settles after the next `render()`
    * the app calls, and rejects when the request deadline (`responseLimits.requestDeadlineMs`,
    * default 5 s) passes first. Queries run one at a time, in call order.
+   * A query made from inside an event callback sends its frame there, which runs a nested event
+   * drain: the events still queued reach the other listeners before the callback returns.
    */
   queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult> {
     return this.#boundary.queryTrackResponse(request);

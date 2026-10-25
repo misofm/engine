@@ -226,3 +226,18 @@ Root rulings on #1579a (2026-10-25):
   at the deadline. `loadSession` disposes first, so it does the same.
 - Behaviour change 3 is D2's behaviour; the doc comments of the headless `subscribeTrackResponse`
   and of `TrackResponseSubscription.pump` say the read settles at the next `render()`.
+
+Review fold-in after attempt 2 (root, 2026-10-25):
+
+- A `RESPONSE_READY` that cannot be decoded while a timed-out tag is held ends the held tag, and
+  the query waiting for it fails with the decode error (one capture is ever armed).
+- A tag reply that arrives after its query's deadline is held: until that send settles, the
+  requester keeps listening and the next query waits. A fake asynchronous transport in
+  `live-response-evals.mjs` reaches the case; the headless send returns before a deadline passes.
+- `decodeResponseReady` checks the frame header and every rule of `response_ready_is_valid` and the
+  codec's default limits: at least two finite points, a finite floor, one side or two of the axis's
+  length, masks within the section count (at most 32), 127-byte effect and diagnostic, the
+  stable-ID grammar for the strip and slot IDs, 64 KiB strings, 1024 fields per level. The codec
+  eval holds one corrupt frame per rule.
+- A query made from an event callback runs a nested event drain (documented on
+  `queryTrackResponse`).

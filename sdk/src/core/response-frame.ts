@@ -529,12 +529,31 @@ export interface ResponseReadyEvent {
   readonly frameBytes: number;
 }
 
+/** The codec's limits (`ProtocolLimits::default`): fields per message level, bytes per string. */
+const MAXIMUM_TLV_COUNT = 1_024;
+const MAXIMUM_STRING_BYTES = 64 * 1_024;
+/** The longest identity or diagnostic a `RESPONSE_READY` carries (`RESPONSE_READY_TEXT_BYTES`). */
+const READY_TEXT_BYTES = 127;
+/** The stable-ID grammar (`valid_stable_id`): a lowercase letter, then `[a-z0-9._-]`, 1 to 127 bytes. */
+const STABLE_ID = /^[a-z][a-z0-9._-]{0,126}$/;
+
+function readyText(value: string, what: string): string {
+  if (new TextEncoder().encode(value).length > READY_TEXT_BYTES) throw malformed(`${what} is longer than 127 bytes`);
+  return value;
+}
+
+function stableId(value: string, what: string): string {
+  if (!STABLE_ID.test(value)) throw malformed(`${what} is not a stable ID`);
+  return value;
+}
+
 function optionalText(fields: readonly RawField[], row: { readonly id: number }): string | undefined {
   const found = fields.filter((candidate) => candidate.id === row.id);
   if (found.length > 1) throw malformed(`field ${row.id} repeats`);
   const entry = found[0];
   if (entry === undefined) return undefined;
   if (entry.wire !== WIRE_UTF8 || entry.value.length === 0) throw malformed(`field ${row.id} is not text`);
+  if (entry.value.length > MAXIMUM_STRING_BYTES) throw malformed(`field ${row.id} exceeds the string limit`);
   try {
     return DECODER.decode(entry.value);
   } catch {
@@ -550,9 +569,14 @@ function requiredText(fields: readonly RawField[], row: { readonly id: number },
 
 function decodeMember(row: RawField): ResponseReadyMember {
   if (row.wire !== WIRE_MESSAGE) throw malformed("a response member is not a message");
+  if (row.value.length >= 8
+      && new DataView(row.value.buffer, row.value.byteOffset, 4).getUint32(0, true) > MAXIMUM_TLV_COUNT) {
+    throw malformed("a response member holds too many fields");
+  }
   const fields = nestedFields(row.value);
   const section = required(fields, MEMBER.section, 1, "a member's section").getUint8(0);
-  const slotId = optionalText(fields, MEMBER.slotId);
+  const slot = optionalText(fields, MEMBER.slotId);
+  const slotId = slot === undefined ? undefined : stableId(slot, "a member's slot ID");
   if (section !== 4 && section !== 5 && section !== 2) throw malformed(`a member names section ${section}`);
   if ((section === 4) !== (slotId === undefined)) throw malformed("a member's slot ID does not match its section");
   const sectionCount = required(fields, MEMBER.sectionCount, 1, "a member's section count").getUint8(0);
@@ -567,7 +591,7 @@ function decodeMember(row: RawField): ResponseReadyMember {
   return Object.freeze({
     section,
     slotId,
-    effect: requiredText(fields, MEMBER.effect, "a member's effect"),
+    effect: readyText(requiredText(fields, MEMBER.effect, "a member's effect"), "a member's effect"),
     kind,
     bypassed: readBool(fields, MEMBER.bypassed, "a member's bypass"),
     enabledLeft,
@@ -585,8 +609,9 @@ export function isResponseReady(frame: Uint8Array): boolean {
 
 /**
  * Read an event frame the engine encoded. Returns `undefined` for any event that is not
- * `RESPONSE_READY`, and raises `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`) for a
- * `RESPONSE_READY` frame that is not valid.
+ * `RESPONSE_READY`. The frame's header and the core's validity rules (`response_ready_is_valid`
+ * and the codec's limits) are checked: a frame that breaks one raises `MisoEngineError`
+ * (`phase: "lifecycle"`, `code: "internal"`).
  */
 export function decodeResponseReady(frame: Uint8Array): ResponseReadyEvent | undefined {
   if (!isResponseReady(frame)) return undefined;
@@ -604,11 +629,14 @@ export function decodeResponseReady(frame: Uint8Array): ResponseReadyEvent | und
   if (EVENT_HEADER_BYTES + view.getUint32(20, true) !== frame.length) {
     throw malformed("the event payload length is wrong");
   }
-  const fields = readFields(frame.subarray(EVENT_HEADER_BYTES), view.getUint32(40, true));
+  const count = view.getUint32(40, true);
+  if (count > MAXIMUM_TLV_COUNT) throw malformed("the event holds too many fields");
+  const fields = readFields(frame.subarray(EVENT_HEADER_BYTES), count);
   const outcome = required(fields, READY.outcome, 2, "the outcome").getUint16(0, true);
   const status = READY_OUTCOMES.get(outcome);
   if (status === undefined) throw malformed(`a response event carries outcome ${outcome}`);
-  const diagnostic = optionalText(fields, READY.diagnostic);
+  const diagnosticText = optionalText(fields, READY.diagnostic);
+  const diagnostic = diagnosticText === undefined ? undefined : readyText(diagnosticText, "the diagnostic");
   if ((status === "ok") === (diagnostic !== undefined)) {
     throw malformed("a response event's diagnostic does not match its outcome");
   }
@@ -644,7 +672,7 @@ export function decodeResponseReady(frame: Uint8Array): ResponseReadyEvent | und
   return Object.freeze({
     sequence: readU64(fields, READY.sequence, "the event sequence"),
     requestTag: readU64(fields, READY.requestTag, "the request tag"),
-    stripId: requiredText(fields, READY.stripId, "the strip ID"),
+    stripId: stableId(requiredText(fields, READY.stripId, "the strip ID"), "the strip ID"),
     status,
     diagnostic,
     capture,

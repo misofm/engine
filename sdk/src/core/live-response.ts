@@ -1161,8 +1161,21 @@ export class TrackResponseRequester {
   /** The rejection of the running query's deadline, while one runs. */
   #abort: ((error: Error) => void) | undefined;
   #unsubscribe: (() => void) | undefined;
-  /** The tag of a query that timed out, until its event is read; and who waits for that. */
-  #orphan: { readonly tag: bigint; readonly released: Promise<void>; readonly release: () => void } | undefined;
+  /**
+   * The tag of a query that timed out, until its event is read; `released` settles then, or
+   * rejects when an event that cannot be decoded arrives while the tag is held.
+   */
+  #orphan: {
+    readonly tag: bigint;
+    readonly released: Promise<void>;
+    readonly release: () => void;
+    readonly fail: (error: Error) => void;
+  } | undefined;
+  /**
+   * Set while the reply to a query that timed out during its send is still outstanding: that reply
+   * may carry a tag to hold, so the requester keeps listening and the next query waits for it.
+   */
+  #holdPending: Promise<void> | undefined;
   /** Events of the running query read before its tag was known. */
   #seen = new Map<bigint, ResponseReadyEvent>();
   /** The first `RESPONSE_READY` the running query could not decode. */
@@ -1199,6 +1212,7 @@ export class TrackResponseRequester {
     this.#abort?.(error);
     this.#orphan?.release();
     this.#orphan = undefined;
+    this.#holdPending = undefined;
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
   }
@@ -1209,7 +1223,7 @@ export class TrackResponseRequester {
   }
 
   #quiet(): void {
-    if (this.#outstanding > 0 || this.#orphan !== undefined) return;
+    if (this.#outstanding > 0 || this.#orphan !== undefined || this.#holdPending !== undefined) return;
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
   }
@@ -1220,8 +1234,16 @@ export class TrackResponseRequester {
     try {
       ready = decodeResponseReady(event.frame);
     } catch (error) {
+      // Only one capture is ever armed: an undecodable answer ends the held tag too, and the query
+      // waiting for it fails with the error.
+      const orphan = this.#orphan;
+      if (orphan !== undefined) {
+        this.#orphan = undefined;
+        orphan.fail(error as Error);
+      }
       this.#eventError ??= error as Error;
       this.#waiting?.settle(error as Error);
+      this.#quiet();
       return;
     }
     if (ready === undefined) return;
@@ -1240,8 +1262,13 @@ export class TrackResponseRequester {
 
   #hold(tag: bigint): void {
     let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
-    this.#orphan = { tag, released, release };
+    let fail!: (error: Error) => void;
+    const released = new Promise<void>((resolve, reject) => {
+      release = resolve;
+      fail = reject;
+    });
+    released.catch(() => undefined);
+    this.#orphan = { tag, released, release, fail };
   }
 
   async #run(request: TrackResponseQuery): Promise<TrackResponseResult> {
@@ -1264,7 +1291,9 @@ export class TrackResponseRequester {
         }, deadlineMs);
       });
       deadline.catch(() => undefined);
-      // A timed-out query's capture is still armed in the core: wait for its answer first.
+      // A timed-out query's capture may still be armed in the core: wait for its late reply, then
+      // for its answer, first.
+      if (this.#holdPending !== undefined) await Promise.race([this.#holdPending, deadline]);
       if (this.#orphan !== undefined) await Promise.race([this.#orphan.released, deadline]);
       if (this.#closed !== undefined) throw this.#closed;
       const requestId = this.#transport.nextRequestId();
@@ -1282,13 +1311,17 @@ export class TrackResponseRequester {
       const replyBytes = await Promise.race([sent, deadline]).catch((error: unknown) => {
         // A reply that arrives after the deadline may still have armed a capture.
         if (timedOut) {
-          sent.then((bytes) => {
-            const late = decodeResponseTagReply(bytes);
-            if (late.ok && this.#closed === undefined) {
-              this.#hold(late.tag);
-              this.#listen();
-            }
-          }, () => undefined);
+          const pending: Promise<void> = sent
+            .then((bytes) => {
+              const late = decodeResponseTagReply(bytes);
+              if (late.ok && this.#closed === undefined) this.#hold(late.tag);
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              if (this.#holdPending === pending) this.#holdPending = undefined;
+              this.#quiet();
+            });
+          this.#holdPending = pending;
         }
         throw error;
       });
