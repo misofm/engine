@@ -170,7 +170,17 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
 - #1596a facts: the core's session had only test-support accessors to its spectrum monitor, so R1
   needs `SessionState::spectrum_monitor`/`spectrum_monitor_mut` in
   `crates/control-plane/src/control.rs` (the two `test_spectrum*` accessors, ungated and renamed).
-  The core promotes at its service step and before a structural edit, never at a plain command, so
-  the #1618 analysis ending now follows the session's stream: the host ends the instance's analysis
-  when the session's running stream (its capture epoch) no longer runs after `service` or a
-  control command, and the staging record keeps the staging analysis's facts.
+  #1597 must re-gate (`test-support`) or delete `spectrum_monitor_mut` when it deletes the old
+  exports, its only production caller.
+- #1596a attempt 2 (verifier MAJOR 1): the core runs its service step, and so promotes, at the
+  start of every control command, `service`, `declare_discontinuity`, the event dequeue, both
+  session seeks, the source seek (`seek_at`) and the seek report (only the browser's source submit
+  runs unserviced). The attempt-1 eager end in `run_control` and `service` missed the event
+  dequeue, the anchored session seek, the source seek and the seek report. Root ruling: one lazy
+  mechanism. Every use of the spectrum staging (`with_spectrum_staging`) first ends a staging
+  stream that the live host's session no longer runs, drops the staged window and writes the
+  record from the service with the staging analysis's facts; the `analysis` parameters of
+  `service`, `control_command`, `declare_discontinuity` and `session_seek`, and the ffi's
+  `with_promotion_analysis`, are deleted. Stated limit until #1597: a stream started through
+  `SPECTRUM_STREAM` after a promotion ended the old one is the session analysis's; the staging
+  analysis follows only streams the old exports start.

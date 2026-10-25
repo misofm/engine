@@ -628,16 +628,18 @@ fn with_spectrum_staging<R>(operation: impl FnOnce(&RefCell<SpectrumStaging>) ->
 }
 
 /// End the staging analysis's stream when the live host's session no longer runs one (#1618,
-/// #1596 D3). The session's core services, and so promotes the plans render adopted, on nearly
-/// every control call (every command, `service`, the event dequeue, both session seeks, the
-/// source seeks and the seek report), and a promotion that does not keep the stream ends it with
-/// the session's own analysis, never with this instance's. So the check is made lazily, before
-/// any use of the staging, and no serviced call can be missed: the analysis ends, the staged
-/// window is dropped and the record is written from the service, with the staging analysis's
-/// facts, as `spectrum_stream_stop` writes it. Without it `spectrum_stream_reset` would answer ok
-/// and `spectrum_stream_analysis` would re-analyze the last window of a stream that no longer
-/// exists. An instance with no live host (an analysis Worker), or whose host is borrowed or not
-/// ready, checks nothing. Allocation-free.
+/// #1596 D3). The session's core runs its service step, and so promotes the plans render adopted,
+/// at the start of most of the browser's control calls: every control command
+/// (`SessionState::command_with_document`), `service`, `declare_discontinuity`, the event dequeue
+/// (`control_event`), both session seeks, the source seek (`seek_at`, both forms) and the seek
+/// report; only the source submit runs unserviced. A promotion that does not keep the stream ends
+/// it with the session's own analysis, never with this instance's. So the check is made lazily,
+/// before any use of the staging, and no serviced call can be missed: the analysis ends, the
+/// staged window is dropped and the record is written from the service, with the staging
+/// analysis's facts, as `spectrum_stream_stop` writes it. Without it `spectrum_stream_reset` would
+/// answer ok and `spectrum_stream_analysis` would re-analyze the last window of a stream that no
+/// longer exists. An instance with no live host (an analysis Worker), or whose host is borrowed or
+/// not ready, checks nothing. Allocation-free.
 fn end_a_stream_the_session_ended(staging: &mut SpectrumStaging) {
     if !staging
         .analysis
