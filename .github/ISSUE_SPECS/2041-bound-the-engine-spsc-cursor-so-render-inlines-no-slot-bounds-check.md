@@ -41,11 +41,15 @@ this spec.
   power-of-two mask the slice above proposes. LLVM cannot prove `cursor & mask < slots.len()` from
   two independent fields, the mask reverses #84 F6, and it grows rings up to 2x. `wrap_increment`,
   capacities and backpressure are unchanged.
-- D2: `Ring::slot` and `Mailbox::cell` are the two unchecked lookups (unsafe fns, each with a
-  `debug_assert!` of its bound); every call site's `SAFETY` states the invariant (a cursor advances
-  only through `wrap_increment(cursor, slots_len)`; a cell index comes only from
-  `MailboxWord::cell_in`). The lookup sits inside the `sync::with`/`with_mut` argument, so loom
-  still sees every access. `docs/REALTIME_DEPENDENCY_POLICY.md`'s `spsc.rs` rows name them.
+- D2: `Ring::slot` is the one unchecked lookup (an unsafe fn with a `debug_assert!` of its
+  bound); every call site's `SAFETY` states the invariant (a cursor advances only through
+  `wrap_increment(cursor, slots_len)`). The lookup sits inside the `sync::with`/`with_mut`
+  argument, so loom still sees every access. `docs/REALTIME_DEPENDENCY_POLICY.md`'s `spsc.rs`
+  rows name it.
+- D2a (root ruling, 2026-10-25): the plan mailbox's `cells[..]` stay checked. Attempt 1 added an
+  unchecked `Mailbox::cell`, but its mutant stayed green (the optimiser already proves the
+  `cell_in` index below 2 on wasm), so it was unsafe surface no measured bound needs; removed.
+  The adoption arrays stay checked for the same reason.
 - D3: `scripts/check-web-audioworklet.sh` drops every SPSC trap-owner pin (render: `enter_block`,
   `observe=1`, `after_block=2`, `poll=3`, `begin_generation=1`, `publish_frame=2`; meter_poll:
   `poll=3`, `publish_frame=2`). No pin stays.
@@ -54,8 +58,8 @@ this spec.
 - Gate with the pins removed: render closure `traps=5`, owners only the allow-listed
   `PreparedRenderPlan::render_inner`; meter_poll `traps=0`. A mutant that restores
   `&self.slots[cursor]` in `Ring::slot` is red (six unexpected owners, `traps=16`). A mutant that
-  restores `&self.cells[cell]` in `Mailbox::cell` stays green: on wasm the optimiser already
-  proves the inlined `cell_in` index below 2, so the mailbox change removes no browser site.
+  restored `&self.cells[cell]` in the attempt-1 `Mailbox::cell` stayed green: on wasm the
+  optimiser already proves the inlined `cell_in` index below 2 (hence D2a).
 - Push/pop, throwaway harness (capacity 255, `u64`, x86-64-v3, one invocation, one warmup, two
   rounds), ns per push+pop pair, before `4448e90b3` / after: fill-drain 2.2835, 2.3119 /
   2.1950, 2.1955; one-push-one-pop 2.4865, 2.3800 / 2.2256, 2.2251.

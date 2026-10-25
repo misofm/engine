@@ -572,9 +572,9 @@ fi
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 named_disassembly=$(wasm-objdump -d "$named")
 # Issue #2041: no render closure admits a trap owner. #1381a, #1577, #1581 and #1588b each pinned
-# an engine SPSC ring's or the plan mailbox's checked `slots[cursor]` / `cells[cell]` index here (a
-# `panic_bounds_check` that could not fire); `spsc.rs` now reads both without a bounds check under
-# its unsafe charter, so a checked index inlined into the render closure again is red.
+# an engine SPSC ring's checked `slots[cursor]` index here (a `panic_bounds_check` that could not
+# fire); `spsc.rs` now reads a slot without a bounds check under its unsafe charter, so a checked
+# index inlined into the render closure again is red.
 # #1588b: `MeterFrameProducer::publish_frame`'s published-queue push refusal, unreachable because
 # that queue has room for every frame the free queue does not hold, is forgotten rather than
 # dropped, so no free joins the closure.

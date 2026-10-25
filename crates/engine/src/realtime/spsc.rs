@@ -901,19 +901,6 @@ struct Mailbox<T> {
 
 // REALTIME_POLICY_BEGIN
 impl<T> Mailbox<T> {
-    /// The cell at `cell`, without a bounds check (#2041), as [`Ring::slot`] is for a ring.
-    ///
-    /// # Safety
-    ///
-    /// `cell < 2`. Every cell index the writer, a permit, an observation or the reader holds
-    /// comes from [`MailboxWord::cell_in`], which returns only 0 or 1.
-    #[inline(always)]
-    unsafe fn cell(&self, cell: usize) -> &UnsafeCell<Option<T>> {
-        debug_assert!(cell < self.cells.len(), "mailbox cell {cell} is not 0 or 1");
-        // SAFETY: the caller guarantees `cell < 2 == cells.len()`.
-        unsafe { self.cells.get_unchecked(cell) }
-    }
-
     /// Store `cell`'s schedule (I8). `Relaxed`: the writer's next `Release` on the word publishes
     /// it.
     fn store_adoption(&self, cell: usize, adoption: PlanAdoption) {
@@ -1064,12 +1051,11 @@ impl<T: Send + 'static> MailboxWriter<T> {
             Ordering::Acquire,
         ) {
             Ok(_) => {
-                // SAFETY: `cell` is the writer's `published`, a permit's cell from `cell_in`.
-                let payload = unsafe { self.shared.cell(cell) };
                 // SAFETY: the compare-and-swap moved the cell from `Full` to `Empty`, so the writer
                 // owns its payload (I4); the reader touches a cell's payload only after its own
                 // claim of that cell won, and it lost this one.
-                let value = sync::with_mut(payload, |slot| unsafe { (*slot).take() });
+                let value =
+                    sync::with_mut(&self.shared.cells[cell], |slot| unsafe { (*slot).take() });
                 // I8: only this writer stores the schedule, so its own last store is the value.
                 let adoption = self.shared.load_adoption(cell);
                 match value {
@@ -1117,11 +1103,11 @@ impl<T: Send + 'static> MailboxPermit<'_, T> {
     ) -> Result<(), MailboxInvariantBroken<T>> {
         let shared = &*self.writer.shared;
         shared.store_adoption(self.cell, adoption);
-        // SAFETY: the permit's cell came from `cell_in`, so it is 0 or 1.
-        let payload = unsafe { shared.cell(self.cell) };
         // SAFETY: the cell is `Empty`, so the writer owns its payload (I4); the reader touches a
         // cell's payload only after its claim of a `Full` cell, and this cell is not `Full`.
-        let previous = sync::with_mut(payload, |slot| unsafe { (*slot).replace(value) });
+        let previous = sync::with_mut(&shared.cells[self.cell], |slot| unsafe {
+            (*slot).replace(value)
+        });
         debug_assert!(previous.is_none(), "an Empty cell holds no payload");
         drop(previous);
         let next = self.observed.with(self.cell, CELL_FULL).advanced();
@@ -1138,7 +1124,8 @@ impl<T: Send + 'static> MailboxPermit<'_, T> {
             Err(_) => {
                 // SAFETY: the cell was never marked `Full`, so no reader can own it; the writer
                 // still does (I4).
-                let value = sync::with_mut(payload, |slot| unsafe { (*slot).take() });
+                let value =
+                    sync::with_mut(&shared.cells[self.cell], |slot| unsafe { (*slot).take() });
                 match value {
                     Some(value) => Err(MailboxInvariantBroken(value)),
                     None => {
@@ -1205,11 +1192,11 @@ impl<T: Send + 'static> MailboxReader<T> {
         {
             return None;
         }
-        // SAFETY: an observation's `full` came from `cell_in`, so it is 0 or 1.
-        let payload = unsafe { self.shared.cell(observed.full) };
         // SAFETY: the compare-and-swap made this cell `Active`, so the reader owns its payload
         // (I4); the writer never touches an `Active` cell.
-        sync::with_mut(payload, |slot| unsafe { (*slot).take() })
+        sync::with_mut(&self.shared.cells[observed.full], |slot| unsafe {
+            (*slot).take()
+        })
     }
 }
 // REALTIME_POLICY_END
