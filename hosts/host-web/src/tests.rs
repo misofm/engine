@@ -1082,14 +1082,12 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let meter_delivery_bytes = meter_delivery_bytes
             + strips * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>()) as u64;
         let frame_bytes = frame_bytes + meter_delivery_bytes;
-        // The one EQ's dense instance table, its producer-slot word and the IDs it copies, and
-        // its observation index entry with the same IDs again (#1586 D3).
+        // The one EQ's dense instance table, its producer-slot word and the IDs it copies. Its
+        // observation index entry is the epoch's (#1589 R2), in the control plane's row.
         let effect_ids = (model.tracks[0].id.as_str().len()
             + model.console.pre_insert[0].slot.as_str().len()) as u64;
-        let instance_bytes = (size_of::<Option<EffectInstance>>() + 2 * size_of::<u32>()) as u64
-            + effect_ids
-            + size_of::<host_core::observation::ObservationIndexEntry>() as u64
-            + effect_ids;
+        let instance_bytes =
+            (size_of::<Option<EffectInstance>>() + 2 * size_of::<u32>()) as u64 + effect_ids;
         let frame_bytes = frame_bytes + instance_bytes;
         let expected_bridge_metadata = projection
             .report
@@ -3775,6 +3773,155 @@ fn meter_reacquisition_rejects_a_full_stale_queue_then_recovers() {
     assert_ne!(host.meter_header().reserved[1] & METER_VALID_LOSS, 0);
 }
 
+/// One `METER_BATCH`: its span, its window sequence and its records' values in order.
+type MeterBatchRow = (u64, u64, u64, Vec<f32>);
+
+/// Run one service step and dequeue every lossy event, keeping the `METER_BATCH`es.
+fn served_meter_batches(host: &mut AudioWorkletEngineHost) -> Vec<MeterBatchRow> {
+    use protocol::{DecodeScratch, DecodedEventPayload, DecodedTypedEventFrame, ProtocolCodec};
+    assert_eq!(host.service(), RESULT_OK);
+    let mut batches = Vec::new();
+    loop {
+        assert_eq!(host.control_event(EVENT_LANE_LOSSY), RESULT_OK);
+        let event = host.control_response();
+        if event.is_empty() {
+            return batches;
+        }
+        let mut fields = [0_u16; 64];
+        if let DecodedTypedEventFrame {
+            payload: DecodedEventPayload::MeterBatch(batch),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_event(event, &mut DecodeScratch::new(&mut fields))
+            .expect("a lossy event")
+        {
+            batches.push((
+                batch.first_sample.0,
+                batch.observed_sample.0,
+                batch.window_sequence,
+                (0..usize::from(batch.count))
+                    .map(|index| batch.record(index).expect("a meter record").value)
+                    .collect(),
+            ));
+        }
+    }
+}
+
+/// #1588 gate 2: the lease and a protocol meter table at once. Under the lease every batch of
+/// `k = 2` covers exactly two consecutive lease frames' spans, and its output and track peaks are
+/// the two frames' maxima. Releasing the lease restarts the delivery epoch once: the partial
+/// batch it cuts is counted in `METER_WINDOWS_LOST`, the batches continue on the new epoch, and
+/// with the table alone the lease frame and its header stay as the release left them.
+///
+/// Test value: red if the two clients fold different windows (a batch that is not the two lease
+/// frames' span or maxima), if one client's change moves the other's data without a counted
+/// restart, or if the table alone writes the lease frame.
+#[test]
+fn the_lease_and_a_meter_table_fold_one_window_grid_and_a_release_restarts_it_once() {
+    use protocol::{
+        CommandPayload, CounterId, DiagnosticSeverity, ExpectedRevision, MeterEntry, MeterMetric,
+        MeterTarget, ProtocolCodec, RequestId, SessionRevision, TelemetryConfiguration,
+        TypedCommandFrame,
+    };
+    const QUANTUM: u64 = 128;
+    let mut host = live_control_host(QUANTUM as u32, 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(
+                    host.committed_revision(),
+                )),
+                payload: CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters: vec![
+                        MeterEntry {
+                            target: MeterTarget::Output,
+                            metric: MeterMetric::Peak,
+                        },
+                        MeterEntry {
+                            target: MeterTarget::Strip("track".into()),
+                            metric: MeterMetric::Peak,
+                        },
+                    ],
+                    meter_period_blocks: 2,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            },
+            &mut bytes,
+        )
+        .expect("a telemetry frame");
+    let staged = u32::try_from(length).expect("frame length");
+    host.control_request_mut(staged)
+        .expect("the control request staging")[..length]
+        .copy_from_slice(&bytes[..length]);
+    assert_eq!(host.control_command(staged), RESULT_OK);
+
+    // Seven lease frames: three whole batches and one frame of a fourth.
+    let values = [0.25_f32, 0.5, 0.125, 1.0, 0.0625, 0.75, 0.375];
+    let mut leased = Vec::new();
+    let mut batches = Vec::new();
+    for (block, value) in values.into_iter().enumerate() {
+        feed_and_render(&mut host, 1, block as u64, value);
+        assert_eq!(host.poll_meters(), 1, "block {block}: one lease frame");
+        let header = *host.meter_header();
+        let frame = host.meter_frame();
+        leased.push((header.first_sample, header.end_sample, frame[0], frame[2]));
+        batches.extend(served_meter_batches(&mut host));
+    }
+    assert_eq!(batches.len(), 3, "a batch every two lease frames");
+    for (index, (first, end, sequence, records)) in batches.iter().enumerate() {
+        let (one, two) = (leased[2 * index], leased[2 * index + 1]);
+        assert_eq!(two.0, one.1, "batch {index}: two consecutive lease frames");
+        assert_eq!((*first, *end), (one.0, two.1), "batch {index}: their span");
+        assert_eq!(*sequence, index as u64 + 1);
+        let (output, track) = (one.3.max(two.3), one.2.max(two.2));
+        assert_eq!(
+            records,
+            &vec![output, output, track, track],
+            "batch {index}: their maxima"
+        );
+    }
+    let lost = served_counter(&mut host, 2, CounterId::MeterWindowsLost);
+
+    // The release restarts the epoch at the next block; the table alone then folds in render.
+    assert_eq!(host.set_meter_lease(false), RESULT_OK);
+    let released = (host.meter_frame().to_vec(), *host.meter_header());
+    let restart = values.len() as u64;
+    let mut after = Vec::new();
+    for block in restart..restart + 4 {
+        feed_and_render(&mut host, 1, block, 0.5);
+        after.extend(served_meter_batches(&mut host));
+    }
+    assert_eq!(
+        after
+            .iter()
+            .map(|(first, end, sequence, _)| (*first, *end, *sequence))
+            .collect::<Vec<_>>(),
+        [
+            (restart * QUANTUM, (restart + 2) * QUANTUM, 4),
+            ((restart + 2) * QUANTUM, (restart + 4) * QUANTUM, 5),
+        ],
+        "the batches continue from the restart"
+    );
+    assert_eq!(
+        served_counter(&mut host, 3, CounterId::MeterWindowsLost),
+        lost + 1,
+        "the restart's one counted window: the partial batch it cut"
+    );
+    assert_eq!(
+        (host.meter_frame().to_vec(), *host.meter_header()),
+        released,
+        "the table alone leaves the lease frame as the release left it"
+    );
+}
+
 /// A three-track observation host over the #143 E4 fixture: compressor, EQ (no tap), gate.
 fn observation_host(
     quantum: u32,
@@ -4340,14 +4487,14 @@ fn bus_meters_render_and_poll_without_allocating() {
 }
 
 /// The dense effect slot and the tap index one stable selection names, through the plan's
-/// observation index (#1586 D3), so a test reaches the reader the read reads.
+/// observation index (#1586 D3, the epoch's since #1589 R2), so a test reaches the reader the read reads.
 fn resolve_observation(
     ready: &ReadyOwnership,
     selection: &ObservationSelection<'_>,
 ) -> Result<(usize, usize), ObservationReadError> {
     let entry = ready
-        .shape
-        .observation_index
+        .observation_index()
+        .ok_or(ObservationReadError::WrongState)?
         .find(selection.track_id, selection.rack, selection.effect_slot_id)
         .ok_or(ObservationReadError::InvalidSelection)?;
     let handle = entry.handle.ok_or(ObservationReadError::Unsupported)?;
@@ -4734,8 +4881,7 @@ fn observe_key(
 fn armed_mask(host: &mut AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
     let ready = host.ready.as_ref().expect("ready");
     let reader = ready
-        .shape
-        .observation_index
+        .observation_index()?
         .find(strip_id, LiveEffectRack::Inserts, insert_id)?
         .handle?;
     let companions = host
@@ -8786,9 +8932,11 @@ mod structural_apply {
     ///
     /// Test value: red if the swap block's hook does not pair the observation readers (the tap
     /// would read as unarmed and the page's subscription would silently stop after every swap), or
-    /// if it maps the readers to the wrong effect slot after the added strip shifts them, or if
+    /// if it maps the readers to the wrong effect slot after the added strip shifts them, if
     /// the selected read reads readers it took at preparation and not the active plan's (#1586a:
-    /// after the carry those are the successor's fresh slots, which nothing publishes to).
+    /// after the carry those are the successor's fresh slots, which nothing publishes to), or if
+    /// it resolves them through another plan's index than the one that renders (#1589 R2: the
+    /// newest committed plan's, between a rebuild's commit and its adoption).
     #[test]
     fn an_armed_tap_and_its_windows_follow_the_effect_through_a_swap() {
         let mut model =
@@ -8828,6 +8976,15 @@ mod structural_apply {
                 revision
             } if revision == base + 1
         ));
+        // The successor waits for its block: the read resolves through the rendering plan's index.
+        assert!(
+            rig.host
+                .read_observation_addresses(&[address(0)])
+                .expect("a read before the adoption")[0]
+                .window
+                .is_some(),
+            "the rendering plan's tap reads its window before the adoption"
+        );
         rig.step();
         assert_eq!(rig.epoch(), 1);
         assert_eq!(
@@ -8847,6 +9004,88 @@ mod structural_apply {
             .expect("the carried tap kept publishing")
             .sequence;
         assert!(after > before, "the windows continue ({before} to {after})");
+    }
+
+    /// #1589 R1: a boot word that binds no observation queue (`0`) leaves the browser serving
+    /// neither the `Observe` edit nor its read: the edit is refused `observation.unavailable`
+    /// before anything commits, and `CAPABILITIES_GET` lists neither `OBSERVATION_READ` nor bit 15.
+    /// Any nonzero word serves both: preparation refuses an effect with more taps than the word,
+    /// so a word of `1` on a session whose one observed effect has one tap binds its queue.
+    ///
+    /// Test value: red if the session serves the edit on plans with no queue for the tap (an
+    /// acknowledged subscription no render ever applies, or an internal fault in place of the
+    /// typed refusal), if it advertises a read that could answer only `observation.unbound`, or
+    /// if it withholds both from a nonzero word below the widest launch effect's tap count.
+    #[test]
+    fn observe_and_its_read_are_served_for_a_nonzero_boot_word_and_refused_for_zero() {
+        let model = observed_model();
+        for taps in [0, 1] {
+            let mut rig = Rig::boot(
+                &model,
+                WebBootOptions {
+                    live_control_observation_taps: taps,
+                    ..options()
+                },
+                None,
+            );
+            let base = rig.host.committed_revision();
+            let arm = SessionEdit::Observe {
+                strip_id: model.tracks[0].id.clone(),
+                section: controls::TapSection::Inserts(StableId::parse("comp").expect("insert ID")),
+                tap_id: 1,
+                armed: true,
+                window_blocks: 1,
+            };
+            match (taps, rig.apply(&[arm], 1)) {
+                (0, Outcome::Refused(_, codes)) => {
+                    assert_eq!(codes, ["observation.unavailable"]);
+                    assert_eq!(rig.host.committed_revision(), base, "nothing committed");
+                }
+                (0, Outcome::Applied { .. }) => {
+                    panic!("an Observe edit on a plan with no observation queue is accepted")
+                }
+                (_, Outcome::Applied { .. }) => {}
+                (_, Outcome::Refused(_, codes)) => {
+                    panic!("word {taps}: the Observe edit is refused {codes:?}")
+                }
+            }
+
+            let codec = ProtocolCodec::default();
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(
+                    &TypedCommandFrame {
+                        request_id: RequestId::new(2).expect("nonzero request"),
+                        expected_revision: ExpectedRevision::Any,
+                        payload: CommandPayload::CapabilitiesGet,
+                    },
+                    &mut bytes,
+                )
+                .expect("a capabilities frame");
+            let (result, reply) = rig.entry(&bytes[..length]);
+            assert_eq!(result, RESULT_OK);
+            let mut fields = [0_u16; 256];
+            let DecodedTypedResponseFrame::Success {
+                payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
+                ..
+            } = codec
+                .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+                .expect("a capabilities reply")
+            else {
+                panic!("a capabilities reply")
+            };
+            let served = taps != 0;
+            assert_eq!(
+                capabilities.supported_commands.contains(&0x000f),
+                served,
+                "word {taps}: OBSERVATION_READ listed"
+            );
+            assert_eq!(
+                capabilities.flags.0 & protocol::CapabilityFlags::OBSERVATION.0 != 0,
+                served,
+                "word {taps}: capability bit 15"
+            );
+        }
     }
 
     fn meter_loss(rig: &Rig) -> u64 {

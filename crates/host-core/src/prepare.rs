@@ -202,6 +202,26 @@ impl WarmLead {
     }
 }
 
+#[cfg(feature = "test-support")]
+impl WarmLead {
+    /// Test-support seam (#1397a): the lead [`warm_lead`] answers when the strips it restarts
+    /// whole confine a growth (`Warm` with `lead_samples == 0`), for the edit whose ordinary
+    /// successor's inventory is `ordinary`, so a host can gate its routing of that answer on a
+    /// session family where no edit reaches it. `restart_whole` is sorted by the seam.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_zero_lead(ordinary: &PlanStateInventory, restart_whole: &[&str]) -> Self {
+        let mut whole: Vec<String> = restart_whole.iter().map(|id| (*id).to_owned()).collect();
+        whole.sort_unstable();
+        Self {
+            lead_samples: 0,
+            restart_whole: whole.into_boxed_slice(),
+            restarted: ordinary.restarted_strips().into(),
+            prime_bytes: 0,
+        }
+    }
+}
+
 /// What [`warm_lead`] answers for a structural edit (#1354 D1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WarmDecision {
@@ -1707,6 +1727,13 @@ pub struct SuccessorBase<'a> {
     /// the lead's is refused with `host.successor.warm_invariant`. `None` is the neutral value: an
     /// ordinary successor.
     pub warm: Option<&'a WarmLead>,
+    /// The strips the transition fallback restarts (#1397 D2 step 1): strip IDs, sorted, the duck
+    /// set [`crate::grown_strips`] computed from the ordinary compile. Preparation restarts each
+    /// one it holds as it restarts a strip its carry join restarts (#1324 D2-D3: every owner
+    /// before the fader and the fader start at rest, and the fader is armed), and lists it in
+    /// [`PreparedHost::restarted_strips`]. An added strip in it is ignored. Empty, the neutral
+    /// value, for every other successor.
+    pub forced_restart: &'a [String],
 }
 
 impl<'a> SuccessorBase<'a> {
@@ -1732,6 +1759,7 @@ impl<'a> SuccessorBase<'a> {
             unchanged_revision: false,
             duck: &NO_DUCK,
             warm: None,
+            forced_restart: &[],
         }
     }
 }
@@ -1821,7 +1849,7 @@ impl<'a> WarmRestart<'a> {
 /// (a strip's `PostMatrix` stage and its routes from a `post_fader` or `post_pan` tap do not).
 /// A route node belongs to its source strip, looked up in `routes` (the successor's routes by
 /// ID); the output belongs to no strip.
-fn strip_owner<'n>(
+pub(crate) fn strip_owner<'n>(
     routes: &'n BTreeMap<&str, &session::Route>,
     node: &'n GraphNodeId,
 ) -> Option<(&'n str, bool)> {
@@ -1910,7 +1938,7 @@ fn tap_before_fader(tap: session::SendTap) -> bool {
 /// The graph nodes a plan compiled from `model` has (#1354a): every strip's seven stages and
 /// its effects, every route and every output. The compiler emits no other node kind
 /// (`graph-compiler` `compile_graph`; a compensation line is not a node of the schedule).
-fn session_graph_nodes(model: &SessionModel) -> BTreeSet<GraphNodeId> {
+pub(crate) fn session_graph_nodes(model: &SessionModel) -> BTreeSet<GraphNodeId> {
     const STAGES: [TrackStage; 7] = [
         TrackStage::Input,
         TrackStage::PostInputBuiltins,
@@ -4466,6 +4494,19 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             lead.restart_whole
                 .iter()
                 .filter(|id| committed_has_strip(model, id))
+                .map(|id| Box::<str>::from(id.as_str())),
+        );
+        restarted.sort_unstable();
+        restarted.dedup();
+    }
+    // #1397 D2 step 1: the transition fallback's duck set, restarted as the join's restarts are.
+    if let Some(base) = successor.filter(|base| !base.forced_restart.is_empty()) {
+        restarted.extend(
+            base.forced_restart
+                .iter()
+                .filter(|id| {
+                    committed_has_strip(base.committed, id) && committed_has_strip(model, id)
+                })
                 .map(|id| Box::<str>::from(id.as_str())),
         );
         restarted.sort_unstable();
@@ -7498,7 +7539,7 @@ fn fade_arms_for<'a>(
 }
 
 /// Whether `committed` has a strip of any kind named `id`.
-fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
+pub(crate) fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
     committed
         .tracks
         .binary_search_by(|track| track.id.as_str().cmp(id))

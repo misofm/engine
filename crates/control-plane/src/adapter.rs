@@ -26,9 +26,10 @@ pub trait ControlAdapter {
     /// Whether the session serves the `Observe` edit (#1584 D7a): a transaction's subscriptions are
     /// checked against the session's binding table and queued on the effects' observation queues
     /// by the core. An adapter that keeps the default refuses every `Observe` edit with
-    /// `observation.unavailable`: the browser until #1589, because its observe kinds 7 and 8 still
-    /// write the same queues, and one queue must never have two writers. Its plans must carry an
-    /// observation queue for every declared tap.
+    /// `observation.unavailable`. The browser serves it beside its observe kinds 7 and 8 (#1589a):
+    /// both write through the control plane's producers (`admit_and_push_observation_batch`), so
+    /// each queue keeps one writer. Its plans must carry an observation queue for every declared
+    /// tap.
     const OBSERVE_EDIT: bool = false;
     /// Whether the session owns a meter delivery that the control plane serves (#1583 D3-D5, R2):
     /// `TELEMETRY_CONFIGURE` then accepts a meter table, its echo carries the meter window, and the
