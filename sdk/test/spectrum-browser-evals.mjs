@@ -1,660 +1,249 @@
+/**
+ * The browser engine's spectrum calls over the three frames (#1596 D1-D7). The host stand-in's
+ * control plane is a real core (a `WasmBoundary` on the shipped module): `control(frame)` runs the
+ * frame through the entry the worklet's message handler calls, and `render()` feeds and renders
+ * blocks as the audio thread does. The host has no spectrum method of its own, so an SDK path that
+ * still called one fails here. The three-browser rows are the qualification's (#1596 gate 5).
+ */
+
 import assert from "node:assert/strict";
-import { scriptedControl } from "./control-support.mjs";
 import { test } from "node:test";
 
 import { createEngine } from "../src/browser/engine.ts";
-import { MisoEngineError } from "../src/core/errors.ts";
+import { MisoEngineAsset } from "../src/core/asset.ts";
+import { WasmBoundary } from "../src/core/boundary.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
+import { onEndpointIds } from "./control-support.mjs";
+import { moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
-const SHAPE = Object.freeze({ sampleRateHz: 48_000, quantumFrames: 128, tracks: ["t"], submixes: [] });
-const PREPARED = Object.freeze({
-  target: Object.freeze({ kind: "output", outputId: "out" }),
-  channels: "both",
+const SKIP = { skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX };
+const QUANTUM = 128;
+const WINDOW_BLOCKS = 2_048 / QUANTUM;
+const OUTPUT = Object.freeze({ target: Object.freeze({ kind: "output", outputId: "out" }), channels: "both" });
+const TRACK = Object.freeze({ target: Object.freeze({ kind: "trackPostPan", trackId: "t" }), channels: "both" });
+const BOTH = Object.freeze({
+  entries: Object.freeze([OUTPUT, TRACK]),
+  maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes * 2,
 });
 
-function context() {
-  return {
-    sampleRate: 48_000,
-    renderQuantumSize: 128,
-    state: "suspended",
-    audioWorklet: { async addModule() {} },
-    async close() {},
+let assetPromise;
+const candidateAsset = () => assetPromise ??= moduleBytes().then((bytes) => MisoEngineAsset.load(bytes));
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * A browser engine over a served core that staged the boot's taps, as the worklet boot does.
+ * `harness.frames` counts the frames the page sent; `harness.hold`, when set, holds the reply of the
+ * next frame (the core has served it) until that promise settles.
+ */
+async function served({ spectrum, spectrumCollection, policy, afterCall } = {}) {
+  const document = sessionDocument({ frames: 64 * 2_048 });
+  const core = await WasmBoundary.boot(await candidateAsset(), new TextEncoder().encode(document), {
+    ...(spectrum === undefined ? {} : { spectrum }),
+    ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
+  });
+  const forward = onEndpointIds(core.controlRequestIds, (frame) => core.controlFrame(frame));
+  const harness = { frames: 0, hold: undefined, hostOptions: undefined };
+  let block = 0;
+  const host = {
+    async control(frame) {
+      harness.frames += 1;
+      const response = forward(frame);
+      const hold = harness.hold;
+      harness.hold = undefined;
+      if (hold !== undefined) await hold;
+      return { tag: "miso.control.v1", requestId: harness.frames, result: 0, response, revision: core.controlRevision() };
+    },
+    onControlEvent: () => () => {},
+    async dispose() { core.dispose(); },
   };
-}
-
-function spectrumResult(query) {
-  return {
-    target: query.target,
-    channels: query.channels ?? "both",
-    sampleRateHz: 48_000,
-    windowFrames: 2_048,
-    binCount: 1,
-    floorDb: -120,
-    frequenciesHz: new Float32Array([0]),
-    leftDb: new Float32Array([0]),
-    rightDb: new Float32Array([0]),
-    capturedSample: 0n,
-    endSample: 2_048n,
-    snapshotToken: 1n,
-    graphSourceUnderrun: false,
-    resultBytes: 1n,
-  };
-}
-
-class SpectrumWorker {
-  #listeners = new Map();
-  messages = [];
-  replies = [];
-  silent;
-  failStream;
-  terminated = false;
-
-  constructor({ silent = false, failStream = false } = {}) {
-    this.silent = silent;
-    this.failStream = failStream;
-  }
-
-  addEventListener(type, listener) {
-    const listeners = this.#listeners.get(type) ?? new Set();
-    listeners.add(listener);
-    this.#listeners.set(type, listeners);
-  }
-
-  removeEventListener(type, listener) {
-    this.#listeners.get(type)?.delete(listener);
-  }
-
-  postMessage(message) {
-    this.messages.push(message);
-    if (this.silent) return;
-    if (message.type === "spectrum-init") {
-      queueMicrotask(() => this.#emit({ type: "spectrum-ready" }));
-    } else if (message.type === "spectrum-query") {
-      queueMicrotask(() => this.#emit({
-        type: "spectrum-result",
-        requestId: message.requestId,
-        result: spectrumResult(message.query),
-      }));
-    } else if (message.type === "spectrum-stream-query") {
-      if (this.failStream) {
-        queueMicrotask(() => this.#emitError("stream Worker failed"));
-        return;
-      }
-      const bytes = encodedSpectrumResult(message.buffer);
-      const reply = {
-        type: "spectrum-stream-result",
-        requestId: message.requestId,
-        resultByteLength: bytes,
-        buffer: message.buffer,
-        metadata: message.metadata,
-      };
-      this.replies.push(reply);
-      queueMicrotask(() => this.#emit(reply));
+  const render = (blocks = 1) => {
+    for (let index = 0; index < blocks; index += 1) {
+      const ack = core.submitSource({
+        sourceId: "s",
+        generation: 1n,
+        startFrame: BigInt(block * QUANTUM),
+        planes: [ramp(QUANTUM, 17 + block), ramp(QUANTUM, 71 + block)],
+        endOfRegion: false,
+      });
+      assert.equal(ack.ok, true, `source block ${block} was refused`);
+      core.render(QUANTUM);
+      block += 1;
     }
-  }
-
-  terminate() {
-    this.terminated = true;
-  }
-
-  #emit(data) {
-    for (const listener of this.#listeners.get("message") ?? []) listener({ data });
-  }
-
-  #emitError(message) {
-    for (const listener of this.#listeners.get("error") ?? []) listener({ message });
-  }
-}
-
-function streamMetadata(status, sequence = 0n, hopFrames = 2_048, sampleRateHz = 48_000) {
-  const hop = BigInt(hopFrames);
-  return {
-    structSize: ABI_LAYOUT.constants.spectrumStreamMetadataBytes,
-    abiVersion: ABI_LAYOUT.abiVersion,
-    result: 0,
-    status,
-    target: 3,
-    channels: 3,
-    sampleRateHz,
-    quantumFrames: 128,
-    hopFrames,
-    sourceUnderrun: 0,
-    captureEpoch: 1n,
-    sequence,
-    droppedCaptures: 0n,
-    windows: sequence,
-    capturedSample: sequence * hop,
-    endSample: sequence * hop + 2_048n,
-    analysisEpoch: 1n,
-    historyStartSample: 0n,
-    smoothingMs: 100,
   };
-}
-
-function encodedSpectrumResult(buffer) {
-  const count = ABI_LAYOUT.constants.spectrumBinCount;
-  const header = ABI_LAYOUT.constants.spectrumResultHeaderBytes;
-  const frequenciesOffset = header;
-  const leftOffset = frequenciesOffset + count * 4;
-  const rightOffset = leftOffset + count * 4;
-  const resultBytes = rightOffset + count * 4;
-  const view = new DataView(buffer, 0, resultBytes);
-  const field = (name) => ABI_LAYOUT.structures.spectrumResult.fields.find((candidate) => candidate.name === name).offset;
-  view.setUint32(field("structSize"), header, true);
-  view.setUint32(field("abiVersion"), ABI_LAYOUT.abiVersion, true);
-  view.setUint32(field("result"), 0, true);
-  view.setUint32(field("target"), 3, true);
-  view.setUint32(field("channels"), 3, true);
-  view.setUint32(field("sampleRateHz"), 48_000, true);
-  view.setUint32(field("windowFrames"), 2_048, true);
-  view.setUint32(field("binCount"), count, true);
-  view.setUint32(field("sourceUnderrun"), 0, true);
-  view.setFloat32(field("floorDb"), -120, true);
-  view.setBigUint64(field("capturedSample"), 0n, true);
-  view.setBigUint64(field("endSample"), 2_048n, true);
-  view.setBigUint64(field("snapshotToken"), 1n, true);
-  view.setBigUint64(field("resultBytes"), BigInt(resultBytes), true);
-  view.setUint32(field("frequenciesOffset"), frequenciesOffset, true);
-  view.setUint32(field("leftOffset"), leftOffset, true);
-  view.setUint32(field("rightOffset"), rightOffset, true);
-  view.setUint32(field("reserved0"), 0, true);
-  return resultBytes;
-}
-
-function hostWithCapture(overrides = {}) {
-  return {
-    onControlEvent() { return () => {}; },
-    async armSpectrum() { return { result: 0 }; },
-    async readSpectrum() { return { result: 0, snapshot: new Uint8Array([1]) }; },
-    async status() { return { result: 0, state: 2, lastResult: 0 }; },
-    async cancelSpectrum() { return { result: 0 }; },
-    async dispose() {},
-    ...overrides,
-  };
-}
-
-async function browserEngine(host, worker, extra = {}) {
-  const createResponseWorker = typeof worker === "function" ? worker : () => worker;
-  return createEngine({
-    document: "opaque",
-    spectrum: PREPARED,
-    scratchBoot: async () => SHAPE,
-    createContext: context,
-    createHost: async () => host,
-    createResponseWorker,
-    ...extra,
-  });
-}
-
-async function assertNativeHopTransport(hopFrames, sampleRateHz = 48_000) {
-  const worker = new SpectrumWorker();
-  let sequence = 0n;
-  const host = hostWithCapture({
-    async startSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(1, 0n, hopFrames, sampleRateHz) };
-    },
-    async readSpectrumStream(buffer) {
-      sequence += 1n;
-      return {
-        result: 0,
-        byteLength: 8_256,
-        buffer,
-        metadata: streamMetadata(6, sequence, hopFrames, sampleRateHz),
-      };
-    },
-    async stopSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(5, sequence, hopFrames, sampleRateHz) };
+  const pending = createEngine({
+    document,
+    ...(spectrum === undefined ? {} : { spectrum }),
+    ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
+    ...(policy === undefined ? {} : { policy }),
+    scratchBoot: async () => ({ sampleRateHz: 48_000, quantumFrames: QUANTUM, tracks: ["t"], submixes: [] }),
+    createContext: () => ({
+      sampleRate: 48_000,
+      renderQuantumSize: QUANTUM,
+      state: "running",
+      audioWorklet: { async addModule() {} },
+      async close() {},
+    }),
+    createHost: async (request) => {
+      harness.hostOptions = request.options;
+      return host;
     },
   });
-  const engine = await browserEngine(host, worker);
-  try {
-    const subscription = await engine.subscribeSpectrum({ ...PREPARED, cadenceMs: 1 });
+  afterCall?.();
+  return { engine: await pending, render, harness };
+}
+
+/** Render while `promise` is pending, one block per turn, and return what it settles to. */
+async function rendering(promise, render, blocks = 8 * WINDOW_BLOCKS) {
+  let done = false;
+  promise.then(() => { done = true; }, () => { done = true; });
+  for (let index = 0; index < blocks && !done; index += 1) {
+    render();
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  return promise;
+}
+
+/** Render a window and pump until a ready notification; every notification goes to `seen`. */
+async function nextReady(subscription, render, seen = []) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    render(WINDOW_BLOCKS);
     const notification = await subscription.pump();
-    assert.ok(notification);
-    const request = worker.messages.find((message) => message.type === "spectrum-stream-query");
-    const reply = worker.replies.find((message) => message.type === "spectrum-stream-result");
-    assert.ok(request);
-    assert.ok(reply);
-    assert.equal(request.metadata.hopFrames, hopFrames);
-    assert.equal(reply.metadata.hopFrames, hopFrames);
-    assert.equal(notification.metadata.hopFrames, hopFrames);
-    assert.equal(notification.metadata.sampleRateHz, sampleRateHz);
-    assert.equal(subscription.bounds.hopFrames, hopFrames);
-    assert.ok(subscription.readLatest());
-    await subscription.close();
-  } finally {
-    await engine.close();
+    if (notification === undefined) continue;
+    seen.push(notification);
+    if (notification.status === "ready") return notification;
   }
+  throw new Error(`the stream published no ready window: ${seen.map((row) => `${row.status}/${row.metadata?.captureEpoch}/${row.metadata?.sequence}`).join(",")}`);
 }
 
-test("browser spectrum preserves native H256 through Worker and publication", async () => {
-  await assertNativeHopTransport(256);
-});
-
-test("browser spectrum preserves native H1024 through Worker and publication", async () => {
-  await assertNativeHopTransport(1_024);
-});
-
-test("browser spectrum preserves a high-rate derived H3200 through Worker and publication", async () => {
-  await assertNativeHopTransport(3_200, 96_000);
-});
-
-test("browser managed spectrum returns and reuses one transfer buffer", async () => {
-  const worker = new SpectrumWorker();
-  const buffers = [];
-  let sequence = 0n;
-  const host = hostWithCapture({
-    async startSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(1) };
-    },
-    async readSpectrumStream(buffer) {
-      buffers.push(buffer);
-      sequence += 1n;
-      return {
-        result: 0,
-        byteLength: 8_256,
-        buffer,
-        metadata: streamMetadata(6, sequence),
-      };
-    },
-    async stopSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(5, sequence) };
-    },
+test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in a boot word", SKIP, async (t) => {
+  // Red if the hop reaches neither the boot configure nor the stream (the boot words no longer
+  // carry it), if a boot word still carries it (the worklet would call the hop boot export), if a
+  // policy changed after `createEngine` was called changes it, or if a published metadata's nested
+  // target can be changed.
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const policy = { spectrumHopFrames: 256 };
+  const { engine, render, harness } = await served({
+    spectrum: OUTPUT,
+    policy,
+    afterCall: () => { policy.spectrumHopFrames = 1_024; },
   });
-  const engine = await browserEngine(host, worker);
   try {
-    const subscription = await engine.subscribeSpectrum({
-      target: { kind: "output", outputId: "out" },
-      channels: "both",
-      cadenceMs: 1,
-    });
-    const first = await subscription.pump();
-    assert.equal(first.available, true);
-    assert.equal(subscription.readLatest().leftDb.length, ABI_LAYOUT.constants.spectrumBinCount);
-    const streamMessages = worker.messages.filter((message) => message.type === "spectrum-stream-query");
-    assert.equal(streamMessages.length, 1);
-    assert.equal("result" in streamMessages[0], false);
-    assert.equal(streamMessages[0].buffer instanceof ArrayBuffer, true);
-    const owned = subscription.readLatest().leftDb;
-    owned[0] = 9;
-    assert.equal(subscription.readLatest().leftDb[0], 0);
-
-    const second = await subscription.pump();
-    assert.equal(second.available, true);
-    assert.equal(buffers.length, 2);
-    assert.equal(buffers[0], buffers[1]);
-    assert.equal(worker.messages.filter((message) => message.type === "spectrum-stream-query").length, 2);
+    assert.equal(harness.hostOptions.spectrumHopFrames, undefined, "the boot words carry no hop");
+    const subscription = await engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0, cadenceMs: 1 });
+    assert.equal(subscription.bounds.hopFrames, 256);
+    const ready = await nextReady(subscription, render);
+    assert.equal(ready.metadata.hopFrames, 256);
+    assert.throws(() => { ready.metadata.target.outputId = "changed"; }, TypeError);
     await subscription.close();
   } finally {
     await engine.close();
   }
 });
 
-test("browser managed spectrum accepts a structuredClone-transferred capture buffer", async () => {
-  const worker = new SpectrumWorker();
-  let sequence = 0n;
-  const host = hostWithCapture({
-    async startSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(1) };
-    },
-    async readSpectrumStream(buffer) {
-      sequence += 1n;
-      const returned = structuredClone(buffer, { transfer: [buffer] });
-      return {
-        result: 0,
-        byteLength: 8_256,
-        buffer: returned,
-        metadata: streamMetadata(6, sequence),
-      };
-    },
-    async stopSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(5, sequence) };
-    },
+test("a run-time configure that adds a tap keeps the stream on the kept tap (#1596 gate 4)", SKIP, async (t) => {
+  // Red if `configureSpectrum` restarts or ends a stream on a tap the new configuration keeps:
+  // the stream would answer `warming`, `gap` or `failed`, or a new capture epoch, after it.
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  // The core keeps a stream across a configure within the collection form (#1594 D6); a change
+  // between the single form and a collection ends it.
+  const { engine, render } = await served({
+    spectrumCollection: { entries: [OUTPUT], maximumCaptureBytes: BOTH.maximumCaptureBytes },
   });
-  const engine = await browserEngine(host, worker);
   try {
-    const subscription = await engine.subscribeSpectrum({
-      target: { kind: "output", outputId: "out" },
-      channels: "both",
-      cadenceMs: 1,
-    });
-    const notification = await subscription.pump();
-    assert.equal(notification.available, true);
-    assert.equal(subscription.readLatest().leftDb.length, ABI_LAYOUT.constants.spectrumBinCount);
+    const subscription = await engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0, cadenceMs: 1 });
+    const before = await nextReady(subscription, render);
+    const configured = await engine.configureSpectrum(BOTH);
+    assert.equal(configured.rebuild, true);
+    assert.ok(configured.configuredEpoch > configured.adoptedEpoch);
+    const seen = [];
+    const after = await nextReady(subscription, render, seen);
+    assert.deepEqual(seen.map((row) => row.status), ["ready"], "the kept stream went on publishing");
+    assert.equal(after.metadata.captureEpoch, before.metadata.captureEpoch);
+    assert.ok(after.metadata.sequence > before.metadata.sequence);
     await subscription.close();
   } finally {
     await engine.close();
   }
 });
 
-test("browser spectrum admission copies mutable query metadata before Worker dispatch", async () => {
-  const worker = new SpectrumWorker();
-  const engine = await browserEngine(hostWithCapture(), worker);
+test("a one-shot query on a collection selects its entry first", SKIP, async () => {
+  // Red if `querySpectrum` arms without selecting the queried entry: the window would be the other
+  // tap's, or the core would refuse the arm with no entry selected.
+  const { engine, render } = await served({ spectrumCollection: BOTH });
   try {
-    const request = { target: { kind: "output", outputId: "out" }, channels: "both" };
-    const pending = engine.querySpectrum(request);
-    request.target.outputId = "mutated";
-    const result = await pending;
-    assert.equal(result.target.outputId, "out");
-    const message = worker.messages.find((candidate) => candidate.type === "spectrum-query");
-    assert.equal(message.query.target.outputId, "out");
+    for (const query of [TRACK, OUTPUT]) {
+      const result = await rendering(engine.querySpectrum(query), render);
+      assert.deepEqual(result.target, query.target);
+      assert.equal(result.windowFrames, 2_048);
+    }
   } finally {
     await engine.close();
   }
 });
 
-test("browser spectrum invalidates a dead Worker and permits a fresh managed lifetime", async () => {
-  let workerCount = 0;
-  let sequence = 0n;
-  let residentArmed = false;
-  const host = hostWithCapture({
-    control: scriptedControl(),
-    async sessionMap() {
-      return { sources: [], metersAttached: false };
-    },
-    onControlEvent() { return () => {}; },
-    async observationMap() {
-      return {
-        result: 0,
-        structureEpoch: 1,
-        bindings: [{
-          trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
-          nativeEffectId: "miso.compressor", tapIds: [1],
-        }],
-      };
-    },
-    async readObservations({ selections }) {
-      return {
-        result: 0,
-        rows: selections.map((selection) => ({
-          ...selection,
-          status: residentArmed ? 3 : 2,
-          sampleRateHz: 48_000,
-          firstSample: residentArmed ? 0n : 0n,
-          endSample: residentArmed ? 128n : 0n,
-          sequence: residentArmed ? 1n : 0n,
-          blocks: residentArmed ? 1 : 0,
-          leftPresent: residentArmed ? 1 : 0,
-          rightPresent: residentArmed ? 1 : 0,
-          left: 1,
-          right: 2,
-        })),
-      };
-    },
-    async command({ commands }) {
-      residentArmed = commands.at(-1)?.kind === ABI_LAYOUT.constants.wireCommandKinds
-        .find((row) => row.name === "observeSubscribe")?.value;
-      return { result: 0, reason: 0, rejectedIndex: 0, admitted: commands.length, appliedAtSample: 0n };
-    },
-    async startSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(1, sequence) };
-    },
-    async readSpectrumStream(buffer) {
-      sequence += 1n;
-      return { result: 0, byteLength: 8_256, buffer, metadata: streamMetadata(6, sequence) };
-    },
-    async stopSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(5, sequence) };
-    },
-  });
-  const engine = await browserEngine(
-    host,
-    () => new SpectrumWorker({ failStream: workerCount++ === 0 }),
-    { policy: { liveControls: { observationTaps: 1 } } },
-  );
-  const request = { target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 1 };
+test("a one-shot query past its deadline cancels its arm behind it, so the next query arms", SKIP, async () => {
+  // Red if a query that stopped waiting leaves its arm standing: the next arm is then refused
+  // `spectrum.busy`.
+  const { engine, render, harness } = await served({ spectrum: OUTPUT });
   try {
-    const resident = await engine.subscribeObservations({
-      selections: [{ trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
-      windowBlocks: 1,
-    });
+    let release;
+    harness.hold = new Promise((resolve) => { release = resolve; });
+    await assert.rejects(engine.querySpectrum({ ...OUTPUT, spectrumLimits: { requestDeadlineMs: 10 } }), /deadline/);
+    release();
+    const result = await rendering(engine.querySpectrum(OUTPUT), render);
+    assert.deepEqual(result.target, OUTPUT.target);
+  } finally {
+    await engine.close();
+  }
+});
+
+test("a stream read past its deadline stops the stream behind it and ends the subscription", SKIP, async (t) => {
+  // Red if a stream frame that timed out leaves the stream running (the next start is refused) or
+  // leaves the subscription live.
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { engine, render, harness } = await served({ spectrum: OUTPUT });
+  const request = { ...OUTPUT, smoothingMs: 0, cadenceMs: 1, spectrumLimits: { requestDeadlineMs: 20 } };
+  try {
     const failed = await engine.subscribeSpectrum(request);
-    await assert.rejects(failed.pump(), /Worker failed|stale|closed/);
-    await assert.rejects(failed.pump(), /stale|closed/);
-    assert.equal((await resident.pump()).available, true);
-
-    const recovered = await engine.subscribeSpectrum(request);
-    const notification = await recovered.pump();
-    assert.equal(notification.available, true);
-    await recovered.close();
-    await resident.close();
-  } finally {
-    await engine.close();
-  }
-});
-
-test("browser spectrum stream metadata is frozen through nested target publication", async () => {
-  let sequence = 0n;
-  const host = hostWithCapture({
-    async startSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(1, sequence) };
-    },
-    async readSpectrumStream(buffer) {
-      sequence += 1n;
-      return { result: 0, byteLength: 8_256, buffer, metadata: streamMetadata(6, sequence) };
-    },
-    async stopSpectrumStream() {
-      return { result: 0, metadata: streamMetadata(5, sequence) };
-    },
-  });
-  const engine = await browserEngine(host, new SpectrumWorker());
-  try {
-    const first = await engine.subscribeSpectrum({
-      target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 2,
-    });
-    const second = await engine.subscribeSpectrum({
-      target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 2,
-    });
-    const firstNotification = await first.pump();
-    assert.equal(firstNotification.metadata.target.outputId, "out");
-    assert.throws(() => { firstNotification.metadata.target.outputId = "changed"; }, TypeError);
-    const secondNotification = await second.pump();
-    assert.equal(secondNotification.metadata.target.outputId, "out");
-    await first.close();
-    await second.close();
-  } finally {
-    await engine.close();
-  }
-});
-
-test("browser spectrum deadline cancels a late arm and blocks inherited capture", async () => {
-  let armed = false;
-  let cancels = 0;
-  const host = hostWithCapture({
-    async armSpectrum() {
-      armed = true;
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      return { result: 0 };
-    },
-    async readSpectrum() {
-      throw new Error("read must wait for the late arm");
-    },
-    async cancelSpectrum() {
-      armed = false;
-      cancels += 1;
-      return { result: 0 };
-    },
-  });
-  const engine = await browserEngine(host, new SpectrumWorker());
-  try {
-    const request = { target: { kind: "output", outputId: "out" }, channels: "both", spectrumLimits: { requestDeadlineMs: 5 } };
-    await assert.rejects(engine.querySpectrum(request), /deadline/);
-    await assert.rejects(engine.querySpectrum(request), /already in flight/);
-    await new Promise((resolve) => setTimeout(resolve, 45));
-    assert.equal(armed, false);
-    assert.equal(cancels, 1);
-    await assert.rejects(engine.querySpectrum(request), /spectrum Worker initialization|deadline|already in flight/);
-  } finally {
-    await engine.close();
-  }
-});
-
-test("browser spectrum Worker initialization uses the total query deadline", async () => {
-  const engine = await browserEngine(hostWithCapture(), new SpectrumWorker({ silent: true }));
-  try {
-    const started = Date.now();
-    await assert.rejects(
-      engine.querySpectrum({
-        target: { kind: "output", outputId: "out" },
-        channels: "both",
-        spectrumLimits: { requestDeadlineMs: 10 },
-      }),
-      /deadline|initialization/,
-    );
-    assert.ok(Date.now() - started < 1_000);
-  } finally {
-    await engine.close();
-  }
-});
-
-test("a spectrum Worker that never answers cannot hold close() past 10 s, whatever the query deadline",
-  { timeout: 5_000 }, async (t) => {
-    // Issue #1532. The ticks cross two timers: close()'s 10 s step bound and the query's 60 s
-    // spectrum deadline (the Worker initialization and the total query deadline).
-    const unhandled = [];
-    const onUnhandled = (reason) => { unhandled.push(reason); };
-    process.on("unhandledRejection", onUnhandled);
-    t.after(() => process.off("unhandledRejection", onUnhandled));
-    const flush = () => new Promise((resolve) => setImmediate(resolve));
-    const worker = new SpectrumWorker({ silent: true });
-    let disposes = 0;
-    let contextCloses = 0;
-    const engine = await browserEngine(hostWithCapture({ async dispose() { disposes += 1; } }), worker, {
-      createContext: () => ({ ...context(), async close() { contextCloses += 1; } }),
-    });
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-    const query = engine.querySpectrum({ ...PREPARED, spectrumLimits: { requestDeadlineMs: 60_000 } })
-      .then(() => undefined, (error) => error);
-    await flush();
-    assert.ok(worker.messages.some((message) => message.type === "spectrum-init"), "the query started the Worker");
-    const closing = assert.rejects(engine.close(), (error) => {
-      assert.ok(error instanceof MisoEngineError);
-      assert.equal(error.phase, "lifecycle");
-      assert.equal(error.code, "spectrumCloseTimeout");
-      assert.match(error.message, /spectrum close/);
-      return true;
-    });
-    await flush();
-    t.mock.timers.tick(10_000);
-    await closing;
-    assert.equal(disposes, 1, "the host is still disposed after the spectrum timeout");
-    assert.equal(contextCloses, 1, "the context is still closed after the spectrum timeout");
-    t.mock.timers.tick(60_000);
-    assert.ok(await query, "the query ends with its own deadline");
-    await flush();
-    assert.equal(worker.terminated, true, "the late Worker is terminated");
-    assert.deepEqual(unhandled, []);
-  });
-
-test("collection selection deadline retires only its stream and holds late cleanup", async () => {
-  const worker = new SpectrumWorker();
-  let finishSelection;
-  let stops = 0;
-  let starts = 0;
-  const host = hostWithCapture({
-    async selectSpectrum() { return { result: 0 }; },
-    async startSpectrumStream() {
-      assert.ok(worker.messages.some((message) => message.type === "spectrum-init"),
-        "the shared Worker is initialized before native activation");
-      starts += 1;
-      return { result: 0, metadata: streamMetadata(1) };
-    },
-    selectSpectrumStream() {
-      return new Promise((resolve) => { finishSelection = resolve; });
-    },
-    async stopSpectrumStream() {
-      stops += 1;
-      return { result: 0, metadata: streamMetadata(5) };
-    },
-  });
-  const engine = await browserEngine(host, worker, {
-    spectrum: undefined,
-    spectrumCollection: { entries: [PREPARED], maximumCaptureBytes: 1024 * 1024 },
-  });
-  const request = { ...PREPARED, smoothingMs: 0, spectrumLimits: { requestDeadlineMs: 20 } };
-  try {
-    const handle = await engine.subscribeSpectrum(request);
-    await assert.rejects(handle.update({ ...request, smoothingMs: 100 }), /deadline/);
-    await assert.rejects(handle.pump(), /closed|stale/);
-    await assert.rejects(engine.subscribeSpectrum(request), /already in flight/);
-    assert.equal(starts, 1, "late selection still owns the native cleanup boundary");
-    finishSelection({ result: 0, metadata: streamMetadata(1) });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(stops, 1);
+    let release;
+    harness.hold = new Promise((resolve) => { release = resolve; });
+    await assert.rejects(failed.pump(), /deadline/);
+    release();
+    await assert.rejects(failed.pump(), /closed|stale/);
     const replacement = await engine.subscribeSpectrum(request);
-    assert.equal(worker.messages.filter((message) => message.type === "spectrum-init").length, 1);
+    assert.equal((await nextReady(replacement, render)).status, "ready");
     await replacement.close();
   } finally {
     await engine.close();
   }
 });
 
-test("initial collection selection has a deadline and cancels its late arm before retry", async () => {
-  let finishSelection;
-  let calls = 0;
-  let cancellations = 0;
-  let starts = 0;
-  const host = hostWithCapture({
-    selectSpectrum() {
-      calls += 1;
-      return calls === 1 ? new Promise((resolve) => { finishSelection = resolve; })
-        : Promise.resolve({ result: 0 });
-    },
-    async cancelSpectrum() { cancellations += 1; return { result: 0 }; },
-    async startSpectrumStream() { starts += 1; return { result: 0, metadata: streamMetadata(1) }; },
-    async stopSpectrumStream() { return { result: 0, metadata: streamMetadata(5) }; },
-  });
-  const engine = await browserEngine(host, new SpectrumWorker(), {
-    spectrum: undefined,
-    spectrumCollection: { entries: [PREPARED], maximumCaptureBytes: 1024 * 1024 },
-  });
-  const request = { ...PREPARED, smoothingMs: 0, spectrumLimits: { requestDeadlineMs: 20 } };
+test("closing the last spectrum subscription waits for the owner's automatic read before it stops", SKIP, async (t) => {
+  // Red if `close()` sends its stop while the owner's automatic read of the stream is in flight.
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const { engine, harness } = await served({ spectrum: OUTPUT });
   try {
-    await assert.rejects(engine.subscribeSpectrum(request), /deadline/);
-    await assert.rejects(engine.subscribeSpectrum(request), /already in flight/);
-    assert.equal(starts, 0);
-    assert.equal(calls, 1);
-    finishSelection({ result: 0 });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(cancellations, 1);
-    const handle = await engine.subscribeSpectrum(request);
-    assert.equal(starts, 1);
-    await handle.close();
-  } finally {
-    await engine.close();
-  }
-});
-
-test("last spectrum close waits for the owner's automatic in-flight read", async () => {
-  let completeRead;
-  let markRead;
-  const readStarted = new Promise((resolve) => { markRead = resolve; });
-  let stops = 0;
-  const host = hostWithCapture({
-    async startSpectrumStream() { return { result: 0, metadata: streamMetadata(1) }; },
-    readSpectrumStream(buffer) {
-      markRead();
-      return new Promise((resolve) => {
-        completeRead = () => resolve({ result: 6, byteLength: 0, buffer, metadata: streamMetadata(2) });
-      });
-    },
-    async stopSpectrumStream() { stops += 1; return { result: 0, metadata: streamMetadata(5) }; },
-  });
-  const engine = await browserEngine(host, new SpectrumWorker());
-  try {
-    const handle = await engine.subscribeSpectrum({ ...PREPARED, smoothingMs: 0 });
-    await readStarted;
+    const handle = await engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0, cadenceMs: 60_000 });
+    let release;
+    harness.hold = new Promise((resolve) => { release = resolve; });
+    // The owner's timer runs at the stream's capture cadence (2048 frames at 48 kHz): one tick is
+    // one automatic read, whose reply is held.
+    const before = harness.frames;
+    t.mock.timers.tick(43);
+    await flush();
+    assert.equal(harness.frames, before + 1, "the automatic read was sent");
+    const sent = harness.frames;
     let closed = false;
     const closing = handle.close().then(() => { closed = true; });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(stops, 0, "close must not race native cancellation with an owned read");
+    await flush();
+    assert.equal(harness.frames, sent, "no frame while the read is in flight");
     assert.equal(closed, false);
-    completeRead();
+    release();
     await closing;
-    assert.equal(stops, 1);
+    assert.equal(harness.frames, sent + 1, "one stop after the read");
     await assert.rejects(handle.pump(), /closed|stale/);
   } finally {
-    completeRead?.();
     await engine.close();
   }
 });
