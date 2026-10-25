@@ -267,6 +267,26 @@ impl SourceControlSet {
             .map(source::HostChunkProvider::prime_flag)
     }
 
+    /// Whether the set holds source `id` vacant: its plan was prepared to carry the ring of the
+    /// plan before it, and [`Self::adopt_persisting`] has not yet moved the producer in (#1403 D3).
+    /// `false` for an ID the set does not hold.
+    #[must_use]
+    pub fn holds_vacant(&self, id: &[u8]) -> bool {
+        self.index_of(id)
+            .is_some_and(|index| self.sources[index].provider.is_none())
+    }
+
+    /// Store `required(id)` on the `prime_required` flag (#1320 D4) of every ring whose producer
+    /// this set holds (#1403 D3). A vacant entry has no producer here and is skipped: its ring's
+    /// flag is reached through the set that holds the producer. Control thread only; no allocation.
+    pub fn set_prime_flags(&self, mut required: impl FnMut(&[u8]) -> bool) {
+        for source in &self.sources {
+            if let Some(provider) = source.provider.as_ref() {
+                provider.prime_flag().set(required(self.id(source)));
+            }
+        }
+    }
+
     fn id(&self, source: &ControlSource) -> &[u8] {
         &self.ids[source.id_offset..source.id_offset + source.id_bytes]
     }

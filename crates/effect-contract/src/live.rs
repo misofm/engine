@@ -103,14 +103,15 @@ use crate::{
 /// are `Live` (`controls`), so the list is the row's class and the cell's presence, never a
 /// runtime answer: one on it whose processor refused the glide would be an acknowledged edit
 /// render never hears (decision 15 E4), which the controls test of this list refuses. The
-/// multiband compressor is not on it until #1367b gives it the glide.
-pub const LIVE_LINK_EFFECTS: [&str; 6] = [
+/// multiband compressor joined it with its glide (#1367b).
+pub const LIVE_LINK_EFFECTS: [&str; 7] = [
     "miso.compressor",
     "miso.gate-expander",
     "miso.transient-shaper",
     "miso.true-peak-limiter",
     "miso.de-esser",
     "miso.dynamic-eq",
+    "miso.multiband-compressor",
 ];
 
 /// One admitted live control event for one prepared effect instance.
@@ -335,8 +336,8 @@ impl EffectLaneShape {
     /// owns no prepared targets (`target_slots == 0`), and none when it does, because a
     /// prepared-target owner's parameters ride its targets (D1); and a link cell, holding its
     /// supported modes, when the effect is on [`LIVE_LINK_EFFECTS`] (#1371 D1), so its processor
-    /// takes every switch the writer stores. A `lane_link` effect off the list (the multiband
-    /// compressor until #1367b) holds none, and its writer refuses a switch.
+    /// takes every switch the writer stores. A `lane_link` effect off the list holds none, and its
+    /// writer refuses a switch.
     #[must_use]
     pub fn from_descriptor(descriptor: &EffectDescriptor, target_slots: usize) -> Self {
         let shape = if target_slots != 0 {

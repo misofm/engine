@@ -122,12 +122,16 @@ pub mod spectrum;
 pub mod spectrum_service;
 #[cfg(feature = "control-provider")]
 pub mod transition;
+#[cfg(feature = "control-provider")]
+pub mod warm;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
 // `test-support` width seam (`test_only_prepare_host_runtime_with_live_controls_on`) that
 // `tests/` files now use, and stays a unit test on the `#[cfg(test)]` backend seam in `prepare`.
 #[cfg(test)]
 mod limiter_linked_session;
 
+/// The meter tap and metric set a plan's meter rows name (#1588 D3).
+pub use builtins::{MeterMetricSet, MeterTap};
 #[cfg(feature = "control-provider")]
 pub use control_provider::{
     CatalogResources, ControlCatalog, MAXIMUM_METER_BATCH_RECORDS, PlanSampleSource,
@@ -160,10 +164,11 @@ pub use live_delta::{
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use live_delta::{take_fast_classification_count, take_lowered_owner_count};
 pub use meters::{
-    GainReductionTaps, METER_QUEUE_DEPTH, MeterCarry, MeterDelivery, MeterFrame, MeterTables,
-    MeterValidity, OutputPeakGate, OutputPeakObserver, OutputPeakReader, OutputPeakWindow, TapView,
-    default_meter_window_blocks, fold_gain_reduction, meter_selection, output_peak_meter,
-    output_peak_queue_payload,
+    GainReductionTaps, METER_FRAME_RING_DEPTH, METER_QUEUE_DEPTH, MeterCarry, MeterDelivery,
+    MeterFrame, MeterFrameConsumer, MeterFrameProducer, MeterFrameRing, MeterFrameRingSetupError,
+    MeterLevel, MeterTables, MeterValidity, OutputPeakDrops, OutputPeakGate, OutputPeakObserver,
+    OutputPeakReader, OutputPeakWindow, TapView, default_meter_window_blocks, fold_gain_reduction,
+    meter_selection, output_peak_meter, output_peak_queue_payload,
 };
 pub use prepare::{
     GraphJumpLengthProducer, GraphJumpLengths, HostLiveControlHandles, HostLiveControlRequest,
@@ -243,6 +248,8 @@ pub use spectrum_service::{
 pub use transition::{
     DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError, plan_strip_transition,
 };
+#[cfg(feature = "control-provider")]
+pub use warm::{PrimedCandidate, publish_primed};
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).
 ///

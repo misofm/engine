@@ -5180,14 +5180,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1367,
-        "reopen": "decision 15 E2, #1367 makes the link mode live",
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
         "automatable": false
       },
       "consoleLinkMode": {
@@ -5232,14 +5232,14 @@ export const CONTROLS = deepFreeze(
             "label": "average"
           }
         ],
-        "ramp": "fixed",
+        "ramp": "linkGlide",
         "scope": "model",
         "family": "effect",
         "lanes": "shared",
-        "class": "rebuildOnly",
-        "reason": "ruledLiveNotBuilt",
-        "reasonIssue": 1367,
-        "reopen": "decision 15 E2, #1367 makes the link mode live",
+        "class": "live",
+        "reason": null,
+        "reasonIssue": null,
+        "reopen": null,
         "automatable": false
       }
     },

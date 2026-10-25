@@ -350,7 +350,7 @@ pub struct SessionControlProvider {
     /// The control half of the session's response capture (#1577 D4).
     response_capture: crate::ResponseCaptureClient,
     /// The meter window in blocks of the host's meter delivery, or `None` while the host has none
-    /// (#1583 D4): the browser until #1588.
+    /// (#1583 D4): a browser booted with no meter window (#1588).
     meter_window_blocks: Option<core::num::NonZeroU32>,
 }
 

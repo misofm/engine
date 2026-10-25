@@ -13,9 +13,11 @@ import {
 } from "./qualification.js";
 import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
 import { PROTOCOL_BLOCKS, protocolCalls } from "./protocol-calls.mjs";
+import { structuralEditReference } from "./structural-edit-reference.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_WEB = path.dirname(HERE);
+const FIXTURE = path.join(HOST_WEB, "tests", "browser-v1");
 const RESULTS_PATH = path.join(HERE, "results.json");
 const MATRIX_PATH = path.join(HOST_WEB, "BROWSER_DEPLOYMENT_MATRIX.md");
 const WASM_ARTIFACT = "miso-engine-v1-audio-worklet.simd128.wasm";
@@ -35,6 +37,14 @@ const MUTATIONS = [
   // #1682: an empty session that did not boot silent and empty, one whose first stem was not a
   // rebuild heard unchanged, and one whose meter stream did not follow the strip count.
   "empty-boot-silence", "empty-boot-shape", "empty-boot-first-stem", "empty-boot-meter",
+  // Issue #1295: a `SESSION_REPLACE` on this (non-isolated) page. A replacement never sent, a Node
+  // reference that applies it one block late, a commit off the rebuild path or applied early, an
+  // outcome other than exact, a source underrun, a blocking rebuild left uncounted, a handler
+  // allocation left unreported, and a 1 MiB replacement the core refused.
+  "structural-edit-skipped", "structural-edit-adoption-shifted", "structural-edit-path",
+  "structural-edit-early", "structural-edit-outcome", "structural-edit-underruns",
+  "structural-edit-blocking-uncounted", "structural-edit-control-allocations-uncounted",
+  "structural-replace-large",
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
@@ -285,9 +295,10 @@ function validate(browserName, result) {
     "no render-telemetry frame arrived over a full window");
 
   // Issue #1562b: a structural apply in a real browser. The core classifies a `delay_samples` edit
-  // as a rebuild and the browser prepares and publishes the replacement plan; the first quantum
-  // is the swap block, so what comes out is the declared delay of the input, exactly, the applied
-  // revision was not early, and the meter stream is the successor's from its first frame.
+  // as a rebuild and the browser prepares and publishes the replacement plan. The edit restarts the
+  // track, so it is a duck-swap (#1324a): the applied revision moves at the scheduled `S` and not
+  // one block earlier, the duck is exact silence until `S`, what comes out after the fade-in is the
+  // declared delay of the input, exactly, and the meter stream is the successor's.
   const structural = result.structuralApply;
   gate(browserName, "structural-apply-path", structural?.commandOk === true
     && structural?.commandPath === "rebuild" && structural?.commandApplied === 1
@@ -296,11 +307,13 @@ function validate(browserName, result) {
   gate(browserName, "structural-apply-early", structural?.pendingRevision === structural?.initialRevision
     && structural?.finalRevision === structural?.committedRevision
     && BigInt(structural?.finalRevision ?? "0") > BigInt(structural?.initialRevision ?? "0")
-    && BigInt(structural?.finalSample ?? "-1") === 0n,
+    && /^[0-9]+$/.test(structural?.scheduledSample ?? "")
+    && BigInt(structural?.finalSample ?? "-1") === BigInt(structural.scheduledSample),
   `the applied revision moved before the swap block or did not reach the committed one: ${JSON.stringify(structural)}`);
   gate(browserName, "structural-apply-output", structural?.exactDelayedOutput === true
+    && structural?.duckedSilent === true
     && structural?.renderedDigest === structural?.expectedDigest,
-  "the swapped plan did not render the input delayed by exactly the edit");
+  "the duck was not silent until the swap, or the swapped plan did not render the input delayed by exactly the edit");
   gate(browserName, "structural-apply-meter", structural?.meterLeaseResult === 0
     && structural?.meterFrames >= 1 && structural?.meterFrameWidth === 4
     && structural?.meterTrackCount === 1 && structural?.sequenceIncreasing === true
@@ -348,6 +361,46 @@ function validate(browserName, result) {
     && Array.isArray(first?.structureEpochs) && first.structureEpochs.length === 1
     && Number.isSafeInteger(first.structureEpochs[0]) && first.structureEpochs[0] >= 1,
   `the meter stream after the first stem was not the strip's with one structure epoch: ${JSON.stringify(first)}`);
+
+  // Issue #1295: one `SESSION_REPLACE` of document B before the first quantum, on this page without
+  // cross-origin isolation (the module's `single` mode). The core commits it on the rebuild path,
+  // the watermark reports R in effect from sample 0 (the swap block) with the outcome exact, no
+  // source block underran, the capture is the module's own render of the same replace under Node,
+  // and the host counted one blocking rebuild and the handler's allocations (D15-10).
+  const edit = result.structuralReplace?.edit;
+  gate(browserName, "structural-edit-path", edit?.replyStatus === "ok" && edit?.commandPath === "rebuild"
+    && /^[0-9]+$/.test(edit?.committedRevision ?? "")
+    && BigInt(edit.committedRevision) > BigInt(edit?.expectedRevision ?? "-1")
+    && edit?.before?.appliedRevision === edit?.expectedRevision,
+  `the replacement was not committed on the rebuild path: ${JSON.stringify({ status: edit?.replyStatus, path: edit?.commandPath, diagnostics: edit?.diagnostics })}`);
+  gate(browserName, "structural-edit-early", edit?.pending?.appliedRevision === edit?.before?.appliedRevision
+    && edit?.after?.appliedRevision === edit?.committedRevision
+    && edit?.after?.appliedSample === "0"
+    && edit?.watermark?.revision === edit?.committedRevision && edit?.watermark?.sample === "0",
+  `the watermark did not report R in effect from the swap block, or moved before it: ${JSON.stringify({ before: edit?.before, pending: edit?.pending, after: edit?.after, watermark: edit?.watermark })}`);
+  gate(browserName, "structural-edit-outcome", edit?.after?.appliedOutcome === "1" && edit?.watermark?.outcome === "1",
+    `the replacement's outcome was not exact: status outcome ${edit?.after?.appliedOutcome}, watermark outcome ${edit?.watermark?.outcome}`);
+  gate(browserName, "structural-edit-underruns", edit?.underrunBlocks === "0",
+    `a source block underran over the capture: ${edit?.underrunBlocks}`);
+  gate(browserName, "structural-edit-output", typeof edit?.renderedDigest === "string"
+    && edit?.reference?.exact?.revision === edit?.committedRevision
+    && edit.renderedDigest === edit.reference.exact.digest,
+  `the capture is not the module's render of the same replace under Node: ${JSON.stringify({ browser: edit?.renderedDigest, reference: edit?.reference })}`);
+  gate(browserName, "structural-edit-blocking", edit?.before?.blockingRebuilds === 0 && edit?.after?.blockingRebuilds === 1,
+    `the single-mode replacement was not counted as exactly one blocking rebuild: ${edit?.before?.blockingRebuilds} -> ${edit?.after?.blockingRebuilds}`);
+  gate(browserName, "structural-edit-control-allocations", Number.isSafeInteger(edit?.before?.singleModeControlAllocations)
+    && edit?.after?.singleModeControlAllocations > edit.before.singleModeControlAllocations,
+  `the handler's allocations under the replacement were not counted: ${edit?.before?.singleModeControlAllocations} -> ${edit?.after?.singleModeControlAllocations}`);
+  // #1697 gate 3: the 1 MiB boot-ceiling document is committed, counted and adopted; its memory
+  // growth is reported (below, against the boot's projection), never pinned.
+  const large = result.structuralReplace?.large;
+  gate(browserName, "structural-replace-large", large?.documentBytes === 1 << 20
+    && large?.replyStatus === "ok" && large?.commandPath === "rebuild"
+    && large?.after?.appliedRevision === large?.committedRevision
+    && large?.before?.blockingRebuilds === 0 && large?.after?.blockingRebuilds === 1
+    && large?.after?.singleModeControlAllocations > large?.before?.singleModeControlAllocations
+    && Number.isSafeInteger(large?.before?.memoryBytes) && Number.isSafeInteger(large?.after?.memoryBytes),
+  `the 1 MiB replacement was not committed, counted and adopted: ${JSON.stringify(large)}`);
 
   // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
@@ -436,7 +489,7 @@ function validate(browserName, result) {
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === 14
+    && allocations.length === 16
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
@@ -1085,6 +1138,19 @@ function mutate(result, mutation) {
   if (mutation === "empty-boot-shape") copy.emptyBoot.boot.tracks = 1;
   if (mutation === "empty-boot-first-stem") copy.emptyBoot.firstStem.exactInputOutput = false;
   if (mutation === "empty-boot-meter") copy.emptyBoot.firstStem.meterWidths = [2];
+  const edit = copy.structuralReplace?.edit;
+  // The capture of a page that never sent the replacement: the module's render of A alone.
+  if (mutation === "structural-edit-skipped") edit.renderedDigest = edit.reference.skipped.digest;
+  if (mutation === "structural-edit-adoption-shifted") edit.reference.exact = edit.reference.shifted;
+  if (mutation === "structural-edit-path") edit.commandPath = "live";
+  if (mutation === "structural-edit-early") edit.pending.appliedRevision = edit.committedRevision;
+  if (mutation === "structural-edit-outcome") edit.after.appliedOutcome = "2";
+  if (mutation === "structural-edit-underruns") edit.underrunBlocks = "1";
+  if (mutation === "structural-edit-blocking-uncounted") edit.after.blockingRebuilds = 0;
+  if (mutation === "structural-edit-control-allocations-uncounted") {
+    edit.after.singleModeControlAllocations = edit.before.singleModeControlAllocations;
+  }
+  if (mutation === "structural-replace-large") copy.structuralReplace.large.replyStatus = "limit_exceeded";
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
   if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;
@@ -1418,7 +1484,32 @@ function normalizedRow(browserName, browserVersion, outcome) {
   };
 }
 
-async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled, protocolReference) {
+/**
+ * Issue #1295 D2: the structural-edit row's references, rendered by the served module under Node
+ * from the page's own frame: the replace before block 0 (the swap block the page's capture
+ * starts at), the same replace one block late, and no replace at all (the two mutations' captures).
+ */
+async function structuralEditReferences(artifacts, edit) {
+  const [documentA, documentB, source] = await Promise.all([
+    readFile(path.join(FIXTURE, "session.json")),
+    readFile(path.join(FIXTURE, "structural-edit-session.json")),
+    readFile(path.join(FIXTURE, "source.json"), "utf8").then(JSON.parse),
+  ]);
+  const frame = Uint8Array.from(edit.frameHex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
+  const render = (replaceBlock) => structuralEditReference({
+    modulePath: path.join(path.resolve(artifacts), WASM_ARTIFACT),
+    documentA,
+    documentB,
+    source,
+    frame,
+    sourceRingFrames: edit.sourceRingFrames,
+    blocks: edit.blocks,
+    replaceBlock,
+  });
+  return { exact: await render(0), shifted: await render(1), skipped: await render(null) };
+}
+
+async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled, protocolReference, structuralReference) {
   const launchOptions = { headless: true };
   if (browserName === "chromium") {
     launchOptions.channel = "chromium";
@@ -1552,12 +1643,43 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       // #1571: the headless half of the protocol row runs here, in Node, on the page's document.
       result.sdkResponse.protocol.headless = await protocolReference(result.sdkResponse.protocol);
     }
+    if (result.structuralReplace?.edit?.frameHex !== undefined) {
+      result.structuralReplace.edit.reference = await structuralReference(result.structuralReplace.edit);
+    }
     const outcome = validate(browserName, result);
     if (proveMutations) mutationProofs(browserName, result);
     if (Array.isArray(result.renderAllocations)) {
       // Issue #1333 D3: the per-instance counts the render-allocations gate just held to zero.
       process.stdout.write(`${browserName}: render-allocations: ${result.renderAllocations
         .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
+    }
+    const replace = result.structuralReplace;
+    if (replace?.large !== undefined) {
+      // #1295 (#1697 gate 3): the module's memory growth across the 1 MiB replacement, against the
+      // boot's projection `document_bytes * PARSE_TRANSIENT_MULTIPLIER` (20); reported, not pinned.
+      const growth = replace.large.after.memoryBytes - replace.large.before.memoryBytes;
+      const projection = replace.large.documentBytes * 20;
+      process.stdout.write(`${browserName}: structural-replace-large: ${JSON.stringify({
+        documentBytes: replace.large.documentBytes,
+        memoryBytesBefore: replace.large.before.memoryBytes,
+        memoryBytesCommitted: replace.large.committed.memoryBytes,
+        memoryBytesAfter: replace.large.after.memoryBytes,
+        appliedSample: replace.large.after.appliedSample,
+        growth,
+        projection,
+        aboveProjection: growth > projection,
+        controlAllocations: replace.large.after.singleModeControlAllocations - replace.large.before.singleModeControlAllocations,
+      })}\n`);
+      // The commit-to-adoption delay of the exact case, recorded, not gated (D6 non-goal).
+      process.stdout.write(`${browserName}: structural-edit: ${JSON.stringify({
+        committedRevision: replace.edit.committedRevision,
+        commitSample: replace.edit.pending.nextAbsoluteSample,
+        appliedSample: replace.edit.after.appliedSample,
+        outcome: replace.edit.after.appliedOutcome,
+        blockingRebuilds: replace.edit.after.blockingRebuilds,
+        controlAllocations: replace.edit.after.singleModeControlAllocations - replace.edit.before.singleModeControlAllocations,
+        digest: replace.edit.renderedDigest,
+      })}\n`);
     }
     const unsubscribe = result.observation?.unsubscribe;
     if (unsubscribe !== undefined) {
@@ -1669,7 +1791,8 @@ async function main() {
     const rows = [];
     for (const browserName of browserNames) {
       const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, proveMutations, sdkRoot !== null,
-        (protocol) => headlessProtocolReference(headlessEntry, artifacts, protocol));
+        (protocol) => headlessProtocolReference(headlessEntry, artifacts, protocol),
+        (edit) => structuralEditReferences(artifacts, edit));
       rows.push(row);
       if (checked !== null) validateCheckedRow(browserName, row, checked);
     }

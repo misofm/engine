@@ -139,8 +139,8 @@ All behavioural gates run in `sdk/test/browser-evals.mjs` over the browser engin
    nothing; a new `edit.track(id)` on the added track succeeds; one on a removed track rejects as
    unknown. After a `live` reply (and after a live edit) an edit object resolved before it still
    posts, unchanged, and the session map is not re-read.
-5. **withSession.** After a `rebuild` commit, `withSession(oldBuilder)` rejects and
-   `withSession(newBuilder)` succeeds.
+5. ~~**withSession.** After a `rebuild` commit, `withSession(oldBuilder)` rejects and
+   `withSession(newBuilder)` succeeds.~~ Deleted (scope R3): superseded by #1562b-K.
 6. Commands, with an artifact directory built as in `qualification.yml`'s `artifact` job and
    `npm ci` in `sdk/`: `bash scripts/check-sdk-generated.sh <artifacts>`,
    `python3 -B scripts/check-sdk-deletions.py`, `bash scripts/check-sdk-types.sh`,
@@ -156,8 +156,8 @@ All behavioural gates run in `sdk/test/browser-evals.mjs` over the browser engin
 - Gate 4: an edit resolved under the old map and posted after a rebuild addresses a shifted strip
   index and is acknowledged on the wrong strip; it turns red. An epoch bumped on every revision
   would reject ordinary fader drags after any live edit; it turns red too.
-- Gate 5: a `withSession` still held to the booted document binds insert IDs of a session that no
-  longer runs.
+- ~~Gate 5: a `withSession` still held to the booted document binds insert IDs of a session that no
+  longer runs.~~ Deleted with gate 5.
 
 ## Dependencies
 
@@ -176,3 +176,45 @@ All behavioural gates run in `sdk/test/browser-evals.mjs` over the browser engin
 - *Publish the applied-revision watermark in the browser status* (#1349).
 
 Dependent: *Apply session transactions from the headless SDK engine* (#1389).
+
+## Decision record (attempt 1, 2026-10-25)
+
+- **Shared core reused, no core change.** `BrowserEngine` gains `apply`, `replaceSession` (async digest),
+  `revision`, `watermark()` and `applied()` over #1389's `session-edit.ts` and `ProtocolClient`; the
+  refusal types are #1389's (`MisoControlRefusal` in the reply, `MisoEngineError` for a refused call).
+  Only `sdk/src/browser/engine.ts`, `sdk/src/browser/index.ts` (type exports), `sdk/test/browser-evals.mjs`,
+  `sdk/test/barrel-surface.ts` and `sdk/README.md` changed (scope note's paths).
+- **Transport and noteCommit.** The engine's `ProtocolClient` sends `host.control(frame, document)` and
+  hands every reply's `revision` to the host's one queue (`noteCommit`) in that reply's continuation
+  (#1389 root ruling (b)); no blind `revision_conflict` retry.
+- **`revision` (root R2).** The newest of: the queue's revision (its own replies and every noted
+  commit), a decoded `sessionCommitted` event (only while an `onEvent` listener is subscribed: the
+  engine adds no listener of its own, so `host.discardedControlEvents` keeps its meaning) and the
+  watermark's revision. No probe per read.
+- **Watermark.** Subscribed with `host.onWatermark` at boot, before any committing frame; the worklet
+  does not post its boot record, so the first snapshot is the core's boot record `(0, 0, EXACT)`.
+  `applied()` settles only from posts (never at the commit) and rejects at `close()`. A host from
+  `createHost` without `onWatermark` (a test stand-in) makes `applied()` reject `unsupported`
+  (`sdk.host.member`, `onWatermark`) instead of waiting forever; the shipped host always has it.
+  Deviation for root: subscribing unconditionally would break the partial host doubles of seven other
+  eval files outside this slice's paths.
+- **D3 ordering lock superseded** (chain decision 5, #1389 R3): no SDK lock between an edit and the
+  `SET_CONTROL` queue; exact revisions order them. D3 rebinding is #1562b-K's; gate 5 deleted (scope R3).
+  A committed `replaceSession` rebinds `liveControls()` to the new document (the browser caches its
+  live controls, so the next call builds them again); a refused one changes nothing.
+- **D5.** README "Edit a playing session": `blockingRebuilds` (#1294 (b)) is how a non-isolated page's
+  blocking rebuild is reported; no new API.
+- **Gates.** Gates 1-3 and one other-sender case run in `browser-evals.mjs` over a host stand-in whose
+  control plane is a real core (`WasmBoundary`), with scripted watermark posts. No real-browser row
+  (the spec puts real bits in #1295).
+- **Gate 4 (verifier fold).** Its "a live submit issued while an `apply` is in flight posts nothing
+  until the reply" clause is deleted: there is no lock (#1389 R3, chain decision 5); a live frame sent
+  while an edit's reply is in flight is refused `revision_conflict` and the queue takes the new
+  revision from that reply. Its stale-edit clause is already held once each, by
+  `sdk/test/structure-evals.mjs` (~215ff, `control.effect.changed`) and
+  `sdk/test/control-list-evals.mjs` (~383, ~393, `control.list.stale`); the live-reply half is in
+  gate 2 (a live controls object made before the apply submits first try).
+- **Gate 3 narrowed.** Only "a refusal leaves `revision` unchanged" is tested: the next frame's expected
+  revision is the core's probe, which the SDK cannot get wrong.
+- **`applied()` probe (verifier fold).** A revision above every one this page saw is probed from the
+  core (`readCommittedRevision`) before it is refused, so another sender's unseen commit waits instead.

@@ -21,6 +21,10 @@ pub(crate) struct PreparedRuntime {
     /// batches ([`ControlAdapter::METER_DELIVERY`]): one entry per meter and per strip. Empty, and
     /// allocating nothing, for any other adapter.
     pub(crate) meter_tables: host_core::MeterTables,
+    /// The plan's meter frame ring (#1588 D2) for an adapter whose render half folds the meters
+    /// ([`ControlAdapter::RENDER_METER_FOLD`]): frames of the plan's strip count. `None` for any
+    /// other adapter.
+    pub(crate) meter_frames: Option<host_core::MeterFrameRing>,
     /// The plan's effect observation readers (#1584 D7), one per observed effect instance in
     /// `HostLiveControlHandles::effect_observations` order: kept, not dropped. Empty for a host
     /// whose preparer takes them for itself (the browser's).
@@ -265,9 +269,8 @@ pub(crate) fn protocol_queue_config<A: ControlAdapter>(
 
 /// The lossy meter lane's slots (#1583 D5, #1587a): one meter batch whole, so a batch never
 /// reaches the caller split or half dropped. For an adapter whose control plane serves the meter
-/// batches (the C ABI) that is [`host_core::MAXIMUM_METER_BATCH_RECORDS`], the most records an
-/// accepted table needs; any other adapter keeps the two slots it had (#1588 sizes the browser's
-/// lane when it adds the browser's delivery).
+/// batches (the C ABI and the browser, #1588) that is [`host_core::MAXIMUM_METER_BATCH_RECORDS`],
+/// the most records an accepted table needs; any other adapter keeps two slots.
 const fn telemetry_slots<A: ControlAdapter>() -> usize {
     if A::METER_DELIVERY {
         host_core::MAXIMUM_METER_BATCH_RECORDS
@@ -445,8 +448,15 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         output_meter[2],
         // #1583: the requested gate word of an adapter whose control plane serves the meter
         // batches (`output_peak_gate_relay`), one `Arc<AtomicU64>`; none otherwise. The delivery's
-        // output-only tables allocate nothing.
-        checked_layout::<SharedArcAllocation<AtomicU64>>(usize::from(A::METER_DELIVERY))?,
+        // output-only tables allocate nothing. #1588 R1: a render-half fold's adapter keeps the
+        // live gate and shares the meter level word instead, one `Arc<AtomicU32>`.
+        if A::RENDER_METER_FOLD {
+            checked_layout::<SharedArcAllocation<core::sync::atomic::AtomicU32>>(usize::from(
+                A::METER_DELIVERY,
+            ))?
+        } else {
+            checked_layout::<SharedArcAllocation<AtomicU64>>(usize::from(A::METER_DELIVERY))?
+        },
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
         // #1584 D6a: the observation-ended cells, one more than the reliable queue's slots (an
         // event popped for egress keeps its cell until its frame is delivered), and the heap the
@@ -589,6 +599,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     strip_heap_bytes: u64,
     capture_owners_high_water: usize,
     meter_tables: &host_core::MeterTables,
+    meter_frame_strips: Option<usize>,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
@@ -629,12 +640,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         route_controls,
         observation,
         monitor,
-        MeterTableRows {
-            retained: u64::try_from(meter_tables.heap_bytes())
-                .map_err(|_| failure(ResourceFault::Platform))?,
-            largest: u64::try_from(meter_tables.largest_allocation_bytes())
-                .map_err(|_| failure(ResourceFault::Platform))?,
-        },
+        meter_table_rows(meter_tables, meter_frame_strips)?,
         response_capture_bytes(compiled.normalized_model(), capture_owners_high_water)?,
     )
 }
@@ -1269,17 +1275,63 @@ pub(crate) struct ProspectivePlan {
 /// the session's fixed rows once, every older held epoch's own rows, and the candidate's epoch and
 /// prepared-protocol rows). The largest-allocation check folds every held row.
 ///
+/// With [`AdmissionPeak::WithReprepare`] (a warm candidate, #1403 D2) a second peak is checked
+/// beside the first: the candidate counted twice beside the held plans that are not candidates,
+/// so the transition re-preparation a warm candidate may later need (#1358, #1397) fits beside it
+/// and the plan it displaces. Both must fit; the first refusal is returned.
+///
 /// Nothing is committed on a refusal.
 pub(crate) fn validate_replacement_peak(
     held: &[LiveEpochResources],
     prospective: ProspectivePlan,
     compiled_models: CompiledModelAdmission,
     limits: ControlLimits,
+    admission: AdmissionPeak,
+) -> Result<(), CompileFailure> {
+    replacement_peak_fits(held, prospective, 1, compiled_models, limits)?;
+    match admission {
+        AdmissionPeak::Single => Ok(()),
+        AdmissionPeak::WithReprepare { running } => {
+            let rows = held
+                .get(..running)
+                .filter(|rows| !rows.is_empty())
+                .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
+            replacement_peak_fits(rows, prospective, 2, compiled_models, limits)
+        }
+    }
+}
+
+/// Which peaks the replacement admission checks (#1398 D4, #1403 D2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdmissionPeak {
+    /// The candidate once beside every held plan: an ordinary candidate.
+    Single,
+    /// That peak, and the candidate twice beside the first `running` held plans (every parked
+    /// epoch and the running plan, no candidate): a warm candidate, which a later transition may
+    /// re-prepare while it waits (the reprepare peak, #1398's former D4 row). Each copy charges
+    /// the candidate's allocated source bytes and its epoch and prepared-protocol capi rows; the
+    /// model terms are the same.
+    WithReprepare {
+        /// How many of the oldest held rows are not candidates.
+        running: usize,
+    },
+}
+
+/// One peak of [`validate_replacement_peak`]: `held` beside `copies` copies of the candidate,
+/// each charged its allocated rows (a carried ring stays its source plan's, counted once).
+fn replacement_peak_fits(
+    held: &[LiveEpochResources],
+    prospective: ProspectivePlan,
+    copies: u64,
+    compiled_models: CompiledModelAdmission,
+    limits: ControlLimits,
 ) -> Result<(), CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
     let newest = held.last().ok_or_else(arithmetic)?;
-    // Each held row's `field`, summed, plus the candidate's `candidate`.
+    let times = |value: u64| value.checked_mul(copies).ok_or_else(arithmetic);
+    // Each held row's `field`, summed, plus the candidate's `candidate` per copy.
     let peak = |field: fn(&PlanResources) -> u64, candidate: u64| {
+        let candidate = times(candidate)?;
         held.iter()
             .try_fold(0_u64, |total, epoch| {
                 total.checked_add(field(&epoch.report))
@@ -1297,6 +1349,7 @@ pub(crate) fn validate_replacement_peak(
     let source_peak = |field: fn(&PlanResources) -> u64,
                        carried: fn(&CarriedSourceBytes) -> u64,
                        candidate: u64| {
+        let candidate = times(candidate)?;
         held.iter()
             .enumerate()
             .try_fold(0_u64, |total, (index, epoch)| {
@@ -1372,44 +1425,47 @@ pub(crate) fn validate_replacement_peak(
             total.checked_add(epoch.capi.epoch_retained)
         })
         .ok_or_else(arithmetic)?;
-    let capi_peak = prospective
-        .capi
-        .epoch_retained
-        .checked_add(prospective.capi.prepared_protocol_retained)
-        .and_then(|candidate| candidate.checked_add(newest.report.control_retained_bytes))
-        .and_then(|value| value.checked_add(older_epochs))
-        // #1696: the kept base this commit stores holds ramps at the candidate's model, which the
-        // newest row charges at its own.
-        .and_then(|value| {
-            value.checked_add(
-                prospective
-                    .capi
-                    .edit_ramps
-                    .saturating_sub(newest.capi.edit_ramps),
-            )
-        })
-        // #1594 R6: the spectrum service the candidate's promotion makes, when the newest plan
-        // has none.
-        .and_then(|value| {
-            value.checked_add(
-                prospective
-                    .capi
-                    .spectrum_service
-                    .saturating_sub(newest.capi.spectrum_service),
-            )
-        })
-        // #1577: the response capture is charged once per session, at its owner high-water; a
-        // capture armed under the committed model is sized by the candidate's row, which can be
-        // larger than the newest's.
-        .and_then(|value| {
-            value.checked_add(
-                prospective
-                    .capi
-                    .response_capture
-                    .saturating_sub(newest.capi.response_capture),
-            )
-        })
-        .ok_or_else(arithmetic)?;
+    let capi_peak = times(
+        prospective
+            .capi
+            .epoch_retained
+            .checked_add(prospective.capi.prepared_protocol_retained)
+            .ok_or_else(arithmetic)?,
+    )?
+    .checked_add(newest.report.control_retained_bytes)
+    .and_then(|value| value.checked_add(older_epochs))
+    // #1696: the kept base this commit stores holds ramps at the candidate's model, which the
+    // newest row charges at its own.
+    .and_then(|value| {
+        value.checked_add(
+            prospective
+                .capi
+                .edit_ramps
+                .saturating_sub(newest.capi.edit_ramps),
+        )
+    })
+    // #1594 R6: the spectrum service the candidate's promotion makes, when the newest plan
+    // has none.
+    .and_then(|value| {
+        value.checked_add(
+            prospective
+                .capi
+                .spectrum_service
+                .saturating_sub(newest.capi.spectrum_service),
+        )
+    })
+    // #1577: the response capture is charged once per session, at its owner high-water; a
+    // capture armed under the committed model is sized by the candidate's row, which can be
+    // larger than the newest's.
+    .and_then(|value| {
+        value.checked_add(
+            prospective
+                .capi
+                .response_capture
+                .saturating_sub(newest.capi.response_capture),
+        )
+    })
+    .ok_or_else(arithmetic)?;
     if capi_peak > limits.maximum_control_retained_bytes {
         return Err(failure(ResourceFault::Limit));
     }
@@ -1661,6 +1717,33 @@ pub trait RuntimePreparer: Send {
     }
 }
 
+/// The epoch's meter rows (#1587a R2, #1588 D2): its meter tables, and the frame ring of
+/// `meter_frame_strips` strips a render-half fold's plan has.
+fn meter_table_rows(
+    meter_tables: &host_core::MeterTables,
+    meter_frame_strips: Option<usize>,
+) -> Result<MeterTableRows, CompileFailure> {
+    let (ring, ring_largest) = match meter_frame_strips {
+        Some(strips) => (
+            host_core::MeterFrameRing::heap_bytes(strips),
+            host_core::MeterFrameRing::largest_allocation_bytes(strips),
+        ),
+        None => (Some(0), Some(0)),
+    };
+    let arithmetic = || failure(ResourceFault::Arithmetic);
+    let retained = meter_tables
+        .heap_bytes()
+        .checked_add(ring.ok_or_else(arithmetic)?)
+        .ok_or_else(arithmetic)?;
+    let largest = meter_tables
+        .largest_allocation_bytes()
+        .max(ring_largest.ok_or_else(arithmetic)?);
+    Ok(MeterTableRows {
+        retained: u64::try_from(retained).map_err(|_| failure(ResourceFault::Platform))?,
+        largest: u64::try_from(largest).map_err(|_| failure(ResourceFault::Platform))?,
+    })
+}
+
 /// Prepare one plan plus its source producers, and project its resource accounting.
 ///
 /// The shared pipeline is `host-core`; the control plane adds only what is its own: its retained
@@ -1759,20 +1842,17 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // `Observe` edit arms. Shrunk to their length first, so the charge below is the allocation.
     let observations = effect_observations.into_boxed_slice();
     // #1587b: each handle's strip, so the meter delivery's gain reduction folds a tap's window
-    // into its strip's word without a search. The index is the position of the strip's meter
-    // consumer, the rule `SessionMeters::resolve` uses for a meter entry, so a tap and an entry of
-    // one strip name the same frame strip; a strip with no meter gets `u32::MAX`, outside every
-    // frame, which the fold skips.
+    // into its strip's word without a search. The index is `strip_meter_index`, the rule a meter
+    // entry's strip resolves by (`MeterBatches::resolve`), so a tap and an entry of one strip name
+    // the same frame strip; a strip with no such meter gets `u32::MAX`, outside every frame, which
+    // the fold skips.
     let observation_strips = {
         let mut strips = Vec::new();
         strips
             .try_reserve_exact(observations.len())
             .map_err(|_| failure(ResourceFault::Allocation))?;
         for handle in &observations {
-            let index = meters
-                .iter()
-                .position(|meter| meter.track_id == handle.track_id)
-                .and_then(|index| u32::try_from(index).ok())
+            let index = crate::control::strip_meter_index(&prepared.inventory, &handle.track_id)
                 .unwrap_or(u32::MAX);
             strips.push(index);
         }
@@ -1816,11 +1896,22 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     // #1587a R2: the plan's meter tables, built here, on the control thread, so its adoption
     // exchanges them by pointer. Only a control-plane meter delivery reads them.
-    let meter_tables = if A::METER_DELIVERY {
-        host_core::MeterTables::new(meters.len(), compiled.normalized_model().strips().count())
+    let strip_count = compiled.normalized_model().strips().count();
+    let meter_tables = if A::METER_DELIVERY && !A::RENDER_METER_FOLD {
+        host_core::MeterTables::new(meters.len(), strip_count)
             .map_err(|_| failure(ResourceFault::Allocation))?
     } else {
         host_core::MeterTables::empty()
+    };
+    // #1588 D2: a render-half fold's frames reach the control plane through the plan's own ring,
+    // built here at the plan's strip count, so no swap reallocates one on the render thread.
+    let meter_frames = if A::METER_DELIVERY && A::RENDER_METER_FOLD {
+        Some(
+            host_core::MeterFrameRing::new(strip_count)
+                .map_err(|_| failure(ResourceFault::Allocation))?,
+        )
+    } else {
+        None
     };
     let mut capi = prepared_capi_resources::<A>(
         compiled,
@@ -1833,6 +1924,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         strip_heap_bytes,
         capture_owners_high_water,
         &meter_tables,
+        meter_frames.as_ref().map(|_| strip_count),
     )?;
     // #1594 R6, #1595 R7: a plan with spectrum captures has a session spectrum service, analysis
     // and one-shot result beside it (made at boot or at the promotion that installs the first
@@ -1883,6 +1975,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         effects,
         meters,
         meter_tables,
+        meter_frames,
         observations,
         observation_strips,
         carried_taps,
@@ -1942,9 +2035,27 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 /// without. It is monitor state: no revision, model or snapshot holds it.
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
+    limits: ControlLimits,
+    preparer: Box<dyn RuntimePreparer>,
+    spectrum: Option<host_core::SpectrumConfiguration>,
+) -> Result<CompiledChildren<A>, CompileFailure>
+where
+    A::Row: Send + 'static,
+{
+    compile_children_warm(document, limits, preparer, spectrum, None)
+}
+
+/// [`compile_children`] with the session's warm-successor bounds (#1403 D1): with
+/// `Some(config)`, every structural rebuild is classified with [`host_core::warm_lead`] and a
+/// latency growth that ducks no strip is published `Primed`; with `None`, every rebuild takes
+/// today's path. Every product session passes `None` until #1360 (the C ABI) and #1361 (the
+/// browser) build the production bounds; the gates set both bounds directly.
+pub(crate) fn compile_children_warm<A: ControlAdapter>(
+    document: &str,
     mut limits: ControlLimits,
     preparer: Box<dyn RuntimePreparer>,
     spectrum: Option<host_core::SpectrumConfiguration>,
+    warm: Option<host_core::WarmConfig>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
     A::Row: Send + 'static,
@@ -2024,6 +2135,7 @@ where
         effects,
         meters,
         meter_tables,
+        meter_frames,
         observations,
         observation_strips,
         carried_taps,
@@ -2097,7 +2209,29 @@ where
     // over a requested gate the plan's relay applies on the render thread; its provider learns the
     // window. Any other adapter takes the reader and the live gate (`take_output_meter`).
     let mut provider = provider;
-    let (output_meter, session_meters, output_gate) = if A::METER_DELIVERY {
+    let (output_meter, session_meters, output_gate) = if A::METER_DELIVERY && A::RENDER_METER_FOLD {
+        // #1588 R1: the render half folds. It keeps the output meter's reader and live gate, and
+        // the session stages the batches from the plans' frame rings under a shared level word,
+        // still reporting the windows the output queue dropped. A host whose strip meters bind
+        // no window of their own (`meter_window_blocks() == 0`: the browser's lease is refused
+        // then) has no delivery to serve, and its provider keeps refusing meter tables.
+        let drops = output_reader.drop_count();
+        if preparer.meter_window_blocks() != 0 {
+            provider.set_meter_window_blocks(Some(window_blocks));
+        }
+        let session_meters = crate::control::SessionMeters::rendered(
+            host_core::MeterLevel::new(),
+            drops,
+            window_blocks,
+            maximum_meter_entries(limits.maximum_control_frame_bytes)?,
+        )
+        .map_err(|_| failure(ResourceFault::Allocation))?;
+        (
+            Some((output_reader, output_gate)),
+            Some(session_meters),
+            None,
+        )
+    } else if A::METER_DELIVERY {
         let (requested, relay) =
             host_core::meters::output_peak_gate_relay(output_gate, u64::from(window_frames.get()));
         // #1587a R2: the delivery folds the boot plan's strip meters over its tables.
@@ -2177,7 +2311,8 @@ where
             observation_index,
             observation_strips,
             carried_taps,
-        ),
+        )
+        .with_meter_frames(meter_frames),
         pending_providers,
         retired_providers,
         publisher,
@@ -2214,6 +2349,8 @@ where
         output_meter,
         meters: session_meters,
         response_ready: None,
+        warm,
+        primed: None,
     };
     let (offsets, pending, counts, armed, armed_bytes) = crate::control::observation_slots(
         &session.providers.effects,
@@ -2419,7 +2556,17 @@ mod admission_tests {
         models: CompiledModelAdmission,
         limits: ControlLimits,
     ) -> Result<(), String> {
-        validate_replacement_peak(held, prospective, models, limits)
+        verdict_at(held, prospective, models, limits, AdmissionPeak::Single)
+    }
+
+    fn verdict_at(
+        held: &[LiveEpochResources],
+        prospective: ProspectivePlan,
+        models: CompiledModelAdmission,
+        limits: ControlLimits,
+        admission: AdmissionPeak,
+    ) -> Result<(), String> {
+        validate_replacement_peak(held, prospective, models, limits, admission)
             .map_err(|failure| String::from_utf8(failure.diagnostic().into_owned()).expect("UTF-8"))
     }
 
@@ -2454,22 +2601,99 @@ mod admission_tests {
         models: CompiledModelAdmission,
         expected: [u64; 9],
     ) {
+        assert_each_cap_at(
+            label,
+            held,
+            prospective,
+            models,
+            expected,
+            AdmissionPeak::Single,
+        );
+    }
+
+    fn assert_each_cap_at(
+        label: &str,
+        held: &[LiveEpochResources],
+        prospective: ProspectivePlan,
+        models: CompiledModelAdmission,
+        expected: [u64; 9],
+        admission: AdmissionPeak,
+    ) {
         for (index, (cap, code)) in CAPS.iter().enumerate().take(8) {
             assert_eq!(
-                verdict(held, prospective, models, with_cap(index, expected[index])),
+                verdict_at(
+                    held,
+                    prospective,
+                    models,
+                    with_cap(index, expected[index]),
+                    admission
+                ),
                 Ok(()),
                 "{label}, {cap}: accepted at the peak {}",
                 expected[index]
             );
             assert_eq!(
-                verdict(
+                verdict_at(
                     held,
                     prospective,
                     models,
-                    with_cap(index, expected[index] - 1)
+                    with_cap(index, expected[index] - 1),
+                    admission
                 ),
                 Err((*code).to_owned()),
                 "{label}, {cap}: refused one byte below"
+            );
+        }
+    }
+
+    /// #1403 (the reprepare peak, #1398's former gate 3): a warm candidate C beside the running
+    /// plan R is admitted against `R + 2C` -- each cap one byte below refuses with its diagnostic,
+    /// at the peak it passes -- while an ordinary candidate passes at `R + C`, where the warm one
+    /// is refused. With a withdrawn candidate A also held, both peaks are checked and the larger
+    /// decides, cap by cap: `R + 2C` while A is small, `R + A + C` once A outweighs C. Test value:
+    /// an admission that checks a warm candidate at the single peak lets a later transition
+    /// re-preparation exceed the caps (red at `R + 2C - 1`); one that drops the held-plan check
+    /// for a warm candidate admits one byte below `R + A + C`; one that counts the withdrawn
+    /// candidate in the reprepare row refuses at the peak.
+    #[test]
+    fn a_warm_candidate_is_admitted_against_its_reprepare_peak() {
+        let models =
+            compiled_model_admission_over(&[model(1 << 20, 3)], model(1 << 22, 7)).expect("models");
+        let warm = AdmissionPeak::WithReprepare { running: 1 };
+        let prospective = candidate(1_000);
+        let running = [epoch(1)];
+        assert_each_cap_at(
+            "R + 2C",
+            &running,
+            prospective,
+            models,
+            peaks(&[1], 2_000, models.retained_bytes, (0, 0)),
+            warm,
+        );
+        let single = peaks(&[1], 1_000, models.retained_bytes, (0, 0));
+        for (index, (cap, code)) in CAPS.iter().enumerate().take(8) {
+            let limits = with_cap(index, single[index]);
+            assert_eq!(
+                (
+                    verdict(&running, prospective, models, limits),
+                    verdict_at(&running, prospective, models, limits, warm),
+                ),
+                (Ok(()), Err((*code).to_owned())),
+                "R + C, {cap}: an ordinary candidate passes, a warm one is refused"
+            );
+        }
+        for withdrawn in [10, 5_000] {
+            let held = [epoch(1), epoch(withdrawn)];
+            let beside = peaks(&[1, withdrawn], 1_000, models.retained_bytes, (0, 0));
+            let reprepare = peaks(&[1], 2_000, models.retained_bytes, (0, 0));
+            let larger = core::array::from_fn(|index| beside[index].max(reprepare[index]));
+            assert_each_cap_at(
+                &format!("a withdrawn candidate of base {withdrawn}"),
+                &held,
+                prospective,
+                models,
+                larger,
+                warm,
             );
         }
     }
