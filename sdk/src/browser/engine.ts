@@ -86,6 +86,8 @@ import type { SpectrumFrameReply, SpectrumFrameRequest, SpectrumFrameStream } fr
 import {
   ObservationSubscriptionOwner,
   observationFrameTransport,
+  observationMapOf,
+  readObservationResults,
 } from "../core/observation-subscriptions.ts";
 import type {
   ObservationSubscription,
@@ -98,18 +100,10 @@ import type {
   SpectrumSubscriptionLimits,
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
-import {
-  decodeObservationRows,
-  enrichObservationMap,
-  resolveObservationAddressesWithTracks,
-  validateObservationSelections,
-} from "../core/observation.ts";
 import type {
   ObservationMap,
   ObservationReadResult,
   ObservationSelection,
-  RawObservationBinding,
-  RawObservationRow,
 } from "../core/observation.ts";
 
 /**
@@ -818,59 +812,37 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       policy.liveControls !== undefined,
     );
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
-    // The map and the strip IDs that name its bindings' indices, from one plan: the map follows the
-    // plan that renders, whose list is the one the reply names (#1562b).
-    const observationMapWithStrips = async (): Promise<{
-      readonly map: ObservationMap;
-      readonly stripIds: readonly string[];
-    }> => {
-      const reply = await host.observationMap();
-      if (reply.result !== constantValue("resultCodes", "ok")) {
-        throw new MisoEngineError("the browser host refused the observation map", {
-          phase: "output",
-          code: resultName(reply.result, "call"),
-          result: reply.result,
-        });
-      }
-      const order = await stripOrders.of(reply.structureEpoch);
-      if (order === undefined) {
-        // The list of the rendering plan was replaced before this page ever read it. The plan is
-        // replaced too (a commit is adopted within a block or two), so a second ask is answered.
-        throw new MisoEngineError("the observation map belongs to a control list that is gone", {
-          phase: "lifecycle",
-          code: "control.list.stale",
-          diagnostics: [{ code: "control.list.stale", path: "structureEpoch" }],
-        });
-      }
-      const stripIds = Object.freeze([...order.tracks, ...order.submixes]);
-      return Object.freeze({
-        map: enrichObservationMap(stripIds, reply.bindings as readonly RawObservationBinding[]),
-        stripIds,
-      });
+    // The map from the core's control list (its section headers name each console slot's and
+    // insert's effect) and the generated catalog's taps, by stable IDs only (#1590 D3).
+    const observationMap = async (): Promise<ObservationMap> => observationMapOf(await stripOrders.current());
+    // The frame endpoint the observation edits and reads share: the worklet's `control` message
+    // (#1589 D3) with the host's one request-ID allocator. A reply's revision is noted for the
+    // transaction queue, as every frame beside it is.
+    const observationEndpoint = async () => {
+      const queue = await createBrowserControlQueue(host);
+      return {
+        send: async (frame: Uint8Array): Promise<Uint8Array> => {
+          const reply = await host.control(frame);
+          queue.noteCommit(reply.revision);
+          if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+          return reply.response;
+        },
+        requestIds: queue.requestIds,
+        committedRevision: () => queue.revision,
+        maximumFrameBytes: () => queue.maximumFrameBytes,
+      };
     };
-    const observationMap = async (): Promise<ObservationMap> => (await observationMapWithStrips()).map;
+    // One `OBSERVATION_READ` through the same entry (#1590), each selection checked against the map.
     const readObservations = async (
       selections: readonly ObservationSelection[],
     ): Promise<readonly ObservationReadResult[]> => {
-      validateObservationSelections(selections);
-      const { map, stripIds } = await observationMapWithStrips();
-      const addresses = resolveObservationAddressesWithTracks(map, stripIds, selections);
-      const reply = await host.readObservations({ selections: [...addresses] });
-      if (reply.result !== constantValue("resultCodes", "ok")) {
-        throw new MisoEngineError("the browser host refused the selected observation read", {
-          phase: reply.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
-          code: resultName(reply.result, "call"),
-          result: reply.result,
-        });
-      }
-      return decodeObservationRows(
-        map,
-        stripIds,
-        selections,
-        addresses,
-        reply.rows as readonly RawObservationRow[],
-        shape.sampleRateHz,
-      );
+      const map = await observationMap();
+      const endpoint = await observationEndpoint();
+      return readObservationResults(map, selections, shape.sampleRateHz, {
+        send: endpoint.send,
+        requestIds: endpoint.requestIds,
+        maximumFrameBytes: endpoint.maximumFrameBytes(),
+      });
     };
     const getLiveControls = (): Promise<EngineLiveControls> => {
       // Every value edit is a SET_CONTROL transaction, so the semantic controls need no boot word.
@@ -890,24 +862,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       return semanticLiveControls;
     };
     // A managed subscription is the core's `Observe` edit and its reads are `OBSERVATION_READ`,
-    // both posted as the worklet's `control` message (#1589 D3) with the host's one request-ID
-    // allocator. A reply's revision is noted for the transaction queue, as every frame beside it
-    // is. A session with no effect that declares a tap binds none, so its map is empty and the
-    // subscription is refused `observation.unavailable` before any edit (#1589 R1).
-    const observationFrames = async () => {
-      const queue = await createBrowserControlQueue(host);
-      return observationFrameTransport({
-        send: async (frame) => {
-          const reply = await host.control(frame);
-          queue.noteCommit(reply.revision);
-          if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
-          return reply.response;
-        },
-        requestIds: queue.requestIds,
-        committedRevision: () => queue.revision,
-        maximumFrameBytes: () => queue.maximumFrameBytes,
-      });
-    };
+    // both through the observation endpoint. A session with no effect that declares a tap binds
+    // none, so its map is empty and the subscription is refused `observation.unavailable` before
+    // any edit (#1589 R1).
+    const observationFrames = async () => observationFrameTransport(await observationEndpoint());
     // #1596 D1-D7: every spectrum call is one of the three frames, posted to the host's `control`
     // message; the core analyzes where the session runs (D4), so no analysis Worker starts.
     const spectrumFrame = async <T>(

@@ -522,7 +522,7 @@ instead of growing with stem duration.
 | Observation | API and meaning of its time |
 | --- | --- |
 | Track/master peaks | Browser `subscribeMeters()`; headless `meters(true)` then `pollMeters()`. Linear peak magnitudes cover `[firstSample, endSample)`. This span timestamps peaks only, not an exact gain-reduction join. A headless frame names its own strips (`trackIds`, `submixIds`) by the control list of the `structureEpoch` it carries, so it stays right across a rebuild, including one that keeps the strip count. |
-| Resident effect values | `observationMap()`, `readObservations()`, or `subscribeObservations()`. Select stable track/rack/effect-slot/tap IDs. Ready values retain the effect owner's own window and native unit. A managed subscription follows a rebuild (the core keeps the tap armed on the effect that carries on). When a commit removes the effect, the core ends the tap with `OBSERVATION_ENDED`: pass `onEnd` to `subscribeObservations()` to be told which selections ended and which remain, once for each commit; `handle.ended` lists them, and a subscription left with no selection is closed. |
+| Resident effect values | `observationMap()`, `readObservations()`, or `subscribeObservations()`. Select stable track/rack/effect-slot/tap IDs. The map is the core's control list (each console slot's and insert's effect) with the generated catalog's taps; a read is one `OBSERVATION_READ`. Ready values retain the effect owner's own window and native unit. A managed subscription follows a rebuild (the core keeps the tap armed on the effect that carries on). When a commit removes the effect, the core ends the tap with `OBSERVATION_ENDED`: pass `onEnd` to `subscribeObservations()` to be told which selections ended and which remain, once for each commit; `handle.ended` lists them, and a subscription left with no selection is closed. |
 | Live EQ/filter response | `queryTrackResponse()` or `subscribeTrackResponse()`. `capturedSample` marks capture of applied target state at a block boundary. The curve is a stationary EQ/input-filter subtotal; fader, pan, routing, and unsupported processors are excluded. |
 | Spectrum | Browser `querySpectrum()`; headless `armSpectrum()`, explicit renders, then `readSpectrum()`. Each result covers 2,048 captured PCM samples, `[capturedSample, endSample)`, with dBFS bins and a graph-wide source-underrun flag. |
 | Continuous spectrum | `subscribeSpectrum()` retains one managed stream. Metadata carries the capture span, hop, epochs, drops, and smoothing history. The default 100 ms power smoothing includes earlier windows; set `smoothingMs: 0` for unsmoothed analysis. |
@@ -544,8 +544,11 @@ Managed observation, response, and spectrum handles expose `readLatest()`, `upda
 explicit renders. Pumping never renders audio. Identical subscriptions share work; refused updates
 preserve the prior configuration. Two managed operations (subscribe, update, close) that each send a record for the same
 effect tap need a render between them: the second is refused with typed `backpressure` until a
-render has drained the first. An identical second subscribe, and a close of a binding that other
-handles still share, send no record and need no render. In a headless engine the refused
+render has drained the first. Each handle sends its own `Observe` edits (one arm per selection, one
+disarm per selection at close) and the core shares one arm between the subscribers of a tap and
+window (issue #1590): an identical second subscribe, and a close that leaves another subscriber on
+the tap, queue no record and need no render. Another window on a tap a subscriber holds is refused
+with `MisoUsageError` (`observation.window_conflict`). In a headless engine the refused
 operation rejects at once: render, then retry. In a browser engine it waits for a render and sends
 again, up to `requestDeadlineMs` and at most 8 resends (one render drains the tap, so more means
 another writer keeps refilling it), and then ends in typed `backpressure`. Resident effect taps

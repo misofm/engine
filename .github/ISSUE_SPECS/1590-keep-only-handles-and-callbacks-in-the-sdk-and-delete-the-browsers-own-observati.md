@@ -157,6 +157,27 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
   observation capacity attaching on every boot adds nothing to its plan; every budgeted row is
   inside its unchanged ceiling.
 
+- **Checkpoint 2 (#1590a).** Each handle keeps its own binding per selection (its arm tag, latest
+  row, cursors); no reference count, no window-conflict check, no preflight read. `subscribe` sends
+  one arm per selection, `update` the disarms then the arms in one transaction, `close` one disarm
+  per selection. The core's `observation.window_conflict` and `observation.not_subscribed` become
+  `MisoUsageError` carrying the core's code (`MisoUsageError` appends it to the message:
+  "observation window conflicts with a managed subscriber (observation.window_conflict)"; the
+  not-subscribed message is new, "the observation is not subscribed with that window", as no SDK
+  message existed). A handle that joins an arm another handle of the owner holds (same tag) starts
+  from that handle's latest row, as before. The periodic read sends one row per tap. The windows
+  are bounded by the core only (`observation.window`).
+- **D3.** `observationMap()` is `observationMapOf(order)`: the strip order's console and insert
+  sections (an internal `stripSections` in `control-list.ts`, read in the same pass as
+  `stripOrderOf`'s `effects`; `index.ts` now names `control-list.ts`'s public exports so it stays
+  internal) and the catalog's declared taps. Both engines use the newest committed list, which is
+  what an `Observe` edit resolves against. `readObservations()` is one `OBSERVATION_READ` in both
+  engines (the headless one synchronous), each selection checked against the map first.
+- **Found while doing D1:** `observationFrameTransport.apply` drew the transaction's request ID
+  before asking `maximumFrameBytes()`, which on a fresh headless engine sends the queue's revision
+  probe with the next ID; the core then refused the transaction (`protocol.failure`). The preflight
+  read had masked it. The ceiling is now read first.
+
 ### Deleted or rewritten tests and their holders
 
 | Deleted / rewritten | Claim now held by |
@@ -168,3 +189,10 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
 | sdk `observation-subscription-evals` "a session booted with no observation taps refuses a subscription observation.unavailable" | the claim no longer exists; every boot serves the edit: host-web `observe_and_its_read_are_served_on_every_boot` |
 | sdk `browser-defaults-evals` "observation attachment uses captured boot policy" | rewritten over the meter word: "the live-control word uses captured boot policy" |
 | `test-web-audioworklet.mjs` "observation taps bound" refusal | "reserved3 nonzero" refusal row |
+| sdk `observation-subscription-evals` "shares bindings, preserves owned rows, guards manual edits, and closes last owner" | rewritten as gate 1: "two handles on one tap and window share the core's one arm; the last close disarms" |
+| sdk `observation-subscription-evals` "a window change on a one-tap effect is one re-arm transaction and lands" | rewritten as gate 2 (window 4 to 8, one new tag) |
+| sdk `observation-subscription-evals` "retries a refused close and bounds the readable union before admission", its `maximumBindings` half | the bound is gone (D2); the retry half stays as "retries a refused close" |
+| sdk `observation-evals` "keeps wide window clocks exact and admits more owners than one read batch" (decoded the export rows) | the export decoder is gone; the frame decoder's rows: `control-frame-evals` "decode ..." over the core's observation-frames fixture; more owners than one batch: "reads an unarmed owner through the actual Wasm map beyond one read batch" |
+| sdk `measurement-evals` "the browser engine meters and observes a bus by its submix ID", its observation half (index resolution) | no index crosses the API (D3); a bus tap: `capability-evals` "a managed subscription to a bus tap arms it at the bus's strip index and reads it ready" |
+| sdk `structure-evals` "an effect that moved to another index is disarmed where it is now", its `effectIndex` probes | the claim stays; adoption is waited for by blocks, not by the index |
+| (new) sdk `observation-evals` "the observation map from the control list and the catalog equals the exports' map" | gate 3 |

@@ -208,50 +208,21 @@ test("a meter frame for another submix list is refused with sdk.meter.submix_cou
   refused({ ...busFrame(), submixGrDb: new Float32Array(1) }, ["aaa-bus", "zzz-bus"]);
 });
 
-test("the browser engine meters and observes a bus by its submix ID", async () => {
+test("the browser engine meters a bus by its submix ID", async () => {
   // Issue #1210 D4/D5 on the browser path: the engine hands the scratch shape's submixes to the
-  // meter projection and resolves observation bindings against the strips, tracks first. Red if
-  // `engine.ts` passes the track list alone to the feeds, the map, the resolver or the decoder.
+  // meter projection. Red if `engine.ts` passes the track list alone to the feeds. (The observation
+  // half went with the index map, #1590 D3: a binding names its strip by ID, and a bus tap's
+  // subscription is `capability-evals`' "a managed subscription to a bus tap".)
   const host = fakeHost();
-  const reads = [];
   Object.assign(host, {
     // The strip order the SDK reads from the core's list: the track, then the bus.
     control: scriptedControl({ strips: { tracks: ["t"], submixes: ["bus"] } }),
     onControlEvent() { return () => {}; },
-    async observationMap() {
-      return {
-        tag: "miso.observationmap.v1", result: 0, structureEpoch: 1,
-        bindings: [
-          { trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
-            nativeEffectId: "miso.compressor", tapIds: [1] },
-          { trackIndex: 1, rack: 1, effectIndex: 0, effectSlotId: "bus-comp",
-            nativeEffectId: "miso.compressor", tapIds: [1] },
-        ],
-      };
-    },
-    async readObservations(request) {
-      reads.push(request.selections);
-      return {
-        tag: "miso.observation.v1", result: 0,
-        rows: request.selections.map((selection) => ({ ...selection, status: 1,
-          sampleRateHz: 48_000, firstSample: 0n, endSample: 0n, sequence: 0n, blocks: 0,
-          leftPresent: 0, rightPresent: 0, left: 0, right: 0 })),
-      };
-    },
   });
   const engine = await openBrowser(host, {
     liveControls: { meterBlocks: 1 },
   }, ["bus"]);
   try {
-    const map = await engine.observationMap();
-    assert.deepEqual(map.bindings.map((binding) => binding.trackId), ["t", "bus"]);
-    const selection = (trackId, effectSlotId) => ({
-      trackId, rack: "inserts", effectSlotId, tapId: 1, channels: "both",
-    });
-    const rows = await engine.readObservations([selection("t", "comp"), selection("bus", "bus-comp")]);
-    assert.deepEqual(reads[0].map((address) => address.trackIndex), [0, 1]);
-    assert.deepEqual(rows.map((row) => row.trackId), ["t", "bus"]);
-
     const updates = [];
     await engine.subscribeMeters((update) => updates.push(update));
     host.emitMeter({

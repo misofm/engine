@@ -28,6 +28,8 @@ import type {
 import {
   ObservationSubscriptionOwner,
   observationFrameTransport,
+  observationMapOf,
+  readObservationResults,
 } from "../core/observation-subscriptions.ts";
 import type {
   ObservationSubscription,
@@ -253,14 +255,26 @@ export class OfflineEngine {
     return this.#boundary.sessionMap();
   }
 
-  /** Read the current prepared owner's stable resident-observation bindings. */
+  /**
+   * The session's effects that declare taps, by stable IDs: the core's control list (its section
+   * headers name each console slot's and insert's effect) and the generated catalog's taps (#1590
+   * D3).
+   */
   observationMap(): ObservationMap {
-    return this.#boundary.observationMap();
+    return observationMapOf(this.#boundary.stripOrder());
   }
 
-  /** Read one bounded non-consuming batch from selected resident observation taps. */
+  /**
+   * Read one bounded non-consuming batch from selected resident observation taps: one
+   * `OBSERVATION_READ` through this engine's control entry (#1590), each selection checked against
+   * {@link observationMap} first.
+   */
   readObservations(selections: readonly ObservationSelection[]): readonly ObservationReadResult[] {
-    return this.#boundary.readObservations(selections);
+    return readObservationResults(this.observationMap(), selections, this.#boundary.status().sampleRateHz, {
+      send: (frame) => this.controlFrame(frame),
+      requestIds: this.#boundary.controlRequestIds,
+      maximumFrameBytes: this.controlTransactions().maximumFrameBytes,
+    });
   }
 
   /**

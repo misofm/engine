@@ -1,12 +1,12 @@
 /** Issue #777: selected resident observation reads keep owner data and lifecycle boundaries. */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { before, describe, test } from "node:test";
 
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineError } from "../src/core/errors.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
-import { decodeObservationRows, enrichObservationMap } from "../src/core/observation.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, insertTap, moduleBytes, observeTaps, ramp, sessionDocument } from "./support.mjs";
 
@@ -74,37 +74,43 @@ function feed(engine, block) {
 }
 
 describe("issue 777 -- selected resident observations", () => {
-  test("keeps wide window clocks exact and admits more owners than one read batch", () => {
-    const rawBindings = Array.from({ length: 257 }, (_unused, index) => ({
-      trackIndex: 0,
-      rack: 1,
-      effectIndex: index,
-      effectSlotId: index === 0 ? "comp" : `effect-${index}`,
-      nativeEffectId: "miso.compressor",
-      tapIds: [1],
-    }));
-    const map = enrichObservationMap(["t"], rawBindings);
-    assert.equal(map.bindings.length, 257);
-
-    const firstSample = 9_007_199_254_740_993n;
-    const row = {
-      trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, channels: 3,
-      status: 3, sampleRateHz: 48_000, firstSample, endSample: firstSample + 128n,
-      sequence: 9_007_199_254_740_995n, blocks: 1,
-      leftPresent: 1, rightPresent: 1, left: 4.5, right: -2.25,
-    };
-    const [decoded] = decodeObservationRows(
-      map,
-      ["t"],
-      [selection("comp")],
-      [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, channels: 3 }],
-      [row],
-      48_000,
-    );
-    assert.ok(decoded.window);
-    assert.equal(decoded.window.firstSample, firstSample);
-    assert.equal(decoded.window.endSample, firstSample + 128n);
-    assert.equal(decoded.window.sequence, 9_007_199_254_740_995n);
+  // #1590 gate 3 (R2): the map from the core's control list (section headers with the effect
+  // identity) and the generated catalog's taps equals the map the browser's map exports gave,
+  // recorded from them before #1590 deleted them, in strip, section and tap content, by stable
+  // IDs only. The control-list fixture adds console slots, a submix and a four-tap effect. Red if
+  // the list and the catalog give another set of taps than the exports did.
+  test("the observation map from the control list and the catalog equals the exports' map", async () => {
+    const binding = ([trackId, rack, effectSlotId, nativeEffectId, tapIds]) =>
+      ({ trackId, rack, effectSlotId, nativeEffectId, tapIds });
+    const cases = [
+      [
+        readFileSync(new URL("../../hosts/host-web/qualification/observation-session.json", import.meta.url), "utf8"),
+        [["track", "inserts", "comp", "miso.compressor", [1]]],
+      ],
+      [
+        JSON.parse(readFileSync(new URL("../../hosts/host-web/tests/fixtures/control-list.json", import.meta.url), "utf8")).session,
+        [
+          ["t1", "console", "pre-comp", "miso.compressor", [1]],
+          ["t1", "inserts", "comp", "miso.compressor", [1]],
+          ["t2", "console", "pre-comp", "miso.compressor", [1]],
+          ["t2", "inserts", "gate", "miso.gate-expander", [1]],
+          ["t3", "console", "pre-comp", "miso.compressor", [1]],
+          ["t3", "inserts", "multi", "miso.multiband-compressor", [1]],
+          ["t3", "inserts", "limiter", "miso.true-peak-limiter", [1]],
+          ["t3", "inserts", "deess", "miso.de-esser", [1]],
+          ["t3", "inserts", "dyneq", "miso.dynamic-eq", [1, 2, 3, 4]],
+          ["b", "console", "pre-comp", "miso.compressor", [1]],
+        ],
+      ],
+    ];
+    for (const [document, expected] of cases) {
+      const engine = await createOfflineEngine(document, { asset });
+      try {
+        assert.deepEqual(engine.observationMap(), { bindings: expected.map(binding) });
+      } finally {
+        engine.dispose();
+      }
+    }
   });
 
   test("reads an unarmed owner through the actual Wasm map beyond one read batch", async () => {

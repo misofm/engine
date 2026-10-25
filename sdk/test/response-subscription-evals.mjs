@@ -133,7 +133,7 @@ test("resident and response handles share one owner poll, timer, and epoch", asy
   let responseReads = 0;
   const observationMap = {
     bindings: [{
-      trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
+      trackId: "t", rack: "inserts", effectSlotId: "comp",
       nativeEffectId: "miso.compressor", tapIds: [1],
     }],
   };

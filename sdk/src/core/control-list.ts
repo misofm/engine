@@ -860,17 +860,50 @@ export function stripEffectOf(
   );
 }
 
+/**
+ * One console slot or insert section of a strip, as the list's section header names it: the
+ * strip, the section kind, the slot's or insert's ID and the effect identity it runs.
+ */
+type ControlStripSection = {
+  readonly stripId: string;
+  readonly rack: "console" | "inserts";
+  readonly sectionId: string;
+  readonly effect: string;
+};
+
+/** The sections {@link stripOrderOf} read from the same headers as each order's `effects`. */
+const orderSections = new WeakMap<ControlStripOrder, readonly ControlStripSection[]>();
+
+/**
+ * @internal The console slot and insert sections of every strip of `order`, in list order, read in
+ * the same pass as its `effects` (#1590 D3). Empty for an order this module did not build.
+ */
+export function stripSections(order: ControlStripOrder): readonly {
+  readonly stripId: string;
+  readonly rack: "console" | "inserts";
+  readonly sectionId: string;
+  readonly effect: string;
+}[] {
+  return orderSections.get(order) ?? [];
+}
+
 /** The strip order of an already read list: its track and submix owner headers, in list order. */
 export function stripOrderOf(list: ControlList): ControlStripOrder {
   const tracks: string[] = [];
   const submixes: string[] = [];
   const effects = new Map<string, string>();
+  const sections: ControlStripSection[] = [];
   for (const header of list.headers) {
     if (header.row === "section") {
       const { owner, section } = header.address;
       if (owner.kind === "strip" && header.effect !== undefined) {
-        if (section.kind === "console") effects.set(effectKey(owner.id, "console", section.slot), header.effect);
-        else if (section.kind === "inserts") effects.set(effectKey(owner.id, "inserts", section.effect), header.effect);
+        if (section.kind === "console") {
+          effects.set(effectKey(owner.id, "console", section.slot), header.effect);
+          sections.push(Object.freeze({ stripId: owner.id, rack: "console" as const, sectionId: section.slot, effect: header.effect }));
+        } else if (section.kind === "inserts") {
+          effects.set(effectKey(owner.id, "inserts", section.effect), header.effect);
+          sections.push(Object.freeze({ stripId: owner.id, rack: "inserts" as const, sectionId: section.effect, effect: header.effect }));
+        }
       }
       continue;
     }
@@ -879,12 +912,14 @@ export function stripOrderOf(list: ControlList): ControlStripOrder {
     if (owner.kind !== "strip") throw malformed("a strip header does not name a strip");
     (header.kind === "track" ? tracks : submixes).push(owner.id);
   }
-  return Object.freeze({
+  const order: ControlStripOrder = Object.freeze({
     structureEpoch: list.structureEpoch,
     tracks: Object.freeze(tracks),
     submixes: Object.freeze(submixes),
     effects,
   });
+  orderSections.set(order, Object.freeze(sections));
+  return order;
 }
 
 /**
