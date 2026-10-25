@@ -2188,6 +2188,7 @@ mod tests {
         }
 
         /// Plan A for five blocks, B published, five more: returns the blocks and the reports.
+        #[cfg(feature = "realtime-audit")]
         fn swap_at_block_five(
             carry: bool,
         ) -> (
