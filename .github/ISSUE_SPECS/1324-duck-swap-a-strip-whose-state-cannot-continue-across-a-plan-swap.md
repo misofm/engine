@@ -526,7 +526,7 @@ Scope (scope note): D1's sidechain closure, D4's sidechain terms of `C` (with th
   neither ducked (removed or restarted) nor added (`submix_input_is_quiet`). A successor route
   into the stage from a tap before the fader that follows an automated source mute (unarmable,
   limit 2, #2011) makes the stage not quiet, so its consumer ducks rather than read the route's
-  step at `S`; no test pins this clause (it needs a mute automation lane). The whole-strip filter,
+  step at `S`. The whole-strip filter,
   the arm and `restarted_strips()` then treat a joined strip as any restarted strip. The closure
   is not order-free when the exemption flips on a later round (a strip that joined earlier stays);
   that only ducks more, never less.
@@ -569,7 +569,11 @@ was added.
   with the closure off, after one round, with `post_fader` joining, without the line-length
   check, with a track's `input` tap joining, with the delay-line arm off (`["eq0"]`), with
   `post_input` and `insert_send` mapped to false, and with the submix arm `false &&`
-  (`["bus", "late"]`).
+  (`["bus", "late"]`). Folds after attempt 2's PASS: a row whose bus input is only `late`'s
+  `pre_fader` route following its stored mute automation, red with the following-route clause
+  `false && ...` (`["bus", "late"]`); a row with the bus's `delay_samples` changed, red with the
+  delay-line arm limited to tracks (`["bus"]`); and the exact arm count (each audible restarted
+  strip armed, the muted `late` not).
 - host-core `transition::tests::c_counts_a_post_fader_sidechain_line_into_a_carried_node` (D4's
   `post_fader` term; feature `control-provider`): red with that term off (`C` 0, not 486).
 
