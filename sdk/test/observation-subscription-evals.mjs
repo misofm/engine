@@ -774,21 +774,24 @@ describe("#1589 gate 2 -- armed() settles on the arm render applied", () => {
     }
   });
 
-  // Red if `armed()` takes any armed row (another arm's tag) as its own, or ignores a newer tag on
-  // a pending binding.
-  test("a row of another arm's tag never resolves armed(), and a newer tag rejects it superseded", async () => {
+  // Red if `armed()` takes any armed row (another arm's tag) as its own, if a window of another arm
+  // is given to the subscription, or if a newer tag on a pending binding is ignored.
+  test("a row of another arm's tag never resolves armed() or reaches readLatest(), and a newer tag rejects it superseded", async () => {
     const harness = injectedOwner();
+    // An earlier subscription of the tap takes tags 1 (its arm) and 2 (its close's disarm).
+    await (await harness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 })).handle.close();
     const handle = (await harness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 })).handle;
     const armed = handle.armed();
-    const row = (tag) => ({
-      status: "pending", armed: true, armSample: 512n, armTag: tag, window: undefined, left: undefined, right: undefined, unit: 1,
-    });
-    let reported = 0n;
-    harness.setRows((selections) => selections.map(() => row(reported)));
-    // The binding's tag is 1, the first edit's: a row armed with tag 0 is not its arm.
+    let reported = 1n;
+    harness.setRows((selections) => selections.map(() => ({
+      status: "ready", armed: true, armSample: 512n, armTag: reported,
+      window: { firstSample: 512n, endSample: 640n, sequence: 9n, blocks: 1 }, left: 1, right: 2, unit: 1,
+    })));
     await handle.pump();
     assert.equal(await settled(armed), false, "an armed row of another tag is not this arm");
-    reported = 2n;
+    assert.equal(handle.readLatest()[0].status, "pending", "a window of an earlier arm is never given to it");
+    assert.equal(handle.readLatest()[0].window, undefined);
+    reported = 4n;
     await handle.pump();
     await assert.rejects(armed, (error) => {
       assert.ok(error instanceof MisoEngineError);
@@ -796,7 +799,6 @@ describe("#1589 gate 2 -- armed() settles on the arm render applied", () => {
       assert.equal(error.diagnosticCode, "sdk.observation.superseded");
       return true;
     });
-    harness.setRows(undefined);
   });
 
   // Red if a close before the arm applied leaves `armed()` pending for ever (or resolves it).
