@@ -620,6 +620,62 @@ fn prime_budget_holds_at_the_exact_count() {
     );
 }
 
+/// Gate 4 (#1355 D5's narrowing): the prime counts the words its fill writes. After two growths
+/// every track holds a claim line of `2P`; a limiter on track 1 then restarts it, and its line,
+/// which it keeps, takes only the `P` words of the prime, while every carried track's line grows
+/// and is written whole.
+#[test]
+fn the_prime_counts_the_words_its_fill_writes() {
+    let grown = |growths: usize, limited: bool| {
+        let mut model = two_tracks();
+        if limited {
+            *inserts(&mut model, "t1") = vec![limiter()];
+        }
+        for growth in 0..growths {
+            let id = format!("m{growth}");
+            let chain = (0..=growth)
+                .map(|stage| {
+                    let mut stage_limiter = limiter();
+                    stage_limiter.id = sid(&format!("limiter-{stage}"));
+                    stage_limiter
+                })
+                .collect();
+            muted_track(&mut model, &id, chain);
+            to_output(&mut model, &id);
+        }
+        Session::compile(finish(model))
+    };
+    let caps = gate_caps();
+    let mut stream = alone(&grown(0, false), &caps, backend(), AHEAD);
+    for growth in 1..=2 {
+        stream.render(BEFORE);
+        assert_eq!(stream.grow(&grown(growth, false), &CONFIG), LEAD);
+    }
+    stream.render(BEFORE);
+    assert_eq!(stream.offset, 2 * LEAD);
+    let edit = grown(2, true);
+    let (lead, w) = stream.warm(&edit, &CONFIG);
+    assert_eq!(lead.lead_samples, LEAD);
+    assert_eq!(restarted_ids(&w.inventory), ["t1"]);
+    let words: u64 = edit
+        .model
+        .tracks
+        .iter()
+        .map(|track| {
+            let line = arrival(&w, &stages(track.id.as_str(), TrackStage::Input)[0]);
+            if track.id.as_str() == "t1" {
+                assert_eq!(line, 2 * LEAD, "track 1 keeps its line");
+                2 * LEAD
+            } else {
+                2 * line
+            }
+        })
+        .sum();
+    // One carried stereo source.
+    let expected = 4 * (LEAD * 2 + words);
+    assert_eq!((lead.prime_bytes(), w.prime_bytes()), (expected, expected));
+}
+
 /// Gate 7: a limiter on a bus restarts the bus's carried feeders whole, and the bus after its
 /// fader, T3 and the output lead by `P`, with T3's claim line exactly `P`.
 #[test]
@@ -1381,3 +1437,4 @@ fn the_growth_chain_primes_without_allocating() {
         }
     }
 }
+
