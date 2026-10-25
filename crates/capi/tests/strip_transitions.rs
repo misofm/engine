@@ -1,6 +1,7 @@
 //! Removing a strip in two phases through the exported C entries (issue #1325, decision 15
 //! D15-9): the removed strip ramps out on the running plan, then the successor is adopted at a
-//! scheduled sample `S`.
+//! scheduled sample `S`. A strip whose successor restarts it is duck-swapped the same way and
+//! fades back in after `S` (issue #1324).
 //!
 //! Every run is single-threaded at 48 kHz in 128-frame blocks with a session `mute_ms` that gives
 //! `N = 2000` samples and 1024-frame source rings. Tracks `a` and `b` play distinct, never-zero
@@ -345,6 +346,11 @@ impl Rig {
     /// Submits block `block` of source `name`; the result code.
     fn feed(&mut self, name: &str, block: u64) -> u32 {
         let frame = if name == "src-a" { frame_a } else { frame_b };
+        self.feed_frames(name, block, &frame)
+    }
+
+    /// Submits block `block` of source `name`, whose frame `f` is `frame(f)`; the result code.
+    fn feed_frames(&mut self, name: &str, block: u64, frame: &dyn Fn(u64) -> [f32; 2]) -> u32 {
         let mut left = [0.0_f32; FRAMES];
         let mut right = [0.0_f32; FRAMES];
         for index in 0..FRAMES {
@@ -774,4 +780,446 @@ fn a_restore_in_phase_one_fades_back_in_from_s() {
         }
     }
     assert!(adopted.is_some(), "the restore is adopted");
+}
+
+// Issue #1324a: a strip whose successor restarts it (an insert added, removed or reordered,
+// `delay_samples`, a prepared parameter) ducks with its `pre_fader` send over `N` on the running
+// plan, the successor is adopted at `S`, and the successor's armed fader and send fade it back in.
+
+/// A native effect `insert` of kind `effect`, at its default parameters.
+fn native(insert: &str, effect: &str) -> session::Effect {
+    session::Effect {
+        id: id(insert),
+        identity: session::EffectIdentity::Native {
+            effect_id: id(effect),
+        },
+        quality: session::EffectQuality::Normal,
+        bypass: false,
+        link_mode: session::LinkMode::Maximum,
+        params: Vec::new(),
+        sidechain: session::SidechainDeclaration::None,
+    }
+}
+
+/// The compressor every duck-swap below adds to `b`: no latency, so no node's arrival grows.
+fn compressor(insert: &str) -> session::Effect {
+    session::Effect {
+        link_mode: session::LinkMode::DualMono,
+        ..native(insert, "miso.compressor")
+    }
+}
+
+/// The gate session with `a` muted in the model when `a_muted` (it then adds exact `+0.0`, so the
+/// output is `b`'s and `r`'s alone) and `b` holding `inserts`.
+fn duck_model(a_muted: bool, inserts: Vec<session::Effect>) -> SessionModel {
+    let mut model = gate_model();
+    model.tracks[0].fader.left_mute = a_muted;
+    model.tracks[0].fader.right_mute = a_muted;
+    model.tracks[1].inserts.effects = inserts;
+    model
+}
+
+/// The transaction that gives `b` the declaration `model` holds for it.
+fn upsert_b(model: &SessionModel) -> Vec<SessionEdit> {
+    vec![SessionEdit::UpsertTrack {
+        track: model.tracks[1].clone(),
+    }]
+}
+
+/// What [`duck_run`] rendered.
+struct DuckRun {
+    blocks: Vec<Vec<u32>>,
+    /// The watermark's first sample and flags for the last transaction's revision, and the
+    /// fallback count before the first transaction and after the adoption.
+    adopted: Option<(u64, u64, [u64; 2])>,
+    /// The render thread's allocations and frees from the block after the first transaction on.
+    churn: u64,
+}
+
+/// Boot `model`, play blocks `0..=last` with both sources fed one block ahead (`src-b`'s frame
+/// `f` is `frame(f)`), and before each block `b` of `edits` apply its transaction, which must
+/// commit on `path`.
+fn duck_run(
+    model: &SessionModel,
+    edits: &[(u64, Vec<SessionEdit>, EditPath)],
+    last: u64,
+    frame: &dyn Fn(u64) -> [f32; 2],
+) -> DuckRun {
+    let mut rig = Rig::boot(model);
+    let feed = |rig: &mut Rig, block: u64| {
+        assert_eq!(rig.feed("src-a", block), RESULT_OK);
+        assert_eq!(rig.feed_frames("src-b", block, frame), RESULT_OK);
+    };
+    feed(&mut rig, 0);
+    let mut run = DuckRun {
+        blocks: Vec::new(),
+        adopted: None,
+        churn: 0,
+    };
+    let mut fallbacks = None;
+    let final_block = edits.iter().map(|(block, ..)| *block).max();
+    for block in 0..=last {
+        for (at, transaction, path) in edits {
+            if *at == block {
+                fallbacks.get_or_insert(rig.watermark().transition_fallback_count);
+                assert_eq!(
+                    rig.apply(transaction),
+                    *path,
+                    "the transaction at block {at}"
+                );
+            }
+        }
+        feed(&mut rig, block + 1);
+        let (bits, churn) = rig.render(block);
+        if edits.first().is_some_and(|(at, ..)| block >= *at) {
+            run.churn += churn;
+        }
+        run.blocks.push(bits);
+        let watermark = rig.watermark();
+        if final_block.is_some_and(|at| block >= at)
+            && run.adopted.is_none()
+            && watermark.revision >= rig.revision
+        {
+            assert_eq!(watermark.revision, rig.revision);
+            run.adopted = Some((
+                watermark.first_sample,
+                watermark.outcome_flags,
+                [
+                    fallbacks.expect("a transaction"),
+                    watermark.transition_fallback_count,
+                ],
+            ));
+        }
+    }
+    run
+}
+
+/// A fresh plan of `model` with `b`'s fader and `b-send` muted, fed `src-b` from frame `offset`
+/// on (its frame `f` plays `frame_b(offset + f)`), given the value-only unmutes of both before
+/// block `fire`: the oracle of a duck-swap's fade-in from `S = offset`. Blocks `0..blocks`.
+fn fresh_fade_run(model: &SessionModel, offset: u64, fire: u64, blocks: u64) -> Vec<Vec<u32>> {
+    let mut muted = model.clone();
+    muted.tracks[1].fader.left_mute = true;
+    muted.tracks[1].fader.right_mute = true;
+    for route in &mut muted.routes {
+        if route.id.as_str() == "b-send" {
+            route.mute = true;
+        }
+    }
+    let mut rig = Rig::boot(&muted);
+    let shifted = |frame: u64| frame_b(offset + frame);
+    let feed = |rig: &mut Rig, block: u64| {
+        assert_eq!(rig.feed("src-a", block), RESULT_OK);
+        assert_eq!(rig.feed_frames("src-b", block, &shifted), RESULT_OK);
+    };
+    feed(&mut rig, 0);
+    (0..blocks)
+        .map(|block| {
+            if block == fire {
+                assert_eq!(rig.apply(&reference_unmutes(model)), EditPath::Live);
+            }
+            feed(&mut rig, block + 1);
+            rig.render(block).0
+        })
+        .collect()
+}
+
+/// #1324a gates 1 and 8. `a` is muted, `b` audible; after block `K` one transaction adds a
+/// compressor insert to `b`, and `b` holds nothing (case 1) or a true-peak limiter (case 2, so
+/// `b`'s `D` is the limiter's latency) before it. (a) Every block before `S` equals the reference
+/// that live-mutes `b` and its `pre_fader` send at the same point. (b) From `S` every block equals
+/// a fresh plan of the successor session fed the same source frames, with `b` and its send muted
+/// and live-unmuted at its block `ceil_q(D)/q`. (d) The watermark reports the revision first at
+/// `S = ceil_q(p + q + N + C)`, `C` the longest line of a route out of `b` in the running plan
+/// (case 1: `b-main`'s, the output latency; case 2: none), as `EXACT` only, with no fallback.
+/// Gate 8: no block from the transaction through the fade allocates or frees on the render thread.
+///
+/// Test value: red if the successor carries `b`'s ducked fader or its send (they stay muted), does
+/// not arm them (they pop in at `S`), fires without waiting `D`, schedules `S` without `C` or
+/// before the duck ends, or reports the planned duck-swap as a fallback.
+#[test]
+fn a_restarted_strip_ducks_then_fades_in_after_s() {
+    assert_installed();
+    let _ = session::parse_session_json(r#"{"warm":0}"#);
+    for limited in [false, true] {
+        let before = duck_model(
+            true,
+            if limited {
+                vec![native("blim", "miso.true-peak-limiter")]
+            } else {
+                Vec::new()
+            },
+        );
+        let mut after = before.clone();
+        after.tracks[1].inserts.effects.push(compressor("comp"));
+        let latency = Rig::boot(&before).latency();
+        assert!(latency > 0, "a's limiter delays the output");
+        let p = (K + 1) * Q;
+        let s = scheduled(p, if limited { 0 } else { latency });
+        let fire = if limited { latency.div_ceil(Q) } else { 0 };
+        let last = s / Q + fire + N.div_ceil(Q) + 4;
+        let what = if limited { "limited b" } else { "plain b" };
+        let reference = duck_run(
+            &before,
+            &[(K + 1, reference_mutes(&before), EditPath::Live)],
+            last,
+            &frame_b,
+        );
+        let run = duck_run(
+            &before,
+            &[(K + 1, upsert_b(&after), EditPath::Rebuild)],
+            last,
+            &frame_b,
+        );
+        let (first, flags, [before_count, after_count]) = run.adopted.expect("adopted");
+        assert_eq!(first, s, "{what}: the duck-swap is adopted at S");
+        assert_eq!(flags, OUTCOME_EXACT, "{what}");
+        assert_eq!(before_count, after_count, "{what}: no fallback");
+        assert_eq!(run.churn, 0, "{what}: the render thread allocates nothing");
+        for block in 0..s / Q {
+            same(
+                &run.blocks[block as usize],
+                &reference.blocks[block as usize],
+                block,
+            );
+        }
+        let fresh = fresh_fade_run(&after, s, fire, last + 1 - s / Q);
+        for block in s / Q..=last {
+            same(
+                &run.blocks[block as usize],
+                &fresh[(block - s / Q) as usize],
+                block,
+            );
+        }
+        assert!(
+            fresh
+                .last()
+                .expect("a block")
+                .iter()
+                .any(|bits| f32::from_bits(*bits) != 0.0),
+            "{what}: the fade is heard"
+        );
+    }
+}
+
+/// #1324a gate 2. `a` and `b` audible, `b`'s source exact zeros: gate 1's transaction leaves every
+/// block equal to a run with no transaction, the duck-swap's adoption included.
+///
+/// Test value: red if the duck-swap ducks or restarts a strip the edit did not touch.
+#[test]
+fn an_untouched_strip_plays_through_a_duck_swap() {
+    assert_installed();
+    let before = duck_model(false, Vec::new());
+    let mut after = before.clone();
+    after.tracks[1].inserts.effects.push(compressor("comp"));
+    let s = scheduled((K + 1) * Q, Rig::boot(&before).latency());
+    let last = s / Q + N.div_ceil(Q) + 4;
+    let silent = |_: u64| [0.0_f32; 2];
+    let reference = duck_run(&before, &[], last, &silent);
+    let run = duck_run(
+        &before,
+        &[(K + 1, upsert_b(&after), EditPath::Rebuild)],
+        last,
+        &silent,
+    );
+    assert_eq!(run.adopted.map(|(first, ..)| first), Some(s));
+    for block in 0..=last {
+        same(
+            &run.blocks[block as usize],
+            &reference.blocks[block as usize],
+            block,
+        );
+    }
+    assert!(
+        reference.blocks[last as usize]
+            .iter()
+            .any(|bits| f32::from_bits(*bits) != 0.0),
+        "a is heard"
+    );
+}
+
+/// The longest run of frames from `from` on in which both output channels are exact `+0.0`, and
+/// where it starts.
+fn longest_silence(blocks: &[Vec<u32>], from: u64) -> (u64, u64) {
+    let frames = blocks.len() as u64 * Q;
+    let silent = |frame: u64| {
+        let block = &blocks[(frame / Q) as usize];
+        let index = (frame % Q) as usize;
+        f32::from_bits(block[index]) == 0.0 && f32::from_bits(block[FRAMES + index]) == 0.0
+    };
+    let (mut best, mut start, mut run) = ((0, 0), 0, 0);
+    for frame in from..frames {
+        if silent(frame) {
+            if run == 0 {
+                start = frame;
+            }
+            run += 1;
+            if run > best.0 {
+                best = (run, start);
+            }
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+
+/// #1324a gate 3. `a` is muted and `b` holds a true-peak limiter then a compressor, with 64
+/// samples of `delay_samples`. Each edit that restarts `b` (an insert added, removed, the inserts
+/// reordered, `delay_samples`, the limiter's prepared `lookahead_ms`) is a rebuild that ducks `b`:
+/// the output holds at least `q` exact-zero frames on both channels, a run that reaches `S`. A
+/// value-only fader edit and a re-pointed `pre_fader` send (D15-9: ramped at route level, never a
+/// duck of its source) produce no such run. An insert's quality is not listed: every launch
+/// effect declares only `normal`, so no session can change one.
+///
+/// Test value: red if an edit kind restarts `b` without the duck (no silence before `S`), or if a
+/// re-pointed send or a fader edit ducks its strip.
+#[test]
+fn every_restarting_edit_ducks_and_a_send_or_value_edit_does_not() {
+    assert_installed();
+    let mut base = duck_model(
+        true,
+        vec![native("blim", "miso.true-peak-limiter"), compressor("comp")],
+    );
+    let builtins = &mut base.tracks[1].builtins;
+    for channel in [&mut builtins.left, &mut builtins.right] {
+        channel.delay_samples = 64;
+    }
+    let edit = |change: &dyn Fn(&mut SessionModel)| {
+        let mut after = base.clone();
+        change(&mut after);
+        after
+    };
+    let ducking: [(&str, SessionModel); 5] = [
+        (
+            "an insert added",
+            edit(&|model| model.tracks[1].inserts.effects.push(compressor("comp2"))),
+        ),
+        (
+            "an insert removed",
+            edit(&|model| model.tracks[1].inserts.effects.truncate(1)),
+        ),
+        (
+            "the inserts reordered",
+            edit(&|model| model.tracks[1].inserts.effects.reverse()),
+        ),
+        (
+            "delay_samples",
+            edit(&|model| {
+                model.tracks[1].builtins.left.delay_samples = 32;
+                model.tracks[1].builtins.right.delay_samples = 32;
+            }),
+        ),
+        (
+            "lookahead_ms",
+            edit(&|model| {
+                model.tracks[1].inserts.effects[0].params = vec![session::EffectParam {
+                    parameter_id: 3,
+                    channel: session::ParameterChannel::Both,
+                    unit: session::ParameterUnit::Milliseconds,
+                    value: 2.0,
+                }];
+            }),
+        ),
+    ];
+    let p = (K + 1) * Q;
+    let last = p / Q + (2 * N).div_ceil(Q) + 16;
+    for (what, after) in &ducking {
+        let run = duck_run(
+            &base,
+            &[(K + 1, upsert_b(after), EditPath::Rebuild)],
+            last,
+            &frame_b,
+        );
+        let (s, ..) = run.adopted.expect("adopted");
+        let (length, start) = longest_silence(&run.blocks, p);
+        assert!(
+            length >= Q && start < s && start + length >= s,
+            "{what}: {length} silent frames from {start}, S = {s}"
+        );
+    }
+    let mut quieter = base.tracks[1].fader.clone();
+    quieter.left_db = -6.0;
+    quieter.right_db = -6.0;
+    let repointed = edit(&|model| {
+        for route in &mut model.routes {
+            if route.id.as_str() == "b-send" {
+                route.source = track_tap("b", session::SendTap::PostFader);
+            }
+        }
+    });
+    let send = repointed
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "b-send")
+        .expect("b's send")
+        .clone();
+    let quiet: [(&str, Vec<SessionEdit>, EditPath); 2] = [
+        (
+            "a fader edit",
+            protocol::control_core::fader_edits(&id("b"), &quieter),
+            EditPath::Live,
+        ),
+        (
+            "a re-pointed send",
+            vec![SessionEdit::UpsertRoute { route: send }],
+            EditPath::Rebuild,
+        ),
+    ];
+    for (what, transaction, path) in quiet {
+        let run = duck_run(&base, &[(K + 1, transaction, path)], last, &frame_b);
+        assert!(run.adopted.is_some(), "{what}");
+        let (length, start) = longest_silence(&run.blocks, p);
+        assert!(length < Q, "{what}: {length} silent frames from {start}");
+    }
+}
+
+/// #1324a gate 6 (#1324 D5). Gate 1's duck-swap (case 1), and after block `K + 3` a second
+/// transaction removes the compressor again. It commits, writes `b` no second mute (`b` and its
+/// send are in the running plan's duck overlay) and is adopted at exactly gate 1's `S`, which
+/// counts `C`, the line of `b`'s route into the output. Every block equals the reference that
+/// live-mutes `b` and its send after block `K` and live-unmutes both right after the block that
+/// ends at `S`: the revert restores the strip with the fade-in at `S`, from the ducked level.
+///
+/// Test value: red if a revert during the duck leaves `b` muted (a base without the overlay), steps
+/// it in at full gain, writes a second ramped mute (the blocks before `S` differ), or moves `S`.
+#[test]
+fn a_revert_during_the_duck_fades_back_in_at_s() {
+    assert_installed();
+    let _ = session::parse_session_json(r#"{"warm":0}"#);
+    let before = duck_model(true, Vec::new());
+    let mut after = before.clone();
+    after.tracks[1].inserts.effects.push(compressor("comp"));
+    let s = scheduled((K + 1) * Q, Rig::boot(&before).latency());
+    let last = (s + N) / Q + 8;
+    let reference = duck_run(
+        &before,
+        &[
+            (K + 1, reference_mutes(&before), EditPath::Live),
+            (s / Q, reference_unmutes(&before), EditPath::Live),
+        ],
+        last,
+        &frame_b,
+    );
+    let run = duck_run(
+        &before,
+        &[
+            (K + 1, upsert_b(&after), EditPath::Rebuild),
+            (K + 4, upsert_b(&before), EditPath::Rebuild),
+        ],
+        last,
+        &frame_b,
+    );
+    assert_eq!(
+        run.adopted.map(|(first, ..)| first),
+        Some(s),
+        "the revert inherits S"
+    );
+    for block in 0..=last {
+        same(
+            &run.blocks[block as usize],
+            &reference.blocks[block as usize],
+            block,
+        );
+    }
 }
