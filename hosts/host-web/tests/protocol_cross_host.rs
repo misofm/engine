@@ -216,7 +216,7 @@ impl Browser {
             .control_request_mut(length)
             .expect("the request staging")[..frame.len()]
             .copy_from_slice(frame);
-        let result = self.host.control_command(length, None);
+        let result = self.host.control_command(length);
         (result, self.host.control_response().to_vec())
     }
 
@@ -253,7 +253,7 @@ impl Browser {
     }
 
     fn service(&mut self) {
-        assert_eq!(self.host.service(None), RESULT_OK, "browser service");
+        assert_eq!(self.host.service(), RESULT_OK, "browser service");
     }
 }
 

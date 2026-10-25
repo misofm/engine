@@ -617,8 +617,57 @@ fn with_response_staging<R>(operation: impl FnOnce(&RefCell<ResponseStaging>) ->
     operation(response_staging())
 }
 
+/// Every use of the spectrum staging goes through here, so the staging's analysis never outlives
+/// the stream it follows (#1618, #1596).
 fn with_spectrum_staging<R>(operation: impl FnOnce(&RefCell<SpectrumStaging>) -> R) -> R {
-    operation(spectrum_staging())
+    let slot = spectrum_staging();
+    if let Ok(mut staging) = slot.try_borrow_mut() {
+        end_a_stream_the_session_ended(&mut staging);
+    }
+    operation(slot)
+}
+
+/// End the staging analysis's stream when the live host's session no longer runs one (#1618,
+/// #1596 D3). The session's core services, and so promotes the plans render adopted, on nearly
+/// every control call (every command, `service`, the event dequeue, both session seeks, the
+/// source seeks and the seek report), and a promotion that does not keep the stream ends it with
+/// the session's own analysis, never with this instance's. So the check is made lazily, before
+/// any use of the staging, and no serviced call can be missed: the analysis ends, the staged
+/// window is dropped and the record is written from the service, with the staging analysis's
+/// facts, as `spectrum_stream_stop` writes it. Without it `spectrum_stream_reset` would answer ok
+/// and `spectrum_stream_analysis` would re-analyze the last window of a stream that no longer
+/// exists. An instance with no live host (an analysis Worker), or whose host is borrowed or not
+/// ready, checks nothing. Allocation-free.
+fn end_a_stream_the_session_ended(staging: &mut SpectrumStaging) {
+    if !staging
+        .analysis
+        .as_ref()
+        .is_some_and(SpectrumAnalysis::stream_active)
+    {
+        return;
+    }
+    let ended = LIVE_HOST.with(|slot| {
+        let slot = slot.try_borrow().ok()?;
+        let host = &slot.as_ref()?.host;
+        match host.spectrum_stream_running()? {
+            true => None,
+            false => Some(host.spectrum_stream_metadata().copied()),
+        }
+    });
+    let Some(metadata) = ended else {
+        return;
+    };
+    staging.capture_len = 0;
+    staging.result_len = 0;
+    if let Some(metadata) = metadata {
+        write_stream_metadata(&mut staging.stream_metadata, &metadata);
+    }
+    if let Some(analysis) = staging.analysis.as_mut() {
+        analysis.end_stream();
+        staging.stream_metadata.analysis_epoch = analysis.analysis_epoch();
+        staging.stream_metadata.history_start_sample = analysis.history_start_sample();
+    }
+    staging.stream_metadata.result = RESULT_OK;
 }
 
 fn with_observation_staging<R>(operation: impl FnOnce(&RefCell<ObservationStaging>) -> R) -> R {
@@ -3405,9 +3454,7 @@ pub extern "C" fn miso_engine_web_v1_source_seek_at(
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_session_seek(handle: u32, generation: u64, frame: u64) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        with_promotion_analysis(host, |host, analysis| {
-            host.session_seek(analysis, generation, frame, None)
-        })
+        host.session_seek(generation, frame, None)
     })
 }
 
@@ -3424,9 +3471,7 @@ pub extern "C" fn miso_engine_web_v1_session_seek_at(
     anchor: u64,
 ) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        with_promotion_analysis(host, |host, analysis| {
-            host.session_seek(analysis, generation, frame, Some(anchor))
-        })
+        host.session_seek(generation, frame, Some(anchor))
     })
 }
 
@@ -3491,50 +3536,6 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
     })
 }
 
-/// Run a host operation that can run the session's promotion of an adopted plan's spectrum
-/// captures (`service`, and a structural `control_command`, which promotes the candidate render
-/// took before it rebuilds), with the staging's analysis for the host to end (#1618, #1596). A
-/// promotion that does not keep the stream ends the analysis with it; the staging's stream record
-/// and staged window then describe a stream that no longer exists, so the record is written from
-/// the service and the window is dropped, as `spectrum_stream_stop` does. Without that,
-/// `spectrum_stream_analysis` would adopt the stale record again and re-report the window. The
-/// session ended the stream with its own analysis, so the record's analysis facts are the
-/// staging's, as a stop through `spectrum_stream_stop` writes them.
-/// A staging that is borrowed has no analysis running: the operation gets `None`.
-fn with_promotion_analysis<R>(
-    host: &mut AudioWorkletEngineHost,
-    operation: impl FnOnce(&mut AudioWorkletEngineHost, Option<&mut SpectrumAnalysis>) -> R,
-) -> R {
-    with_spectrum_staging(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return operation(host, None);
-        };
-        let staging = &mut *staging;
-        let was_running = staging
-            .analysis
-            .as_ref()
-            .is_some_and(SpectrumAnalysis::stream_active);
-        let result = operation(host, staging.analysis.as_mut());
-        let running = staging
-            .analysis
-            .as_ref()
-            .is_some_and(SpectrumAnalysis::stream_active);
-        if was_running && !running {
-            staging.capture_len = 0;
-            staging.result_len = 0;
-            if let Some(metadata) = host.spectrum_stream_metadata().copied() {
-                write_stream_metadata(&mut staging.stream_metadata, &metadata);
-            }
-            if let Some(analysis) = staging.analysis.as_ref() {
-                staging.stream_metadata.analysis_epoch = analysis.analysis_epoch();
-                staging.stream_metadata.history_start_sample = analysis.history_start_sample();
-            }
-            staging.stream_metadata.result = RESULT_OK;
-        }
-        result
-    })
-}
-
 /// Run the control plane's service step once (issue #1381a D5, #1348 D1): reclaim every plan and
 /// attachment render has displaced, in the caller's thread and never in render. Control side
 /// only: the control Worker, or in `single` mode the worklet's message handler, never `process()`.
@@ -3544,9 +3545,7 @@ fn with_promotion_analysis<R>(
 /// that is not ready; an epoch failure as [`RESULT_INTERNAL`] with the session's diagnostic.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        with_promotion_analysis(host, AudioWorkletEngineHost::service)
-    })
+    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| host.service())
 }
 
 /// Declare a discontinuity (issue #1323): the next block need not continue the previous output,
@@ -3564,7 +3563,7 @@ pub extern "C" fn miso_engine_web_v1_service(handle: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_declare_discontinuity(handle: u32) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        with_promotion_analysis(host, AudioWorkletEngineHost::declare_discontinuity)
+        host.declare_discontinuity()
     })
 }
 
@@ -3611,9 +3610,7 @@ pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u
             } else {
                 &[]
             };
-            let result = with_promotion_analysis(host, |host, analysis| {
-                host.control_command_with_document(len, document, analysis)
-            });
+            let result = host.control_command_with_document(len, document);
             // #1386 D7: no host keeps the document after the call.
             *staging.document = Vec::new();
             staging.document_valid = false;
@@ -6152,6 +6149,27 @@ mod spectrum_ffi_tests {
         bytes
     }
 
+    /// A `CAPABILITIES_GET` frame: a plain command, which changes nothing.
+    fn capabilities_frame(request: u64) -> Vec<u8> {
+        use protocol::{
+            CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
+        };
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::CapabilitiesGet,
+                },
+                &mut bytes,
+            )
+            .expect("a capabilities frame");
+        bytes.truncate(length);
+        bytes
+    }
+
     /// A `SPECTRUM_CONFIGURE` frame for one left-channel tap at `track`'s post-pan point.
     fn retarget_spectrum_frame(request: u64, track: &str) -> Vec<u8> {
         use protocol::{
@@ -6185,19 +6203,36 @@ mod spectrum_ffi_tests {
         bytes
     }
 
+    /// The control exports that run the session's service step, and so its promotion of the
+    /// plans render adopted (one row each of the test below).
+    #[derive(Clone, Copy, Debug)]
+    enum Promoter {
+        Service,
+        StructuralCommand,
+        PlainCommand,
+        AnchoredSessionSeek,
+        EventDequeue,
+    }
+
     /// A promotion that does not keep the spectrum stream ends the instance's analysis with it
     /// (#1618, m1 and m7 of the batch 12b review; #1596), whichever control export runs the
-    /// session's promotion: the service step, or a structural control command, which promotes the
-    /// candidate render took before it rebuilds. A `SPECTRUM_CONFIGURE` moves the tap from the
+    /// session's promotion: the service step, a structural or a plain control command, the
+    /// anchored session seek or the event dequeue. A `SPECTRUM_CONFIGURE` moves the tap from the
     /// output to `eq0`, so the successor's capture is fresh and the session's stream ends.
     ///
-    /// Test value: red if `miso_engine_web_v1_service` or `miso_engine_web_v1_control_command`
-    /// lets the session's promotion end the stream without the staging's analysis: the analysis
-    /// stays active, so `spectrum_stream_reset` answers ok instead of a wrong state and
-    /// `spectrum_stream_analysis` re-analyzes the last window of a stream that no longer exists.
+    /// Test value: red if any of those exports lets the session's promotion end the stream while
+    /// the staging's analysis runs on: `spectrum_stream_reset` then answers ok instead of a wrong
+    /// state, the record is not written as stopped, and `spectrum_stream_analysis` re-analyzes the
+    /// last window of a stream that no longer exists.
     #[test]
     fn a_promotion_that_drops_the_stream_ends_the_analysis() {
-        for by_service in [true, false] {
+        for promoter in [
+            Promoter::Service,
+            Promoter::StructuralCommand,
+            Promoter::PlainCommand,
+            Promoter::AnchoredSessionSeek,
+            Promoter::EventDequeue,
+        ] {
             stage_left_output_request();
             let document =
                 include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -6252,16 +6287,37 @@ mod spectrum_ffi_tests {
                     .expect("the control staging");
             assert_eq!(result, RESULT_OK);
             render(2);
-            if by_service {
-                assert_eq!(miso_engine_web_v1_service(handle), RESULT_OK);
-            } else {
-                // A structural edit promotes the candidate render took before it rebuilds.
-                let revision = with_host(handle, 0, AudioWorkletEngineHost::committed_revision);
-                let (result, _) =
+            let result = match promoter {
+                Promoter::Service => miso_engine_web_v1_service(handle),
+                Promoter::StructuralCommand => {
+                    let revision = with_host(handle, 0, AudioWorkletEngineHost::committed_revision);
                     native_staging::control_command(handle, &adding_a_strip_frame(2, revision))
-                        .expect("the control staging");
-                assert_eq!(result, RESULT_OK);
-            }
+                        .expect("the control staging")
+                        .0
+                }
+                Promoter::PlainCommand => {
+                    native_staging::control_command(handle, &capabilities_frame(2))
+                        .expect("the control staging")
+                        .0
+                }
+                // The next block is 18; the seek lands there under a new generation.
+                Promoter::AnchoredSessionSeek => {
+                    miso_engine_web_v1_session_seek_at(handle, 2, 0, 18 * 128)
+                }
+                Promoter::EventDequeue => {
+                    miso_engine_web_v1_control_event(handle, crate::EVENT_LANE_RELIABLE)
+                }
+            };
+            assert_eq!(result, RESULT_OK, "{promoter:?}");
+            assert_eq!(
+                with_host(
+                    handle,
+                    None,
+                    AudioWorkletEngineHost::spectrum_stream_running
+                ),
+                Some(false),
+                "{promoter:?} promoted the successor, whose capture runs no stream"
+            );
 
             assert!(
                 with_spectrum_staging(|slot| {
@@ -6270,7 +6326,7 @@ mod spectrum_ffi_tests {
                         .as_ref()
                         .is_some_and(|analysis| !analysis.stream_active())
                 }),
-                "the analysis ended with the stream (by_service = {by_service})"
+                "the analysis ended with the stream ({promoter:?})"
             );
             // The record says what `spectrum_stream_stop` would: the facts of the staging's
             // analysis (its history reset once, below), not of the session's, which has none.
@@ -6289,17 +6345,17 @@ mod spectrum_ffi_tests {
             assert!(analysis_epoch > 0, "the reset advanced the history's epoch");
             assert_eq!(
                 record_epoch, analysis_epoch,
-                "the record carries the staging analysis's facts (by_service = {by_service})"
+                "the record carries the staging analysis's facts ({promoter:?})"
             );
             assert_eq!(
                 miso_engine_web_v1_spectrum_stream_reset(),
                 RESULT_WRONG_STATE,
-                "there is no stream to reset (by_service = {by_service})"
+                "there is no stream to reset ({promoter:?})"
             );
             assert_ne!(
                 miso_engine_web_v1_spectrum_stream_analysis(),
                 RESULT_OK,
-                "the analysis does not re-report the last window (by_service = {by_service})"
+                "the analysis does not re-report the last window ({promoter:?})"
             );
             assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
         }

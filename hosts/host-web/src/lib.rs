@@ -1568,24 +1568,17 @@ impl ReadyOwnership {
         request: &[u8],
         document: &[u8],
         output_capacity: u64,
-        analysis: Option<&mut SpectrumAnalysis>,
     ) -> Result<usize, control_plane::CommandError> {
-        self.run_control(
-            analysis,
-            control_plane::CommandError::Backpressure,
-            |control| control.command_with_document(request, document, output_capacity),
-        )
+        self.run_control(control_plane::CommandError::Backpressure, |control| {
+            control.command_with_document(request, document, output_capacity)
+        })
     }
 
     /// Declare a discontinuity through the control plane (#1323), the function the C ABI's
     /// `miso_engine_v1_declare_discontinuity` runs. A plan it publishes is kept and counted as
     /// [`Self::run_command`] keeps a rebuild's.
-    fn declare_discontinuity(
-        &mut self,
-        analysis: Option<&mut SpectrumAnalysis>,
-    ) -> Result<(), control_plane::CommandError> {
+    fn declare_discontinuity(&mut self) -> Result<(), control_plane::CommandError> {
         self.run_control(
-            analysis,
             control_plane::CommandError::Backpressure,
             WebSession::declare_discontinuity,
         )
@@ -1598,7 +1591,6 @@ impl ReadyOwnership {
     /// declares nothing and so publishes nothing.
     fn session_seek(
         &mut self,
-        analysis: Option<&mut SpectrumAnalysis>,
         generation: u64,
         timeline_frame: u64,
         anchor_sample: Option<u64>,
@@ -1609,7 +1601,6 @@ impl ReadyOwnership {
                 .session_seek(generation, timeline_frame, anchor_sample);
         }
         self.run_control(
-            analysis,
             SessionSeekFailure::Declaration(control_plane::CommandError::Backpressure),
             |control| control.session_seek(generation, timeline_frame, None),
         )
@@ -1618,13 +1609,8 @@ impl ReadyOwnership {
     /// Run one control-plane call that may publish a replacement plan (#1290a, #1323): reclaim
     /// first, check the room for the plan's tables (refusing with `full` when there is none, with
     /// nothing run), run `call`, and keep the tables of a plan it published for its adoption block.
-    ///
-    /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
-    /// stream: a promotion `call` runs in the core (a structural edit promotes the candidate render
-    /// took before it rebuilds) ends it when the promotion ends the stream (#1618).
     fn run_control<T, E>(
         &mut self,
-        analysis: Option<&mut SpectrumAnalysis>,
         full: E,
         call: impl FnOnce(&mut WebSession) -> Result<T, E>,
     ) -> Result<T, E> {
@@ -1632,10 +1618,8 @@ impl ReadyOwnership {
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
             return Err(full);
         }
-        let stream = self.spectrum_stream();
         let before = self.control.newest_plan_epoch();
         let result = call(&mut self.control);
-        self.end_ended_stream(stream, analysis);
         // Whatever the preparer left is taken: a command refused after its preparation leaves
         // tables nothing will read.
         let prepared = self
@@ -1740,34 +1724,6 @@ impl ReadyOwnership {
         let control = &self.control;
         self.pending_shapes
             .retain(|entry| entry.adopted || control.holds_plan_epoch(entry.epoch));
-    }
-
-    /// The capture epoch of the session's running spectrum stream, `Some(None)` for a running
-    /// stream with no epoch, or `None` when no stream runs (#1596).
-    fn spectrum_stream(&self) -> Option<Option<u64>> {
-        self.control
-            .spectrum_monitor()
-            .service()
-            .filter(|service| service.stream_active())
-            .map(SpectrumService::stream_epoch)
-    }
-
-    /// End `analysis`'s stream when the session's stream that ran as `before`
-    /// ([`Self::spectrum_stream`]) no longer runs (#1618, #1596): the core promotes the plans
-    /// render adopted, and a promotion that does not keep the stream ends it with the session's
-    /// own analysis, never with the instance's. Without this the instance's analysis would keep
-    /// analyzing a stream that no longer exists. Allocation-free.
-    fn end_ended_stream(
-        &self,
-        before: Option<Option<u64>>,
-        analysis: Option<&mut SpectrumAnalysis>,
-    ) {
-        if before.is_some()
-            && self.spectrum_stream() != before
-            && let Some(analysis) = analysis
-        {
-            analysis.end_stream();
-        }
     }
 
     // REALTIME_POLICY_BEGIN
@@ -2328,14 +2284,10 @@ impl AudioWorkletEngineHost {
     /// `protocol.failure` (the replay cache), and a retry must take a new request ID to meet the
     /// refusal again.
     ///
-    /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
-    /// stream (see [`Self::service`]); a plan this command's reclaim promotes ends it when the
-    /// stream is not kept.
-    ///
     /// It is [`Self::control_command_with_document`] with an empty document, so a
     /// `SESSION_REPLACE` frame sent here is refused `session.replace.document_length`.
-    pub fn control_command(&mut self, len: u32, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
-        self.control_command_with_document(len, &[], analysis)
+    pub fn control_command(&mut self, len: u32) -> u32 {
+        self.control_command_with_document(len, &[])
     }
 
     /// [`Self::control_command`] with the document a `SESSION_REPLACE` frame names (#1697, #1386
@@ -2344,12 +2296,7 @@ impl AudioWorkletEngineHost {
     /// `miso_engine_v1_submit_document_command`, and every other command ignores it. The browser
     /// decodes nothing in it either. `miso_engine_web_v1_control_command` passes the document
     /// `miso_engine_web_v1_replace_document_ptr` staged. Results as [`Self::control_command`].
-    pub fn control_command_with_document(
-        &mut self,
-        len: u32,
-        document: &[u8],
-        analysis: Option<&mut SpectrumAnalysis>,
-    ) -> u32 {
+    pub fn control_command_with_document(&mut self, len: u32, document: &[u8]) -> u32 {
         self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -2361,7 +2308,7 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        match ready.run_command(request, document, CONTROL_FRAME_BYTES, analysis) {
+        match ready.run_command(request, document, CONTROL_FRAME_BYTES) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -2385,7 +2332,7 @@ impl AudioWorkletEngineHost {
     /// Results: [`RESULT_OK`]; [`RESULT_WRONG_STATE`] for a host that is not ready; and the
     /// refusals of [`Self::control_command`] for a rebuild, with the core's diagnostic at
     /// [`Self::control_response`]. A refusal changes nothing.
-    pub fn declare_discontinuity(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
+    pub fn declare_discontinuity(&mut self) -> u32 {
         self.control_response = ControlResponse::None;
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -2393,7 +2340,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        match ready.declare_discontinuity(analysis) {
+        match ready.declare_discontinuity() {
             Ok(()) => self.record(RESULT_OK),
             Err(error) => self.refuse_control(&error),
         }
@@ -2559,21 +2506,15 @@ impl AudioWorkletEngineHost {
     /// so a periodic tick never overwrites a refusal the host has yet to read.
     ///
     /// An epoch failure is sticky: the host fails with the session's diagnostic.
-    ///
-    /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
-    /// stream, which a promotion this step performs ends when it does not keep the stream (#1618);
-    /// the browser's audio thread passes `None`.
-    pub fn service(&mut self, analysis: Option<&mut SpectrumAnalysis>) -> u32 {
+    pub fn service(&mut self) -> u32 {
         if self.status.state != STATE_READY {
             return RESULT_WRONG_STATE;
         }
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let stream = ready.spectrum_stream();
         match ready.control.service() {
             Ok(()) => {
-                ready.end_ended_stream(stream, analysis);
                 ready.reclaim_shapes();
                 RESULT_OK
             }
@@ -3010,6 +2951,22 @@ impl AudioWorkletEngineHost {
         self.spectrum_service()
             .ok()
             .and_then(SpectrumService::stream_epoch)
+    }
+
+    /// Whether the session's spectrum stream runs, `Some(false)` without a service, or `None` for
+    /// a host that is not ready (#1596).
+    #[must_use]
+    pub fn spectrum_stream_running(&self) -> Option<bool> {
+        if self.status.state != STATE_READY {
+            return None;
+        }
+        self.ready.as_ref().map(|ready| {
+            ready
+                .control
+                .spectrum_monitor()
+                .service()
+                .is_some_and(SpectrumService::stream_active)
+        })
     }
 
     /// Cancel a pending spectrum capture and discard any completed window.
@@ -3549,7 +3506,6 @@ impl AudioWorkletEngineHost {
     /// reports as that call's does, with nothing pushed. The anchored form declares nothing.
     pub fn session_seek(
         &mut self,
-        analysis: Option<&mut SpectrumAnalysis>,
         generation: u64,
         timeline_frame: u64,
         anchor_sample: Option<u64>,
@@ -3561,7 +3517,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         };
-        match ready.session_seek(analysis, generation, timeline_frame, anchor_sample) {
+        match ready.session_seek(generation, timeline_frame, anchor_sample) {
             Ok(()) => self.record(RESULT_OK),
             Err(SessionSeekFailure::Seek(failure)) => {
                 let code = self.refuse_source(failure);

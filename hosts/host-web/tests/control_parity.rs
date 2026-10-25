@@ -3440,11 +3440,11 @@ fn a_composed_stored_mute_renders_alike_on_both_hosts() {
                         generation += 1;
                         timeline = 2_600;
                         assert_eq!(
-                            browser.host.session_seek(None, generation, timeline, None),
+                            browser.host.session_seek(generation, timeline, None),
                             host_web::RESULT_OK
                         );
                         assert_eq!(
-                            twin.host.session_seek(None, generation, timeline, None),
+                            twin.host.session_seek(generation, timeline, None),
                             host_web::RESULT_OK
                         );
                         c_abi.session_seek(generation, timeline, None);
@@ -4699,14 +4699,14 @@ fn a_refused_source_call_reports_the_same_result_and_diagnostic_on_both_hosts() 
         (
             "session seek, stale generation",
             (invalid, b"source.generation.stale"),
-            Box::new(|rig| rig.host.session_seek(None, 1, 0, None)),
+            Box::new(|rig| rig.host.session_seek(1, 0, None)),
             // SAFETY: As above.
             Box::new(|session| unsafe { capi::miso_engine_v1_session_seek(session, 1, 0) }),
         ),
         (
             "session seek_at, unaligned anchor",
             (invalid, b"source.seek.anchor_unaligned"),
-            Box::new(|rig| rig.host.session_seek(None, 2, 0, Some(1))),
+            Box::new(|rig| rig.host.session_seek(2, 0, Some(1))),
             // SAFETY: As above.
             Box::new(|session| unsafe { capi::miso_engine_v1_session_seek_at(session, 2, 0, 1) }),
         ),
@@ -4868,7 +4868,7 @@ fn the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks() {
         let call_block = 4_u64;
         let frame = 40 * quantum;
         assert_eq!(
-            browser.host.session_seek(None, 2, frame, None),
+            browser.host.session_seek(2, frame, None),
             host_web::RESULT_OK
         );
         c_abi.session_seek(2, frame, None);
@@ -4919,7 +4919,7 @@ fn the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks() {
         let late_frame = 30 * quantum;
         let anchor = 3 * quantum;
         assert_eq!(
-            browser.host.session_seek(None, 3, late_frame, Some(anchor)),
+            browser.host.session_seek(3, late_frame, Some(anchor)),
             host_web::RESULT_OK
         );
         c_abi.session_seek(3, late_frame, Some(anchor));
@@ -5015,7 +5015,7 @@ fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_host
         // 3. An anchored seek at block 10: nothing is declared, the floors stay.
         let anchor = 10 * quantum;
         assert_eq!(
-            browser.host.session_seek(None, 2, 0, Some(anchor)),
+            browser.host.session_seek(2, 0, Some(anchor)),
             host_web::RESULT_OK
         );
         c_abi.session_seek(2, 0, Some(anchor));
@@ -5037,7 +5037,7 @@ fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_host
 
         // 1. A refused plain seek (generation 2 is stale): nothing is declared.
         assert_eq!(
-            browser.host.session_seek(None, 2, 0, None),
+            browser.host.session_seek(2, 0, None),
             host_web::RESULT_INVALID_ARGUMENT
         );
         assert_eq!(
@@ -5062,10 +5062,7 @@ fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_host
         // 2. An accepted plain seek: it declares, the floors reset and the seek applies at the
         // next block.
         let call = 14_u64;
-        assert_eq!(
-            browser.host.session_seek(None, 3, 0, None),
-            host_web::RESULT_OK
-        );
+        assert_eq!(browser.host.session_seek(3, 0, None), host_web::RESULT_OK);
         c_abi.session_seek(3, 0, None);
         for block in call..call + 4 {
             session_block(
@@ -7257,7 +7254,7 @@ fn the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek() 
     for block in 0..BLOCKS {
         if block == SEEK_BLOCK {
             assert_eq!(
-                browser.host.session_seek(None, 2, SEEK_TIMELINE, None),
+                browser.host.session_seek(2, SEEK_TIMELINE, None),
                 host_web::RESULT_OK,
                 "browser session seek"
             );
@@ -7382,9 +7379,7 @@ fn a_session_replace_answers_and_renders_alike_on_both_hosts() {
                 .control_request_mut(length)
                 .expect("the control request staging")[..frame.len()]
                 .copy_from_slice(&frame);
-            let b_code = browser
-                .host
-                .control_command_with_document(length, document, None);
+            let b_code = browser.host.control_command_with_document(length, document);
             let b_reply = browser.host.control_response().to_vec();
             drain_events(&mut browser.host);
             let (c_code, c_reply) = c_abi.send_document_raw(&frame, document);

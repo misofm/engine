@@ -2014,7 +2014,7 @@ fn designate_master(host: &mut AudioWorkletEngineHost, strip: &str) {
     host.control_request_mut(frame.len() as u32)
         .expect("the control staging")[..frame.len()]
         .copy_from_slice(&frame);
-    assert_eq!(host.control_command(frame.len() as u32, None), RESULT_OK);
+    assert_eq!(host.control_command(frame.len() as u32), RESULT_OK);
     let index = host
         .live_control_tracks()
         .iter()
@@ -2122,7 +2122,7 @@ fn native_set_control_timeline_digest_pins_the_wasm_parity() {
         host.control_request_mut(length)
             .expect("the control request staging")[..frame.len()]
             .copy_from_slice(frame);
-        assert_eq!(host.control_command(length, None), RESULT_OK);
+        assert_eq!(host.control_command(length), RESULT_OK);
         // A commit queues its reliable events; drain them the way the worklet does.
         for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
             loop {
@@ -2210,7 +2210,7 @@ fn automation_transcript(document: &[u8]) -> Vec<Vec<f32>> {
     for block in 0..BLOCKS {
         if block == SEEK_BLOCK {
             assert_eq!(
-                host.session_seek(None, 2, SEEK_TIMELINE, None),
+                host.session_seek(2, SEEK_TIMELINE, None),
                 RESULT_OK,
                 "the session seek"
             );
@@ -3275,7 +3275,7 @@ fn served_counter(host: &mut AudioWorkletEngineHost, request: u64, id: protocol:
         CommandPayload, CountersRequest, DecodeScratch, DecodedSuccessResponsePayload,
         DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
     };
-    assert_eq!(host.service(None), RESULT_OK);
+    assert_eq!(host.service(), RESULT_OK);
     let codec = ProtocolCodec::default();
     let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
     let length = codec
@@ -3295,7 +3295,7 @@ fn served_counter(host: &mut AudioWorkletEngineHost, request: u64, id: protocol:
     host.control_request_mut(staged)
         .expect("the control request staging")[..length]
         .copy_from_slice(&bytes[..length]);
-    assert_eq!(host.control_command(staged, None), RESULT_OK);
+    assert_eq!(host.control_command(staged), RESULT_OK);
     let mut fields = [0_u16; 64];
     let DecodedTypedResponseFrame::Success {
         payload: DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
@@ -3387,7 +3387,7 @@ fn the_counters_get_reply_counts_the_frames_a_source_removal_discards() {
         host.control_request_mut(staged)
             .expect("the control request staging")[..length]
             .copy_from_slice(&bytes[..length]);
-        assert_eq!(host.control_command(staged, None), RESULT_OK);
+        assert_eq!(host.control_command(staged), RESULT_OK);
         let mut fields = [0_u16; 64];
         assert!(
             matches!(
@@ -5255,7 +5255,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
             host.control_request_mut(frame.len() as u32)
                 .expect("the control staging")[..frame.len()]
                 .copy_from_slice(&frame);
-            assert_eq!(host.control_command(frame.len() as u32, None), RESULT_OK);
+            assert_eq!(host.control_command(frame.len() as u32), RESULT_OK);
         }
         assert_eq!(host.live_control_tracks().len(), 1);
         assert_eq!(
@@ -6980,7 +6980,7 @@ mod structural_apply {
                 .control_request_mut(bytes.len() as u32)
                 .expect("the control staging");
             staging[..bytes.len()].copy_from_slice(bytes);
-            let result = self.host.control_command(bytes.len() as u32, None);
+            let result = self.host.control_command(bytes.len() as u32);
             (result, self.host.control_response().to_vec())
         }
 
@@ -7107,7 +7107,7 @@ mod structural_apply {
         }
         assert_eq!(rig.epoch(), 1);
         assert!(!rig.pending(), "render adopted the plan");
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         assert!(!rig.pending());
         assert_eq!(
             rig.host.status().next_absolute_sample,
@@ -7283,7 +7283,7 @@ mod structural_apply {
             }
             rig.step();
             if rebuild == Some(block) {
-                assert_eq!(rig.host.service(None), RESULT_OK);
+                assert_eq!(rig.host.service(), RESULT_OK);
             }
             reads.push(rig.read_stream());
         }
@@ -7387,7 +7387,7 @@ mod structural_apply {
             "the edit is never refused for a spectrum entry"
         );
         // D7: until render adopts the successor, a service step keeps the running plan's service.
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         assert_eq!(
             rig.host
                 .spectrum_stream_metadata()
@@ -7399,7 +7399,7 @@ mod structural_apply {
         // then a service step keeps the running plan's service.
         rig.step();
         while rig.epoch() == 0 {
-            assert_eq!(rig.host.service(None), RESULT_OK);
+            assert_eq!(rig.host.service(), RESULT_OK);
             assert_eq!(
                 rig.host
                     .spectrum_stream_metadata()
@@ -7411,7 +7411,7 @@ mod structural_apply {
             rig.step();
         }
         assert_eq!(rig.epoch(), 1, "render adopted the successor");
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         assert!(
             rig.host.spectrum_stream_metadata().is_none(),
             "the successor has no spectrum observer, so the browser holds no service"
@@ -7703,7 +7703,7 @@ mod structural_apply {
             (Some(1), Some(0)),
             "the record armed the compressor it named, not the one that took its old index"
         );
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         for _ in 0..4 {
             rig.step();
         }
@@ -7714,7 +7714,7 @@ mod structural_apply {
             rig.host.read_observation_addresses(&[address]).is_ok(),
             "the reader the catalog names is the successor's"
         );
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
     }
 
     /// #1323 gate 2 on the browser: the #1285 removal of a muted track behind a true-peak limiter
@@ -7788,7 +7788,7 @@ mod structural_apply {
             "the removal keeps A's latency (#1285)"
         );
         let revision = rig.host.committed_revision();
-        assert_eq!(rig.host.declare_discontinuity(None), RESULT_OK);
+        assert_eq!(rig.host.declare_discontinuity(), RESULT_OK);
         assert!(rig.pending(), "the declaration published a plan");
         while rig.block < BLOCKS {
             rig.step();
@@ -7857,7 +7857,7 @@ mod structural_apply {
             None,
             "from the declaration on, the output is a fresh boot's"
         );
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
     }
 
     /// Root ruling B16-R9's bookkeeping on the browser: a plain session seek declares the
@@ -7936,7 +7936,7 @@ mod structural_apply {
             let before = newest(&rig);
 
             const FRAME: u64 = 1_280;
-            assert_eq!(rig.host.session_seek(None, 2, FRAME, None), RESULT_OK);
+            assert_eq!(rig.host.session_seek(2, FRAME, None), RESULT_OK);
             let successor = newest(&rig);
             assert_eq!(successor, before + 1, "swap {swap}: one successor");
             assert_eq!(
@@ -7990,7 +7990,7 @@ mod structural_apply {
                 "swap {swap}: the next block adopts it"
             );
             assert_eq!(rig.host.status().state, STATE_READY, "swap {swap}");
-            assert_eq!(rig.host.service(None), RESULT_OK);
+            assert_eq!(rig.host.service(), RESULT_OK);
         }
     }
 
@@ -8072,7 +8072,7 @@ mod structural_apply {
             rig.step();
         }
         assert!(!rig.pending(), "render adopted the newest plan");
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         assert_eq!(
             rig.host.live_control_tracks().len(),
             model.tracks.len() + EDITS as usize,
@@ -8795,7 +8795,7 @@ mod structural_apply {
             1,
             "the subscription the plan had acknowledged is armed on the successor"
         );
-        assert_eq!(rig.host.service(None), RESULT_OK);
+        assert_eq!(rig.host.service(), RESULT_OK);
         for _ in 0..4 {
             rig.step();
         }
