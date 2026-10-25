@@ -325,6 +325,13 @@ report labels): PCM is sequential in the ring, so no gate here sees the label. K
   at `block_start + O_W` before any check reads or any move takes W's lines and sources (the
   pattern #1652 MINOR-2 uses for route comparisons). The first block and the carry share
   `replay_prime`. A predecessor with no source set primes nothing, as in render.
+- **Readiness of a plan whose own prime is pending (verifier MINOR-1, after PASS).** A warm C
+  published while an adopted W has not rendered replays W's `k_W` blocks and then primes `k_C`,
+  so `GraphExecutor::prime_ready` with `prime_pending` checks from W's prime sample
+  `S + O_W - k_W·q` over `k_W + lead_blocks` blocks (the driver walks one more). Without it, a feed
+  of `P_C + q` past the render clock passes the check and C's prime underruns (the source crate's
+  debug assertion aborts). The carry computes the replay sample before it clears the flag and
+  debug-asserts on overflow, as `replay_prime` does.
 - **Gate 4's held seek runs after one growth (MAJOR-2)**, so `O = P` and readiness reads the window
   at `S + O`. A source-read sample `X` is heard at render sample `X` on either plan, so A continued
   takes the same absolute anchor, and its feed (`O` behind) is topped up to the anchor before the
@@ -339,7 +346,10 @@ Test value (attempt 2):
 - `a_warm_successor_displaced_before_its_first_block_keeps_its_prime`: a carry that takes a
   never-rendered warm predecessor's lines and rings without running its pending prime shifts every
   carried track by `P` from C's adoption on. Red on the fix's revert (both widths; first
-  divergence at block 6, C's adoption).
+  divergence at block 6, C's adoption). Its second case (C a second growth, fed `P_C + q` past
+  the clock) is held for one block and then adopted: red (the prime underruns) with readiness
+  that ignores the running plan's pending prime. Every block and the refused call allocate
+  nothing.
 - Gate 4 (held seek after a growth): a readiness check at `S` instead of `S + O` misses a seek
   anchored inside `[S + O, S + O + P + q)` and adopts before it applies. Red with
   `checked_add(0)` in `GraphExecutor::prime_ready` (adopted at block 17, not 19).

@@ -6620,13 +6620,29 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// `lead_blocks` blocks at the block from `block_start` (#1355 D4): its source set's check at
     /// the block's source-read sample `block_start + O`, where the successor's prime begins. A
     /// plan with no source set has no ring to prime. An overflowing sample is never ready.
+    ///
+    /// A warm plan adopted but not yet rendered still owes its own prime of `k` blocks, which the
+    /// successor's carry replays first (#1355 MAJOR-1): the check then starts at its prime's
+    /// sample `block_start + O - k·q` and walks both primes, `k + lead_blocks` blocks.
     fn prime_ready(&self, block_start: u64, lead_blocks: u32) -> bool {
-        let Some(source_read_sample) = block_start.checked_add(self.source_read_offset) else {
+        let Some(set) = self.source_set.as_ref() else {
+            return true;
+        };
+        let owed = if self.prime_pending {
+            self.prime_blocks
+        } else {
+            0
+        };
+        let Some((first_sample, blocks)) = block_start
+            .checked_add(self.source_read_offset)
+            .and_then(|sample| {
+                sample.checked_sub(u64::from(owed) * u64::from(set.envelope.quantum.0))
+            })
+            .zip(lead_blocks.checked_add(owed))
+        else {
             return false;
         };
-        self.source_set
-            .as_ref()
-            .is_none_or(|set| set.driver.prime_ready(source_read_sample, lead_blocks))
+        set.driver.prime_ready(first_sample, blocks)
     }
     // REALTIME_POLICY_END
 
@@ -7081,23 +7097,26 @@ impl GraphExecutor {
         // lines and sources are read or taken, so this plan carries the lines and ring positions
         // that block would have left. (The source set's absence leaves nothing to prime, as in
         // render.)
-        if core::mem::take(&mut predecessor.prime_pending)
+        if predecessor.prime_pending
             && let Some(set) = predecessor.source_set.as_mut()
-            && let Some(source_read_sample) =
-                block_start.checked_add(predecessor.source_read_offset)
         {
-            replay_prime(
-                &mut predecessor.runtime,
-                set,
-                predecessor
-                    .carry
-                    .as_ref()
-                    .map_or(&[][..], |program| &program.sources),
-                predecessor.prime_blocks,
-                source_read_sample,
-                &predecessor.prime_claims,
-                &mut predecessor.prime_sidechains,
-            );
+            let source_read_sample = block_start.checked_add(predecessor.source_read_offset);
+            predecessor.prime_pending = false;
+            match source_read_sample {
+                Some(source_read_sample) => replay_prime(
+                    &mut predecessor.runtime,
+                    set,
+                    predecessor
+                        .carry
+                        .as_ref()
+                        .map_or(&[][..], |program| &program.sources),
+                    predecessor.prime_blocks,
+                    source_read_sample,
+                    &predecessor.prime_claims,
+                    &mut predecessor.prime_sidechains,
+                ),
+                None => debug_assert!(false, "#1355: a displaced prime's sample overflows"),
+            }
         }
         // Issue #1276: every builtin-input move must resolve before anything moves, so a refused
         // hand-over moves nothing at all.

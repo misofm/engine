@@ -1133,6 +1133,8 @@ impl Stream {
         self.feeder.top_up(&mut self.sources, read);
         let mut output = [f32::NAN; QUANTUM as usize * 2];
         let wrong = self.owner.next_absolute_sample() + 1;
+        engine::realtime::audit::reset();
+        let mark = bench_support::alloc::current_thread_counters();
         let refused = self.owner.render_contiguous(
             engine::realtime::RenderIo {
                 output: engine::realtime::PlanarBufferMut::try_new(
@@ -1144,6 +1146,19 @@ impl Stream {
                 .expect("output"),
             },
             wrong,
+        );
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        let audit = engine::realtime::audit::snapshot();
+        assert_eq!(
+            (
+                delta.allocations,
+                delta.reallocations,
+                delta.deallocations,
+                audit.allocations,
+                audit.deallocations
+            ),
+            (0, 0, 0, 0, 0),
+            "the call that adopts the candidate and refuses allocates or frees nothing"
         );
         assert!(
             matches!(
@@ -1401,37 +1416,79 @@ fn an_input_tap_sidechain_from_a_restarted_track_continues() {
 }
 
 /// A warm successor displaced before its first block (#1355 MAJOR-1): render adopts W in a call
-/// it then refuses, so W renders nothing, and the ordinary successor C, prepared from W's
-/// inventory, displaces it at the next block. C's carry replays W's pending prime at C's
-/// adoption block before it takes W's lines and sources, so the output equals A continued.
-/// Both bank widths.
+/// it then refuses, so W renders nothing, and the successor C, prepared from W's inventory,
+/// displaces it. C's carry replays W's pending prime at C's adoption block before it takes W's
+/// lines and sources, so the output equals A continued. C is an ordinary rebuild, adopted at
+/// once, or a second growth: then readiness walks W's pending prime and C's (from the ring head,
+/// `k_W + k_C + 1` blocks), so a feed of only `P_C + q` past the render clock holds C while W
+/// renders its first block, and C is adopted once fed. No block, the refused call included,
+/// allocates or frees on the render thread. Both bank widths.
 #[test]
 fn a_warm_successor_displaced_before_its_first_block_keeps_its_prime() {
     let a = Session::compile(finish(two_tracks()));
     let mut b = two_tracks();
     muted_track(&mut b, "t3", vec![limiter()]);
     to_output(&mut b, "t3");
-    let mut c = b.clone();
-    muted_track(&mut c, "t4", Vec::new());
-    to_output(&mut c, "t4");
-    let (b, c) = (Session::compile(finish(b)), Session::compile(finish(c)));
+    let mut rebuilt = b.clone();
+    muted_track(&mut rebuilt, "t4", Vec::new());
+    to_output(&mut rebuilt, "t4");
+    let mut grown = b.clone();
+    muted_track(
+        &mut grown,
+        "t4",
+        vec![limiter(), {
+            let mut second = limiter();
+            second.id = sid("limiter-2");
+            second
+        }],
+    );
+    to_output(&mut grown, "t4");
+    let b = Session::compile(finish(b));
+    let (rebuilt, grown) = (
+        Session::compile(finish(rebuilt)),
+        Session::compile(finish(grown)),
+    );
     for &backend in Backend::VECTOR {
-        let caps = gate_caps();
-        let mut swapped = alone(&a, &caps, backend, AHEAD);
-        swapped.render(BEFORE);
-        assert_eq!(swapped.grow(&b, &CONFIG), LEAD);
-        swapped.refused_call();
-        assert_eq!(swapped.offset, LEAD);
-        swapped.rebuild(&c);
-        swapped.render(AFTER);
-        assert_eq!(
-            swapped.swap_blocks(),
-            [BEFORE],
-            "{backend:?}: C adopted at once"
-        );
-        let mut continued = alone(&a, &caps, backend, AHEAD);
-        continued.render(BEFORE + AFTER);
-        assert_eq!(first_divergence(&swapped, &continued), None, "{backend:?}");
+        for warm_c in [false, true] {
+            let caps = gate_caps();
+            let mut swapped = alone(&a, &caps, backend, AHEAD);
+            swapped.render(BEFORE);
+            assert_eq!(swapped.grow(&b, &CONFIG), LEAD);
+            swapped.refused_call();
+            assert_eq!(swapped.offset, LEAD);
+            let adopted = if warm_c {
+                assert_eq!(swapped.grow(&grown, &CONFIG), LEAD);
+                // `P_C + q` past the render clock: one block past W's read.
+                swapped.feeder.ahead = LEAD + QUANTUM - swapped.offset;
+                swapped.render(1);
+                assert!(
+                    swapped.swap_blocks().is_empty(),
+                    "{backend:?}: C held while W's prime is pending"
+                );
+                swapped.feeder.ahead = AHEAD * QUANTUM;
+                swapped.render(AFTER - 1);
+                BEFORE + 1
+            } else {
+                swapped.rebuild(&rebuilt);
+                swapped.render(AFTER);
+                BEFORE
+            };
+            assert_eq!(swapped.swap_blocks(), [adopted], "{backend:?}, {warm_c}");
+            for (index, block) in swapped.blocks.iter().enumerate() {
+                assert_eq!(
+                    (block.allocator, block.audit),
+                    ((0, 0, 0), (0, 0)),
+                    "{backend:?}, {warm_c}: block {index}"
+                );
+            }
+            let mut continued = alone(&a, &caps, backend, AHEAD);
+            continued.render(BEFORE + AFTER);
+            assert_eq!(
+                first_divergence(&swapped, &continued),
+                None,
+                "{backend:?}, warm C: {warm_c}"
+            );
+        }
     }
 }
 
