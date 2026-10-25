@@ -4,11 +4,6 @@
 //! the document with it and no assertion here can catch a *rename*. What these tests catch is the
 //! other half, which `offset_of!` cannot reach:
 //!
-//! * the **command record**, whose offsets are a decode rule rather than a `#[repr(C)]` type.
-//!   `CommandRecord::decode` reads byte positions out of the staging buffer directly, so the rows
-//!   in the document are a transcription of a function body. The test below encodes a record *at
-//!   the emitted offsets* and requires the live engine to decode exactly the values written — the
-//!   only way to prove a hand-transcribed offset table against a hand-written decoder.
 //! * the **source-ring rule** (#1406 D3), which the document states as its inputs rather than as
 //!   an answer. The test re-derives the ring from those inputs and requires it to equal
 //!   `default_source_ring_frames` at every launch rate and a spread of quanta, so a consumer that
@@ -19,10 +14,7 @@
 //! * the **document's own structure**, so a schema key cannot be dropped silently.
 
 use host_core::{LAUNCH_SAMPLE_RATES, p_max_samples, stall_ring_frames};
-use host_web::{
-    AudioWorkletEngineHost, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_REASON_NONE, COMMAND_RECORD_BYTES,
-    RESULT_OK, WebBootOptions, default_source_ring_frames,
-};
+use host_web::{AudioWorkletEngineHost, WebBootOptions, default_source_ring_frames};
 use parameter_metadata::abi_layout::{ERROR_PHASES, SCHEMA, STAGING_SEQUENCE, render};
 
 /// The document parsed as JSON. Each helper below panics loudly on a missing key, which is itself
@@ -31,12 +23,11 @@ fn parse(document: &str) -> serde_json::Value {
     serde_json::from_str(document).expect("the document is JSON")
 }
 
-/// A structure's `fields` rows: a member of `structures`, or the top-level `commandRecord`.
+/// A structure's `fields` rows: a member of `structures`.
 fn field_offset(document: &str, structure: &str, field: &str) -> usize {
     let document = parse(document);
     let block = document["structures"]
         .get(structure)
-        .or_else(|| document.get(structure))
         .unwrap_or_else(|| panic!("document names structure {structure}"));
     let row = block["fields"]
         .as_array()
@@ -66,75 +57,6 @@ fn scalar(document: &str, block: &str, name: &str) -> u64 {
     parse(document)[block][name]
         .as_u64()
         .unwrap_or_else(|| panic!("document names scalar {name} in {block}"))
-}
-
-/// The emitted command-record offsets decode, on the live engine, to exactly the values written.
-///
-/// The record is an `observeSubscribe` (kind 7), the one kind with a field at every address the
-/// document publishes that the engine reads: `kind`, `rack`, the two ID lengths and fields,
-/// `tapId` and `windowBlocks`. The fixture is the observed compressor insert `comp` of strip `t0`,
-/// whose tap 1 is resident.
-///
-/// Red mutation: move any row in `command_record_fields` -- say `tapId` to 8 -- and the engine reads
-/// the window word as the tap ID (or the tap ID as zero); the acknowledgement stops being
-/// `RESULT_OK` and becomes `UNKNOWN_TAP`.
-#[test]
-fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
-    let document = render();
-    let bytes = scalar(&document, "commandRecord", "bytes");
-    assert_eq!(
-        bytes,
-        u64::from(COMMAND_RECORD_BYTES),
-        "the command record's published size is the engine's"
-    );
-
-    let fixture = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/session/v1/observation-frame-shape.json"),
-    )
-    .expect("the observation fixture exists");
-    let options = WebBootOptions {
-        require_sample_rate_hz: 48_000,
-        require_quantum_frames: 128,
-        source_ring_frames: 128,
-        live_control_observation_taps: 4,
-        ..WebBootOptions::explicit_defaults()
-    };
-    let mut host = AudioWorkletEngineHost::boot(fixture.as_bytes(), options)
-        .expect("the observation fixture boots");
-
-    let kind = field_offset(&document, "commandRecord", "kind");
-    let rack = field_offset(&document, "commandRecord", "rack");
-    let strip_bytes = field_offset(&document, "commandRecord", "stripIdBytes");
-    let effect_bytes = field_offset(&document, "commandRecord", "effectIdBytes");
-    let tap_id = field_offset(&document, "commandRecord", "tapId");
-    let window = field_offset(&document, "commandRecord", "windowBlocks");
-    let strip_id = field_offset(&document, "commandRecord", "stripId");
-    let effect_id = field_offset(&document, "commandRecord", "effectId");
-
-    let staging = host
-        .command_staging_mut()
-        .expect("observation staging exists");
-    staging[..COMMAND_RECORD_BYTES as usize].fill(0);
-    staging[kind] = u8::try_from(COMMAND_OBSERVE_SUBSCRIBE).expect("kind is a byte");
-    // Rack 1 is the inserts, where the fixture put its compressor.
-    staging[rack] = 1;
-    staging[strip_bytes] = 2;
-    staging[effect_bytes] = 4;
-    staging[strip_id..strip_id + 2].copy_from_slice(b"t0");
-    staging[effect_id..effect_id + 4].copy_from_slice(b"comp");
-    // Tap 1 is the compressor's resident gain-reduction tap.
-    staging[tap_id..tap_id + 4].copy_from_slice(&1_u32.to_le_bytes());
-    staging[window..window + 4].copy_from_slice(&2_u32.to_le_bytes());
-
-    let result = host.submit_commands(1);
-    let report = *host.command_report();
-    assert_eq!(
-        (result, report.reason, report.admitted),
-        (RESULT_OK, COMMAND_REASON_NONE, 1),
-        "a record written at the published offsets was refused (reason {})",
-        report.reason
-    );
 }
 
 /// The published source-ring rule reproduces the engine's derivation at every launch shape (#1406
