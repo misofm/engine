@@ -655,6 +655,80 @@ pub(crate) mod response_result {
     };
 }
 
+/// One selection of an `OBSERVATION_READ` request (#1586 D1): a tap by its stable address (the
+/// `Observe` edit's address shape: a strip owner, a console or inserts section with its slot ID,
+/// no `control` and no `lane`), its effect-local tap ID and the lanes to return.
+pub(crate) mod observation_selection {
+    use super::*;
+    pub(crate) const ADDRESS: FieldSpec = FieldSpec::msg(1, true, false, &control_address::SPEC);
+    pub(crate) const TAP_ID: FieldSpec = FieldSpec::req(2, Wire::U32);
+    /// Left `1`, right `2`, both `3`.
+    pub(crate) const CHANNELS: FieldSpec = FieldSpec::req(3, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ObservationSelection",
+        fields: &[ADDRESS, TAP_ID, CHANNELS],
+    };
+}
+
+/// `OBSERVATION_READ` (`0x000f`, #1586 D1): 1 to 256 selections.
+pub(crate) mod observation_read_request {
+    use super::*;
+    pub(crate) const SELECTION: FieldSpec =
+        FieldSpec::msg(1, true, true, &observation_selection::SPEC);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ObservationReadRequest",
+        fields: &[SELECTION],
+    };
+}
+
+/// One row of an `OBSERVATION_READ` reply (#1586 D1): the status, the arm state the status was
+/// taken from, the window exactly when ready, each lane exactly when ready and asked for, and the
+/// tap's native unit.
+pub(crate) mod observation_row {
+    use super::*;
+    /// Pending `1`, unarmed `2`, ready `3`.
+    pub(crate) const STATUS: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const ARMED: FieldSpec = FieldSpec::req(2, Wire::Bool);
+    pub(crate) const ARM_SAMPLE: FieldSpec = FieldSpec::req(3, Wire::U64);
+    pub(crate) const ARM_TAG: FieldSpec = FieldSpec::req(4, Wire::U64);
+    pub(crate) const FIRST_SAMPLE: FieldSpec = FieldSpec::opt(5, Wire::U64);
+    pub(crate) const END_SAMPLE: FieldSpec = FieldSpec::opt(6, Wire::U64);
+    pub(crate) const SEQUENCE: FieldSpec = FieldSpec::opt(7, Wire::U64);
+    pub(crate) const BLOCKS: FieldSpec = FieldSpec::opt(8, Wire::U32);
+    pub(crate) const LEFT: FieldSpec = FieldSpec::opt(9, Wire::F32);
+    pub(crate) const RIGHT: FieldSpec = FieldSpec::opt(10, Wire::F32);
+    /// The tap's native `ParameterUnit` code.
+    pub(crate) const UNIT: FieldSpec = FieldSpec::req(11, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ObservationRow",
+        fields: &[
+            STATUS,
+            ARMED,
+            ARM_SAMPLE,
+            ARM_TAG,
+            FIRST_SAMPLE,
+            END_SAMPLE,
+            SEQUENCE,
+            BLOCKS,
+            LEFT,
+            RIGHT,
+            UNIT,
+        ],
+    };
+}
+
+/// The `OBSERVATION_READ` reply (#1586 D1): the render sample at the read and one row per
+/// selection, in selection order.
+pub(crate) mod observation_read_page {
+    use super::*;
+    pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const ROW: FieldSpec = FieldSpec::msg(2, true, true, &observation_row::SPEC);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ObservationReadPage",
+        fields: &[OBSERVED_SAMPLE, ROW],
+    };
+}
+
 /// One tap of a `SPECTRUM_CONFIGURE` request (#1594 D2).
 pub(crate) mod spectrum_entry {
     use super::*;
@@ -2169,6 +2243,10 @@ mod tests {
             &response_override::SPEC,
             &response_request::SPEC,
             &response_result::SPEC,
+            &observation_selection::SPEC,
+            &observation_read_request::SPEC,
+            &observation_row::SPEC,
+            &observation_read_page::SPEC,
             &spectrum_entry::SPEC,
             &spectrum_configure_request::SPEC,
             &spectrum_configured::SPEC,
