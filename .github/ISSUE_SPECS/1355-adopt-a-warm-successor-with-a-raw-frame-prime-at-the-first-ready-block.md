@@ -328,7 +328,10 @@ report labels): PCM is sequential in the ring, so no gate here sees the label. K
 - **Gate 4's held seek runs after one growth (MAJOR-2)**, so `O = P` and readiness reads the window
   at `S + O`. A source-read sample `X` is heard at render sample `X` on either plan, so A continued
   takes the same absolute anchor, and its feed (`O` behind) is topped up to the anchor before the
-  seek so the old generation has no gap.
+  seek so the old generation has no gap. The swapped stream is fed the old generation past the
+  window's end before the seek (a host may feed ahead; the seek discards those frames), so the
+  frames readiness walks are all present and only the held anchor holds the adoption: with the
+  feed stopped at the anchor the data walk alone held it, and an `S + 0` window stayed green.
 - **`WarmLead::prime_bytes` (MINOR-1).** The L3 term is live debt now: the fill writes L3 lines and
   the count leaves them out. Recorded in #1354's notes for 1354b; the budget is unchanged here.
 
@@ -338,4 +341,5 @@ Test value (attempt 2):
   carried track by `P` from C's adoption on. Red on the fix's revert (both widths; first
   divergence at block 6, C's adoption).
 - Gate 4 (held seek after a growth): a readiness check at `S` instead of `S + O` misses a seek
-  anchored inside `[S + O, S + O + P + q)` and adopts before it applies.
+  anchored inside `[S + O, S + O + P + q)` and adopts before it applies. Red with
+  `checked_add(0)` in `GraphExecutor::prime_ready` (adopted at block 17, not 19).
