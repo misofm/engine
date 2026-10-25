@@ -283,3 +283,20 @@ issued tag ends in exactly one `RESPONSE_READY`, across a rebuild, a supersessio
   cell stays empty. Mutant: no structural check. Red.
 - N2: the header names `LIMIT_EXCEEDED` `response.reply_too_large` after a rebuild among the event
   refusals. `check-capi-abi.sh` passes.
+
+**After the merge of #1324a/b (2026-10-25).** A rebuild that restarts a strip now duck-swaps: render
+adopts its plan at the end of the duck, not at the next block. Two `response_strip` tests failed,
+and the cause is that adoption point, not a defect. A request armed before the commit was captured
+at the first block from the running plan (`captured_sample` 128). That is the documented rule: the
+result comes from the newest plan the session had when the request was served. Before #1324 the
+running plan was displaced at the next block, so the job went stale and was armed again. No
+comparison was loosened:
+
+- `end_to_end_then_removed_strip` asserts both cases. A request armed before the commit gets one
+  event, from the running plan, without the insert. A request armed after the commit, on the
+  pending plan, gets one event, from the adopted plan, with the insert.
+- `a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal` arms on a pending rebuild of
+  `eq1`, so the bound is checked at `eq0`'s four owners. The growth then supersedes that plan before
+  it renders. The job goes stale and is armed again at 24 owners, and its event is the refusal.
+- Mutants: capture without the plan-epoch wait (the job is captured from a plan older than its
+  own), red in both; no refusal replacement, red.
