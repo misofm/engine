@@ -755,6 +755,46 @@ test("an anchored start is applied once by the engine handler, and the drain rea
   assert.deepEqual([controls(direct)[MSB1_CONTROL.SUBMITTED], controls(direct)[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
 });
 
+test("the prelude over the real engine worklet class: one miso.seek-at.v1, and the drain consumes the epoch", async () => {
+  // #1297b: red if the prelude's hook does not compose with the engine handler it wraps (a renamed
+  // `receiveSeekAt` or `acknowledge`, a reply shape it does not read): the ring would then wait
+  // forever on a seek the engine applied. The class is the shipped worklet's; its exports are stubs.
+  const feedSource = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const engineSource = await readFile(new URL("../../hosts/host-web/web/miso-engine-v1-audio-worklet.js", import.meta.url), "utf8");
+  const { sandbox, registrations } = preludeHarness(feedSource);
+  // Each worklet module has its own scope in a browser; a script in one vm context shares one.
+  vm.runInContext(`(() => {\n${engineSource}\n})();`, sandbox);
+  const Wrapped = registrations.get("miso-engine-v1-audio-worklet");
+  // Not constructed (that boots a module): the fields the handler and the drain read, set directly.
+  const engine = Object.create(Wrapped.prototype);
+  const memory = { buffer: new ArrayBuffer(65_536) };
+  const seekAts = []; const submissions = []; const posts = [];
+  Object.assign(engine, {
+    exports: {
+      memory,
+      miso_engine_web_v1_source_seek_at: (...args) => { seekAts.push(args); return 0; },
+      miso_engine_web_v1_source_submit: (_h, _id, generation, start) => { submissions.push([generation, start]); return 0; },
+    },
+    memoryBuffer: memory.buffer, handle: 7, sourceIdPointer: 0, sourceIdCapacity: 128,
+    sourcePcm: new sandbox.Float32Array(memory.buffer, 1024, 4), quantumFrames: 4, maximumSourceChannels: 2,
+    ready: true, disposed: false, stickyResult: 0, lastRequestId: 0, sabRings: [], pendingSeekAt: null,
+    port: { postMessage: (message) => posts.push(message) },
+  });
+  const ring = createMsb1Ring({ sourceId: "café", channels: 1, frameCapacity: 4, capacity: 2 });
+  engine.attachSharedRings([ring]);
+  const writer = new Msb1RingWriter(ring); writer.engage(1n);
+  writer.seek(3n, 40n, 1_024n);
+  writer.reserve(4); writer.commit({ generation: 3n, startFrame: 40n, frames: 4, endOfRegion: false });
+  engine.drainSharedRing(engine.sabRings[0]);
+  assert.deepEqual(submissions, [], "nothing before the handler");
+  engine.receive({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "café", generation: 3n, sourceFrame: 40n, anchorSample: 1_024n });
+  assert.deepEqual(seekAts, [[7, 5, 3n, 40n, 1_024n]]);
+  assert.deepEqual(posts.map(({ tag, result }) => [tag, result]), [["miso.ack.v1", 0]]);
+  engine.drainSharedRing(engine.sabRings[0]);
+  assert.deepEqual(submissions, [[3n, 40n]]);
+  assert.equal(controls(ring)[MSB1_CONTROL.SEEKS_APPLIED], 1);
+});
+
 test("detachSource withdraws one ring: the drain never reads it after it resolves, and the others keep draining", async () => {
   // #1297b gate 4 (the feed half; the engine's timing is browser-evals'). Red if detachSource
   // resolves before the worklet withdrew the ring, names the ring by an identity a cloned message

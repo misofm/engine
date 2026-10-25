@@ -262,3 +262,16 @@ README.
   (one status read, `A` rounded, `frameAt` once, handler `seek_at` once, no slot read and no plain
   seek before it, a refused `seek-at` never consumed); `detachSource`; the pump's plain seek in the
   new layout; D6 over the real core (apply and replace).
+
+Attempt 2 (verifier findings of attempt 1):
+- `detach-source` names the ring by its index in the attach list: a port clones a
+  SharedArrayBuffer into a new object, so object identity never matched in a browser. The worklet
+  clears that entry and replies `detached: true|false`; the SDK rejects `detachRefused` and closes
+  the feed on false. Both fake ports now `structuredClone`; the detach test was red on attempt 1's
+  code under the cloning port.
+- The browser barrel exports `pcm-feed.ts` by name, without `linkFeedEngine` and `FeedRetirement`
+  (`@ts-expect-error` pins in `sdk/test/barrel-surface.ts`; `sdk/src/browser/index.ts` and that
+  test file are outside the scope note's list, edited for this finding).
+- One test composes the prelude with the shipped engine worklet class (stub exports): one
+  `miso.seek-at.v1` through `receive`, then the drain consumes the epoch (red when the engine's
+  handler is renamed). `Msb1RingWriter.seek`'s anchor is documented as the SDK start's.

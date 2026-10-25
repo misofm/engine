@@ -36,8 +36,10 @@ export class Msb1RingWriter {
  reserve(frames:number):readonly Float32Array[]|null{if(!positive(frames)||frames>this.frameCapacity)throw new RangeError("PCM chunk does not fit MSB1"); if(this.occupancy>=this.capacity){Atomics.add(this.#v.control,MSB1_CONTROL.OVERFLOW,1);return null} const i=Atomics.load(this.#v.control,MSB1_CONTROL.WRITE_INDEX);this.#reserved=i;const p=this.#v.planes[i&(this.capacity-1)]!;for(const x of p)x.fill(0);return p}
  commit(chunk:{readonly generation:bigint;readonly startFrame:bigint;readonly frames:number;readonly endOfRegion:boolean}){if(this.#reserved<0)throw new Error("MSB1 commit without reservation");const i=this.#reserved;this.#reserved=-1;const s=i&(this.capacity-1),w=s*8,w64=s*4;this.#v.headers[w+SLOT.SEQUENCE]=i;this.#v.headers[w+SLOT.GENERATION_TAG]=Number(BigInt.asIntN(32,chunk.generation));this.#v.headers[w+SLOT.FRAMES]=chunk.frames;this.#v.headers[w+SLOT.FLAGS]=chunk.endOfRegion?1:0;this.#v.headersI64[w64+SLOT_I64.GENERATION]=chunk.generation;this.#v.headersI64[w64+SLOT_I64.START_FRAME]=chunk.startFrame;Atomics.add(this.#v.control,MSB1_CONTROL.WROTE,1);Atomics.store(this.#v.control,MSB1_CONTROL.WRITE_INDEX,(i+1)&(MSB1_WRAP-1))}
  /** Publish a seek: the generation, the frame and the anchor sample (`MSB1_NO_ANCHOR`: a plain
-  * seek), then the tag and the epoch. An anchored seek is applied by the engine's message handler
-  * from its `miso.seek-at.v1` (#1297 amendment), never by the drain. */
+  * seek), then the tag and the epoch. Apps publish plain seeks. `anchorSample` belongs to the
+  * SDK's anchored start (`FeedSource.start`, #1297b): the engine's message handler applies such a
+  * seek from the `miso.seek-at.v1` the SDK sends with it, never the drain, so an anchored seek
+  * published without that message stalls the ring (the drain reads none of its chunks). */
  seek(generation:bigint,frame:bigint,anchorSample:bigint=MSB1_NO_ANCHOR){this.#v.controlI64[0]=generation;this.#v.controlI64[1]=frame;this.#v.controlI64[2]=anchorSample;Atomics.store(this.#v.control,MSB1_CONTROL.GENERATION_TAG,Number(BigInt.asIntN(32,generation)));Atomics.add(this.#v.control,MSB1_CONTROL.SEEK_EPOCH,1)}
  release(){Atomics.store(this.#v.control,MSB1_CONTROL.WRITER_STATE,0)}
 }

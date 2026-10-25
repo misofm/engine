@@ -237,12 +237,16 @@ plays:
   `generation` in `prime`, and do not seek the ring there. The drain reads none of that ring's
   chunks until the engine applied the seek. If the audio reaches `A` before that, the engine
   starts the stem at the frame plus the lateness and reports it in the source's seek report; the
-  stem stays in time. A refused seek rejects `ready()` with a `MisoEngineError` and closes the feed.
+  stem stays in time. The margin in `A` is one ring of audio, so write at most one ring's worth
+  in `prime` (the ring holds no more), and keep writing after `ready()` resolves. A refused seek
+  rejects `ready()` with a `MisoEngineError` and closes the feed. Do not publish an anchored seek
+  with `Msb1RingWriter.seek` yourself: without the SDK's message to the engine, that ring stalls.
 - **Remove a stem.** When a committed edit removes a source of the feed, keep feeding its ring. The
   SDK detaches it with `feed.detachSource(sourceId)` after `engine.applied(revision)` resolves
   (the strip's ramp-out has then played), and releases its writer.
 - `feed.detachSource(sourceId)` resolves after the worklet's drain stopped reading that ring; the
-  other rings keep draining.
+  other rings keep draining. If the worklet withdrew no ring, it rejects with `detachRefused` and
+  closes the feed.
 
 The MSB1 ring keeps version 1 with an anchor word: the control block is 144 bytes (the anchor
 `i64` at 128, `-1` for a plain seek), the ID is at 144 and the slot headers at 272. The drain
