@@ -85,7 +85,7 @@ fn document() -> (String, u64) {
     )
 }
 
-fn limits() -> CompileLimits {
+fn limits(frame_bytes: u64) -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
         source_ring_frames: 1_024,
@@ -108,8 +108,8 @@ fn limits() -> CompileLimits {
         maximum_meter_streams: 4_096,
         maximum_meter_items: 1 << 20,
         maximum_meter_bytes: 1 << 26,
-        maximum_control_frame_bytes: FRAME_BYTES,
-        maximum_replay_bytes: FRAME_BYTES * 16,
+        maximum_control_frame_bytes: frame_bytes,
+        maximum_replay_bytes: frame_bytes.max(8_192) * 16,
         maximum_replay_entries: 64,
         maximum_submixes: 0,
         maximum_vcas: 0,
@@ -140,6 +140,10 @@ struct Host {
 
 impl Host {
     fn new(document: &str, revision: u64) -> Self {
+        Self::with_frame_bytes(document, revision, FRAME_BYTES)
+    }
+
+    fn with_frame_bytes(document: &str, revision: u64, frame_bytes: u64) -> Self {
         let config = EngineConfig {
             struct_size: ENGINE_CONFIG_SIZE,
             abi_version: ABI_VERSION,
@@ -156,7 +160,7 @@ impl Host {
             capacity_bytes: storage.len() as u64,
             required_bytes: 0,
         };
-        let compile_limits = limits();
+        let compile_limits = limits(frame_bytes);
         // SAFETY: Every descriptor and output location remains live for the complete call.
         unsafe {
             assert_eq!(
@@ -644,4 +648,41 @@ fn one_in_flight_none_lost_and_replay() {
     assert_eq!(host.run(4), Vec::new(), "a replay arms nothing");
     assert_eq!(host.ask("eq1").1, Reply::Tag(2), "released after delivery");
     // Destroyed with tag 2 in flight: nothing more is owed by a session that no longer exists.
+}
+
+/// The acked-batch lens on a rebuild that grows the strip: on a 4 KiB control frame limit a
+/// request whose event bound fits arms tag 1; two rebuilds then add twenty inserts, so the capture
+/// from the rebuilt plan no longer fits a frame. The tag still gets exactly one event, the refusal
+/// `LIMIT_EXCEEDED` `response.reply_too_large`, and the next request arms again.
+///
+/// Test value: red if an event the endpoint cannot encode is held for ever (the tag never
+/// answered and the capture never released) or dropped.
+#[test]
+fn a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal() {
+    let (document, revision) = document();
+    let mut host = Host::with_frame_bytes(&document, revision, 4_096);
+    assert_eq!(host.ask("eq0").1, Reply::Tag(1));
+    // Two transactions of ten inserts each (one frame of twenty would not fit 4 KiB).
+    for batch in 0..2_u32 {
+        let edits: Vec<_> = (0..10)
+            .map(|index| {
+                let at = 10 * batch + index;
+                add_insert("eq0", &format!("grow-{at}"), 2 + at)
+            })
+            .collect();
+        assert!(host.transact(&edits));
+    }
+    let ready = host.run(BLOCKS);
+    assert_eq!(ready.len(), 1, "one event for the grown capture");
+    assert_eq!(
+        (ready[0].request_tag, &ready[0].outcome),
+        (
+            1,
+            &ResponseReadyOutcome::Refused {
+                status: StatusCode::LimitExceeded,
+                diagnostic: "response.reply_too_large".to_owned(),
+            }
+        )
+    );
+    assert_eq!(host.ask("eq1").1, Reply::Tag(2), "released after delivery");
 }
