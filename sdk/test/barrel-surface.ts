@@ -38,6 +38,7 @@ import * as hostMirror from "../src/browser/host-mirror.ts";
 import * as lattice from "../src/core/lattice.ts";
 import * as writer from "../src/core/writer.ts";
 import * as sessionTransaction from "../src/core/session-transaction.ts";
+import * as sessionEdit from "../src/core/session-edit.ts";
 
 /** Declaration identity, not assignability: `Exact<A, B>` is false when either side is wider. */
 type Exact<A, B> =
@@ -170,6 +171,27 @@ type HeadlessSessionEditSpec =
   Assert<Exact<headlessBarrel.SessionEditSpec, sessionTransaction.SessionEditSpec>>;
 // @ts-expect-error the transaction encoder is stamped at send and is not public
 type NoRootEncodeSessionTransaction = typeof barrel.encodeSessionTransaction;
+
+// --- core/session-edit.ts (#1389): the outcome types are public, the encoder and ledger are not --
+
+type RootEditOutcome = Assert<Exact<barrel.EditOutcome, sessionEdit.EditOutcome>>;
+type RootEditPath = Assert<Exact<barrel.EditPath, sessionEdit.EditPath>>;
+type RootWatermarkSnapshot = Assert<Exact<barrel.WatermarkSnapshot, sessionEdit.WatermarkSnapshot>>;
+type HeadlessEditOutcome = Assert<Exact<headlessBarrel.EditOutcome, sessionEdit.EditOutcome>>;
+type HeadlessEditPath = Assert<Exact<headlessBarrel.EditPath, sessionEdit.EditPath>>;
+type HeadlessWatermarkSnapshot =
+  Assert<Exact<headlessBarrel.WatermarkSnapshot, sessionEdit.WatermarkSnapshot>>;
+// #1296: the browser engine resolves with the same types.
+type BrowserEditOutcome = Assert<Exact<browserBarrel.EditOutcome, sessionEdit.EditOutcome>>;
+type BrowserEditPath = Assert<Exact<browserBarrel.EditPath, sessionEdit.EditPath>>;
+type BrowserWatermarkSnapshot =
+  Assert<Exact<browserBarrel.WatermarkSnapshot, sessionEdit.WatermarkSnapshot>>;
+// @ts-expect-error the applied ledger is each engine's own
+type NoBrowserAppliedLedger = typeof browserBarrel.AppliedLedger;
+// @ts-expect-error the replace encoder is stamped at send and is not public
+type NoRootEncodeSessionReplace = typeof barrel.encodeSessionReplaceRequest;
+// @ts-expect-error the applied ledger is each engine's own
+type NoHeadlessAppliedLedger = typeof headlessBarrel.AppliedLedger;
 // @ts-expect-error the session normalizers are internal to the two builders
 type NoRootNormalizeTrack = typeof barrel.normalizeTrack;
 // @ts-expect-error the session normalizers are internal to the two builders
