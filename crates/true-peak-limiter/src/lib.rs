@@ -56,8 +56,8 @@
 //!
 //! **The linked pair (D5).** A glide's frames render the per-lane body and clear the #990
 //! record: the two channels' peaks differ while a weight moves. A switch into `Maximum` clears it
-//! too, and starts a per-bank countdown of the glide plus one gain-ring length, raised and never
-//! lowered by every later switch. When the countdown ends, both gain rings have been rewritten under
+//! too, and starts a per-bank countdown of the glide plus the `N + R` frames that rewrite both
+//! gain rings, raised and never lowered by every later switch. When the countdown ends, both gain rings have been rewritten under
 //! the target modes, and the record is re-derived once from the words ([`gain_state_agrees`]);
 //! the fast path never runs on disagreeing words.
 #![allow(missing_docs)]
@@ -3914,7 +3914,8 @@ struct LimiterCore<L: Lane> {
     ///
     /// A switch (a [`retarget_link`](Self::retarget_link) that changes a lane's mode or leaves
     /// its weight in flight, or a restore that brings a glide) clears the record and raises this
-    /// to at least the glide's length plus one gain-ring length `R`, never lowering it, so it
+    /// to at least the glide's length plus the `N + R` frames that rewrite both gain rings
+    /// ([`arm_relink`](Self::arm_relink)), never lowering it, so it
     /// never falls below any lane's glide remaining. Every frame the bank renders or skips counts
     /// it down; when it reaches zero on a dual path, the glide has ended and both gain rings have
     /// been rewritten under the lanes' modes, and the record is re-derived from the words
@@ -4033,11 +4034,17 @@ impl<L: Lane> LimiterCore<L> {
     }
 
     /// D5: clears the #990 record and raises the countdown to cover a glide of `remaining`
-    /// frames and one gain-ring length after it. Never lowers it.
+    /// frames and the `N + R` frames after it that rewrite both gain rings. Never lowers it.
+    ///
+    /// Why `N + R`: from the first frame after the glide, each channel's peak is its mode's law,
+    /// so the required-gain ring's `R` slots are rewritten under it after `R` frames. A box term
+    /// written at frame `n` is the minimum of `r[n-N ..= n-N+Wb-1]`, so it depends on a required
+    /// gain `N` frames old, and the box ring's `R` slots all come from the new law only `N + R - 1`
+    /// frames after the glide. The van Herk `prefix` and the box sum follow the rings.
     fn arm_relink(&mut self, remaining: u32) {
         self.gain_linked = false;
-        let frames = remaining.saturating_add(self.shape.ring as u32);
-        self.relink_frames = self.relink_frames.max(frames);
+        let rewrite = (self.shape.n + self.shape.ring) as u32;
+        self.relink_frames = self.relink_frames.max(remaining.saturating_add(rewrite));
     }
 
     /// D5: counts the countdown down by `frames` rendered or skipped frames, and when it ends on
@@ -5867,6 +5874,8 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod glide;
     use dsp_reference::reference_annex2_phases;
     use effect_contract::BankWidth;
     use effect_contract::{
@@ -7684,7 +7693,12 @@ mod tests {
         // The two coefficient ramps, which the fast path must not freeze. A skipped block
         // advances no ramp, so a claim admitted while a de-zipper window was still open would
         // strand `current` short of its target for as long as the silence lasted.
-        for ramps in [&channel.limit, &channel.release] {
+        // Issue #1370: and the link weight, which a glide moves every frame.
+        for ramps in [
+            &channel.limit[..],
+            &channel.release[..],
+            &channel.link[..channel.width],
+        ] {
             for ramp in ramps.iter() {
                 words.push(ramp.current.to_bits());
                 words.push(ramp.target.to_bits());
