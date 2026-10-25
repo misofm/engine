@@ -137,30 +137,18 @@ test("resident and response handles share one owner poll, timer, and epoch", asy
       nativeEffectId: "miso.compressor", tapIds: [1],
     }],
   };
-  const observationLiveControls = {
-    async syncStructure() {},
-    edit: {
-      strip: () => ({
-        effect: () => ({ observe: (_tap, on) => ({ kind: on ? "observeSubscribe" : "observeUnsubscribe" }) }),
-      }),
-    },
-    async submit(...edits) {
-      return {
-        ok: true, result: 0, code: "ok", reason: 0, reasonName: "none", rejectedIndex: 0,
-        admitted: edits.length, appliedAtSample: 0n,
-      };
-    },
-  };
   const transport = {
     observationMap: () => observationMap,
-    readObservations: (selections) => selections.map((selection) => ({
-      ...selection,
-      nativeEffectId: "miso.compressor",
-      descriptor: { id: 1, name: "Gain Reduction", displayUnit: "dB", unitName: "dB", subscribable: true },
-      sampleRateHz: 48_000,
-      status: "unarmed",
-    })),
-    liveControls: () => observationLiveControls,
+    // #1589b: the observation half on the core's frames; the tap never arms here.
+    apply: async (edits) => ({ revision: 1n, observeArmTags: edits.map(() => 1n), removedArmTags: [] }),
+    read: async (selections) => ({
+      observedSample: 0n,
+      rows: selections.map(() => ({
+        status: "unarmed", armed: false, armSample: 0n, armTag: 0n,
+        window: undefined, left: undefined, right: undefined, unit: 1,
+      })),
+    }),
+    sampleRateHz: () => 48_000,
     responseRead: async () => {
       responseReads += 1;
       if (responseReads > 1) {

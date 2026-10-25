@@ -15,8 +15,16 @@ import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 
 import {
+  commandFrame,
+  concat,
   decodeControlReply,
+  decodeObservationReadReply,
+  field,
+  nested,
   encodeControlTransaction,
+  encodeObservationRead,
+  encodeObserveTransaction,
+  u8,
 } from "../src/core/control-frame.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import {
@@ -27,6 +35,12 @@ import {
 } from "../src/core/spectrum-frame.ts";
 
 const HEADER_BYTES = 48;
+
+/** #1589b: the Rust codec's `Observe` and `OBSERVATION_READ` frames (`crates/protocol/tests/observation_frames.rs`). */
+const OBSERVATION_FIXTURE = JSON.parse(await readFile(
+  new URL("../../crates/protocol/tests/fixtures/observation-frames.json", import.meta.url),
+  "utf8",
+));
 
 const FIXTURE = JSON.parse(await readFile(
   new URL("../../crates/protocol/tests/fixtures/set-control-frames.json", import.meta.url),
@@ -350,4 +364,89 @@ describe("the spectrum codec equals the protocol codec's frames (#1596 gate 1)",
       }
     });
   }
+});
+
+/** A binary32 word as the fixture's `leftBits`/`rightBits` spell it, or `null`. */
+function bitsOf(value) {
+  if (value === undefined) return null;
+  const view = new DataView(new ArrayBuffer(4));
+  view.setFloat32(0, value, true);
+  return view.getUint32(0, true).toString(16).padStart(8, "0");
+}
+
+describe("the observation codec equals the protocol codec's frames (#1589b)", () => {
+  for (const command of OBSERVATION_FIXTURE.commands) {
+    test(`encode ${command.name}`, () => {
+      const { request } = command;
+      const bytes = request.op === "apply"
+        ? encodeObserveTransaction({
+          requestId: BigInt(command.requestId),
+          expectedRevision: BigInt(request.expectedRevision),
+          edits: request.edits,
+        })
+        : encodeObservationRead(BigInt(command.requestId), request.selections);
+      assert.equal(hexOf(bytes), command.hex);
+    });
+  }
+
+  for (const reply of OBSERVATION_FIXTURE.replies) {
+    test(`decode ${reply.name}`, () => {
+      const { expect } = reply;
+      const decoded = decodeObservationReadReply(bytesOf(reply.hex));
+      assert.equal(decoded.requestId, BigInt(expect.requestId));
+      assert.equal(decoded.revision, BigInt(expect.revision));
+      assert.equal(decoded.ok, expect.ok);
+      if (!expect.ok) {
+        assert.equal(decoded.status, expect.status);
+        assert.equal(decoded.diagnostics[0]?.code, expect.code);
+        return;
+      }
+      assert.equal(decoded.value.observedSample, BigInt(expect.observedSample));
+      assert.deepEqual(decoded.value.rows.map((row) => ({
+        status: row.status,
+        armed: row.armed,
+        armSample: row.armSample.toString(),
+        armTag: row.armTag.toString(),
+        window: row.window === undefined ? null : {
+          firstSample: row.window.firstSample.toString(),
+          endSample: row.window.endSample.toString(),
+          sequence: row.window.sequence.toString(),
+          blocks: row.window.blocks,
+        },
+        leftBits: bitsOf(row.left),
+        rightBits: bitsOf(row.right),
+        unit: row.unit,
+      })), expect.rows);
+    });
+  }
+});
+
+/** An `OBSERVATION_READ` reply of one unarmed row, its unit `unit`, and `extra` fields after it. */
+function corruptPage(unit, extra = []) {
+  const u64 = (value) => {
+    const out = new Uint8Array(8);
+    new DataView(out.buffer).setBigUint64(0, value, true);
+    return out;
+  };
+  const row = nested(2, true, [
+    field(1, 1, true, u8(2)),
+    field(2, 8, true, u8(0)),
+    field(3, 4, true, u64(0n)),
+    field(4, 4, true, u64(0n)),
+    field(11, 1, true, u8(unit)),
+    ...extra,
+  ]);
+  const fields = [field(1, 4, true, u64(0n)), row];
+  const out = commandFrame(0x000f, 0, 7n, 5n, fields.length, concat(fields));
+  out[14] = 2;
+  return out;
+}
+
+describe("the observation row decoder refuses what the Rust codec refuses (#1589b)", () => {
+  // Red if a corrupt row is taken as data: the Rust codec knows units 1 to 6 and row fields 1 to 11.
+  test("a well-formed row decodes, a unit above 6 and a field past 11 are malformed", () => {
+    assert.equal(decodeObservationReadReply(corruptPage(6)).value.rows[0].unit, 6);
+    assert.throws(() => decodeObservationReadReply(corruptPage(7)), MisoEngineError);
+    assert.throws(() => decodeObservationReadReply(corruptPage(1, [field(12, 1, false, u8(0))])), MisoEngineError);
+  });
 });

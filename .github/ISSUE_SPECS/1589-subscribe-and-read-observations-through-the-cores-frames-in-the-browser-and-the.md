@@ -182,3 +182,87 @@ Commands: `cargo test --locked -p host-web --all-features`, `cargo test --locked
 - **Gate 1 (D6).** `protocol_cross_host.rs`'s one-script gate runs on the observation fixture with
   taps for every declared tap and gains steps 16-18 (one `Observe` arm, two blocks, one
   `OBSERVATION_READ`, a ready row); step 1's exception loses `0x000f` and bit 15.
+
+## Decision record: slice #1589b (2026-10-25)
+
+- **D3 as built.** `ObservationSubscriptionTransport` is `{ observationMap, apply, read, sampleRateHz,
+  observationEnded?, renderWait?, ... }`; `liveControls()` and `readObservations()` are gone from it.
+  `observationFrameTransport(endpoint)` (`sdk/src/core/observation-subscriptions.ts`) builds `apply`
+  and `read` from an engine's command entry, the same on both engines: headless over
+  `controlFrame` (the module's control entry), browser over the worklet's `control` message, each
+  with its endpoint's one request-ID allocator. The codec is in `sdk/src/core/control-frame.ts`
+  (`encodeObserveTransaction`, `encodeObservationRead`, `decodeObservationReadReply`), held to
+  `crates/protocol/tests/fixtures/observation-frames.json` (`observation_frames.rs`, a byte gate on
+  the model of #1563 and #1596b; the reply with arm tags is #1563's fixture). The observation map
+  stays (#1590): it checks a selection and names its effect before any edit.
+- **Refusals.** A refused reply raises `MisoEngineError` with `code` the result class of its status
+  (`spectrumRefusalResult`, the mapping #1596b uses) and `diagnosticCode` the core's code; a failed
+  call (`backpressure`, a full frame) is `controlCallFailure`'s error. The retry rule is kept: only
+  `code: "backpressure"` waits for a render (browser, up to `requestDeadlineMs`); headless throws.
+- **`revision_conflict` resend (new).** An `Observe` transaction needs the exact committed revision,
+  and the browser reads it from its queue (`queue.revision`, noted from every reply), so another
+  sender's commit can race it. An `Observe` writes no model value, so the same edits at the
+  revision the refusal reports are the same request: it is resent, at most 8 times. Headless reads
+  the core's revision in the same call and never conflicts.
+- **Window change.** An `update` that changes the window of a tap the handle alone holds sends the
+  disarm of the old window and the arm of the new one in one transaction (the core's one re-arm,
+  #1584 gate 1); kinds 7/8 sent the arm alone.
+- **D4 as built.** `armed()` per configuration, by section 8.4: a binding records the tag its arm
+  edit got (`observeArmTags`, one per edit, checked); a read that reports `armed` with that tag sets
+  the binding's arm sample; the handle resolves with the largest once every selection has one. A
+  read of another tag never resolves it, and a `ready` row of another tag reads `pending`; a newer
+  tag on a pending binding rejects `internal` `sdk.observation.superseded` (unreachable by the
+  reference rule; the subscription is left as it is). `armed()` settles only at a read: `pump()`,
+  and in the browser the delivery timer. Close and an `update` that changes the selections or the
+  window reject `sdk.observation.closed`; dispose rejects `sdk.engine.disposed`; a headless
+  `loadSession` rejects `sdk.observation.closed` (the handles close; the engine is not disposed).
+- **Owner removal from the event.** `sdk.observation.owner_removed` is set by `OBSERVATION_ENDED`,
+  not by a reply's `removedArmTags`: the removing commit is any sender's (a structural `apply`, a
+  replace, a frame the app sent itself), and only the event reaches the owner for all of them. The
+  event's revision filter now uses the arm reply's revision.
+- **Reads.** A read of more bindings than one reply frame holds (`64 + 192 n`, #1586 D4; 85 rows at
+  the browser's 16 KiB frame) is sent as several `OBSERVATION_READ`s, in order. An `Observe`
+  transaction over the endpoint's frame limit is refused `MisoUsageError` before it is sent (a
+  stated limit: about 80 selections per subscribe or update in the browser, where kinds 7/8 took
+  256 records).
+- **D5.** The SDK's reference counting stays; each SDK binding holds one core reference.
+- **SDK public changes.** `ObservationSubscription.appliedAtSample` and
+  `ObservationSubscriptionReceipt.appliedAtSample` are deleted; both gain `armed(): Promise<bigint>`.
+  `ObservationSubscriptionBounds.maximumCommandRecords` is deleted (the core's frame and edit limits
+  bound a transaction now). `ObservationSubscriptionTransport` changes as above;
+  `observationFrameTransport` and `ObservationFrameEndpoint`, `ObserveApplied` are new exports of
+  the module (not of the package entries). `EngineLiveControls.submitManaged` is deleted, and
+  `LiveControlBeforeSubmit` loses its `managed` argument. The browser engine no longer refuses a
+  subscription with `MisoUsageError` when `policy.liveControls.observationTaps` is 0: a session
+  whose map has no binding at all is refused `MisoEngineError` `unsupported` with R1's
+  `observation.unavailable` on both engines, before any edit (review fold, MINOR 1; a session that
+  binds taps but has no tapped effect reads the same, since its map is empty too).
+  `sdk.observation.selection` stays for a selection that names an unknown tap. A preflight that finds the tap
+  armed by another subscriber is still `MisoUsageError` (message reworded). The public
+  `readObservations()` of both engines keeps the numeric read export (#1590).
+- **Qualification.** #1530's wait rows log the `Observe` transactions through `host.control` (call
+  result, reply status, the edits' bytes); #1535's unsubscribe run arms and disarms with
+  `observeThroughSdk` (the SDK codec, in `sdk-response-entry.ts`) and its ack gate is the reply's
+  `monitor` path; the resident row adds `sdk-observation-armed` (R4). `sdk-response-entry.ts` is
+  outside the scope note's paths: its #1530 logger and resident row read `host.command` and
+  `appliedAtSample`, which this slice removes from the SDK path. Kinds 7/8 stay for #1589c (the E12
+  and staging-read rows still use `host.observe`).
+- **Tests outside the scope note's list.** The observation fakes of `spectrum-evals.mjs`,
+  `spectrum-browser-evals.mjs`, `response-subscription-evals.mjs` and `structure-evals.mjs` (m3)
+  move to the frame transport; `control-support.mjs` gains `scriptedObservationControl` (a scripted
+  `Observe`/`OBSERVATION_READ` endpoint for hand-written browser hosts). Deleted, with what holds
+  the claim now: `measurement-evals.mjs` "browser live controls retain the managed observation
+  conflict hook" (the browser rig test of the hook in `observation-subscription-evals.mjs`) and
+  "the browser engine sends an observation record that names its tap by key" (an `Observe` edit has
+  no index on the wire: the codec fixture); `structure-evals.mjs` "through the browser transport"
+  and the `browser` row of #1677's transports (a hand-built owner in the test; both engines send the
+  same frames, and gate 3's browser leg runs the real browser engine); the observation-subscription
+  evals' "booted with no observation taps" (the SDK's own boot-word check is gone) and "past a full
+  frame ... observationLimit" (the frame path's full frame is a non-backpressure refusal, the rule
+  the "not backpressure" test holds).
+- **Review fold (attempt 1 PASS, root rulings).** The full frame of armed taps keeps its named
+  diagnostic: an `Observe` transaction refused `capi.resource.limit` (the core's `Limit`, the only
+  resource limit an `Observe`-only transaction meets) raises `MisoEngineError` with
+  `diagnosticCode` `observationLimit` and the advice to unsubscribe another tap, never resent
+  (MINOR 2). `decodeObservationRow` refuses a unit above 6 and a row field past 11, as the Rust
+  codec does (MINOR 3).

@@ -79,6 +79,8 @@ const MUTATIONS = [
   "sdk-observation-wait-unbounded", "sdk-observation-wait-late", "sdk-observation-wait-early",
   "sdk-observation-wait-untyped", "sdk-observation-wait-rendered",
   "sdk-observation-wait-after-render", "sdk-observation-wait-resend",
+  // Issue #1589 D4 (R4): an `armed()` that never settled, or settled after a window it gave.
+  "sdk-observation-armed",
   // Issue #1533: a Playwright page error, a page-side unhandled rejection, and a result that
   // `qualifyBrowser` never gave its page-error lists.
   "page-errors", "page-errors-window", "page-errors-missing",
@@ -570,15 +572,16 @@ function validateSdkLiveBypass(browserName, live) {
 
 /**
  * Issue #1530 gates 1-3: the browser SDK's wait on observation backpressure, against the shipped
- * worklet. `ok` is command result 0; `bp` is result 6 with reason 8.
+ * worklet. Each entry is one `Observe` transaction (#1589b): `ok` is call result 0 with an `ok`
+ * reply; `bp` is the failed call of result 6 (backpressure), which carries no reply frame.
  */
 function validateSdkObservationWait(browserName, wait) {
   const deadline = wait?.deadline;
   const render = wait?.render;
   const log = (entries) => JSON.stringify(Array.isArray(entries)
-    ? entries.map((entry) => [entry?.result, entry?.reason]) : null);
-  const OK = [0, 0];
-  const BP = [6, 8];
+    ? entries.map((entry) => [entry?.result, entry?.status]) : null);
+  const OK = [0, "ok"];
+  const BP = [6, null];
   const expected = (...entries) => JSON.stringify(entries);
   gate(browserName, "sdk-observation-wait", deadline?.settled === true
     && deadline.typed === true
@@ -892,13 +895,20 @@ function validateSdkResponse(browserName, response) {
   "browser resident observation subscription did not deliver an automatic ready notification");
   gate(browserName, "sdk-observation-subscription", liveU64(resident.subscriptionId)
     && liveU64(resident.owner) && liveU64(resident.epoch)
-    && typeof resident.appliedAtSample === "string"
     && resident.bounds?.maximumHandles > 0
     && resident.bounds?.maximumBindings > 0
     && resident.bounds?.maximumSelections > 0
     && resident.bounds?.maximumWindowBlocks > 0
     && resident.bounds?.maximumCadenceMs > 0,
   "resident observation subscription did not publish bounded owner identity and limits");
+  // #1589 D4 (R4): `armed()` settled with the arm sample render applied, and no window it was given
+  // opened before it.
+  gate(browserName, "sdk-observation-armed", typeof resident.armedSample === "string"
+    && /^[0-9]+$/.test(resident.armedSample)
+    && Array.isArray(resident.windows) && resident.windows.length === 2
+    && resident.windows.every((window) => window !== null
+      && BigInt(window.firstSample) >= BigInt(resident.armedSample)),
+  `armed() did not settle with the arm sample before the subscription's windows: ${JSON.stringify(resident.armedSample)}`);
   gate(browserName, "sdk-observation-subscription", resident.sharedBinding === true
     && resident.firstCloseKeepsLive === true
     && resident.invalidUpdateRefused === true
@@ -1281,8 +1291,9 @@ function mutate(result, mutation) {
   if (mutation === "sdk-observation-wait-after-render") wait.deadline.closeAfterRender.resolved = false;
   if (mutation === "sdk-observation-wait-resend") {
     wait.render.commands.splice(wait.render.commands.length - 1, 0,
-      { result: 6, reason: 8, records: wait.render.commands[1].records });
+      { result: 6, status: null, records: wait.render.commands[1].records });
   }
+  if (mutation === "sdk-observation-armed") copy.sdkResponse.observations.resident.armedSample = null;
   if (mutation === "sdk-render-allocations") copy.sdkResponse.renderAllocations[0].count = 1;
   if (mutation === "sdk-render-allocations-missing") copy.sdkResponse.renderAllocations.splice(1, 1);
   if (mutation === "page-errors") copy.pageErrors.playwright.push("pageerror: Error: planted");
@@ -1300,12 +1311,13 @@ function unsubscribeFailureProofs() {
     contextStateBeforeBoot: "suspended",
     meterLeaseResult: 0,
     subscribeResult: 0,
+    subscribePath: "monitor",
     armedFrames: 4,
     armedMaximumTrackGrDb: 5.2,
     renderedAfterSubscribe: "3",
     renderedBeforeUnsubscribe: "4",
     unsubscribeResult: 0,
-    unsubscribeBindings: 0,
+    unsubscribePath: "monitor",
     framesAfterAcknowledgement: 60,
     maximumTrackGrDbAfterAcknowledgement: 0,
     signalShortfall: false,
@@ -1322,8 +1334,9 @@ function unsubscribeFailureProofs() {
     ["context", { contextStateBeforeBoot: "running" }, ["context"]],
     ["armed frames", { armedFrames: 3 }, ["armed"]],
     ["armed reduction", { armedMaximumTrackGrDb: 0 }, ["armed"]],
+    ["armed path", { subscribePath: null }, ["armed"]],
     ["render-between", { renderedBeforeUnsubscribe: "3" }, ["render-between"]],
-    ["unsubscribe-ack", { unsubscribeBindings: 1 }, ["unsubscribe-ack"]],
+    ["unsubscribe-ack", { unsubscribePath: null }, ["unsubscribe-ack"]],
     ["reduction", { maximumTrackGrDbAfterAcknowledgement: 1 }, ["reduction"]],
     ["reduction, no frame (D9)", { framesAfterAcknowledgement: 0 }, ["reduction"]],
     ["shortfall frames", { signalFramesAfterAcknowledgement: 47 }, ["shortfall"]],
