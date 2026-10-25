@@ -140,6 +140,15 @@ jobs:
           closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"
           echo "Shipped AudioWorklet module at \`$GITHUB_SHA\`: \`$sha256\` (the \`artifact-identity\` summary says whether it changed)" >> "$GITHUB_STEP_SUMMARY"
+      # Issue #2045: the shipped bytes name the compiler that built them. The module's `producers`
+      # section must give rustc exactly the version the browser artifact toolchain's rustc prints,
+      # so a build on another rustc fails here, before anything is uploaded.
+      - name: Check the shipped module names the browser artifact toolchain's compiler
+        env:
+          TOOLCHAIN: ${{ steps.build.outputs.toolchain }}
+        run: |
+          python3 -B scripts/check-wasm-producers.py --self-test
+          python3 -B scripts/check-wasm-producers.py target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm --toolchain "$TOOLCHAIN"
       - name: Upload shipped artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -181,13 +190,18 @@ jobs:
           rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
           channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
           rustup toolchain install "$channel" --profile minimal --component rust-src
-      # The twin: this commit again, from another checkout path and with another CARGO_HOME, the
-      # two roots rustc could embed. `artifact` built from $GITHUB_WORKSPACE with the runner's.
-      - name: Rebuild the module from another checkout path and CARGO_HOME
+      # The twin: this commit again, from another checkout path, with another CARGO_HOME and with
+      # the browser artifact toolchain freshly installed into another RUSTUP_HOME: the three roots
+      # rustc could embed (#2045: the third holds the sysroot remap). `artifact` built from
+      # $GITHUB_WORKSPACE with the runner's. A fresh install, not a copy: a copied toolchain
+      # directory carries no rustup manifest, and RUSTUP_TOOLCHAIN could resolve elsewhere.
+      - name: Rebuild the module from another checkout path, CARGO_HOME and RUSTUP_HOME
         run: |
           git worktree add --detach "$RUNNER_TEMP/twin" HEAD
           mkdir "$RUNNER_TEMP/twin-module"
-          CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
+          channel="$(bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --print-toolchain)"
+          RUSTUP_HOME="$RUNNER_TEMP/twin-rustup" rustup toolchain install "$channel" --profile minimal --component rust-src
+          RUSTUP_HOME="$RUNNER_TEMP/twin-rustup" CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
       # The base is never rebuilt here: this run's workflow is the change's, and a base built in it
       # is built in the change's environment (#1061 attempts 1 and 2). The report reads the digest
       # the base's own run recorded instead, and says CANNOT TELL when there is none.

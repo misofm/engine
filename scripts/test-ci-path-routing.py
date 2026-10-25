@@ -1513,6 +1513,13 @@ def main() -> int:
     )  # a twin sharing the artifact job's CARGO_HOME proves nothing about it
     workflow_mutation_fails(
         "qualification.yml",
+        'RUSTUP_HOME="$RUNNER_TEMP/twin-rustup" CARGO_HOME=',
+        "CARGO_HOME=",
+    )  # #2045: a twin sharing the artifact job's RUSTUP_HOME lets a dropped sysroot remap pass
+    for line in checker.PRODUCERS_CHECK_LINES:
+        workflow_mutation_fails("qualification.yml", line, "")  # #2045: the producers check gone
+    workflow_mutation_fails(
+        "qualification.yml",
         "    name: shipped AudioWorklet artifact identity (changed or unchanged, reproducible, "
         "release pin)\n    needs: [route, artifact]\n"
         "    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'\n",
