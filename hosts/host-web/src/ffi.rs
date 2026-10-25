@@ -51,6 +51,9 @@
 #![allow(unsafe_code)]
 
 use crate::render_lock::{control_allocation_count, render_allocation_count, render_locked};
+// Named by the exports' result docs only.
+#[cfg(doc)]
+use crate::RESULT_BACKPRESSURE;
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure,

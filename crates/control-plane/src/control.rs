@@ -4126,8 +4126,9 @@ where
     ///   index (#1589 R2) and faults (`Internal`) when the plan's epoch is any other plan's, so the
     ///   index and the readers are always one plan's.
     /// - A `SPECTRUM_CONFIGURE` that prepares a successor before the plan's first block has the
-    ///   plan adopt it in place (#1597, [`PlanState::adopt_before_first_block`]) and promotes it,
-    ///   so its reply reports `adopted_epoch == configured_epoch` and a capture armed now covers
+    ///   plan adopt it in place (#1597, through
+    ///   [`engine::realtime::RealtimePlanOwner::adopt_before_first_block`]) and promotes it, so
+    ///   its reply reports `adopted_epoch == configured_epoch` and a capture armed now covers
     ///   the first block. No render has adopted anything yet, so this is the plan the first block
     ///   would have adopted: a boot configures its taps through the command and still gets them in
     ///   the plan that renders sample 0.
