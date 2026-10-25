@@ -451,8 +451,7 @@ and the mutation was reverted.
 | `test-web-audioworklet.mjs` worklet construction (#1210 D3) | drop the header `submix_count` == enumerated count check | `a submix count the meter header disagrees with must fail initialization` |
 | `check-session-map-shape.py --self-test` (#1210) | the host list or the worklet reply without `submixes` | both new self-test mutations are caught (17 in all) |
 | `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word`, `tests::a_bus_limiter_can_be_the_designated_master` (#1213 gates 5, 6) | restore #1207's GR-fold skip of strip indices `>= T` | the bus word stays `0` and `master_gr_present` is `0` |
-| `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word` (#1213, K2 verdict (a)) | `observation_selection_for_address` looks up `ready.tracks` only | the selected read at the bus's strip index is `InvalidSelection` |
-| `capability-evals.mjs` bus selected read (#1213, K2 verdict (a), `check-sdk-headless.sh`) | the same tracks-only lookup, artifact rebuilt | `readObservations` fails with `invalidArgument` |
+| (retired by #1590: `observation_selection_for_address` and the numeric read are deleted; the bus test and `capability-evals.mjs` read the bus tap by its stable key through `OBSERVATION_READ`) | | |
 | `capability-evals.mjs` bus refusal classifier (#1213 D5a, `check-sdk-headless.sh`) | the SDK classifier compares against the track count | the bus's missing insert reports `unknownTrack` |
 | `capability-evals.mjs` bus solo refusal (#1213 D4, #1212 NIT-2, `check-sdk-headless.sh`) | delete the `solo_safe` check before `set_solo`, artifact rebuilt | the shipped admission reports reason 2, not 12 |
 | `test-web-audioworklet.mjs` worklet eq-config classifier (#1213 D5a; attempt 2 MINOR-3) | compare `message.trackIndex >= this.trackCount` | the bus's missing insert reports `2` (`unknownTrack`), not `4` |
@@ -470,9 +469,7 @@ Chromium leg of `qualification/run.mjs`.
 | same | `dealloc` (or `realloc`) skips `count_if_locked` | the in-window count of 5 fails |
 | same | `render_locked` never clears the flag | `the window clears the flag when it returns` |
 | `const _: () = assert!(!needs_drop::<..>())` in `ffi.rs` | add a `Vec<u8>` field to `BootStaging` | `error[E0080]`: `assertion failed: !needs_drop::<RefCell<BootStaging>>()` |
-| `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserve_stagings` | `a staging accessor allocated inside its render-locked window`: 7 |
-| same | drop `observation_staging()` from `reserve_stagings` | the same assertion: 6 |
-| same | drop the `reserve_stagings()` call from `boot_staged`'s success path, which both boot exports share | the same assertion: 13 |
+| (retired by #1590: `tests/render_locked_staging.rs`, `reserve_stagings` and the observation staging are deleted; no staging is left for a booted instance to allocate in a render-locked window) | | |
 | `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` returns `Some(self.captures[self.selected.unwrap_or(0)].channels())` (a mask while nothing is selected) | `Some(Left)` where `None` is expected; no other host-core or host-web test goes red |
 | `check-web-audioworklet-callgraph.py --self-test` (h2) | the destructor-registration test is `False` | both (h2) cases |
 | same, (h3) | the atomic-wait test is `False` | (h3) `wait32` and `wait64` |

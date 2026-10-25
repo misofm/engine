@@ -2106,13 +2106,6 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     2: 64, 3: 2 * quantum * 4, 4: 256, 5: 2 * quantum * 4,
     7: meterFrameFloats * 4,
   };
-  // Issue #143: the additive observation ABI is present even in this hermetic processor fake.
-  // This fixture does not model a compiled observation row, but the worklet still prewarms and
-  // discovers the fixed staging views before it can publish `miso.ready.v1`.
-  const observationIdPointer = 17500;
-  const observationSelectionPointer = 18000;
-  const observationResultPointer = 19000;
-  const observationSelectionCapacity = 4;
   calls.meterLease = [];
   calls.meterWindows = 0;
   const boot = () => {
@@ -2240,22 +2233,6 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     },
     miso_engine_web_v1_source_channels: (_handle, index) => sourceRows[index]?.channels ?? 0,
     miso_engine_web_v1_source_frames: (_handle, index) => sourceRows[index]?.frames ?? 0n,
-    miso_engine_web_v1_observation_count: () => 0,
-    miso_engine_web_v1_observation_id_ptr: () => observationIdPointer,
-    miso_engine_web_v1_observation_id_capacity: () => 128,
-    miso_engine_web_v1_observation_track_index: () => 0,
-    miso_engine_web_v1_observation_rack: () => 1,
-    miso_engine_web_v1_observation_effect_index: () => 0,
-    miso_engine_web_v1_observation_effect_slot_id: () => 0,
-    miso_engine_web_v1_observation_native_effect_id: () => 0,
-    miso_engine_web_v1_observation_tap_count: () => 0,
-    miso_engine_web_v1_observation_tap_id: () => 0,
-    miso_engine_web_v1_observation_selection_ptr: () => observationSelectionPointer,
-    miso_engine_web_v1_observation_selection_bytes: () => 32,
-    miso_engine_web_v1_observation_selection_capacity: () => observationSelectionCapacity,
-    miso_engine_web_v1_observation_read: () => 0,
-    miso_engine_web_v1_observation_result_ptr: () => observationResultPointer,
-    miso_engine_web_v1_observation_result_bytes: (_handle, count = 0) => count * 96,
     miso_engine_web_v1_service: (handle) => {
       calls.service.push(handle);
       return calls.serviceResult;
@@ -3857,39 +3834,16 @@ async function testProcessor() {
     }
 
     {
-      // Issue #1562b: a rebuild can change the committed sources and, at its adoption block, the
-      // observation bindings, so both maps are read from the engine at each request. Red if the
-      // worklet answers from the boot's rows (a source added by a rebuild would never be listed),
-      // or if the observation map does not name the structure epoch of the plan that renders.
+      // Issue #1562b: a rebuild can change the committed sources, so the session map is read from
+      // the engine at each request. Red if the worklet answers from the boot's rows (a source
+      // added by a rebuild would never be listed). (#1590 deleted the observation map.)
       const { processor, fake } = makeProcessor();
-      const left = new Float32Array(64);
-      const right = new Float32Array(64);
       fake.sourceRows.push({ id: "zz-added", channels: 1, frames: 480n });
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 1 });
       assert.deepEqual(
         processor.port.posts.at(-1).message.sources.map((source) => source.id),
         ["bass", "drums", "zz-added"],
         "the session map lists a source a rebuild added",
-      );
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 2 });
-      const before = processor.port.posts.at(-1).message;
-      assert.equal(before.tag, "miso.observationmap.v1");
-      assert.equal(before.structureEpoch, 1, "the boot plan's list");
-      assert.deepEqual([...before.bindings], []);
-
-      // A replacement plan waits: the rendering plan's epoch is still the boot's.
-      fake.commitMeterSuccessor();
-      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 3 });
-      assert.equal(processor.port.posts.at(-1).message.structureEpoch, 1, "not adopted yet");
-      // The adopting block: the successor's header is the rendering plan's now.
-      fake.calls.adoptOnNextRender = true;
-      assert.equal(processor.process([], [[left, right]]), true);
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 4 });
-      assert.equal(
-        processor.port.posts.at(-1).message.structureEpoch,
-        2,
-        "the adopted plan's list",
       );
     }
 

@@ -227,20 +227,6 @@ export interface SessionMap {
   readonly submixes: readonly string[];
 }
 
-interface ObservationLayoutField {
-  readonly name: string;
-  readonly offset: number;
-  readonly type: string;
-}
-
-function observationField(structure: "observationSelection" | "observationResult", name: string): ObservationLayoutField {
-  const field = ABI_LAYOUT.structures[structure].fields.find((candidate) => candidate.name === name);
-  if (field === undefined) {
-    throw new MisoUsageError(`the generated ABI layout has no ${structure}.${name}`);
-  }
-  return field;
-}
-
 /** A direct snapshot of the frozen status structure. */
 export interface EngineStatus {
   readonly state: number;

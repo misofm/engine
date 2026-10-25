@@ -19,7 +19,7 @@ resource row belongs to exactly one class:
 
 * `EXACT_ROWS` are contract facts, not layout: the boot options and status structures, the staged
   document, the configured diagnostic, ID and PCM staging capacities, the two largest-allocation
-  rows (24,576 bytes since #1580 deleted the 1 MiB live-response capture), the four rows this identity fixture drives to zero (no delay, no scalar effect, no
+  rows (16,384 bytes, the control frame, since #1590 deleted the 24,576-byte observation staging), the four rows this identity fixture drives to zero (no delay, no scalar effect, no
   tap-declaring effect), and the compile's shape and backend. They must equal `expected.json`.
 * `CEILING_ROWS` are retained production memory: `size_of` sums over pointer-bearing structures
   and AoSoA bank payloads. Each must be positive and at most its ceiling in `expected.json`'s

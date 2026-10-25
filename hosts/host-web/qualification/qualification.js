@@ -1516,8 +1516,8 @@ async function runStallQualification(createHost, sessionDocument) {
   };
 }
 
-/// Issue #1333 D3: the worklet's staging read, inside a render-locked window: an observation row
-/// over a rendered session. The instance reports its count before its dispose. The browser reads
+/// Issue #1333 D3: a rendered session with an observation read (#1590: the core's `OBSERVATION_READ`
+/// through the control entry, since the browser's own staging read is gone). The instance reports its count before its dispose. The browser reads
 /// spectrum (#1597) and the track response (#1580) through the session's frames, on the control
 /// side: this run also sends one strip `RESPONSE_GET` before it renders (#1580 D2), so the render
 /// that answers it is inside the counted workload.
@@ -1547,7 +1547,9 @@ async function runStagingReadRun(createHost, sessionDocument) {
     if (acknowledgement.result !== RESULT_OK) throw new Error("staging-read prefill rejected");
   }
   // Issue #1589c: the arm is the core's `Observe` edit through the host's `control` message.
-  const { observeThroughSdk, requestTrackResponseThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const {
+    observeThroughSdk, readObservationThroughSdk, requestTrackResponseThroughSdk,
+  } = await import("/sdk/sdk-response-client.js");
   const subscribed = await observeThroughSdk(host, {
     stripId: "track",
     rack: "inserts",
@@ -1562,11 +1564,12 @@ async function runStagingReadRun(createHost, sessionDocument) {
   const response = await requestTrackResponseThroughSdk(host, "track");
   try {
     await context.startRendering();
-    const observation = await host.readObservations({
-      selections: [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: OBSERVATION_TAP_ID, channels: 3 }],
+    // #1590: the row reads through the core's `OBSERVATION_READ`, the browser's one read path.
+    const observation = await readObservationThroughSdk(host, {
+      stripId: "track", rack: "inserts", effectId: "comp", tapId: OBSERVATION_TAP_ID, channels: "both",
     });
     run.observationReadResult = observation.result;
-    run.observationRows = observation.rows.length;
+    run.observationRows = observation.rows;
     const ready = await response.ready(TRACK_RESPONSE_WAIT_MS);
     run.trackResponse = {
       result: response.result,

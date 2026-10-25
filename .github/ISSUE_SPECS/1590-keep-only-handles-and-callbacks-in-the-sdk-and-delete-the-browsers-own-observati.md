@@ -177,6 +177,32 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
   before asking `maximumFrameBytes()`, which on a fresh headless engine sends the queue's revision
   probe with the next ID; the core then refused the transaction (`protocol.failure`). The preflight
   read had masked it. The ceiling is now read first.
+- **Checkpoint 3 (#1590b).** Deleted: the sixteen observation exports, `ObservationStaging` and
+  its retained-byte projections, `WebObservationSelection`/`WebObservationResult` and their byte
+  constants, `MAXIMUM_OBSERVATION_READS`, `OBSERVATION_CHANNEL_*`, `OBSERVATION_STATUS_*`, the
+  host-side observation types and methods (`read_observations` ... `read_observation_addresses_into`,
+  `observation_binding*`), `observation_selection_for_address`, the numeric-address shape tables
+  they alone read (`PlanShape::{rack_effects, effect_base}`, `EffectInstance::address`,
+  `ReadyOwnership::effect_slot`, `live_effect_address`) and the browser host's `observationMap` /
+  `readObservations` (JS, `.d.ts` twins, worklet handlers, 13 rows of
+  `render-thread-exports.json`, the layout's two records and two vocabularies). The worklet no
+  longer reads the observation staging pointer at boot. Every remaining browser read is the core's
+  `OBSERVATION_READ` through the control entry; host-web's tests read through a `read_taps` helper
+  that sends that frame. The qualification's staging-read row reads through the SDK's frame
+  encoder.
+- **expected.json, checkpoint 3** (regenerated through `direct-oracle.mjs` print mode; PCM
+  digests unchanged): exact rows `largestBridgeAllocationBytes` and `largestNamedAllocationBytes`
+  24,576 -> 16,384 (the deleted 256 x 96-byte observation result staging was the largest bridge
+  allocation; the control frame is now). Measured rows fell: `bridgeMetadataBytes` 551,970 ->
+  496,495 and `bridgeRetainedBytes` 589,078 -> 533,603 (the 55,475-byte staging), so their
+  ceilings are re-derived by the file's own rule (value + 10 %, rounded up to 64 bytes): 607,232
+  -> 546,176 and 648,064 -> 587,008. Memory: 1,900,544 -> 1,835,008 bytes (simd128), 1,966,080 ->
+  1,900,544 (automation timeline); no memory ceiling moved.
+- **host-web `representative_retained_projection_tracks_the_post_prepare_exact_aggregate`.** The
+  staging left the projection and the exact row alike, so the gaps did not move (identity
+  628,283 -> 628,275; nine-track 955,059 -> 954,987), but the ratio the test bounds rose
+  (nine-track 954,987 / 86,248 = 11.07). The multiplier is re-pinned by its own rule from 7 to 12
+  (8.4 % headroom). Flagged for review: a ratio bound whose base shrank.
 
 ### Deleted or rewritten tests and their holders
 
@@ -196,3 +222,14 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
 | sdk `measurement-evals` "the browser engine meters and observes a bus by its submix ID", its observation half (index resolution) | no index crosses the API (D3); a bus tap: `capability-evals` "a managed subscription to a bus tap arms it at the bus's strip index and reads it ready" |
 | sdk `structure-evals` "an effect that moved to another index is disarmed where it is now", its `effectIndex` probes | the claim stays; adoption is waited for by blocks, not by the index |
 | (new) sdk `observation-evals` "the observation map from the control list and the catalog equals the exports' map" | gate 3 |
+| host-web `selected_observation_numeric_read_refuses_failed_host_without_touching_output` | the numeric caller-output read is gone (an export claim); no holder needed |
+| host-web `selected_observation_reads_are_bounded_stable_and_non_consuming`, `..._keep_same_track_owner_windows_and_sequences` | rewritten over `OBSERVATION_READ` (`read_taps`); claims kept |
+| host-web ffi `observation_records_address_console_slots_and_inserts`, `a_post_insert_observation_is_read_at_its_console_slot_index` | export claims; the stable-key console and insert addressing: sdk gate 3 map test (console slots, inserts, a submix) and the `Observe` edit tests of control-plane |
+| host-web ffi `observation_staging_retention_adds_actual_refcell_once` | the staging is gone; no holder needed |
+| host-web ffi `alias_host_borrow_refusal_is_terminal_before_any_staging_work`, `invalid_alias_handle_is_terminal_before_any_staging_work` | kept without the staging markers as `alias_host_borrow_refusal_is_terminal`, `invalid_alias_handle_is_terminal` (the meter lease) |
+| host-web `tests/render_locked_staging.rs` (whole binary) | no staging remains for a booted instance to allocate inside a render-locked window; no holder needed |
+| host-web `a_bus_session_boots_live_controlled_and_files_every_bus_effect`, its dense-slot half | the per-strip address tables are gone; each strip's effects, observers and strip indices are still asserted |
+| host-web `the_catalogs_describe_the_successor_from_the_adoption_block_on`, its observation-catalog half | the catalog is gone; the plan's observed strip indices (`observation_tracks`) carry the claim |
+| `test-web-audioworklet.mjs` observation map epoch block | the map is gone; the session-map half stays |
+| `protocol_cross_host` `both_hosts_read_one_observation_tap_alike` | rewritten: both hosts answer the same `OBSERVATION_READ` frame |
+| sdk `browser-evals` "generated u64 offsets preserve BigInt", its `observationResult` leaves | the leaves read `seekReport`'s u64 fields |

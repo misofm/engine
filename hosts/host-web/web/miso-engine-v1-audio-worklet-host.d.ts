@@ -182,68 +182,6 @@ export interface MisoSessionMap {
   readonly metersAttached: boolean;
 }
 
-/** Numeric current-owner address used by the additive selected-observation request. */
-export interface MisoObservationAddress {
-  /// Strip index: the compiled session's tracks first, then its submixes (issue 1213).
-  readonly trackIndex: number;
-  /** `1` inserts or `3` console: the layout JSON's `racks` table. */
-  readonly rack: number;
-  readonly effectIndex: number;
-  readonly tapId: number;
-  /** `1` left, `2` right or `3` both. */
-  readonly channels: number;
-}
-
-/** One resident observation binding, in the prepared owner's stable map order. */
-export interface MisoObservationMapBinding {
-  /// Strip index: the compiled session's tracks first, then its submixes (issue 1213).
-  readonly trackIndex: number;
-  /** `1` inserts or `3` console. */
-  readonly rack: number;
-  readonly effectIndex: number;
-  readonly effectSlotId: string;
-  readonly nativeEffectId: string;
-  readonly tapIds: number[];
-}
-
-/** The current owner's observation map. */
-export interface MisoObservationMap {
-  readonly tag: "miso.observationmap.v1";
-  readonly requestId: number;
-  readonly result: number;
-  /// The structure epoch of the control list whose strip order `bindings` follow (issue 1562b):
-  /// the `structureEpoch` of `CONTROL_LIST_GET` pages, as the plan that renders carries it. A
-  /// binding's `trackIndex` indexes the tracks, then the submixes, of the list of this epoch. A
-  /// rebuild that adds, removes or reorders a strip changes it at the block that adopts the
-  /// replacement plan; between that commit and the adoption the control list is already the
-  /// replacement's, so a client names the strips of this map by the list of this epoch and never
-  /// by the newest list. A positive safe integer.
-  readonly structureEpoch: number;
-  readonly bindings: MisoObservationMapBinding[];
-}
-
-/** One numeric row copied from the fixed observation-result records. */
-export interface MisoObservationReadRow extends MisoObservationAddress {
-  readonly status: number;
-  readonly sampleRateHz: number;
-  readonly firstSample: bigint;
-  readonly endSample: bigint;
-  readonly sequence: bigint;
-  readonly blocks: number;
-  readonly leftPresent: number;
-  readonly rightPresent: number;
-  readonly left: number;
-  readonly right: number;
-}
-
-/** One bounded selected-observation reply. */
-export interface MisoObservationReadReply {
-  readonly tag: "miso.observation.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly rows: MisoObservationReadRow[];
-}
-
 /// One decimated meter window (issue 137 D2, extended by issue 143).
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
@@ -275,11 +213,11 @@ export interface MisoMeterFrame {
   /// an effect holds its reduction as negative decibels internally, and the fold is `max(|x|)` over
   /// the window. An app's `Math.max(0, x ?? 0)` is therefore a no-op rather than a silent zeroing.
   /// A `gainChangeDb` tap (`peakSigned`, issue 1918) is signed, positive for a boost: it adds only
-  /// a cut's depth here and a boost adds `0`; its signed value is read with `readObservations`.
+  /// a cut's depth here and a boost adds `0`; its signed value is read with `OBSERVATION_READ`.
   ///
   /// Every entry is finite. `0` deliberately conflates "not reducing" with "no observed effect on
   /// this track", because the array is positional and read without null checks; the distinction
-  /// lives in the observation map and the `OBSERVATION_READ` rows. Several armed taps on one
+  /// lives in the `OBSERVATION_READ` rows. Several armed taps on one
   /// track fold max-magnitude into the one slot, on the control plane. Each value is the latest
   /// available independently aged effect fold; this frame carries no GR sequence or sample span.
   ///
@@ -610,10 +548,6 @@ export interface MisoAudioWorkletHost {
   /// boot's 1 MiB document bound; an empty one rejects with `RESULT_INVALID_ARGUMENT` (1) before
   /// the port, and one over the bound answers `RESULT_INVALID_ARGUMENT` with an empty response.
   control(frame: Uint8Array, document?: Uint8Array): Promise<MisoControlReply>;
-  /// Read the current prepared owner's stable observation bindings.
-  observationMap(): Promise<MisoObservationMap>;
-  /// Read one bounded batch of numeric addresses resolved from `observationMap()`.
-  readObservations(request: { selections: MisoObservationAddress[] }): Promise<MisoObservationReadReply>;
   /// Read the compiled session's canonical source order (issues 137 D1, 207).
   ///
   /// `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every

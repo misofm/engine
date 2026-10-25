@@ -57,9 +57,9 @@ test("generated u64 offsets preserve BigInt", () => {
   const leaves = [
     { structure: "planWatermark", name: "revision", value: 0x0100_0000_0000_0007n },
     { structure: "planWatermark", name: "firstSample", value: 0x0200_0000_0000_0009n },
-    { structure: "observationResult", name: "firstSample", value: 0x0400_0000_0000_000bn },
-    { structure: "observationResult", name: "sequence", value: 0xffff_ffff_ffff_ffd1n },
-    { structure: "observationResult", name: "endSample", value: 0xffff_ffff_ffff_fff1n },
+    { structure: "seekReport", name: "firstSample", value: 0x0400_0000_0000_000bn },
+    { structure: "seekReport", name: "generation", value: 0xffff_ffff_ffff_ffd1n },
+    { structure: "seekReport", name: "sourceFrame", value: 0xffff_ffff_ffff_fff1n },
   ];
   const structures = [...new Set(leaves.map(({ structure }) => structure))];
   const pointers = new Map();

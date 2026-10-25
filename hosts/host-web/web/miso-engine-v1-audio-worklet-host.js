@@ -94,67 +94,10 @@ const SEEK_REPORT_FIELDS = [
 const MAXIMUM_CONTROL_IN_FLIGHT = 64;
 // The engine's `maximum_control_frame_bytes` (`CONTROL_FRAME_BYTES` in the Rust host).
 const MAXIMUM_CONTROL_FRAME_BYTES = 16384;
-const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
-const MAXIMUM_OBSERVATION_READS = 256;
-const OBSERVATION_CHANNELS = new Set([1, 2, 3]);
-const OBSERVATION_STATUSES = new Set([1, 2, 3]);
-const OBSERVATION_SELECTION_BYTES = 32;
-const OBSERVATION_RESULT_BYTES = 96;
-const OBSERVATION_MAP_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "effectSlotId", "nativeEffectId", "tapIds",
-];
-const OBSERVATION_ROW_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "tapId", "channels", "status", "sampleRateHz",
-  "firstSample", "endSample", "sequence", "blocks", "leftPresent", "rightPresent", "left", "right",
-];
 // Issue #207: one entry of the session map's source list. The names are the `.d.ts`'s and the
 // worklet's, spelled once here so the acknowledgement validator and the type declaration cannot
 // drift apart without `scripts/check-session-map-shape.py` seeing it.
 const SESSION_SOURCE_FIELDS = ["id", "channels", "frames"];
-
-// Decision 12 (#1096): an effect is addressed as `1` inserts, by its index in the track's inserts,
-// or `3` console, by the slot's index in the session's slot order (`pre_insert`, then
-// `post_insert`). The retired `simd1` (`0`) and `simd2` (`2`) codes are refused and never
-// reallocated.
-const RACK_INSERTS = 1;
-const RACK_CONSOLE = 3;
-const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
-
-function validObservationAddress(address) {
-  return hasExactFields(address, OBSERVATION_ADDRESS_FIELDS)
-    && validU32(address.trackIndex)
-    && effectRack(address.rack)
-    && validU32(address.effectIndex)
-    && validU32(address.tapId) && address.tapId > 0
-    && validU32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
-}
-
-function validObservationMapBinding(binding) {
-  return hasExactFields(binding, OBSERVATION_MAP_FIELDS)
-    && validU32(binding.trackIndex)
-    && effectRack(binding.rack)
-    && validU32(binding.effectIndex)
-    && typeof binding.effectSlotId === "string" && binding.effectSlotId.length > 0
-    && typeof binding.nativeEffectId === "string" && binding.nativeEffectId.length > 0
-    && Array.isArray(binding.tapIds) && binding.tapIds.length > 0
-    && binding.tapIds.every((tapId) => validU32(tapId) && tapId > 0);
-}
-
-function validObservationRow(row) {
-  return hasExactFields(row, OBSERVATION_ROW_FIELDS)
-    && validU32(row.trackIndex)
-    && effectRack(row.rack)
-    && validU32(row.effectIndex)
-    && validU32(row.tapId) && row.tapId > 0
-    && validU32(row.channels) && OBSERVATION_CHANNELS.has(row.channels)
-    && validU32(row.status) && OBSERVATION_STATUSES.has(row.status)
-    && validU32(row.sampleRateHz) && validU64(row.firstSample)
-    && validU64(row.endSample) && validU64(row.sequence)
-    && validU32(row.blocks) && validU32(row.leftPresent) && row.leftPresent <= 1
-    && validU32(row.rightPresent) && row.rightPresent <= 1
-    && typeof row.left === "number" && Number.isFinite(row.left)
-    && typeof row.right === "number" && Number.isFinite(row.right);
-}
 
 const RESOURCE_FIELDS = [
   "sampleRateHz", "quantumFrames", "backend", "optionsBytes", "statusBytes", "sessionDocumentBytes",
@@ -408,7 +351,6 @@ class MisoAudioWorkletHost {
   #statusFollow = null;
   #inFlightRenderAllocations = 0;
   #inFlightControl = 0;
-  #inFlightObservationReads = 0;
   #inFlightLease = new Set();
   #ringBlocks;
   #onMeterFrame = null;
@@ -518,10 +460,7 @@ class MisoAudioWorkletHost {
       this.#inFlightRenderAllocations -= 1;
     } else if (pending.response === "control") {
       this.#inFlightControl -= 1;
-    } else if (pending.response === "observationRead") {
-      this.#inFlightObservationReads -= 1;
-    } else if (pending.response === "lease" || pending.response === "sessionMap"
-      || pending.response === "observationMap") {
+    } else if (pending.response === "lease" || pending.response === "sessionMap") {
       this.#inFlightLease.delete(pending.leaseKind);
     }
   }
@@ -668,10 +607,6 @@ class MisoAudioWorkletHost {
           ? ["tag", "requestId", "result", "response", "revision"]
         : pending.response === "sessionMap"
           ? ["tag", "requestId", "result", "sources", "metersAttached"]
-          : pending.response === "observationMap"
-            ? ["tag", "requestId", "result", "structureEpoch", "bindings"]
-            : pending.response === "observationRead"
-              ? ["tag", "requestId", "result", "rows"]
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
@@ -693,10 +628,6 @@ class MisoAudioWorkletHost {
         ? "miso.control.v1"
       : pending.response === "sessionMap"
         ? "miso.sessionmap.v1"
-        : pending.response === "observationMap"
-          ? "miso.observationmap.v1"
-          : pending.response === "observationRead"
-            ? "miso.observation.v1"
               : pending.response === "sessionSeek"
                   ? "miso.session-seek.v1"
                 : pending.response === "seekReport"
@@ -721,19 +652,6 @@ class MisoAudioWorkletHost {
         && validU32(source.channels) && source.channels > 0
         && validU64(source.frames, true))
       && typeof message.metersAttached === "boolean"
-    );
-    const validObservationMap = pending.response !== "observationMap" || (
-      message.result === RESULT_OK && Array.isArray(message.bindings)
-      // Issue #1562b: the structure epoch of the control list whose strip order the bindings
-      // follow (the rendering plan's), a positive safe integer.
-      && Number.isSafeInteger(message.structureEpoch) && message.structureEpoch > 0
-      && message.bindings.every(validObservationMapBinding)
-    );
-    const validObservationRead = pending.response !== "observationRead" || (
-      Array.isArray(message.rows)
-      && (message.result !== RESULT_OK || message.rows.length === pending.observationCount)
-      && (message.result === RESULT_OK || message.rows.length === 0)
-      && message.rows.every(validObservationRow)
     );
     const validStatus = pending.response !== "status" || (
       message.result === RESULT_OK && validU32(message.state) && message.state <= 4
@@ -766,7 +684,6 @@ class MisoAudioWorkletHost {
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validRenderAllocations || !validControl || !validSessionMap
-        || !validObservationMap || !validObservationRead
         || !validSessionSeek || !validSeekReport) {
       this.#fail(webError(255, message.requestId));
       return;
@@ -795,7 +712,6 @@ class MisoAudioWorkletHost {
     this.#statusFollow = null;
     this.#inFlightRenderAllocations = 0;
     this.#inFlightControl = 0;
-    this.#inFlightObservationReads = 0;
     for (const pending of unsettled) pending.reject(error);
     follow?.reject(error);
   }
@@ -811,8 +727,7 @@ class MisoAudioWorkletHost {
     if (response === "seekReport") return this.#inFlightSeekReports.has(sourceId);
     if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
     if (response === "control") return this.#inFlightControl >= MAXIMUM_CONTROL_IN_FLIGHT;
-    if (response === "observationRead") return this.#inFlightObservationReads >= 1;
-    if (response === "lease" || response === "sessionMap" || response === "observationMap") {
+    if (response === "lease" || response === "sessionMap") {
       return this.#inFlightLease.has(sourceId);
     }
     return false; // dispose is terminal and waits for nothing
@@ -831,9 +746,7 @@ class MisoAudioWorkletHost {
       this.#inFlightRenderAllocations += 1;
     } else if (response === "control") {
       this.#inFlightControl += 1;
-    } else if (response === "observationRead") {
-      this.#inFlightObservationReads += 1;
-    } else if (response === "lease" || response === "sessionMap" || response === "observationMap") {
+    } else if (response === "lease" || response === "sessionMap") {
       this.#inFlightLease.add(sourceId);
     }
   }
@@ -861,7 +774,6 @@ class MisoAudioWorkletHost {
         requestId,
         sourceId,
         leaseKind: sourceId,
-        observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         generation: stamped.generation,
         resolve,
         reject,
@@ -1032,8 +944,8 @@ class MisoAudioWorkletHost {
   /// Read this instance's render-locked allocator count (issue #1333 D3).
   ///
   /// The count is every allocator call the instance made inside the exports its processor calls
-  /// on the render thread after boot: render, source submission, meter polling and the
-  /// observation staging reads. Decision 15 requires it to stay zero. It
+  /// on the render thread after boot: render, source submission and meter polling. Decision 15
+  /// requires it to stay zero. It
   /// is per instance, so a caller reads it on each host before that host's `dispose()`. The
   /// worklet answers in its message handler, never in `process()`.
   renderAllocationCount() {
@@ -1092,39 +1004,11 @@ class MisoAudioWorkletHost {
   /// Read the compiled session's canonical track order (issue #137 D1), its sources (issue #207)
   /// and its canonical submix order (issue #1210 D3).
   ///
-  /// This is the addressing authority for the strip positions the meter frame and the observation
-  /// map use: the app never guesses an index. An `Observe` edit does not use one: it names its tap
+  /// This is the addressing authority for the strip positions the meter frame uses: the app never
+  /// guesses an index. An `Observe` edit does not use one: it names its tap
   /// by stable key (#1677).
   sessionMap() {
     return this.#request({ tag: "miso.sessionmap.v1" }, [], "sessionMap", false, undefined, "sessionMap");
-  }
-
-  /// Read the current prepared owner's stable observation bindings.
-  observationMap() {
-    return this.#request(
-      { tag: "miso.observationmap.v1" },
-      [],
-      "observationMap",
-      false,
-      undefined,
-      "observationMap",
-    );
-  }
-
-  /// Read one bounded batch of numeric addresses resolved from `observationMap()`.
-  readObservations(request) {
-    if (!hasExactFields(request, ["selections"])
-        || !Array.isArray(request.selections)
-        || request.selections.length === 0
-        || request.selections.length > MAXIMUM_OBSERVATION_READS
-        || !request.selections.every(validObservationAddress)) {
-      return Promise.reject(webError(1));
-    }
-    return this.#request(
-      { tag: "miso.observation.v1", selections: request.selections },
-      [],
-      "observationRead",
-    );
   }
 
   /// Take or release the decimated meter lease (issue #137 D2).

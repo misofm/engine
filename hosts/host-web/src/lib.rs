@@ -33,13 +33,10 @@ use std::sync::{Arc, Mutex};
 
 use builtins_compiler::MeterConsumer;
 use control_plane::{
-    CompileFailure, ControlAdapter, ControlLimits, ObservationKeyRef, PlanQueries, PlanResources,
-    PlanState, SessionSeekFailure, SessionState, SourceFailure, SourceRefusalKind,
+    CompileFailure, ControlAdapter, ControlLimits, PlanQueries, PlanResources, PlanState,
+    SessionSeekFailure, SessionState, SourceFailure, SourceRefusalKind,
 };
-use effect_contract::ObservationDescriptor;
-use engine::realtime::{
-    HostAttachment, ObservationWindow, ObserverCarry, ObserverKind, PlanarBufferMut,
-};
+use engine::realtime::{HostAttachment, ObserverCarry, ObserverKind, PlanarBufferMut};
 use host_core::{
     CompiledSession, EffectObservationHandle, GainReductionTaps, HostLiveControlRequest,
     HostLiveLanes, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
@@ -167,203 +164,6 @@ pub const BUFFER_OUTPUT_PCM: u32 = 5;
 /// Fixed decimated meter-frame buffer (issue #137 D2).
 pub const BUFFER_METER_FRAME: u32 = 7;
 
-/// Largest number of selected observation rows one bounded read may resolve.
-///
-/// A selected read is a control-plane snapshot, not a subscription or a history, so the host never
-/// grows storage from the number of renders or from the number of reads a caller makes. The
-/// browser's read is host-core's (#1586 D3), so the bound is host-core's.
-pub const MAXIMUM_OBSERVATION_READS: usize = host_core::observation::MAXIMUM_OBSERVATION_SELECTIONS;
-
-/// Requested left lane in a selected observation record.
-pub const OBSERVATION_CHANNEL_LEFT: u32 = 1;
-/// Requested right lane in a selected observation record.
-pub const OBSERVATION_CHANNEL_RIGHT: u32 = 2;
-/// Requested left and right lanes in a selected observation record.
-pub const OBSERVATION_CHANNEL_BOTH: u32 = OBSERVATION_CHANNEL_LEFT | OBSERVATION_CHANNEL_RIGHT;
-/// The selected tap has not published a complete window yet.
-pub const OBSERVATION_STATUS_PENDING: u32 = 1;
-/// The selected tap is currently disarmed.
-pub const OBSERVATION_STATUS_UNARMED: u32 = 2;
-/// The selected tap returned a complete resident window.
-pub const OBSERVATION_STATUS_READY: u32 = 3;
-
-/// The lanes a selection asks for, and a row's availability: host-core's, since the read is
-/// host-core's ([`host_core::observation`], #1586 D3).
-pub use host_core::observation::{ObservationReadChannels, ObservationReadStatus};
-
-/// A typed refusal for one complete selected-observation batch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ObservationReadError {
-    /// The host is not in the ready state.
-    WrongState,
-    /// A stable tuple, tap or batch shape is invalid for this host.
-    InvalidSelection,
-    /// The tuple names a declared target that was not prepared as a resident observation.
-    Unsupported,
-    /// The bounded selected-read ceiling was exceeded.
-    BufferTooSmall,
-}
-
-/// One stable selection for [`AudioWorkletEngineHost::read_observations`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObservationSelection<'a> {
-    /// Canonical normalized track identity.
-    pub track_id: &'a str,
-    /// The session rack containing the effect: a console slot or an insert (issue #1096).
-    pub rack: LiveEffectRack,
-    /// Stable local effect identity, never an array position: the slot ID of a console slot, the
-    /// insert's ID of an insert.
-    pub effect_slot_id: &'a str,
-    /// Effect-local declared observation tap id.
-    pub tap_id: u32,
-    /// Independent owner-published lane values to return.
-    pub channels: ObservationReadChannels,
-}
-
-/// Numeric owner address used by the Wasm bridge after a stable map has resolved a selection.
-///
-/// The address is deliberately not public identity: it is valid only for the current prepared
-/// host and is re-resolved from the stable map by each SDK boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObservationAddress {
-    /// Strip index: a track's canonical index, or `T + j` for submix `j` (issue #1213 D1).
-    pub track_index: u32,
-    /// The session rack (issue #1096).
-    pub rack: LiveEffectRack,
-    /// A console slot's index in the session's slot order, or an insert's index.
-    pub effect_index: u32,
-    /// Effect-local observation tap id.
-    pub tap_id: u32,
-    /// Requested owner-published lanes.
-    pub channels: ObservationReadChannels,
-}
-
-/// One bound resident observation effect in the current prepared owner.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ObservationBinding<'a> {
-    /// Numeric address fields used by the bridge.
-    pub address: ObservationAddress,
-    /// Stable local effect-slot identity.
-    pub effect_slot_id: &'a str,
-    /// Native effect contract identity.
-    pub native_effect_id: &'static str,
-    /// Existing owner descriptors, in declared tap order.
-    pub descriptors: &'static [ObservationDescriptor],
-}
-
-/// Fixed selected-read input record shared with the Wasm boundary.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct WebObservationSelection {
-    /// Exact structure byte size.
-    pub struct_size: u32,
-    /// Browser ABI version.
-    pub abi_version: u32,
-    /// Strip index: canonical normalized tracks, then submixes (issue #1213, spelling P17).
-    pub track_index: u32,
-    /// [`RACK_INSERTS`] or [`RACK_CONSOLE`]; the retired `0` and `2` are refused.
-    pub rack: u32,
-    /// A console slot's index in the session's slot order, or an insert's index.
-    pub effect_index: u32,
-    /// Effect-local observation tap id.
-    pub tap_id: u32,
-    /// One of [`OBSERVATION_CHANNEL_LEFT`], [`OBSERVATION_CHANNEL_RIGHT`] or both.
-    pub channels: u32,
-    /// Required zero.
-    pub reserved: u32,
-}
-
-/// Fixed selected-read result record shared with the Wasm boundary.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct WebObservationResult {
-    /// Exact structure byte size.
-    pub struct_size: u32,
-    /// Browser ABI version.
-    pub abi_version: u32,
-    /// One of the `OBSERVATION_STATUS_*` values.
-    pub status: u32,
-    /// Strip index: canonical normalized tracks, then submixes (issue #1213, spelling P17).
-    pub track_index: u32,
-    /// [`RACK_INSERTS`] or [`RACK_CONSOLE`]; the retired `0` and `2` are refused.
-    pub rack: u32,
-    /// A console slot's index in the session's slot order, or an insert's index.
-    pub effect_index: u32,
-    /// Effect-local observation tap id.
-    pub tap_id: u32,
-    /// Requested channel mask.
-    pub channels: u32,
-    /// Exact prepared sample rate.
-    pub sample_rate_hz: u32,
-    /// Required zero.
-    pub reserved0: u32,
-    /// Complete window's inclusive first sample, or zero without a window.
-    pub first_sample: u64,
-    /// Complete window's exclusive end sample, or zero without a window.
-    pub end_sample: u64,
-    /// Exact owner publication sequence, or zero without a window.
-    pub sequence: u64,
-    /// Render blocks folded into the complete window, or zero without a window.
-    pub blocks: u32,
-    /// Whether `left` is present for this requested channel mask.
-    pub left_present: u32,
-    /// Whether `right` is present for this requested channel mask.
-    pub right_present: u32,
-    /// Owner-published native-unit left value when present.
-    pub left: f32,
-    /// Owner-published native-unit right value when present.
-    pub right: f32,
-    /// Required zero expansion words.
-    pub reserved: [u32; 3],
-}
-
-/// Byte size of [`WebObservationSelection`].
-pub const OBSERVATION_SELECTION_BYTES: u32 = size_of::<WebObservationSelection>() as u32;
-/// Byte size of [`WebObservationResult`].
-pub const OBSERVATION_RESULT_BYTES: u32 = size_of::<WebObservationResult>() as u32;
-
-/// One owned result row from a selected observation read.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ObservationReadResult {
-    /// The actual stable tuple resolved by the current prepared host.
-    pub track_id: Box<str>,
-    /// The resolved session rack.
-    pub rack: LiveEffectRack,
-    /// The actual stable local effect-slot identity.
-    pub effect_slot_id: Box<str>,
-    /// Native effect contract identity from the owner descriptor.
-    pub native_effect_id: &'static str,
-    /// The complete owner descriptor, including native and display units.
-    pub descriptor: ObservationDescriptor,
-    /// The requested channel selection.
-    pub channels: ObservationReadChannels,
-    /// The host session's exact prepared rate.
-    pub sample_rate_hz: u32,
-    /// Availability at the read boundary.
-    pub status: ObservationReadStatus,
-    /// The untouched latest complete window, when one is available.
-    pub window: Option<engine::realtime::ObservationWindow>,
-    /// Selected left value in the owner's declared native unit.
-    pub left: Option<f32>,
-    /// Selected right value in the owner's declared native unit.
-    pub right: Option<f32>,
-}
-
-/// Allocation-free selected-read values for the Wasm staging bridge.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ObservationReadValues {
-    /// Availability at the read boundary.
-    pub status: ObservationReadStatus,
-    /// The host session's exact prepared rate.
-    pub sample_rate_hz: u32,
-    /// The untouched latest complete window, when one is available.
-    pub window: Option<ObservationWindow>,
-    /// Selected left value in the owner's declared native unit.
-    pub left: Option<f32>,
-    /// Selected right value in the owner's declared native unit.
-    pub right: Option<f32>,
-}
-
 // Command kinds 7 and 8 (the observation subscribe and unsubscribe records) were deleted by #1589c:
 // the core's `Observe` edit arms a tap. Their numbers are retired and never reallocated.
 /// The `rack` of an effect-addressed record: one of the strip's inserts (decision 12, #1096).
@@ -374,30 +174,11 @@ pub const RACK_INSERTS: u8 = 1;
 ///
 /// Appended. `effect_index` is the console slot's index.
 ///
-/// The retired `simd1` and `simd2` codes, `0` and `2`, are refused with the observation path's
-/// invalid-argument result and are never reallocated. `ABI_VERSION` did not move.
+/// The retired `simd1` and `simd2` codes, `0` and `2`, are refused and never reallocated.
+/// `ABI_VERSION` did not move.
 pub const RACK_CONSOLE: u8 = 3;
 /// The `rack` of a builtin-addressed record, which names no effect rack.
 pub const RACK_NOT_APPLICABLE: u8 = 255;
-
-/// Decode a record's `rack` and `effect_index` into a live effect address (issue #1096).
-///
-/// `None` for every other rack, the retired `0` and `2` among them.
-pub(crate) fn live_effect_address(rack: u32, effect_index: u32) -> Option<LiveEffectAddress> {
-    match u8::try_from(rack) {
-        Ok(RACK_INSERTS) => Some(LiveEffectAddress::insert(effect_index)),
-        Ok(RACK_CONSOLE) => Some(LiveEffectAddress::console(effect_index)),
-        _ => None,
-    }
-}
-
-/// The record `rack` of a live effect rack (issue #1096).
-pub(crate) const fn live_effect_rack_raw(rack: LiveEffectRack) -> u8 {
-    match rack {
-        LiveEffectRack::Inserts => RACK_INSERTS,
-        LiveEffectRack::Console => RACK_CONSOLE,
-    }
-}
 
 /// The dense effect position of one live address, given its track's first position and its
 /// lowered rack counts in chain order (issue #1096).
@@ -881,8 +662,6 @@ struct EffectInstance {
     track_id: Box<str>,
     /// The session-declared effect identifier.
     effect_id: Box<str>,
-    /// The instance's live address within its strip.
-    address: LiveEffectAddress,
     /// The effect's declared parameter table and observation menu.
     descriptor: &'static effect_contract::EffectDescriptor,
 }
@@ -908,14 +687,6 @@ struct PlanShape {
     /// `tracks.len() + j` (issue #1207 D2), which is the index word an observation selection
     /// addresses it by (issue #1213 D1).
     submixes: Vec<Box<str>>,
-    /// Effects per strip (tracks, then submixes) in each lowered rack, in chain order
-    /// `[pre_insert, inserts, post_insert]`, so an effect-addressed read finds its effect by
-    /// arithmetic ([`LiveEffectAddress::lower`] reads them).
-    rack_effects: Box<[[u32; 3]]>,
-    /// Per-strip prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup:
-    /// the tracks first, then the submixes (issue #1207 D3), so a track's entry is the same with
-    /// or without submixes.
-    effect_base: Box<[u32]>,
     /// Every effect instance of the plan in the dense `effect_slot` order, whose length is the
     /// number of instances. It is how the reads reach an effect's readers.
     effect_instances: Box<[Option<EffectInstance>]>,
@@ -1378,27 +1149,11 @@ impl ReadyOwnership {
     // REALTIME_POLICY_END
 
     /// The session's `OBSERVATION_READ` index of the plan render runs (#1589 R2): the epoch of
-    /// [`Self::shape`], whose readers the active plan's [`RenderCompanions`] hold, so a read
-    /// resolves through one plan's index and readers whether or not the service step has
-    /// promoted that epoch yet. `None` only if the session dropped the epoch, which it never
-    /// does while the plan renders.
+    /// [`Self::shape`], whose readers the active plan's [`RenderCompanions`] hold. Test support:
+    /// the tests find a tap's readers through it.
+    #[cfg(test)]
     fn observation_index(&self) -> Option<&host_core::observation::ObservationIndex> {
         self.control.observation_index(self.shape_epoch)
-    }
-
-    /// The dense index of one addressed effect instance in `effect_instances`.
-    ///
-    /// An effect is addressed in the session's terms, a console slot by its slot index or an
-    /// insert by its index (issue #1096); [`LiveEffectAddress::lower`] is the one translation to
-    /// the lowered rack that orders the band. `None` means the address names no instance this
-    /// session prepared.
-    fn effect_slot(&self, track: usize, address: LiveEffectAddress) -> Option<usize> {
-        let slot = dense_effect_slot(
-            *self.shape.effect_base.get(track)?,
-            *self.shape.rack_effects.get(track)?,
-            address,
-        )?;
-        (slot < self.shape.effect_instances.len()).then_some(slot)
     }
 }
 
@@ -2241,193 +1996,6 @@ impl AudioWorkletEngineHost {
         })
     }
 
-    /// Read one bounded batch of selected resident observation taps.
-    ///
-    /// The complete selection is resolved before a result vector is allocated, so a malformed,
-    /// unsupported or over-sized batch leaves the host untouched. Each successful row reads its
-    /// existing control-side cell without acknowledging it; legacy meter polling therefore keeps
-    /// its own consumer semantics and repeated selected reads remain non-consuming.
-    pub fn read_observations(
-        &mut self,
-        selections: &[ObservationSelection<'_>],
-    ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
-        Self::read_selected(
-            self.status.state,
-            self.status.sample_rate_hz,
-            self.ready.as_ref(),
-            self.plan.as_mut(),
-            selections,
-        )
-    }
-
-    /// The body of [`Self::read_observations`], over split borrows: the selections may borrow the
-    /// ready table's IDs while the readers are read through the render half.
-    fn read_selected(
-        state: u32,
-        sample_rate_hz: u32,
-        ready: Option<&ReadyOwnership>,
-        plan: Option<&mut WebPlan>,
-        selections: &[ObservationSelection<'_>],
-    ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
-        if state != STATE_READY {
-            return Err(ObservationReadError::WrongState);
-        }
-        if selections.len() > MAXIMUM_OBSERVATION_READS {
-            return Err(ObservationReadError::BufferTooSmall);
-        }
-        let (Some(ready), Some(plan)) = (ready, plan) else {
-            return Err(ObservationReadError::WrongState);
-        };
-
-        // #1586 D3: host-core checks the whole batch (every selection resolves, no tap twice)
-        // before it writes a row, so a refused batch allocates no result vector.
-        let handles = observation_handles(plan);
-        let empty = host_core::observation::ObservationIndex::default();
-        let mut results: Vec<ObservationReadResult> = Vec::new();
-        host_core::observation::read_with(
-            ready.observation_index().unwrap_or(&empty),
-            handles,
-            selections,
-            |selection| Ok::<_, ObservationReadError>(core_selection(selection)),
-            |key| observation_issued(ready, key),
-            |position, entry, row| {
-                if results.capacity() == 0 {
-                    results.reserve_exact(selections.len());
-                }
-                let selection = &selections[position];
-                let Some(tap) = row.tap else {
-                    return;
-                };
-                results.push(ObservationReadResult {
-                    track_id: entry.strip_id.clone(),
-                    rack: selection.rack,
-                    effect_slot_id: entry.effect_id.clone(),
-                    native_effect_id: entry.effect.id.as_str(),
-                    descriptor: *tap,
-                    channels: selection.channels,
-                    sample_rate_hz,
-                    status: row.status,
-                    window: row.window,
-                    left: row.left,
-                    right: row.right,
-                });
-            },
-        )?;
-        Ok(results)
-    }
-
-    /// Number of currently bound resident observation effects in dense owner order.
-    #[must_use]
-    pub fn observation_binding_count(&self) -> usize {
-        self.ready.as_ref().map_or(0, |ready| {
-            ready
-                .shape
-                .effect_instances
-                .iter()
-                .flatten()
-                .filter(|instance| instance.reader.is_some())
-                .count()
-        })
-    }
-
-    /// One current-owner observation binding for the read-only session map.
-    #[must_use]
-    pub fn observation_binding(&self, index: u32) -> Option<ObservationBinding<'_>> {
-        let ready = self.ready.as_ref()?;
-        let mut observed_index = 0_u32;
-        for (effect, handle) in ready.shape.effect_instances.iter().enumerate() {
-            let Some(handle) = handle.as_ref().filter(|handle| handle.reader.is_some()) else {
-                continue;
-            };
-            if observed_index == index {
-                let track_index = *ready.shape.observation_tracks.get(effect)?;
-                if track_index == u32::MAX {
-                    return None;
-                }
-                return Some(ObservationBinding {
-                    address: ObservationAddress {
-                        track_index,
-                        rack: handle.address.rack,
-                        effect_index: handle.address.index,
-                        tap_id: 0,
-                        channels: ObservationReadChannels::Both,
-                    },
-                    effect_slot_id: handle.effect_id.as_ref(),
-                    native_effect_id: handle.descriptor.id.as_str(),
-                    descriptors: handle.descriptor.observations,
-                });
-            }
-            observed_index = observed_index.saturating_add(1);
-        }
-        None
-    }
-
-    /// Read a bounded numeric batch after the current stable map has resolved it.
-    pub fn read_observation_addresses(
-        &mut self,
-        addresses: &[ObservationAddress],
-    ) -> Result<Vec<ObservationReadResult>, ObservationReadError> {
-        if addresses.len() > MAXIMUM_OBSERVATION_READS {
-            return Err(ObservationReadError::BufferTooSmall);
-        }
-        let Some(ready) = self.ready.as_ref() else {
-            return Err(ObservationReadError::WrongState);
-        };
-        let mut selections = Vec::with_capacity(addresses.len());
-        for address in addresses {
-            selections.push(observation_selection_for_address(ready, *address)?);
-        }
-        Self::read_selected(
-            self.status.state,
-            self.status.sample_rate_hz,
-            self.ready.as_ref(),
-            self.plan.as_mut(),
-            &selections,
-        )
-    }
-
-    /// Fill a caller-owned numeric result slice without allocating on the Wasm boundary.
-    pub fn read_observation_addresses_into(
-        &mut self,
-        addresses: &[ObservationAddress],
-        output: &mut [ObservationReadValues],
-    ) -> Result<(), ObservationReadError> {
-        if self.status.state != STATE_READY {
-            return Err(ObservationReadError::WrongState);
-        }
-        if addresses.len() > MAXIMUM_OBSERVATION_READS || output.len() < addresses.len() {
-            return Err(ObservationReadError::BufferTooSmall);
-        }
-        let (Some(ready), Some(plan)) = (self.ready.as_ref(), self.plan.as_mut()) else {
-            return Err(ObservationReadError::WrongState);
-        };
-        // #1586 D3: each numeric address maps to its stable selection through the session map in
-        // the same pass as host-core's check, so the first refusal in address order is returned
-        // and nothing is written before the whole batch passed.
-        let handles = observation_handles(plan);
-        let sample_rate_hz = self.status.sample_rate_hz;
-        let empty = host_core::observation::ObservationIndex::default();
-        host_core::observation::read_with(
-            ready.observation_index().unwrap_or(&empty),
-            handles,
-            addresses,
-            |address| {
-                observation_selection_for_address(ready, *address)
-                    .map(|selection| core_selection(&selection))
-            },
-            |key| observation_issued(ready, key),
-            |position, _, row| {
-                output[position] = ObservationReadValues {
-                    status: row.status,
-                    sample_rate_hz,
-                    window: row.window,
-                    left: row.left,
-                    right: row.right,
-                };
-            },
-        )
-    }
-
     /// Number of complete meter windows folded since compilation.
     #[must_use]
     pub fn meter_windows(&self) -> u64 {
@@ -2921,59 +2489,6 @@ impl AudioWorkletEngineHost {
     }
 }
 
-/// Resolve one stable selected-observation tuple against the current prepared owner.
-///
-/// The effect slot id is compared with the prepared control owner, and the observation handle is
-/// compared through that same dense slot. This prevents a reordered or replaced same-position
-/// effect from accidentally inheriting an old caller tuple.
-///
-/// `address.track_index` is a strip index (issue #1213 D1): a track, or submix `j` at `T + j`, the
-/// same index [`strip_index`] resolves an ID to.
-fn observation_selection_for_address<'a>(
-    ready: &'a ReadyOwnership,
-    address: ObservationAddress,
-) -> Result<ObservationSelection<'a>, ObservationReadError> {
-    let strip = address.track_index as usize;
-    let track_id = ready
-        .shape
-        .tracks
-        .get(strip)
-        .or_else(|| {
-            ready
-                .shape
-                .submixes
-                .get(strip.checked_sub(ready.shape.tracks.len())?)
-        })
-        .map(Box::as_ref)
-        .ok_or(ObservationReadError::InvalidSelection)?;
-    let effect = ready
-        .effect_slot(
-            address.track_index as usize,
-            LiveEffectAddress {
-                rack: address.rack,
-                index: address.effect_index,
-            },
-        )
-        .ok_or(ObservationReadError::InvalidSelection)?;
-    let instance = ready
-        .shape
-        .effect_instances
-        .get(effect)
-        .and_then(Option::as_ref)
-        .ok_or(ObservationReadError::InvalidSelection)?;
-    if instance.reader.is_none() {
-        return Err(ObservationReadError::Unsupported);
-    }
-    let effect_slot_id = instance.effect_id.as_ref();
-    Ok(ObservationSelection {
-        track_id,
-        rack: address.rack,
-        effect_slot_id,
-        tap_id: address.tap_id,
-        channels: address.channels,
-    })
-}
-
 /// One plan's observation taps as the core's gain-reduction fold sees them (#1582 D3): the
 /// shape's dense effect table and strip table over the plan companions' reader sets. Each tap's
 /// arm state is its slot's, which render writes (#1585 D6).
@@ -3136,46 +2651,6 @@ fn observation_handles(plan: &mut WebPlan) -> &[EffectObservationHandle] {
         .map_or(&[], |companions| &*companions.effect_observations)
 }
 
-/// A stable browser selection in host-core's terms.
-const fn core_selection<'a>(
-    selection: &ObservationSelection<'a>,
-) -> host_core::observation::ObservationSelection<'a> {
-    host_core::observation::ObservationSelection {
-        strip_id: selection.track_id,
-        section: selection.rack,
-        effect_id: selection.effect_slot_id,
-        tap_id: selection.tap_id,
-        channels: selection.channels,
-    }
-}
-
-/// The tag and kind of the last record the control plane issued for one tap (#1585 D4), looked
-/// up by its stable key on the newest plan.
-fn observation_issued(
-    ready: &ReadyOwnership,
-    key: &host_core::observation::ObservationKey<'_>,
-) -> (u64, bool) {
-    ready.control.observation_issued(&ObservationKeyRef {
-        strip_id: key.strip_id.as_bytes(),
-        rack: key.section,
-        effect_id: key.effect_id.as_bytes(),
-        tap_id: key.tap_id,
-    })
-}
-
-impl From<host_core::observation::ObservationReadError> for ObservationReadError {
-    fn from(error: host_core::observation::ObservationReadError) -> Self {
-        use host_core::observation::ObservationRefusal as Refusal;
-        match error.refusal {
-            Refusal::TooManySelections | Refusal::RowsTooShort => Self::BufferTooSmall,
-            Refusal::UnknownAddress | Refusal::UnknownTap | Refusal::Duplicate => {
-                Self::InvalidSelection
-            }
-            Refusal::UnsupportedTap | Refusal::Unbound => Self::Unsupported,
-        }
-    }
-}
-
 const fn selected_backend() -> u32 {
     if cfg!(all(target_arch = "wasm32", target_feature = "simd128")) {
         BACKEND_SIMD128
@@ -3322,7 +2797,6 @@ fn project_buffers(
         .ok_or_else(arithmetic)?;
     let bridge_metadata = fixed_metadata
         .checked_add(plane_reference_bytes)
-        .and_then(|bytes| bytes.checked_add(crate::ffi::observation_staging_retained_bytes()))
         .ok_or_else(arithmetic)?;
     let rows = [
         u64::from(BOOT_OPTIONS_BYTES),
@@ -3339,16 +2813,14 @@ fn project_buffers(
         total.checked_add(row).ok_or_else(arithmetic)
     })?;
     // `bridge_metadata` is the sum of retained payloads, not one allocation. Keep the largest
-    // row below to the individually allocated fixed buffers and add the staging helper's exact
-    // largest payload separately.
+    // row below to the individually allocated fixed buffers.
     let largest = rows[..rows.len() - 1]
         .iter()
         .copied()
         .max()
         .unwrap_or(0)
         .max(host_shell_bytes)
-        .max(plane_reference_bytes)
-        .max(crate::ffi::observation_staging_largest_allocation_bytes());
+        .max(plane_reference_bytes);
     let mut report = empty_resource_report(selected_backend());
     report.sample_rate_hz = sample_rate_hz;
     report.quantum_frames = quantum_frames;
@@ -4172,7 +3644,6 @@ fn build_plan_shape(
             reader: None,
             track_id: track_id.clone(),
             effect_id: effect_id.clone(),
-            address: *address,
             descriptor,
         });
     }
@@ -4215,8 +3686,6 @@ fn build_plan_shape(
     Ok(PlanShape {
         tracks,
         submixes,
-        rack_effects: rack_effects.into_boxed_slice(),
-        effect_base: effect_base.into_boxed_slice(),
         effect_instances: effect_instances.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),
         // #1689: no plan is prepared with a master; `ReadyOwnership::sync_master` points the
