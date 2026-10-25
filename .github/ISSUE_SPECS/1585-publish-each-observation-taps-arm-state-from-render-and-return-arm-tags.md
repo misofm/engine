@@ -253,3 +253,44 @@ re-pin in #1585a.
 - capi nine-track reference budgets: the fixture's EQs declare no tap, so only
   `capi_retained_bytes` moves, 197,471 -> 197,455 (-24 for the deleted forward `Vec`, +8 for the
   tag counter); every ceiling stands.
+
+## Decision record: slice #1585b (2026-10-25, attempt 1)
+
+- **D4 as R3, on the 1585a counter.** No second counter: `ObserveContext::next_arm_tag` reads
+  `SessionState::next_arm_tag`; the store tags each net record (`ObserveWrite::arm_tag`) in key
+  order at preparation and the scratch bindings with the tag of the record in effect, and returns
+  `next_arm_tag_after`. The control plane pushes those tags (live: `push_effect_observe`'s tag
+  argument, `0` still issues a fresh one for the browser's kinds 7/8; structural: the successor
+  pushes and a matched forward carry the write's tag) and installs the counter at commit, so a
+  dropped token issues none. Overflow refuses with `SessionStoreError::ArmTagsExhausted`
+  (`INTERNAL`). This also fixes a 1585a gap: a binding the edits released and re-bound with its
+  window (no record) kept tag `0` in the table; it now keeps the tag it began with.
+- **D5.** `TransactionApplied` (no longer `Copy`) gains `observe_arm_tags` (field 3) and
+  `removed_arm_tags` (field 4), packed `u64`, written exactly when non-empty; a decoder refuses a
+  present empty list. The controller fixes both before it measures the reply (the room check):
+  `observe_arm_tags` from the store, `removed_arm_tags` from the table the commit applies and the
+  prospective model by `has_target`, the rule `ObservationBindings::after` applies, so it covers
+  `SESSION_REPLACE` too. Per-edit rule (D5 made exact): an edit that keeps the binding the
+  transaction began with reports its tag; every other edit reports the tap's record's tag, or,
+  when the transaction leaves the tap as it found it, the initial binding's tag (`0` if unbound).
+- **SDK.** `decodeControlReply` returns `applied.observeArmTags` / `removedArmTags` (`bigint[]`,
+  type `ControlApplied`); the SET_CONTROL fixture gains `applied_with_arm_tags`.
+- **Re-pin.** After #1369a: `COMPLETE_SCHEMA_HASH` `06bb3b6f65f39eec` -> `5b6cbc157a1f6154`; only
+  `response.session_transaction` moves (per-frame FNV against `origin/main`, 53 byte-equal).
+- **Paths beyond the scope note.** `tools/audit/src/protocol.rs` (compile-forced `::new`),
+  `crates/protocol/tests/{set_control_frames.rs,fixtures/set-control-frames.json}`,
+  `sdk/src/{core/control-frame.ts,index.ts}`, `sdk/test/control-frame-evals.mjs` (root: SDK twin),
+  `crates/control-plane/tests/observation_bindings.rs` (two assertions in the structural test).
+
+### Evidence
+
+- Gate 2: `each_observe_reply_names_the_arm_tag_of_its_record` (capi `live_tests.rs`): tags 1, 1,
+  1, 2, 3; one transaction 3, 3, 4, 4; a release and same-window re-arm 4, 4; the removal
+  `removed_arm_tags` `[4]`. Red on: the per-edit rule ignoring the kept binding; the last disarm
+  reporting the old binding; `removed_arm_tags` empty; the live commit not installing the counter;
+  the store not re-tagging a re-bound binding.
+- Structural: `an_observe_in_a_structural_transaction_...` asserts the reply's tags equal the
+  queued records' and that a later record's tag follows. Red on: successor pushes taking a fresh
+  tag at commit; the rebuild not installing the counter.
+- Wire: `transaction_applied_arm_tags_are_present_exactly_when_they_hold_a_tag`; red when an
+  empty list is written.
