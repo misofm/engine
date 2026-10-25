@@ -474,13 +474,26 @@ next-block adoption of a strip-restarting rebuild):
   structural edits that restart no strip (tracks added), so render still takes each candidate at
   the next block, which those claims are about.
 
-**Still red, not fixed.** (1) capi `in_place_commands_equal_full_commands_through_the_c_abi`: at
-step 352 of its 500-step stream a source submission returns `source.backpressure`. The stream's
-restarting rebuilds keep candidates pending and superseded for many blocks; from about step 238
-two retired provider epochs (18 and 20) are never reclaimed, a plain seek at step 284 never shows
-in the seek report, and the ring then fills. The same stream with the duck disabled passes, so it
-is the long phase 1, not the filter; the defect looks latent in the supersession and source
-producer path (#1310, #1344, #1325) and needs its own diagnosis. (2) SDK `structure-evals.mjs`
-(headless check, 6 failures: lines 347, 394, 497, 534, browser and headless): fixed block counts
-after a restarting rebuild; SDK files are outside this slice's authorization.
+**Root cause of the in-place parity failure (fixed here).** The input join's `debug_assert`
+("a compiled strip's input values have live records", `prepare.rs` input join) fired on unmodified
+main too, inside a caught panic, whenever a transaction moved a high-pass above its strip's
+low-pass: such a model compiles, the live path refuses its records, and the preparation's own
+`builtin.filter.order` refusal comes later. On main no candidate was pending at that moment. With
+1324a's longer phase 1 one was: the rebuild had withdrawn candidate A when it panicked, the capi
+host caught the panic, and A (acked revisions) was dropped with the publisher's mark consumed. The
+next edit's withdrawal found `Nothing`, promoted A as if render ran it, parked the running epoch
+for good, and routed the source producer to a plan render never adopted: its ring filled
+(`source.backpressure`). Acked-batch answer: yes, an acked candidate was lost, through the panic.
+The fix removes the `debug_assert` (a refusal is the designed path: the section restarts, or the
+preparation refuses), pinned by host-core's
+`an_input_section_the_live_path_refuses_is_a_typed_refusal` (red with the assert back, and the
+in-place test red with it). Left for root: any other panic inside a rebuild after the withdrawal
+still drops the withdrawn candidate in a host that catches panics (a panic-safety question for
+#1310's withdraw-then-rebuild order).
+
+**Still red, not fixed.** SDK `structure-evals.mjs` (headless check, 6 failures: lines 347, 394,
+497, 534, browser and headless): they render fixed block counts after a restarting rebuild. The
+headless SDK exposes no applied-revision watermark (`EngineStatus` drops the status struct's
+`watermarkRevision`), so an eval-only helper cannot wait on it; it needs that field exposed in
+`sdk/src/core/boundary.ts`, or root's ruling on another signal.
 
