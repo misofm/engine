@@ -487,7 +487,7 @@ ARTIFACT_DIGEST_STEP = (
 ARTIFACT_DIGEST_OUTPUT = (
     "    outputs:\n"
     "      sha256: ${{ steps.build.outputs.sha256 }}\n"
-    "      rustc: ${{ steps.build.outputs.rustc }}\n"
+    "      toolchain: ${{ steps.build.outputs.toolchain }}\n"
     "      closure_sha256: ${{ steps.build.outputs.closure_sha256 }}\n"
 )
 ARTIFACT_READERS = ("sdk", "artifact-gates", "browser")
@@ -517,7 +517,8 @@ ARTIFACT_DIRECTORY = "target/ci/qualification-artifacts"
 # - on `main`, `artifact-record` posts the record: a job run only on a push to `main`, checking out
 #   nothing, and the only job in the workflow holding a write permission, so no job a pull request
 #   reaches can forge its base's record (#1061 attempt 3 verdict, finding 1);
-# - the build step writes the digest and the rustc release the record and the report carry;
+# - the build step writes the digest and the toolchain (#1334: the browser artifact's dated
+#   nightly) the record and the report carry;
 # - `artifact-identity` fetches and compares in one step with no `if:`, keeps its twin build, and
 #   has the one read permission;
 # - neither job carries a job-level `continue-on-error` (a failed record or comparison would still
@@ -529,7 +530,8 @@ ARTIFACT_BUILD_LINES = (
     "          bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin "
     "target/ci/qualification-artifacts\n",
     '          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"\n',
-    '          echo "rustc=$(rustc -vV | sed -n \'s/^release: //p\')" >> "$GITHUB_OUTPUT"\n',
+    '          echo "toolchain=$(bash scripts/build-web-audioworklet.sh --print-toolchain)" >> '
+    '"$GITHUB_OUTPUT"\n',
     "          " + ARTIFACT_CLOSURE_DIGEST,
     '          echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"\n',
 )
@@ -544,10 +546,10 @@ ARTIFACT_RECORD_STEP = """      - name: Record this commit's module for later ch
         env:
           GH_TOKEN: ${{ github.token }}
           SHA256: ${{ needs.artifact.outputs.sha256 }}
-          RUSTC: ${{ needs.artifact.outputs.rustc }}
+          TOOLCHAIN: ${{ needs.artifact.outputs.toolchain }}
         run: |
-          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$RUSTC" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo "malformed record: '$SHA256' rustc '$RUSTC'" >&2; exit 1; }
-          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $RUSTC" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$TOOLCHAIN" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "malformed record: '$SHA256' rustc '$TOOLCHAIN'" >&2; exit 1; }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $TOOLCHAIN" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 """
 WRITE_PERMISSION = re.compile(r"^\s+[a-z-]+: write\s*$|^\s*permissions: write-all\s*$",
                               re.MULTILINE)
@@ -567,11 +569,11 @@ IDENTITY_REPORT_STEP = """      - name: Report ARTIFACT CHANGED or UNCHANGED aga
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           BUILT: ${{ needs.artifact.outputs.sha256 }}
-          RUSTC: ${{ needs.artifact.outputs.rustc }}
+          TOOLCHAIN: ${{ needs.artifact.outputs.toolchain }}
         run: |
           set -o pipefail
           python3 -B scripts/web-audioworklet-identity.py --self-test
-          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --rustc "$RUSTC" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --toolchain "$TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
 """
 IDENTITY_STEPS = (IDENTITY_TWIN_STEP, IDENTITY_REPORT_STEP)
 UNMASKABLE = re.compile(r"^    (continue-on-error|defaults|env):", re.MULTILINE)
@@ -594,14 +596,14 @@ def job_steps(job_text: str) -> list[str]:
     return steps
 
 def check_qualification_artifact_digest(text: str) -> None:
-    """Issue #1061: the `artifact` job publishes its module's digest and rustc release, posts
+    """Issue #1061: the `artifact` job publishes its module's digest and toolchain, posts
     main's record on pushes, and every job that reads the module verifies its download against
     that digest before anything reads it. Issue #1044: the same holds for the whole directory,
     generated documents included, against the job's closure digest."""
     artifact = job(text, "artifact")
     require(ARTIFACT_DIGEST_OUTPUT in artifact,
-            "qualification.yml: the artifact job must publish its module's sha256, rustc "
-            "release and closure digest (#1044) as outputs")
+            "qualification.yml: the artifact job must publish its module's sha256, toolchain "
+            "and closure digest (#1044) as outputs")
     require(UNMASKABLE.search(artifact) is None,
             "qualification.yml: the artifact job must carry no job-level continue-on-error, "
             "defaults or env")
