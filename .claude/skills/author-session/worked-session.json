@@ -88,16 +88,19 @@
         {
           "slot": "eq",
           "bypass": true,
+          "link_mode": "slot",
           "params": []
         },
         {
           "slot": "comp",
           "bypass": true,
+          "link_mode": "slot",
           "params": []
         },
         {
           "slot": "limiter",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -182,6 +185,7 @@
         {
           "slot": "eq",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -206,6 +210,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -224,6 +229,7 @@
         {
           "slot": "limiter",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -295,16 +301,19 @@
         {
           "slot": "eq",
           "bypass": true,
+          "link_mode": "slot",
           "params": []
         },
         {
           "slot": "comp",
           "bypass": true,
+          "link_mode": "slot",
           "params": []
         },
         {
           "slot": "limiter",
           "bypass": true,
+          "link_mode": "slot",
           "params": []
         }
       ],

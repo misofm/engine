@@ -42,7 +42,7 @@ fn descriptor_resources_and_transactional_caps_are_frozen() {
             .tail,
             TailSamples::Finite(0)
         );
-        assert_eq!(quality.maximum_state.total(), Some(112));
+        assert_eq!(quality.maximum_state.total(), Some(176));
         assert_eq!(quality.maximum_state.common_bytes, 0);
         assert_eq!(quality.maximum_state.left_bytes, LANE_STATE_BYTES as u32);
         assert_eq!(quality.maximum_state.right_bytes, LANE_STATE_BYTES as u32);

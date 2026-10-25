@@ -220,6 +220,11 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
             "its read of the successor executor's `observer_carries()` record (#1327 D3); the "
             "runtime render-locked count covers them",
         ),
+        "_RNvMs7_NtNtCs_6engine8realtime13plan_exchangeNtB5_17RealtimePlanOwner22copy_response_snapshot": (
+            1,
+            "#1577: the response capture copies the plan's snapshot through the executor trait "
+            "object (`Box<dyn PreparedPlanExecutor>`), once per armed job; no allocation, no drop",
+        ),
         "_RNvMs4_NtNtCs_6engine8realtime4planNtB5_18PreparedRenderPlan12render_inner": (
             2,
             "`executor.begin_live_block(snapshot)` (#1502 D2: hands the block's live snapshot to "

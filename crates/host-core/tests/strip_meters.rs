@@ -183,11 +183,13 @@ fn strip_s(console: &Console) -> Submix {
             ConsoleEntry {
                 slot: sid("desk-eq"),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: bell(1_000.0, 6.0),
             },
             ConsoleEntry {
                 slot: sid("desk-tone"),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: bell(3_000.0, -4.0),
             },
         ];

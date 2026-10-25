@@ -593,6 +593,7 @@ fn prepare_graph_plan(
     let entry = |name: &str| session::ConsoleEntry {
         slot: StableId::parse(name).expect("fixture effect ID"),
         bypass: fixture_effect.bypass,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: Vec::new(),
     };
     model.console.pre_insert = vec![slot("fixture-simd1")];

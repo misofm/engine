@@ -162,6 +162,7 @@ Commands: `cargo test --locked -p host-core --all-features`,
   `COMPLETE_SCHEMA_HASH` did not move. `reference_session_retained_rows`: `capi_retained_bytes`
   measured 259,662 after attempt 2's 128-entry bound (and #1325a's duck overlay from main),
   ceiling 285,632 (+10 %, to 64), for the 32,512 B strip-ID reserve and the meter lane.
+  Merged with #1577's response capture: 312,897, ceiling 344,192.
   Attempt 2 (verifier m2): the lane is sized by the adapter, 256 for a `METER_DELIVERY` adapter
   (the C ABI) and 2 otherwise, so the browser's capability record does not change; #1588 sizes
   the browser's lane. `protocol_cross_host` gains a third documented exception (the C ABI's

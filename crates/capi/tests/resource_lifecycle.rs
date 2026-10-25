@@ -799,6 +799,12 @@ struct CompileObservation {
     /// (#1325, `control_plane::duck_overlay_bytes`): bounds, not allocations, since a boot solos
     /// nothing, keeps no ramp and ducks nothing.
     monitor_and_ramps: u64,
+    /// The response capture's armed job and delivered result (#1577), from
+    /// `control_plane::response_capture_bytes` over the compiled model: a bound, not an
+    /// allocation, since a boot arms nothing. It passes owner high-water 0 because
+    /// `observe_compile` compiles fresh at boot; a rebuild oracle must pass the session's high-water. `response_capture.rs` in control-plane holds a
+    /// capture at the bound within it.
+    response_capture: u64,
     /// The strip-ID text the two stored meter tables can own (#1587a, #1325a's rule), from
     /// `control_plane::meter_text_reserve_bytes` at the compile's control frame: a bound, not an
     /// allocation, since a boot configures no table.
@@ -861,6 +867,10 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         + ramp_row
         + control_plane::duck_overlay_bytes(store.compiled().normalized_model())
             .expect("the duck overlay row");
+    let response_capture =
+        control_plane::response_capture_bytes(store.compiled().normalized_model(), 0)
+            .expect("the response capture row")
+            .total_bytes;
     let meter_text_reserve =
         control_plane::meter_text_reserve_bytes(compile_limits.maximum_control_frame_bytes)
             .expect("the meter text reserve");
@@ -909,6 +919,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         strip_table_charge,
         observation_reserve,
         monitor_and_ramps,
+        response_capture,
         meter_text_reserve,
     }
 }
@@ -956,14 +967,15 @@ impl CompileObservation {
                 + self.owners.observations
                 + self.observation_reserve
                 + self.monitor_and_ramps
+                + self.response_capture
                 + self.meter_text_reserve
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
              observation readers + the decode-field rounding, all observed (left; the send producers' row is the graph \
-             function's total, and the observation reserve and the monitor and ramp rows are the control \
-             plane's bounds, as is the meter tables' text), against \
+             function's total, and the observation reserve, the monitor and ramp rows, the response \
+             capture row and the meter tables' text are the control plane's bounds), against \
              `capi_retained_bytes` (right)"
         );
     }
@@ -1361,6 +1373,12 @@ impl Budget {
 /// row does not depend on the lane width), above the 175,296 ceiling, so the ceiling is 192,972
 /// plus 10 %, rounded up to 64: 212,269.2 -> 212,288.
 ///
+/// #1577 charges the response capture: its channel's two queues (544 bytes) and, at the model's
+/// bounds, one armed job and one delivered result (52,076 bytes for this session: two owners and a
+/// 4,096-point result's three curves). `capi_retained_bytes` measured 197,855 before and 250,475
+/// after (x86-64; the row does not depend on the lane width), above the 212,288 ceiling, so the
+/// ceiling is 250,475 plus 10 %, rounded up to 64: 275,522.5 -> 275,584.
+///
 /// #887 (batch 13) tiles the gather and scatter of padded banks, a structural move: every bank
 /// chain now owns two lane-major staging planes, and a padded chain a `quantum`-word `+0.0` plane,
 /// and the estimates charge both (builtin banks had never been charged their staging). The
@@ -1386,6 +1404,11 @@ impl Budget {
 /// meter queues are now as deep as the output meter's (8, was 1; root ruling 2), so
 /// `builtin_meter_payload_bytes` measured 20,538 and `builtin_retained_payload_bytes` 56,997,
 /// above 11,520 and 51,648: 22,591.8 -> 22,592 and 62,696.7 -> 62,720.
+///
+/// #1587a with #1577 (both on `main`): the meter rows above and the response capture's are
+/// independent and add up. `capi_retained_bytes` measured 312,897 (x86-64, deterministic; 259,662
+/// + 52,620 for the capture, + 615 from other merged rows), above both slices' ceilings (285,632
+/// and 275,584), so the ceiling is 312,897 plus 10 %, rounded up to 64: 344,186.7 -> 344,192.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1492,8 +1515,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 285_632,
-        four_lanes: 285_632,
+        eight_lanes: 344_192,
+        four_lanes: 344_192,
     },
     Budget {
         row: "largest_named_allocation_bytes",

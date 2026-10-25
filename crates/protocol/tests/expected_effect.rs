@@ -33,6 +33,7 @@ fn store() -> SessionStore {
         track.console.push(ConsoleEntry {
             slot: id("comp"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: Vec::new(),
         });
     }

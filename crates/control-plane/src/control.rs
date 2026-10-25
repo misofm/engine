@@ -940,6 +940,10 @@ thread_local! {
     /// Whether the service step leaves displaced plans in the retirement queue (batch 15a review
     /// fold M1): a render preempted between claiming a candidate and retiring the plan it displaced.
     static TEST_HOLD_RECLAMATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// The key the newest epoch's gate had last published when this thread last queued an
+    /// observation record (#1968): a commit's records are queued before its publication.
+    static TEST_OBSERVE_PUSH_KEY: core::cell::Cell<Option<engine::realtime::GateKey>> =
+        const { core::cell::Cell::new(None) };
     /// `(commits made from an in-place token, in-place tokens materialized)` on this thread.
     static IN_PLACE_COUNTS: core::cell::Cell<(usize, usize)> = const { core::cell::Cell::new((0, 0)) };
     static TEST_OWNER_STATE: core::cell::Cell<TestOwnerCounters> =
@@ -1169,6 +1173,10 @@ pub struct SessionState<A: ControlAdapter> {
     /// The most observation slots any committed plan has had; the ended-event cells and the
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
+    /// The most owners one strip of any model this session committed has had (#1577): the
+    /// response capture is charged at it, since a job or result sized under a displaced model can
+    /// outlive the rebuild that displaced it.
+    pub(crate) capture_owners_high_water: usize,
     /// The next arm tag this session issues (#1585 D4): `1` at compile, one more per queued
     /// observation record, so tags are monotone per session and `0` is never one. A record is
     /// tagged when it is queued, after its batch was admitted, so a refused submission issues none.
@@ -1184,6 +1192,9 @@ pub struct SessionState<A: ControlAdapter> {
     /// render half does. `None` from boot when the session serves the meter batches itself
     /// ([`Self::meters`]).
     pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
+    /// The response capture's delivered result (#1577 D5), kept by `service` until a host takes
+    /// it; #1578 turns it into an event.
+    pub(crate) response_ready: Option<host_core::ResponseReady>,
     /// The session's meter delivery when its control plane serves the meter batches (#1583 D5,
     /// R2: the C ABI's), built at boot over the output meter's reader and a requested gate.
     pub(crate) meters: Option<SessionMeters>,
@@ -2610,6 +2621,23 @@ where
         &self.providers
     }
 
+    /// The key the newest epoch's gate had last published when this thread last queued an
+    /// observation record, and resets it (#1968): `None` if no record was queued since.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_observe_push_key(&self) -> Option<engine::realtime::GateKey> {
+        TEST_OBSERVE_PUSH_KEY.with(core::cell::Cell::take)
+    }
+
+    /// The key the newest epoch's gate published last (#1968).
+    #[cfg(feature = "test-support")]
+    pub fn test_newest_gate_key(&self) -> engine::realtime::GateKey {
+        self.pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .revision_gate
+            .last_published_key()
+    }
+
     /// The pending provider epochs, oldest first.
     #[cfg(feature = "test-support")]
     pub fn test_pending_providers(&self) -> &[ProviderEpoch] {
@@ -3022,10 +3050,61 @@ where
     pub fn service(&mut self) -> Result<(), CommandError> {
         self.fold_observation_pending();
         self.synchronize_plan_epochs()?;
+        self.poll_response_capture();
         self.refresh_provider_counters();
         self.collect_render_activity();
         self.refresh_provider_counters();
         Ok(())
+    }
+
+    /// Takes the response capture's reply, if one is there and no result is waiting (#1577 D5).
+    fn poll_response_capture(&mut self) {
+        if self.response_ready.is_some() {
+            return;
+        }
+        let (provider, store) = self.controller.provider_and_session_mut();
+        self.response_ready = provider.poll_response_capture(store.compiled().normalized_model());
+    }
+
+    /// Test seam (#1577 D5): arm one capture of `strip_id`'s response owners from the newest plan.
+    ///
+    /// # Errors
+    ///
+    /// The capture's refusal; a refusal changes nothing.
+    #[cfg(feature = "test-support")]
+    pub fn test_arm_track_response(
+        &mut self,
+        strip_id: &str,
+        grid: host_core::ResponsePreviewGrid,
+        channels: host_core::ResponseChannels,
+    ) -> Result<u64, host_core::ResponseCaptureRefusal> {
+        let (provider, store) = self.controller.provider_and_session_mut();
+        provider.arm_response_capture(
+            store.compiled().normalized_model(),
+            strip_id,
+            grid,
+            channels,
+        )
+    }
+
+    /// Test seam (#1577): the response capture row the newest epoch's plan was charged
+    /// (`CapiResources::response_capture`), the pending candidate's when one is pending.
+    #[cfg(feature = "test-support")]
+    pub fn test_response_capture_charge(&self) -> u64 {
+        self.pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .capi
+            .response_capture
+    }
+
+    /// Test seam (#1577 D5): take the delivered capture result and release the capture, as #1578
+    /// does when the host dequeues its event.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_track_response(&mut self) -> Option<host_core::ResponseReady> {
+        let ready = self.response_ready.take()?;
+        self.controller.provider_mut().release_response_capture();
+        Some(ready)
     }
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
@@ -4075,12 +4154,9 @@ where
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
         kept_ramps.keep_within(prospective.normalized_model());
-        // #1325 D6 (the 1325b boundary): a transaction in phase 1 that restores a strip or a
-        // source the running plan is ramping out is retryable backpressure until #1325b gives the
-        // successor's base the overlay. Prepared against the kept model alone, the restored strip
-        // would carry its ducked fader and stay muted. Nothing has changed yet, so the caller
-        // republishes the withdrawn candidate; once render adopts it the overlay is gone and the
-        // same edit is an added strip (#1288).
+        // #1325 D6: the duck overlay of the running plan's cells while phase 1 runs, empty
+        // outside it. The successor's base composes it, so a strip or source this transaction
+        // restores carries from its ducked state and ramps back in from `S`.
         let duck = if superseding {
             &self
                 .kept_holder()
@@ -4090,17 +4166,6 @@ where
         } else {
             &NO_DUCK
         };
-        {
-            let next = prospective.normalized_model();
-            if next.strips().any(|strip| duck.has_strip(strip.id.as_str()))
-                || next
-                    .sources
-                    .iter()
-                    .any(|source| duck.has_source(source.id.as_str().as_bytes()))
-            {
-                return Err(CommandError::Backpressure);
-            }
-        }
         // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
         // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
         // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
@@ -4112,11 +4177,11 @@ where
                     .pending_providers
                     .last()
                     .ok_or(CommandError::Internal)?;
-                Some(
-                    holder
-                        .inventory
-                        .across_withdrawn(&donor.inventory, candidate.plan()),
-                )
+                Some(holder.inventory.across_withdrawn_in_phase_one(
+                    &donor.inventory,
+                    candidate.plan(),
+                    duck,
+                ))
             }
             None => None,
         };
@@ -4139,6 +4204,7 @@ where
                 observation: &observation_change.bindings,
                 discontinuity,
                 unchanged_revision,
+                duck,
                 ..SuccessorBase::new(inventory, kept.model.normalized_model(), revision)
             }
         } else {
@@ -4182,6 +4248,7 @@ where
             Some(base),
             &self.live_values_superseded,
             self.observation_slots_high_water,
+            self.capture_owners_high_water,
         )
         .map_err(spectrum_invariant)?;
         // #1325 D7: after preparation, the pure transition step against the plan the successor
@@ -4659,6 +4726,19 @@ where
                     .pending_providers
                     .last_mut()
                     .unwrap_or(&mut self.providers);
+                // #1325 D6: a source B restores in phase 1 carries P0's ring, so its producer
+                // moves from P0's set, where phase 1 kept it, into B's. Every other entry B holds
+                // vacant took its producer from A's set above, so only restored ones move here.
+                let restored = candidate_provider
+                    .sources
+                    .adopt_persisting(&mut holder.sources);
+                debug_assert!(
+                    restored
+                        <= transition
+                            .as_ref()
+                            .map_or(0, |transition| transition.restored_sources().len()),
+                    "only a restored source's producer moves from the running plan's set"
+                );
                 if let Some(kept) = holder.kept.as_mut() {
                     kept.edit_ramps = kept_ramps;
                     if monitor_ramp.is_some() {
@@ -4797,7 +4877,12 @@ where
         {
             *epoch = configured_epoch;
         }
+        let candidate_epoch = candidate_provider.epoch;
         self.pending_providers.push(candidate_provider);
+        // #1577 D4: a capture armed from here on waits for the candidate.
+        self.controller
+            .provider_mut()
+            .set_newest_plan_epoch(candidate_epoch);
         // #1584 D6a: the newest plan's slots, built above. The fold ran when this command was
         // serviced and nothing has been pushed since (one thread), so none is lost.
         (
@@ -4810,6 +4895,17 @@ where
         self.observation_slots_high_water = self
             .observation_slots_high_water
             .max(self.observation_pending.len());
+        // #1577: the committed model's owners join the capture's high-water; the successor's
+        // charge already counted them (`response_capture_bytes`), so this can only hold or rise.
+        self.capture_owners_high_water = self.capture_owners_high_water.max(
+            host_core::response_capture_owners(
+                self.controller.session().compiled().normalized_model(),
+            )
+            // Unreachable: the successor's preparation counted this model's owners before the
+            // commit (`prepared_capi_resources` -> `response_capture_bytes`) and refused the
+            // transaction on an overflow, so the count is `Some` here.
+            .unwrap_or(usize::MAX),
+        );
         if let Some((_, donor)) = superseded.as_ref() {
             // #1310 D5 step 6: A's report row leaves; `retain` shrinks in place.
             let donor_epoch = donor.epoch;
@@ -5459,17 +5555,6 @@ where
                 *row = A::Row::from(resources);
             }
         }
-        // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
-        // that carries its content, the newest epoch's (#1502 D6), which is the routing the
-        // producers were chosen by, so the cells a commit writes and the gate that reveals them
-        // are one plan's. Every record push, cell write, target publication and owner commit is
-        // before it, so render's `Acquire` snapshot of the gate sees them all and the watermark
-        // never reports the revision before its values can apply. The stamp's revision is
-        // published, read into a local, so the always-on bound of `stamp` covers the publication. A
-        // monitor publication carries the committed revision (#1603).
-        if let Some(key) = key {
-            revision_gate.publish_key(key);
-        }
         // #1310: the kept base's lengths, built above, now that the edit is committed.
         if let Some(kept) = self
             .kept_holder_mut()
@@ -5484,12 +5569,39 @@ where
         }
         // #1584 D4: the subscriptions' records, admitted above with no observation record queued
         // since, then the table the edits left, before the reply exists. A record cannot be refused
-        // here: the control thread is the queues' only producer.
+        // here: the control thread is the queues' only producer. #1968: they are pushed before the
+        // revision is published below, on the queues of the plan whose gate publishes it, so a
+        // block whose snapshot covers the revision drains them in the same block (the drain pops
+        // the queue after the snapshot), and a watermark that covers the revision means the tap
+        // is armed. Render drains the queues outside the gate, so a record may apply one block
+        // early: a subscription has no revision (CONTROL_PROTOCOL_SEMANTICS.md, "Observation
+        // subscriptions"), so it is not one of the transaction's live values, and it applies at
+        // whatever block drains next, as an `Observe`-only transaction's does. So the first window
+        // may open one block before the revision's values apply; its `first_sample` says so, and a
+        // reader that needs the changed audio takes the windows whose `first_sample` is at or
+        // after the watermark's.
         if !observe_changes.is_empty() {
             self.push_admitted_observation_batch(observe_changes.iter().copied());
         }
         if let Some(bindings) = observe_bindings {
             self.observation = bindings;
+        }
+        // 8. The revision, as the commit's last write (#1314 D2): published on the gate of the plan
+        // that carries its content, the newest epoch's (#1502 D6), which is the routing the
+        // producers were chosen by, so the cells a commit writes and the gate that reveals them
+        // are one plan's. Every record push (the observation records above included, #1968), cell
+        // write, target publication and owner commit is before it, so render's `Acquire` snapshot
+        // of the gate sees them all and the watermark never reports the revision before its values
+        // can apply. The stamp's revision is published, read into a local, so the always-on bound
+        // of `stamp` covers the publication. A monitor publication carries the committed revision
+        // (#1603). The observation pushes borrowed the session, so the newest epoch's gate is
+        // borrowed again: the same epoch, since nothing in between adds or promotes one.
+        if let Some(key) = key {
+            self.pending_providers
+                .last_mut()
+                .unwrap_or(&mut self.providers)
+                .revision_gate
+                .publish_key(key);
         }
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
@@ -6134,6 +6246,12 @@ where
         let pushed = producer.try_push_observe(tap_index, armed, window_blocks, arm_tag);
         if pushed.is_ok() {
             self.next_arm_tag = arm_tag.saturating_add(1);
+        }
+        #[cfg(feature = "test-support")]
+        if pushed.is_ok() {
+            let newest = self.pending_providers.last().unwrap_or(&self.providers);
+            let key = newest.revision_gate.last_published_key();
+            TEST_OBSERVE_PUSH_KEY.with(|cell| cell.set(Some(key)));
         }
         // #1310 (root ruling B15-Q4): a record on a plan render has not adopted.
         let on_candidate = !self.pending_providers.is_empty();

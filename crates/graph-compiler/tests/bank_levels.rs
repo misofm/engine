@@ -667,6 +667,7 @@ fn place(model: &mut SessionModel, chains: Vec<[Vec<Effect>; 3]>) {
     let entry = |effect: Effect| ConsoleEntry {
         slot: effect.id,
         bypass: effect.bypass,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: effect.params,
     };
     for (track, [first, second, third]) in model.tracks.iter_mut().zip(chains) {
