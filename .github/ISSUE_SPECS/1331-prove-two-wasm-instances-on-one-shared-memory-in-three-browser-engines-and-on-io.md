@@ -287,7 +287,8 @@ both modules: atomic `ff266dfc456573263cdcea57c99e83985a9d2f5bf9eaffcb94e9f18ffe
 `db6e0aff...`), plain `4a7dc7eedea7f022fa71a74acf0a3a94db4afa53eef86673efaf60e9320dd964` (5,624,549 B; named twin
 `cf17b597...`). The gate-5 script copy built the same plain bytes in another target dir. Note for
 #1380: the atomic shape prints `unstable feature specified for -Ctarget-feature: atomics` once per
-build; it does not fail under `-D warnings`, and `-A unstable_features` does not silence it.
+build; it does not fail under `-D warnings`, and `-A unstable_features` does not silence it
+(`a2/logs/atomics-warning.log`: a trivial crate, all three forms print it once and exit 0).
 
 **D7 headroom (descriptive).** Workload frozen before timing (`a2/workload/FROZEN.txt`): the atomic
 module, and the 64-track app session with one change, `fixture-source` declared 1,441,280 frames
@@ -313,11 +314,13 @@ Headroom at fs_h = 48 kHz, q = 128 frames:
 All spans: 0 render errors, 0 non-finite words, 0 silent blocks; worklet render allocations 0, no
 trap. In all three engines, the worklet's first 350 blocks gave the #1331a-1 native digest
 `44ecef33...` (the longer source does not change them). In the Worker, Firefox renders this
-session about 15 times slower than Chromium. The Firefox worklet uses about 0.9 of its quantum in
-every mode, and #1331a-1 saw the same in single mode on unshared memory, so the slowdown is not
-specific to the Worker or to the second instance. The cause is not investigated, and the slowdown
+session about 15 times slower than Chromium. The Firefox Worker uses about 0.91 of real time per
+block (1/h). About 43 % of the worklet's calls during the spans read over 2 ms (4381/10219), and
+#1331a-1 saw 44 % in `two` and 47-48 % in both single legs on unshared memory, so the slowdown is
+not specific to the Worker or to the second instance. The cause is not investigated, and the slowdown
 can be a property of the Playwright Firefox build only. Firefox h = 1.10 gives m·h = 0.77 ≤ 1,
-which triggers #1286 D3's stop, so #1286 must not take h = 1.10 until the cause is known. These
+which triggers #1286 D3's stop: #1286 D3 derives no browser value and its slice stops for an
+owner ruling. These
 rows are the browser input to #1286 D3; this spike sizes nothing.
 
 **Gate 3 (native under the nightly): PASS.** `RUSTUP_TOOLCHAIN=nightly-2026-08-20 cargo test
@@ -362,7 +365,7 @@ atomic shape as written (runner; green under the shim). The nightly keeps every 
 G5 and browser pin on the plain shape, so #1334 may adopt the plain D2 command as recorded. Open:
 (1) the cause of Firefox's slow render (every mode, unshared memory too; maybe the Playwright
 build only). Owner: root routes it as an owner question and a successor diagnosis issue; until
-then #1286 does not take h = 1.10. (2) G5 for the atomic shape needs the runner change, in #1380.
+then #1286 D3 derives no browser value and its slice stops for an owner ruling. (2) G5 for the atomic shape needs the runner change, in #1380.
 #1331b (iPhone) stays owner-gated, and D7 on iOS is part of it.
 
 ## Amendment (decision 17, root 2026-10-13)
