@@ -138,3 +138,35 @@ All behavioural gates run in `sdk/test/headless-apply-evals.mjs` against the rea
 - *Build and encode session transactions in the SDK* (#1383).
 - *Encode the session, submix, output, route, automation and VCA edits in the SDK* (#1385).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332).
+
+## Decision record (attempt 1, 2026-10-25)
+
+- **Root R1-R3 adopted.** #1389 owns the shared core: `sdk/src/core/session-edit.ts` (`EditOutcome`,
+  `EditPath`, `WatermarkSnapshot`, the `SESSION_REPLACE` encoder, the SHA-256 digest, `AppliedLedger`),
+  `ProtocolClient.applyTransaction`/`replaceSession` with `ProtocolTransport.send(frame, document?)`, and
+  `EditPath` `"unchanged"` (`control-frame.ts` `EDIT_PATHS` 5, `MESSAGE_SESSION_REPLACE`, and an internal
+  `decodeAppliedReply(bytes, message)` so the public `decodeControlReply` keeps its signature). R2 amends D1:
+  `replaceSession` is async (one `crypto.subtle` digest on both hosts); only `apply` settles before the event
+  loop. The context's dropped exports read as `control_request_ptr`/`control_command` and
+  `replace_document_ptr` (#1697).
+- **D1 refusals.** A refusal the core reports in the reply frame rejects with `MisoControlRefusal` (status,
+  diagnostics, observed revision), as every `ProtocolClient` call does; a refusal of the call itself (a new
+  sample rate: `reprepareRequired`, `control.apply.reprepare_required`) rejects with `MisoEngineError`
+  carrying the result and diagnostic. Neither commits.
+- **D2 narrowed.** The boundary gains `readWatermark()` (the 96-byte `planWatermark` record) and
+  `controlFrame(frame, document?)`; apply and replace run through the existing control entry, and
+  `committedDocument` already exists (#1571). No `service()` method: the core's `dequeue_event` runs the
+  service step first (`crates/control-plane/src/control.rs`, `dequeue_event`), and the boundary drains events
+  after every control frame and every render, so D3's service calls already happen and an explicit export
+  call would be redundant and untestable.
+- **D3.** The watermark is read after each `render()` and on `watermark()`/`applied()`, and settles the
+  ledger. `revision` is the core's committed revision word, read on demand.
+- **D4.** `replaceSession` rebinds `liveControls()`/`withSession` to the replacement document; after an
+  `apply` rebuild live controls resolve from the core's control list (#1562b-K). Gate 4 is folded into gate 1.
+- **Found, not fixed (outside the authorized paths): a `ControlTransactionQueue` made before an `apply` or
+  `replaceSession` refuses its next `SET_CONTROL` with `revision_conflict`.** The queue expects the revision
+  of its own last reply and retries nothing on a refusal (`control-queue.ts`, `#transact`), so the second
+  half of gate 4 ("after gate 2's live reply, an edit object resolved before it still submits") fails once;
+  the submit after it succeeds. R3's premise of an existing retry does not hold. Fix needs
+  `sdk/src/core/control-queue.ts` (a retry of a `revision_conflict` at the observed revision, values being
+  absolute, or a revision the engine hands the queue after a sibling commit): reported to root.

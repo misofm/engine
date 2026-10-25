@@ -58,6 +58,9 @@ import type {
   TransportSnapshot,
 } from "../core/protocol-messages.ts";
 import { SessionBuilder } from "../core/session.ts";
+import { AppliedLedger } from "../core/session-edit.ts";
+import type { EditOutcome, WatermarkSnapshot } from "../core/session-edit.ts";
+import type { SessionTransaction } from "../core/session-transaction.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
 import { loadBundledEngineAsset } from "./assets.ts";
@@ -155,6 +158,8 @@ export class OfflineEngine {
    * state `seek` adds: the core refuses a stale generation, so this only picks the next one.
    */
   #highestGeneration = 1n;
+  /** The pending `applied(revision)` promises, settled from the watermark after each `render()`. */
+  readonly #applied = new AppliedLedger();
 
   private constructor(
     asset: MisoEngineAsset,
@@ -470,9 +475,69 @@ export class OfflineEngine {
     return this.#boundary.onControlEvent((event) => listener(decodeProtocolEvent(event.frame)));
   }
 
+  /**
+   * Apply one structural transaction (`transaction(base)...build()`) at the committed revision, and
+   * resolve with the revision it committed and the path the core chose: `live` (the running plan
+   * ramps to the new values), `model_only` (nothing to render differently) or `rebuild` (a successor
+   * plan, adopted at the next `render()`, with every unchanged source and node playing on). A
+   * refusal rejects with `MisoControlRefusal`, and nothing is committed. The call is synchronous in
+   * the core; the promise is settled before control returns to the event loop.
+   */
+  apply(transaction: SessionTransaction): Promise<EditOutcome> {
+    return this.#protocolClient().applyTransaction(transaction);
+  }
+
+  /**
+   * Replace the session with `document`: the core diffs it against the committed model into one
+   * transaction, so it is an edit, not a reboot (`loadSession`): sources keep playing and unchanged
+   * nodes keep their state. Resolves as `apply` does, or with `unchanged` (no revision) when the
+   * document equals the committed model. Live controls then resolve IDs against `document`.
+   */
+  async replaceSession(document: SessionDocument): Promise<EditOutcome> {
+    // A copy: the digest is awaited, and a caller's array may change before the bytes are staged.
+    const bytes = documentBytes(document).slice();
+    const outcome = await this.#protocolClient().replaceSession(bytes);
+    // The committed model is now `document`'s: live controls resolve against it.
+    this.#session = builtSession(document);
+    this.#booted = bytes;
+    return outcome;
+  }
+
+  /** The committed session revision: 0 at boot and after `loadSession`, +1 for each commit. */
+  get revision(): bigint {
+    return this.#boundary.controlRevision();
+  }
+
+  /** The applied-revision watermark, read now: which committed revision is audible, since which sample. */
+  watermark(): WatermarkSnapshot {
+    const snapshot = this.#boundary.readWatermark();
+    this.#applied.settle(snapshot);
+    return snapshot;
+  }
+
+  /**
+   * Resolve with the first watermark that covers `revision`: the revision is in effect, with every
+   * revision before it, from the snapshot's `sample`. The watermark is read after each `render()`,
+   * so this stays pending while the caller renders nothing (D15-17). A revision above the committed
+   * one rejects with `MisoUsageError`, and so does every pending one at `loadSession` or `dispose`.
+   */
+  applied(revision: bigint): Promise<WatermarkSnapshot> {
+    if (typeof revision !== "bigint" || revision < 0n) {
+      return Promise.reject(new MisoUsageError("applied() takes a non-negative bigint revision"));
+    }
+    const committed = this.revision;
+    if (revision > committed) {
+      return Promise.reject(new MisoUsageError(
+        `revision ${revision} is not committed; the committed revision is ${committed}`,
+      ));
+    }
+    this.watermark();
+    return this.#applied.applied(revision);
+  }
+
   #protocolClient(): ProtocolClient {
     return this.#protocol ??= new ProtocolClient({
-      send: (frame) => this.#boundary.controlFrame(frame),
+      send: (frame, document) => this.#boundary.controlFrame(frame, document),
       // The one allocator of this endpoint, which the transaction queue and the control list share.
       requestIds: this.#boundary.controlRequestIds,
       // The core's own committed revision: the queue's, and also a commit another sender made.
@@ -564,7 +629,11 @@ export class OfflineEngine {
   }
 
   render(actualFrames?: number): { readonly left: Float32Array; readonly right: Float32Array } {
-    return this.#boundary.render(actualFrames ?? this.status().quantumFrames);
+    const output = this.#boundary.render(actualFrames ?? this.status().quantumFrames);
+    // The block's control-event drain ran the core's service step; the watermark it published
+    // settles every `applied` it covers (D3).
+    this.watermark();
+    return output;
   }
 
   submitCommands(records: Uint8Array, count: number): CommandReport {
@@ -580,6 +649,10 @@ export class OfflineEngine {
    */
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
     this.#observationSubscriptions?.invalidate();
+    // Revisions restart with the new session: a pending revision of the old one never applies.
+    this.#applied.rejectAll(new MisoUsageError(
+      "loadSession() rebooted the engine: the pending revision belongs to the replaced session",
+    ));
     // Cleared first, so a refused reboot cannot leave IDs resolving against the replaced session.
     this.#session = undefined;
     this.#booted = undefined;
@@ -599,6 +672,7 @@ export class OfflineEngine {
   }
 
   dispose(): void {
+    this.#applied.rejectAll(new MisoUsageError("this engine was disposed"));
     this.#controlQueue?.close();
     this.#observationSubscriptions?.invalidate(true);
     this.#boundary.dispose();
