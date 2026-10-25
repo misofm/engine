@@ -4611,7 +4611,8 @@ pub enum GraphFadeTarget {
     /// names it.
     Route(u32),
     /// A fading copy's op (#1953b): the runtime unit of a transition route that a successor
-    /// compiles for a lane-less route it removes or re-points, at the predecessor's coefficients.
+    /// compiles for a lane-less route it removes, re-points or (#2077) keeps at other values, at
+    /// the predecessor's coefficients.
     /// It fades *out*, to `[+0.0; 4]` and muted, over the arm's ramp.
     RouteOut(u32),
 }
