@@ -76,6 +76,18 @@ function parserCapture() {
   return capture;
 }
 
+/** Render blocks until `promise` settles; at most `blocks`. */
+async function renderUntil(engine, promise, blocks = 8) {
+  let settled = false;
+  const observed = promise.finally(() => { settled = true; });
+  observed.catch(() => {});
+  for (let block = 0; block < blocks && !settled; block += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (!settled) engine.render();
+  }
+  return observed;
+}
+
 before(async () => {
   if (process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX) asset = await MisoEngineAsset.load(await moduleBytes());
 });
@@ -106,8 +118,9 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
     cadenceMs: 1,
   };
   try {
-    const first = await engine.subscribeTrackResponse(request);
-    const second = await engine.subscribeTrackResponse(request);
+    // A headless read is a query, which settles after the app's next render (#1579a D2).
+    const first = await renderUntil(engine, engine.subscribeTrackResponse(request));
+    const second = await renderUntil(engine, engine.subscribeTrackResponse(request));
     assert.equal(first.job, second.job);
     assert.equal(first.revision, 1n);
     const firstResult = first.readLatest();
@@ -116,26 +129,17 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
     const secondValue = secondResult.leftDb[0];
     firstResult.leftDb[0] = Number.NaN;
     assert.equal(secondResult.leftDb[0], secondValue);
-    assert.equal(await first.pump(), undefined);
+    // A later capture of the same values publishes nothing, although its sample and tag moved.
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(await renderUntil(engine, first.pump()), undefined);
 
     const semanticLiveControls = engine.liveControls();
     await semanticLiveControls.submit(
       semanticLiveControls.edit.track("t").console("eq", "miso.parametric-eq")
         .parameter("band-1-gain", -3),
     );
-    assert.equal(await first.pump(), undefined);
-    const shape = engine.shape();
-    for (const source of shape.sources) {
-      engine.submitSource({
-        sourceId: source.id,
-        generation: 1n,
-        startFrame: 0n,
-        planes: Array.from({ length: source.channels }, () => new Float32Array(shape.quantumFrames)),
-        endOfRegion: false,
-      });
-    }
-    engine.render();
-    const notification = await first.pump();
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const notification = await renderUntil(engine, first.pump());
     assert.ok(notification);
     assert.equal(notification.revision, 2n);
     assert.equal(notification.skippedPublications, 0n);
