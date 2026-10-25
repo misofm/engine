@@ -5248,14 +5248,12 @@ where
         if let Some(candidate) = withdrawn.take() {
             // #2044: a panic after the successor's `publish_primed` wrote its prime flags (the
             // protocol commit's own steps) leaves the flags of the rings the candidate carries
-            // as the successor set them. A `Primed` candidate is judged by them, so they are set
-            // again from the candidate's own carry before it is republished.
-            if result.is_err()
-                && self
-                    .primed
-                    .is_some_and(|record| record.epoch == candidate.epoch().0)
-            {
-                self.restore_prime_flags();
+            // as the successor set them. A `Primed` candidate is judged by them, so every
+            // republished one gets its own flags back first (idempotent: a refusal before
+            // `publish_primed` writes the same values again).
+            let epoch = candidate.epoch().0;
+            if self.primed.is_some_and(|record| record.epoch == epoch) {
+                self.restore_prime_flags(epoch);
             }
             self.publisher.republish(candidate);
             #[cfg(feature = "test-support")]
@@ -5265,18 +5263,22 @@ where
     }
 
     /// Sets the prime flags of the newest pending candidate's carry again, as its own
-    /// `publish_primed` set them (#1403 D3, #2044), before it is republished after a panic.
+    /// `publish_primed` set them (#1403 D3, #2044), before it is republished.
     ///
     /// Its publication moved every producer it held vacant in from the epoch it succeeds, which
     /// then holds those entries vacant. So the candidate carries exactly the rings whose
     /// producers it holds and whose IDs that epoch holds vacant (a redeclared source's entry
     /// there keeps its own producer); every producer that epoch still holds is of a ring the
     /// candidate does not carry. No allocation.
-    fn restore_prime_flags(&self) {
+    fn restore_prime_flags(&self, epoch: u64) {
         let len = self.pending_providers.len();
         let Some(candidate) = self.pending_providers.last() else {
             return;
         };
+        debug_assert_eq!(
+            candidate.epoch, epoch,
+            "the republished candidate is the newest pending epoch"
+        );
         let holder = match len {
             0 | 1 => &self.providers,
             _ => &self.pending_providers[len - 2],
@@ -10634,14 +10636,6 @@ mod tests {
             );
         }
 
-        /// Gate 4, the record's lifecycle: each step that ends W's pendency drops W's record,
-        /// and a warm successor's publication records its own epoch; a refused supersession
-        /// republishes W and keeps W's record unchanged, and W is then adopted.
-        ///
-        /// Test value: a record kept after W's adoption or supersession names W's epoch (#1358's
-        /// deadline step would then act on B); a record dropped on a refused supersession leaves
-        /// W pending with no record; a `not_before` read from the source-read clock is `P` late
-        /// once a warm plan runs.
         /// #2044: a warm B that does not carry W's [`UNUSED`] ring panics after its primed
         /// publication wrote that ring's flag, before its commit. W is republished and, its own
         /// flags set again, waits while that ring is not fed, as it does when no B ran; once fed,
@@ -10698,6 +10692,14 @@ mod tests {
             assert_eq!(run(true), reference, "the republished W");
         }
 
+        /// Gate 4, the record's lifecycle: each step that ends W's pendency drops W's record,
+        /// and a warm successor's publication records its own epoch; a refused supersession
+        /// republishes W and keeps W's record unchanged, and W is then adopted.
+        ///
+        /// Test value: a record kept after W's adoption or supersession names W's epoch (#1358's
+        /// deadline step would then act on B); a record dropped on a refused supersession leaves
+        /// W pending with no record; a `not_before` read from the source-read clock is `P` late
+        /// once a warm plan runs.
         #[test]
         fn the_record_names_the_one_pending_warm_candidate() {
             /// W published and pending, frames withheld; its record.
