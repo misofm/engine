@@ -2707,14 +2707,15 @@ where
     }
 
     /// The session's spectrum monitor (#1593): its configuration, epochs, service and analysis.
-    #[cfg(feature = "test-support")]
-    pub fn test_spectrum(&self) -> &crate::spectrum::SpectrumMonitor {
+    #[must_use]
+    pub const fn spectrum_monitor(&self) -> &crate::spectrum::SpectrumMonitor {
         &self.spectrum
     }
 
-    /// The session's spectrum monitor, for the service's arm, read and stream calls (#1593).
-    #[cfg(feature = "test-support")]
-    pub fn test_spectrum_mut(&mut self) -> &mut crate::spectrum::SpectrumMonitor {
+    /// The session's spectrum monitor, for the service's arm, read and stream calls (#1593): the
+    /// browser's own spectrum exports read the session's one service through it until #1597
+    /// deletes them (#1596 R1).
+    pub fn spectrum_monitor_mut(&mut self) -> &mut crate::spectrum::SpectrumMonitor {
         &mut self.spectrum
     }
 

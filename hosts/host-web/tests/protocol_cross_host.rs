@@ -673,14 +673,13 @@ fn capabilities_plus(
 fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let mut legs = Legs::new();
 
-    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697). #1596 removes
-    // the first remaining exception: until the browser reads spectrum through the frames, the C
-    // ABI's reply is the browser's plus exactly the three spectrum commands (`0x0010`-`0x0012`)
-    // with flag bit 16 (#1595 R2). #1588 removes the second: until the browser serves meter
-    // batches through the frames, the C ABI's lossy meter lane holds one whole batch, 256 slots,
-    // and the browser's keeps two (#1587a, root ruling m2). #1589 removes the third: until the
-    // browser's session serves `OBSERVATION_READ`, the C ABI also lists `0x000f` with flag bit 15
-    // (#1586 R2). Every other step stays byte-equal.
+    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697) and the three
+    // spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1596). #1588 removes the first
+    // remaining exception: until the browser serves meter batches through the frames, the C ABI's
+    // lossy meter lane holds one whole batch, 256 slots, and the browser's keeps two (#1587a, root
+    // ruling m2). #1589 removes the second: until the browser's session serves `OBSERVATION_READ`,
+    // the C ABI also lists `0x000f` with flag bit 15 (#1586 R2). Every other step stays
+    // byte-equal.
     let request = legs.next();
     let bytes = frame(
         request,
@@ -705,13 +704,13 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     assert_eq!(
         capabilities_plus(
             &browser_reply,
-            &[0x000f, 0x0010, 0x0011, 0x0012],
-            protocol::CapabilityFlags::OBSERVATION.0 | protocol::CapabilityFlags::SPECTRUM.0,
+            &[0x000f],
+            protocol::CapabilityFlags::OBSERVATION.0,
             Some(host_core::MAXIMUM_METER_BATCH_RECORDS as u64)
         ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f-0x0012, bits 15 \
-         and 16 and its 256-slot meter lane"
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f, bit 15 and its \
+         256-slot meter lane"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
@@ -904,6 +903,56 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         CommandPayload::TransportGet,
     );
     legs.both("15 request ID reuse", &reused);
+
+    // 16. Spectrum through the frames (#1596 gate 6): one `SPECTRUM_CONFIGURE` for the track's
+    // post-pan tap, two render blocks for the adoption and the promotion, a `SPECTRUM_CAPTURE`
+    // arm, one 2,048-frame window of render blocks, then the read of both channels: the same
+    // bytes on both legs, so the analyzed bins are equal word for word.
+    legs.command(
+        "16 spectrum configure",
+        CommandPayload::SpectrumConfigure(&protocol::SpectrumConfigureRequest {
+            form: protocol::SpectrumForm::Single,
+            entries: vec![protocol::SpectrumEntry {
+                target_kind: protocol::SpectrumTargetKind::TrackPostPan,
+                target_id: TRACK_ID.to_owned(),
+                channels: protocol::ParameterChannel::Both,
+            }],
+            maximum_capture_bytes: 1 << 20,
+            hop_frames: None,
+        }),
+    );
+    for block in 8..10 {
+        legs.block(block);
+    }
+    legs.command(
+        "16 spectrum arm",
+        CommandPayload::SpectrumCapture(&protocol::SpectrumCaptureRequest::Arm),
+    );
+    for block in 10..26 {
+        legs.block(block);
+    }
+    let read = legs.command(
+        "16 spectrum read",
+        CommandPayload::SpectrumCapture(&protocol::SpectrumCaptureRequest::Read {
+            channels: protocol::ParameterChannel::Both,
+            include_window: false,
+        }),
+    );
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::SpectrumCaptured(reply),
+        ..
+    } = ProtocolCodec::default()
+        .decode_typed_response(&read, &mut protocol::DecodeScratch::new(&mut fields))
+        .expect("16 spectrum read: a response frame")
+    else {
+        panic!("16 spectrum read: a capture reply")
+    };
+    assert_eq!(
+        reply.status,
+        protocol::SpectrumCaptureStatus::Ready,
+        "16 spectrum read: vacuous without a ready window"
+    );
 
     legs.drain("at the end");
 

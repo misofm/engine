@@ -3491,12 +3491,15 @@ pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> 
     })
 }
 
-/// Run a host operation that can promote an adopted plan's spectrum captures (`service`, and the
-/// reclaim every `control_command` starts with), with the staging's analysis for the promotion to
-/// end (#1618). A promotion that does not keep the stream ends the analysis with it; the staging's
-/// stream record and staged window then describe a stream that no longer exists, so the record is
-/// written from the service and the window is dropped, as `spectrum_stream_stop` does. Without
-/// that, `spectrum_stream_analysis` would adopt the stale record again and re-report the window.
+/// Run a host operation that can run the session's promotion of an adopted plan's spectrum
+/// captures (`service`, and a structural `control_command`, which promotes the candidate render
+/// took before it rebuilds), with the staging's analysis for the host to end (#1618, #1596). A
+/// promotion that does not keep the stream ends the analysis with it; the staging's stream record
+/// and staged window then describe a stream that no longer exists, so the record is written from
+/// the service and the window is dropped, as `spectrum_stream_stop` does. Without that,
+/// `spectrum_stream_analysis` would adopt the stale record again and re-report the window. The
+/// session ended the stream with its own analysis, so the record's analysis facts are the
+/// staging's, as a stop through `spectrum_stream_stop` writes them.
 /// A staging that is borrowed has no analysis running: the operation gets `None`.
 fn with_promotion_analysis<R>(
     host: &mut AudioWorkletEngineHost,
@@ -3521,6 +3524,10 @@ fn with_promotion_analysis<R>(
             staging.result_len = 0;
             if let Some(metadata) = host.spectrum_stream_metadata().copied() {
                 write_stream_metadata(&mut staging.stream_metadata, &metadata);
+            }
+            if let Some(analysis) = staging.analysis.as_ref() {
+                staging.stream_metadata.analysis_epoch = analysis.analysis_epoch();
+                staging.stream_metadata.history_start_sample = analysis.history_start_sample();
             }
             staging.stream_metadata.result = RESULT_OK;
         }
@@ -6145,16 +6152,49 @@ mod spectrum_ffi_tests {
         bytes
     }
 
-    /// A rebuild whose promotion does not keep the spectrum stream ends the instance's analysis
-    /// with it (#1618, m1 and m7 of the batch 12b review), whichever control export runs the
-    /// promotion: the service step, or the reclaim a control command starts with. The swap carries
-    /// (the engine reports it so) but its pairing does not name the capture, so the successor's
-    /// fresh capture is installed and the service's stream ends.
+    /// A `SPECTRUM_CONFIGURE` frame for one left-channel tap at `track`'s post-pan point.
+    fn retarget_spectrum_frame(request: u64, track: &str) -> Vec<u8> {
+        use protocol::{
+            CommandPayload, ExpectedRevision, ParameterChannel, ProtocolCodec, RequestId,
+            SpectrumConfigureRequest, SpectrumEntry, SpectrumForm, SpectrumTargetKind,
+            TypedCommandFrame,
+        };
+        let configure = SpectrumConfigureRequest {
+            form: SpectrumForm::Single,
+            entries: vec![SpectrumEntry {
+                target_kind: SpectrumTargetKind::TrackPostPan,
+                target_id: track.to_owned(),
+                channels: ParameterChannel::Left,
+            }],
+            maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
+            hop_frames: None,
+        };
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::SpectrumConfigure(&configure),
+                },
+                &mut bytes,
+            )
+            .expect("a spectrum configure frame");
+        bytes.truncate(length);
+        bytes
+    }
+
+    /// A promotion that does not keep the spectrum stream ends the instance's analysis with it
+    /// (#1618, m1 and m7 of the batch 12b review; #1596), whichever control export runs the
+    /// session's promotion: the service step, or a structural control command, which promotes the
+    /// candidate render took before it rebuilds. A `SPECTRUM_CONFIGURE` moves the tap from the
+    /// output to `eq0`, so the successor's capture is fresh and the session's stream ends.
     ///
     /// Test value: red if `miso_engine_web_v1_service` or `miso_engine_web_v1_control_command`
-    /// promotes without the staging's analysis: the stream ends but the analysis stays active, so
-    /// `spectrum_stream_reset` answers ok instead of a wrong state and `spectrum_stream_analysis`
-    /// re-analyzes the last window of a stream that no longer exists.
+    /// lets the session's promotion end the stream without the staging's analysis: the analysis
+    /// stays active, so `spectrum_stream_reset` answers ok instead of a wrong state and
+    /// `spectrum_stream_analysis` re-analyzes the last window of a stream that no longer exists.
     #[test]
     fn a_promotion_that_drops_the_stream_ends_the_analysis() {
         for by_service in [true, false] {
@@ -6203,51 +6243,21 @@ mod spectrum_ffi_tests {
                     .is_some_and(SpectrumAnalysis::stream_active)
             }));
 
-            // A rebuild commits, and the block after it adopts the successor plan.
-            let revision = with_host(handle, 0, AudioWorkletEngineHost::committed_revision);
+            // The tap moves to `eq0`: a rebuild commits, and the block after it adopts the
+            // successor plan, whose capture is fresh.
             let (result, _) =
-                native_staging::control_command(handle, &adding_a_strip_frame(1, revision))
+                native_staging::control_command(handle, &retarget_spectrum_frame(1, "eq0"))
                     .expect("the control staging");
             assert_eq!(result, RESULT_OK);
             render(2);
-            // The pairing names nothing: the swap carried, but not this capture.
-            with_host_mut(handle, (), |host| {
-                let ready = host.ready.as_mut().expect("ready");
-                let waiting = ready
-                    .pending_shapes
-                    .iter_mut()
-                    .filter(|entry| entry.adoption == Some(true))
-                    .filter_map(|entry| entry.spectrum.as_mut())
-                    .map(|handover| handover.pairing = Box::default())
-                    .count();
-                assert_eq!(waiting, 1, "the adopted plan waits for its promotion");
-            });
             if by_service {
                 assert_eq!(miso_engine_web_v1_service(handle), RESULT_OK);
             } else {
-                // Any control command reclaims first; a revision probe is the lightest.
-                let probe = {
-                    use protocol::{
-                        CommandPayload, ExpectedRevision, ProtocolCodec, RequestId,
-                        TypedCommandFrame,
-                    };
-                    let codec = ProtocolCodec::default();
-                    let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
-                    let length = codec
-                        .encode_command_frame_into(
-                            &TypedCommandFrame {
-                                request_id: RequestId::new(2).expect("nonzero request"),
-                                expected_revision: ExpectedRevision::Any,
-                                payload: CommandPayload::CapabilitiesGet,
-                            },
-                            &mut bytes,
-                        )
-                        .expect("a capabilities frame");
-                    bytes.truncate(length);
-                    bytes
-                };
+                // A structural edit promotes the candidate render took before it rebuilds.
+                let revision = with_host(handle, 0, AudioWorkletEngineHost::committed_revision);
                 let (result, _) =
-                    native_staging::control_command(handle, &probe).expect("the control staging");
+                    native_staging::control_command(handle, &adding_a_strip_frame(2, revision))
+                        .expect("the control staging");
                 assert_eq!(result, RESULT_OK);
             }
 

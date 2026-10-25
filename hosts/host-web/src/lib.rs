@@ -1485,34 +1485,6 @@ struct PendingShape {
     /// Whether the adoption block has passed: the entry then holds tables nothing reads, which
     /// the service step drops on the control side.
     adopted: bool,
-    /// What the block that adopted this very plan took from its predecessor, set by that block
-    /// and `None` before it and for a candidate a later one superseded (#1290d2): `Some(true)`
-    /// when the engine reported the hand-over carried, `Some(false)` for a refused or unrequested
-    /// one. The promotion in [`ReadyOwnership::promote_spectrum`] reads it once.
-    adoption: Option<bool>,
-    /// The plan's prepared spectrum captures and the pairing list beside them, until the plan's
-    /// promotion installs them in the spectrum service (#1290d2); dropped with the entry when the
-    /// plan was superseded and never rendered.
-    spectrum: Option<SpectrumHandover>,
-}
-
-/// The spectrum captures a replacement plan was prepared with, and the pairing that names the
-/// observers its swap block moves (#1395; #1290d2). The captures are control-side objects: the
-/// plan holds the observers, the service holds the readers, so a plan's captures never ride in
-/// its attachment and cannot be lost with a retired plan.
-struct SpectrumHandover {
-    captures: PreparedSpectrumCaptures,
-    /// [`host_core::PlanStateInventory::spectrum_pairing`] of the plan, copied at preparation.
-    pairing: Box<[host_core::SpectrumPair]>,
-}
-
-/// The heap a handover's pairing list holds, charged to the plan's rows with its tables. A free
-/// function: an inherent impl before the host's own would renumber the mangled render symbols the
-/// call-graph gate pins.
-fn spectrum_pairing_bytes(handover: &SpectrumHandover) -> Option<u64> {
-    u64::try_from(handover.pairing.len())
-        .ok()?
-        .checked_mul(u64::try_from(size_of::<host_core::SpectrumPair>()).ok()?)
 }
 
 /// Everything one compiled session owns on the browser side.
@@ -1538,9 +1510,6 @@ struct ReadyOwnership {
     shape: Box<PlanShape>,
     /// The epoch of the plan `shape` describes.
     shape_epoch: u64,
-    /// The plan owner's count of carried swaps as of the last adoption block the host handled
-    /// (#1290d2): a swap carried exactly when the count moved.
-    carried_swaps_seen: u64,
     /// Where the preparer leaves a replacement plan's tables (#1290a).
     record: Arc<Mutex<BootRecord>>,
     /// The tables of replacement plans between their commit and the service step after their
@@ -1565,10 +1534,6 @@ struct ReadyOwnership {
     /// This keeps command-free blocks from walking every destination counter. It is set at each
     /// successful push, so a partial internal failure cannot accidentally credit queue capacity.
     has_in_flight_commands: bool,
-    /// The optional one-shot spectrum service over its observer or atomically selectable
-    /// collection. It is declared before the prepared host so consumers are released before the
-    /// plan's producers.
-    spectrum: Option<SpectrumService>,
     /// The session's one meter delivery (#1582 D1): the output meter's reader and gate (#1581 D5),
     /// the level the lease drives, the window grid, the generation, the loss count and the
     /// rendering plan's meter tables. The poll calls it and copies the frame it publishes into
@@ -1653,23 +1618,30 @@ impl ReadyOwnership {
     /// Run one control-plane call that may publish a replacement plan (#1290a, #1323): reclaim
     /// first, check the room for the plan's tables (refusing with `full` when there is none, with
     /// nothing run), run `call`, and keep the tables of a plan it published for its adoption block.
+    ///
+    /// `analysis` is the smoothing history of an instance that owns both halves of the spectrum
+    /// stream: a promotion `call` runs in the core (a structural edit promotes the candidate render
+    /// took before it rebuilds) ends it when the promotion ends the stream (#1618).
     fn run_control<T, E>(
         &mut self,
         analysis: Option<&mut SpectrumAnalysis>,
         full: E,
         call: impl FnOnce(&mut WebSession) -> Result<T, E>,
     ) -> Result<T, E> {
-        self.reclaim_shapes(analysis);
+        self.reclaim_shapes();
         if self.pending_shapes.len() == self.pending_shapes.capacity() {
             return Err(full);
         }
+        let stream = self.spectrum_stream();
         let before = self.control.newest_plan_epoch();
         let result = call(&mut self.control);
+        self.end_ended_stream(stream, analysis);
         // Whatever the preparer left is taken: a command refused after its preparation leaves
         // tables nothing will read.
-        let (prepared, handover) = self.record.lock().map_or((None, None), |mut record| {
-            (record.shape.take(), record.spectrum.take())
-        });
+        let prepared = self
+            .record
+            .lock()
+            .map_or(None, |mut record| record.shape.take());
         let epoch = self.control.newest_plan_epoch();
         if result.is_ok() && epoch != before {
             // A rebuild commits only after the preparer returned `Ok`, and the preparer returns
@@ -1681,8 +1653,6 @@ impl ReadyOwnership {
                 epoch,
                 shape: Box::new(shape),
                 adopted: false,
-                adoption: None,
-                spectrum: handover,
             });
             // The replacement's header carries its master word before the rendering plan's header
             // names it (#1689), so the page never reads the successor without its master.
@@ -1694,8 +1664,8 @@ impl ReadyOwnership {
                     .name_successor(core::ptr::from_ref(&entry.shape.meter_header));
             }
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
-            // #1310: the commit may have superseded the candidate that waited; its tables and
-            // spectrum captures go now, on the control side, as the core says.
+            // #1310: the commit may have superseded the candidate that waited; its tables go now,
+            // on the control side, as the core says.
             self.drop_superseded_shapes();
         }
         if result.is_ok() {
@@ -1756,69 +1726,47 @@ impl ReadyOwnership {
 
     /// Drop the tables of plans render has adopted past (#1290a): the host's own, retired by the
     /// adoption block, and those of a candidate that a later one superseded. Control side only.
-    fn reclaim_shapes(&mut self, analysis: Option<&mut SpectrumAnalysis>) {
-        self.promote_spectrum(analysis);
+    fn reclaim_shapes(&mut self) {
         self.pending_shapes.retain(|entry| !entry.adopted);
         self.drop_superseded_shapes();
     }
 
-    /// Drop the tables, and the spectrum captures, of every candidate the core no longer holds
-    /// (#1310, batch 15a review fold B1): a structural edit that superseded a waiting candidate
-    /// dropped its plan with the commit, and no block will adopt it. The core decides
+    /// Drop the tables of every candidate the core no longer holds (#1310, batch 15a review fold
+    /// B1): a structural edit that superseded a waiting candidate dropped its plan with the commit,
+    /// and no block will adopt it. The core decides
     /// ([`control_plane::SessionState::holds_plan_epoch`]); an adopted entry waits for
-    /// [`Self::reclaim_shapes`], which promotes its spectrum first. Control side only: it frees.
+    /// [`Self::reclaim_shapes`]. Control side only: it frees.
     fn drop_superseded_shapes(&mut self) {
         let control = &self.control;
         self.pending_shapes
             .retain(|entry| entry.adopted || control.holds_plan_epoch(entry.epoch));
     }
 
-    /// Promote the plans the render half has adopted (#1290d2; #1395 D3, D5): install each
-    /// adopted plan's spectrum captures in the service, paired with the service's current ones
-    /// by the plan's pairing list and the engine's carry outcome for that swap, and drop the
-    /// captures it displaces here, off the audio thread. Entries go in commit order, so two
-    /// adoptions before one service step promote one after the other, each against the captures
-    /// the one before left. A plan that was superseded before it rendered was never adopted
-    /// (`adoption` is `None`) and its captures drop with its entry. An adopted plan with no
-    /// captures was prepared with no configuration and removes the service (#1593 D6). Control
-    /// side only: it frees.
-    ///
-    /// `analysis` is the smoothing history of the instance that owns both halves (the ffi staging's
-    /// analysis, #1618): a promotion that does not keep the stream ends the stream's analysis in
-    /// the same call, so the analysis never reports facts of a stream that ended. The browser's
-    /// audio thread, which keeps none, passes `None`.
-    fn promote_spectrum(&mut self, mut analysis: Option<&mut SpectrumAnalysis>) {
-        for entry in &mut self.pending_shapes {
-            // A candidate render has not adopted keeps its hand-over: a service step or command
-            // between its commit and its adoption block must not drop it (batch 15a review fold
-            // 2). Only an adopted entry's is taken.
-            let Some(carried) = entry.adoption.take() else {
-                continue;
-            };
-            let Some(handover) = entry.spectrum.take() else {
-                // A plan prepared with no configuration (#1593 D6: an edit removed every target):
-                // the service goes, its stream and the analysis's end, and every read answers
-                // `Unprepared`.
-                if let Some(mut service) = self.spectrum.take() {
-                    service.stop_stream(analysis.as_deref_mut());
-                }
-                continue;
-            };
-            // A configuration only shrinks today, so captures never follow a removed service;
-            // #1594's re-configure must create the service here instead.
-            debug_assert!(
-                self.spectrum.is_some(),
-                "a plan with captures was adopted after the service was removed"
-            );
-            let Some(service) = self.spectrum.as_mut() else {
-                continue;
-            };
-            drop(service.adopt_successor(
-                handover.captures,
-                &handover.pairing,
-                carried,
-                analysis.as_deref_mut(),
-            ));
+    /// The capture epoch of the session's running spectrum stream, `Some(None)` for a running
+    /// stream with no epoch, or `None` when no stream runs (#1596).
+    fn spectrum_stream(&self) -> Option<Option<u64>> {
+        self.control
+            .spectrum_monitor()
+            .service()
+            .filter(|service| service.stream_active())
+            .map(SpectrumService::stream_epoch)
+    }
+
+    /// End `analysis`'s stream when the session's stream that ran as `before`
+    /// ([`Self::spectrum_stream`]) no longer runs (#1618, #1596): the core promotes the plans
+    /// render adopted, and a promotion that does not keep the stream ends it with the session's
+    /// own analysis, never with the instance's. Without this the instance's analysis would keep
+    /// analyzing a stream that no longer exists. Allocation-free.
+    fn end_ended_stream(
+        &self,
+        before: Option<Option<u64>>,
+        analysis: Option<&mut SpectrumAnalysis>,
+    ) {
+        if before.is_some()
+            && self.spectrum_stream() != before
+            && let Some(analysis) = analysis
+        {
+            analysis.end_stream();
         }
     }
 
@@ -1827,9 +1775,6 @@ impl ReadyOwnership {
     /// The tables it retires stay in the entry for [`Self::reclaim_shapes`]; an entry of an
     /// earlier epoch was superseded and is marked the same way. A pointer exchange: it allocates
     /// and frees nothing, and indexes nothing, so it adds no trap to the render export.
-    ///
-    /// `swap_carried` is whether the engine reported this swap's hand-over as carried (the owner's
-    /// carried-swap count advanced), which the plan's spectrum promotion needs (#1290d2).
     ///
     /// `carried` is the pairing the swap block's attachment hook made (#1381b): the readers the
     /// executors carried, which this hand-over follows with the meter delivery's per-meter state
@@ -1846,13 +1791,7 @@ impl ReadyOwnership {
     /// the published ones from this block on. The retiring header is marked
     /// ([`WebMeterHeader::retired`]) and names the adopted one, so the page's render path switches
     /// to the views it cut over them in advance. Pointer exchanges and scalar writes only.
-    fn adopt_shape(
-        &mut self,
-        epoch: u64,
-        swap_carried: bool,
-        carried: &[CarriedReader],
-        first_sample: u64,
-    ) {
+    fn adopt_shape(&mut self, epoch: u64, carried: &[CarriedReader], first_sample: u64) {
         self.shape_epoch = epoch;
         let meters_carried = carried
             .iter()
@@ -1865,7 +1804,6 @@ impl ReadyOwnership {
             if entry.epoch == epoch {
                 core::mem::swap(&mut self.shape, &mut entry.shape);
                 entry.adopted = true;
-                entry.adoption = Some(swap_carried);
                 taken = true;
                 // `self.shape` is the adopted plan's and `entry.shape` the retired one's. The
                 // stream the page reads continues in the adopted plan's header (#1290d1): its
@@ -2632,9 +2570,11 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
+        let stream = ready.spectrum_stream();
         match ready.control.service() {
             Ok(()) => {
-                ready.reclaim_shapes(analysis);
+                ready.end_ended_stream(stream, analysis);
+                ready.reclaim_shapes();
                 RESULT_OK
             }
             Err(error) => {
@@ -2911,7 +2851,9 @@ impl AudioWorkletEngineHost {
         plan.copy_response_snapshot(engine::realtime::ResponseSnapshotRequest { track_id, sink })
     }
 
-    /// The spectrum service of a ready host, or the result word that refuses the call.
+    /// The spectrum service of a ready host, or the result word that refuses the call: the
+    /// session's one service (#1596 R1), which the spectrum frames read too, until #1597 deletes
+    /// these exports.
     fn spectrum_service(&self) -> Result<&SpectrumService, u32> {
         if self.status.state != STATE_READY {
             return Err(RESULT_WRONG_STATE);
@@ -2919,8 +2861,9 @@ impl AudioWorkletEngineHost {
         self.ready
             .as_ref()
             .ok_or(RESULT_WRONG_STATE)?
-            .spectrum
-            .as_ref()
+            .control
+            .spectrum_monitor()
+            .service()
             .ok_or_else(|| spectrum_result(SpectrumServiceError::Unprepared))
     }
 
@@ -2932,8 +2875,10 @@ impl AudioWorkletEngineHost {
         self.ready
             .as_mut()
             .ok_or(RESULT_WRONG_STATE)?
-            .spectrum
-            .as_mut()
+            .control
+            .spectrum_monitor_mut()
+            .service_and_analysis_mut()
+            .map(|(service, _)| service)
             .ok_or_else(|| spectrum_result(SpectrumServiceError::Unprepared))
     }
 
@@ -3082,7 +3027,7 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_target(&self) -> u32 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum.as_ref())
+            .and_then(|ready| ready.control.spectrum_monitor().service())
             .map_or(0, SpectrumService::target_kind)
     }
 
@@ -3091,7 +3036,7 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_channels(&self) -> u32 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum.as_ref())
+            .and_then(|ready| ready.control.spectrum_monitor().service())
             .and_then(SpectrumService::channels)
             .map_or(0, spectrum_channels_raw)
     }
@@ -3101,7 +3046,7 @@ impl AudioWorkletEngineHost {
     pub fn spectrum_selection_epoch(&self) -> u64 {
         self.ready
             .as_ref()
-            .and_then(|ready| ready.spectrum.as_ref())
+            .and_then(|ready| ready.control.spectrum_monitor().service())
             .map_or(0, SpectrumService::selection_epoch)
     }
 
@@ -3666,11 +3611,6 @@ impl AudioWorkletEngineHost {
                 // drops the retired ones at its next step.
                 let epoch = plan.owner().active_epoch().0;
                 if epoch != ready.shape_epoch {
-                    // #1290d2: whether the engine carried this swap, from the owner's count of
-                    // carried swaps (a refused or unrequested hand-over does not advance it).
-                    let carried_swaps = plan.owner().carried_count();
-                    let swap_carried = carried_swaps != ready.carried_swaps_seen;
-                    ready.carried_swaps_seen = carried_swaps;
                     // #882: the host's carried-meter fact (`adopt_shape`'s `meters_carried`) is the
                     // engine's, which chose this block's strip meter level.
                     debug_assert_eq!(
@@ -3686,7 +3626,7 @@ impl AudioWorkletEngineHost {
                     let carried = plan
                         .active_attachment_mut::<RenderCompanions>()
                         .map_or(&[][..], |companions| companions.carried());
-                    ready.adopt_shape(epoch, swap_carried, carried, render_first_sample);
+                    ready.adopt_shape(epoch, carried, render_first_sample);
                 }
                 self.status.next_absolute_sample = next_absolute_sample;
                 self.status.rendered_quanta = self.status.rendered_quanta.saturating_add(1);
@@ -4939,6 +4879,8 @@ pub struct WebAdapter;
 impl ControlAdapter for WebAdapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+    /// #1596: the browser reads spectrum through the session's three frames, as the C ABI does.
+    const SPECTRUM: bool = true;
     /// #1697: `miso_engine_web_v1_replace_document_ptr` stages the document a `SESSION_REPLACE`
     /// names, and [`AudioWorkletEngineHost::control_command_with_document`] passes it beside the
     /// frame.
@@ -4958,10 +4900,8 @@ type WebPlan = PlanState<WebAdapter>;
 /// carries everything the render side reads, and they drop with the plan on the retirement path.
 /// The browser renders through the plan owner (#1381a D4) and reaches the active plan's companions
 /// through `PlanState::active_attachment_mut`: the meter poll and the observation reads read the
-/// readers there. A plan's spectrum captures are not among them: [`SpectrumService`] owns the
-/// captures, so the preparer leaves a plan's in the `BootRecord` (boot moves them into the
-/// service; a replacement's wait beside its tables for the promotion, #1290d2) until the spectrum
-/// readers move to the control plane (#1596).
+/// readers there. A plan's spectrum captures are not among them: the preparer returns them to the
+/// session, whose spectrum monitor installs them at the plan's promotion (#1596 D3).
 ///
 /// Field order is the drop order: the meter consumers, then the effect observation handles, the
 /// relative order the same two fields have in `ReadyOwnership`. Neither reads the other while it
@@ -5083,10 +5023,6 @@ struct BootRecord {
     /// plan's and every replacement plan's. Boot takes the first; a command that publishes a
     /// replacement takes that plan's, and one that fails after preparing leaves a table to drop.
     shape: Option<PlanShape>,
-    /// The spectrum captures of the plan the preparer prepared last, with its pairing list
-    /// (#1290d2). Boot moves them into the spectrum service; a command that publishes a
-    /// replacement keeps them beside the plan's tables until the plan's promotion.
-    spectrum: Option<SpectrumHandover>,
 }
 
 impl RenderCompanions {
@@ -5223,8 +5159,8 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         caps: &HostPrepareCaps,
         lanes: HostLiveLanes,
         // The session's configuration (#1593 D3): the boot request, then whatever of it the
-        // session's edits left. The capture stays in the record for the browser's service, so the
-        // preparer returns none until #1596 moves the browser's readers.
+        // session's edits left. The captures go to the session, whose spectrum monitor installs
+        // them at the plan's promotion and serves every read (#1596 D3), as on the C ABI.
         spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
@@ -5232,7 +5168,7 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         (
             PreparedHost,
             host_core::HostLiveControlHandles,
-            Option<host_core::PreparedSpectrumCaptures>,
+            Option<PreparedSpectrumCaptures>,
         ),
         PrepareDiagnostics,
     > {
@@ -5242,7 +5178,7 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         {
             record.rejection = Some(failure.kind());
         }
-        prepared.map(|(host, handles)| (host, handles, None))
+        prepared
     }
 
     /// The boot word (#1581 T2 obligation), so the session's output meter closes its windows on
@@ -5263,7 +5199,14 @@ impl WebRuntimePreparer {
         spectrum: Option<&host_core::SpectrumPreparation>,
         successor: Option<SuccessorBase<'_>>,
         superseded: &host_core::LiveValuesSuperseded,
-    ) -> Result<(PreparedHost, host_core::HostLiveControlHandles), PrepareDiagnostics> {
+    ) -> Result<
+        (
+            PreparedHost,
+            host_core::HostLiveControlHandles,
+            Option<PreparedSpectrumCaptures>,
+        ),
+        PrepareDiagnostics,
+    > {
         let boot = successor.is_none();
         let live_controls =
             live_control_request(self.options, compiled.quantum().0).ok_or_else(|| {
@@ -5316,24 +5259,6 @@ impl WebRuntimePreparer {
             meters.len() + effect_observations.len(),
             CarriedReader::UNUSED,
         );
-        // #1290d2: the captures and the pairing that names the observers this plan's swap block
-        // moves leave with the tables, so they can be installed in the service at the plan's
-        // promotion whatever the plan's attachment has become by then.
-        let spectrum = match spectrum_captures {
-            Some(captures) => {
-                let pairs = host.inventory.spectrum_pairing();
-                let mut pairing: Vec<host_core::SpectrumPair> = Vec::new();
-                pairing.try_reserve_exact(pairs.len()).map_err(|_| {
-                    PrepareDiagnostics::fixed(PrepareRejection::Platform, "web.resource.allocation")
-                })?;
-                pairing.extend_from_slice(pairs);
-                Some(SpectrumHandover {
-                    captures,
-                    pairing: pairing.into_boxed_slice(),
-                })
-            }
-            None => None,
-        };
         let companions = RenderCompanions {
             meters,
             effect_observations,
@@ -5350,10 +5275,6 @@ impl WebRuntimePreparer {
             let (tables, tables_largest) = shape.retained_bytes().ok_or_else(arithmetic)?;
             retained = retained.checked_add(tables).ok_or_else(arithmetic)?;
             largest = largest.max(tables_largest);
-            if let Some(pairing) = spectrum.as_ref().and_then(spectrum_pairing_bytes) {
-                retained = retained.checked_add(pairing).ok_or_else(arithmetic)?;
-                largest = largest.max(pairing);
-            }
         }
         charge_attachment(&mut host.report, caps, retained, largest)?;
         host.plan.set_host_attachment(Box::new(companions));
@@ -5369,9 +5290,8 @@ impl WebRuntimePreparer {
                 record.superseded = Some(handles.live_values_superseded.clone());
             }
             record.shape = Some(shape);
-            record.spectrum = spectrum;
         }
-        Ok((host, handles))
+        Ok((host, handles, spectrum_captures))
     }
 }
 
@@ -5795,7 +5715,7 @@ fn compile_ready(
         spectrum,
     )
     .map_err(|failure| boot_refusal(&failure, &record))?;
-    let (engine, live_values_superseded, mut shape, spectrum_boot) = {
+    let (engine, live_values_superseded, mut shape) = {
         let mut record = record
             .lock()
             .map_err(|_| fixed_diagnostic("web.internal.boot_record"))?;
@@ -5804,15 +5724,12 @@ fn compile_ready(
             record.superseded.take(),
             record.shape.take(),
         ) {
-            (Some(engine), Some(superseded), Some(shape)) => {
-                (engine, superseded, shape, record.spectrum.take())
-            }
+            (Some(engine), Some(superseded), Some(shape)) => (engine, superseded, shape),
             _ => return Err(fixed_diagnostic("web.internal.boot_record").into()),
         }
     };
     let resources = plan.queries().resources();
     let session = control.committed_session();
-    let session_sample_rate_hz = session.sample_rate().0;
     let session_quantum_frames = session.quantum().0;
 
     let control_table = control_table_bytes(engine.source_count as usize)
@@ -5860,7 +5777,7 @@ fn compile_ready(
     report.observation_retained_bytes = engine.observation_retained_bytes;
     // #1290a: the tables were built by the boot plan's own preparation (`build_plan_shape`), the
     // same function every replacement plan's preparation runs. The boot plan's spectrum captures
-    // go to the spectrum service below.
+    // went to the session's spectrum monitor (#1596 D3).
     plan.active_attachment_mut::<RenderCompanions>()
         .ok_or_else(|| fixed_diagnostic("web.internal.companions"))?;
     let rows = shape
@@ -5965,7 +5882,6 @@ fn compile_ready(
             shape
         },
         shape_epoch: 0,
-        carried_swaps_seen: 0,
         record,
         pending_shapes: {
             let mut pending = Vec::new();
@@ -5977,14 +5893,6 @@ fn compile_ready(
         blocking_rebuilds: 0,
         command_decoded: boxed_observe_staging(decoded_count)?,
         has_in_flight_commands: false,
-        spectrum: spectrum_boot.map(|handover| {
-            SpectrumService::new(
-                handover.captures,
-                session_sample_rate_hz,
-                session_quantum_frames,
-                spectrum_hop,
-            )
-        }),
         meters: MeterDelivery::new(
             output_reader,
             output_gate,
