@@ -190,7 +190,7 @@ async function testMainRealm() {
         } else if (received.tag === "miso.status.v1") {
           response = {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
-            lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
+            lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64, blockingRebuilds: 1,
             nextAbsoluteSample: 64n, renderedQuanta: 1n, liveValuesSuperseded: 7n,
             appliedRevision: 9n, appliedSample: 64n, appliedOutcome: 1n,
             memoryBytes: 65536, singleModeControlAllocations: 3, staleViewQuanta: 0,
@@ -1669,6 +1669,9 @@ async function testMainRealm() {
       (reply) => ({ ...reply, liveValuesSuperseded: 7 }),
       (reply) => ({ ...reply, liveValuesSuperseded: -1n }),
       (reply) => ({ ...reply, liveValuesSuperseded: 1n << 64n }),
+      // #1294b: the blocking-rebuild count is a required u32 number.
+      ({ blockingRebuilds: _dropped, ...rest }) => rest,
+      (reply) => ({ ...reply, blockingRebuilds: 1n }),
       // #1349 gate 5: each of the three watermark words is required and must be a u64 bigint.
       ({ appliedRevision: _dropped, ...rest }) => rest,
       ({ appliedSample: _dropped, ...rest }) => rest,
@@ -4091,15 +4094,17 @@ async function testProcessor() {
     }
 
     // #1399 gate 3: a status block whose word at 48 is nonzero is a valid block, and the reply
-    // carries the word.
+    // carries the word; #1294b: likewise the blocking-rebuild word at 28.
     {
       const fake = createFakeExports(64);
       new DataView(fake.exports.memory.buffer, 16384).setBigUint64(48, 0x0102_0304_0506n, true);
+      new DataView(fake.exports.memory.buffer, 16384).setUint32(28, 3, true);
       const processor = construct(fake);
       assert.equal(processor.port.posts[0].message.tag, "miso.ready.v1");
       processor.receive({ tag: "miso.status.v1", requestId: 1 });
       const status = processor.port.posts.at(-1).message;
       assert.equal(status.liveValuesSuperseded, 0x0102_0304_0506n);
+      assert.equal(status.blockingRebuilds, 3, "the status reply carries the word at 28");
       new DataView(fake.exports.memory.buffer, 16384).setBigUint64(48, (1n << 64n) - 1n, true);
       processor.receive({ tag: "miso.status.v1", requestId: 2 });
       assert.equal(

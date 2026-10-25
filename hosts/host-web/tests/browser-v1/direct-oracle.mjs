@@ -46,6 +46,7 @@ function status(exports, handle) {
   const view = new DataView(exports.memory.buffer, pointer, 80);
   assert.equal(view.getUint32(0, true), 80);
   assert.equal(view.getUint32(4, true), ABI_VERSION);
+  // Word 28 is `blocking_rebuilds` (#1294b): zero because no transcript here rebuilds.
   assert.equal(view.getUint32(28, true), 0);
   // Word 48 is `live_values_superseded` (#1399): a script that replaces a live value render has
   // not read counts it, so it is not required zero. Words 56, 64 and 72 are the applied-revision
