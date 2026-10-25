@@ -3296,15 +3296,24 @@ fn race_live_edits(run: usize) -> RaceCounts {
         // SAFETY: No other thread uses either handle yet.
         unsafe { fed_render_c(session, plan, &mut feed, block) };
     }
-    // #1583 gate 7: the output's meter table, one batch per window, configured after the warm-up
-    // so the race's first block applies the requested gate, every block folds the output meter,
-    // and the control thread stages the batches.
+    // #1583 gate 7, #1587a gate 5: the output's and two strips' peaks, one batch per window,
+    // configured after the warm-up so the race's first block applies the requested gate, every
+    // block folds the output and strip meters, and the control thread stages the batches and
+    // adopts each swap's strip meters.
     let window = 12_u32;
+    let strip = |id: &str| protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(id.into()),
+        metric: protocol::MeterMetric::Peak,
+    };
     let meters = protocol::TelemetryConfiguration {
-        meters: vec![protocol::MeterEntry {
-            target: protocol::MeterTarget::Output,
-            metric: protocol::MeterMetric::Peak,
-        }],
+        meters: vec![
+            protocol::MeterEntry {
+                target: protocol::MeterTarget::Output,
+                metric: protocol::MeterMetric::Peak,
+            },
+            strip("eq0"),
+            strip("race-bus"),
+        ],
         meter_period_blocks: window,
         meter_window_blocks: None,
         counter_ids: Vec::new(),
