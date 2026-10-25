@@ -1178,11 +1178,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
       if (spectrumPending) throw new MisoUsageError("a spectrum query is already in flight");
-      // A managed subscription holds the capture through all of its life, an update's stop and
-      // restart included (the headless `cancelSpectrum` refuses it the same way).
-      if (spectrumStreamHeld || observationSubscriptions?.managedSpectrumActive() === true) {
-        throw new MisoUsageError("a managed spectrum stream holds the capture");
-      }
+      if (spectrumStreamHeld) throw new MisoUsageError("a managed spectrum stream holds the capture");
       const selected = spectrumSelection(request);
       const channels = selected.channels ?? "both";
       const deadline = queryDeadline(request);

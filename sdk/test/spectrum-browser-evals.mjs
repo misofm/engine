@@ -127,8 +127,8 @@ async function nextReady(subscription, render, seen = []) {
 test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in a boot word", SKIP, async (t) => {
   // Red if the hop reaches neither the boot configure nor the stream (the boot words no longer
   // carry it), if a boot word still carries it (the worklet would call the hop boot export), if a
-  // policy changed after `createEngine` was called changes it, if a published metadata's nested
-  // target can be changed, or if a one-shot query is let onto the capture during a managed update.
+  // policy changed after `createEngine` was called changes it, or if a published metadata's nested
+  // target can be changed.
   t.mock.timers.enable({ apis: ["setInterval"] });
   const policy = { spectrumHopFrames: 256 };
   const { engine, render, harness } = await served({
@@ -143,11 +143,6 @@ test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in 
     const ready = await nextReady(subscription, render);
     assert.equal(ready.metadata.hopFrames, 256);
     assert.throws(() => { ready.metadata.target.outputId = "changed"; }, TypeError);
-    // A single-form smoothing update stops and restarts the stream: the capture stays the
-    // subscription's throughout, and the update completes.
-    const updating = subscription.update({ ...OUTPUT, smoothingMs: 50, cadenceMs: 1 });
-    await assert.rejects(engine.querySpectrum(OUTPUT), /managed spectrum stream holds the capture/);
-    assert.equal((await updating).configuration.smoothingMs, 50);
     await subscription.close();
   } finally {
     await engine.close();

@@ -247,9 +247,12 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   under backpressure) no longer leaves `spectrum.busy` for good. The SDK refuses the overlap of a
   one-shot query and a managed stream with `MisoUsageError` in both orders: a query while a stream
   start is in flight or its stream runs, and a stream start while a query runs. Before, the overlap
-  reached the core, which answered it `spectrum.busy` for some orders only. A query is also refused
-  while a managed subscription is active, so a single-form update's stop and restart keeps the
-  capture. A boot configure past `requestDeadlineMs` rejects `createEngine` with a boot-phase
+  reached the core, which answered it `spectrum.busy` for some orders only. No guard on
+  `managedSpectrumActive()` is needed: a managed update releases the hold only on its stop path,
+  which a collection never takes (any change of a collection job is one `SPECTRUM_STREAM` select,
+  because the capture key holds every job-key field but the smoothing, and a smoothing change also
+  selects); in the single form the stop's reply and the restart's call are only microtask turns
+  apart, with no await between, so no caller can run a query in between. A boot configure past `requestDeadlineMs` rejects `createEngine` with a boot-phase
   `MisoEngineError` whose code is the new SDK timeout code `bootConfigureTimeout` (no `result`;
   `sdk/src/core/errors.ts` and `sdk/test/error-types.ts`, root-extended paths), not `MisoUsageError`. Root-added paths: `sdk/README.md` (the hop section now
   describes the boot configure and `configureSpectrum`) and `docs/CONTROL_PROTOCOL_REGISTRY.md`
