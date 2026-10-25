@@ -39,7 +39,11 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// Issue #1644 adds `session_seek` and `session_seek_at` (D1): the worklet's message handler seeks
 /// the timeline and every source through them between blocks, so their allocations are control
 /// allocations and they are never inside `process()` or a render-locked window.
-const UNWRAPPED_EXPORTS: [&str; 15] = [
+///
+/// Issue #1297a adds `source_seek_at` and `source_seek_report`: the worklet's message handler
+/// applies an anchored source seek and reads a seek report through them between blocks; both run
+/// the service step, so they are control work, never inside `process()` or a render-locked window.
+const UNWRAPPED_EXPORTS: [&str; 17] = [
     "dispose",
     "render_allocation_count",
     "service",
@@ -55,6 +59,8 @@ const UNWRAPPED_EXPORTS: [&str; 15] = [
     "watermark_read",
     "session_seek",
     "session_seek_at",
+    "source_seek_at",
+    "source_seek_report",
 ];
 
 /// One entry of the control-side allowlist (#1443 D3): a function whose `try_pop` calls run on a
