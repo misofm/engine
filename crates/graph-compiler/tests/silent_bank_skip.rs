@@ -670,26 +670,34 @@ fn a_skipping_block_allocates_nothing() {
 
 // ---- Gate 3 (issue #1782a) ----------------------------------------------------------------------
 
-/// Where each track renders in a plan whose one pack group holds every track, as `(unit, lane)`:
-/// home `track / W, track % W` from the group's first unit until a forced move trades two.
+/// Where each track renders in a plan whose one pack group holds tracks `from..TRACKS`, as
+/// `(unit, lane)`: home `(track - from) / W, (track - from) % W` from the group's first unit
+/// until a forced move trades two. A track before `from` is in no group and never moves.
 struct Placement {
     at: Vec<(usize, usize)>,
 }
 
 impl Placement {
     fn of(plan: &PreparedRenderPlan) -> Self {
+        Self::from(plan, 0)
+    }
+
+    fn from(plan: &PreparedRenderPlan, from: usize) -> Self {
         let groups = graph::test_only_pack_groups(plan);
         let &[(first, last, width)] = groups.as_slice() else {
             panic!("one pack group: {groups:?}");
         };
         let (first, width) = (first as usize, width as usize);
         assert!(
-            (last as usize - first + 1) * width >= TRACKS,
-            "the group holds every track: {groups:?}"
+            (last as usize - first + 1) * width >= TRACKS - from,
+            "the group holds tracks {from}..{TRACKS}: {groups:?}"
         );
         Self {
             at: (0..TRACKS)
-                .map(|track| (first + track / width, track % width))
+                .map(|track| {
+                    let index = track.saturating_sub(from);
+                    (first + index / width, index % width)
+                })
                 .collect(),
         }
     }
@@ -711,7 +719,10 @@ impl Placement {
 /// automated `ch11` stays in its own bank): the store lane `ch00` leaves lane 0 and comes back,
 /// strips cross between the stereo banks and the padded one, moves land inside a window where every
 /// bank skips (230..360) and inside the padded bank's (400..530), and the successor is moved after
-/// it took the carry.
+/// it took the carry. The two moves at 440 are the regression row of the carry's way home: they
+/// leave `ch11` (automated) on a home lane whose own strip sits outside the fader bank that has
+/// automation slots, so the direct trade back refuses at both widths and the walk must send
+/// `ch11` home instead (red before that fallback: the carry was dropped).
 const MOVES: [(u64, usize, usize); 13] = [
     (0, 0, 5),
     (0, 9, 17),
@@ -841,9 +852,9 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
             predecessor: effects[&(strip, lane.effect_id)],
         })
         .collect();
-    assert_eq!(
-        effect_moves.len(),
-        3 * TRACKS,
+    assert_eq!(effect_moves.len(), effects.len(), "every effect carries");
+    assert!(
+        effect_moves.len() >= 3 * TRACKS,
         "every console effect carries"
     );
     graph::install_effect_carry(&mut after.plan, effect_moves, 0).expect("effect carry");
@@ -865,16 +876,41 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
 /// fold changes its association order or its signed zeros, which no other test reaches.
 #[test]
 fn a_moved_strip_renders_the_bits_of_an_unmoved_one() {
-    let blocks = 560;
-    let schedules = schedules(blocks, 0x1782);
     let mut model = session(first_sixteen);
     for (index, track) in model.tracks.iter_mut().enumerate() {
         track.builtins.left.hpf_hz = 100.0 + index as f32;
         track.builtins.right.hpf_hz = 100.0 + index as f32;
     }
-    let mut moved = carried_pair(&model, &schedules);
-    let mut home = carried_pair(&model, &schedules);
-    let mut placement = Placement::of(&moved.before.plan);
+    eprintln!("layout: one group, the master's first contributor in it");
+    gate_three(&model, 0);
+    // Tracks 0..8 carry an EQ insert, so their bank is no peer of the next: the group is the
+    // other banks, and the master's first contributor (ch00, which stores) is an earlier unit
+    // outside it. A displaced group's fold then adds onto a live master, which shows any early
+    // epilogue write the store would otherwise overwrite. (Four tracks are not enough: a padded
+    // insert bank declines the route fold outright.)
+    let eq = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+    for track in &mut model.tracks[..8] {
+        let mut insert = eq.clone();
+        insert.id = sid("insert0-eq");
+        track.inserts.effects.push(insert);
+    }
+    eprintln!("layout: the master's first contributor before the group");
+    gate_three(&model, 8);
+}
+
+/// Gate 3 over `model`, whose one pack group holds tracks `from..TRACKS`; the moves of tracks
+/// before `from` are left out.
+fn gate_three(model: &SessionModel, from: usize) {
+    let blocks = 560;
+    let schedules = schedules(blocks, 0x1782);
+    let mut moved = carried_pair(model, &schedules);
+    let mut home = carried_pair(model, &schedules);
+    assert_eq!(
+        moved.before.plan.bank_route_folds(),
+        TRACKS as u64,
+        "every track folds into the master"
+    );
+    let mut placement = Placement::from(&moved.before.plan, from);
     let frames = moved.before.frames;
     let mut moved_pcm = vec![0.0_f32; frames * 2];
     let mut home_pcm = vec![0.0_f32; frames * 2];
@@ -890,7 +926,7 @@ fn a_moved_strip_renders_the_bits_of_an_unmoved_one() {
                     "the successor takes the carry"
                 );
             }
-            placement = Placement::of(&moved.after.plan);
+            placement = Placement::from(&moved.after.plan, from);
         }
         let (moved_plan, home_plan) = if block < SWAP {
             (&mut moved.before, &mut home.before)
@@ -898,7 +934,7 @@ fn a_moved_strip_renders_the_bits_of_an_unmoved_one() {
             (&mut moved.after, &mut home.after)
         };
         for &(at, x, y) in &MOVES {
-            if at == block {
+            if at == block && x >= from && y >= from {
                 placement.swap(&mut moved_plan.plan, x, y);
             }
         }
