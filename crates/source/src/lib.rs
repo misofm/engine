@@ -3556,6 +3556,42 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         }
         true
     }
+
+    // REALTIME_POLICY_BEGIN
+    /// The timeline's prime check and every flagged consumer's (#1355 D4, #1320 D2, #1641 D5):
+    /// a ring no warm successor carries is not asked, so it never holds the adoption back.
+    fn prime_ready(&self, source_read_sample: u64, lead_blocks: u32) -> bool {
+        self.timeline.prime_ready(source_read_sample, lead_blocks)
+            && self
+                .sources
+                .iter()
+                .filter_map(|source| source.consumer.as_ref())
+                .filter(|consumer| consumer.prime_required())
+                .all(|consumer| consumer.prime_ready(source_read_sample, lead_blocks))
+    }
+
+    /// One prime block (#1355 D5): every move's successor entry must be occupied (the carry has
+    /// moved it in), or nothing is primed. Then the timeline, if it is not vacant, and each moved
+    /// consumer replay the block from `source_read_sample` (#1320 D3, #1641 D5).
+    fn prime_block_at(&mut self, source_read_sample: u64, moves: &[(u32, u32)]) -> bool {
+        if !moves.iter().all(|&(successor, _)| {
+            self.sources
+                .get(successor as usize)
+                .is_some_and(|source| source.consumer.is_some())
+        }) {
+            return false;
+        }
+        if !self.timeline.is_vacant() {
+            self.timeline.prime_block_at(source_read_sample);
+        }
+        for &(successor, _) in moves {
+            if let Some(consumer) = self.sources[successor as usize].consumer.as_mut() {
+                let _report = consumer.prime_block_at(source_read_sample);
+            }
+        }
+        true
+    }
+    // REALTIME_POLICY_END
 }
 
 impl SourceGraphSourceSetDriver {

@@ -947,7 +947,7 @@ impl RealtimePlanOwner {
         self.active.1.adopt_absolute_sample(continuing);
         // The incoming plan's one chance to take state from the outgoing one: after the clock
         // adoption, before it renders, and before the outgoing plan leaves for retirement.
-        let carry = self.active.1.carry_from(&mut old.1);
+        let carry = self.active.1.carry_from(&mut old.1, block_start);
         match carry {
             CarryOutcome::Carried => self.carried = self.carried.saturating_add(1),
             CarryOutcome::PredecessorMismatch => {

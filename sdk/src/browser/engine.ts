@@ -2,7 +2,7 @@ import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { WasmBoundary } from "../core/boundary.ts";
 import type { EngineCallResult, SessionShape } from "../core/boundary.ts";
-import { MisoEngineError, MisoUsageError, resultName } from "../core/errors.ts";
+import { MisoEngineError, MisoUsageError, SessionSeekProducerError, resultName } from "../core/errors.ts";
 import type { SdkTimeoutCode } from "../core/errors.ts";
 import { constantValue } from "../core/abi.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
@@ -206,6 +206,23 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
   readonly contextAttempts?: number;
 }
 
+/**
+ * A PCM producer `BrowserEngine.seek` repositions after the engine accepted a session seek (issue
+ * #1644 D3): it moves every ring it writes to `frame`, clamped to each source's region, under
+ * `generation`. `CanonicalPcmPump` from the stem store implements it.
+ */
+export interface SessionSeekProducer {
+  seek(frame: number, generation: bigint): void | Promise<void>;
+}
+
+/** The options of `BrowserEngine.seek`. */
+export interface BrowserSeekOptions {
+  /** The generation to seek under; by default one above the largest this engine has used. */
+  readonly generation?: bigint;
+  /** The producers to reposition, in order, after the engine accepted the seek. */
+  readonly producers?: readonly SessionSeekProducer[];
+}
+
 export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioContext> {
   readonly shape: SessionShape;
   readonly context: Context;
@@ -297,6 +314,23 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * unsubscribe function.
    */
   onEvent(listener: (event: ProtocolEvent) => void): () => void;
+  /**
+   * Seek the timeline and every source to `frame` under one new generation, all or nothing (issue
+   * #1644 D3), and resolve with the generation used. The engine declares the discontinuity in the
+   * same call. The generation is `options.generation`, else one above the largest this object has
+   * used for a seek (the first is `2n`; every source starts at `1n`). Only after the engine
+   * accepted the seek are `options.producers` repositioned, in order, to `frame` under that
+   * generation; the feed then consumes their ring seeks without seeking the sources again. An app
+   * that drives its producers itself must also wait for this call to resolve: a producer that
+   * seeks first makes the session seek stale. A refused seek (a stale generation is
+   * `invalidArgument`, `source.generation.stale`), or a second seek sent while one is unsettled
+   * (`backpressure`), repositions nothing and rejects with a `MisoEngineError` that carries the
+   * result. A producer that fails after the engine accepted the seek rejects the call with
+   * `SessionSeekProducerError`, which carries the applied generation. A `frame` that is not a
+   * non-negative bigint at most `Number.MAX_SAFE_INTEGER`, or a closed engine, throws
+   * `MisoUsageError` before anything is sent.
+   */
+  seek(frame: bigint, options?: BrowserSeekOptions): Promise<{ readonly generation: bigint }>;
   /**
    * Dispose the worklet host, then close its context. Safe to call more than once.
    *
@@ -728,6 +762,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let spectrumStreamBuffer: ArrayBuffer | undefined;
     let spectrumActiveQuery: SpectrumQuery | undefined = preparedSpectrum;
     let closed = false;
+    // Issue #1644 D3: the largest generation a session seek of this object has used; every source
+    // and the timeline start at 1.
+    let highestSeekGeneration = 1n;
     // Issue #1210 D5: meter frames and observation bindings carry strip indices, the tracks then
     // the submixes. The order is the core's control list (#1564 D5), read again whenever its
     // structure epoch moves, and kept by epoch (#1562b): the plan that renders keeps naming its
@@ -1529,6 +1566,48 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             reportListenerError(error);
           }
         });
+      },
+      seek: async (frame: bigint, options?: BrowserSeekOptions) => {
+        if (closed) throw new MisoUsageError("the browser engine is closed");
+        if (typeof frame !== "bigint" || frame < 0n || frame > BigInt(Number.MAX_SAFE_INTEGER)) {
+          throw new MisoUsageError("seek frame must be a non-negative bigint at most Number.MAX_SAFE_INTEGER");
+        }
+        const generation = options?.generation ?? highestSeekGeneration + 1n;
+        if (typeof generation !== "bigint" || generation <= 0n) {
+          throw new MisoUsageError("seek generation must be a positive bigint");
+        }
+        const producers = options?.producers ?? [];
+        if (!Array.isArray(producers) || producers.some((producer) => typeof producer?.seek !== "function")) {
+          throw new MisoUsageError("seek producers must each have a seek method");
+        }
+        const refused = (result: number): MisoEngineError =>
+          new MisoEngineError("the browser host refused the session seek", {
+            phase: "source",
+            code: resultName(result, "call"),
+            result,
+          });
+        let reply: Awaited<ReturnType<MisoAudioWorkletHost["seekSession"]>>;
+        try {
+          reply = await host.seekSession({ generation, frame });
+        } catch (error) {
+          // The host rejects a local refusal (a second unsettled seek: `backpressure`) and a
+          // sticky failure with its numeric record; keep the result in the SDK's vocabulary.
+          const result = (error as { readonly result?: unknown }).result;
+          if (typeof result === "number" && Number.isSafeInteger(result) && result >= 0) {
+            throw refused(result);
+          }
+          throw error;
+        }
+        if (reply.result !== constantValue("resultCodes", "ok")) throw refused(reply.result);
+        if (generation > highestSeekGeneration) highestSeekGeneration = generation;
+        for (const [index, producer] of producers.entries()) {
+          try {
+            await producer.seek(Number(frame), generation);
+          } catch (error) {
+            throw new SessionSeekProducerError(generation, index, error);
+          }
+        }
+        return Object.freeze({ generation });
       },
       close: () => {
         closed = true;

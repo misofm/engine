@@ -410,6 +410,11 @@ Notes for later slices:
 - **#1355:** `prime_bytes` counts every source-claim line of W, including an added track's line
   whose source is not carried. #1355 must confirm which lines the fill writes and narrow D3's count
   if the fill skips such lines.
+- **1354b (from #1355 attempt 2, 2026-10-25):** the L3 term of D3 is live debt, not empty by
+  construction. #1355's fill writes the `Input`-tap sidechain lines (L3) from a restarted track
+  into a carried node since that slice, and `prime_bytes_of` still leaves them out, so
+  `PrimeBudget` under-counts a prime with such a line. 1354b adds the term; #1355 does not change
+  the budget.
 
 Test value (1354a):
 - Gate 1: a lead floor on every surviving node (round-4 B1) moves track 2 and the output off
