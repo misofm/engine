@@ -4977,10 +4977,10 @@ impl ControlAdapter for WebAdapter {
     const RENDER_METER_FOLD: bool = true;
     /// #1589a: the session serves the `Observe` edit and `OBSERVATION_READ` (with capability bit
     /// 15) for a boot whose observation taps bind every declared tap
-    /// ([`WebRuntimePreparer::observation_queues`], R1). The edit's records ride the same
-    /// producers as kinds 7 and 8, through the one control plane, so each queue keeps one writer
-    /// (the control half); the read reads the readers the render half keeps
-    /// ([`ReadyOwnership::run_command`] lends them, R2).
+    /// ([`control_plane::RuntimePreparer::observation_queues`], R1). The edit's records ride the
+    /// same producers as kinds 7 and 8, through the one control plane, so each queue keeps one
+    /// writer (the control half); the read reads the readers the render half keeps, which the
+    /// control entry lends with their plan's epoch (R2).
     const OBSERVE_EDIT: bool = true;
 }
 
