@@ -162,3 +162,68 @@ Commands: `cargo test --locked -p protocol --all-features`, `cargo test --locked
 ## Supersedes and shrinks
 
 - None.
+
+## Decision record: slice #1586a (2026-10-25)
+
+Split by root (scope note, R1 accepted): #1586a is the core read and the browser rewire; #1586b is
+the `OBSERVATION_READ` command on the C ABI (D1, D6's C ABI and capability part, D7). No protocol
+change and no hash re-pin in #1586a.
+
+- **D3 amended (root ruling on finding 1).** The browser's carried swap exchanges reader sets
+  between two plans' handles at fixed positions on the render thread
+  (`host_core::pair_carried_observations`), so an index that held reader or observer copies taken
+  at preparation would read the successor's fresh slot after a carry, which nothing publishes to.
+  `ObservationIndex` therefore holds, per effect instance, its stable key (strip ID, section,
+  effect ID), its handle's position in the plan's `effect_observations` (`None` for an instance
+  with no tap, which reads as `Unbound`) and its descriptor, sorted for a binary search.
+  `read_into` and `read_with` also take the active plan's `&[EffectObservationHandle]` and read only
+  through `ObservationReader::read_state`. host-web builds the index in `build_plan_shape` (the boot
+  plan's and every replacement's), where the positions are fixed: a carry swaps only `readers`,
+  never a position, and the shape is adopted in the same swap block as the companions.
+- **D5 amended.** `ObservationReader::observer()` is #1586b's, only if the C ABI's index wants
+  observers; #1586a does not add it (nothing in it needs it).
+- **D3 amended (root ruling on finding 2).** host-core cannot reach the control plane's issued-tag
+  table (`control-plane` depends on `host-core`), so the read takes a per-selection lookup
+  `FnMut(&ObservationKey) -> (u64, bool)`, filled by host-web from `SessionState::observation_issued`.
+  The #1585 status contract is unchanged (Pending while the slot's tag is below the issued tag of an
+  arm or re-arm, or no window since the arm, or every attempt tore; an accepted disarm reads
+  Unarmed at once).
+- **`read_with`.** The browser's numeric export maps each address to its stable selection through
+  the session map in the same pass as the check, so the first refusal in address order is the one
+  returned, as before; `read_into` is the slice form over stable selections. Both check the whole
+  batch before any row is written and keep what each selection resolved to on the stack (no
+  allocation per read).
+- **Duplicate rule.** One rule for both browser paths: the same address and tap twice, whatever the
+  lanes (D4). The numeric export used to compare whole addresses, lanes included, so a batch naming
+  one tap twice with different lanes was read; it is now refused with the invalid-argument result.
+  The SDK already refuses that batch (`validateObservationSelections`).
+- **Moved and deleted.** `resolve_observation`, `read_observation_values` and
+  `ReadyOwnership::effect_by_id` (its only callers were the read and a test helper) are gone;
+  `observation_selection_for_address` stays as the numeric map. `ObservationReadChannels` and
+  `ObservationReadStatus` are host-core's, re-exported by host-web under the same names.
+- **Charge.** The index's table and the IDs it copies join the shape's instance-table row.
+- **Tap bound.** The old `tap_index >= u32::BITS` refusal is replaced by `tap < readers.len()`
+  (`Unbound` otherwise): one reader per declared tap, and the tap count per effect is capped at
+  preparation.
+- **Gate 2, host-core half: closed on purpose.** The existing browser test
+  `selected_observation_reads_keep_same_track_owner_windows_and_sequences` asserts each reader's
+  `consumed_sequence` is unchanged after a read that now goes through `read_with`, so a
+  host-core copy would test the same claim twice.
+
+### Evidence
+
+- Bytes: a one-time scratch dump (not committed) of every numeric batch and single read, all
+  channels, across arm, render, disarm and re-arm on `observation_host` and
+  `same_track_observation_host`, on base `1c485261c` and on this branch, separate target dirs: 366
+  lines identical except the one batch above (same tap, two lane sets), now refused.
+  `WebObservationResult` is built from the unchanged export code over these values.
+- Gate 4's three browser tests pass unchanged.
+- Carry: `an_armed_tap_and_its_windows_follow_the_effect_through_a_swap` and two other
+  structural tests are red on a mutant that reads handles copied at preparation; the existing test
+  defends the claim, so no new test (its test-value sentence names it).
+- Charge: `observation_staging_resource_is_exact_for_the_taps_off_and_on_modes` now boots one
+  console EQ and adds its instance rows and its index entry to the exact bridge totals; red when the
+  index charge is removed.
+- `a_read_checks_the_whole_batch_before_it_writes_a_row` (host-core): red on a single-pass read
+  that writes before the batch passed, on a duplicate rule that compares lanes, and on a refusal
+  that names selection 0.
