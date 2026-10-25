@@ -708,7 +708,10 @@ impl HostHalf {
             + self.prepared.report.route_control_resources.total_bytes
             + self.prepared.report.inventory_retained_bytes
             // #1696 D3: the epoch's monitor overlay row, at its model's bounds.
-            + self.monitor_and_ramp_rows().0;
+            + self.monitor_and_ramp_rows().0
+            // #1325 D6: the duck overlay a kept base of the epoch holds, at its model's bounds.
+            + control_plane::duck_overlay_bytes(self.store.compiled().normalized_model())
+                .expect("the duck overlay row");
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =
@@ -785,8 +788,9 @@ struct CompileObservation {
     /// a tap, so they are on the observed side as the send producers' upper bound is.
     observation_reserve: u64,
     /// The monitor overlay's and the edit-ramp table's rows (#1696), from
-    /// `control_plane::monitor_and_ramp_bytes` over the compiled model: bounds, not allocations,
-    /// since a boot solos nothing and keeps no ramp.
+    /// `control_plane::monitor_and_ramp_bytes` over the compiled model, and the duck overlay's
+    /// (#1325, `control_plane::duck_overlay_bytes`): bounds, not allocations, since a boot solos
+    /// nothing, keeps no ramp and ducks nothing.
     monitor_and_ramps: u64,
     /// The response capture's armed job and delivered result (#1577), from
     /// `control_plane::response_capture_bytes` over the compiled model: a bound, not an
@@ -846,7 +850,11 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
     let (overlay_row, ramp_row) =
         control_plane::monitor_and_ramp_bytes(store.compiled().normalized_model())
             .expect("the monitor and ramp rows");
-    let monitor_and_ramps = overlay_row + ramp_row;
+    // #1325 D6: and the duck overlay a kept base holds, a bound like the overlay's.
+    let monitor_and_ramps = overlay_row
+        + ramp_row
+        + control_plane::duck_overlay_bytes(store.compiled().normalized_model())
+            .expect("the duck overlay row");
     let response_capture =
         control_plane::response_capture_bytes(store.compiled().normalized_model(), 0)
             .expect("the response capture row")

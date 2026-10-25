@@ -122,6 +122,118 @@ pub(crate) struct KeptBase {
     /// overlay change between `monitor` and its own with it, as one transaction holding every
     /// write would (`MonitorChange::ramp`).
     pub(crate) monitor_ramp: Option<Option<u32>>,
+    /// What phase 1 of a strip removal wrote to the epoch's cells while a successor waits (#1325
+    /// D6): the strips and routes ramped to `+0.0`, the removed sources that still feed the
+    /// epoch's plan, and `S`. Empty when no pending edit removed a strip. It drops with this base.
+    pub(crate) duck: host_core::DuckOverlay,
+}
+
+/// The overlay of a rebuild that supersedes nothing: no strip ducks yet (#1325 D6).
+static NO_DUCK: host_core::DuckOverlay = host_core::DuckOverlay::new();
+
+/// Where phase 1's records land in the running plan's epoch (#1325 D2): one strip producer index
+/// per strip record and one route producer index per route record, in record order.
+struct DuckWrites {
+    strips: Vec<usize>,
+    routes: Vec<usize>,
+}
+
+/// Resolve every producer phase 1 writes in `held`, the running plan's epoch, and check the stamp
+/// its writes take (#1325 D2, D8). Before the commit: every refusal is an internal fault, with
+/// nothing written. The stamp check is the caller's last fallible step: it leaves the stamp's key
+/// open on the gate, and [`write_duck`] takes the same key again.
+fn resolve_duck_writes(
+    held: &mut ProviderEpoch,
+    transition: &host_core::StripTransition,
+) -> Result<DuckWrites, CommandError> {
+    let lanes = &held.strips;
+    let controls = &lanes.controls;
+    let mut strips = Vec::new();
+    let mut routes = Vec::new();
+    if strips
+        .try_reserve_exact(transition.strip_records().len())
+        .is_err()
+        || routes.try_reserve_exact(transition.routes().len()).is_err()
+    {
+        return Err(CommandError::Internal);
+    }
+    for strip in transition.strip_records() {
+        let index = host_core::strip_position(
+            controls.len(),
+            lanes.track_count,
+            |index| &*controls[index].track_id,
+            &strip.strip_id,
+        )
+        .ok_or(CommandError::Internal)?;
+        let fader = &controls[index].fader;
+        if strip
+            .offsets
+            .iter()
+            .enumerate()
+            .any(|(channel, record)| record.is_some() && !fader.has_offsets(channel))
+        {
+            return Err(CommandError::Internal);
+        }
+        strips.push(index);
+    }
+    for route in transition.route_records() {
+        let index = match route.record {
+            host_core::SendRecord::Folded(_) => {
+                host_core::route_producer_position(&lanes.routes, route.route_id)
+            }
+            host_core::SendRecord::Following(record) => {
+                host_core::follow_route_producer_for(&lanes.follow_routes, route.route_id, &record)
+            }
+        }
+        .ok_or(CommandError::Internal)?;
+        routes.push(index);
+    }
+    let last = held.revision_gate.last_published();
+    if held.revision_gate.stamp_monitor(last).is_err() {
+        return Err(CommandError::Internal);
+    }
+    Ok(DuckWrites { strips, routes })
+}
+
+/// Write phase 1's ramped mutes to the running plan's cells and publish them on its gate (#1325
+/// D2): after the commit, and nothing here can fail. The stamp is a monitor publication under the
+/// gate's last published revision ([`resolve_duck_writes`] checked it), so render applies the
+/// writes at its next block and the gate still reports the revision it reported.
+fn write_duck(
+    held: &mut ProviderEpoch,
+    transition: &host_core::StripTransition,
+    writes: &DuckWrites,
+) {
+    let ProviderEpoch {
+        strips: lanes,
+        revision_gate,
+        ..
+    } = held;
+    let last = revision_gate.last_published();
+    let stamp = revision_gate
+        .stamp_monitor(last)
+        .expect("the phase-1 stamp was checked before the commit");
+    let key = stamp.key();
+    for (strip, &index) in transition.strip_records().iter().zip(&writes.strips) {
+        let producer = &mut lanes.controls[index];
+        for record in strip.fader_records() {
+            producer.fader.write(stamp, record);
+        }
+        for (channel, record) in strip.offsets.iter().enumerate() {
+            if let Some(record) = *record {
+                producer.fader.write_offsets(stamp, channel, record);
+            }
+        }
+    }
+    for (route, &index) in transition.route_records().zip(&writes.routes) {
+        match route.record {
+            host_core::SendRecord::Folded(record) => lanes.routes[index].write(stamp, record),
+            host_core::SendRecord::Following(record) => {
+                lanes.follow_routes[index].write(stamp, record);
+            }
+        }
+    }
+    revision_gate.publish_key(key);
 }
 
 /// What a rebuild publishes a successor for (#1323).
@@ -183,6 +295,20 @@ impl SpectrumRefusal {
         Self::Reply(status, code.to_owned())
     }
 }
+
+/// The record of every spectrum `BACKPRESSURE` refusal, which only `Busy` answers (#1944 D2,
+/// #1595 D6): the capture's one-shot arm slot, one entry, held. A collection without a selection
+/// also answers `Busy` and so reports the slot as held: a known imprecision, reopened only with D6.
+const SPECTRUM_ARM_BACKPRESSURE: protocol::Backpressure = protocol::Backpressure {
+    queue_kind: protocol::BackpressureQueueKind::SpectrumArm,
+    capacity: 1,
+    occupancy: 1,
+    requested_items: 1,
+    generation: None,
+    retry_boundary: None,
+    requested_bytes: None,
+    available_bytes: None,
+};
 
 /// The configuration a `SPECTRUM_CONFIGURE` request sets, by #1591 D2's constructors: `None` for
 /// an empty collection with budget 0. A constructor's refusal is `INVALID_FIELD` with its code.
@@ -3134,20 +3260,41 @@ where
                     &mut self.response_scratch,
                 )
                 .map_err(map_command_process_error),
-            Err(SpectrumRefusal::Reply(status, code)) => self
-                .controller
-                .complete_session_command_refused(
-                    prepared,
-                    status,
-                    &code,
-                    &mut self.response_scratch,
-                )
-                .map_err(map_command_process_error),
+            Err(SpectrumRefusal::Reply(status, code)) => {
+                self.complete_spectrum_refusal(prepared, status, &code)
+            }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
                 Err(error)
             }
         }
+    }
+
+    /// Completes a spectrum command's typed refusal, recorded for replay: a `BACKPRESSURE` with
+    /// the arm slot's record (#1944), any other status without one.
+    fn complete_spectrum_refusal(
+        &mut self,
+        prepared: protocol::PreparedSessionCommand,
+        status: protocol::StatusCode,
+        code: &str,
+    ) -> Result<usize, CommandError> {
+        if status == protocol::StatusCode::Backpressure {
+            self.controller
+                .complete_session_command_refused_backpressure(
+                    prepared,
+                    code,
+                    SPECTRUM_ARM_BACKPRESSURE,
+                    &mut self.response_scratch,
+                )
+        } else {
+            self.controller.complete_session_command_refused(
+                prepared,
+                status,
+                code,
+                &mut self.response_scratch,
+            )
+        }
+        .map_err(map_command_process_error)
     }
 
     /// Completes a `SPECTRUM_CAPTURE` with its reply or its refusal, as [`Self::session_command`]
@@ -3161,15 +3308,7 @@ where
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(SpectrumRefusal::Reply(status, code)) => {
-                return self
-                    .controller
-                    .complete_session_command_refused(
-                        prepared,
-                        status,
-                        &code,
-                        &mut self.response_scratch,
-                    )
-                    .map_err(map_command_process_error);
+                return self.complete_spectrum_refusal(prepared, status, &code);
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
@@ -3222,15 +3361,7 @@ where
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(SpectrumRefusal::Reply(status, code)) => {
-                return self
-                    .controller
-                    .complete_session_command_refused(
-                        prepared,
-                        status,
-                        &code,
-                        &mut self.response_scratch,
-                    )
-                    .map_err(map_command_process_error);
+                return self.complete_spectrum_refusal(prepared, status, &code);
             }
             Err(SpectrumRefusal::Error(error)) => {
                 drop(prepared);
@@ -3808,6 +3939,32 @@ where
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
         kept_ramps.keep_within(prospective.normalized_model());
+        // #1325 D6 (the 1325b boundary): a transaction in phase 1 that restores a strip or a
+        // source the running plan is ramping out is retryable backpressure until #1325b gives the
+        // successor's base the overlay. Prepared against the kept model alone, the restored strip
+        // would carry its ducked fader and stay muted. Nothing has changed yet, so the caller
+        // republishes the withdrawn candidate; once render adopts it the overlay is gone and the
+        // same edit is an added strip (#1288).
+        let duck = if superseding {
+            &self
+                .kept_holder()
+                .and_then(|holder| holder.kept.as_ref())
+                .ok_or(CommandError::Internal)?
+                .duck
+        } else {
+            &NO_DUCK
+        };
+        {
+            let next = prospective.normalized_model();
+            if next.strips().any(|strip| duck.has_strip(strip.id.as_str()))
+                || next
+                    .sources
+                    .iter()
+                    .any(|source| duck.has_source(source.id.as_str().as_bytes()))
+            {
+                return Err(CommandError::Backpressure);
+            }
+        }
         // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
         // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
         // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
@@ -3892,6 +4049,22 @@ where
             self.capture_owners_high_water,
         )
         .map_err(spectrum_invariant)?;
+        // #1325 D7: after preparation, the pure transition step against the plan the successor
+        // displaces. A declared discontinuity need not continue the running plan's output
+        // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
+        // is built here, before anything is reserved or committed.
+        let transition = if declared {
+            None
+        } else {
+            Some(
+                host_core::plan_strip_transition(&base, duck, prospective.normalized_model())
+                    .map_err(|_| CommandError::Internal)?,
+            )
+        };
+        let next_duck = transition
+            .as_ref()
+            .map(|transition| duck.joined(transition));
+        let quantum = prospective.normalized_model().quantum_frames;
         let PreparedRuntime {
             sources,
             strips,
@@ -4267,6 +4440,31 @@ where
         {
             return Err(CommandError::Internal);
         }
+        // #1325 D2: the producers phase 1 writes, resolved in the epoch of the running plan, P0
+        // (the epoch the successor displaces), before the commit; a strip or route with no
+        // producer, or an offsets record for a lane with no offsets cell, is an internal fault
+        // found here, so no ack precedes a dropped write. Then the stamp P0's writes take: a
+        // monitor publication under P0's last published revision, which spends none, so P0's
+        // gate never reports this revision and the watermark reports it first when render
+        // adopts the successor (D5). The stamp check is the last fallible step before the commit.
+        let duck_writes = match transition.as_ref().filter(|transition| transition.ducks()) {
+            Some(transition) => {
+                let held = if superseding {
+                    let len = self.pending_providers.len();
+                    match len {
+                        0 => return Err(CommandError::Internal),
+                        1 => &mut self.providers,
+                        _ => &mut self.pending_providers[len - 2],
+                    }
+                } else {
+                    self.pending_providers
+                        .last_mut()
+                        .unwrap_or(&mut self.providers)
+                };
+                Some(resolve_duck_writes(held, transition)?)
+            }
+            None => None,
+        };
         let (committed, displaced) = match kind {
             Rebuild::Transaction(prepared) => {
                 // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
@@ -4354,6 +4552,7 @@ where
                         monitor: previous_monitor,
                         edit_ramps: kept_ramps,
                         monitor_ramp,
+                        duck: host_core::DuckOverlay::new(),
                     });
                 }
                 // Nothing was withdrawn, so nothing is pending but B: a taken candidate was
@@ -4367,6 +4566,40 @@ where
                 0
             }
         };
+        // #1325 D2, D3, D6: phase 1 on P0, which is now the newest epoch the control plane holds
+        // (a withdrawn candidate's epoch was popped above; the successor is pushed below). The
+        // ramped mutes go to P0's cells under the stamp checked before the commit, then `p` is
+        // read, then the successor's schedule is set: `S` from this transaction's writes, raised
+        // to the overlay's, which a superseding candidate inherits.
+        if let Some(mut next_duck) = next_duck {
+            let held = self
+                .pending_providers
+                .last_mut()
+                .unwrap_or(&mut self.providers);
+            if let (Some(transition), Some(writes)) = (transition.as_ref(), duck_writes.as_ref()) {
+                write_duck(held, transition, writes);
+                let p = reservation
+                    .inner
+                    .as_ref()
+                    .expect("reservation is live")
+                    .render_clock();
+                next_duck.raise_not_before(transition.not_before(p, quantum));
+            }
+            if let Some(not_before) = next_duck.not_before() {
+                reservation
+                    .inner
+                    .as_mut()
+                    .expect("reservation is live")
+                    .set_adoption(PlanAdoption::NoEarlierThan(not_before));
+            }
+            let held = self
+                .pending_providers
+                .last_mut()
+                .unwrap_or(&mut self.providers);
+            if let Some(kept) = held.kept.as_mut() {
+                kept.duck = next_duck;
+            }
+        }
         self.controller
             .provider_mut()
             .replace_session_catalog(candidate_catalog, revision);
@@ -5335,6 +5568,23 @@ where
                 .any(|provider| provider.epoch == epoch)
     }
 
+    /// The index of source `id` in the graph source set of the plan of epoch `epoch`, as that
+    /// plan's state inventory records it, or `None` when the plan has no such source or the
+    /// control plane holds no epoch `epoch` (#1325). A host that owns the render plan on its own
+    /// thread resolves a source against the plan that renders with it: while a successor waits,
+    /// and through a strip removal's phase 1, that plan's source set is not the newest committed
+    /// session's.
+    pub fn rendering_source_index(&self, epoch: u64, id: &[u8]) -> Option<usize> {
+        let id = core::str::from_utf8(id).ok()?;
+        core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .chain(&self.retired_providers)
+            .find(|provider| provider.epoch == epoch)?
+            .inventory
+            .source(id)
+            .map(|row| row.index as usize)
+    }
+
     /// Sets the replacement peak ceiling ([`ControlLimits::maximum_replacement_peak_bytes`]) once
     /// the adapter knows its own fixed bytes exactly (#1290a D3): they are known only after the
     /// first plan is prepared, and the limits the session was built with are a plain value.
@@ -5350,6 +5600,31 @@ where
     #[must_use]
     pub fn newest_plan_epoch(&self) -> u64 {
         self.newest_providers().epoch
+    }
+
+    /// The epoch whose producer a source call for `id` goes to (#1325 D4): the running plan's
+    /// while a pending successor removes the source and the running plan still renders it (the
+    /// duck overlay lists it), so phase 1's ramp plays the PCM the host submits; else the newest
+    /// committed session's. One binary search, no allocation and no lock. Once render adopts the
+    /// successor, the service step promotes it and the overlay drops with the old epoch's kept
+    /// base, so the call is refused as an unknown source, as before.
+    fn source_providers_mut(&mut self, id: &[u8]) -> &mut ProviderEpoch {
+        // The overlay ends when render adopts the successor: from then on the running epoch's
+        // plan no longer renders, even before the service step promotes the successor (the
+        // browser's unserviced feed), so a removed source is refused as unknown (D4). One
+        // `Acquire` load of the epoch render published, no lock.
+        let rendered = self.shared.active_epoch.load(Ordering::Acquire);
+        let ducked = self.kept_holder().is_some_and(|holder| {
+            rendered <= holder.epoch
+                && holder
+                    .kept
+                    .as_ref()
+                    .is_some_and(|kept| kept.duck.has_source(id))
+        });
+        if ducked {
+            return self.kept_holder_mut().expect("a kept base has a holder");
+        }
+        self.newest_providers_mut()
     }
 
     fn newest_providers_mut(&mut self) -> &mut ProviderEpoch {
@@ -5881,7 +6156,7 @@ where
         id: &[u8],
         submission: SourceSubmission<'_>,
     ) -> Result<source::SubmitReport, SourceFailure> {
-        self.newest_providers_mut()
+        self.source_providers_mut(id)
             .sources
             .submit(id, submission)
             .map_err(SourceFailure::Control)
@@ -5905,7 +6180,7 @@ where
         generation: u64,
         source_frame: u64,
     ) -> Result<(), SourceFailure> {
-        self.newest_providers_mut()
+        self.source_providers_mut(id)
             .sources
             .seek(id, generation, source_frame)
             .map_err(SourceFailure::Control)
@@ -5921,7 +6196,7 @@ where
         anchor_sample: u64,
     ) -> Result<(), SourceFailure> {
         self.service().map_err(|_| SourceFailure::Internal)?;
-        self.newest_providers_mut()
+        self.source_providers_mut(id)
             .sources
             .seek_at(id, generation, source_frame, anchor_sample)
             .map_err(SourceFailure::Control)
