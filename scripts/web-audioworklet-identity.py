@@ -578,7 +578,7 @@ def run_self_test(scratch: pathlib.Path) -> None:
     at(base)
     release_pr = merge(base, commit("release b", pin=b, version="1.1.0", expected=b, qualified=b))
     case("release", True, ("RELEASE: this change edits", "the built bytes", "is the pin",
-                           f"`BROWSER_ARTIFACT_TOOLCHAIN` `{N1}`", "records the three"),
+                           f"`BROWSER_ARTIFACT_TOOLCHAIN` `{N1}`", "records the two"),
          absent=("TOOLCHAIN: this change moves",))
     case("release built other bytes", False, ("**FAIL** the pin", "**FAIL** artifact-lineage"),
          built=c, twin="c")

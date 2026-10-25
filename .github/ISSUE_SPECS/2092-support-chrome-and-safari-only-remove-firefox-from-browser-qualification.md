@@ -24,3 +24,9 @@ The browser host's supported engines are Chromium (Chrome) and WebKit (Safari). 
 - D3 (root R3): the stem-store browser evals default to chromium and webkit; a firefox leg is refused as an unknown leg.
 - D4: `docs/C_ABI_V1_QUALIFICATION.md` keeps its dated Firefox line (a record); `MUTATIONS.md` keeps its recorded Firefox rows and adds one note. Historical handoffs and verdicts stay.
 - D5: AGENTS.md's "re-recorded three-browser matrix" sentence changes only with the owner's approval; root takes the wording to the owner.
+- D6 (root, after review of attempt 1): `rust-toolchain.toml`'s live bump rule comment says "a re-recorded browser matrix (Chromium and WebKit)".
+
+## Evidence (attempt 1, corrected after review)
+- `npm run qualify -- --browser chromium|webkit --sdk-root sdk --check-matrix --self-test-mutations` on a fresh build, no `sdk/dist`: both "all qualification gates passed" (151.0.7922.34; 26.5). `--browser firefox`: `Error: unknown browser: firefox`, exit 1.
+- The first record of `web-audioworklet-identity.py --self-test` was wrong: it read the exit code of a pipe, and the self-test failed (`release: 'records the three' missing`). The review found it; the release case now expects "records the two", and the self-test exits 0.
+- `generate-matrix.mjs --check`, `ci-telemetry.py --self-test`, `check-stem-store-v1.mjs` and the lint job's policy scripts with self-tests: pass.
