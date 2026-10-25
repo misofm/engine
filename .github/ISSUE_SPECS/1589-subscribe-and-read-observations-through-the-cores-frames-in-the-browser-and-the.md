@@ -233,9 +233,11 @@ Commands: `cargo test --locked -p host-web --all-features`, `cargo test --locked
   `observationFrameTransport` and `ObservationFrameEndpoint`, `ObserveApplied` are new exports of
   the module (not of the package entries). `EngineLiveControls.submitManaged` is deleted, and
   `LiveControlBeforeSubmit` loses its `managed` argument. The browser engine no longer refuses a
-  subscription with `MisoUsageError` when `policy.liveControls.observationTaps` is 0: the map of a
-  session that binds no tap has no binding, so the subscription is refused `MisoEngineError`
-  `unsupported` `sdk.observation.selection` (headless already did). A preflight that finds the tap
+  subscription with `MisoUsageError` when `policy.liveControls.observationTaps` is 0: a session
+  whose map has no binding at all is refused `MisoEngineError` `unsupported` with R1's
+  `observation.unavailable` on both engines, before any edit (review fold, MINOR 1; a session that
+  binds taps but has no tapped effect reads the same, since its map is empty too).
+  `sdk.observation.selection` stays for a selection that names an unknown tap. A preflight that finds the tap
   armed by another subscriber is still `MisoUsageError` (message reworded). The public
   `readObservations()` of both engines keeps the numeric read export (#1590).
 - **Qualification.** #1530's wait rows log the `Observe` transactions through `host.control` (call
@@ -258,3 +260,9 @@ Commands: `cargo test --locked -p host-web --all-features`, `cargo test --locked
   evals' "booted with no observation taps" (the SDK's own boot-word check is gone) and "past a full
   frame ... observationLimit" (the frame path's full frame is a non-backpressure refusal, the rule
   the "not backpressure" test holds).
+- **Review fold (attempt 1 PASS, root rulings).** The full frame of armed taps keeps its named
+  diagnostic: an `Observe` transaction refused `capi.resource.limit` (the core's `Limit`, the only
+  resource limit an `Observe`-only transaction meets) raises `MisoEngineError` with
+  `diagnosticCode` `observationLimit` and the advice to unsubscribe another tap, never resent
+  (MINOR 2). `decodeObservationRow` refuses a unit above 6 and a row field past 11, as the Rust
+  codec does (MINOR 3).
