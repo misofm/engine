@@ -227,3 +227,51 @@ change and no hash re-pin in #1586a.
 - `a_read_checks_the_whole_batch_before_it_writes_a_row` (host-core): red on a single-pass read
   that writes before the batch passed, on a duplicate rule that compares lanes, and on a refusal
   that names selection 0.
+
+## Decision record: slice #1586b (2026-10-25)
+
+`OBSERVATION_READ` on the wire and the C ABI. Root accepted the scope note's R1-R4.
+
+- **D1 as built.** `MessageId::ObservationRead = 0x000f`; `ObservationReadRequest` (repeated
+  `ObservationSelection`: the `Observe` edit's address codec, shared with `session_wire`, `tap_id`,
+  `channels`) and `ObservationReadPage` (`observed_sample`, repeated `ObservationRow`) with D1's
+  field numbers. The codec checks both ways: 1 to 256 selections and rows; a window (all four
+  fields) exactly when ready; lanes only when ready and at least one then; a ready row armed, with
+  a nonzero tag, a non-empty window opened at or after the arm sample. `armed`, `arm_sample` and
+  `arm_tag` are the slot's published state (what render applied), `false`/`0`/`0` while render has
+  not applied the tap's last record or the read tore. `unit` is the tap's declared `unit`; the
+  values are the raw window values in it.
+- **D2 under #1585's merged contract.** Gate 1's "unarmed after the arm before a render" is
+  pending under the contract #1585 merged (an arm render has not applied reads `Pending`); the
+  row claims no arm (armed `false`, tag `0`), which is what the gate defends.
+- **D4 additions.** A batch whose widest reply (`64 + 192 n` bytes) exceeds the frame limit is
+  refused first, `LIMIT_EXCEEDED` `observation.frame`, as `spectrum.frame` is: otherwise a read
+  that fits the request frame could fail at encode with no typed answer. The selection refusals
+  name `selection[i]` through `complete_session_command_refused_at` (new beside
+  `complete_session_command_refused`).
+- **R2 as built.** `ProviderFeatures::observation`, set from `ControlAdapter::OBSERVE_EDIT` in
+  `compile.rs`; the endpoint serves the read (routes it to the session, lists `0x000f`, sets bit
+  15) only on the session family, and the decode rule is bit 15 ⇔ `0x000f`, and `0x000f` ⇒ the
+  session family. An unadvertised read takes the one-call path and answers `UNAVAILABLE`.
+  `CapabilityFlags::KNOWN` is bits 0-16 minus 5 (#1595b landed bit 16 first).
+- **R1 as built (D6).** `ProviderEpoch::observation_index`, built in `prepare_runtime` from the
+  epoch's producers and reader handles (an adapter without `OBSERVE_EDIT` keeps an empty index)
+  and moved with the epoch; the read uses the running epoch's index and readers through
+  `host_core::observation::read_with`, with the issued tags from `SessionState::observation_issued`.
+  The session's 256-row table is made at boot. Charges: the index's entries and ID copies join the
+  epoch's observation handle row; the row table is a fixed row.
+- **Stated limit (#1674).** The C ABI does not pair carried observation readers at promotion yet
+  (#1674's observation half, which must take the swap record's tap entries). After a rebuild that
+  carries a tapped effect, the read reads the successor's own slot, which the carried tap does not
+  publish to: the row carries no window, never a wrong one.
+- **Gate 6, race half: not done here.** The existing race test is
+  `crates/capi/tests/resource_lifecycle.rs`, outside this slice's paths; the read is a seqlock
+  reader on the control thread and adds no render-side code.
+
+### Evidence
+
+- **Re-pin.** `COMPLETE_SCHEMA_HASH` `5b6cbc157a1f6154` -> `f4c2fe333739f44d`: the corpus gains
+  `command.observation_read` and `response.observation_read`, 56 frames; the 54 earlier frames
+  hash to the old pin (checked once with the two new frames filtered out).
+- Capability vectors in `crates/capi/src/runtime/tests.rs` re-pin: field 25 is 0x20 bytes (the ID
+  takes the two padding bytes) and the flags `0x1ffdf`.
