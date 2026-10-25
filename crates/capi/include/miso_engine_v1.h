@@ -415,6 +415,15 @@ extern "C" {
  * added one: in a new ring at generation 1, frame 0, with the PCM accepted for it before the
  * command discarded with its plan; the host restarts its feed.
  *
+ * Removing or re-pointing a route (issue 1953). A transaction that removes a route between two
+ * strips it keeps, or gives it another source, tap or destination, and whose route goes into a
+ * submix or leaves its source before the fader, ramps it out the same way: the route is muted on
+ * the running plan over N, C counts its compensation delay, and the replacement is adopted no
+ * earlier than S. A re-pointed route is a removal plus an addition: from S it fades in at its new
+ * destination as an added route does, and its source strip plays on. A post_fader or post_pan
+ * route into an output still stops at once at the swap, and a route re-pointed from one still
+ * steps on both sides: it stops at once at its old destination and enters at once at its new one.
+ *
  * Duck-swapping a strip whose state cannot continue (issue 1324). A transaction whose
  * replacement restarts a strip it keeps -- an insert added, removed or reordered, delay_samples, a
  * value the plan keeps prepared (such as the true-peak limiter's lookahead), any edit after which
@@ -562,7 +571,8 @@ extern "C" {
  * the host sends before the fade cancels it, and an unmute (the track is unmuted already) leaves
  * the fade waiting. A route the transaction adds between two strips that keep playing, and a
  * send of an added track from a tap before its fader, fade in over the same ramp (#1363), at
- * adoption or with that track's fader; a removed or re-pointed route still stops at once. If g's
+ * adoption or with that track's fader; a removed or re-pointed route ramps out first (issue 1953)
+ * unless it is a post_fader or post_pan route into an output, which still stops at once. If g's
  * PCM is not queued when the block
  * at A renders, the seek applies there anyway: the blocks without PCM count as underrun frames,
  * and PCM that falls behind the read position is discarded. A playing stem's seek report gives
