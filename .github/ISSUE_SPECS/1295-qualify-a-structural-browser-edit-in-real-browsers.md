@@ -122,3 +122,49 @@ instance, whose structural edit is the blocking rebuild, reported and counted, D
 - *Replace the running browser session in the Rust host* (#1290).
 - *Diff a replacement document against the committed model and export replace from the browser
   engine module* (#1386).
+
+## Amendment 1 (root, 2026-10-25): the non-isolated leg only
+
+- **Narrowed.** This issue delivers the non-isolated leg (the module's `single` mode, the page
+  `server.mjs` serves today, with no COOP/COEP). D4's isolated rows (`instanceMode === "worker"`,
+  `blockingRebuilds` 0, `singleModeControlAllocations` 0) and the COOP/COEP server leg move to
+  #1332's deliverable list (owner-gated at #1331b). The case is written so that #1332 adds a leg,
+  not a case.
+- **The edit message.** `miso.replace.v1` does not exist: the replace is `miso.control.v1`
+  `{ frame: SESSION_REPLACE, document }` (#1697), the frame's two fields the document's length and
+  SHA-256 (#1386).
+- **D1 amended.** B's added track is **unmuted at -6 dB** (an EQ insert, the same source, its own
+  route; no latency change), so the capture differs from A's render and an adoption shift is
+  detectable. The replace is sent before the first quantum: the offline context's first quantum is
+  the swap block, as the #1562b row uses (Firefox has no `OfflineAudioContext.suspend`).
+- **#1697 gate 3 lands here.** One replace of the 1 MiB boot-ceiling document in a real browser:
+  the memory growth is recorded against `document_bytes * PARSE_TRANSIENT_MULTIPLIER` and reported
+  to root, never pinned; the replace is a counted blocking rebuild and the render-locked count is 0.
+- **Not duplicated.** The #1562b `structural-apply-*` and #1682 `empty-boot-first-stem` rows
+  already prove the `SESSION_TRANSACTION_APPLY` path in three browsers; this issue adds the replace
+  path only.
+
+## Decision record (implementation, 2026-10-25)
+
+- **One function, two boots** (`runStructuralReplaceQualification`, `qualification.js`): the exact
+  case boots A (`tests/browser-v1/session.json`), prefills `source.json`'s two blocks, sends B
+  (`tests/browser-v1/structural-edit-session.json`) and renders 33 quanta (the swap block plus 32);
+  the measurement case boots A and sends the 1 MiB document, then renders 4 quanta.
+- **The frame** is built in `sdk-response-entry.ts` (`replaceSessionThroughSdk`) with the SDK's
+  own frame encoder (`commandFrame`, `field`) and decoded with its envelope decoder, its request ID
+  from the host's one allocator (the transaction queue's) and its digest by `crypto.subtle`. This
+  is R4's "no new fixture encoder" with the SDK's codec instead of a second one in
+  `qualification.js`. The underrun counter is `COUNTERS_GET` `sourceUnderrunBlocks` through the
+  SDK's `ProtocolClient` on the same allocator.
+- **The reference (D2, R1)** is `qualification/structural-edit-reference.mjs`: the served module
+  under Node, single instance, the worklet's boot words, the page's frame bytes unchanged and B,
+  staged as the worklet's `readControlCommand` stages them. `tests/browser-v1/direct-oracle.mjs`
+  runs its own `main` on import and exports nothing, and is outside this issue's paths, so its
+  `boot` and `sendControlFrame` are restated there. `run.mjs` renders three references per
+  browser: the replace before block 0 (the gate), one block late (`structural-edit-adoption-shifted`)
+  and none (`structural-edit-skipped`). No digest is committed.
+- **The 1 MiB document** is built in JS (`qualification/worst-replace-document.mjs`): the browser
+  job has no Rust toolchain. It equals `cargo run -p host-web --example worst_boot_document`
+  byte for byte (compared once on 2026-10-25, 1,048,576 bytes, `Buffer.compare` 0).
+- **The matrix** gains prose, not a column: a new row gate would make the old `results.json` rows
+  differ, and the one three-browser run could not then both check and re-record the matrix.
