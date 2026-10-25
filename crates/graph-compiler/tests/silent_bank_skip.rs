@@ -37,6 +37,7 @@
 //! Live writes (a mid-ramp fader or trim edit, a bypass edge) are not attached here: this level
 //! compiles without live controls. The #1781 rest tests in the stage crates cover them.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
@@ -46,7 +47,11 @@ use builtins_compiler::{
 use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
-use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime};
+use engine::realtime::{
+    PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime, ResponseSnapshotError,
+    ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
+    ResponseSnapshotSink,
+};
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
     GraphObservationBlock, GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
@@ -607,7 +612,9 @@ fn gate_one(layout: RightNegative) {
 // ---- Gate 2 -------------------------------------------------------------------------------------
 
 /// Gate 2. Test value: red if a skipped block -- the input test, the rest query, the scratch
-/// zeroing, the clock advance or the silent fold -- allocates or frees on the render thread.
+/// zeroing, the clock advance or the silent fold -- allocates or frees on the render thread; and
+/// (#1782a) if a forced lane move, or a block of a displaced group -- the deferred epilogues, the
+/// home-tile re-materialisation and the group fold, skipping or not -- does.
 #[test]
 fn a_skipping_block_allocates_nothing() {
     let blocks = 400;
@@ -627,22 +634,402 @@ fn a_skipping_block_allocates_nothing() {
         })
         .collect();
     let mut bound = bind(&session(first_four), &schedules, false);
+    let mut placement = Placement::of(&bound.plan);
     let mut pcm = vec![0.0_f32; bound.frames * 2];
     assert_installed();
     let mut measured = 0;
     for block in 0..blocks as u64 {
+        // #1782a: moves while the tracks play, and again once every bank skips.
+        if block == 10 || block == 100 {
+            let mark = current_thread_counters();
+            for (x, y) in [(0, 5), (9, 17), (12, 16)] {
+                placement.swap(&mut bound.plan, x, y);
+            }
+            let delta = current_thread_delta_since(mark);
+            assert_eq!(
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (0, 0, 0),
+                "block {block}: a lane move allocated or freed"
+            );
+        }
         let before = bound.skips();
         let mark = current_thread_counters();
         bound.render(block, true, &mut pcm);
         let delta = current_thread_delta_since(mark);
-        if block >= 2 && bound.skips() > before {
-            measured += 1;
+        if block >= 10 || (block >= 2 && bound.skips() > before) {
+            measured += usize::from(bound.skips() > before);
             assert_eq!(
                 (delta.allocations, delta.reallocations, delta.deallocations),
                 (0, 0, 0),
-                "block {block}: a skipping block allocated or freed"
+                "block {block}: a skipping or displaced block allocated or freed"
             );
         }
     }
     assert!(measured > 0, "some block skipped");
+}
+
+// ---- Gate 3 (issue #1782a) ----------------------------------------------------------------------
+
+/// Where each grouped track renders, as `(unit, lane)`, read from the plan itself: each pack
+/// group `graph::test_only_pack_groups` reports is `(first unit, last unit, lanes per unit)`, and
+/// each of its units' `PlanUnitEligibility::lane_tracks` names the track bind put on each lane
+/// (its home). A track in no group is `None` and never moves.
+///
+/// What the plans group, for the record (the test asserts none of it): a group is a run of
+/// adjacent peer banks, and every console bank of [`session`] has one slot program (input
+/// builtins, EQ, compressor, limiter, fader, matrix), gathers directly and folds into the master;
+/// the mono collapse arming is joined after bind and is no group term. So all of the session's
+/// banks are one group at both widths: `(20, 22, 8)` at eight lanes and `(20, 24, 4)` at four.
+/// With the EQ insert on tracks 0..8 their banks hold one slot more and are no peers of the
+/// others: at eight lanes they are one unit, which is no group (a group has two or more), so
+/// the group is `(21, 22, 8)`; at four lanes they are two units and a group of their own,
+/// `[(20, 21, 4), (22, 24, 4)]`.
+struct Placement {
+    at: Vec<Option<(usize, usize)>>,
+    /// Each track's group, by its index in the report.
+    group: Vec<Option<usize>>,
+}
+
+impl Placement {
+    fn of(plan: &PreparedRenderPlan) -> Self {
+        let groups = graph::test_only_pack_groups(plan);
+        assert!(!groups.is_empty(), "the plan has a pack group");
+        let rows = plan.unit_eligibility();
+        let mut at = vec![None; TRACKS];
+        let mut group = vec![None; TRACKS];
+        for (index, &(first, last, _)) in groups.iter().enumerate() {
+            for unit in first as usize..=last as usize {
+                let row = rows
+                    .iter()
+                    .find(|row| row.unit as usize == unit)
+                    .expect("a grouped unit's row");
+                assert!(row.banked, "a grouped unit is a bank");
+                for (lane, track) in row.lane_tracks.iter().enumerate() {
+                    let track: usize = track[2..].parse().expect("chNN");
+                    assert!(at[track].is_none(), "ch{track:02} is in one group");
+                    at[track] = Some((unit, lane));
+                    group[track] = Some(index);
+                }
+            }
+        }
+        Self { at, group }
+    }
+
+    /// Whether tracks `x` and `y` are in one group, so the plan lets them trade lanes.
+    fn together(&self, x: usize, y: usize) -> bool {
+        self.group[x].is_some() && self.group[x] == self.group[y]
+    }
+
+    /// Whether track `track`'s group holds `ch00`, the master's first contributor, which stores:
+    /// a group without it folds onto a live master.
+    fn with_store(&self, track: usize) -> bool {
+        self.group[track].is_some() && self.group[track] == self.group[0]
+    }
+
+    /// Trade the lanes tracks `x` and `y` render at.
+    fn swap(&mut self, plan: &mut PreparedRenderPlan, x: usize, y: usize) {
+        assert!(
+            self.together(x, y),
+            "ch{x:02} and ch{y:02} are in one group"
+        );
+        let (Some(a), Some(b)) = (self.at[x], self.at[y]) else {
+            unreachable!("grouped tracks are placed");
+        };
+        assert!(
+            graph::test_only_swap_bank_lanes(plan, a, b),
+            "ch{x:02} at {:?} and ch{y:02} at {:?} trade lanes",
+            self.at[x],
+            self.at[y]
+        );
+        self.at.swap(x, y);
+    }
+}
+
+/// The forced permutation, as `(block, x, y)`: tracks `x` and `y` trade lanes before `block`
+/// renders. Every move is legal at both widths (each track pair shares a collapse arming, and the
+/// automated `ch11` stays in its own bank): the store lane `ch00` leaves lane 0 and comes back,
+/// strips cross between the stereo banks and the padded one, moves land inside a window where every
+/// bank skips (230..360) and inside the padded bank's (400..530), and the successor is moved after
+/// it took the carry. The two moves at 440 are the regression row of the carry's way home: they
+/// leave `ch11` (automated) on a home lane whose own strip sits outside the fader bank that has
+/// automation slots, so the direct trade back refuses at both widths and the walk must send
+/// `ch11` home instead (red before that fallback: the carry was dropped).
+const MOVES: [(u64, usize, usize); 13] = [
+    (0, 0, 5),
+    (0, 9, 17),
+    (0, 12, 16),
+    (0, 8, 15),
+    (120, 0, 3),
+    (120, 10, 11),
+    (250, 17, 19),
+    (250, 9, 17),
+    (410, 5, 0),
+    (440, 8, 9),
+    (440, 8, 10),
+    (480, 1, 6),
+    (480, 13, 18),
+];
+
+/// The swap block: the successor takes the carry from the predecessor, which is displaced.
+const SWAP: u64 = 450;
+
+/// Blocks before which every track's response snapshot is read from both plans.
+const SNAPSHOTS: [u64; 4] = [100, 300, SWAP, 500];
+
+/// Every owner's identity, bypass and section words, in graph order.
+struct SnapshotWords(Vec<u32>);
+impl ResponseSnapshotSink for SnapshotWords {
+    fn copy_owner(
+        &mut self,
+        owner: ResponseSnapshotOwnerInfo<'_>,
+        left: &[ResponseSnapshotSection],
+        right: &[ResponseSnapshotSection],
+    ) -> Result<(), ResponseSnapshotError> {
+        self.0.extend(owner.track_id.bytes().map(u32::from));
+        self.0.extend([
+            u32::from(owner.rack),
+            owner.slot,
+            owner.kind,
+            u32::from(owner.bypassed),
+        ]);
+        for section in left.iter().chain(right) {
+            self.0.extend([
+                section.id,
+                section.kind,
+                u32::from(section.enabled),
+                u32::from(section.word_count),
+            ]);
+            self.0.extend(section.words);
+        }
+        Ok(())
+    }
+}
+
+fn snapshot(plan: &mut PreparedRenderPlan, track: usize) -> Vec<u32> {
+    let id = format!("ch{track:02}");
+    let mut sink = SnapshotWords(Vec::new());
+    plan.copy_response_snapshot(ResponseSnapshotRequest {
+        track_id: &id,
+        sink: &mut sink,
+    })
+    .unwrap_or_else(|error| panic!("{id}: snapshot {error:?}"));
+    sink.0
+}
+
+/// A predecessor and the successor built to displace it, with the carry host-core installs: every
+/// strip input section, fader and matrix lane, and console effect lane, joined by strip ID.
+struct Pair {
+    before: Bound,
+    after: Bound,
+}
+
+fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
+    let mut before = bind(model, schedules, true);
+    let mut after = bind(model, schedules, true);
+    graph::install_carry_program(
+        &mut after.plan,
+        graph::GraphCarryProgram {
+            predecessor: graph::plan_identity(&mut before.plan).expect("a graph plan"),
+            sources: Box::default(),
+            timeline: false,
+        },
+    )
+    .expect("carry program");
+    let inputs: BTreeMap<_, _> = graph::builtin_input_lanes(&mut before.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .collect();
+    let input_moves: Vec<_> = graph::builtin_input_lanes(&mut after.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, successor)| graph::GraphLaneMove {
+            successor,
+            predecessor: inputs[&strip],
+        })
+        .collect();
+    assert_eq!(input_moves.len(), TRACKS, "every input section carries");
+    graph::install_builtin_input_carry(&mut after.plan, input_moves).expect("input carry");
+    let strips: BTreeMap<_, _> = graph::builtin_strip_lanes(&mut before.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, lane)| ((strip, lane.owner), lane.location))
+        .collect();
+    let strip_moves: Vec<_> = graph::builtin_strip_lanes(&mut after.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, lane)| graph::GraphStripMove {
+            owner: lane.owner,
+            successor: lane.location,
+            predecessor: strips[&(strip, lane.owner)],
+            continued_cells: 0,
+        })
+        .collect();
+    assert_eq!(
+        strip_moves.len(),
+        2 * TRACKS,
+        "every fader and matrix carries"
+    );
+    graph::install_builtin_strip_carry(&mut after.plan, strip_moves).expect("strip carry");
+    let effects: BTreeMap<_, _> = graph::bank_effect_lanes(&mut before.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, lane)| ((strip, lane.effect_id), lane.location))
+        .collect();
+    let effect_moves: Vec<_> = graph::bank_effect_lanes(&mut after.plan)
+        .expect("a graph plan")
+        .into_iter()
+        .map(|(strip, lane)| graph::GraphEffectMove {
+            successor: lane.location,
+            predecessor: effects[&(strip, lane.effect_id)],
+        })
+        .collect();
+    assert_eq!(effect_moves.len(), effects.len(), "every effect carries");
+    assert!(
+        effect_moves.len() >= 3 * TRACKS,
+        "every console effect carries"
+    );
+    graph::install_effect_carry(&mut after.plan, effect_moves, 0).expect("effect carry");
+    Pair { before, after }
+}
+
+/// Gate 3 (#1782a): a plan whose strips trade bank lanes renders exactly the unmoved plan.
+///
+/// One session, two carried pairs: one pair renders under [`MOVES`], the other never moves. Before
+/// [`SWAP`] the predecessors render; at it each successor takes its predecessor's state, the moved
+/// predecessor displaced; then the successors render, the moved one moved again. Every block's host
+/// output, every track's post-matrix words and every track's response snapshot at [`SNAPSHOTS`]
+/// must agree by `to_bits`, NaNs folded. The tracks' input filters differ, so a snapshot read of
+/// another strip's lane shows.
+///
+/// Test value: red when a move leaves a lane-keyed reader behind -- a member op (gather source,
+/// scatter target, observer), a route fold entry or its store bit, a source-claim bit, a
+/// response-snapshot binding, the carry's predecessor side -- or when a displaced group's master
+/// fold changes its association order or its signed zeros, which no other test reaches.
+#[test]
+fn a_moved_strip_renders_the_bits_of_an_unmoved_one() {
+    let mut model = session(first_sixteen);
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.builtins.left.hpf_hz = 100.0 + index as f32;
+        track.builtins.right.hpf_hz = 100.0 + index as f32;
+    }
+    eprintln!("layout: one group, the master's first contributor in it");
+    gate_three(&model, false);
+    // Tracks 0..8 carry an EQ insert, so their bank is no peer of the next: the group is the
+    // other banks, and the master's first contributor (ch00, which stores) is an earlier unit
+    // outside it. A displaced group's fold then adds onto a live master, which shows any early
+    // epilogue write the store would otherwise overwrite. (Four tracks are not enough: a padded
+    // insert bank declines the route fold outright.)
+    let eq = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+    for track in &mut model.tracks[..8] {
+        let mut insert = eq.clone();
+        insert.id = sid("insert0-eq");
+        track.inserts.effects.push(insert);
+    }
+    eprintln!("layout: the master's first contributor before the group");
+    gate_three(&model, true);
+}
+
+/// Gate 3 over `model`; a move of two tracks the plan does not group together is left out
+/// ([`Placement`]: only the insert layout's mono tracks at eight lanes). At every width it must
+/// still make the regression row's two moves, a move of the store lane `ch00` (`inserts`
+/// false), and a move in a group that folds onto a live master (`inserts` true); else it fails.
+fn gate_three(model: &SessionModel, inserts: bool) {
+    let blocks = 560;
+    let schedules = schedules(blocks, 0x1782);
+    let mut moved = carried_pair(model, &schedules);
+    let mut home = carried_pair(model, &schedules);
+    assert_eq!(
+        moved.before.plan.bank_route_folds(),
+        TRACKS as u64,
+        "every track folds into the master"
+    );
+    let mut placement = Placement::of(&moved.before.plan);
+    let (mut regression, mut store_lane, mut live_master) = (0, 0, 0);
+    let frames = moved.before.frames;
+    let mut moved_pcm = vec![0.0_f32; frames * 2];
+    let mut home_pcm = vec![0.0_f32; frames * 2];
+    let mut displaced_skips = 0;
+    for block in 0..blocks as u64 {
+        if block == SWAP {
+            for pair in [&mut moved, &mut home] {
+                assert_eq!(
+                    pair.after
+                        .plan
+                        .adopt_predecessor_plan(&mut pair.before.plan),
+                    engine::realtime::CarryOutcome::Carried,
+                    "the successor takes the carry"
+                );
+            }
+            placement = Placement::of(&moved.after.plan);
+        }
+        let (moved_plan, home_plan) = if block < SWAP {
+            (&mut moved.before, &mut home.before)
+        } else {
+            (&mut moved.after, &mut home.after)
+        };
+        for &(at, x, y) in &MOVES {
+            if at == block && placement.together(x, y) {
+                regression += usize::from(at == 440);
+                store_lane += usize::from(x == 0 || y == 0);
+                live_master += usize::from(!placement.with_store(x));
+                placement.swap(&mut moved_plan.plan, x, y);
+            }
+        }
+        if SNAPSHOTS.contains(&block) {
+            for track in 0..TRACKS {
+                assert_eq!(
+                    snapshot(&mut moved_plan.plan, track),
+                    snapshot(&mut home_plan.plan, track),
+                    "block {block}: ch{track:02}'s response snapshot"
+                );
+            }
+        }
+        let before = moved_plan.skips();
+        moved_plan.render(block, true, &mut moved_pcm);
+        home_plan.render(block, true, &mut home_pcm);
+        displaced_skips += usize::from(moved_plan.skips() > before);
+        for (index, (a, b)) in moved_pcm.iter().zip(&home_pcm).enumerate() {
+            assert_eq!(
+                fold_nan(a.to_bits()),
+                fold_nan(b.to_bits()),
+                "block {block}: host word {index} differs ({a:e} moved, {b:e} unmoved)"
+            );
+        }
+    }
+    assert!(displaced_skips > 0, "a displaced group skipped a bank");
+    assert_eq!(regression, 2, "the regression row's two moves were made");
+    if inserts {
+        assert!(
+            live_master > 0,
+            "a move in a group that folds onto a live master"
+        );
+    } else {
+        assert!(store_lane > 0, "the store lane moved");
+    }
+    for (side, (moved, home)) in [(&moved.before, &home.before), (&moved.after, &home.after)]
+        .into_iter()
+        .enumerate()
+    {
+        for (track, (a, b)) in moved.sinks.iter().zip(&home.sinks).enumerate() {
+            let a = a.lock().expect("capture");
+            let b = b.lock().expect("capture");
+            assert_eq!(
+                a.len(),
+                b.len(),
+                "plan {side}, ch{track:02}: observed lengths"
+            );
+            // The predecessor's 450 blocks reach every track's signal.
+            assert!(
+                side == 1 || a.iter().any(|word| f32::from_bits(*word) != 0.0),
+                "ch{track:02} is audible"
+            );
+            for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    fold_nan(*x),
+                    fold_nan(*y),
+                    "plan {side}, ch{track:02}: observed word {index} differs"
+                );
+            }
+        }
+    }
 }
