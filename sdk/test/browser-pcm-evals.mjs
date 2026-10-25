@@ -865,8 +865,8 @@ test("alignTo a source whose own anchored start is not rendered yet takes that s
 
 test("alignTo refuses a reference another feed has not started yet, and one restarted while the anchor was computed", async () => {
   // #1297c. Red if Y aligns to a reference whose start a linked feed has not published (Y would
-  // take the reference's old report), or keeps a start record that a newer start of the reference
-  // replaced while Y's anchor was computed.
+  // take the reference's old report), keeps a start record that a newer start of the reference
+  // replaced while Y's anchor was computed, or still counts a detached reference's start as pending.
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
   const initial = { result: 0, report: { generation: 1n, firstSample: 0n, sourceFrame: 0n, cumulativeUnderrunFrames: 0n, cumulativeHeldFrames: 0n } };
   const options = (run, host, sources) => ({ context, sources, quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
@@ -879,6 +879,15 @@ test("alignTo refuses a reference another feed has not started yet, and one rest
     assert.deepEqual([run.seekAts, controls(feed.rings[0])[MSB1_CONTROL.SEEK_EPOCH]], [[], 0]);
     await reference.ready();
     assert.deepEqual(run.seekAts.map(([id]) => id), ["X"], "the reference still starts");
+  }
+  {
+    // A reference detached before its start ran is no longer pending: Y reads its report.
+    const run = anchoredPrelude(source);
+    const { host } = alignHost(run, 1_000n, [{ result: 0, report: { ...initial.report, generation: 0n } }]);
+    const reference = attachEngineFeed(options(run, host, [{ sourceId: "X", channels: 1, start: { frameAt: () => 7n, prime() {} } }]));
+    await reference.detachSource("X");
+    const feed = attachEngineFeed(options(run, host, [{ sourceId: "Y", channels: 1, start: { alignTo: "X", prime() {} } }]));
+    await assert.rejects(feed.ready(), (error) => error instanceof MisoUsageError && error.diagnosticCode === "feed.align.unrendered");
   }
   {
     const run = anchoredPrelude(source);

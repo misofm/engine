@@ -487,7 +487,6 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   const close = (): void => {
     if (state === "closed") return;
     state = "closed"; release(created);
-    pendingStarts.clear();
     link?.feeds.delete(linked);
     for (const [sourceId, start] of link?.starts ?? []) if (created.includes(start.ring)) link!.starts.delete(sourceId);
     pending?.finish(new PcmFeedError("closed", "Engine feed is closed"));
