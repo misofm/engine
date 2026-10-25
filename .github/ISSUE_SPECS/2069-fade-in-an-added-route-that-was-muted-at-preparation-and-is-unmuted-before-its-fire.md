@@ -34,3 +34,42 @@ Cover six-word and following routes on every bank width.
 ## Paths
 `crates/graph/src/runtime.rs`, `crates/graph/src/lib.rs`, `crates/host-core/src/prepare.rs`, their
 tests; this spec.
+
+## Decision record (attempt 1, 2026-10-25)
+- Rule (root): arm it. A route's mute is a live value, so a mute at preparation is its initial
+  state. The six-word arm records the prepared target and mute (`[+0.0; 4]`, muted); a record
+  before `S` retargets the fire (#1363 D3). A following route's fire composes with the flags it
+  holds at `S` (#2011), so it needs only the refusal removed.
+- A fire to a mute from a waiting route ramps nowhere: `LiveRoute::fire_fade_in` takes the arm
+  and leaves the route settled at `[+0.0; 4]`, muted, inactive. Without this the fire ramps
+  `0 -> 0` over the fade and mixes zeros (work on silence; a signed-zero bit could move). The same
+  holds for an unmuted arm that a muting record reaches before `S`: an intended change, accepted
+  by root under the owner principle "no processing on silence". That route is now inactive from
+  the fire block on and no longer mixes `0 * x` for the fade's length. Bits can move there only
+  through a signed zero, a non-finite source sample (`0 * inf` is NaN), or the destination's
+  silence skip. A fading copy's fade-out is
+  never muted while it waits, so it always ramps. A following route's fire to `[+0.0; 4]` moves
+  no column bit, so it ramps nowhere already.
+- Host (`added_route_fades`): a muted route arms only when its mute is live in the plan: a six-word
+  lane (`six_word && route_rows_live`) or a following route. A lane-less muted route (a
+  `post_fader`/`post_pan` send into the output, or no route lanes) still arms nothing: no live
+  record can unmute a lane-less route, and a rebuild that does unmute it is the lane-less
+  value-change gap, which a successor issue owns.
+- #1877 re-arm: a waiting kept route the successor mutes is re-armed and carries its entry, as any
+  value change; only a re-point is excluded. This does not touch 1953b's copy logic (a lane-less
+  in-flight route is not live, so the predicate skips it if muted).
+- Third site, same rule: the duck-swap (restarted strip) send arm in `prepare.rs` (`armed_restarts`) also skipped
+  `route.mute`; it now arms a muted send too (its `has_op` already means a lane).
+- Width: `LiveRoute`/`LiveFollowRoute` are per-op code, not bank kernels; the graph claims are
+  width-free unit tests, and the host assertion runs on every bound width.
+- Successor (not fixed here): the strip fader arm (`crates/graph/src/lib.rs` `arm_fade_in`, "a strip
+  the session mutes on both channels arms nothing") has the same defect shape.
+- Evidence, no bit moved (PR evidence, not a committed test): base 893bc2a57 and branch code
+  dd95a47fe each ran base's `successor_swap.rs` with a digest dump in `fade_run`
+  (`--test-threads=1`). 125 tests passed in both, and the 175 `fade_run` digests are identical
+  (both files sha256 `840bb6fd...2560`). The record is in the session scratchpad,
+  `scratchpad/nbm-2069/` (`METHOD.txt`, `base.txt`, `branch.txt`, `successor_swap.base-dump.rs`).
+- Tests (each red on its mutant): the graph six-word arm test (muted arm, unmute before the fire,
+  fire to a mute, fire block of a muting record), the #2011 delayed follow test (muted `flags`),
+  and successor_swap rows for an added muted route (with and without a lane), a duck-swap muted
+  send, and the #1877 re-arm of a muted waiting send.
