@@ -266,3 +266,144 @@ Commands: `cargo test --locked -p host-web --all-features`, `cargo test --locked
   `diagnosticCode` `observationLimit` and the advice to unsubscribe another tap, never resent
   (MINOR 2). `decodeObservationRow` refuses a unit above 6 and a row field past 11, as the Rust
   codec does (MINOR 3).
+
+## Decision record: slice #1589c (2026-10-25)
+
+Base `893bc2a57` (main with #1589a, #1589b, #1597 and #1580). The spec's line anchors were stale;
+the symbol names held. No wire tag, schema hash, protocol message, C ABI symbol or `ABI_VERSION`
+moved; no rendered bit moved (the observation timeline's PCM pin, `expected.json`, is unchanged, and
+the arm reaches render through the same queues).
+
+### Deleted public surface
+
+- **Exports (2):** `miso_engine_web_v1_command_submit`, `miso_engine_web_v1_command_report_ptr`.
+  `abi_layout::EXPORTS` goes from 65 to 63; `render-thread-exports.json` loses `command_submit`.
+- **host-web (Rust):** `BUFFER_COMMAND` (the value 6 is retired, never reused),
+  `COMMAND_RECORD_BYTES`, `RECORD_ID_FIELD_BYTES`, `MAXIMUM_COMMAND_RECORDS`,
+  `COMMAND_OBSERVE_SUBSCRIBE`, `COMMAND_OBSERVE_UNSUBSCRIBE`, every `COMMAND_REASON_*` (`NONE`,
+  `MALFORMED`, `UNKNOWN_TRACK`, `UNKNOWN_RACK`, `UNKNOWN_EFFECT`, `UNKNOWN_PARAMETER`, `DOMAIN`,
+  `UNSUPPORTED_KIND`, `BACKPRESSURE`, `WRONG_STATE`, `UNKNOWN_TAP`, `OBSERVATION_UNBOUND`,
+  `OBSERVATION_LIMIT`), `WebCommandReport`, `COMMAND_REPORT_BYTES`; the methods
+  `AudioWorkletEngineHost::{submit_commands, command_report, command_staging_mut,
+  command_staging_bytes, live_controls_attached}`; `native_staging::command_records`. Internal:
+  `admit_commands`, `CommandRecord` (its decode and `key`), `CommandRejection`, `key_refusal`,
+  `StagedObserve`, `ReadyOwnership::{admit_on_newest_plan, effect_producer_position,
+  commands_enabled, command_decoded, has_in_flight_commands}`, `PlanShape::{producer_slots,
+  command_wanted, observe_named, in_flight}`, `EffectInstance::producer`, the command staging
+  buffer and its boot-budget rows, and the render path's in-flight counter clear (a deletion: no
+  render arithmetic changed). `MAXIMUM_OBSERVATION_READS` stays 256, now host-core's
+  `MAXIMUM_OBSERVATION_SELECTIONS`.
+- **parameter-metadata:** `PLANE_RENDER`, `PLANE_OBSERVATION`. The metadata document loses
+  `commandRecordBytes`, `maximumCommandRecords`, `commandKinds` and `commandReasons`; the ABI layout
+  loses `commandRecord`, `structures.commandReport`, `constants.wireCommandKinds`,
+  `constants.commandReasons`, `constants.maximumCommandRecords` and the `bufferKinds` row
+  `command`. Both keep their `v1` schema tags (pre-launch; the generators and the SDK assets are
+  regenerated).
+- **Worklet scripts:** the worklet's `miso.command.v1` handler (`receiveCommand`), its command
+  staging and report views; the host's `command()` and `observe()`, the `miso.observe.v1` map,
+  `COMMAND_KINDS`, `COMMAND_REASONS`, the `command` pending kind and its 256-record bound.
+- **`.d.ts` twins:** `MisoCommandKind`, `MisoCommandReason`, `MisoCommand`, `MisoCommandRequest`,
+  `MisoCommandAck`, `MisoObservationSubscription`, `MisoObservationRequest`,
+  `MisoObservationBinding`, `MisoObservationAck`, `MisoAudioWorkletHost.command()` and `.observe()`.
+- **SDK:** `LaneEdit`, `WriterOptions`, `SemanticWriterOptions`, `encodeLaneEdits`,
+  `observationEdit`, `LiveControlBeforeSubmit`, `CommandReport`, `commandReasonName`, the generated
+  types `CommandKindName`, `CommandReasonName`, `AbiCommandField`; the methods
+  `EffectEdits.observe()`, `OfflineEngine.submitCommands()`, `WasmBoundary.submitCommands()`,
+  `ObservationSubscriptionOwner.beforeLiveControlSubmit()`; the field
+  `LiveControlTransport.observe`; the `beforeSubmit` parameter of `EngineLiveControls`'s
+  constructor and of `createBrowserLiveControls` (now `(map, transport, session?, booted?)` and
+  `(host, session?, booted?)`); `EngineLiveControls.submit` takes the builders' edit sets only;
+  `LiveControlWriter` takes `{ queue, maximumBatch? }` only, and its default `maximumBatch` is no
+  longer the deleted 256-record bound (a batch is bounded by the queue's edit and frame limits);
+  `FlushOutcome.reason` is `"backpressure" | undefined`. Internal: `internal/lane-edit.ts`,
+  `requireRack`. `readObservations()` (both engines) stays on the numeric read export (#1590, the
+  spec's non-goal).
+
+### Replacements
+
+- The tests and the qualification rows that armed by kinds 7/8 arm by the core's `Observe` edit:
+  host-web `tests.rs` through `control_command` (`apply_observe`), the parity rows of
+  `protocol_cross_host.rs` and `control_parity.rs` by the same transaction on both hosts, the SDK
+  evals by `observeTaps` (`sdk/test/support.mjs`), and the qualification rows (E12 `observation`,
+  `staging-reads`, `sdk-observation`) by `observeThroughSdk`. Their predicates check the reply
+  (`status` `ok`; E12 also `path` `monitor` and an arm tag); new mutation `observation-arm-refused`
+  names the `observation` gate in run.mjs's #2040 table.
+- A re-arm is the core's: the disarm of the old window and the arm of the new one in one transaction
+  (a second arm with the same window is a shared reference, #1584). The tests that re-armed by a
+  second kind 7 now send that pair.
+- The raw-Wasm oracle's observation timeline sends three committed frames,
+  `tests/browser-v1/set-control-frames/observe-{unknown-tap,arm,disarm}.bin`, held to the native
+  encoder by `set_control_frames_are_the_committed_fixtures`, and reads each reply's status word.
+  `expected.json`'s `observationTimeline` pins `subscribeStatus` 0, `unknownTapStatus` 12 and
+  `unavailableStatus` 12 (`VALIDATION_FAILED`) in place of the three command reasons. An `Observe`
+  frame is control work and may grow the memory, so the oracle no longer asserts the whole timeline
+  never grows memory; it asserts each run of renders does not.
+- Gate 4: `check-web-audioworklet.sh`'s exact export list, `check-abi-layout-v1.py` and the
+  realtime policy's export table name no `command_submit`; the layout self-test refuses the return
+  of the command record, its kind table, buffer kind 6 and the `command_submit` export.
+
+### Deleted tests and their holders
+
+| Deleted | Its claim now held by |
+|---|---|
+| host-web `idle_render_skips_admission_counter_clear_without_losing_queue_credit` | Feature gone (the browser's own admission counters). Queue room: control-plane `observation_bindings::a_full_queue_refuses_the_disarm_with_backpressure_and_changes_nothing`. |
+| host-web `a_record_with_an_empty_id_is_refused_malformed_at_its_index` | Feature gone (the record's ID fields); an `Observe` edit's IDs are stable IDs the codec decodes: protocol `session_wire::tests::observe_round_trips_and_refuses_an_address_it_cannot_use`. |
+| host-web `every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell` | Feature gone; gate 4 (`check-web-audioworklet.sh`'s exact export list has no `command_submit`). |
+| host-web `observation_misuse_is_typed_and_all_or_nothing` | control-plane `observation_bindings::refusals_change_nothing` (unknown address, unknown tap, tap 0), `a_full_queue_refuses_the_disarm_with_backpressure_and_changes_nothing`, `an_observe_transaction_arms_shares_and_disarms_the_tap` (windows); the record-shape cases are feature gone; its lease-retake check moved into host-web `meter_reacquisition_rejects_a_full_stale_queue_then_recovers`. |
+| host-web `a_submission_names_each_observation_tap_once` | control-plane `observation_bindings::a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming`. |
+| host-web `every_insert_of_a_sixty_four_track_session_subscribes` | control-plane `observation_bindings::every_insert_of_a_sixty_four_track_session_subscribes_at_the_browser_frame`. |
+| host-web `a_subscription_past_the_frame_is_refused_and_an_unsubscribe_makes_room` | control-plane `observation_bindings::a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits`. |
+| host-web `the_boot_words_are_reserved_and_observation_staging_follows_the_taps`, its staging half (the test stays as `the_boot_words_at_offsets_32_and_56_are_reserved`) | host-web `structural_apply::observe_and_its_read_are_served_for_a_nonzero_boot_word_and_refused_for_zero`. |
+| host-web `the_catalogs_describe_the_successor_from_the_adoption_block_on`, its second-arm backpressure check; a swap test's `submit_commands(0)` check | A second same-window arm shares the tap (control-plane `an_observe_transaction_arms_shares_and_disarms_the_tap`); the zero-record submit is feature gone. |
+| `render_locked_source.rs` `command_exports` (four `command_submit` legs) | Feature gone (gate 4). |
+| parameter-metadata `the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule` | Feature gone. |
+| writer-evals "a flush into a full observation queue surfaces typed reason-8 and drops nothing", "a refusal is not terminal: after a render the FINAL record lands", "a batch larger than the queue splits under the same contract and lands across renders", "a refusal halves the count that was submitted, not the ceiling" | writer-evals "backpressure from the core is flow control: nothing is dropped and nothing escalates" (4 of a ceiling of 8 submitted, `nextBatch` 2, drain lands; red with the ceiling-halving mutant) and "a hundred positions of one control collapse to one pending record". |
+| writer-evals "an observation record carries its tap's stable key and nothing positional (#1677)" | Feature gone; the `Observe` edit's key: `crates/protocol/tests/observation_frames.rs` (codec fixture). |
+| writer-evals "an async submit produces the same outcomes and the same stats as a sync one" | Feature gone (the synchronous record callback; the queue path is always awaited); writer-evals "two flushes entered without awaiting the first serialize into two disjoint batches". |
+| structure-evals "a key the plan does not have is refused with its typed reason, and nothing changes" | control-plane `observation_bindings::refusals_change_nothing`. |
+| structure-evals "a key is resolved on the newest plan: a tap the replacement no longer has is refused" | host-web `structural_apply::the_catalogs_describe_the_successor_from_the_adoption_block_on` and control-plane `an_observe_on_a_superseded_candidate_reaches_its_replacement`. |
+| observation-subscription-evals "a submission naming one observation tap twice is refused whole as malformed" | control-plane `observation_bindings::a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming`. |
+| observation-subscription-evals "the browser live controls refuse a manual observation record while a managed subscription holds a tap", and the guard checks in two other tests | Feature gone (no manual record path). |
+| live-controls-evals "observation edits stay command records on the browser transport", "whole-batch admission is checked on the observation report", the `observe()` checks of "a value edit needs the instance's stable ID" | Feature gone. |
+| browser-defaults-evals: the observation-record key checks | Feature gone (`observation_frames.rs`). |
+| test-web-audioworklet.mjs: the host's `command()`/`observe()` cases (the 256-record bound, `windowBlocks: 0`, record encoding and refusals, ack backpressure, the map's order and bus binding, reasons 10/11/15 and the retired 12-14, recompile and re-subscribe, the disposed refusals of the two), the worklet's `miso.command.v1` case, two calls of the #393 mixed-ID loop (200 calls now) | Feature gone. A refused `Observe` is a control reply (SDK `observation-subscription-evals` typed-refusal tests); the #151 dead-meter class needs a reason table that no longer exists. |
+| test-web-audioworklet.sh: the command-reason and command-kind vocabulary gates with their on-disk mutations, the reason-cap mutation; `scripts/check-command-kind-vocabulary.py`, `scripts/check-command-reason-vocabulary.py` | Feature gone (the vocabularies are deleted). |
+| check-abi-layout-v1.py `--self-test`: "a command-record field moves", "a retired value-command kind returns", the two `commandReasons` cases | Feature gone; replaced by the four return-of-deleted-surface mutations (37 in all). |
+| check-parameter-metadata-v1.py `--self-test`: the twenty `commandKinds`/`commandReasons` cases | Feature gone; two mutations refuse their return. |
+| check-web-audioworklet-callgraph.py `--self-test` (b1b) and `--allocation-only` | Feature gone (its one caller was `command_submit`). |
+| check-web-audioworklet.sh: the `command_submit` allocation leg, the command-record stride check | Feature gone (gate 4). |
+
+Rewritten (claim kept): host-web `bridge_resource_rows_are_exact_for_the_taps_off_and_on_modes`
+(was `observation_staging_resource_is_exact_...`), `a_bus_observation_arm_renders_without_allocating`
+(was `..._admits_and_renders_...`: only the render is measured, the arm is control work),
+`a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` (reads the control plane's error),
+`native_observation_timeline_digest_pins_the_wasm_parity`, `a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window`,
+`selected_observation_reads_are_bounded_stable_and_non_consuming`; parameter-metadata
+`every_metadata_observation_tap_resolves_through_an_observe_edit`; protocol_cross_host
+`both_hosts_read_one_observation_tap_alike` (#1586 gate 5: both hosts arm by one `Observe`).
+
+### Paths outside the scope note's list
+
+Mirrors that named the deleted code: `tools/parameter-metadata/src/lib.rs` (the metadata's command
+vocabulary), `tools/parameter-metadata/tests/round_trip.rs`, `scripts/check-parameter-metadata-v1.py`
+and its fixture, the two deleted vocabulary scripts, `scripts/test-web-audioworklet.sh`,
+`scripts/check-web-audioworklet-callgraph.py`, `hosts/host-web/src/render_lock.rs` (header list),
+`hosts/host-web/tests/{control_parity,render_locked_source}.rs`,
+`hosts/host-web/tests/browser-v1/{direct-oracle.mjs,expected.json,set-control-frames/observe-*.bin}`,
+`hosts/host-web/qualification/sdk-response-entry.ts`, `hosts/host-web/MUTATIONS.md`,
+`docs/EFFECT_OBSERVATION_V1.md`, the SDK sources and evals that held the record path
+(`sdk/src/core/{writer,live-controls,boundary,abi,observation-subscriptions}.ts`,
+`sdk/src/{browser/live-controls,browser/engine,headless/engine,headless/index}.ts`,
+`sdk/src/internal/{lane-edit,rack}.ts`, `sdk/codegen/generate.mjs`, `sdk/test/*`).
+
+### Open after this slice
+
+- control-plane keeps `SessionState::{effect_producers, admit_and_push_observation_batch,
+  resolve_observation_key, observation_ended_bytes, observation_frame_bytes}` public with no host
+  caller (the core's own `Observe` edit uses the crate-private halves; `effect_producers`'s doc says
+  it goes with these kinds). Outside this slice's paths: #1590 or a successor.
+- `a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` tests a control-plane function from
+  host-web; it belongs in control-plane.
+- Stale prose outside the paths: `crates/effect-compiler/src/prepare.rs` and
+  `crates/effect-contract/src/live.rs` still name `miso.command.v1`; `docs/EFFECT_OBSERVATION_V1.md`'s
+  "Plan replacement drops subscriptions" predates #1585.
