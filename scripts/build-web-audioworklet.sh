@@ -169,6 +169,9 @@ remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/re
 remap+=" --remap-path-prefix=$sysroot=/rustc-sysroot"
 
 (
+  # Issue #2067: cargo reads CARGO_ENCODED_RUSTFLAGS before RUSTFLAGS, so a caller's exported
+  # value would silently replace every flag below; the subshell drops it for this build only.
+  unset CARGO_ENCODED_RUSTFLAGS
   cd "$repo_root"
   RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$simd_target" \
     RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \

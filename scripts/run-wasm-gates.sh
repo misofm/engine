@@ -73,9 +73,14 @@ run_guest() {
     # Issue #1334: the guest builds on the shipped module's own toolchain, the dated nightly with
     # `-Zbuild-std`, so G5 compares the compiler that ships. The host runner stays on stable.
     channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
-    RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$target_directory" \
-        RUSTFLAGS="-C target-feature=$feature" \
-        cargo build --locked --release -Zbuild-std=std,panic_abort --target "$TARGET" -p wasm-gate-guest
+    # Issue #2067: cargo reads CARGO_ENCODED_RUSTFLAGS before RUSTFLAGS, so a caller's exported
+    # value would silently replace the guest's feature flag; the subshell drops it for this build.
+    (
+        unset CARGO_ENCODED_RUSTFLAGS
+        RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$target_directory" \
+            RUSTFLAGS="-C target-feature=$feature" \
+            cargo build --locked --release -Zbuild-std=std,panic_abort --target "$TARGET" -p wasm-gate-guest
+    )
     cargo run --locked --release -q -p wasm-gates -- \
         "$target_directory/$TARGET/release/$GUEST" --expect-backend "$expected" | tee -a "$evidence"
 }
