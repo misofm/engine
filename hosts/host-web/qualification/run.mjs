@@ -696,9 +696,9 @@ function validateSdkProtocol(browserName, protocol) {
   `the browser's answers are not the headless engine's: ${json({ browser: browser?.answers, headless: headless?.answers })}`);
   const refusal = browser?.answers?.refusal;
   gate(browserName, "sdk-protocol-refusal", refusal?.name === "MisoControlRefusal"
-    && typeof refusal.status === "string" && typeof refusal.code === "string"
-    && json(refusal) === json(headless?.answers?.refusal),
-  `diagnostics({ limit: 0 }) is not the core's refusal on both engines: ${json({ browser: refusal, headless: headless?.answers?.refusal })}`);
+    && typeof refusal.status === "string" && typeof refusal.code === "string",
+  // #2040: the browser-versus-headless equality is the answers gate's, which compares this object.
+  `diagnostics({ limit: 0 }) is not the core's refusal: ${json({ browser: refusal, headless: headless?.answers?.refusal })}`);
   const events = Array.isArray(browser.events) ? browser.events : [];
   const reference = Array.isArray(headless.events) ? headless.events : [];
   // The request that caused an event is an endpoint's own ID: the browser reads the committed
@@ -1466,7 +1466,7 @@ function mutationProofs(browserName, result) {
   };
   assert.doesNotThrow(
     () => validate(browserName, widthCrossing),
-    `${browserName}: sdk-observation-window-width: valid decimal-width-crossing span was refused`,
+    `${browserName}: sdk-observation-subscription-window-width: valid decimal-width-crossing span was refused`,
   );
 }
 

@@ -53,3 +53,7 @@ record each choice. No gate's own logic changes.
   the same object first); recorded, not changed (no gate logic changes).
 - Red check (PR evidence): `sdk-spectrum-continuous-hop-wrong` pointed at `sdk-spectrum-hop` fails Chromium with
   `chromium: sdk-spectrum-continuous-hop-wrong: red mutation escaped its gate sdk-spectrum-hop`.
+- Root ruling (2026-10-25): the refusal gate's browser-versus-headless equality clause is deleted. The
+  `sdk-protocol-answers` gate compares the same `answers` object (refusal included) first, so the clause
+  held nothing the answers gate does not. The positive label `sdk-observation-window-width` is renamed
+  `sdk-observation-subscription-window-width` to match the renamed rows.
