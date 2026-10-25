@@ -15,7 +15,7 @@ use protocol::{
     ControlScope, ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord,
     ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
     CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
-    EnumChoice, MeterMetric, MeterTarget, ParameterChannel, ParameterProviderError,
+    EnumChoice, MeterMetric, ParameterChannel, ParameterProviderError,
     ParameterUnit as ProtocolUnit, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
     ResponseGrid, ResponseProviderError, ResponseResult, ResponseTarget, SampleTime, StatusCode,
     TelemetryConfiguration, TelemetryCounters, TelemetryRefusal, TelemetryRefusalPath,
@@ -1387,11 +1387,16 @@ impl ControlProvider for SessionControlProvider {
     }
 }
 
-/// The meter table rules this provider owns (#1583 D3), in order: with no meter delivery any
-/// entry is `meter.unavailable`; the period must be a positive multiple of the window
-/// (`meter.period`); then, until #1587, the first gain-reduction entry is
-/// `meter.gain_reduction.unavailable` and the first strip peak entry `meter.strip.unavailable`.
-/// An empty table is always served.
+/// The most records one `METER_BATCH` carries (the wire's bound): a table whose entries need more
+/// is refused, so every batch of an accepted table encodes whole (#1587a).
+pub const MAXIMUM_METER_BATCH_RECORDS: usize = 256;
+
+/// The meter table rules this provider owns (#1583 D3, #1587a), in order: with no meter delivery
+/// any entry is `meter.unavailable`; the period must be a positive multiple of the window
+/// (`meter.period`); then, until #1587b, the first gain-reduction entry is
+/// `meter.gain_reduction.unavailable`; and the first entry whose records (two per peak entry, left
+/// and right) take the table past [`MAXIMUM_METER_BATCH_RECORDS`] is `meter.records`. An empty
+/// table is always served.
 fn refuse_meter_table(
     configuration: &TelemetryConfiguration,
     window: Option<core::num::NonZeroU32>,
@@ -1424,16 +1429,23 @@ fn refuse_meter_table(
             TelemetryRefusalPath::MeterPeriod,
         );
     }
-    for (index, entry) in configuration.meters.iter().enumerate() {
-        let code = match (&entry.target, entry.metric) {
-            (_, MeterMetric::GainReduction) => "meter.gain_reduction.unavailable",
-            (MeterTarget::Strip(_), MeterMetric::Peak) => "meter.strip.unavailable",
-            (MeterTarget::Output, MeterMetric::Peak) => continue,
-        };
+    if let Some(index) = configuration
+        .meters
+        .iter()
+        .position(|entry| entry.metric == MeterMetric::GainReduction)
+    {
         return refuse(
             ParameterProviderError::Unavailable,
-            code,
+            "meter.gain_reduction.unavailable",
             TelemetryRefusalPath::Meter(index),
+        );
+    }
+    // Every entry left is a peak entry, the output's or a strip's: two records each.
+    if configuration.meters.len() > MAXIMUM_METER_BATCH_RECORDS / 2 {
+        return refuse(
+            ParameterProviderError::InvalidField,
+            "meter.records",
+            TelemetryRefusalPath::Meter(MAXIMUM_METER_BATCH_RECORDS / 2),
         );
     }
     Ok(())
@@ -2586,6 +2598,43 @@ mod tests {
 
     const RATE: u32 = 48_000;
 
+    /// #1587a: a meter table is served only when one batch can carry all its records. 128 peak
+    /// entries need 256 records and pass; the 129th entry takes the table past the batch's bound
+    /// and is refused, `INVALID_FIELD`, `meter.records`, at that entry.
+    ///
+    /// Test value: red if the bound is missing or off by one, so an accepted table's batches can
+    /// never encode and every window it meters is lost.
+    #[test]
+    fn a_meter_table_past_one_batch_of_records_is_refused_at_its_first_extra_entry() {
+        let window = core::num::NonZeroU32::new(4);
+        let table = |entries: usize| protocol::TelemetryConfiguration {
+            meters: (0..entries)
+                .map(|index| protocol::MeterEntry {
+                    target: protocol::MeterTarget::Strip(format!("s{index}").into()),
+                    metric: MeterMetric::Peak,
+                })
+                .collect(),
+            meter_period_blocks: 4,
+            meter_window_blocks: None,
+            counter_ids: Vec::new(),
+            counter_period_blocks: 0,
+            diagnostics_enabled: false,
+            minimum_diagnostic_severity: DiagnosticSeverity::Info,
+        };
+        assert_eq!(
+            refuse_meter_table(&table(MAXIMUM_METER_BATCH_RECORDS / 2), window),
+            Ok(())
+        );
+        assert_eq!(
+            refuse_meter_table(&table(MAXIMUM_METER_BATCH_RECORDS / 2 + 1), window),
+            Err(TelemetryRefusal {
+                error: ParameterProviderError::InvalidField,
+                code: Some("meter.records"),
+                path: TelemetryRefusalPath::Meter(MAXIMUM_METER_BATCH_RECORDS / 2),
+            })
+        );
+    }
+
     /// A reply frame that cannot be encoded is a typed failure with an empty reply, never an empty
     /// success the host would hand on as a frame.
     ///
@@ -3551,6 +3600,11 @@ mod tests {
             fader: model.tracks[0].fader.clone(),
             members: vec![model.tracks[0].id.clone()],
         });
+        // One insert, so the inserts section's header appears beside own, builtins and console.
+        let mut insert = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        insert.id = session::StableId::parse("insert-a").expect("insert ID");
+        insert.params.clear();
+        model.tracks[0].inserts.effects.push(insert);
         let catalog =
             ControlCatalog::build(&model, &MonitorOverlay::default(), RATE).expect("catalog");
         let expected = controls::list(&model, &MonitorOverlay::default(), RATE).collect::<Vec<_>>();
@@ -3565,6 +3619,7 @@ mod tests {
         let mut next_control = expected.iter();
         let mut owner: Option<&ControlAddress> = None;
         let mut section: Option<&ControlAddress> = None;
+        let mut sections = Vec::new();
         for (index, entry) in entries.iter().enumerate() {
             assert_eq!(entry.handle as usize, index + 1, "handles count from 1");
             match &entry.body {
@@ -3573,10 +3628,19 @@ mod tests {
                     owner = Some(&entry.address);
                     section = None;
                 }
-                ControlBody::SectionHeader(_) => {
+                ControlBody::SectionHeader(header) => {
                     let owner = owner.expect("a section header follows its owner header");
                     assert_eq!(entry.address.owner_kind, owner.owner_kind);
                     assert_eq!(entry.address.owner_id, owner.owner_id);
+                    let name = match entry.address.section {
+                        ControlSection::Own => "own",
+                        ControlSection::Builtins => "builtins",
+                        ControlSection::Console | ControlSection::Inserts => {
+                            entry.address.slot_id.as_deref().expect("a slot ID")
+                        }
+                    };
+                    assert_eq!(header.name, name);
+                    sections.push(entry.address.section);
                     section = Some(&entry.address);
                 }
                 ControlBody::Control(row) => {
@@ -3601,6 +3665,14 @@ mod tests {
             next_control.next().is_none(),
             "every listed control is held"
         );
+        for kind in [
+            ControlSection::Own,
+            ControlSection::Builtins,
+            ControlSection::Console,
+            ControlSection::Inserts,
+        ] {
+            assert!(sections.contains(&kind), "{kind:?}");
+        }
         // Every owner kind has a header: strips, the VCA, routes and the session.
         let kinds = entries
             .iter()

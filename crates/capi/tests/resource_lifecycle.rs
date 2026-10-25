@@ -616,7 +616,10 @@ fn host_half_counting(
     let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
         store.compiled(),
         &caps,
+        // As capi asks: #1584 D7's observation taps and #1587a's strip meter queue depth.
         &host_core::HostLiveControlRequest {
+            meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
+                .expect("the meter queue depth"),
             observation_taps: host_core::launch_maximum_observation_taps(),
             ..host_core::HostLiveControlRequest::default()
         },
@@ -711,7 +714,11 @@ impl HostHalf {
             + self.monitor_and_ramp_rows().0
             // #1325 D6: the duck overlay a kept base of the epoch holds, at its model's bounds.
             + control_plane::duck_overlay_bytes(self.store.compiled().normalized_model())
-                .expect("the duck overlay row");
+                .expect("the duck overlay row")
+            // #1587a R2: the epoch's meter tables, one entry per meter and per strip.
+            + host_core::MeterTables::new(self.meters.len(), self.strips.len())
+                .expect("the meter tables")
+                .heap_bytes() as u64;
         // The token also holds the commit's one `OBSERVATION_ENDED` event (#1584 D6a), which the
         // control plane bounds by the frame it must fit.
         let (_, ended_event) =
@@ -798,6 +805,10 @@ struct CompileObservation {
     /// `observe_compile` compiles fresh at boot; a rebuild oracle must pass the session's high-water. `response_capture.rs` in control-plane holds a
     /// capture at the bound within it.
     response_capture: u64,
+    /// The strip-ID text the two stored meter tables can own (#1587a, #1325a's rule), from
+    /// `control_plane::meter_text_reserve_bytes` at the compile's control frame: a bound, not an
+    /// allocation, since a boot configures no table.
+    meter_text_reserve: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -860,6 +871,9 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_plane::response_capture_bytes(store.compiled().normalized_model(), 0)
             .expect("the response capture row")
             .total_bytes;
+    let meter_text_reserve =
+        control_plane::meter_text_reserve_bytes(compile_limits.maximum_control_frame_bytes)
+            .expect("the meter text reserve");
     let host_core::PreparedHost {
         plan,
         sources,
@@ -906,6 +920,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         observation_reserve,
         monitor_and_ramps,
         response_capture,
+        meter_text_reserve,
     }
 }
 
@@ -953,13 +968,14 @@ impl CompileObservation {
                 + self.observation_reserve
                 + self.monitor_and_ramps
                 + self.response_capture
+                + self.meter_text_reserve
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
             "{label}: capi's own allocations + the effect producers + the strip producers + the \
              source producers + the parameter catalog + the plan state inventory + the \
              observation readers + the decode-field rounding, all observed (left; the send producers' row is the graph \
-             function's total, and the observation reserve, the monitor and ramp rows and the response \
-             capture row are the control plane's bounds), against \
+             function's total, and the observation reserve, the monitor and ramp rows, the response \
+             capture row and the meter tables' text are the control plane's bounds), against \
              `capi_retained_bytes` (right)"
         );
     }
@@ -1378,6 +1394,22 @@ impl Budget {
 /// 10 %, rounded up to 64: 82,790.4 -> 82,816; the effect runtime row gains 512 (12,800, within
 /// 13,568); and the graph ceilings rise by the +38,912 delta plus 10 %: 324,352 + 42,803.2 ->
 /// 367,168 and 324,224 + 42,803.2 -> 367,040, until the next `aarch64-debug` print tightens them.
+///
+/// #1587a serves strip peaks on the C ABI. `capi_retained_bytes` measured 259,662 (x86-64, after
+/// #1325a's duck overlay; the row does not depend on the lane width), above the 212,288 ceiling:
+/// the strip-ID text of the two stored meter tables, charged at the 128 entries an accepted table
+/// holds x 127 B x 2 = 32,512 B (#1325a's rule), the meter lane at 256 slots (one whole batch; the
+/// counter lane stays at 2), each epoch's meter tables and the entry resolution and fold vectors.
+/// So the ceiling is 259,662 plus 10 %, rounded up to 64: 285,628.2 -> 285,632. The C ABI's strip
+/// meter queues are now as deep as the output meter's (8, was 1; root ruling 2), so
+/// `builtin_meter_payload_bytes` measured 20,538 and `builtin_retained_payload_bytes` 56,997,
+/// above 11,520 and 51,648: 22,591.8 -> 22,592 and 62,696.7 -> 62,720.
+///
+/// #1587a with #1577 (both on `main`): the meter rows above and the response capture's are
+/// independent and add up. `capi_retained_bytes` measured 312,897 (x86-64, deterministic: 259,662
+/// plus 52,620 for the capture and 615 from other merged rows), above both slices' ceilings
+/// (285,632 and 275,584), so the ceiling is 312,897 plus 10 %, rounded up to 64: 344,186.7 ->
+/// 344,192.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1472,20 +1504,20 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_meter_payload_bytes",
         value: |report| report.builtin_meter_payload_bytes,
-        eight_lanes: 11_520,
-        four_lanes: 11_520,
+        eight_lanes: 22_592,
+        four_lanes: 22_592,
     },
     Budget {
         row: "builtin_retained_payload_bytes",
         value: |report| report.builtin_retained_payload_bytes,
-        eight_lanes: 51_648,
-        four_lanes: 51_648,
+        eight_lanes: 62_720,
+        four_lanes: 62_720,
     },
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 275_584,
-        four_lanes: 275_584,
+        eight_lanes: 344_192,
+        four_lanes: 344_192,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -1924,7 +1956,11 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let successor = host_core::prepare_host_runtime_with_live_lanes_successor(
         prospective_host.store.compiled(),
         &host_caps(&limits()),
-        &host_core::HostLiveControlRequest::default(),
+        &host_core::HostLiveControlRequest {
+            meter_queue_depth: core::num::NonZeroUsize::new(host_core::METER_QUEUE_DEPTH)
+                .expect("the meter queue depth"),
+            ..host_core::HostLiveControlRequest::default()
+        },
         host_core::HostLiveLanes {
             strip_input: true,
             effects: true,
@@ -3292,15 +3328,24 @@ fn race_live_edits(run: usize) -> RaceCounts {
         // SAFETY: No other thread uses either handle yet.
         unsafe { fed_render_c(session, plan, &mut feed, block) };
     }
-    // #1583 gate 7: the output's meter table, one batch per window, configured after the warm-up
-    // so the race's first block applies the requested gate, every block folds the output meter,
-    // and the control thread stages the batches.
+    // #1583 gate 7, #1587a gate 5: the output's and two strips' peaks, one batch per window,
+    // configured after the warm-up so the race's first block applies the requested gate, every
+    // block folds the output and strip meters, and the control thread stages the batches and
+    // adopts each swap's strip meters.
     let window = 12_u32;
+    let strip = |id: &str| protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(id.into()),
+        metric: protocol::MeterMetric::Peak,
+    };
     let meters = protocol::TelemetryConfiguration {
-        meters: vec![protocol::MeterEntry {
-            target: protocol::MeterTarget::Output,
-            metric: protocol::MeterMetric::Peak,
-        }],
+        meters: vec![
+            protocol::MeterEntry {
+                target: protocol::MeterTarget::Output,
+                metric: protocol::MeterMetric::Peak,
+            },
+            strip("eq0"),
+            strip("race-bus"),
+        ],
         meter_period_blocks: window,
         meter_window_blocks: None,
         counter_ids: Vec::new(),

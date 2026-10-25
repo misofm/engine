@@ -100,6 +100,8 @@ const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"
 const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample"];
 const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
+/// Issue #1697: a `SESSION_REPLACE` frame carries its document beside it.
+const CONTROL_DOCUMENT_FIELDS = [...CONTROL_FIELDS, "document"];
 // Issue #1570b D4: the two event lanes in drain order (the C ABI's lane codes: reliable, lossy) and
 // the most `control_event` calls one drain makes on a lane. The queues hold at most 2 reliable
 // events, 2 render diagnostics and 1 telemetry event, so a bound of 16 is never the limit.
@@ -1203,7 +1205,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.receiveSessionSeek(message);
     } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
       this.receiveCommand(message);
-    } else if (message?.tag === "miso.control.v1" && exactFields(message, CONTROL_FIELDS)) {
+    } else if (message?.tag === "miso.control.v1"
+        && (exactFields(message, CONTROL_FIELDS)
+          || exactFields(message, CONTROL_DOCUMENT_FIELDS))) {
       this.receiveControl(message);
     } else if (message?.tag === "miso.meters.v1" && exactFields(message, LEASE_FIELDS)) {
       this.receiveMeterLease(message);
@@ -1786,17 +1790,23 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// response frame bytes unchanged (after a failure, the refusal's diagnostic text), and the
   /// committed revision after the call. A frame the staging buffer cannot hold is a typed refusal
   /// of a well-formed request, not a protocol error.
+  ///
+  /// Issue #1697: an optional `document` (the same checks as `frame`) is the document a
+  /// `SESSION_REPLACE` frame names; it is staged beside the frame, here and never in `process()`.
   receiveControl(message) {
+    const wholeBytes = (bytes) => bytes instanceof Uint8Array
+      && bytes.buffer instanceof ArrayBuffer
+      && !(typeof SharedArrayBuffer !== "undefined" && bytes.buffer instanceof SharedArrayBuffer)
+      && bytes.byteLength !== 0 && bytes.byteOffset === 0
+      && bytes.byteLength === bytes.buffer.byteLength;
     const frame = message.frame;
+    const document = message.document;
     if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !(frame instanceof Uint8Array) || !(frame.buffer instanceof ArrayBuffer)
-        || (typeof SharedArrayBuffer !== "undefined" && frame.buffer instanceof SharedArrayBuffer)
-        || frame.byteLength === 0 || frame.byteOffset !== 0
-        || frame.byteLength !== frame.buffer.byteLength) {
+        || !wholeBytes(frame) || ("document" in message && !wholeBytes(document))) {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
       return;
     }
-    const reply = this.readControlCommand(frame);
+    const reply = this.readControlCommand(frame, document);
     this.port.postMessage({
       tag: "miso.control.v1",
       requestId: message.requestId,
@@ -1814,9 +1824,28 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// may have grown under the call: the reply is then read from the fresh buffer, and the caller's
   /// handler re-binds the views (no fault). A frame the staging cannot hold (a zero
   /// pointer) has no response: the previous command's bytes are not its reply.
-  readControlCommand(frame) {
+  ///
+  /// Issue #1697: a `document` is staged through `replace_document_ptr` after the frame's staging
+  /// is known to hold the frame and before the frame is written, so a refused frame never leaves a
+  /// document staged for a later command; a document the staging refuses (a zero pointer, for
+  /// example a length over the boot bound) is the same typed refusal with no response, and runs
+  /// no command. The command frees the staged document, whatever its result. The staging may grow
+  /// the module's memory, so every write cuts its view from the live buffer.
+  readControlCommand(frame, document) {
     const length = frame.byteLength;
-    const pointer = this.exports.miso_engine_web_v1_control_request_ptr(this.handle, length);
+    let pointer = this.exports.miso_engine_web_v1_control_request_ptr(this.handle, length);
+    if (pointer !== 0 && document !== undefined) {
+      const documentPointer = this.exports.miso_engine_web_v1_replace_document_ptr(
+        this.handle,
+        document.byteLength,
+      );
+      if (documentPointer === 0) {
+        pointer = 0;
+      } else {
+        new Uint8Array(this.exports.memory.buffer, documentPointer, document.byteLength)
+          .set(document);
+      }
+    }
     let result = RESULT_INVALID_ARGUMENT;
     if (pointer !== 0) {
       new Uint8Array(this.exports.memory.buffer, pointer, length).set(frame);

@@ -32,16 +32,21 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// watermark into its fixed record after each service step, outside `process()` and every
 /// render-locked window.
 ///
+/// Issue #1697 adds `replace_document_ptr`: the worklet's message handler stages the document a
+/// `SESSION_REPLACE` frame names beside the frame, a control allocation, never inside `process()`
+/// or a render-locked window.
+///
 /// Issue #1644 adds `session_seek` and `session_seek_at` (D1): the worklet's message handler seeks
 /// the timeline and every source through them between blocks, so their allocations are control
 /// allocations and they are never inside `process()` or a render-locked window.
-const UNWRAPPED_EXPORTS: [&str; 14] = [
+const UNWRAPPED_EXPORTS: [&str; 15] = [
     "dispose",
     "render_allocation_count",
     "service",
     "control_allocation_count",
     "control_request_ptr",
     "control_command",
+    "replace_document_ptr",
     "control_event",
     "control_response_ptr",
     "control_response_bytes",

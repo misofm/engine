@@ -132,7 +132,8 @@ export function fractionDigits(value: number): number | undefined {
 /**
  * A decimal literal normalized to sign, integer digits and fraction digits.
  *
- * Mirrors the engine's `ExactDecimal`. Leading integer zeros and trailing fraction zeros are
+ * The SDK owns spelling equivalence: the engine matches no decimal text (its session values are
+ * `f32` words). Leading integer zeros and trailing fraction zeros are
  * removed, so `0.3`, `0.30` and `+0.300` are one value and compare equal without any scaling that
  * could overflow -- which is what lets a document's own spelling be preserved while still being
  * matched exactly against a canonical rendering.

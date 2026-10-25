@@ -290,7 +290,8 @@ pub fn assert_installed() {
 mod tests {
     use super::{
         Counters, Mode, assert_installed, counters, current_thread_counters,
-        current_thread_delta_since, delta_since, mode,
+        current_thread_delta_since, current_thread_peak, current_thread_peak_reset, delta_since,
+        mode,
     };
 
     #[test]
@@ -306,6 +307,19 @@ mod tests {
         assert!(moved.allocations >= 1, "no allocation was counted");
         assert!(moved.requested_bytes >= 4096, "no bytes were counted");
         drop(held);
+    }
+
+    /// Test value: turns red when the peak window stops tracking this thread's heap (a constant
+    /// zero passes both #1615 heap ceilings, so those gates could never fail).
+    #[test]
+    fn the_peak_window_tracks_live_and_peak_bytes() {
+        current_thread_peak_reset();
+        let held = std::hint::black_box(vec![0_u8; 4096]);
+        assert!(current_thread_peak().peak_bytes >= 4096);
+        drop(held);
+        let window = current_thread_peak();
+        assert_eq!(window.live_bytes, 0);
+        assert!(window.peak_bytes >= 4096);
     }
 
     #[test]

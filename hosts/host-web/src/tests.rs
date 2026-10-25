@@ -410,6 +410,131 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
+/// #1697 gate 2 (#1386 gate 8, browser half): `miso_engine_web_v1_replace_document_ptr` stages a
+/// replacement document of more than 64 KiB, and one of exactly `MAXIMUM_DOCUMENT_BYTES`, and the
+/// `SESSION_REPLACE` frame that names it commits through `miso_engine_web_v1_control_command`;
+/// one byte more, or none, stages nothing. After every command the staging holds no byte, and the
+/// first command after boot frees the boot's copy.
+///
+/// Test value: red if the staging's bound is off by one either way, if a refused staging leaves
+/// an earlier document for the next command, or if the command (or the boot) keeps the document's
+/// bytes after the reply.
+#[test]
+fn a_replace_document_up_to_the_boot_bound_commits_and_is_freed_after_its_command() {
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
+        EditPath, ExpectedRevision, ProtocolCodec, RequestId, SessionReplaceRequest,
+        SessionRevision, TypedCommandFrame,
+    };
+    use sha2::{Digest, Sha256};
+    let frame = |request: u64, payload: CommandPayload<'_>, expected: ExpectedRevision| {
+        let mut bytes = vec![0_u8; 4_096];
+        let length = ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: expected,
+                    payload,
+                },
+                &mut bytes,
+            )
+            .expect("a command frame");
+        bytes.truncate(length);
+        bytes
+    };
+    let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
+    let booted = one_track_session(128);
+    let handle = crate::ffi::test_boot(booted.as_bytes(), boot_options(128));
+    assert_ne!(handle, 0);
+    assert!(
+        crate::ffi::test_document_staging().2 >= booted.len(),
+        "the boot keeps its copy until the first command"
+    );
+    let (result, _) = ffi::native_staging::control_command(
+        handle,
+        &frame(1, CommandPayload::CapabilitiesGet, ExpectedRevision::Any),
+    )
+    .expect("a live handle");
+    assert_eq!(result, RESULT_OK);
+    assert_eq!(
+        crate::ffi::test_document_staging(),
+        (false, 0, 0),
+        "the first command frees the boot's copy"
+    );
+
+    let mut model = parse_session_json(&booted).expect("the booted document");
+    for (request, (size, db)) in [((64 << 10) + 1, -3.0), (maximum, -6.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let request = request as u64 + 2;
+        model.tracks[0].fader.left_db = db;
+        let mut document = canonical_session_json(&model).expect("a valid document");
+        assert!(document.len() < size);
+        // Whitespace after the value pads the document to `size` without changing it.
+        document.extend(core::iter::repeat_n(' ', size - document.len()));
+        assert!(crate::ffi::test_replace_document(
+            handle,
+            document.as_bytes()
+        ));
+        assert_eq!(crate::ffi::test_document_staging(), (true, size, size));
+        let revision = crate::ffi::miso_engine_web_v1_control_revision(handle);
+        let replace = frame(
+            request,
+            CommandPayload::SessionReplace(SessionReplaceRequest {
+                document_bytes: size as u32,
+                document_sha256: Sha256::digest(document.as_bytes()).into(),
+            }),
+            ExpectedRevision::Exact(SessionRevision(revision)),
+        );
+        let (result, reply) =
+            ffi::native_staging::control_command(handle, &replace).expect("a live handle");
+        assert_eq!(result, RESULT_OK, "{}", String::from_utf8_lossy(&reply));
+        let mut fields = [0_u16; 64];
+        let DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::SessionReplaced(applied),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+            .expect("a typed reply")
+        else {
+            panic!("{size} bytes: a committed replace")
+        };
+        assert_eq!(applied.edit_path, EditPath::Live, "{size} bytes");
+        assert_eq!(
+            crate::ffi::miso_engine_web_v1_control_revision(handle),
+            revision + 1
+        );
+        assert_eq!(
+            crate::ffi::test_document_staging(),
+            (false, 0, 0),
+            "{size} bytes: the command frees the document"
+        );
+    }
+
+    // A staged document and a command with a wrong handle: the refusal frees it too.
+    assert!(crate::ffi::test_replace_document(handle, b"{}"));
+    assert_eq!(
+        crate::ffi::miso_engine_web_v1_control_command(handle.wrapping_add(1), 2),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(crate::ffi::test_document_staging(), (false, 0, 0));
+    // A staged document, then a refused staging: nothing is left for the next command.
+    assert!(crate::ffi::test_replace_document(handle, b"{}"));
+    for refused in [maximum + 1, 0] {
+        assert!(
+            !crate::ffi::test_replace_document(handle, &vec![b' '; refused]),
+            "{refused} bytes"
+        );
+        assert_eq!(
+            crate::ffi::test_document_staging(),
+            (false, 0, 0),
+            "{refused} bytes stage nothing"
+        );
+    }
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+}
+
 #[test]
 fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     let quantum = 64_u32;
