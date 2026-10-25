@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
-const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { digestPlanes, effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+
+// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
+const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 
 const WINDOW_FRAMES = 2_048;
 const CHANNELS = "both";

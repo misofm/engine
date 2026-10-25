@@ -10,8 +10,6 @@ import { ProtocolClient } from "../../../sdk/src/core/protocol-messages.ts";
 import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/shipped-host.d.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
-// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
-const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
 import { effect, session } from "../../../sdk/src/core/session.ts";
 import { MisoEngineError } from "../../../sdk/src/core/errors.ts";
@@ -23,6 +21,9 @@ import { createDefaultHost } from "../../../sdk/src/browser/default-host.ts";
 import { decodeSpectrumCaptureReply, decodeSpectrumStreamReply } from "../../../sdk/src/core/spectrum-frame.ts";
 import { spectrumMetadataOf } from "../../../sdk/src/core/spectrum.ts";
 import { PROTOCOL_BLOCKS, protocolCalls } from "./protocol-calls.mjs";
+
+// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
+const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 
 const EQ_CONFIGURATION_ID = 9_007_199_254_740_993n;
 /**

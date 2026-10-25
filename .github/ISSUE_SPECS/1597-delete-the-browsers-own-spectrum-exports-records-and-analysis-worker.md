@@ -163,3 +163,53 @@ Commands: as #1596's, plus `python3 -B scripts/check-abi-layout-v1.py`,
   regenerated layout and the package smoke. The staging-read qualification row keeps its observation
   and track-response reads; its spectrum reads and its stream instance went with the exports, so the
   worker instances are 15, not 16.
+- #1597 attempt 2 (verifier folds, root rulings). The engine test
+  `adopt_before_first_block_adopts_only_before_a_render_call` holds the owner's window: red on the
+  mutant that deletes `self.entered = true;` from `render_contiguous` (the second call returns
+  `Applied`), which no other test caught. What the one-time 63-block comparison covers: that no
+  output or meter bit moves between the staged boot and the in-place route, the first block's
+  meter restart included. That the taps are in the first plan (a capture armed before any block
+  reads sample 0) is the control-plane gate-1 test's claim, not the comparison's.
+- Public changes of the shipped worklet host declaration (`miso-engine-v1-audio-worklet-host.d.ts`,
+  in the SDK as `browser/shipped-host.d.ts`): the types `MisoSpectrumTarget`,
+  `MisoSpectrumChannels`, `MisoSpectrumBootOptions`, `MisoSpectrumCollectionEntry`,
+  `MisoSpectrumCollectionBootOptions`, `MisoSpectrumOperation`, `MisoSpectrumReply`,
+  `MisoSpectrumStreamMetadata`, `MisoSpectrumStreamStartReply`, `MisoSpectrumSelectionReply` and
+  `MisoSpectrumStreamReadReply` are gone; `MisoWebBootOptions` lost `spectrumHopFrames`, `spectrum`
+  and `spectrumCollection`; `MisoAudioWorkletHost` lost `armSpectrum`, `readSpectrum`,
+  `cancelSpectrum`, `startSpectrumStream`, `selectSpectrum`, `selectSpectrumStream`,
+  `readSpectrumStream` and `stopSpectrumStream`. The SDK barrels export none of them.
+- Deleted tests and the live test that holds each claim (control-plane is
+  `crates/control-plane/tests/spectrum_monitor.rs`; "feature gone" where the subject no longer
+  exists):
+
+  | deleted test | claim now held by |
+  |---|---|
+  | `the_first_plan_reads_the_reference_window` | `a_configure_before_the_first_block_reaches_sample_zero` (folded) |
+  | `a_spectrum_boot_meters_every_submix_like_the_plain_boot` | `a_spectrum_tap_meters_every_submix_like_the_plain_boot` (renamed, configure route) |
+  | `a_running_spectrum_stream_continues_across_a_rebuild` | `a_structural_edit_carries_the_stream`; `web_runtime_preparer_attaches_the_companions_on_every_branch` |
+  | `removing_the_spectrum_target_strip_is_accepted_and_drops_the_service` | `a_removed_target_drops_its_entry_and_its_arm` |
+  | `ordinary_spectrum_hops_reach_the_browser_stream_cadence` | `an_equal_or_hop_only_configure_publishes_no_plan`; SDK `boot-evals.mjs` copied-hop eval |
+  | `explicit_ordinary_boot_publishes_h256_and_h1024_stream_metadata` | `an_equal_or_hop_only_configure_publishes_no_plan` |
+  | `legacy_boot_wrappers_keep_the_derived_default_hop` | feature gone (hop boot exports) |
+  | `invalid_explicit_hop_borrow_conflict_returns_zero_without_publication` | feature gone (hop boot export) |
+  | `invalid_explicit_hops_refuse_before_publication_and_valid_retries_work` | feature gone; the configure refuses a hop (`spectrum.hop`), SDK `boot-evals.mjs` |
+  | `spectrum_hop_capability_is_the_pinned_value` | feature gone; capability bit 16, SDK `boot-evals.mjs` |
+  | `cold_spectrum_capture_configuration_is_idempotent` | feature gone (staging capture buffers) |
+  | `spectrum_capture_capacity_validator_rejects_explicit_surplus` | feature gone (staging capture buffers) |
+  | `collection_staging_uses_caller_count_and_packed_identity_bytes` | feature gone (collection staging) |
+  | `staged_request_words_are_answered_as_the_core_answers_them` | feature gone; the configure's refusals, `a_refused_configure_changes_nothing_and_a_pending_edit_is_superseded` |
+  | `the_read_export_answers_the_core_refusals` | `each_capture_refusal_answers_its_status_and_changes_nothing` |
+  | `invalid_spectrum_cancel_refuses_before_touching_managed_stream` | `each_capture_refusal_answers_its_status_and_changes_nothing` |
+  | `invalid_spectrum_channel_selection_preserves_window_for_valid_retry` | `each_capture_refusal_answers_its_status_and_changes_nothing` |
+  | `select_after_the_callers_arm_is_backpressure_until_the_window_is_read` | `each_capture_refusal_answers_its_status_and_changes_nothing` (`spectrum.busy`) |
+  | `collection_selection_is_atomic_and_keeps_one_active_capture` | `a_stream_read_follows_the_core_machine`; host-core `SpectrumService` select tests |
+  | `stream_start_refuses_a_callers_arm_on_a_collection` | `a_stream_read_follows_the_core_machine` |
+  | `stream_analysis_answers_by_the_stream_state` | `a_stream_read_follows_the_core_machine` |
+  | `continuous_spectrum_ffi_reports_profile_and_analyzes_one_window` | `a_stream_read_follows_the_core_machine`; `a_capture_read_returns_the_reference_analysis` |
+  | `a_promotion_that_drops_the_stream_ends_the_analysis` | feature gone (staging analysis); `a_removed_target_drops_its_entry_and_its_arm` |
+  | `continuous_spectrum_ffi_imports_metadata_without_a_host_handle` | feature gone (analysis Worker) |
+  | `imported_stream_analysis_accepts_supported_hops` | feature gone (analysis Worker) |
+  | `imported_stream_analysis_rejects_unsupported_hops_transactionally` | feature gone (analysis Worker) |
+  | `imported_stream_analysis_does_not_poison_one_shot_or_stream_history` | feature gone (analysis Worker) |
+  | `stream_guard_refusals_preserve_markers_for_both_host_borrow_kinds` | feature gone (spectrum exports); the observation alias guards keep theirs |

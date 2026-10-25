@@ -5095,7 +5095,10 @@ where
         }
         let epoch = self.monitor_rebuild(configuration)?;
         // #1597: before the first block, a lent plan adopts the successor in place, and the
-        // promotion installs its captures now.
+        // promotion installs its captures now. Not an ack before a drop: the candidate is adopted
+        // and nothing is lost if the promotion below fails, which only an `Internal` invariant
+        // fault can make it do; the reply is then not sent, and the next service step meets the
+        // same fault.
         if let Some(plan) = plan
             && plan.adopt_before_first_block()
         {

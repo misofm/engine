@@ -12,12 +12,13 @@ import { test } from "node:test";
 import { createEngine } from "../src/browser/engine.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
-// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
-const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 import { decodeResponseEnvelope } from "../src/core/control-frame.ts";
 import { MisoEngineError } from "../src/core/errors.ts";
 import { onEndpointIds } from "./control-support.mjs";
 import { moduleBytes, ramp, sessionDocument } from "./support.mjs";
+
+// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
+const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 
 const SKIP = { skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX };
 const QUANTUM = 128;
