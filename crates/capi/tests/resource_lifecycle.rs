@@ -1424,8 +1424,8 @@ impl Budget {
 /// deterministic: 312,897 plus 21,149 for the session's 256-row `OBSERVATION_READ` table and each
 /// epoch's observation index, one entry per effect instance and a copy of its two IDs; the read's
 /// selections decode onto the stack, so no selection table is retained). The three slices' rows
-/// are independent and add up, so the ceiling is 334,046 plus 10 %, rounded up to 64: 367,450.6
-/// -> 367,488.
+/// are independent and add up. 334,046 fits under the 344,192 ceiling, so the ceiling is
+/// unchanged: a ceiling is raised only when a row goes over it.
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1532,8 +1532,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 367_488,
-        four_lanes: 367_488,
+        eight_lanes: 344_192,
+        four_lanes: 344_192,
     },
     Budget {
         row: "largest_named_allocation_bytes",

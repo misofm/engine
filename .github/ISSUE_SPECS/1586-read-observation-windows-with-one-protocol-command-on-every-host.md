@@ -296,6 +296,6 @@ change and no hash re-pin in #1586a.
   before.
 - **Frame check** uses the controller's codec (its limits), not `ProtocolCodec::default()`.
 - **Budget.** After merging #1587a, `capi_retained_bytes` measured 334,046 (312,897 on `main` plus
-  21,149 for the row table and the epoch's index); the ceiling is 367,488 (plus 10 %, rounded up
-  to 64), recorded in `resource_lifecycle.rs`.
+  21,149 for the row table and the epoch's index), under the unchanged 344,192 ceiling (root:
+  a ceiling is raised only when a row goes over it), recorded in `resource_lifecycle.rs`.
 - The schema hash stays `f4c2fe333739f44d`.
