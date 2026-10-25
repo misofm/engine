@@ -191,3 +191,69 @@ each block's snapshot (#1312 Amendment 2). D1 and D2 follow. The link cell is on
 - *Resolve an absent live ramp to the session default on the browser and in the SDK* (#1364).
 - *Carry console effect lanes across a plan swap* (#1279).
 - *Carry live-controlled effect lanes across a plan swap* (#1280).
+
+## Amendment 2 (implementation, 2026-10-25): decision 17 and the root rulings
+
+Built on `main` after #1369a/b, #1370a/b and #1969 (every `lane_link` effect has `retarget_link`).
+Root rulings R1, R2, R5, R6 and the mid-glide carry ruling (scope note `1369-chain.md`) replace
+parts of D1-D6:
+
+- **Stale, retired by decision 17 S9.** D3's `SetEffectLinkMode`, `EditRamps::Link` per effect and
+  `SetTrackConsole` as the per-edit path are gone: every link write is a `SET_CONTROL` of the
+  instance's `link_mode` row, and its ramp is that edit's `ramp_samples`. The protocol records it
+  under the strip's one `(Strip, Link)` key, so two link writes of one transaction on one strip
+  with different lengths refuse `control.ramp.conflict`, as the pan and matrix rows do.
+- **D4 narrowed (R6, decision 17 C5).** A console slot's declared mode (`SetConsole`) stays
+  structural and has no row; only the insert row and the console-entry row are live. "One cell
+  per strip on a slot-default change" is dropped. A move of an entry to the slot's own mode
+  resolves to what runs and writes nothing.
+- **R5, the row flip by an id list.** `controls::LIVE_LINK_EFFECTS` (compressor, gate-expander,
+  transient shaper, true-peak limiter, de-esser, dynamic EQ: every effect with `retarget_link`)
+  makes both link rows `Live`, `Motion::Ramp(LinkGlide)` and excluded from automation ("a mode,
+  not a performance value", as `matrix_mode`). The multiband row stays
+  `RuledLiveNotBuilt{1367}` (#1367b). Any other effect's link change stays `Structure`. The
+  controls test prepares each listed effect and refuses the list if one refuses a glide.
+- **R2, ramp.** `LiveRamps::resolve(LinkGlide, edit)`: the edit's length (an explicit 0 steps),
+  else `link_samples` (`fader_ms`).
+- **D1 amended: a record variant and a two-word cell.** `EffectControlRecord::Link(LinkSwitch {
+  mode, ramp_samples })` carries the write through the one record pipeline (the classifier's
+  records, the producer's preflight and write, the successor's carry retarget), so no second
+  write path exists. The cell is two words (mode code, glide), like the bypass cell, so no 24-bit
+  packing bound is needed; the writer refuses a lane without a link cell or a mode the effect does
+  not support (`EffectWriteRefusal::Link`) and a glide over `LINK_GLIDE_MAX_SAMPLES` (`Ramp`).
+- **D2 as specified.** Drain order bypass, link, parameters, targets. The bank stage applies the
+  switch in its drain (before the chain's collapse and rest decisions; the switch moves both
+  channels alike), the per-node instance in its stage; a refusal counts in the lane's
+  `link_refusals`. A switch to the mode the lane already heads for applies nothing.
+- **D6 replaced by root's mid-glide ruling.** The successor is prepared at the committed mode, and
+  the carry keeps the lane's current glide words: each control lane tracks the mode its
+  processor holds (prepared mode, then each taken switch; it moves with lane swaps and carries),
+  and before a carry restores a bank lane's payload the stage seats the predecessor's mode with
+  a zero-length retarget, so the restore keeps the glide in flight; the link write of the
+  committed mode (the successor's own retarget from the join, or the predecessor's unread write,
+  carried like any cell) then glides on from there. A refused restore returns the lane to its
+  prepared mode. A per-node pair swaps processors and needs no seat. No new memory at the swap:
+  one inline cell, reader and carried slot per lane, allocated at preparation.
+- **Gates as built.** Classifier: `host-core` `live_delta::tests::a_changed_link_mode_of_an_effect_without_a_glide_is_a_rebuild`
+  (the batch-2 guard, kept for effects off the list) and
+  `tests/live_delta.rs::a_link_change_is_one_glide_record_with_the_edits_ramp`. C ABI:
+  `a_link_change_glides_live_and_is_heard` (gates 2 and 5, bank and per node),
+  `forty_link_edits_before_one_block_are_all_accepted_and_the_last_is_heard` (gate 3),
+  `a_rebuild_mid_glide_carries_the_glide_to_its_target` (gate 4: applied, unread and
+  same-transaction). Writer bounds: `effect-contract` `a_record_without_a_cell_is_refused_and_writes_nothing`.
+  Tests that used a link change to force a restart now route a sidechain instead.
+- **Gate 3's refusal case injects a `BeforeLivePush` fault, not an out-of-domain parameter.** Under
+  decision 17 a value outside its domain is refused by `controls::check` while the protocol
+  applies the `SET_CONTROL`, before classification and before any producer is touched, so it
+  cannot show that a link write waits for the commit's later checks. The fault refuses the
+  transaction after every preflight, at the last fallible step before the stamp, which is where a
+  link write placed too early would show: no cell write, the model and the plan unchanged.
+- **Verifier fold (m1): a link cell only where the processor glides.** `EffectLaneShape::from_descriptor`
+  gives a lane a link cell only for an effect on `effect_contract::LIVE_LINK_EFFECTS` (the list
+  moved to the contract crate; `controls` re-exports it), so the multiband compressor
+  (`lane_link`, no `retarget_link` yet) holds none and its writer refuses a switch
+  (`EffectWriteRefusal::Link`). **For #1367b:** adding the multiband to `LIVE_LINK_EFFECTS` once
+  its `retarget_link` lands gives its lanes the cell and flips its row in one edit; the controls
+  ruled-class test then requires the glide and the cell.
+- **Verifier fold (m2).** `a_change_and_its_reversal_before_a_block_leave_the_glide_be` pins the
+  same-mode rule of D2 (a switch to the lane's own target applies nothing).

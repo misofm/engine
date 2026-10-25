@@ -8,11 +8,14 @@ use std::collections::BTreeSet;
 use common::{LAUNCH_EFFECTS, RATE, address, effects_fixture, id, insert_id, insert_row};
 use controls::{
     BYPASS_CONTROL, ControlAddress, ControlClass, ControlError, ControlRow, LINK_MODE_CONTROL,
-    Lane, MonitorOverlay, Owner, RebuildReason, Section, check, get, list, set,
+    LIVE_LINK_EFFECTS, Lane, LiveRampRow, MonitorOverlay, Motion, Owner, RebuildReason, Section,
+    check, get, list, set,
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
-    AutomationRate, EffectDescriptor, ParameterChannelPolicy, ParameterUnit, parameter_value_valid,
+    AutomationRate, EffectDescriptor, EffectLaneShape, EffectQuality, LinkMode,
+    ParameterChannelPolicy, ParameterUnit, PortRole, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedPorts, PreparedSidechainPort, parameter_value_valid,
 };
 use session::{
     EffectParam, ParameterChannel, ParameterUnit as SessionUnit, SessionModel,
@@ -173,7 +176,10 @@ fn rebuild_reason(class: ControlClass) -> Option<RebuildReason> {
 
 /// Gate 1, classes. Red if an effect row carries a class that contradicts decision 14 or 15, if a
 /// `None` parameter has no reason in its row, or if a parameter the rulings make live is
-/// rebuild-only (or the reverse).
+/// rebuild-only (or the reverse). For the link mode (#1371, root R5): red if an effect on
+/// [`LIVE_LINK_EFFECTS`] keeps a rebuild-only or unramped row or one that automation reaches, or
+/// if the list names an effect whose prepared instance refuses the glide, so an acknowledged link
+/// edit would never be heard (decision 15 E4).
 #[test]
 fn effect_rows_carry_the_ruled_class() {
     let model = effects_fixture();
@@ -219,15 +225,35 @@ fn effect_rows_carry_the_ruled_class() {
                 && row.address.control == LINK_MODE_CONTROL
         });
         match (effect, link) {
-            ("miso.multiband-compressor", Some(row)) => assert_eq!(
-                rebuild_reason(row.descriptor.class),
-                Some(RebuildReason::RuledLiveNotBuilt { issue: 1367 })
-            ),
-            (_, Some(row)) => assert_eq!(
-                rebuild_reason(row.descriptor.class),
-                Some(RebuildReason::Optimisation),
-                "{effect}"
-            ),
+            ("miso.multiband-compressor", Some(row)) => {
+                assert_eq!(
+                    rebuild_reason(row.descriptor.class),
+                    Some(RebuildReason::RuledLiveNotBuilt { issue: 1367 })
+                );
+                // `lane_link`, but no glide yet (#1367b): its lane holds no link cell, so the
+                // writer refuses a switch (`EffectWriteRefusal::Link`) its processor would refuse
+                // after an ack.
+                assert!(descriptor.lane_link);
+                assert!(
+                    !EffectLaneShape::from_descriptor(descriptor, 0).has_link(),
+                    "{effect}"
+                );
+            }
+            (_, Some(row)) => {
+                assert!(LIVE_LINK_EFFECTS.contains(&effect), "{effect}");
+                assert_eq!(row.descriptor.class, ControlClass::Live, "{effect}");
+                assert_eq!(
+                    row.descriptor.motion,
+                    Motion::Ramp(LiveRampRow::LinkGlide),
+                    "{effect}"
+                );
+                assert!(!row.descriptor.automatable(), "{effect}: a mode");
+                assert!(glides(effect), "{effect} refuses a link glide");
+                assert!(
+                    EffectLaneShape::from_descriptor(descriptor, 0).has_link(),
+                    "{effect}"
+                );
+            }
             (_, None) => assert_eq!(
                 descriptor.supported_link_modes.bits().count_ones(),
                 1,
@@ -235,6 +261,49 @@ fn effect_rows_carry_the_ruled_class() {
             ),
         }
     }
+}
+
+/// Whether a prepared instance of `effect`, at its defaults in dual mono, takes a glide to every
+/// other mode it supports (`retarget_link`, #1370).
+fn glides(effect: &str) -> bool {
+    let registry = launch_native_effect_registry().expect("the launch registry builds");
+    let factory = registry.get_ascii(effect).expect("a launch effect");
+    let descriptor = factory.descriptor();
+    let initial = effect_compiler::resolve_initial_values(descriptor, &[]).expect("defaults");
+    let request = PrepareEffectRequest {
+        sample_rate: RATE,
+        quantum: 128,
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::DualMono,
+        // An effect with an optional sidechain declares the port; it stays unconnected.
+        ports: PreparedPorts {
+            sidechain: descriptor
+                .ports
+                .iter()
+                .find(|port| port.role == PortRole::SidechainInput)
+                .map_or(PreparedSidechainPort::None, |port| {
+                    PreparedSidechainPort::Unconnected {
+                        id: port.id,
+                        required: port.required,
+                    }
+                }),
+        },
+        initial_values: &initial,
+        limits: PrepareEffectLimits {
+            maximum_total_state_bytes: 1 << 26,
+            maximum_scratch_bytes: 1 << 26,
+            maximum_automation_spans_per_block: 64,
+        },
+        tail_bound: registry
+            .tail_bound(descriptor.id, RATE, EffectQuality::Normal)
+            .expect("a declared row"),
+    };
+    let mut processor = factory.prepare(request).expect("prepares").processor;
+    [LinkMode::Maximum, LinkMode::Average]
+        .into_iter()
+        .filter(|mode| descriptor.supported_link_modes.contains(*mode))
+        .all(|mode| processor.retarget_link(0, mode, 64))
 }
 
 /// The registry test: no descriptor parameter may share an ID with the bypass or the link mode.
@@ -543,7 +612,8 @@ fn bypass_link_mode_and_prepared_rows_are_written_by_set() {
     );
 
     let link = insert_row("vocal", COMPRESSOR, LINK_MODE_CONTROL, Lane::Both);
-    set(&mut model, &link, 2.0, None, RATE).unwrap();
+    // A live link row glides over the edit's own length when it carries one (#1371 D3).
+    set(&mut model, &link, 2.0, Some(64), RATE).unwrap();
     assert_eq!(
         model.tracks[0].inserts.effects[1].link_mode,
         session::LinkMode::Maximum

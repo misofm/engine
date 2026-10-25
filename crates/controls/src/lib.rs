@@ -62,7 +62,9 @@ pub use diff::{
 pub use effect_contract::control::{
     ControlClass, ControlKind, Family, LiveRampRow, RebuildReason, Taper,
 };
-pub use effect_rows::{BYPASS_CONTROL, LINK_MODE_CONTROL, check_expected_effect};
+pub use effect_rows::{
+    BYPASS_CONTROL, LINK_MODE_CONTROL, LIVE_LINK_EFFECTS, check_expected_effect,
+};
 pub use effective::{
     Effective, EffectiveInputs, EffectiveRoute, EffectiveRouteInput, EffectiveShapeError,
     EffectiveSource, EffectiveStrip, LocalEffective, LocalInputs, ModelInputs, MonitorChange,

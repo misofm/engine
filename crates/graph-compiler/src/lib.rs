@@ -3143,6 +3143,7 @@ mod tests {
                         ),
                         bypass: entry.bank_preparation.bypass,
                         observation_depth: 0,
+                        link: None,
                     },
                     &engine::realtime::LiveValuesSuperseded::new(),
                 )
@@ -3379,6 +3380,7 @@ mod tests {
                     ),
                     bypass: entry.bank_preparation.bypass,
                     observation_depth: 0,
+                    link: None,
                 },
                 &engine::realtime::LiveValuesSuperseded::new(),
             )
@@ -6729,6 +6731,7 @@ mod tests {
                     ),
                     bypass: entry.bank_preparation.bypass,
                     observation_depth: 0,
+                    link: None,
                 },
                 &superseded,
             )
@@ -6911,7 +6914,8 @@ mod tests {
             }
             EffectControlRecord::Parameter { .. }
             | EffectControlRecord::Observe { .. }
-            | EffectControlRecord::Bypass(_) => panic!("{label} is not a prepared target"),
+            | EffectControlRecord::Bypass(_)
+            | EffectControlRecord::Link(_) => panic!("{label} is not a prepared target"),
         }
     }
 
@@ -7004,7 +7008,8 @@ mod tests {
                 EffectControlRecord::PreparedTarget(target) => target.channel,
                 EffectControlRecord::Parameter { .. }
                 | EffectControlRecord::Observe { .. }
-                | EffectControlRecord::Bypass(_) => panic!("expected prepared target"),
+                | EffectControlRecord::Bypass(_)
+                | EffectControlRecord::Link(_) => panic!("expected prepared target"),
             },
             ContractParameterChannel::Both
         );

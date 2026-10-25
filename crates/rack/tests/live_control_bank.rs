@@ -188,6 +188,7 @@ fn lane_pair(
             shape: EffectLaneShape::from_live_parameters([(0, ParameterChannelPolicy::PerLane)], 0),
             bypass,
             observation_depth: 0,
+            link: None,
         },
         superseded,
     )
@@ -957,6 +958,7 @@ fn each_lanes_subscriptions_reach_that_lanes_taps_in_order() {
                 ),
                 bypass: false,
                 observation_depth: 2,
+                link: None,
             },
             &superseded,
         )
@@ -1032,6 +1034,7 @@ fn a_bank_window_below_a_lanes_live_cells_is_refused_at_bind() {
                 ),
                 bypass: false,
                 observation_depth: 0,
+                link: None,
             },
             &superseded,
         )
@@ -1079,6 +1082,7 @@ fn a_live_slot_sizes_its_spans_by_its_lanes_cells_not_the_capacity() {
                 shape: EffectLaneShape::from_live_parameters([], 0),
                 bypass: false,
                 observation_depth: 0,
+                link: None,
             },
             &superseded,
         )
