@@ -138,3 +138,50 @@ All behavioural gates run in `sdk/test/headless-apply-evals.mjs` against the rea
 - *Build and encode session transactions in the SDK* (#1383).
 - *Encode the session, submix, output, route, automation and VCA edits in the SDK* (#1385).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332).
+
+## Decision record (attempt 1, 2026-10-25)
+
+- **Root R1-R3 adopted.** #1389 owns the shared core: `sdk/src/core/session-edit.ts` (`EditOutcome`,
+  `EditPath`, `WatermarkSnapshot`, the `SESSION_REPLACE` encoder, the SHA-256 digest, `AppliedLedger`),
+  `ProtocolClient.applyTransaction`/`replaceSession` with `ProtocolTransport.send(frame, document?)`, and
+  `EditPath` `"unchanged"` (`control-frame.ts` `EDIT_PATHS` 5, `MESSAGE_SESSION_REPLACE`, and an internal
+  `decodeAppliedReply(bytes, message)` so the public `decodeControlReply` keeps its signature). R2 amends D1:
+  `replaceSession` is async (one `crypto.subtle` digest on both hosts); only `apply` settles before the event
+  loop. The context's dropped exports read as `control_request_ptr`/`control_command` and
+  `replace_document_ptr` (#1697).
+- **D1 refusals.** A refusal the core reports in the reply frame rejects with `MisoControlRefusal` (status,
+  diagnostics, observed revision), as every `ProtocolClient` call does; a refusal of the call itself (a new
+  sample rate: `reprepareRequired`, `control.apply.reprepare_required`) rejects with `MisoEngineError`
+  carrying the result and diagnostic. Neither commits.
+- **D2 narrowed.** The boundary gains `readWatermark()` (the 96-byte `planWatermark` record) and
+  `controlFrame(frame, document?)`; apply and replace run through the existing control entry, and
+  `committedDocument` already exists (#1571). No `service()` method: the core's `dequeue_event` runs the
+  service step first (`crates/control-plane/src/control.rs`, `dequeue_event`), and the boundary drains events
+  after every control frame and every render, so the core is serviced after each control frame (`apply`,
+  `replaceSession`, every `SET_CONTROL`) and each `render()`. It is not serviced after `submitCommands`,
+  `submitSource` or `seekSource`: they commit nothing and displace no plan, so a service step there would
+  reclaim nothing, and the next render's drain services first. An explicit export call would be redundant
+  and untestable.
+- **`submitCommands` commits no revision.** Its observation records are admitted to the newest plan
+  (`AudioWorkletEngineHost::submit_commands`, `admit_on_newest_plan`) and never pass the control plane's
+  commit, so it needs no `noteCommit`.
+- **D3.** The watermark is read after each `render()` and on `watermark()`/`applied()`, and settles the
+  ledger. `revision` is the core's committed revision word, read on demand.
+- **D4.** `replaceSession` rebinds `liveControls()`/`withSession` to the replacement document; after an
+  `apply` rebuild live controls resolve from the core's control list (#1562b-K). Gate 4's first half is
+  already held, once each: strips rebinding after a rebuild in `sdk/test/structure-evals.mjs` (#1562b-K) and
+  the stale-list refusal in `sdk/test/control-list-evals.mjs`; gate 1 adds only the replace's own claim
+  (`withSession` of the replacement document succeeds). A mutant caching the boot's session map stays green
+  because edits resolve through the control list's strip order, so no headless map rebinding exists to test.
+- **R3's assumed retry did not exist; root ruling (b) replaces it.** A `ControlTransactionQueue` made before an
+  `apply` refused its next `SET_CONTROL` with `revision_conflict`: the queue expects the revision of its own
+  last reply and retries nothing (`control-queue.ts`, `#transact`). Root ruled (b), no blind retry (it would
+  hide a real conflict with another writer): the queue gains `noteCommit(revision)`, and the headless engine
+  calls it with the core's committed revision in the same call as every frame it sends beside the queue
+  (the `ProtocolClient` transport: `apply`, `replaceSession`, `setTransport`, `configureTelemetry`, the
+  snapshot reads; and the raw `controlFrame`). A noted revision also outlives the older reply of a
+  transaction that flew while it was noted. #1296 reuses the hook in the browser. Gate 4's second half is
+  restored in gate 2 (a live controls object resolved before the apply submits first try, at revision 2).
+- **`SESSION_REPLACE` bytes.** `crates/protocol/tests/set_control_frames.rs` writes one `replace` row into
+  `fixtures/set-control-frames.json` (root ruling 2); the SDK encoder is held to it byte for byte. No source
+  or schema changed, and the built module's digest is unchanged.

@@ -16,6 +16,8 @@ import type { ControlStripOrder } from "./control-list.ts";
 import { ControlRequestIds } from "./control-queue.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
 import { TrackResponseModule } from "./live-response.ts";
+import { watermarkSnapshot } from "./session-edit.ts";
+import type { WatermarkSnapshot } from "./session-edit.ts";
 import type {
   TrackResponseObservedState,
   TrackResponseQuery,
@@ -1362,9 +1364,14 @@ export class WasmBoundary {
    *
    * A malformed reply after the core committed rejects although the edit was applied; values are
    * absolute, so a resend is safe.
+   *
+   * `document`, when present, is staged with `replace_document_ptr` before the frame and goes
+   * beside it (#1697, #1386 D7): the document a `SESSION_REPLACE` frame names by length and digest.
+   * The core frees the staging after the command, whatever it was, so a document serves one frame.
    */
-  controlFrame(frame: Uint8Array): Uint8Array {
+  controlFrame(frame: Uint8Array, document?: Uint8Array): Uint8Array {
     const handle = this.#live();
+    if (document !== undefined) this.#stageReplaceDocument(handle, document);
     const request = optionalExport(this.#exports, "miso_engine_web_v1_control_request_ptr");
     const command = optionalExport(this.#exports, "miso_engine_web_v1_control_command");
     const responsePointer = optionalExport(this.#exports, "miso_engine_web_v1_control_response_ptr");
@@ -1413,6 +1420,47 @@ export class WasmBoundary {
       });
     }
     return reply;
+  }
+
+  #stageReplaceDocument(handle: number, document: Uint8Array): void {
+    const pointer = document.length === 0
+      ? 0
+      : Number(this.#exports.miso_engine_web_v1_replace_document_ptr(handle, document.length));
+    const memory = this.#exports.memory;
+    if (pointer === 0 || pointer + document.length > memory.buffer.byteLength) {
+      throw new MisoEngineError("the engine staged no buffer for this replacement document", {
+        phase: "lifecycle",
+        code: "bufferTooSmall",
+        result: constantValue("resultCodes", "bufferTooSmall"),
+        diagnostics: [{ code: "sdk.document.bytes", path: `${document.length}` }],
+      });
+    }
+    new Uint8Array(memory.buffer, pointer, document.length).set(document);
+  }
+
+  /**
+   * The plan's applied-revision watermark (#1381a D5, D15-17): `watermark_read` copies it into its
+   * fixed record, read here at `watermark_ptr`. The record's counters stay in the engine; the
+   * snapshot carries the revision, its first sample and the outcome flags of the last advance.
+   * Render is the only writer and runs on this thread, so a read never meets a torn record; a
+   * `backpressure` result would still be the core's to report, and is thrown as such.
+   */
+  readWatermark(): WatermarkSnapshot {
+    const handle = this.#live();
+    const result = Number(this.#exports.miso_engine_web_v1_watermark_read(handle));
+    if (result !== constantValue("resultCodes", "ok")) {
+      throw new MisoEngineError("the engine refused to read its watermark", {
+        phase: "lifecycle",
+        code: resultName(result, "call"),
+        result,
+      });
+    }
+    const record = new StructView(
+      this.#exports.memory,
+      "planWatermark",
+      Number(this.#exports.miso_engine_web_v1_watermark_ptr(handle)),
+    );
+    return watermarkSnapshot(record.u64("revision"), record.u64("firstSample"), record.u64("outcomeFlags"));
   }
 
   /**
