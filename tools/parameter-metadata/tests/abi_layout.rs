@@ -9,22 +9,21 @@
 //!   in the document are a transcription of a function body. The test below encodes a record *at
 //!   the emitted offsets* and requires the live engine to decode exactly the values written — the
 //!   only way to prove a hand-transcribed offset table against a hand-written decoder.
-//! * the **source-ring rule**, which the document states as its two inputs rather than as an
-//!   answer. The test re-derives the ring from those inputs and requires it to equal
+//! * the **source-ring rule** (#1406 D3), which the document states as its inputs rather than as
+//!   an answer. The test re-derives the ring from those inputs and requires it to equal
 //!   `default_source_ring_frames` at every launch rate and a spread of quanta, so a consumer that
-//!   applies the published rule lands where the engine lands.
+//!   applies the published rule lands where the engine lands, and requires the host to boot on
+//!   that ring.
 //! * the **alias table**, which must be exactly the three alias constants and must agree with the
 //!   base names on the same values.
 //! * the **document's own structure**, so a schema key cannot be dropped silently.
 
-use host_core::LAUNCH_SAMPLE_RATES;
+use host_core::{LAUNCH_SAMPLE_RATES, p_max_samples, stall_ring_frames};
 use host_web::{
     AudioWorkletEngineHost, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_REASON_NONE, COMMAND_RECORD_BYTES,
     RESULT_OK, WebBootOptions, default_source_ring_frames,
 };
-use parameter_metadata::abi_layout::{
-    ERROR_PHASES, SCHEMA, SOURCE_RING_RESERVE_QUANTA, STAGING_SEQUENCE, render,
-};
+use parameter_metadata::abi_layout::{ERROR_PHASES, SCHEMA, STAGING_SEQUENCE, render};
 
 /// The document parsed as JSON. Each helper below panics loudly on a missing key, which is itself
 /// an assertion that the schema did not change.
@@ -138,33 +137,85 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
     );
 }
 
-/// The published source-ring rule reproduces the engine's derivation at every launch shape.
+/// The published source-ring rule reproduces the engine's derivation at every launch shape (#1406
+/// gates 2 and 3), and the host boots on the ring the zero override derives.
 ///
-/// Red mutation: publish `reserveQuanta: 1` and every row below misses by one quantum.
+/// Red mutations: publish `reserveQuanta: 1` or `primeReserveQuanta: 0` and every row misses by
+/// one quantum; take `p_max_samples` at quantum 128 for every quantum and the 96 kHz / 127 row is
+/// 14,129 frames, not a whole number of quanta, which the boot refuses.
 #[test]
 fn the_published_source_ring_rule_reproduces_the_engine_derivation() {
     let document = render();
-    let tolerance_ms = parse(&document)["constants"]["sourceRing"]["stallToleranceMs"]
-        .as_u64()
-        .expect("the document names sourceRing's tolerance");
+    let ring = &parse(&document)["constants"]["sourceRing"];
+    let input = |name: &str| {
+        ring[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the document names sourceRing.{name}"))
+    };
+    let tolerance_ms = input("stallToleranceMs");
     assert_eq!(
         u32::try_from(tolerance_ms).expect("a u32"),
         host_web::SOURCE_STALL_TOLERANCE_MS,
         "the published tolerance is the engine's constant"
     );
+    let latencies = ring["primeLatencySamples"]
+        .as_array()
+        .expect("the document names sourceRing.primeLatencySamples");
+    assert_eq!(
+        latencies.len(),
+        LAUNCH_SAMPLE_RATES.len(),
+        "one row per launch rate"
+    );
+    let minimal = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/session/v1/canonical-minimal.json"),
+    )
+    .expect("the minimal fixture exists");
 
-    for rate in LAUNCH_SAMPLE_RATES {
+    for (rate, row) in LAUNCH_SAMPLE_RATES.into_iter().zip(latencies) {
         let rate = rate.0;
+        assert_eq!(row["sampleRateHz"].as_u64(), Some(u64::from(rate)));
+        let latency = row["samples"].as_u64().expect("a latency row's samples");
         for quantum in [1_u32, 2, 32, 64, 127, 128, 129, 256, 480, 1024] {
+            let q = u64::from(quantum);
             let stall_frames = u64::from(rate) * tolerance_ms / 1_000;
-            let quanta =
-                stall_frames.div_ceil(u64::from(quantum)) + u64::from(SOURCE_RING_RESERVE_QUANTA);
-            let published = u32::try_from(quanta * u64::from(quantum)).expect("fits a u32");
+            let quanta = stall_frames.div_ceil(q)
+                + input("reserveQuanta")
+                + input("primeGrowths") * latency.div_ceil(q)
+                + input("primeReserveQuanta");
+            let published = u32::try_from(quanta * q).expect("fits a u32");
+            let engine = default_source_ring_frames(rate, quantum);
             assert_eq!(
-                published,
-                default_source_ring_frames(rate, quantum),
+                published, engine,
                 "the published rule and the engine disagree at {rate} Hz / {quantum} frames"
             );
+            let floor = u64::from(stall_ring_frames(rate, quantum))
+                + u64::from(p_max_samples(rate, quantum))
+                + q;
+            assert!(
+                engine.is_multiple_of(quantum) && u64::from(engine) >= floor,
+                "{rate} Hz / {quantum} frames: {engine} frames"
+            );
+            // The boot takes the zero override as `default_source_ring_frames` and refuses a ring
+            // that preparation would.
+            let session = minimal
+                .replacen(
+                    "\"sample_rate_hz\": 48000",
+                    &format!("\"sample_rate_hz\": {rate}"),
+                    1,
+                )
+                .replacen(
+                    "\"quantum_frames\": 128",
+                    &format!("\"quantum_frames\": {quantum}"),
+                    1,
+                );
+            let options = WebBootOptions {
+                require_sample_rate_hz: rate,
+                require_quantum_frames: quantum,
+                ..WebBootOptions::explicit_defaults()
+            };
+            AudioWorkletEngineHost::boot(session.as_bytes(), options)
+                .unwrap_or_else(|_| panic!("{rate} Hz / {quantum} frames: the zero ring boots"));
         }
     }
 }

@@ -80,8 +80,8 @@ describe("eval 1 -- the three red probes at the SDK boundary", () => {
       assert.equal(shape.sources[0].channels, 2);
       assert.equal(shape.sources[0].frames, 9_600n);
       assert.deepEqual(shape.tracks, ["t"]);
-      // 9906 = 78 x 127, derived from the published rule applied to the reported shape.
-      assert.equal(shape.sourceRingFrames, 9_906);
+      // 14097 = 111 x 127, derived from the published rule applied to the reported shape (#1406).
+      assert.equal(shape.sourceRingFrames, 14_097);
       assert.equal(shape.sourceRingFrames % shape.quantumFrames, 0);
       assert.equal(engine.state(), "ready");
     } finally {
@@ -315,7 +315,7 @@ describe("eval 8 -- lifecycle", () => {
       assert.equal(shape.sampleRateHz, 96_000, "the second boot's own answer");
       assert.equal(shape.quantumFrames, 127);
       assert.equal(shape.sources[0].frames, 9_600n);
-      assert.equal(shape.sourceRingFrames, 9_906);
+      assert.equal(shape.sourceRingFrames, 14_097);
       assert.equal(engine.state(), "ready");
     } finally {
       engine.dispose();
