@@ -165,6 +165,8 @@ interface LinkedFeed {
   sourceIds(): readonly string[];
   /** The ring the feed still delivers for `sourceId`. */
   ring(sourceId: string): SharedArrayBuffer | undefined;
+  /** Issue 1297c: `sourceId` is in the feed's start list and its anchored start is not published yet. */
+  startPending(sourceId: string): boolean;
   detachSource(sourceId: string): Promise<void>;
 }
 /** Keyed by the engine's host object, which `FeedEngine.host` names. */
@@ -430,6 +432,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   if (starts.some((start) => start !== undefined && ((typeof start?.frameAt === "function") === (typeof start?.alignTo === "string") || typeof start.prime !== "function"))) {
     throw new MisoUsageError("a feed source start needs a prime function and exactly one of frameAt and alignTo");
   }
+  const order = startOrder(options.sources);
   const link = options.engine === undefined ? undefined : feedLinks.get(options.engine.host);
   if (options.engine !== undefined && link === undefined) throw new MisoUsageError("the feed's engine is not one createEngine resolved with");
   if (link === undefined && starts.some((start) => start !== undefined)) throw new MisoUsageError("a feed source start needs the feed's engine");
@@ -453,7 +456,11 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   let pending: { id: number; seeks: SeekSnapshot[]; finish: (error?: PcmFeedError) => void } | undefined;
   const detaching = new Map<number, (error?: PcmFeedError) => void>();
   // Issue #1297b D4: the starts not yet run, and the one `ready()` that runs them.
-  let unstarted = options.sources.flatMap((source, index) => source.start === undefined ? [] : [{ source, start: source.start, ring: created[index]! }]);
+  // Issue #1297c: in dependency order, so a source that aligns to another source of this feed
+  // starts after that one published its start.
+  let unstarted = order.map((index) => ({ source: options.sources[index]!, start: options.sources[index]!.start!, ring: created[index]! }));
+  // Issue #1297c: the sources whose anchored start this feed has not published yet.
+  const pendingStarts = new Set(unstarted.map((entry) => entry.source.sourceId));
   let starting: Promise<void> | undefined;
   node.port.onmessage = ({ data }: MessageEvent): void => {
     if (data?.op === "source-detached") {
@@ -474,11 +481,13 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   const linked: LinkedFeed = {
     sourceIds: () => [...live.keys()],
     ring: (sourceId) => live.get(sourceId)?.ring,
+    startPending: (sourceId) => pendingStarts.has(sourceId),
     detachSource: (sourceId) => feed.detachSource(sourceId),
   };
   const close = (): void => {
     if (state === "closed") return;
     state = "closed"; release(created);
+    pendingStarts.clear();
     link?.feeds.delete(linked);
     for (const [sourceId, start] of link?.starts ?? []) if (created.includes(start.ring)) link!.starts.delete(sourceId);
     pending?.finish(new PcmFeedError("closed", "Engine feed is closed"));
@@ -517,6 +526,8 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
         // The reference's own anchored start is not rendered yet: its report is the old
         // generation's, so the frame comes from that start, exactly.
         frame = started.frame + (anchorSample - started.anchorSample);
+        // A newer start of the reference published meanwhile moves its timeline.
+        if (pendingStart(link!, alignTo, before.generation, refuse) !== started) throw refuse("it seeked while the anchor was computed", "feed.align.reseeked");
       } else {
         const after = await readSeekReport(host, entry.source.sourceId, alignTo);
         if (pendingStart(link!, alignTo, after.generation, refuse) !== undefined) throw refuse("it seeked while the anchor was computed", "feed.align.reseeked");
@@ -533,6 +544,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     new Msb1RingWriter(entry.ring).seek(generation, frame, anchorSample);
     const seek = Object.freeze({ sourceId: entry.source.sourceId, generation, frame, anchorSample });
     link!.starts.set(seek.sourceId, { seek, ring: entry.ring });
+    pendingStarts.delete(seek.sourceId);
     await entry.start.prime(seek);
     if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
     // Detached during its own prime: the ring is withdrawn, so the engine is not asked to seek it.
@@ -614,6 +626,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       // The ring leaves the delivered set now, so no prepareSeek or later retirement names it.
       live.delete(sourceId);
       if (link?.starts.get(sourceId)?.ring === ring) link.starts.delete(sourceId);
+      pendingStarts.delete(sourceId);
       rings = liveRings();
       unstarted = unstarted.filter((entry) => entry.source.sourceId !== sourceId);
       await new Promise<void>((resolve, reject) => {
@@ -640,6 +653,34 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     close,
   };
   return feed;
+}
+
+/**
+ * Issue 1297c: the indexes of the sources that have a `start`, in a stable dependency order: a
+ * source whose `alignTo` names another started source of the same feed comes after it. A
+ * self-alignment or an `alignTo` cycle is refused. Each start names at most one reference, so the
+ * walk follows one chain at a time, without recursion.
+ */
+function startOrder(sources: readonly FeedSource[]): number[] {
+  const indexOf = new Map(sources.map((source, index) => [source.sourceId, index] as const));
+  const placed = new Set<number>();
+  const order: number[] = [];
+  for (let first = 0; first < sources.length; first += 1) {
+    const chain: number[] = [];
+    const onChain = new Set<number>();
+    let index: number | undefined = first;
+    while (index !== undefined && !placed.has(index)) {
+      const source: FeedSource = sources[index]!;
+      if (source.start === undefined) break;
+      if (onChain.has(index)) throw new MisoUsageError(`feed source ${source.sourceId} is on an alignTo cycle`);
+      chain.push(index); onChain.add(index);
+      const alignTo: string | undefined = source.start.alignTo;
+      if (alignTo === source.sourceId) throw new MisoUsageError(`feed source ${source.sourceId} cannot align to itself`);
+      index = alignTo === undefined ? undefined : indexOf.get(alignTo);
+    }
+    for (const entry of chain.reverse()) { placed.add(entry); order.push(entry); }
+  }
+  return order;
 }
 
 /** Bounded reads of a busy seek report (`RESULT_BACKPRESSURE`): render was publishing it. */
@@ -679,6 +720,11 @@ function alignRefusal(sourceId: string, alignTo: string): (cause: string, code: 
  * pending too, and the frame it will play is not known here: `feed.align.held`.
  */
 function pendingStart(link: FeedLink, alignTo: string, reported: bigint, refuse: ReturnType<typeof alignRefusal>): FeedStartSeek | undefined {
+  // A linked feed will start the reference but has not published that start: its frame is not
+  // known yet. The SDK does not wait across feeds; the app retries after that feed's `ready()`.
+  for (const feed of link.feeds) {
+    if (feed.startPending(alignTo)) throw refuse("its own start is not published yet; retry after its feed's ready()", "feed.align.unstarted");
+  }
   const start = link.starts.get(alignTo);
   let ring: SharedArrayBuffer | undefined;
   for (const feed of link.feeds) ring ??= feed.ring(alignTo);

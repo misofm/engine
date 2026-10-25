@@ -758,13 +758,13 @@ test("an anchored start is applied once by the engine handler, and the drain rea
 /**
  * Issue 1297c: an engine host whose seek reports for `alignTo` come from `replies` (a reply may be
  * a function that returns one), cloned as a port does. `next` is the status's next sample, or a
- * function that returns it.
+ * function that returns it (or a promise of it).
  */
 function alignHost(run, next, replies) {
   let requestId = 0;
   const reads = [];
   const host = {
-    async status() { return { result: 0, nextAbsoluteSample: typeof next === "function" ? next() : next }; },
+    async status() { return { result: 0, nextAbsoluteSample: typeof next === "function" ? await next() : next }; },
     async seekSourceAt(request) {
       run.engine.receiveSeekAt({ tag: "miso.seek-at.v1", requestId: (requestId += 1), ...request });
       return structuredClone({ tag: "miso.ack.v1", requestId, result: run.engine.lastAck.result });
@@ -834,28 +834,64 @@ test("alignTo refuses an unrendered, busy, reseeked, held or pending-seek refere
   const run = anchoredPrelude(source);
   const { host } = alignHost(run, 0n, []);
   assert.throws(() => attachEngineFeed({ context, sources: [{ sourceId: "both", channels: 1, start: { alignTo: "X", frameAt: () => 0n, prime() {} } }], quantumFrames: 4, engine: { host }, createNode: () => run.node }), MisoUsageError);
+  // A self-alignment and an alignTo cycle within one feed are refused at attach.
+  for (const sources of [
+    [{ sourceId: "self", channels: 1, start: { alignTo: "self", prime() {} } }],
+    [{ sourceId: "a", channels: 1, start: { alignTo: "c", prime() {} } }, { sourceId: "b", channels: 1, start: { alignTo: "a", prime() {} } }, { sourceId: "c", channels: 1, start: { alignTo: "b", prime() {} } }],
+  ]) {
+    assert.throws(() => attachEngineFeed({ context, sources, quantumFrames: 4, engine: { host }, createNode: () => run.node }), (error) => error instanceof MisoUsageError && /itself|cycle/.test(error.message), sources[0].sourceId);
+  }
 });
 
 test("alignTo a source whose own anchored start is not rendered yet takes that start's frame", async () => {
   // #1297c (several stems added together). Red if the SDK aligns to the reference's report while
-  // the reference's own start is pending (the report still shows generation 1 at frame 0).
+  // the reference's own start is pending (the report still shows generation 1 at frame 0), or
+  // starts a feed's sources in list order when an aligned source is listed before its reference.
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
-  const run = anchoredPrelude(source);
+  const x = { sourceId: "X", channels: 1, start: { frameAt: (anchor) => anchor + 50_000n, prime() {} } };
+  const y = { sourceId: "Y", channels: 1, start: { alignTo: "X", prime() {} } };
+  for (const sources of [[x, y], [y, x]]) {
+    const run = anchoredPrelude(source);
+    const initial = { result: 0, report: { generation: 1n, firstSample: 0n, sourceFrame: 0n, cumulativeUnderrunFrames: 0n, cumulativeHeldFrames: 0n } };
+    let next = 1_000n;
+    const { host } = alignHost(run, () => { const now = next; next += 100n; return now; }, [initial, initial]);
+    const feed = attachEngineFeed({ context, sources, quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
+    await feed.ready();
+    // A_X = 1000 + 8 = 1008, F_X = 51008; A_Y = 1100 + 8 = 1108, so F_Y = 51008 + 100.
+    assert.deepEqual(run.seekAts, [["X", 5n, 51_008n, 1_008n], ["Y", 6n, 51_108n, 1_108n]], sources[0].sourceId);
+    assert.deepEqual([...new BigInt64Array(feed.rings[sources.indexOf(y)], MSB1_CONTROL_I64_OFFSET, 3)], [6n, 51_108n, 1_108n]);
+  }
+});
+
+test("alignTo refuses a reference another feed has not started yet, and one restarted while the anchor was computed", async () => {
+  // #1297c. Red if Y aligns to a reference whose start a linked feed has not published (Y would
+  // take the reference's old report), or keeps a start record that a newer start of the reference
+  // replaced while Y's anchor was computed.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
   const initial = { result: 0, report: { generation: 1n, firstSample: 0n, sourceFrame: 0n, cumulativeUnderrunFrames: 0n, cumulativeHeldFrames: 0n } };
-  let next = 1_000n;
-  const { host } = alignHost(run, () => { const now = next; next += 100n; return now; }, [initial, initial]);
-  const feed = attachEngineFeed({
-    context,
-    sources: [
-      { sourceId: "X", channels: 1, start: { frameAt: (anchor) => anchor + 50_000n, prime() {} } },
-      { sourceId: "Y", channels: 1, start: { alignTo: "X", prime() {} } },
-    ],
-    quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node,
-  });
-  await feed.ready();
-  // A_X = 1000 + 8 = 1008, F_X = 51008; A_Y = 1100 + 8 = 1108, so F_Y = 51008 + 100.
-  assert.deepEqual(run.seekAts, [["X", 5n, 51_008n, 1_008n], ["Y", 6n, 51_108n, 1_108n]]);
-  assert.deepEqual([...new BigInt64Array(feed.rings[1], MSB1_CONTROL_I64_OFFSET, 3)], [6n, 51_108n, 1_108n]);
+  const options = (run, host, sources) => ({ context, sources, quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
+  {
+    const run = anchoredPrelude(source);
+    const { host } = alignHost(run, 1_000n, [initial]);
+    const reference = attachEngineFeed(options(run, host, [{ sourceId: "X", channels: 1, start: { frameAt: () => 7n, prime() {} } }]));
+    const feed = attachEngineFeed(options(run, host, [{ sourceId: "Y", channels: 1, start: { alignTo: "X", prime() {} } }]));
+    await assert.rejects(feed.ready(), (error) => error instanceof MisoUsageError && error.diagnosticCode === "feed.align.unstarted");
+    assert.deepEqual([run.seekAts, controls(feed.rings[0])[MSB1_CONTROL.SEEK_EPOCH]], [[], 0]);
+    await reference.ready();
+    assert.deepEqual(run.seekAts.map(([id]) => id), ["X"], "the reference still starts");
+  }
+  {
+    const run = anchoredPrelude(source);
+    let restart;
+    const { host } = alignHost(run, async () => { const hook = restart; restart = undefined; await hook?.(); return 1_000n; }, [initial]);
+    const first = attachEngineFeed(options(run, host, [{ sourceId: "X", channels: 1, start: { frameAt: () => 7n, prime() {} } }]));
+    await first.ready();
+    // During Y's one status read, another feed starts X again at a new generation and frame.
+    restart = () => attachEngineFeed(options(run, host, [{ sourceId: "X", channels: 1, start: { frameAt: () => 900n, prime() {} } }])).ready();
+    const feed = attachEngineFeed(options(run, host, [{ sourceId: "Y", channels: 1, start: { alignTo: "X", prime() {} } }]));
+    await assert.rejects(feed.ready(), (error) => error instanceof MisoUsageError && error.diagnosticCode === "feed.align.reseeked");
+    assert.deepEqual([run.seekAts.map(([id, , frame]) => [id, frame]), controls(feed.rings[0])[MSB1_CONTROL.SEEK_EPOCH]], [[["X", 7n], ["X", 900n]], 0]);
+  }
 });
 
 test("two feeds that align to one reference at once both start: a locally refused read is retried after a macrotask", async () => {
