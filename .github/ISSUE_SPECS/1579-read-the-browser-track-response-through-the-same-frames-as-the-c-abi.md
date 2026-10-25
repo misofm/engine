@@ -153,3 +153,51 @@ qualification (`npm run qualify -- --artifacts ... --sdk-root ... --browser <b> 
 ## Supersedes and shrinks
 
 - None. #1580 ends the browser's own capture.
+
+## Decision record (#1579a, 2026-10-25)
+
+Slice #1579a (scope note, root): D1, D2, D3, D6 and the parity fixture, on the headless engine.
+#1579b keeps D4 for the browser, the browser's half of D5, the qualification rows and gate 5.
+
+- **Split of D5.** The browser engine still reads through its response Worker until #1579b: its
+  qualification rows render an `OfflineAudioContext` before they query, so a D1 query there needs
+  the #1579b row changes in the same slice. #1579a deletes only what the headless engine used:
+  `TrackResponseModule.queryActive`, `queryActiveIfChanged` and its capture-export path, and
+  `WasmBoundary.queryTrackResponseIfChanged`. `TrackResponseModule.querySnapshot*`,
+  `parseTrackResponseState`, `sameTrackResponseState`, `BrowserTrackResponse`,
+  `trackResponseHostRequest` and the Worker's `track-response-*` messages stay for #1579b.
+- **Seam.** The `responseRead` seam keeps its shape. The headless read is one D1 query; its state
+  key is built from the decoded result (`trackResponseStateOf`: every member field and curve bit,
+  not the sample, tag or frame length), so the owner publishes only on a change (D4's rule, on the
+  headless engine now).
+- **Event fields.** The generated frame table holds only the `RESPONSE_GET` messages, so the
+  `RESPONSE_READY` field IDs are written in `response-frame.ts`; the fixture holds them to the core.
+  `response-frame.ts` stays free of `ABI_LAYOUT` and `WebAssembly`; result codes map in the caller.
+- **Fixture.** `crates/capi/tests/response_strip.rs` writes `sdk/test/fixtures/response-ready.json`
+  (the document, the strip request frame and the `RESPONSE_READY` frame the C ABI answered, with the
+  codec's values). `sdk/test/live-response-evals.mjs` encodes the same request (bytes), decodes the
+  event through D3, and asks the headless engine the same question of the same document.
+- **`onEvent`.** `decodeProtocolEvent` (not in this slice's paths) refuses `0x8040`, which made an
+  `onEvent` listener report an error after every query. Both engines' `onEvent` now skip a
+  `RESPONSE_READY`: the query reads it. A `ProtocolEvent` kind for it is left to a later issue.
+
+SDK public behaviour changes (record them in the changelog with the PR):
+
+1. `OfflineEngine.queryTrackResponse` and `WasmBoundary.queryTrackResponse` return
+   `Promise<TrackResponseResult>`, settled after the next `render()` (R2), rejected with
+   `MisoUsageError` "exceeded its deadline" when `requestDeadlineMs` (default 5 s) passes first.
+   A disposed engine rejects with `MisoUsageError`.
+2. Concurrent headless queries run one at a time in call order (no "already in flight" refusal).
+3. A headless query no longer returns the state before the next render: it reads the state the
+   next block applied (gate 2). A headless `subscribeTrackResponse` and `pump()` settle only when
+   the app renders.
+4. `rackValue` is the decision-17 section code: input `4`, console `5`, inserts `2` (was 0, 4, 2).
+   Rack names do not change. `snapshotToken` is the request tag; `resultBytes` the event frame's
+   length; `enabledLeft`/`enabledRight` have one entry per section the core reports.
+5. A refusal raises `MisoEngineError` whose `code` is the core's diagnostic (for example
+   `response.reply_too_large`, was `refusedBudget`) and whose `result` is the mapped result class.
+   `responseRefusalResult` now maps `backpressure` to `backpressure` (was `internal`).
+6. `WasmBoundary.queryTrackResponseIfChanged` is removed.
+7. `engine.onEvent` (both engines) never delivers a `RESPONSE_READY`.
+8. `TrackResponseSubscriptionBounds` takes `maximumPoints` from `maximumResponsePoints` and
+   `maximumCaptureBytes` from `1 << 20` (same values as before).
