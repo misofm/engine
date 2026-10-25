@@ -134,8 +134,8 @@ and #1534 gate 3's worklet commands.
   then the ring's drops plus the same fold, unstaged and output-drop terms as the C ABI's.
 - **Re-split (root, 2026-10-25).** #1588a ships both halves: root authorized
   `crates/control-plane/src/{compile.rs,control.rs,adapter.rs}`, `hosts/host-web/src/lib.rs`
-  (the adapter consts only, so far) and `hosts/host-web/tests/protocol_cross_host.rs`. #1588b keeps the rest of its list: the render half's level word, restart and ring push in
-  `poll_meters`, the lease bit, taking each plan's ring producer
+  (the adapter consts only, so far) and `hosts/host-web/tests/protocol_cross_host.rs`. #1588b
+  keeps the rest of its list: the render half's level word, restart and ring push in `poll_meters`, the lease bit, taking each plan's ring producer
   (`SessionState::take_meter_frame_producer`) into its shape, turning `METER_DELIVERY` on,
   removing steps 1 and 5's exceptions, D5's meter entry, and gates 1, 2, 3 and 5.
 - **R2 amended (implementer).** The browser's strip counts are unbounded (its caps are
