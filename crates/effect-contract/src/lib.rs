@@ -35,11 +35,10 @@ pub use response::{
 pub const RESPONSE_SNAPSHOT_MAXIMUM_SECTIONS: usize = 6;
 
 pub use step::{
-    DEFAULT_STEP_LADDER, ExactDecimal, FADER_STEP_LADDER, LatticeError, LatticePoint,
-    NearestLatticeValues, ParameterLattice, StepLadder, canonical_descriptor_decimal,
-    decimal_to_f32, default_parameter_lattice, lattice_index_for_decimal, parameter_lattice_points,
-    parameter_lattice_points_parts, resolve_parameter_step, validate_parameter_lattice,
-    validate_parameter_lattice_parts,
+    DEFAULT_STEP_LADDER, FADER_STEP_LADDER, LatticeError, LatticePoint, ParameterLattice,
+    StepLadder, canonical_descriptor_decimal, decimal_to_f32, default_parameter_lattice,
+    parameter_lattice_points, parameter_lattice_points_parts, resolve_parameter_step,
+    validate_parameter_lattice, validate_parameter_lattice_parts,
 };
 pub use symmetry::{
     ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent, payload_sections_agree,
@@ -832,11 +831,10 @@ pub struct ParameterDescriptor {
     pub readable: bool,
     pub automatable: bool,
     pub enum_choices: &'static [EnumChoice],
-    /// Exact-decimal persisted-value lattice and named step ladder (issue #242).
+    /// Persisted-value lattice and named step ladder (issue #242).
     ///
     /// `minimum`, `maximum`, and `default_value` are rendered at this declaration's pinned
-    /// precision before lattice construction. Persisted document text is compared with those
-    /// decimal renderings and the generated interior points without passing through `f32`.
+    /// precision before lattice construction.
     pub lattice: ParameterLattice,
     /// Why this parameter is prepared (`automation_rate` is `None`), and nothing otherwise
     /// (decision 17, D1). `validate_descriptor` refuses a prepared parameter without a reason and

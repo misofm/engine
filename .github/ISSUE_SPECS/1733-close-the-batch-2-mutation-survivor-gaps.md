@@ -43,6 +43,13 @@ One row per item. Lines are at ad5c7ae86.
   canonical-string match does not replace it, and the pan and rate-keyed cutoff tests there assert
   the `NearestLatticeValues` refusal brackets. Rewriting them is a test-design change in a crate
   outside the authorized paths, so it goes back to root.
+- 2026-10-25, root ruling: (a) stands, and that file is authorized. Membership there is now a
+  numeric check through the product path (`decimal_to_f32(canonical)` bits equal the `f32`
+  value), and the bracket assertions are deleted: no product caller rounds to a neighbour. Two
+  tests whose claim was the deleted lookup are deleted: the default's prepared word (now the
+  `member` check of the bounds-and-default test) and the endpoint index round trip with padded
+  spellings (index == rank is in the lawful-lattice test; spelling belongs to the SDK). The lattice
+  oracle matches canonical text exactly; its output is byte-identical to the pre-change output.
 - 2026-10-25, implementer, item 3 finding: `apply_session_edit` refuses a same-length order with a
   duplicated ID (`[a, a]` on `[a, b]`), but only in the reorder loop, after `mem::take` has
   emptied the rack, so the refused call leaves the rack empty. The store applies edits to a

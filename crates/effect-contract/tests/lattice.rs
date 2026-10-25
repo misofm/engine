@@ -8,8 +8,7 @@
 use effect_contract::{
     AutomationRate, LatticePoint, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
     ParameterId, ParameterLattice, ParameterMapping, ParameterUnit, SmoothingRule, StepSize,
-    canonical_descriptor_decimal, decimal_to_f32, lattice_index_for_decimal,
-    parameter_lattice_points, resolve_parameter_step,
+    canonical_descriptor_decimal, decimal_to_f32, parameter_lattice_points, resolve_parameter_step,
 };
 
 fn descriptor(
@@ -79,8 +78,7 @@ fn geometric_ratio_row_keeps_its_round_maximum_and_meaningful_default() {
     ))
     .expect("ratio lattice");
     assert_eq!(ratio.last().expect("maximum").canonical, "20.00000000");
-    assert!(lattice_index_for_decimal(&ratio, "20").is_ok());
-    assert!(lattice_index_for_decimal(&ratio, "4.0").is_ok());
+    assert!(contains(&ratio, "4.00000000"));
 
     // The EQ Q row: 0.70710677 IS Butterworth 1/sqrt(2). Quantizing it onto the percent grid
     // would be a real quality loss, so ruling B3 admits it as an intrinsic member instead.
@@ -95,8 +93,10 @@ fn geometric_ratio_row_keeps_its_round_maximum_and_meaningful_default() {
     ))
     .expect("q lattice");
     assert_eq!(q.last().expect("maximum").canonical, "18.00000000");
-    let index = lattice_index_for_decimal(&q, "0.70710677").expect("butterworth default");
-    let point = &q[index as usize];
+    let point = q
+        .iter()
+        .find(|point| point.canonical == "0.70710677")
+        .expect("butterworth default");
     assert!(point.intrinsic);
     assert_eq!(
         decimal_to_f32(&point.canonical).expect("blessed conversion"),
@@ -180,109 +180,6 @@ fn arithmetic_rows_step_by_exactly_one_declared_unit() {
     assert_eq!(points.first().expect("minimum").canonical, "-24.0");
     assert_eq!(points.last().expect("maximum").canonical, "24.0");
     assert!(contains(&points, "0.0"));
-    // 0.25 dB is off a 0.1 dB grid: the refusal must name the two values that bracket it.
-    let refusal = lattice_index_for_decimal(&points, "0.25").expect_err("off-lattice");
-    assert_eq!(refusal.lower.as_deref(), Some("0.2"));
-    assert_eq!(refusal.upper.as_deref(), Some("0.3"));
-}
-
-// ---------------------------------------------------------------------------
-// S2: exact decimal, never an `f32` round trip.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn equivalent_spellings_of_one_lattice_point_are_one_value() {
-    let points = parameter_lattice_points(&descriptor(
-        ParameterUnit::Linear,
-        ParameterDomain::Continuous,
-        ParameterMapping::Linear,
-        Some(0.0),
-        Some(1.0),
-        0.5,
-        ParameterLattice::arithmetic(0.01, 2),
-    ))
-    .expect("linear lattice");
-    // The document's accepted spelling is the author's exact utterance and is preserved as
-    // written; every equivalent spelling names the same point and reaches the same `f32`.
-    let spellings = ["0.3", "0.30", "0.300000", "3e-1", "0.3e0", "+0.30"];
-    let mut prepared = Vec::new();
-    for spelling in spellings {
-        let index = lattice_index_for_decimal(&points, spelling)
-            .unwrap_or_else(|_| panic!("{spelling} is the same lattice point"));
-        prepared.push(decimal_to_f32(&points[index as usize].canonical).expect("conversion"));
-    }
-    assert!(
-        prepared
-            .windows(2)
-            .all(|pair| pair[0].to_bits() == pair[1].to_bits()),
-        "spelling variance is provably inert in the prepared word: {prepared:?}"
-    );
-    assert_eq!(prepared[0], 0.3_f32);
-}
-
-#[test]
-fn decimal_matching_refuses_what_an_f32_comparison_would_admit() {
-    // The red mutation this eval exists for: validating by comparing `f32` words instead of
-    // decimals. `0.3` is not `f32`-exact, so a whole neighbourhood of DIFFERENT decimals rounds
-    // to the same word. Every one of them is off-lattice and must be refused by name.
-    let points = parameter_lattice_points(&descriptor(
-        ParameterUnit::Linear,
-        ParameterDomain::Continuous,
-        ParameterMapping::Linear,
-        Some(0.0),
-        Some(1.0),
-        0.5,
-        ParameterLattice::arithmetic(0.1, 1),
-    ))
-    .expect("linear lattice");
-    let legal = decimal_to_f32("0.3").expect("blessed conversion");
-    let impostors = [
-        "0.30000001",
-        "0.300000011920928955078125",
-        "0.3000000119209290",
-        "0.30000000596046447753906250",
-    ];
-    for impostor in impostors {
-        // Each impostor is a DIFFERENT decimal that rounds to the SAME `f32` word, which is
-        // exactly what an `f32`-comparison validator cannot tell apart.
-        assert_eq!(
-            impostor.parse::<f32>().expect("parses").to_bits(),
-            legal.to_bits(),
-            "{impostor} must be the same f32 word as the legal 0.3"
-        );
-        let refusal = lattice_index_for_decimal(&points, impostor)
-            .expect_err("a different decimal is a different value");
-        assert_eq!(refusal.lower.as_deref(), Some("0.3"));
-        assert_eq!(refusal.upper.as_deref(), Some("0.4"));
-    }
-    // And the legal spelling itself still matches, so the rule discriminates rather than refusing
-    // everything in the neighbourhood.
-    let index = lattice_index_for_decimal(&points, "0.3").expect("the lattice point itself");
-    assert_eq!(
-        decimal_to_f32(&points[index as usize].canonical).map(f32::to_bits),
-        Some(legal.to_bits())
-    );
-}
-
-#[test]
-fn refusal_names_the_two_nearest_legal_values() {
-    let points = hertz(10.0, 20_000.0, 80.0, 20.0);
-    // The shipped fixture value that #242 makes illegal, and what it would have to become.
-    let refusal = lattice_index_for_decimal(&points, "120.0").expect_err("off-lattice");
-    assert_eq!(refusal.lower.as_deref(), Some("119.865"));
-    assert_eq!(refusal.upper.as_deref(), Some("121.257"));
-    // Below the minimum there is no lower neighbour, and above the maximum no upper one: that is
-    // out-of-domain, which is a different diagnosis from off-lattice.
-    let under = lattice_index_for_decimal(&points, "1.0").expect_err("under range");
-    assert_eq!(under.lower, None);
-    assert_eq!(under.upper.as_deref(), Some("10.000"));
-    let over = lattice_index_for_decimal(&points, "44100.0").expect_err("over range");
-    assert_eq!(over.lower.as_deref(), Some("20000.000"));
-    assert_eq!(over.upper, None);
-    // Text that is not a decimal literal at all brackets nothing.
-    let nonsense = lattice_index_for_decimal(&points, "twelve").expect_err("not a decimal");
-    assert_eq!(nonsense.lower, None);
-    assert_eq!(nonsense.upper, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,8 +205,6 @@ fn a_boolean_lattice_admits_exactly_its_two_encodings() {
             .collect::<Vec<_>>(),
         ["0", "1"]
     );
-    assert_eq!(lattice_index_for_decimal(&points, "1.0"), Ok(1));
-    assert!(lattice_index_for_decimal(&points, "2").is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -385,46 +280,4 @@ fn every_ladder_size_lands_on_a_lattice_point_and_clamps_at_the_ends() {
         resolve_parameter_step(&points, points.len() as u32 - 1, StepSize::Xl, 100, ladder),
         Some(points.len() as u32 - 1)
     );
-}
-
-#[test]
-fn a_negative_zero_spelling_names_the_zero_lattice_point() {
-    // A document may spell zero with a sign. `-0.0` and `0.0` are the same NUMBER, and the
-    // lattice is a set of numbers, so both name the one zero point and both prepare the one
-    // word. The descriptor surface has no signed zero at all -- `canonical_descriptor_decimal`
-    // refuses `-0.0` -- so there is no second point for a signed spelling to land on, and the
-    // matcher must not invent one. Pinned because a normalizer that let the sign survive would
-    // sort `-0.0` below every negative point and silently refuse a lawful document.
-    let points = parameter_lattice_points(&descriptor(
-        ParameterUnit::Db,
-        ParameterDomain::Continuous,
-        ParameterMapping::Linear,
-        Some(-24.0),
-        Some(24.0),
-        0.0,
-        ParameterLattice::arithmetic(0.1, 1),
-    ))
-    .expect("decibel lattice");
-
-    let zero = lattice_index_for_decimal(&points, "0.0").expect("the zero point");
-    assert_eq!(points[zero as usize].canonical, "0.0");
-    for spelling in ["-0.0", "-0", "0", "+0.0", "-0.00", "0.000"] {
-        assert_eq!(
-            lattice_index_for_decimal(&points, spelling),
-            Ok(zero),
-            "{spelling} names the zero lattice point"
-        );
-    }
-    // And the prepared word carries no sign either: every spelling reaches positive zero through
-    // the one blessed conversion.
-    let prepared = decimal_to_f32(&points[zero as usize].canonical).expect("conversion");
-    assert_eq!(prepared.to_bits(), 0.0_f32.to_bits());
-    assert!(!prepared.is_sign_negative());
-
-    // A signed zero is still a distinct value from its neighbours, so the rule is about the sign
-    // of zero and not about collapsing small magnitudes.
-    assert_ne!(lattice_index_for_decimal(&points, "-0.1"), Ok(zero));
-    assert_ne!(lattice_index_for_decimal(&points, "0.1"), Ok(zero));
-    // The descriptor surface refuses to render a signed zero in the first place.
-    assert_eq!(canonical_descriptor_decimal(-0.0, 1), None);
 }
