@@ -955,7 +955,11 @@ mod tests {
             assert!(transition.ducks(), "{case}: the route ducks");
             assert!(transition.strips().is_empty(), "{case}: b keeps playing");
             assert_eq!(transition.routes(), [Box::<str>::from("b-send")], "{case}");
-            assert_eq!(transition.compensation(), latency, "{case}: C is b-send's line");
+            assert_eq!(
+                transition.compensation(),
+                latency,
+                "{case}: C is b-send's line"
+            );
         }
         let lane_less = without(&|next| next.routes.retain(|route| route.id.as_str() != "b-main"));
         assert!(!lane_less.ducks(), "a lane-less route keeps the fold");

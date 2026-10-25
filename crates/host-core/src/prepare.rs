@@ -7668,9 +7668,7 @@ fn added_route_fades<'a>(
             tap.precedes_fader()
         } else {
             // (a): an added route between two strips that keep playing.
-            !known(route)
-                && destination_known
-                && (!armed_source || tap.precedes_fader())
+            !known(route) && destination_known && (!armed_source || tap.precedes_fader())
         };
         if fade {
             fades.push(RouteFade {
