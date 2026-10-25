@@ -8705,7 +8705,9 @@ mod structural_apply {
     ///
     /// Test value: red if the swap block's hook does not pair the observation readers (the tap
     /// would read as unarmed and the page's subscription would silently stop after every swap), or
-    /// if it maps the readers to the wrong effect slot after the added strip shifts them.
+    /// if it maps the readers to the wrong effect slot after the added strip shifts them, or if
+    /// the selected read reads readers it took at preparation and not the active plan's (#1586a:
+    /// after the carry those are the successor's fresh slots, which nothing publishes to).
     #[test]
     fn an_armed_tap_and_its_windows_follow_the_effect_through_a_swap() {
         let mut model =
