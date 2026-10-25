@@ -3382,6 +3382,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     effect_id: binding.key.section.id().as_str(),
                     tap_id: binding.key.tap_id,
                     window_blocks: binding.window_blocks,
+                    arm_tag: binding.arm_tag,
                 })
                 .collect();
             attach_effect_observation(&mut effects, taps, observation_window_blocks, &arms)

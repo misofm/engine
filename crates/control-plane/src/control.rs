@@ -1162,10 +1162,10 @@ pub struct SessionState<A: ControlAdapter> {
     /// The most observation slots any committed plan has had; the ended-event cells and the
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
-    /// The observation records the last rebuild queued again on the plan it published, taken
-    /// from the candidate it superseded (#1310, root ruling B15-Q4); empty after a rebuild that
-    /// superseded nothing.
-    pub(crate) observation_forwarded: Vec<ObservationForward>,
+    /// The next arm tag this session issues (#1585 D4): `1` at compile, one more per queued
+    /// observation record, so tags are monotone per session and `0` is never one. A record is
+    /// tagged when it is queued, after its batch was admitted, so a refused submission issues none.
+    pub(crate) next_arm_tag: u64,
     /// The live send moves that may still ramp, as one conservative window (root ruling B19-R7,
     /// the B17-R14 pattern; #1718 deletes it): `None` when none may.
     pub(crate) send_moves: Option<SendMoveWindow>,
@@ -1450,19 +1450,23 @@ pub(crate) fn observation_slots(
         let key_bytes = wire.key_bytes(producer.track_id.len(), producer.effect_id.len());
         let key_bytes = u16::try_from(key_bytes).unwrap_or(u16::MAX);
         for tap in 0..producer.observe_capacity() {
-            let is_armed = !bindings.is_empty()
-                && producer
+            let binding = if bindings.is_empty() {
+                None
+            } else {
+                producer
                     .descriptor
                     .observations
                     .get(tap)
-                    .is_some_and(|declared| {
-                        bindings.is_armed_by_parts(
+                    .and_then(|declared| {
+                        bindings.binding_by_parts(
                             &producer.track_id,
                             producer.address.rack == host_core::LiveEffectRack::Console,
                             &producer.effect_id,
                             declared.id.0,
                         )
-                    });
+                    })
+            };
+            let is_armed = binding.is_some();
             armed += usize::from(is_armed);
             if is_armed {
                 armed_bytes += usize::from(key_bytes);
@@ -1473,6 +1477,8 @@ pub(crate) fn observation_slots(
                 mark: 0,
                 key_bytes,
                 queued: false,
+                // An armed tap's prepared arm publishes its binding's tag (#1585 R2).
+                tag: binding.map_or(0, |binding| binding.arm_tag),
             });
         }
     }
@@ -1516,6 +1522,11 @@ pub(crate) struct ObservationSlot {
     /// on its own instance, because a tap it carries from the running plan takes that plan's
     /// state and would lose the record.
     pub(crate) queued: bool,
+    /// The tag of the last record queued for this tap on the newest plan, or of the binding its
+    /// prepared arm publishes (#1585 D4); `0` for none. Its kind is [`Self::armed`], which every
+    /// push and every slot build sets with it. A reader reports the tap pending while the record
+    /// is an arm whose tag its slot has not published, and unarmed at once after a disarm.
+    pub(crate) tag: u64,
 }
 
 /// What the host last pushed to one observation slot (#1584 D6a).
@@ -1564,11 +1575,8 @@ fn tap_key_of(
 }
 
 /// One observation record a superseded candidate's queue held, as it is queued again on its
-/// replacement's matching instance (#1310, root ruling B15-Q4).
-///
-/// A host that keeps its own copy of each plan's armed taps reads them through
-/// [`SessionState::observation_forwarded`] and copies them onto the replacement's copy, as it does
-/// for a record it admitted itself.
+/// replacement's matching instance (#1310, root ruling B15-Q4). No host mirrors it: render
+/// publishes each tap's arm state in its slot when it drains the record (#1585 D3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationForward {
     /// The replacement's effect producer, a position in [`SessionState::effect_producers`].
@@ -1579,6 +1587,10 @@ pub struct ObservationForward {
     pub armed: bool,
     /// The bound window, `0` for the plan's meter window.
     pub window_blocks: u32,
+    /// The record's tag (#1585 D4): the donor slot's for a forward the transaction does not
+    /// change, so render publishes the tag the record was acknowledged with; `0` asks the commit
+    /// for a fresh one.
+    pub arm_tag: u64,
 }
 
 /// The records a withdrawn candidate's observation queues hold, as the replacement queues them
@@ -1642,6 +1654,7 @@ pub(crate) fn observation_forwards(
                 tap_index,
                 armed: window.is_some(),
                 window_blocks: window.unwrap_or(0),
+                arm_tag: slots.get(slot as usize).map_or(0, |entry| entry.tag),
             });
         }
     }
@@ -1671,7 +1684,7 @@ pub(crate) fn observation_forwards(
 fn observe_successor_pushes(
     writes: &[controls::ObserveWrite],
     successor: &[host_core::EffectControlProducer],
-    forwards: &[ObservationForward],
+    forwards: &mut [ObservationForward],
 ) -> Result<Vec<ObservationForward>, CommandError> {
     let mut pushes = Vec::new();
     pushes
@@ -1700,10 +1713,13 @@ fn observe_successor_pushes(
         let Some((position, tap_index)) = target else {
             continue;
         };
-        if forwards
-            .iter()
-            .any(|forward| forward.position == position && forward.tap_index == tap_index)
+        // A forward re-queues the bound state, this write's included: it carries this write's
+        // fresh tag (#1585 D4).
+        if let Some(forward) = forwards
+            .iter_mut()
+            .find(|forward| forward.position == position && forward.tap_index == tap_index)
         {
+            forward.arm_tag = 0;
             continue;
         }
         pushes.push(ObservationForward {
@@ -1711,6 +1727,7 @@ fn observe_successor_pushes(
             tap_index,
             armed: write.armed,
             window_blocks: write.window_blocks,
+            arm_tag: 0,
         });
     }
     for push in &pushes {
@@ -4278,7 +4295,7 @@ where
         // #1310 (root ruling B15-Q4): the observation records queued on A, re-queued on B's matching
         // instances, with their room checked here. A tap B carries from P0 takes P0's state at
         // the swap, which never saw them; arming from the bindings covers only a tap B starts.
-        let forwards = match self.pending_providers.last() {
+        let mut forwards = match self.pending_providers.last() {
             Some(donor) if superseding => observation_forwards(
                 &donor.effects,
                 &self.observation_offsets,
@@ -4300,7 +4317,7 @@ where
             Rebuild::Transaction(prepared) => observe_successor_pushes(
                 prepared.get().prospective_session().observe_writes(),
                 &candidate_provider.effects,
-                &forwards,
+                &mut forwards,
             )?,
             Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => Vec::new(),
         };
@@ -4557,27 +4574,38 @@ where
         reservation.set_superseded(superseded_revisions);
         // #1310 (root ruling B15-Q4): A's queued observation records, on B's queues before B is
         // published. Their room was checked before the commit.
-        for forward in &forwards {
-            candidate_provider.effects[forward.position]
-                .try_push_observe(forward.tap_index, forward.armed, forward.window_blocks)
-                .expect("the room for every forwarded record was checked before the commit");
-            let first = slots.0[forward.position];
-            if let Some(slot) = slots.1.get_mut((first + forward.tap_index) as usize) {
-                slot.queued = true;
-            }
-        }
-        // #1584 T2: the transaction's own records, likewise, their room checked before the commit.
-        for push in &observe_pushes {
-            candidate_provider.effects[push.position]
-                .try_push_observe(push.tap_index, push.armed, push.window_blocks)
+        // #1584 T2: then the transaction's own records, likewise, their room checked before the
+        // commit. #1585 D4: each record is tagged here, after the commit, so a refused rebuild
+        // issues no tag; the slot and an armed binding take the tag its prepared arm or a reader
+        // compares against.
+        for record in forwards.iter().chain(&observe_pushes) {
+            let arm_tag = if record.arm_tag == 0 {
+                let tag = self.next_arm_tag;
+                self.next_arm_tag = tag.saturating_add(1);
+                tag
+            } else {
+                record.arm_tag
+            };
+            let producer = &mut candidate_provider.effects[record.position];
+            producer
+                .try_push_observe(
+                    record.tap_index,
+                    record.armed,
+                    record.window_blocks,
+                    arm_tag,
+                )
                 .expect("the room for every observe record was checked before the commit");
-            let first = slots.0[push.position];
-            if let Some(slot) = slots.1.get_mut((first + push.tap_index) as usize) {
+            if record.armed
+                && let Some(key) = tap_key_of(producer, record.tap_index)
+            {
+                self.observation.set_arm_tag(&key, arm_tag);
+            }
+            let first = slots.0[record.position];
+            if let Some(slot) = slots.1.get_mut((first + record.tap_index) as usize) {
                 slot.queued = true;
+                slot.tag = arm_tag;
             }
         }
-        // A move: the list was built before the commit.
-        self.observation_forwarded = forwards;
         // #1593 D4: the configuration the successor was prepared with is the session's from now
         // on; its epoch is the one the candidate's captures report at promotion.
         let configured_epoch = self.spectrum.commit(spectrum_configuration);
@@ -5650,6 +5678,28 @@ where
         })
     }
 
+    /// The tag of the last record this session queued for the tap `key` names on the newest plan,
+    /// or of the binding a prepared arm publishes there, `0` for none or for a key the plan does
+    /// not have (#1585 D4). Tags are monotone, so a reader whose slot publishes a lower tag knows
+    /// render has not applied the tap's last record yet. Allocates nothing.
+    #[must_use]
+    pub fn observation_issued_tag(&self, key: &ObservationKeyRef<'_>) -> u64 {
+        self.observation_issued(key).0
+    }
+
+    /// [`Self::observation_issued_tag`] and the kind of that record: `true` for an arm or a
+    /// re-arm (or a binding's prepared arm), `false` for a disarm or for none (#1585, root ruling
+    /// on #1977). A disarm is in effect for a reader at once: no later window belongs to the
+    /// subscription it ends. Allocates nothing.
+    #[must_use]
+    pub fn observation_issued(&self, key: &ObservationKeyRef<'_>) -> (u64, bool) {
+        self.resolve_observation_key(key)
+            .ok()
+            .and_then(|tap| self.observation_slot(tap.producer, tap.tap_index))
+            .and_then(|slot| self.observation_pending.get(slot))
+            .map_or((0, false), |entry| (entry.tag, entry.armed))
+    }
+
     /// The encoded bytes of the one `OBSERVATION_ENDED` frame that would end every armed tap,
     /// pushes the table has not folded yet included, or `0` when none is armed (#1685 D1). A
     /// subscription is admitted only while this is at most [`Self::observation_frame_bytes`].
@@ -5896,7 +5946,12 @@ where
             .unwrap_or(&mut self.providers)
             .effects
             .get_mut(position)?;
-        let pushed = producer.try_push_observe(tap_index, armed, window_blocks);
+        // #1585 D4: the record's tag, issued only when the push succeeds.
+        let arm_tag = self.next_arm_tag;
+        let pushed = producer.try_push_observe(tap_index, armed, window_blocks, arm_tag);
+        if pushed.is_ok() {
+            self.next_arm_tag = arm_tag.saturating_add(1);
+        }
         // #1310 (root ruling B15-Q4): a record on a plan render has not adopted.
         let on_candidate = !self.pending_providers.is_empty();
         if pushed.is_ok() {
@@ -5919,6 +5974,7 @@ where
                     PendingArm::Disarm
                 };
                 entry.queued |= on_candidate;
+                entry.tag = arm_tag;
                 // The count and the bytes follow the slot's state (#1676, #1685): an arm of an
                 // armed tap only changes its window, and a disarm of a tap that is not armed
                 // removes nothing.
@@ -5963,13 +6019,15 @@ where
                 break;
             };
             for slot in first..end {
-                let arm = core::mem::take(&mut self.observation_pending[slot as usize].pending);
+                let entry = &mut self.observation_pending[slot as usize];
+                let arm = core::mem::take(&mut entry.pending);
+                let arm_tag = entry.tag;
                 let Some(key) = tap_key_of(producer, slot - first) else {
                     continue;
                 };
                 match arm {
                     PendingArm::None => {}
-                    PendingArm::Arm(window) => self.observation.set(key, window),
+                    PendingArm::Arm(window) => self.observation.set_tagged(key, window, arm_tag),
                     PendingArm::Disarm => {
                         self.observation.clear(&key);
                     }
@@ -5985,16 +6043,6 @@ where
     #[must_use]
     pub fn master_strip(&self) -> Option<&session::StableId> {
         self.monitor.master()
-    }
-
-    /// The observation records the last rebuild queued again on the plan it published, from the
-    /// unadopted candidate it superseded (#1310, root ruling B15-Q4), each with the tap's bound state.
-    /// Read right after a structural command publishes a plan; empty when it superseded nothing.
-    /// A host that mirrors each plan's armed taps copies these onto the new plan's mirror, as for a
-    /// record it admitted: the plan arms them at its first block, whatever its carry brings.
-    #[must_use]
-    pub fn observation_forwarded(&self) -> &[ObservationForward] {
-        &self.observation_forwarded
     }
 
     /// The taps the host has armed (#1584 D6a), for a test or an adapter that reports them.
