@@ -8699,8 +8699,8 @@ mod tests {
         };
         use session::{
             ControlAddress, Effect, EffectIdentity, EffectQuality, LinkMode, Owner,
-            ParameterChannel, RouteSource, Section, SessionModel, SidechainDeclaration, Source,
-            StableId, Track, parse_session_json,
+            ParameterChannel, RouteSource, Section, SendTap, SessionModel, SidechainDeclaration,
+            Source, StableId, Track, parse_session_json,
         };
 
         const SESSION: &str =
@@ -9447,6 +9447,172 @@ mod tests {
                 fresh.blocks[..],
                 "a fresh plan of the edit from S"
             );
+        }
+
+        /// The gate-6 session (#1397b): track `t1` routed from its `post_fader` tap into submix
+        /// `g`, `g` into submix `h`, `h` to the output; track `t2` with two soft-clip inserts
+        /// (31 samples each) into `h`; track `k` with a true-peak limiter (486 samples) and then a
+        /// compressor keyed from `g`'s `key` tap, to the output. `t1` reads [`SOURCE`], `t2` and
+        /// `k` read [`AUX`]. With `clipped`, `t1` holds one soft-clip insert.
+        fn keyed_bus(key: SendTap, clipped: bool) -> SessionModel {
+            use session::{Route, RouteDestination, Sidechain, Submix};
+            let mut model = session_a();
+            let template_track = model.tracks[0].clone();
+            let template_route = model.routes[0].clone();
+            let soft_clip = |id: &str| Effect {
+                identity: EffectIdentity::Native {
+                    effect_id: sid("miso.soft-clip"),
+                },
+                link_mode: LinkMode::DualMono,
+                ..limiter(id)
+            };
+            let track = |id: &str, source: &str, inserts: Vec<Effect>| Track {
+                id: sid(id),
+                source_id: sid(source),
+                inserts: session::Rack { effects: inserts },
+                ..template_track.clone()
+            };
+            let mut keyed = compressor("comp");
+            keyed.link_mode = LinkMode::DualMono;
+            keyed.sidechain = SidechainDeclaration::Routed(Sidechain {
+                source: RouteSource::Submix {
+                    submix_id: sid("g"),
+                    tap: key,
+                },
+                port_id: sid("sidechain-in"),
+            });
+            model.tracks = vec![
+                track("k", AUX, vec![limiter("limiter-0"), keyed]),
+                track(
+                    "t1",
+                    SOURCE,
+                    if clipped { vec![soft_clip("clip-1")] } else { Vec::new() },
+                ),
+                track("t2", AUX, vec![soft_clip("clip-a"), soft_clip("clip-b")]),
+            ];
+            model.submixes = vec![
+                Submix::unity(sid("g"), &model.console),
+                Submix::unity(sid("h"), &model.console),
+            ];
+            let route = |id: &str, source: RouteSource, into: Option<&str>| Route {
+                id: sid(id),
+                source,
+                destination: into.map_or_else(
+                    || template_route.destination.clone(),
+                    |submix| RouteDestination::SubmixInput {
+                        submix_id: sid(submix),
+                    },
+                ),
+                ..template_route.clone()
+            };
+            let from_track = |id: &str, tap| RouteSource::Track {
+                track_id: sid(id),
+                tap,
+            };
+            let from_submix = |id: &str, tap| RouteSource::Submix {
+                submix_id: sid(id),
+                tap,
+            };
+            model.routes = vec![
+                route("g-h", from_submix("g", SendTap::PostFader), Some("h")),
+                route("h-main", from_submix("h", SendTap::PostPan), None),
+                route("k-main", from_track("k", SendTap::PostPan), None),
+                route("t1-g", from_track("t1", SendTap::PostFader), Some("g")),
+                route("t2-h", from_track("t2", SendTap::PostFader), Some("h")),
+            ];
+            model
+        }
+
+        /// #1397 gate 6, a sidechain key out of a grown strip, on both bank widths. A soft-clip
+        /// insert added to `t1` of [`keyed_bus`] with `P_MAX` 0 takes the transition at submit
+        /// (`warm_lead` answers `LeadBound`); `g`'s arrival grows by 31, so the `g`-to-`h` route
+        /// line shrinks from 62 to 31 samples and the `g`-to-`k` key line from 486 to 455.
+        /// - (a) Keyed from `g`'s `post_fader` tap: the successor restarts `[g, t1]`, and `S`
+        ///   counts the key line, `C = 486`.
+        /// - (b) Keyed from `g`'s `pre_fader` tap: #1324 D1's closure restarts `k` too,
+        ///   `[g, k, t1]`, and `C` is `g`-to-`h`'s 62.
+        ///
+        /// Each is published `NoEarlierThan(S)`, adopted at `S`, reports `TRANSITION_FALLBACK`,
+        /// and every block before `t1`'s fire block (the first at or after `S + 31`) equals the
+        /// session with no structural edit and the ducked strips live-muted at the edit's block.
+        ///
+        /// Test value: (a) a `C` that counts sidechain lines only from strips the carry join
+        /// restarts (round-8 M1) misses `g`, so `S` counts 62 instead of 486 and the shortened key
+        /// line drops `g`'s fade tail from `k`'s detector; (b) a closure run before the
+        /// transition's forced restarts join the set leaves `k` carried and audible through the
+        /// duck, and its shortened key line drops `g`'s pre-fader signal at `S`.
+        #[test]
+        fn a_sidechain_key_out_of_a_grown_strip_is_ducked() {
+            const CLIP: u64 = 31;
+            let bound = WarmConfig {
+                p_max: 0,
+                prime_bytes_max: u64::MAX,
+            };
+            let limits = ControlLimits {
+                maximum_submixes: 2,
+                ..limits()
+            };
+            for (key, restarted, c) in [
+                (SendTap::PostFader, &["g", "t1"][..], 486),
+                (SendTap::PreFader, &["g", "k", "t1"][..], 62),
+            ] {
+                let a = keyed_bus(key, false);
+                let b = keyed_bus(key, true);
+                let edit = [SessionEdit::UpsertTrack {
+                    track: b.tracks[1].clone(),
+                }];
+                let n = u64::from(a.control_smoothing_samples().mute);
+                for &backend in lane::Backend::VECTOR {
+                    let boot = |warm| {
+                        let mut rig = Rig::boot_on(warm, limits, &a, Some(backend));
+                        rig.render(BEFORE);
+                        rig
+                    };
+                    let mut rig = boot(Some(bound));
+                    let p = rig.children.session.test_render_clock();
+                    let s = (p + QUANTUM + n + c).div_ceil(QUANTUM) * QUANTUM;
+                    assert_eq!(
+                        rig.rebuild(&edit),
+                        PlanAdoption::NoEarlierThan(s),
+                        "{key:?} {backend:?}"
+                    );
+                    assert_eq!(rig.primed(), None);
+                    let newest = rig
+                        .children
+                        .session
+                        .pending_providers
+                        .last()
+                        .expect("the transition");
+                    assert_eq!(
+                        newest
+                            .inventory
+                            .restarted_strips()
+                            .iter()
+                            .map(|id| &**id)
+                            .collect::<Vec<_>>(),
+                        restarted,
+                        "{key:?} {backend:?}"
+                    );
+                    let s_block = usize::try_from(s / QUANTUM).expect("block");
+                    let fire = usize::try_from((s + CLIP).div_ceil(QUANTUM)).expect("block");
+                    rig.render(fire - BEFORE);
+                    assert_eq!(rig.swaps(), [s_block], "{key:?} {backend:?}");
+                    let watermark = rig.children.plan.queries().watermark().expect("watermark");
+                    assert_eq!(watermark.outcome_flags, OUTCOME_TRANSITION_FALLBACK);
+                    let mut reference = boot(None);
+                    let mutes: Vec<SessionEdit> = restarted
+                        .iter()
+                        .map(|strip| builtin(strip, 6, 1.0))
+                        .collect();
+                    assert!(matches!(reference.transact(&mutes), Ok(EditPath::Live)));
+                    reference.render(fire - BEFORE);
+                    assert_eq!(
+                        first_divergence(&rig, &reference),
+                        None,
+                        "{key:?} {backend:?}: the reference until t1's fire block"
+                    );
+                }
+            }
         }
 
         /// #1397 D1's second arm: a `Warm` answer with a zero lead (injected: the restarts confine
