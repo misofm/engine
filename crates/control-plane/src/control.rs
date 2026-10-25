@@ -68,9 +68,11 @@ pub struct ProviderEpoch {
     /// effect instance in `HostLiveControlHandles::effect_observations` order: the windows a tap an
     /// `Observe` edit armed publishes. Empty for a host whose preparer keeps them itself (the
     /// browser's). Their slots are `Arc`s shared with the plan's lanes, as the meters' rings are.
-    /// Only the adapters' tests read them before #1586.
-    #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+    /// The meter delivery's gain reduction reads them (#1587b).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
+    /// Each observation handle's strip (#1587b), in `observations` order: its index in the plan's
+    /// strips (`SessionModel::strips` order, the meter frame's), built with the plan.
+    pub(crate) observation_strips: Box<[u32]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
     /// The handle of this epoch's plan's revision gate (#1502 D1). Control publishes every
@@ -699,6 +701,7 @@ impl ProviderEpoch {
             meters,
             meter_tables: host_core::MeterTables::empty(),
             observations: Box::default(),
+            observation_strips: Box::default(),
             capi,
             revision_gate,
             carried: CarriedSourceBytes::default(),
@@ -712,12 +715,14 @@ impl ProviderEpoch {
         owner
     }
 
-    /// This epoch with its plan's observation readers (#1584 D7).
+    /// This epoch with its plan's observation readers (#1584 D7) and their strips (#1587b).
     pub(crate) fn with_observations(
         mut self,
         observations: Box<[host_core::EffectObservationHandle]>,
+        observation_strips: Box<[u32]>,
     ) -> Self {
         self.observations = observations;
+        self.observation_strips = observation_strips;
         self
     }
 
@@ -741,6 +746,7 @@ impl ProviderEpoch {
             meters,
             meter_tables: host_core::MeterTables::empty(),
             observations: Box::default(),
+            observation_strips: Box::default(),
             capi,
             revision_gate,
             carried,
@@ -1248,7 +1254,8 @@ impl SessionMeters {
         })
     }
 
-    /// Resolve every entry of `table` against `consumers`, the strip meters of the epoch whose
+    /// Resolve every strip entry of `table` (peak and gain reduction, #1587b) against
+    /// `consumers`, the strip meters of the epoch whose
     /// tables the delivery holds (one per strip, in the frame's strip order), and size the folds
     /// to the table. The folds keep their values: they are indexed by table entry, so a batch an
     /// adoption interrupts goes on folding into them, and `push_with_strips` resets them at a
@@ -1257,12 +1264,12 @@ impl SessionMeters {
     fn resolve(&mut self, table: &[protocol::MeterEntry], consumers: &[host_core::MeterConsumer]) {
         self.resolution.clear();
         self.resolution.extend(table.iter().map(|entry| {
-            match (&entry.target, entry.metric) {
-                (protocol::MeterTarget::Strip(id), protocol::MeterMetric::Peak) => consumers
+            match &entry.target {
+                protocol::MeterTarget::Strip(id) => consumers
                     .iter()
                     .position(|meter| *meter.track_id == **id)
                     .and_then(|index| u32::try_from(index).ok()),
-                _ => None,
+                protocol::MeterTarget::Output => None,
             }
         }));
         self.folds.resize(
@@ -1306,11 +1313,32 @@ fn epoch_meters<'a>(
         .map(|provider| &*provider.meters)
 }
 
-/// The C ABI's delivery reads no gain-reduction tap until #1587b.
-struct NoGainReductionTaps;
+/// The observation taps of a provider epoch, as the meter delivery's gain reduction reads them
+/// (#1587b): every declared tap of every observed instance, on its instance's strip, with the arm
+/// state render publishes in the tap's slot (#1585 D2). A torn read is an unarmed tap for this
+/// poll.
+struct CapiGainReductionTaps<'a> {
+    observations: &'a [host_core::EffectObservationHandle],
+    strips: &'a [u32],
+}
 
-impl host_core::GainReductionTaps for NoGainReductionTaps {
-    fn for_each_tap(&mut self, _visit: &mut impl FnMut(host_core::TapView<'_>)) {}
+impl host_core::GainReductionTaps for CapiGainReductionTaps<'_> {
+    fn for_each_tap(&mut self, visit: &mut impl FnMut(host_core::TapView<'_>)) {
+        for (handle, &strip) in self.observations.iter().zip(self.strips) {
+            for (descriptor, reader) in handle.descriptor.observations.iter().zip(&handle.readers) {
+                let (armed, arm_sample) = reader
+                    .read_state()
+                    .map_or((false, 0), |state| (state.armed, state.arm_sample));
+                visit(host_core::TapView {
+                    strip,
+                    descriptor,
+                    reader,
+                    armed,
+                    arm_sample,
+                });
+            }
+        }
+    }
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -2200,11 +2228,13 @@ where
     /// publishes none, bounded by the window queue's depth and one more. It polls only while the
     /// delivery holds the running epoch's tables, with that epoch's strip meters.
     ///
-    /// Records follow the table (D3), two per entry: the output's peak entry gives the batch's
-    /// left and right output peak, `VALID` when the output peak covered the batch's span; a strip's
-    /// peak entry gives its strip's left and right peak, the maxima over the batch's frames,
-    /// `VALID` when every frame had the strip; `CLIPPED` marks a valid value above `1.0`, and a
-    /// value that is not valid is `0.0` with flags `0`. An accepted table needs at most
+    /// Records follow the table (D3): the output's peak entry gives the batch's left and right
+    /// output peak, `VALID` when the output peak covered the batch's span; a strip's peak entry
+    /// gives its strip's left and right peak, the maxima over the batch's frames, `VALID` when
+    /// every frame had the strip; `CLIPPED` marks a valid peak above `1.0`. A strip's gain
+    /// reduction entry gives one `Aggregate` record (#1587b), the last frame's reading that is
+    /// present, `VALID` when any frame's is: only an armed tap's window from at or after its arm
+    /// sample is a reading. A value that is not valid is `0.0` with flags `0`. An accepted table needs at most
     /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, so the records stay on the stack.
     fn stage_meter_batches(&mut self, revision: protocol::SessionRevision) {
         /// `METER_BATCH` record flags (registry): valid and clipped.
@@ -2225,11 +2255,15 @@ where
         };
         let mut records = [blank; host_core::MAXIMUM_METER_BATCH_RECORDS];
         for _ in 0..=host_core::METER_QUEUE_DEPTH {
-            let Some(frame) = meters.delivery.poll(
-                &mut self.providers.meters,
-                &mut NoGainReductionTaps,
-                next_sample,
-            ) else {
+            let mut taps = CapiGainReductionTaps {
+                observations: &self.providers.observations,
+                strips: &self.providers.observation_strips,
+            };
+            let Some(frame) =
+                meters
+                    .delivery
+                    .poll(&mut self.providers.meters, &mut taps, next_sample)
+            else {
                 break;
             };
             let Some(batch) =
@@ -2249,8 +2283,21 @@ where
                     (protocol::MeterTarget::Strip(_), protocol::MeterMetric::Peak) => {
                         (fold.present, fold.peak)
                     }
-                    // Refused at the configure until #1587b.
-                    (_, protocol::MeterMetric::GainReduction) => continue,
+                    // #1587b D3: one aggregate record, never clipped. The wire refuses an
+                    // output gain-reduction entry.
+                    (_, protocol::MeterMetric::GainReduction) => {
+                        if let Some(slot) = records.get_mut(count) {
+                            let valid = fold.gain_reduction_present;
+                            *slot = protocol::MeterRecord {
+                                handle,
+                                component: protocol::MeterComponent::Aggregate,
+                                flags: if valid { VALID } else { 0 },
+                                value: if valid { fold.gain_reduction_db } else { 0.0 },
+                            };
+                            count += 1;
+                        }
+                        continue;
+                    }
                 };
                 for (component, value) in [
                     (protocol::MeterComponent::Left, peak[0]),
@@ -4276,6 +4323,7 @@ where
             meters,
             meter_tables,
             observations,
+            observation_strips,
             plan: candidate_plan,
             resources,
             carried,
@@ -4307,6 +4355,7 @@ where
         );
         candidate_provider.discontinuity = discontinuity;
         candidate_provider.observations = observations;
+        candidate_provider.observation_strips = observation_strips;
         candidate_provider.meter_tables = meter_tables;
         // The configuration epoch is set beside the push, after the commit.
         candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {

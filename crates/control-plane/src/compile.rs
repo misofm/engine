@@ -25,6 +25,9 @@ pub(crate) struct PreparedRuntime {
     /// `HostLiveControlHandles::effect_observations` order: kept, not dropped. Empty for a host
     /// whose preparer takes them for itself (the browser's).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
+    /// Each observation handle's strip (#1587b), in `observations` order: its index in the
+    /// session model's strips, the meter frame's strip order. Empty with `observations`.
+    pub(crate) observation_strips: Box<[u32]>,
     pub(crate) plan: PreparedRenderPlan,
     /// The plan's one revision-gate handle, taken before the plan is published (#1502 D6).
     pub(crate) revision_gate: PlanRevisionGate,
@@ -832,15 +835,16 @@ pub(crate) struct ObservationResources {
 }
 
 /// The heap `handles` own (#1584 D7): the boxed slice, and each handle's strip and effect ID text
-/// and its boxed readers. The readers' slots are `Arc`s shared with the plan's lanes, whose bytes
-/// are the plan's `observation_retained_bytes`.
+/// and its boxed readers, and their strip index, `strips` (#1587b). The readers' slots are `Arc`s
+/// shared with the plan's lanes, whose bytes are the plan's `observation_retained_bytes`.
 pub(crate) fn observation_handle_bytes(
     handles: &[host_core::EffectObservationHandle],
+    strips: &[u32],
 ) -> Result<u64, CompileFailure> {
     let arithmetic = || failure(ResourceFault::Arithmetic);
     handles
         .iter()
-        .try_fold(size_of_val(handles), |total, handle| {
+        .try_fold(size_of_val(handles) + size_of_val(strips), |total, handle| {
             total
                 .checked_add(handle.track_id.len())?
                 .checked_add(handle.effect_id.len())?
@@ -1674,6 +1678,25 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // #1584 D7: the observation readers stay with the plan's epoch, the reader of every tap an
     // `Observe` edit arms. Shrunk to their length first, so the charge below is the allocation.
     let observations = effect_observations.into_boxed_slice();
+    // #1587b: each handle's strip, so the meter delivery's gain reduction folds a tap's window
+    // into its strip's word without a search. Every handle names a strip of the plan; one that
+    // did not would get `u32::MAX`, outside every frame, which the fold skips.
+    let observation_strips = {
+        let model = compiled.normalized_model();
+        let mut strips = Vec::new();
+        strips
+            .try_reserve_exact(observations.len())
+            .map_err(|_| failure(ResourceFault::Allocation))?;
+        for handle in &observations {
+            let index = model
+                .strips()
+                .position(|strip| strip.id.as_str() == &*handle.track_id)
+                .and_then(|index| u32::try_from(index).ok())
+                .unwrap_or(u32::MAX);
+            strips.push(index);
+        }
+        strips.into_boxed_slice()
+    };
     // #1587a R2: the plan's meter tables, built here, on the control thread, so its adoption
     // exchanges them by pointer. Only a control-plane meter delivery reads them.
     let meter_tables = if A::METER_DELIVERY {
@@ -1690,7 +1713,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         prepared.report.route_control_resources,
         observation_resources(
             &effects,
-            observation_handle_bytes(&observations)?,
+            observation_handle_bytes(&observations, &observation_strips)?,
             observation_slots_high_water,
         )?,
         limits,
@@ -1743,6 +1766,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         meters,
         meter_tables,
         observations,
+        observation_strips,
         plan,
         revision_gate,
         resources: PlanResources {
@@ -1881,6 +1905,7 @@ where
         meters,
         meter_tables,
         observations,
+        observation_strips,
         plan,
         mut revision_gate,
         resources,
@@ -2022,7 +2047,7 @@ where
             capi,
             revision_gate,
         )
-        .with_observations(observations),
+        .with_observations(observations, observation_strips),
         pending_providers,
         retired_providers,
         publisher,

@@ -5477,16 +5477,6 @@ fn a_refused_meter_table_is_typed_and_changes_nothing() {
                 "meter_period_blocks".to_owned(),
             )],
         ),
-        (
-            vec![
-                output_peak_entry(),
-                strip("eq0", protocol::MeterMetric::GainReduction),
-            ],
-            window,
-            StatusCode::Unavailable,
-            "meter.gain_reduction.unavailable",
-            path(1),
-        ),
     ];
     for (request, (meters, period, status, code, at)) in (2..).zip(refusals) {
         assert_eq!(

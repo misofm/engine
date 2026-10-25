@@ -3328,10 +3328,11 @@ fn race_live_edits(run: usize) -> RaceCounts {
         // SAFETY: No other thread uses either handle yet.
         unsafe { fed_render_c(session, plan, &mut feed, block) };
     }
-    // #1583 gate 7, #1587a gate 5: the output's and two strips' peaks, one batch per window,
-    // configured after the warm-up so the race's first block applies the requested gate, every
-    // block folds the output and strip meters, and the control thread stages the batches and
-    // adopts each swap's strip meters.
+    // #1583 gate 7, #1587a and #1587b gate 5: the output's and two strips' peaks and the first
+    // strip's gain reduction, one batch per window, configured after the warm-up so the race's
+    // first block applies the requested gate, every block folds the output and strip meters, and
+    // the control thread stages the batches, reads the armed tap and adopts each swap's strip
+    // meters.
     let window = 12_u32;
     let strip = |id: &str| protocol::MeterEntry {
         target: protocol::MeterTarget::Strip(id.into()),
@@ -3345,6 +3346,11 @@ fn race_live_edits(run: usize) -> RaceCounts {
             },
             strip("eq0"),
             strip("race-bus"),
+            // #1587b gate 5: the gain reduction of the strip whose compressor tap the race arms.
+            protocol::MeterEntry {
+                target: protocol::MeterTarget::Strip("eq0".into()),
+                metric: protocol::MeterMetric::GainReduction,
+            },
         ],
         meter_period_blocks: window,
         meter_window_blocks: None,
