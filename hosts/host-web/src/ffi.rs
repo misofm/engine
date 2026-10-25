@@ -6873,7 +6873,7 @@ mod observation_alias_tests {
     ///
     /// The fixture puts an unobserved EQ in `pre_insert` and the observed compressor in
     /// `post_insert`, so the compressor is console slot `1`. Red if a numeric read resolves a
-    /// console selection over `pre_insert` alone (`resolve_observation` then finds no `comp` and
+    /// console selection over `pre_insert` alone (the observation index then finds no `comp` and
     /// refuses the read), or if `post_insert` is numbered from `0` (the map reports slot `0`, and
     /// slot `0` is the EQ, which has no tap).
     #[test]

@@ -4205,6 +4205,33 @@ fn bus_meters_render_and_poll_without_allocating() {
     assert_eq!(deallocations, 0, "render/poll freed");
 }
 
+/// The dense effect slot and the tap index one stable selection names, through the plan's
+/// observation index (#1586 D3), so a test reaches the reader the read reads.
+fn resolve_observation(
+    ready: &ReadyOwnership,
+    selection: &ObservationSelection<'_>,
+) -> Result<(usize, usize), ObservationReadError> {
+    let entry = ready
+        .shape
+        .observation_index
+        .find(selection.track_id, selection.rack, selection.effect_slot_id)
+        .ok_or(ObservationReadError::InvalidSelection)?;
+    let handle = entry.handle.ok_or(ObservationReadError::Unsupported)?;
+    let effect = ready
+        .shape
+        .effect_instances
+        .iter()
+        .position(|instance| instance.as_ref().and_then(|instance| instance.reader) == Some(handle))
+        .ok_or(ObservationReadError::Unsupported)?;
+    let tap = entry
+        .effect
+        .observations
+        .iter()
+        .position(|tap| tap.id.0 == selection.tap_id)
+        .ok_or(ObservationReadError::InvalidSelection)?;
+    Ok((effect, tap))
+}
+
 #[test]
 fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     const QUANTUM: u32 = 128;
@@ -4572,13 +4599,11 @@ fn observe_key(
 #[cfg(feature = "test-support")]
 fn armed_mask(host: &mut AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
     let ready = host.ready.as_ref().expect("ready");
-    let strip = strip_index(
-        &ready.shape.tracks,
-        &ready.shape.submixes,
-        strip_id.as_bytes(),
-    )?;
-    let effect = ready.effect_by_id(strip, LiveEffectRack::Inserts, insert_id.as_bytes())?;
-    let reader = ready.shape.effect_instances.get(effect)?.as_ref()?.reader?;
+    let reader = ready
+        .shape
+        .observation_index
+        .find(strip_id, LiveEffectRack::Inserts, insert_id)?
+        .handle?;
     let companions = host
         .plan
         .as_mut()?
