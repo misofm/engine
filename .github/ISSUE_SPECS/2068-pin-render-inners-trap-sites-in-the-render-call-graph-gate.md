@@ -37,3 +37,9 @@ A changed count fails with the owner name, the found count and the pinned count.
 - Measured on `build-web-audioworklet.sh --named-twin` at 207cad85f: `render_inner` holds 1
   `unreachable` site in the `miso_engine_web_v1_render` closure; it is in neither the `meter_poll`
   nor the `command_submit` closure.
+- PR evidence (mutant, restored): `core::hint::black_box(core::hint::black_box([0u8; 4])[frames]);`
+  added in `PreparedRenderPlan::render_inner`, named twin rebuilt. The gate went red with
+  `trap owner 18PreparedRenderPlan12render_inner holds 2 trap sites, pinned at 1`; origin/main's
+  analyser (name-only allow list) stayed green on the same mutant build.
+- Review fold: `--trap-owner` requires `SUBSTRING=SITES`; a bare name fails. No caller used the
+  bare form. Self-test (b1) now proves the refusal and uses pinned forms; (b1a) covers the pin.
