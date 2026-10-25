@@ -208,6 +208,7 @@ fn meter_entry_json(entry: &MeterEntry) -> J {
     let mut fields = Vec::new();
     match &entry.target {
         MeterTarget::Output => fields.push(("target", text("output"))),
+        MeterTarget::Master => fields.push(("target", text("master"))),
         MeterTarget::Strip(id) => {
             fields.push(("target", text("strip")));
             fields.push(("stripId", text(id)));
