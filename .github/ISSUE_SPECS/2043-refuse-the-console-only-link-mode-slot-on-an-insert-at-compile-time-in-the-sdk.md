@@ -32,3 +32,14 @@ callers. No wire or runtime behaviour changes.
 ## Paths
 `sdk/codegen/generate.mjs`, `sdk/src/generated/control-builders.ts`, `sdk/src/core/live-controls.ts`,
 `sdk/src/core/control-builder-support.ts`, `sdk/test/`, this spec.
+
+## Decision record (attempt 1, 2026-10-25)
+- One parametrised class, not two: `EffectControlBuilders<E, R extends "console" | "inserts" = union>`,
+  `rack: R`, `linkMode(mode: R extends "console" ? EffectConsoleLinkModeLabel<E> : EffectLinkModeLabel<E>)`.
+  The default union keeps every existing caller compiling; it distributes to today's loose signature.
+- `EffectEdits<E, R = LiveControlRack>`; `console()` returns `EffectEdits<E, "console">`, `insert()`
+  `EffectEdits<E, "inserts">`, `effect(rack, index, id)` keeps the union. `EffectInstance` does not grow
+  an `R`: the strip context and the `EffectEdits` constructor take `EffectInstance<E> & { rack: R }`.
+- The runtime refusal stays for untyped callers; no wire or runtime change.
+- Evidence: the `@ts-expect-error` row in `sdk/test/live-controls-types.ts` goes red (TS2578, unused
+  directive) when the generator emits the union `linkMode` signature again.
