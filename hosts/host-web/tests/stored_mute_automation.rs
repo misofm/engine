@@ -106,7 +106,7 @@ impl Leg for Browser {
         self.generation += 1;
         assert_eq!(
             self.host
-                .session_seek(None, self.generation, timeline_frame, None),
+                .session_seek(self.generation, timeline_frame, None),
             RESULT_OK,
             "browser session seek"
         );
@@ -121,7 +121,7 @@ impl Leg for Browser {
             .control_request_mut(length)
             .expect("the control request staging")[..bytes.len()]
             .copy_from_slice(&bytes);
-        let result = self.host.control_command(length, None);
+        let result = self.host.control_command(length);
         let response = self.host.control_response().to_vec();
         assert_eq!(result, RESULT_OK, "{}", String::from_utf8_lossy(&response));
         // A commit queues its reliable events; the control half's drain reads them (#1570b D4).
