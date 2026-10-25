@@ -19,6 +19,7 @@ import {
 } from "../src/browser/pcm-ring.ts";
 import {
   attachEngineFeed,
+  linkFeedEngine,
   PcmFeedError,
   PcmRunwayError,
   prepareEngineFeed,
@@ -28,6 +29,7 @@ import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
 import { constantValue } from "../src/core/abi.ts";
+import { MisoEngineError } from "../src/core/errors.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
 
 const context = { audioWorklet: { addModule: async () => {} } };
@@ -639,6 +641,150 @@ function runPrelude(source, { tracking = false, mutate = false, capacity = 2, in
   if (tracking) arm();
   return { sandbox, allocations, engine, attach, rings, ringControls, writers, submissions, seeks, process, setSubmitResult: (value) => { submitResult = value; }, setSeekResult: (value) => { seekResult = value; } };
 }
+
+/**
+ * Issue #1297b: the feed prelude over a stand-in engine processor that has the engine handler's
+ * `receiveSeekAt` shape (validate, call `source_seek_at` once, `acknowledge` the result). The
+ * stand-in calls its own recorder, never `exports`, so a `source_seek_at` the drain makes is the
+ * only one the recording proxy (and the last test) can see. `node` is an SDK feed node wired to
+ * the attach processor's port in both directions.
+ */
+function anchoredPrelude(source) {
+  const { sandbox, registrations } = preludeHarness(source);
+  const submissions = []; const seeks = []; const seekAts = []; let seekAtResult = 0;
+  class Engine {
+    constructor() {
+      this.quantumFrames = 4; this.maximumSourceChannels = 2; this.memoryBuffer = new ArrayBuffer(65_536);
+      this.sourceIdPointer = 0; this.sourceIdCapacity = 128; this.sourcePcm = new sandbox.Float32Array(this.memoryBuffer, 1024, 8);
+      this.handle = 1; this.ready = true; this.disposed = false; this.stickyResult = 0;
+      this.exports = recordFeedCalls({ memory: { buffer: this.memoryBuffer }, miso_engine_web_v1_source_seek: (_h, _id, generation, frame) => { seeks.push([generation, frame]); return 0; }, miso_engine_web_v1_source_submit: (_h, idLength, generation, start, channels, frames) => { submissions.push({ id: new TextDecoder().decode(new Uint8Array(this.memoryBuffer, 0, idLength)), generation, start, channels, frames }); return 0; } });
+    }
+    receiveSeekAt(message) {
+      seekAts.push([message.sourceId, message.generation, message.sourceFrame, message.anchorSample]);
+      this.acknowledge(message.requestId, seekAtResult);
+    }
+    acknowledge(requestId, result) { this.lastAck = { requestId, result }; }
+    rebindMemoryViews() { this.memoryBuffer = this.exports.memory.buffer; }
+    process() { return true; }
+  }
+  sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
+  const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
+  const attach = new (registrations.get("miso-sab-feed-attach"))();
+  const node = { port: { onmessage: null, postMessage: (data) => attach.port.onmessage({ data }) }, disconnect() {} };
+  attach.port.postMessage = (data) => node.port.onmessage?.({ data });
+  return { engine, attach, node, submissions, seeks, seekAts, process: () => engine.process([], []), setSeekAtResult: (value) => { seekAtResult = value; } };
+}
+
+test("the drain refuses a ring written to the old MSB1 header offset", async () => {
+  // #1297b gate 3: a reader that keeps the old offsets reads the ID bytes as the anchor.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = anchoredPrelude(source);
+  const old = createMsb1Ring({ sourceId: "old", channels: 1, frameCapacity: 4, capacity: 2 });
+  // The old layout, self-consistent: headers at 256, PCM right after them.
+  controls(old)[MSB1_CONTROL.HEADER_OFFSET] = 256;
+  controls(old)[MSB1_CONTROL.PCM_OFFSET] = 256 + 2 * MSB1_SLOT_HEADER_BYTES;
+  const current = createMsb1Ring({ sourceId: "current", channels: 1, frameCapacity: 4, capacity: 2 });
+  run.attach.port.onmessage({ data: { op: "attach", rings: [old, current] } });
+  assert.deepEqual([old, current].map((ring) => controls(ring)[MSB1_CONTROL.ATTACHED]), [0, 1]);
+});
+
+test("an anchored start is applied once by the engine handler, and the drain reads none of its ring before", async () => {
+  // #1297b gates 1 and 2. Red if the SDK starts the stem with a plain seek or lets the drain apply
+  // it (`source_seek_at` from process() runs the service step), if the drain feeds the ring's
+  // PCM before the handler applied its seek, if the SDK recomputes the anchor or the frame after
+  // the one status read, or if `A` is not next + the ring's frames, rounded up to a quantum.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = anchoredPrelude(source);
+  let next = 1_001n; let statusReads = 0; let requestId = 0; let generation = 4n;
+  const host = {
+    async status() { statusReads += 1; const now = next; next += 512n; return { result: 0, nextAbsoluteSample: now }; },
+    async seekSourceAt(request) {
+      run.engine.receiveSeekAt({ tag: "miso.seek-at.v1", requestId: (requestId += 1), ...request });
+      return { tag: "miso.ack.v1", requestId, result: run.engine.lastAck.result };
+    },
+  };
+  linkFeedEngine(host, () => (generation += 1n));
+  const asked = []; const primed = [];
+  const start = {
+    frameAt(anchorSample) { asked.push(anchorSample); return anchorSample - 1_000n + 5n; },
+    prime(seek) {
+      primed.push(seek);
+      const writer = new Msb1RingWriter(feed.rings[0]);
+      for (let chunk = 0; chunk < 2; chunk += 1) {
+        writer.reserve(4)[0].fill(chunk + 1);
+        writer.commit({ generation: seek.generation, startFrame: seek.frame + BigInt(chunk * 4), frames: 4, endOfRegion: false });
+      }
+      run.process(); // a block while the seek is published in the ring but not yet applied
+      assert.deepEqual([run.submissions.length, run.seeks.length, controls(feed.rings[0])[MSB1_CONTROL.SEEKS_APPLIED]], [0, 0, 0],
+        "the drain reads no slot and seeks nothing before the handler applied the anchored seek");
+    },
+  };
+  const feed = attachEngineFeed({ context, sources: [{ sourceId: "added", channels: 1, start }], quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
+  new Msb1RingWriter(feed.rings[0]).engage(1n);
+  await feed.ready();
+  // A = 1001 + 2 chunks * 4 frames = 1009, rounded up to 1012; the frame is the app's for it.
+  assert.deepEqual([statusReads, asked], [1, [1_012n]]);
+  assert.deepEqual(primed, [{ sourceId: "added", generation: 5n, frame: 17n, anchorSample: 1_012n }]);
+  assert.deepEqual(run.seekAts, [["added", 5n, 17n, 1_012n]], "the handler applied the seek once");
+  assert.deepEqual([...new BigInt64Array(feed.rings[0], MSB1_CONTROL_I64_OFFSET, 3)], [5n, 17n, 1_012n], "the ring holds the same seek");
+  run.process();
+  run.process();
+  assert.deepEqual(run.seeks, [], "never a plain seek for the started source");
+  assert.deepEqual(run.submissions.map(({ id, generation: g, start: frame }) => [id, g, frame]), [["added", 5n, 17n], ["added", 5n, 21n]]);
+  assert.equal(controls(feed.rings[0])[MSB1_CONTROL.SEEKS_APPLIED], 1);
+
+  // Acked batch: a refused `seek-at` rejects the start with its result, and its epoch is never consumed.
+  run.setSeekAtResult(1);
+  const refused = attachEngineFeed({ context, sources: [{ sourceId: "refused", channels: 1, start: { frameAt: () => 0n, prime() {} } }], quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
+  await assert.rejects(refused.ready(), (error) => error instanceof MisoEngineError && error.result === 1);
+  assert.equal(refused.state, "closed");
+  const direct = createMsb1Ring({ sourceId: "direct", channels: 1, frameCapacity: 4, capacity: 2 });
+  run.attach.port.onmessage({ data: { op: "attach", rings: [direct] } });
+  const writer = new Msb1RingWriter(direct); writer.engage(1n);
+  writer.seek(9n, 0n, 2_048n);
+  writer.reserve(4); writer.commit({ generation: 9n, startFrame: 0n, frames: 4, endOfRegion: false });
+  const seekAt = { tag: "miso.seek-at.v1", sourceId: "direct", generation: 9n, sourceFrame: 0n, anchorSample: 2_048n };
+  run.engine.receiveSeekAt({ ...seekAt, requestId: 100 });
+  run.process();
+  assert.deepEqual([controls(direct)[MSB1_CONTROL.SUBMITTED], controls(direct)[MSB1_CONTROL.SEEKS_APPLIED], controls(direct)[MSB1_CONTROL.REFUSED]], [0, 0, 0], "a refused handler seek leaves the epoch unseen");
+  run.setSeekAtResult(0);
+  run.engine.receiveSeekAt({ ...seekAt, requestId: 101 });
+  run.process();
+  assert.deepEqual([controls(direct)[MSB1_CONTROL.SUBMITTED], controls(direct)[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
+});
+
+test("detachSource withdraws one ring: the drain never reads it after it resolves, and the others keep draining", async () => {
+  // #1297b gate 4 (the feed half; the engine's timing is browser-evals'). Red if detachSource
+  // resolves before the worklet withdrew the ring, withdraws another node's or every ring, or
+  // leaves the ring's writer engaged.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = anchoredPrelude(source);
+  const feed = attachEngineFeed({ context, sources: [{ sourceId: "kept", channels: 1 }, { sourceId: "gone", channels: 1 }], quantumFrames: 4, capacityChunks: 4, createNode: () => run.node });
+  const [kept, gone] = feed.rings.map((ring) => new Msb1RingWriter(ring));
+  const write = (writer, frame) => { writer.reserve(4); writer.commit({ generation: 1n, startFrame: frame, frames: 4, endOfRegion: false }); };
+  for (const writer of [kept, gone]) writer.engage(1n);
+  await feed.ready();
+  const [keptRing, goneRing] = feed.rings;
+  await feed.detachSource("gone");
+  assert.deepEqual(feed.rings, [keptRing]);
+  assert.equal(controls(goneRing)[MSB1_CONTROL.WRITER_STATE], 0, "released after the confirmation");
+  write(kept, 0n); write(gone, 0n);
+  run.process();
+  assert.deepEqual(run.submissions.map(({ id }) => id), ["kept"]);
+  assert.equal(controls(goneRing)[MSB1_CONTROL.READ_INDEX], 0, "the withdrawn ring is never read");
+  await assert.rejects(feed.detachSource("gone"), /no source gone/);
+});
+
+test("the pump's writer publishes a plain seek in the SDK's ring layout", async () => {
+  // #1297b hazard: a pump that keeps the old two-word seek leaves an earlier anchor in the ring,
+  // and the drain then waits for a handler seek that never comes.
+  const { Msb1RingWriter: PumpWriter } = await import("../../hosts/host-web/web/stem-store/pcm-pump.js");
+  const ring = createMsb1Ring({ sourceId: "stem", channels: 1, frameCapacity: 4, capacity: 2 });
+  new Msb1RingWriter(ring).seek(2n, 0n, 4_096n);
+  new PumpWriter(ring).seek(3n, 8n);
+  assert.deepEqual([...new BigInt64Array(ring, MSB1_CONTROL_I64_OFFSET, 3)], [3n, 8n, -1n]);
+  assert.equal(new TextDecoder().decode(new Uint8Array(ring, MSB1_ID_OFFSET, 4)), "stem");
+});
 
 test("full shared runways fill each internal queue gradually within the per-source callback budget", async () => {
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
