@@ -276,7 +276,13 @@ enum Rebuild {
     /// reports `TRANSITION_FALLBACK`. It carries like a transaction that supersedes the donor and
     /// commits like a monitor rebuild: nothing is committed and the revision does not change, but
     /// the candidate's gate is stamped with the committed revision, which the donor carried.
-    Transition { model: Box<CompiledSession> },
+    Transition {
+        model: Box<CompiledSession>,
+        /// The injected refusal of this re-preparation (#1397 deliverable 3), taken from the
+        /// thread's hook when the fallback starts.
+        #[cfg(feature = "test-support")]
+        injected_refusal: bool,
+    },
 }
 
 /// The edit ramps of a discontinuity successor: no edit gave a row a length (#1323).
@@ -3142,7 +3148,7 @@ where
     ///
     /// # Errors
     ///
-    /// As [`Self::fall_back_pending_warm`].
+    /// As the deadline step's own body (`fall_back_pending_warm`): an internal fault.
     #[cfg(feature = "test-support")]
     pub fn test_fall_back_to_transition(&mut self) -> Result<TransitionStep, CommandError> {
         self.fall_back_pending_warm()
@@ -4708,11 +4714,15 @@ where
             Some(_) => {}
         }
         #[cfg(feature = "test-support")]
-        let injected = TEST_REFUSE_REPREPARE.with(core::cell::Cell::get);
+        let injected = TEST_REFUSE_REPREPARE.with(|state| state.replace(false));
         #[cfg(not(feature = "test-support"))]
         let injected = false;
         let result = self.rebuild(
-            Rebuild::Transition { model },
+            Rebuild::Transition {
+                model,
+                #[cfg(feature = "test-support")]
+                injected_refusal: injected,
+            },
             revision,
             monitor_change,
             observation_change,
@@ -4882,7 +4892,7 @@ where
                 .ok_or(CommandError::Internal)?,
             Rebuild::Discontinuity(model)
             | Rebuild::Monitor { model, .. }
-            | Rebuild::Transition { model } => &**model,
+            | Rebuild::Transition { model, .. } => &**model,
         };
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
@@ -4991,10 +5001,6 @@ where
         // displaces. A declared discontinuity need not continue the running plan's output
         // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
         // is built here, before anything is reserved or committed.
-        // #1325 D7: after preparation, the pure transition step against the plan the successor
-        // displaces. A declared discontinuity need not continue the running plan's output
-        // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
-        // is built here, before anything is reserved or committed.
         let plan_transition = |restarted: &[Box<str>]| {
             host_core::plan_strip_transition(&base, duck, prospective.normalized_model(), restarted)
                 .map_err(|_| CommandError::Internal)
@@ -5038,7 +5044,6 @@ where
             (transition_fallback, replanned) = (true, true);
         } else if let Some(config) = self.warm
             && transition.is_some()
-            && duck.strips().is_empty()
         {
             let decision = host_core::warm_lead(
                 prospective,
@@ -5055,8 +5060,12 @@ where
                 ),
                 None => decision,
             };
+            // #1397a attempt 2 (root ruling): while a phase 1 that ducks a strip is pending, a
+            // growth is not prepared warm (its successor would wait for the inherited `S` with
+            // carried nodes a lead ahead), and an ordinary successor would step a carried strip
+            // whose line changes length: it takes the transition, whose duck joins the overlay.
             match decision {
-                host_core::WarmDecision::Warm(lead) => {
+                host_core::WarmDecision::Warm(lead) if duck.strips().is_empty() => {
                     let lead_blocks = u32::try_from(lead.lead_samples / u64::from(quantum))
                         .map_err(|_| CommandError::Internal)?;
                     drop(prepared_runtime);
@@ -5070,7 +5079,7 @@ where
                     }
                 }
                 // #1397 D2 at submit, with no donor: a failure refuses the edit before its commit.
-                host_core::WarmDecision::Unavailable(_) => {
+                host_core::WarmDecision::Warm(_) | host_core::WarmDecision::Unavailable(_) => {
                     prepared_runtime = fall_back(prepared_runtime)?;
                     (transition_fallback, replanned) = (true, true);
                 }
@@ -5086,7 +5095,13 @@ where
         }
         // #1397 deliverable 3: the injected refusal of a transition re-preparation, after it.
         #[cfg(feature = "test-support")]
-        if fallback && TEST_REFUSE_REPREPARE.with(|state| state.replace(false)) {
+        if matches!(
+            kind,
+            Rebuild::Transition {
+                injected_refusal: true,
+                ..
+            }
+        ) {
             drop(prepared_runtime);
             drop(kind);
             return Err(CommandError::Backpressure);
@@ -5293,7 +5308,7 @@ where
                 follow_retarget_ramp.max(send_landing_ramp(next))
             }
             Rebuild::Transaction(_) => follow_retarget_ramp,
-            Rebuild::Monitor { model, .. } | Rebuild::Transition { model }
+            Rebuild::Monitor { model, .. } | Rebuild::Transition { model, .. }
                 if carries_withdrawn_edits =>
             {
                 if follow_loses_a_curve || send_fallback {
@@ -5555,7 +5570,7 @@ where
             // withdrawn candidate, drops below as a commit's displaced model does.
             Rebuild::Discontinuity(model)
             | Rebuild::Monitor { model, .. }
-            | Rebuild::Transition { model } => (None, Some(*model)),
+            | Rebuild::Transition { model, .. } => (None, Some(*model)),
         };
         // #1403 D3: a warm candidate's flags and `Primed` schedule, after the last fallible step
         // and before its set takes any producer or donated ring: each entry it holds vacant is
@@ -9175,8 +9190,13 @@ mod tests {
             continued.render(s_block - BEFORE);
             assert_eq!(first_divergence(&rig, &continued), None);
 
-            // The growth while phase 1 of a removal is pending inherits the overlay's `S`: today's
-            // path, with no record (#1397 D1: an inherited overlay that ducks a strip).
+            // The growth while phase 1 of a removal is pending (#1397a attempt 2, root ruling):
+            // it takes the transition, which ducks track 1 too (the output's arrival grows) and
+            // inherits the overlay's `S`, with no record. Up to its `S'` the output is A with
+            // track 2 and then track 1 live-muted at the two edits' blocks; from `S'`, for 64
+            // blocks, a fresh plan of the committed session with track 1 muted, fed from frame
+            // `S'` and live-unmuted at once; the adoption reports `TRANSITION_FALLBACK`. Red on an
+            // ordinary successor, which carries track 1 across its changed line (`EXACT`).
             let mut rig = Rig::new(Some(CONFIG));
             rig.render(BEFORE);
             let PlanAdoption::NoEarlierThan(s) = rig.rebuild(&remove_track("eq1")) else {
@@ -9184,11 +9204,58 @@ mod tests {
             };
             rig.render(1);
             let adoption = rig.rebuild(&growth());
-            assert!(
-                matches!(adoption, PlanAdoption::NoEarlierThan(later) if later >= s),
-                "published {adoption:?}"
-            );
+            let PlanAdoption::NoEarlierThan(later) = adoption else {
+                panic!("published {adoption:?}")
+            };
+            assert!(later >= s);
             assert_eq!(rig.primed(), None);
+            let s_block = usize::try_from(later / QUANTUM).expect("block");
+            rig.render(s_block + 64 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_ne!(watermark.outcome_flags & OUTCOME_TRANSITION_FALLBACK, 0);
+            let mut continued = Rig::new(None);
+            continued.render(BEFORE);
+            for track in ["eq1", "eq0"] {
+                assert!(matches!(
+                    continued.transact(&[builtin(track, 6, 1.0)]),
+                    Ok(EditPath::Live)
+                ));
+                continued.render(1);
+            }
+            continued.render(s_block - BEFORE - 2);
+            assert_eq!(rig.blocks[..s_block], continued.blocks[..], "A continued");
+            let mut muted = rig
+                .children
+                .session
+                .controller
+                .session()
+                .compiled()
+                .normalized_model()
+                .clone();
+            for track in &mut muted.tracks {
+                if track.id.as_str() == "eq0" {
+                    track.fader.left_mute = true;
+                    track.fader.right_mute = true;
+                }
+            }
+            let mut fresh = Rig::boot(None, limits(), &muted);
+            let offset = usize::try_from(later).expect("frames");
+            for (_, planes, _) in &mut fresh.feeds {
+                for plane in planes.iter_mut() {
+                    plane.drain(..offset);
+                }
+            }
+            assert!(matches!(
+                fresh.transact(&[builtin("eq0", 6, 0.0)]),
+                Ok(EditPath::Live)
+            ));
+            fresh.render(64);
+            assert_eq!(
+                rig.blocks[s_block..],
+                fresh.blocks[..],
+                "the fresh plan from S'"
+            );
         }
 
         /// Gate 3, edits while W is pending, frames withheld. A live fader edit on track 2 goes
