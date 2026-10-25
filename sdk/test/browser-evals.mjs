@@ -56,8 +56,8 @@ function wordAt(block, name) {
 test("generated u64 offsets preserve BigInt", () => {
   const memory = new WebAssembly.Memory({ initial: 1 });
   const leaves = [
-    { structure: "liveResponseResult", name: "snapshotToken", value: 0x0100_0000_0000_0007n },
-    { structure: "liveResponseResult", name: "capturedSample", value: 0x0200_0000_0000_0009n },
+    { structure: "planWatermark", name: "revision", value: 0x0100_0000_0000_0007n },
+    { structure: "planWatermark", name: "firstSample", value: 0x0200_0000_0000_0009n },
     { structure: "observationResult", name: "firstSample", value: 0x0400_0000_0000_000bn },
     { structure: "observationResult", name: "sequence", value: 0xffff_ffff_ffff_ffd1n },
     { structure: "observationResult", name: "endSample", value: 0xffff_ffff_ffff_fff1n },
