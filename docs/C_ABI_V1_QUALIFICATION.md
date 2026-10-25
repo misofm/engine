@@ -118,13 +118,12 @@ its fader. A strip whose insert is keyed from a restarted strip's `post_input`, 
 `insert_return` or `pre_fader` tap, or from its `input` tap when its delay line restarts, is
 restarted and duck-swapped with it, repeated until no strip joins; a track's other `input` tap, a
 `post_fader` or `post_pan` tap, and a submix's `input` tap whose sidechain line keeps its length or
-whose every incoming line comes from a ducked or an added strip (and none from a pre-fader route
-that follows an automated source mute) add nothing. `C` also counts each sidechain line a
+whose every incoming line comes from a ducked or an added strip add nothing. `C` also counts each sidechain line a
 replacement can shorten: from a ducked strip's `post_fader` or `post_pan` tap into a carried strip,
 and from a ducked submix's `input` tap kept by the last rule, plus the longest route line into that
 submix. A planned duck-swap completes as `EXACT`, never as the transition fallback. A revert before `S` inherits `S` and fades the strip
-back in from it. Known limit: a pre-fader route that follows its source's automated mute has no
-fade arm, so it restarts at its prepared value at `S` (#2011).
+back in from it. A pre-fader route that follows its source's automated mute is armed too, and its
+fire composes with the curve it hears then, so a column the curve silences stays silent (#2011).
 
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
