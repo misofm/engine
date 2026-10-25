@@ -204,7 +204,9 @@ extern "C" {
  * event is unread is BACKPRESSURE response.capture.pending. Every request answered with a tag
  * gets exactly one RESPONSE_READY: OK with the curves, or a refusal (response.strip.removed when
  * the strip left the session first, response.effect.unsupported, response.limit,
- * response.capture); a full event queue delays it and never drops it. An unknown strip is
+ * response.capture, and LIMIT_EXCEEDED response.reply_too_large when a rebuild after the request
+ * grew the strip's event past the control frame limit); a full event queue delays it and never
+ * drops it. An unknown strip is
  * NOT_FOUND control.address.unknown, and a request whose event could exceed the control frame
  * limit or maximum_reply_bytes is response.reply_too_large; neither arms anything. A replayed
  * request returns the same tag and arms nothing.
