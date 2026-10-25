@@ -148,3 +148,155 @@ has asymmetric input filters, an EQ insert and an EQ console slot, and a compres
 ## Supersedes and shrinks
 
 - Shrinks #763 (see #1573's amendment record): the track response reaches the C ABI.
+
+## Decision and evidence record
+
+**Split (scope note, root, 2026-10-24).** #1578a (protocol, carries the schema-hash re-pin): D1, D2
+and the controller half of D3/D4. #1578b (serving): D3's provider path, D4's delivery in
+`SessionState::service`, D5, D6 and `crates/capi/tests/response_strip.rs`. Root decisions R1-R5
+of the scope note stand (R1 release on an empty cell, R2 the controller's check only for a strip
+target and after the replay cache, R3 the bound at 127-byte identities, R4 the two capi tests,
+R5 the queue after #1586b).
+
+**#1578a, attempt 1 (implementer, 2026-10-25).**
+
+- D1: `MessageId::ResponseReady = 0x8040`; `allocated_id` lists it; the registry lists it exactly
+  when `features.response` is set; the invariant adds `has_command(0x000e) == has_event(0x8040)`.
+- D2: `ResponseReady { sequence, request_tag, strip_id, outcome }`, with `ResponseReadyOutcome::
+  Ready(TrackResponseCapture)` or `Refused { status, diagnostic }`, so a refusal with curves cannot
+  be built and the encoder checks the rest. Implementer reading of "the codec refuses every other
+  shape": a stable strip ID; a refusal is one of `NOT_FOUND`, `UNAVAILABLE`, `LIMIT_EXCEEDED`,
+  `INTERNAL` with a 1-127-byte diagnostic and no capture field or member; a capture has at least
+  two finite axis points, a finite floor, one or two finite sides of the axis's length; a member's
+  slot ID is present exactly for console and inserts, its effect is 1-127 bytes, `section_count`
+  is at most 32 and neither mask sets a bit at or above it. `response_ready_encoded_bound` is the
+  larger of the ready form and a refusal with a 127-byte diagnostic.
+- D3 (controller half): a strip `RESPONSE_GET` while the cell is held is `BACKPRESSURE`
+  `response.capture.pending` before the provider. Implementer decision I1: the mandatory
+  backpressure record names a new queue kind, `BackpressureQueueKind::ResponseCapture = 8`
+  (capacity 1, occupancy 1, no generation), on #1944's precedent for the spectrum arm slot, and
+  every `RESPONSE_GET` `BACKPRESSURE` (the provider's `Pending` in #1578b too) carries it. Kind 9
+  is now the first refused code. Root to confirm.
+- D4 (controller half): one `response_ready: Option<ResponseReady>` cell. `enqueue_response_ready_
+  event(revision, event)` writes the next reliable sequence into the event, sizes the frame, queues
+  `ReliablePayload::ResponseReady { event_sequence }` and moves the event into the cell; on any
+  refusal (structural transaction outstanding or queue full, cell held, not served, unencodable)
+  it returns `ResponseReadyEnqueueError { reason, event }` with the event unchanged and no
+  sequence used. The cell is emptied only after a successful encode in
+  `dequeue_reliable_event_frame_into`; `response_ready_pending()` is R1's query.
+- Acked-batch question: the event's ack is the `RESPONSE_GET` tag reply (#1578b). No path of
+  #1578a drops an event: every refusal hands it back, a short output keeps it, and only a
+  delivered frame empties the cell.
+- Advertisement: from this slice the C ABI lists `0x8040` (it lists `0x000e`), while its provider
+  still refuses a strip target with `response.target.unavailable` until #1578b, so no tag is
+  issued and no event is owed.
+- **Re-pin.** `COMPLETE_SCHEMA_HASH` `f4c2fe333739f44d` -> `cb8db815ed0103a0`, 56 -> 59 frames:
+  `command.response_get_strip`, `event.response_ready`, `event.response_ready_refused`, and
+  `response.capabilities` lists `0x8040`. Check: with the capabilities frame's event field patched
+  back (length 14 -> 12, `0x8040` -> padding) and the three new frames filtered out, the 56 frames
+  hash to `f4c2fe333739f44d` (scratch example, not committed).
+- Files outside the spec's list, each forced by the wire change: `crates/capi/src/runtime/tests.rs`
+  (two pinned capability vectors gain `0x8040`), `crates/protocol/tests/sdk_message_fixture.rs` and
+  `sdk/test/fixtures/protocol-messages.json` (the full capabilities fixture lists `0x8040`, which
+  the invariant now requires; re-blessed), `crates/conformance/{src/main.rs,tests/mutation_million.rs}`,
+  `scripts/check-protocol-wasm-parity.sh` and `docs/CONTROL_PROTOCOL_CONFORMANCE.md` (the re-pin
+  set). `crates/control-plane/src/control.rs` maps the two new `EventEgressError` variants.
+- Tests and test value (each red first on a recorded mutant):
+  - `response_ready_round_trips_both_forms_and_refuses_every_other_shape` (message_wire): red if a
+    field or member is lost in the round trip or one D2 presence rule is not enforced in either
+    direction. Mutants: a refusal that admits a capture sample; no mask check; a builtins member
+    that admits a slot ID. All red.
+  - `response_ready_encoded_bound_is_the_largest_frame_exactly` (message_wire): red if the bound
+    drifts from the encoder. Mutants: five member scalars; the refused form ignored. Both red.
+  - `a_response_ready_event_is_held_until_delivered_and_holds_off_a_strip_request` (controller):
+    red if a refused enqueue loses or alters the event, the cell empties before delivery or never,
+    a second event overwrites a held one, or a strip request reaches the provider while an event is
+    unread. Mutants: no strip check; the queue-full refusal keeps the written sequence; no clear on
+    delivery; a clear on a failed encode; no occupied check. All red.
+  - Rewritten `a_capability_frame_must_tie_bit_14_to_the_response_command_and_event` (controller):
+    red if the registry stops listing `0x8040` with `0x000e` or the invariant stops tying the
+    flag, command and event. Mutants: no pairing clause; the registry never lists `0x8040`. Both
+    red.
+  - `a_backpressure_payload_naming_the_retired_automation_queue_is_refused` (one row): red if kind 8
+    stops decoding or decodes with a generation. Mutant: kind 8 given a generation. Red.
+
+**Root, 2026-10-25.** I1 accepted. #1578b lands in the same PR as #1578a, because #1578a alone
+advertises `0x8040` on the C ABI before it can send one. Acked-batch lens for the delivery: an
+issued tag ends in exactly one `RESPONSE_READY`, across a rebuild, a supersession and a dispose.
+
+**#1578b, attempt 1 (implementer, 2026-10-25).** No hash re-pin.
+
+- D3: `SessionControlProvider::response_get` serves target 3 before the shared preflight (which
+  still refuses it, `response.target.unavailable`, for the session-less entry): the core's checks
+  (`response.points`, `response.grid`), `response.rate.session`, the strip (`NOT_FOUND`
+  `control.address.unknown`), the event bound at the strip's owner count against the smaller of
+  the reply bound and field 18 (`LIMIT_EXCEEDED` `response.reply_too_large`), then `arm`, with
+  `Pending` as `BACKPRESSURE` `response.capture.pending` (the controller attaches the kind-8
+  record). The tag is answered after the job is in the render queue.
+- D4: `SessionState.response_ready` holds `PendingResponse::Event` while the controller cannot
+  take it; `service` releases the capture once the controller's cell and this field are both
+  empty (R1), polls, converts and queues. A full queue, a held cell or an outstanding structural
+  transaction keeps the event. Implementer decision I2: an event the endpoint cannot encode (a
+  rebuild grew the strip past the frame limit after the bound check) becomes its refusal
+  (`LIMIT_EXCEEDED` `response.reply_too_large`, or `INTERNAL` `response.capture` for another encode
+  failure) and is queued in its place, so the tag is still answered and the capture is released.
+  The #1577 test seam keeps its own variants (`SeamArmed`, `SeamResult`) under `test-support`: a
+  seam-armed capture issued no protocol tag and owes no event.
+- D5: `host_core::response_ready_event` moves every buffer. `response_capture_ceiling` adds the
+  event's member table, which is allocated while the result's is still held.
+- Dispose: a session destroyed with a capture in flight owes nothing; the last test ends that way.
+- Files outside the spec's list: `crates/host-core/src/lib.rs` (the export of
+  `response_ready_event`) and `crates/capi/tests/response_get.rs` (its strip-target refusal row is
+  superseded and deleted).
+- Tests, each red first on a recorded mutant:
+  - `crates/capi/tests/response_strip.rs::end_to_end_then_removed_strip`: red if the C ABI's curve
+    or owners differ from the core's composition, if the event arrives before a render, if a strip a
+    superseding removal took is never answered, or if a rebuild leaves a tag without its event or
+    with two. Mutants: the event's masks swapped (red only once the insert's masks differ by side);
+    `StripRemoved` mapped to `INTERNAL`; no release; the strip target still refused. All red.
+  - `one_in_flight_none_lost_and_replay`: red if a full queue drops an acked request's event, two
+    captures run at once, a replay arms, or a delivered capture is never released. Mutants: a held
+    event dropped on a refused enqueue; no release. Both red.
+  - `a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal`: red if an unencodable event
+    is held for ever or dropped. Mutant: no refusal replacement. Red.
+  - `host_core::control_provider::tests::a_strip_request_is_checked_before_it_arms`: red if a
+    refused strip request arms, the bound is not checked before arming, or a refusal has the wrong
+    status or code. Mutants: no bound check; unknown strip as `UNAVAILABLE`. Both red.
+  - Not mutated: gate 5's replay is the controller's replay cache, which answers before `execute`;
+    the test shows that the replayed frame returns tag 1, that no event follows, and that the next
+    tag is 2.
+
+**Verifier PASS, folds (2026-10-25).**
+
+- M1: `response_strip.rs`'s `drain` returns at most `RELIABLE_EVENT_SLOTS + 2` frames and then
+  panics, so a double-delivery defect fails at once instead of growing without bound. Mutant: a
+  held event that is never taken out after it is queued. All three tests red, in 0.18 s.
+- M2: `a_capture_at_the_bound_stays_within_its_charge` (control-plane) also arms the bound capture
+  through a strip `RESPONSE_GET` and delivers it with `service`. The event held in the
+  controller's cell left 49,444 bytes live, of the 50,552-byte `result_bytes` charge. Test value:
+  red if the event path holds more than the result's charge. Mutant: a delivery that keeps the
+  result beside its event. Red. The conversion's own member table is not separately observable at
+  launch identities: the charge's 127-byte identities leave more slack than the table takes.
+  Measured `capi_retained_bytes`: 335,878 (x86-64, on the tree merged with main `bd6f53a31`),
+  under the unchanged 344,192 ceiling.
+- N1: the protocol test sets an odd structural generation; the event comes back unchanged and the
+  cell stays empty. Mutant: no structural check. Red.
+- N2: the header names `LIMIT_EXCEEDED` `response.reply_too_large` after a rebuild among the event
+  refusals. `check-capi-abi.sh` passes.
+
+**After the merge of #1324a/b (2026-10-25).** A rebuild that restarts a strip now duck-swaps: render
+adopts its plan at the end of the duck, not at the next block. Two `response_strip` tests failed,
+and the cause is that adoption point, not a defect. A request armed before the commit was captured
+at the first block from the running plan (`captured_sample` 128). That is the documented rule: the
+result comes from the newest plan the session had when the request was served. Before #1324 the
+running plan was displaced at the next block, so the job went stale and was armed again. No
+comparison was loosened:
+
+- `end_to_end_then_removed_strip` asserts both cases. A request armed before the commit gets one
+  event, from the running plan, without the insert. A request armed after the commit, on the
+  pending plan, gets one event, from the adopted plan, with the insert.
+- `a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal` arms on a pending rebuild of
+  `eq1`, so the bound is checked at `eq0`'s four owners. The growth then supersedes that plan before
+  it renders. The job goes stale and is armed again at 24 owners, and its event is the refusal.
+- Mutants: capture without the plan-epoch wait (the job is captured from a plan older than its
+  own), red in both; no refusal replacement, red.

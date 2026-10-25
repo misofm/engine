@@ -114,11 +114,17 @@ strip's owners before its fader (its input section, its effects, the compensatio
 chain and on those routes, and their live lanes) and its fader, keeps its matrix and its
 post-fader routes carrying the ducked tail, and arms the fader and those routes (#1288, #1363 D1
 (c)) to fade in over `N` from the first block at or after `S + D`, `D` the strip's latency before
-its fader. A planned duck-swap completes as `EXACT`, never as the transition fallback. A revert
-before `S` inherits `S` and fades the strip back in from it. Known limits of this slice: a carried
-effect whose sidechain reads a ducked strip's pre-fader tap still steps at `S` (#1324b), and a
-pre-fader route that follows its source's automated mute has no fade arm, so it restarts at its
-prepared value at `S`.
+its fader. A strip whose insert is keyed from a restarted strip's `post_input`, `insert_send`,
+`insert_return` or `pre_fader` tap, or from its `input` tap when its delay line restarts, is
+restarted and duck-swapped with it, repeated until no strip joins; a track's other `input` tap, a
+`post_fader` or `post_pan` tap, and a submix's `input` tap whose sidechain line keeps its length or
+whose every incoming line comes from a ducked or an added strip (and none from a pre-fader route
+that follows an automated source mute) add nothing. `C` also counts each sidechain line a
+replacement can shorten: from a ducked strip's `post_fader` or `post_pan` tap into a carried strip,
+and from a ducked submix's `input` tap kept by the last rule, plus the longest route line into that
+submix. A planned duck-swap completes as `EXACT`, never as the transition fallback. A revert before `S` inherits `S` and fades the strip
+back in from it. Known limit: a pre-fader route that follows its source's automated mute has no
+fade arm, so it restarts at its prepared value at `S` (#2011).
 
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
@@ -1368,3 +1374,27 @@ after every edit and zero render-thread allocations, `runtime::live_tests::an_ob
 and the parity row `protocol_cross_host::both_hosts_read_one_observation_tap_alike`. After a
 rebuild that carries a tapped effect the read follows the carried tap: the promotion pairs the
 carried readers from the swap block's record (#1674's observation half, #1587b).
+
+## Issue 1578 track response
+
+A strip `RESPONSE_GET` (`000e`, target 3) crosses `miso_engine_v1_submit_command` to the session
+provider, which checks it (the core's checks, `response.rate.session`, the strip, the bound of its
+event at the strip's owner count against the control frame limit and `maximum_reply_bytes`), arms
+the session's one response capture (#1577) and answers its tag; the capture's result arrives as
+one reliable `RESPONSE_READY` (`8040`) through `miso_engine_v1_dequeue_event`. No C symbol or
+struct changes; the capability report lists `8040` with `000e` under flag bit 14, and the
+capability vectors pinned in `crates/capi/src/runtime/tests.rs` re-pin for it. `SessionState::service`
+turns the delivered result into the event (`host_core::response_ready_event`, #1578 D5) and moves
+it into the protocol controller's one cell; a full reliable queue, a held cell or an outstanding
+structural transaction keeps it for the next `service`, an event the frame limit cannot carry
+becomes its `LIMIT_EXCEEDED` `response.reply_too_large` refusal, and the capture is released once
+its event's frame has reached the host. The response capture's charge
+(`host_core::response_capture_ceiling`) adds the event's member table, which is allocated while
+the result's is still held. The gates are `crates/capi/tests/response_strip.rs`:
+`end_to_end_then_removed_strip` (no event before a render; one event after one render whose curves
+and owners are bit-equal to `compose_track_response` over a `PreparedHost` of the same document;
+one event across a rebuild; `NOT_FOUND` `response.strip.removed` for a strip a superseding removal
+took), `one_in_flight_none_lost_and_replay` (`BACKPRESSURE` `response.capture.pending` with queue
+kind 8 while one is in flight; held, not lost, behind a full reliable queue; a replay returns the
+same tag and arms nothing; released after delivery) and
+`a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal`.

@@ -413,3 +413,12 @@ for every other session.
 - **NITs.** The duplicated #1325 D7 comment is gone; the test entry's doc names the private
   method in plain text; the injected refusal is taken from its hook when the fallback starts and
   travels on `Rebuild::Transition`.
+
+## Merge note (slice 1397a, merge of main with #1324b, 2026-10-25)
+
+- `C` now counts `post_fader`/`post_pan` sidechain lines out of a ducked strip (#1324b D4), so the
+  warm arm's sidechain limit (attempt 1, "Sidechain limit") is gone, and `plan_strip_transition`'s
+  doc no longer states it. `grown_strips`'s limit stays: no sidechain line and no closure (1397b).
+- In the successor preparation, D2's forced restarts join the restarted set before #1324b's
+  sidechain closure, so the closure also closes over them; the transition is planned again over
+  the prepared `restarted_strips()`, so each strip the closure adds is ducked.
