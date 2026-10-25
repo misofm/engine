@@ -183,4 +183,12 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   `service`, `control_command`, `declare_discontinuity` and `session_seek`, and the ffi's
   `with_promotion_analysis`, are deleted. Stated limit until #1597: a stream started through
   `SPECTRUM_STREAM` after a promotion ended the old one is the session analysis's; the staging
-  analysis follows only streams the old exports start.
+  analysis follows only streams the old exports start. The lazy check sees only whether a stream
+  runs, so a command that ends the old-export stream and starts a `SPECTRUM_STREAM` stream in one
+  call leaves the staging analysis on the new stream. The capture epoch cannot tell the two apart:
+  it does survive a carried promotion, but it also advances inside one kept stream on every render
+  failure (`continuous_fail`) and every re-selection (`restart_continuous`), so a mismatch would end
+  a live staging stream at a failure; and a promotion's fresh capture starts its epochs at 0 again,
+  so the new stream's first epoch can equal the old one's. A true stream identity needs a start
+  generation in `SpectrumService` (host-core); #1597 deletes the staging analysis, which ends the
+  case.

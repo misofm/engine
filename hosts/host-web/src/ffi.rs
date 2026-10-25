@@ -663,6 +663,11 @@ fn end_a_stream_the_session_ended(staging: &mut SpectrumStaging) {
     staging.result_len = 0;
     if let Some(metadata) = metadata {
         write_stream_metadata(&mut staging.stream_metadata, &metadata);
+    } else {
+        // The session holds no spectrum service: an inactive stream, as `spectrum_stream_read`
+        // writes it.
+        staging.stream_metadata.status = SPECTRUM_STREAM_STATUS_INACTIVE;
+        staging.stream_metadata.source_underrun = 0;
     }
     if let Some(analysis) = staging.analysis.as_mut() {
         analysis.end_stream();
@@ -6289,6 +6294,15 @@ mod spectrum_ffi_tests {
                     .expect("the control staging");
             assert_eq!(result, RESULT_OK);
             render(2);
+            assert_eq!(
+                with_host(
+                    handle,
+                    None,
+                    AudioWorkletEngineHost::spectrum_stream_running
+                ),
+                Some(true),
+                "{promoter:?}: the session's stream runs until a promotion"
+            );
             let result = match promoter {
                 Promoter::Service => miso_engine_web_v1_service(handle),
                 Promoter::StructuralCommand => {
