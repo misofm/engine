@@ -27,8 +27,7 @@ effect-compiler.workspace = true
 effect-contract.workspace = true
 graph.workspace = true
 graph-compiler.workspace = true
-# `control-provider`: `publish_primed`, the production publication of a warm candidate (#1403).
-host-core = { workspace = true, features = ["control-provider"] }
+host-core.workspace = true
 lane.workspace = true
 session.workspace = true
 sha2.workspace = true

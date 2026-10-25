@@ -253,10 +253,13 @@ whole-bank move (#1269, Deferred) earns a brief.
   supported engine). D3 item 3 uses WebKit's `h = 13.7` at `fs_h = 48 kHz`; the subject carries it
   as a constant and the validator pins it.
 - **Publication (R2).** Phase 2 reserves each warm successor through
-  `PlanPublisher::reserve_replacement` and publishes it `Primed` with host-core's `publish_primed`
-  (#1403, merged since the scope note): it writes the running rings' `prime_required` flags and
-  takes `not_before` from the render clock (the next block), the production order R2 describes.
-  It needs host-core's `control-provider` feature. No control-plane `WarmConfig` plumbing (R1).
+  `PlanPublisher::reserve_replacement(plan, Primed { not_before, lead_blocks })` with `not_before`
+  the publisher's render clock (the next block), after the bench writes the `prime_required`
+  flags itself through `SourceControlSet::set_prime_flags` (the running set's rings read `true`
+  exactly when the candidate holds them vacant; the candidate's own rings `false`), in #1403 D3's
+  order. host-core's `publish_primed` does the same but sits behind `control-provider`, which
+  `scripts/check-host-core-policy.sh` lets only control-plane enable. No control-plane
+  `WarmConfig` plumbing (R1).
 - **Carry refusals (R4).** `RealtimePlanOwner::active_plan_mut` is test-support only, so the
   bench reads `graph::carry_refusal_count` on every plan the retirer reclaims, and each phase ends
   with one untimed closing swap so that every measured plan is reclaimed. The count is reported per

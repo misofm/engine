@@ -13,8 +13,9 @@
 //!    track (D1's growth chain at 96 kHz), so every growth is a warm growth of
 //!    `P = ceil_q(L_max)` and `C_4`'s `ΣP` is `p_max_samples(96 kHz, 128)`. Each `C_j` is
 //!    prepared warm through host-core (`warm_lead`, then `SuccessorBase { warm }`) and published
-//!    `Primed` through `publish_primed` with `not_before` at the next block; the timed
-//!    observation is the render call that adopts it.
+//!    `Primed` with `not_before` at the next block (the render clock), after the bench sets the
+//!    running rings' `prime_required` flags itself (scope note R2: the bench owns its rings); the
+//!    timed observation is the render call that adopts it.
 //!
 //! Every plan is prepared as the C ABI prepares it (`capi`'s preparer: the live lanes the session's
 //! rows choose, effect lanes for the observation taps, the meter queue depth), with every source
@@ -46,8 +47,7 @@ use host_core::{
     CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
     HostPrepareCaps, HostShapePolicy, LiveValuesSuperseded, PlanStateInventory, PreparedHost,
     SourceControlSet, SourceSubmission, SuccessorBase, WarmConfig, WarmDecision,
-    compile_host_model, default_source_ring_frames, p_max_samples, publish_primed,
-    stall_ring_frames, warm_lead,
+    compile_host_model, default_source_ring_frames, p_max_samples, stall_ring_frames, warm_lead,
 };
 use session::{
     Effect, EffectIdentity, EffectQuality, LinkMode, SessionModel, SidechainDeclaration, StableId,
@@ -527,9 +527,14 @@ impl Stream {
     }
 
     /// Publish `host`, prepared from [`Self::base`] for `session`: adopted at the next block, or,
-    /// with `lead_blocks`, `Primed` through [`publish_primed`] (which writes the running rings'
-    /// `prime_required` flags and sets `not_before` from the render clock). Returns `not_before`
-    /// for a primed candidate.
+    /// with `lead_blocks`, `Primed` with `not_before` at the render clock (the next block's
+    /// start). Returns `not_before` for a primed candidate.
+    ///
+    /// A primed candidate's flags are written first (#1320 D4, the order #1403 D3 states): every
+    /// ring whose producer the running set holds reads `true` exactly when the candidate carries
+    /// it (holds it vacant), and every ring the candidate created reads `false`. Only then does the
+    /// candidate's set take the carried producers, and the commit's `Release` orders the stores
+    /// before render's load of the candidate.
     fn publish(
         &mut self,
         host: PreparedHost,
@@ -550,13 +555,22 @@ impl Stream {
         plan.take_revision_gate()
             .expect("the successor's gate")
             .publish(self.revision);
-        let mut reservation = self
+        let not_before = lead_blocks.map(|_| self.publisher.render_clock());
+        let adoption = match (not_before, lead_blocks) {
+            (Some(not_before), Some(lead_blocks)) => {
+                self.sources.set_prime_flags(|id| sources.holds_vacant(id));
+                sources.set_prime_flags(|_| false);
+                PlanAdoption::Primed {
+                    not_before,
+                    lead_blocks,
+                }
+            }
+            _ => PlanAdoption::Next,
+        };
+        let reservation = self
             .publisher
-            .reserve_replacement(plan, PlanAdoption::Next)
+            .reserve_replacement(plan, adoption)
             .unwrap_or_else(|_| panic!("reserve the successor"));
-        let not_before = lead_blocks.map(|lead_blocks| {
-            publish_primed(&mut reservation, &self.sources, &sources, None, lead_blocks).not_before
-        });
         // After the flags: W's set takes the producers of the rings it carries.
         sources.adopt_persisting(&mut self.sources);
         self.pending = Some(inventory.source_read_offset());
