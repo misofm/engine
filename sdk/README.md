@@ -241,6 +241,20 @@ plays:
   in `prime` (the ring holds no more), and keep writing after `ready()` resolves. A refused seek
   rejects `ready()` with a `MisoEngineError` and closes the feed. Do not publish an anchored seek
   with `Msb1RingWriter.seek` yourself: without the SDK's message to the engine, that ring stalls.
+  To start in time with a playing stem instead of your own mapping, give `start: { alignTo:
+  sourceId, prime }` (or `alignTo: "$timeline"`): the SDK reads that source's seek report before
+  and after the anchor is computed and uses `sourceFrame + (A - firstSample)`. To add
+  several stems together, start one with `frameAt` and align the others to it: if the reference's
+  own anchored start is published but not rendered yet, the SDK uses that start's frame at `A`. In
+  one feed the SDK starts a source after the source it aligns to, whatever the list order; a
+  self-alignment or an `alignTo` cycle throws at attach. Across feeds the SDK does not wait: a
+  reference whose feed has not published its start yet refuses (`feed.align.unstarted`), so align
+  after that feed's `ready()` resolved. If the engine later refuses the reference's own seek, the
+  aligned stem stays at the frame the reference's `frameAt` mapping gave. A reference that has not
+  rendered yet, whose report stays busy, that seeked or held frames between the two reads, or
+  whose ring publishes another seek the engine has not rendered rejects `ready()` with a
+  `MisoUsageError` whose `diagnosticCode` names the cause (`feed.align.*`), publishes nothing and
+  closes the feed; use `frameAt` then.
 - **Remove a stem.** When a committed edit removes a source of the feed, keep feeding its ring. The
   SDK detaches it with `feed.detachSource(sourceId)` after `engine.applied(revision)` resolves
   (the strip's ramp-out has then played), and releases its writer.
