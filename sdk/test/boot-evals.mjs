@@ -11,6 +11,7 @@ import { after, before, describe, test } from "node:test";
 
 import { MisoEngineAsset, sha256Hex } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
+import { readFields } from "../src/core/control-frame.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { hexLower } from "../src/core/hex.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
@@ -362,47 +363,56 @@ describe("eval 8 -- lifecycle", () => {
   });
 });
 
-describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
-  const capabilityExport = "miso_engine_web_v1_spectrum_hop_capability";
-  const hopBootExport = "miso_engine_web_v1_boot_with_spectrum_hop";
+describe("issue #1596 D2 -- the spectrum capability and the boot configuration", () => {
+  /** A little-endian unsigned word of `width` bytes at `at`. */
+  function wordAt(bytes, at, width) {
+    let value = 0;
+    for (let index = width - 1; index >= 0; index -= 1) value = value * 256 + bytes[at + index];
+    return value;
+  }
 
-  function proxiedAsset({
-    abiVersion = ABI_LAYOUT.abiVersion,
-    capability = 1,
-    capabilityMissing = false,
-    hopBoot = true,
-    throwOnCapability = false,
-  } = {}) {
-    const calls = { instantiates: 0, capability: 0, legacy: 0, hop: [] };
+  /** A frame's command or reply message ID, from its 48-byte header. */
+  const messageOf = (frame) => wordAt(frame, 16, 2);
+
+  /** The value of top-level field `id` of a BTLV frame, as a view into `bytes`, by the SDK's reader. */
+  function fieldOf(bytes, id) {
+    return readFields(bytes.subarray(48), wordAt(bytes, 40, 4)).find((row) => row.id === id)?.value;
+  }
+
+  /**
+   * The real asset, with every control frame recorded and, with `clearSpectrumFlag`, flag bit 16
+   * cleared in each `CAPABILITIES_GET` reply: an engine that does not serve the spectrum frames.
+   */
+  function proxiedAsset({ clearSpectrumFlag = false } = {}) {
+    const calls = { instantiates: 0, frames: [] };
     const fake = {
       instantiate: async () => {
         calls.instantiates += 1;
         const instance = await asset.instantiate();
         const real = instance.exports;
+        let staging = 0;
         const exports = new Proxy(
           Object.fromEntries(Object.keys(real).map((name) => [name, real[name]])),
           {
             get(target, name, receiver) {
-              if (name === "miso_engine_web_v1_abi_version") {
-                return () => abiVersion;
+              if (name === "miso_engine_web_v1_control_request_ptr") {
+                return (handle, length) => (staging = Number(target[name](handle, length)));
               }
-              if (name === capabilityExport) {
-                calls.capability += 1;
-                if (capabilityMissing) return undefined;
-                if (throwOnCapability) throw new Error("capability probe failed");
-                return () => capability;
-              }
-              if (name === hopBootExport) {
-                if (!hopBoot) return undefined;
-                return (length, hop) => {
-                  calls.hop.push([length, hop]);
-                  return target.miso_engine_web_v1_boot(length);
-                };
-              }
-              if (name === "miso_engine_web_v1_boot") {
-                return (...args) => {
-                  calls.legacy += 1;
-                  return target.miso_engine_web_v1_boot(...args);
+              if (name === "miso_engine_web_v1_control_command") {
+                return (handle, length) => {
+                  const frame = new Uint8Array(real.memory.buffer, staging, length).slice();
+                  calls.frames.push(frame);
+                  const result = target[name](handle, length);
+                  const message = messageOf(frame);
+                  if (clearSpectrumFlag && message === 0x0001) {
+                    const pointer = Number(real.miso_engine_web_v1_control_response_ptr(handle));
+                    const bytes = Number(real.miso_engine_web_v1_control_response_bytes(handle));
+                    const reply = new Uint8Array(real.memory.buffer, pointer, bytes);
+                    const flags = fieldOf(reply, 27);
+                    assert.ok(flags, "a capabilities reply carries its flags");
+                    flags[2] &= ~1;
+                  }
+                  return result;
                 };
               }
               return Reflect.get(target, name, receiver);
@@ -420,35 +430,7 @@ describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
   }
 
   const document = new TextEncoder().encode(sessionDocument());
-
-  test("all four explicit hops reach only the additive boot export", async () => {
-    for (const hop of [256, 512, 1024, 2048]) {
-      const { fake, calls } = proxiedAsset();
-      const boundary = await WasmBoundary.boot(fake, document, { spectrumHopFrames: hop });
-      try {
-        assert.deepEqual(calls.hop, [[document.byteLength, hop]]);
-        assert.equal(calls.legacy, 0);
-      } finally {
-        boundary.dispose();
-      }
-    }
-  });
-
-  test("old assets with all additive exports omitted still use legacy boot", async () => {
-    const { fake, calls } = proxiedAsset({
-      capabilityMissing: true,
-      hopBoot: false,
-      throwOnCapability: true,
-    });
-    const boundary = await WasmBoundary.boot(fake, document);
-    try {
-      assert.equal(calls.capability, 0);
-      assert.equal(calls.legacy, 1);
-      assert.deepEqual(calls.hop, []);
-    } finally {
-      boundary.dispose();
-    }
-  });
+  const spectrum = { target: { kind: "output", outputId: "out" }, channels: "both" };
 
   test("invalid hops refuse before instantiate", async () => {
     for (const hop of [0, 255, 256.5, "1024", null, NaN]) {
@@ -459,78 +441,26 @@ describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
     }
   });
 
-  test("missing or wrong capability and missing additive export refuse without fallback", async () => {
-    const cases = [
-      { name: "missing capability", capabilityMissing: true },
-      { name: "wrong capability", capability: 0 },
-      { name: "missing additive export", capability: 1, hopBoot: false },
-    ];
-    for (const refusal of cases) {
-      const { fake, calls } = proxiedAsset(refusal);
-      await assert.rejects(
-        () => WasmBoundary.boot(fake, document, { spectrumHopFrames: 256 }),
-        (error) => {
-          assert.ok(error instanceof MisoEngineError, refusal.name);
-          assert.equal(error.phase, "asset");
-          assert.equal(error.code, "abiMismatch");
-          assert.equal(error.diagnosticCode, "sdk.asset.capability");
-          return true;
-        },
-      );
-      assert.equal(calls.legacy, 0, `${refusal.name} fell back to legacy boot`);
-      assert.deepEqual(calls.hop, [], `${refusal.name} invoked additive boot`);
-    }
-  });
-
-  test("wrong ABI is reported before an explicit capability refusal", async () => {
-    const { fake, calls } = proxiedAsset({ abiVersion: 0, capabilityMissing: true });
-    await assert.rejects(
-      () => WasmBoundary.boot(fake, document, { spectrumHopFrames: 256 }),
-      (error) => {
-        assert.ok(error instanceof MisoEngineError);
-        assert.equal(error.phase, "asset");
-        assert.equal(error.code, "abiMismatch");
-        assert.equal(error.diagnosticCode, "sdk.asset.abi_version");
-        assert.equal(error.diagnosticPath, "0");
-        return true;
-      },
-    );
-    assert.equal(calls.capability, 0, "wrong ABI reached the optional capability probe");
-    assert.equal(calls.legacy, 0);
-    assert.deepEqual(calls.hop, []);
-  });
-
-  test("explicit reboot preflights unsupported capability and keeps the live session", async () => {
-    const { fake, calls } = proxiedAsset({ capabilityMissing: true });
+  test("an engine without capability bit 16 refuses a spectrum boot, and a reboot keeps the live session", async () => {
+    const { fake } = proxiedAsset({ clearSpectrumFlag: true });
+    const refused = (error) => {
+      assert.ok(error instanceof MisoEngineError);
+      assert.equal(error.phase, "asset");
+      assert.equal(error.code, "unsupported");
+      assert.equal(error.diagnosticCode, "sdk.asset.capability");
+      return true;
+    };
+    await assert.rejects(() => WasmBoundary.boot(fake, document, { spectrum }), refused);
     const boundary = await WasmBoundary.boot(fake, document);
     try {
-      assert.throws(
-        () => boundary.reboot(document, { spectrumHopFrames: 256 }),
-        (error) => error instanceof MisoEngineError
-          && error.phase === "asset"
-          && error.code === "abiMismatch",
-      );
-      assert.equal(boundary.state(), "ready");
-      assert.equal(calls.legacy, 1, "unsupported reboot booted or disposed the live session");
+      assert.throws(() => boundary.reboot(document, { spectrum }), refused);
+      assert.equal(boundary.state(), "ready", "the refused reboot disposed the live session");
     } finally {
       boundary.dispose();
     }
   });
 
-  test("explicit reboot dispatches the additive export with its captured hop", async () => {
-    const { fake, calls } = proxiedAsset();
-    const boundary = await WasmBoundary.boot(fake, document);
-    try {
-      boundary.reboot(document, { spectrumHopFrames: 512 });
-      assert.deepEqual(calls.hop, [[document.byteLength, 512]]);
-      assert.equal(calls.legacy, 1, "the initial omitted boot should use the legacy export");
-      assert.equal(boundary.state(), "ready");
-    } finally {
-      boundary.dispose();
-    }
-  });
-
-  test("caller mutation after boot invocation cannot change the copied hop", async () => {
+  test("the boot's and the reboot's one SPECTRUM_CONFIGURE carries the hop copied before instantiate", async () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     const { fake, calls } = proxiedAsset();
@@ -540,13 +470,24 @@ describe("issue #852 B2a -- optional prepared spectrum hop boot", () => {
         return fake.instantiate();
       },
     };
-    const options = { spectrumHopFrames: 1024 };
+    const options = { spectrum, spectrumHopFrames: 1024 };
     const pending = WasmBoundary.boot(delayed, document, options);
     options.spectrumHopFrames = 256;
     release();
     const boundary = await pending;
+    const configureHops = () => calls.frames
+      .filter((frame) => messageOf(frame) === 0x0010)
+      .map((frame) => {
+        const hop = fieldOf(frame, 4);
+        assert.ok(hop, "the configuration carries the hop");
+        return wordAt(hop, 0, 4);
+      });
     try {
-      assert.deepEqual(calls.hop, [[document.byteLength, 1024]]);
+      assert.deepEqual(configureHops(), [1024]);
+      // A reboot is the same boot: its one configuration carries the reboot's own hop.
+      calls.frames.length = 0;
+      boundary.reboot(document, { spectrum, spectrumHopFrames: 512 });
+      assert.deepEqual(configureHops(), [512]);
     } finally {
       boundary.dispose();
     }

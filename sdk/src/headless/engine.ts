@@ -18,7 +18,13 @@ import type {
 } from "../core/observation.ts";
 import type { TrackResponseObservedState, TrackResponseQuery, TrackResponseRead, TrackResponseResult } from "../core/live-response.ts";
 import { cloneSpectrumCollection, cloneSpectrumQuery } from "../core/spectrum.ts";
-import type { SpectrumResult } from "../core/spectrum.ts";
+import type {
+  SpectrumCollection,
+  SpectrumConfigureOptions,
+  SpectrumConfigured,
+  SpectrumQuery,
+  SpectrumResult,
+} from "../core/spectrum.ts";
 import {
   ObservationSubscriptionOwner,
 } from "../core/observation-subscriptions.ts";
@@ -286,17 +292,35 @@ export class OfflineEngine {
     return this.#boundary.queryTrackResponse(request);
   }
 
-  /** Arm the optional prepared spectrum boundary for its next complete 2048-frame window. */
+  /**
+   * Set, change or remove the spectrum taps of the running session with one `SPECTRUM_CONFIGURE`
+   * (#1596 D5): a query sets one tap, a collection several, and an empty collection with budget 0
+   * removes them. A change of taps prepares a replacement plan that the next `render()` adopts; the
+   * taps are in effect once a spectrum reply reports `adoptedEpoch === configuredEpoch`. A core
+   * refusal rejects with `MisoEngineError` whose `diagnosticCode` is the core's code.
+   */
+  configureSpectrum(
+    configuration: SpectrumQuery | SpectrumCollection,
+    options?: SpectrumConfigureOptions,
+  ): Promise<SpectrumConfigured> {
+    try {
+      return Promise.resolve(this.#boundary.configureSpectrum(configuration, options));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  /** Arm the selected spectrum capture for its next complete 2048-frame window. */
   armSpectrum(): EngineCallResult {
     return this.#boundary.armSpectrum();
   }
 
-  /** Read/analyze the completed spectrum window; `undefined` means more explicit renders are needed. */
+  /** Read the completed spectrum window, analyzed; `undefined` means more explicit renders are needed. */
   readSpectrum(): SpectrumResult | undefined {
     return this.#boundary.readSpectrum();
   }
 
-  /** Cancel the optional pending spectrum capture. */
+  /** Cancel the pending spectrum capture. */
   cancelSpectrum(): EngineCallResult {
     if (this.#observationSubscriptions?.managedSpectrumActive()) {
       const result = constantValue("resultCodes", "wrongState");
