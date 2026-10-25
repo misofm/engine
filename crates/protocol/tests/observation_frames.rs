@@ -213,7 +213,7 @@ const PADDED: [&str; 9] = [
 ];
 
 fn padded_section(index: usize, name: &str) -> TapSection {
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         TapSection::Inserts(id(name))
     } else {
         TapSection::Console(id(name))
