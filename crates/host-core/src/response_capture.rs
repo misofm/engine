@@ -193,7 +193,7 @@ pub fn response_capture_channel()
 
 /// The bytes the channel's two queues retain, ring headers and slots, as a resource report
 /// charges them. The armed job and the delivered result are charged apart, at the model's bounds
-/// ([`response_capture_ceiling_bytes`]).
+/// ([`response_capture_ceiling`]).
 ///
 /// # Errors
 ///
