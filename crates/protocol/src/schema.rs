@@ -1054,7 +1054,7 @@ pub(crate) mod meter_batch {
 /// One meter table entry of `TELEMETRY_CONFIGURE` (#1583 D1): its 1-based position is its handle.
 pub(crate) mod meter_entry {
     use super::*;
-    /// Output `1`, strip `2`.
+    /// Output `1`, strip `2`, master `3` (#1690 D3).
     pub(crate) const TARGET: FieldSpec = FieldSpec::req(1, Wire::U8);
     /// The strip's stable ID: present exactly when `target` is a strip.
     pub(crate) const STRIP_ID: FieldSpec = FieldSpec::opt(2, Wire::Utf8);

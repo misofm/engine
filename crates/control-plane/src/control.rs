@@ -1308,12 +1308,13 @@ enum MeterSource {
 /// same for both sources.
 struct MeterBatches {
     fold: host_core::meters::MeterBatchFold,
-    /// The provider epoch `resolution` was resolved against (#1588 D3), `None` after a configure:
-    /// a frame of another epoch resolves the entries again first.
+    /// The provider epoch `resolution` was resolved against (#1588 D3), `None` after a configure
+    /// and after a commit that moves the master (#1690 D2): a frame of another epoch, or the next
+    /// frame after either, resolves the entries again first.
     resolved_epoch: Option<u64>,
     /// Each table entry's strip in `resolved_epoch`'s plan (#1587a D2, R4): its index in the
-    /// frame's strip peaks, or `None` for an absent strip and for every entry that reads no strip
-    /// peak. Rebuilt at a frame of another epoch, never searched by a batch. Reserved at boot for
+    /// frame's strip peaks, or `None` for an absent strip and for every entry that reads no strip;
+    /// a master entry's is the master strip's (#1690 D2). Rebuilt at a frame of another epoch, never searched by a batch. Reserved at boot for
     /// the most entries a table holds, so no rebuild allocates.
     resolution: Vec<Option<u32>>,
     /// Each table entry's peak fold over the open batch, as long as `resolution`.
@@ -1413,7 +1414,10 @@ impl MeterBatches {
     /// frames are folded (`PlanStateInventory::meter_targets`: meter `i` is the frame's strip `i`;
     /// `None` when no epoch held is that one, and then no entry has a strip): a strip's peak or gain
     /// reduction entry (#1587b) reads the first post-matrix sample-peak meter of its strip, so a caller selection (a
-    /// subset, another order, several taps on one strip) never reads another meter's peak. Then
+    /// subset, another order, several taps on one strip) never reads another meter's peak. A
+    /// master's gain reduction entry (#1690 D2, D3) resolves the same way the strip `master` names,
+    /// the core's `master` row now (`SessionState::master_strip`), by its ID: no strip when no
+    /// strip is the master or the epoch has none of that ID. Then
     /// size the folds to the table. The folds keep their
     /// values: they are indexed by table entry, so a batch an adoption interrupts goes on folding
     /// into them, and `push_with_strips` resets them at a batch's first frame. A table never
@@ -1422,6 +1426,7 @@ impl MeterBatches {
         &mut self,
         table: &[protocol::MeterEntry],
         meters: Option<&host_core::PlanStateInventory>,
+        master: Option<&str>,
     ) {
         self.resolution.clear();
         self.resolution.extend(
@@ -1429,6 +1434,9 @@ impl MeterBatches {
                 .iter()
                 .map(|entry| match (&entry.target, entry.metric) {
                     (protocol::MeterTarget::Strip(id), _) => strip_meter_index(meters?, id),
+                    (protocol::MeterTarget::Master, protocol::MeterMetric::GainReduction) => {
+                        strip_meter_index(meters?, master?)
+                    }
                     _ => None,
                 }),
         );
@@ -1441,7 +1449,7 @@ impl MeterBatches {
     /// Fold one published `frame` of provider epoch `epoch` and stage the `METER_BATCH` it
     /// completes (#1583 D5, #1587a, #1588 D4), the one staging both sources share. A frame of
     /// another epoch than the last one resolved resolves the entries against `epochs`' strips of
-    /// its epoch first (#1588 D3).
+    /// its epoch first (#1588 D3), with `master` the strip the core's `master` row names now.
     ///
     /// Records follow the table (D3): the output's peak entry gives the batch's left and right
     /// output peak, `VALID` when the output peak covered the batch's span; a strip's peak entry
@@ -1449,13 +1457,15 @@ impl MeterBatches {
     /// every frame had the strip; `CLIPPED` marks a valid peak above `1.0`. A strip's gain
     /// reduction entry gives one `Aggregate` record (#1587b), the last frame's reading that is
     /// present, `VALID` when any frame's is: only an armed tap's window from at or after its arm
-    /// sample is a reading. A value that is not valid is `0.0` with flags `0`. An accepted table needs at most
+    /// sample is a reading. The master's gain reduction entry (#1690 D3) is the same record of the
+    /// master strip. A value that is not valid is `0.0` with flags `0`. An accepted table needs at most
     /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, so the records stay on the stack.
     fn stage(
         &mut self,
         frame: &host_core::MeterFrame,
         epoch: u64,
         epochs: &ProviderEpochs<'_>,
+        master: Option<&str>,
         controller: &mut ObservedController,
         revision: protocol::SessionRevision,
     ) {
@@ -1466,6 +1476,7 @@ impl MeterBatches {
             self.resolve(
                 &controller.telemetry_configuration().meters,
                 epochs.meters(epoch),
+                master,
             );
             self.resolved_epoch = Some(epoch);
         }
@@ -1489,11 +1500,13 @@ impl MeterBatches {
                 (protocol::MeterTarget::Output, protocol::MeterMetric::Peak) => {
                     (batch.output_valid, batch.output_peak)
                 }
-                (protocol::MeterTarget::Strip(_), protocol::MeterMetric::Peak) => {
-                    (fold.present, fold.peak)
-                }
-                // #1587b D3: one aggregate record, never clipped. The wire refuses an output
-                // gain-reduction entry.
+                // The wire refuses a master peak entry, which resolves no strip.
+                (
+                    protocol::MeterTarget::Strip(_) | protocol::MeterTarget::Master,
+                    protocol::MeterMetric::Peak,
+                ) => (fold.present, fold.peak),
+                // #1587b D3, #1690 D3: one aggregate record, never clipped. The wire refuses an
+                // output gain-reduction entry.
                 (_, protocol::MeterMetric::GainReduction) => {
                     if let Some(slot) = records.get_mut(count) {
                         let valid = fold.gain_reduction_present;
@@ -1554,6 +1567,22 @@ impl MeterBatches {
 /// post-matrix sample-peak meter (`PlanStateInventory::meter_targets`), or `None`. The one rule
 /// for a meter entry's strip (#1588 D3) and an observation tap's (#1587b), so both read the same
 /// frame strip.
+/// After a live or monitor commit wrote the monitor overlay (#1690 D2): when the master it leaves
+/// (`now`) is not `previous`, the meter entries resolve again at the next frame, so a master entry
+/// reads the strip the row names now. A rebuild needs no call: its successor's frames are of a new
+/// epoch, which resolves them. Control thread; allocates nothing.
+fn master_moved(
+    meters: &mut Option<SessionMeters>,
+    previous: Option<&session::StableId>,
+    now: Option<&session::StableId>,
+) {
+    if previous != now
+        && let Some(meters) = meters.as_mut()
+    {
+        meters.batches.resolved_epoch = None;
+    }
+}
+
 pub(crate) fn strip_meter_index(meters: &host_core::PlanStateInventory, id: &str) -> Option<u32> {
     meters
         .meter_targets()
@@ -2759,11 +2788,13 @@ where
             retired_providers,
             pending_providers,
             shared,
+            monitor,
             ..
         } = self;
         let Some(meters) = meters.as_mut() else {
             return;
         };
+        let master = monitor.master().map(session::StableId::as_str);
         match &mut meters.source {
             MeterSource::Delivery { delivery, epoch } => {
                 if *epoch != providers.epoch {
@@ -2786,7 +2817,7 @@ where
                     };
                     meters
                         .batches
-                        .stage(frame, frame.plan_epoch, &epochs, controller, revision);
+                        .stage(frame, frame.plan_epoch, &epochs, master, controller, revision);
                 }
             }
             MeterSource::Rendered { .. } => {
@@ -2834,7 +2865,7 @@ where
                         if on {
                             meters
                                 .batches
-                                .stage(frame, epoch, &epochs, controller, revision);
+                                .stage(frame, epoch, &epochs, master, controller, revision);
                         }
                         if let Some(ring) = core::iter::once(&mut *providers)
                             .chain(retired_providers.iter_mut())
@@ -5656,6 +5687,9 @@ where
         fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
         let monitor_ramp = writes_monitor.then_some(monitor_change.ramp);
+        // #1690 D2: a master the rebuild moves or ends is read from the successor's first frame,
+        // which resolves the entries again as a frame of a new epoch; the plan still rendering
+        // keeps its resolution until then, as the browser's `sync_master` keeps its designation.
         let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
         // #1584 D6a: and the subscriptions the successor was prepared with.
         self.observation = observation_change.bindings;
@@ -6509,7 +6543,8 @@ where
             "the revision stamped is the revision committed (#1312 D7)"
         );
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
-        self.monitor = monitor_change.overlay;
+        let previous_monitor = core::mem::replace(&mut self.monitor, monitor_change.overlay);
+        master_moved(&mut self.meters, previous_monitor.master(), self.monitor.master());
         fold_send_move(&mut self.send_moves, revision, send_ramp);
         for index in published {
             owners.effects[index]

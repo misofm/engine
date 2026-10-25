@@ -2478,9 +2478,9 @@ fn every_counter_id_round_trips_and_the_next_is_refused() {
 /// form and field 8 refused in a command.
 ///
 /// Test value: red if the encoder, the decoder and the registry disagree on the table, the span or
-/// the retired field: a rule one side forgets (a duplicate, an output gain reduction, a 257th entry,
-/// a zero period, an empty span, a zero sequence, a command window) is a frame one side writes and
-/// the other refuses.
+/// the retired field: a rule one side forgets (a duplicate, an output gain reduction, a master peak
+/// or a master with a strip ID (#1690 D3), a 257th entry, a zero period, an empty span, a zero
+/// sequence, a command window) is a frame one side writes and the other refuses.
 #[test]
 fn the_meter_table_and_the_window_span_follow_one_rule_on_encode_and_decode() {
     let codec = ProtocolCodec::new(ProtocolLimits {
@@ -2496,6 +2496,7 @@ fn the_meter_table_and_the_window_span_follow_one_rule_on_encode_and_decode() {
             entry(MeterTarget::Output, MeterMetric::Peak),
             entry(strip("vocal"), MeterMetric::Peak),
             entry(strip("vocal"), MeterMetric::GainReduction),
+            entry(MeterTarget::Master, MeterMetric::GainReduction),
         ],
         meter_period_blocks: 24,
         meter_window_blocks: None,
@@ -2570,6 +2571,11 @@ fn the_meter_table_and_the_window_span_follow_one_rule_on_encode_and_decode() {
             meters: vec![entry(MeterTarget::Output, MeterMetric::GainReduction)],
             ..base.clone()
         },
+        // The master's peak (#1690 D3).
+        TelemetryConfiguration {
+            meters: vec![entry(MeterTarget::Master, MeterMetric::Peak)],
+            ..base.clone()
+        },
         // A table with no period.
         TelemetryConfiguration {
             meter_period_blocks: 0,
@@ -2616,11 +2622,21 @@ fn the_meter_table_and_the_window_span_follow_one_rule_on_encode_and_decode() {
         // No period.
         (
             replace(&bytes, &period, &[2, 0, 3, 1, 4, 0, 0, 0, 0, 0, 0, 0], 0),
-            8,
+            count(&base),
+        ),
+        // The master's peak: the output's peak entry with the master's target (#1690 D3).
+        (
+            replace(&output_bytes, &u8_field(1, 1), &u8_field(1, 3), 0),
+            6,
+        ),
+        // A master target with a strip ID.
+        (
+            replace(&one_strip_bytes, &u8_field(1, 2), &u8_field(1, 3), 1),
+            7,
         ),
         // An unknown target and an unknown metric.
         (
-            replace(&output_bytes, &u8_field(1, 1), &u8_field(1, 3), 0),
+            replace(&output_bytes, &u8_field(1, 1), &u8_field(1, 4), 0),
             6,
         ),
         (
@@ -2637,10 +2653,11 @@ fn the_meter_table_and_the_window_span_follow_one_rule_on_encode_and_decode() {
             7,
         ),
     ];
-    for (frame, fields) in &refused_frames {
+    for (index, (frame, fields)) in refused_frames.iter().enumerate() {
         assert_eq!(
             codec.decode_telemetry_configuration(frame, *fields),
-            Err(DecodeError::InvalidField)
+            Err(DecodeError::InvalidField),
+            "refused frame {index}"
         );
     }
     // 256 entries are the most; a 257th is refused both ways.
