@@ -42,7 +42,11 @@ extern "C" {
  * position continue, so the host goes on submitting with no seek. The live changes are a track's
  * fader levels, mutes, and pan or matrix values; a changed value of a track effect parameter
  * whose automation rate is Block, on a console-slot entry or an insert, the parametric EQ's live
- * parameters included (applied through prepared targets); and a track effect's bypass. A
+ * parameters included (applied through prepared targets); a track effect's bypass; and the
+ * link mode of an insert or of a console entry's override of the compressor, gate/expander,
+ * transient shaper, true-peak limiter, de-esser or dynamic EQ (#1371): the lane's detector glides
+ * to the new mode over the edit's own ramp_samples, else the session's fader_ms. A console slot's
+ * declared link mode, and the link mode of any other effect, rebuild. A
  * transaction that changes only the
  * session ID, a profile's id or a stored automation entry on a row that does not render yet
  * commits with no replacement and no live value. A stored fader automation edit (an entry on a
@@ -56,13 +60,13 @@ extern "C" {
  * that a follows_mute send reads, a fader outside its domain or effect parameters that
  * preparation refuses (refused as MISO_ENGINE_V1_COMPILE_REJECTED with the same diagnostic as
  * before), and every other field. A committed live value (fader, mute, pan or matrix, effect
- * parameter, effect bypass or parametric EQ) reaches render no later than the first block whose
+ * parameter, effect bypass, effect link mode or parametric EQ) reaches render no later than the first block whose
  * render call begins after miso_engine_v1_submit_command returns or, while a replacement plan is
  * pending, at that plan's adoption, which the watermark reports. Every such value of one
  * transaction takes effect in the same block, and the watermark names that block's first sample;
  * it is heard up to latency_samples later. These values are held in latest-target cells, not
- * queues: a host sends any number of fader, mute, pan, effect parameter, effect bypass or
- * parametric EQ edits between two render calls, a paused host included, and none is refused for
+ * queues: a host sends any number of fader, mute, pan, effect parameter, effect bypass, effect
+ * link mode or parametric EQ edits between two render calls, a paused host included, and none is refused for
  * room. A later value for the same cell committed before that block replaces the earlier one.
  * The counter LIVE_VALUES_SUPERSEDED (protocol counter 16, read with COUNTERS_GET) counts, per
  * cell, each write to a plan that render adopts which the block covering it does not apply
@@ -76,10 +80,12 @@ extern "C" {
  * that cannot carry its state, or an effect chain that changed. Each such strip counts once per
  * adopted plan, however many of its parts restart. A candidate that is withdrawn adds nothing, and
  * an added strip is not a restart. COUNTERS_GET reports it once the render call of the adopting
- * block has returned. An effect's bypass, its parameters (one cell per channel for a per-lane
- * parameter, one for a shared one) and a parametric EQ's prepared targets are cells of that
- * effect's lane; a block applies the bypass first, then the parameters in parameter order, then
- * the targets, all under the one snapshot that covers the fader values. An acknowledged live edit
+ * block has returned. An effect's bypass, its link mode (one cell, for the effects above), its
+ * parameters (one cell per channel for a per-lane parameter, one for a shared one) and a
+ * parametric EQ's prepared targets are cells of that effect's lane; a block applies the bypass
+ * first, then the link mode, then the parameters in parameter order, then the targets, all under
+ * the one snapshot that covers the fader values. A replacement plan that lands while a link mode
+ * glides continues the glide to its target. An acknowledged live edit
  * is never dropped. A live edit commits
  * the same reliable events as a replacement, so the host drains the reliable event lane after
  * each edit either way. The success response of every SESSION_TRANSACTION_APPLY names how the
@@ -223,6 +229,21 @@ extern "C" {
  * spectrum.channels, spectrum.select.single, spectrum.stream.active, spectrum.stream.inactive and
  * others) and changes nothing. An exact replay of a read returns the same bytes and pops nothing;
  * a host gives each read a new request ID.
+ *
+ * Observation reads (issue 1586). OBSERVATION_READ (message ID 0x000f, capability flag bit 15,
+ * which also means the OBSERVE edit is served) through miso_engine_v1_submit_command reads the
+ * latest window of 1 to 256 observation taps, each named by its strip, its console slot or insert
+ * and its tap ID. No C symbol or struct is added. The read consumes nothing and arms nothing. Each
+ * row says pending, unarmed or ready, the arm state render applied (armed, arm sample, arm tag;
+ * none until render applies the tap's last record), and, when ready, the window (first and end
+ * sample, sequence, blocks) and the asked-for lanes in the tap's native unit. A tap is ready once
+ * a window that opened at or after its arm has closed; a disarm reads unarmed when it is accepted.
+ * The batch is checked whole first: a reply wider than maximum_control_frame_bytes (64 + 192 bytes
+ * per row; 21 rows fit 4096 bytes) is LIMIT_EXCEEDED (observation.frame), and the first bad
+ * selection is refused at selection[i] (observation.address.unknown, observation.tap.unknown,
+ * observation.tap.unsupported, observation.unbound, observation.selection.duplicate), with no
+ * row. Until issue 1674 pairs carried readers, a tap whose effect a rebuild carried is read from
+ * the new plan's own slot, which the carried tap does not publish to: no window, never a wrong one.
  *
  * Completion (issue 1314). miso_engine_v1_submit_command is synchronous only for what can fail:
  * it validates and classifies the transaction, prepares a replacement plan and reserves its

@@ -1129,7 +1129,9 @@ fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call()
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     };
@@ -1246,7 +1248,9 @@ fn attached_observation_ends_follow_their_commit_in_one_event() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     };
@@ -1344,7 +1348,9 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     };
@@ -1400,7 +1406,9 @@ fn the_end_needs_room_with_the_commit_and_a_dropped_token_releases_it() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     };
@@ -1444,7 +1452,9 @@ fn prepare_at(
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("valid transaction was immediate")
         }
     }
@@ -1502,7 +1512,9 @@ fn edit_path_is_written_at_commit_and_replayed_byte_for_byte() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            PreparedCommandFrame::Immediate(_)
+            | PreparedCommandFrame::Session(_)
+            | PreparedCommandFrame::ObservationRead(_) => {
                 panic!("valid transaction was immediate")
             }
         };
@@ -1561,7 +1573,9 @@ fn a_structural_commit_writes_its_replay_entry_and_evicts_at_the_commit() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            PreparedCommandFrame::Immediate(_)
+            | PreparedCommandFrame::Session(_)
+            | PreparedCommandFrame::ObservationRead(_) => {
                 panic!("expected structural token")
             }
         }
@@ -1726,7 +1740,9 @@ fn a_transaction_of_monitor_writes_commits_no_model_revision_or_event() {
         .expect("prepare")
     {
         PreparedCommandFrame::Structural(prepared) => *prepared,
-        PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+        PreparedCommandFrame::Immediate(_)
+        | PreparedCommandFrame::Session(_)
+        | PreparedCommandFrame::ObservationRead(_) => {
             panic!("expected a token")
         }
     };
@@ -1891,7 +1907,9 @@ fn structural_token_cancel_owner_generation_and_serial_rules_are_affine() {
             .expect("prepare")
         {
             PreparedCommandFrame::Structural(prepared) => *prepared,
-            PreparedCommandFrame::Immediate(_) | PreparedCommandFrame::Session(_) => {
+            PreparedCommandFrame::Immediate(_)
+            | PreparedCommandFrame::Session(_)
+            | PreparedCommandFrame::ObservationRead(_) => {
                 panic!("expected structural token")
             }
         }
@@ -4445,11 +4463,14 @@ fn a_stale_structure_epoch_is_a_revision_conflict_that_names_itself() {
 /// Gate 2: the capability registry lists `0x000c` and `0x000d` and never the retired `0x0004` and
 /// `0x0005`; without the controls feature neither new message is listed, bit 7 is clear and a
 /// request for one is `UNAVAILABLE`. #1595 D8: with the spectrum feature the three spectrum
-/// commands are listed with bit 16, and without it none is and bit 16 is clear.
+/// commands are listed with bit 16, and without it none is and bit 16 is clear. #1586 D6: the
+/// observation feature switches `0x000f` and bit 15 together, and the session executes the read
+/// exactly when it is advertised.
 ///
 /// Red if a retired ID is advertised or served, bit 7 stops tracking the pair, a disabled
 /// provider answers a control request, or the spectrum feature does not switch the three
-/// commands and bit 16 together.
+/// commands and bit 16 together, or the observation feature `0x000f`, bit 15 and the read's
+/// route.
 #[test]
 fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones() {
     let ids = |endpoint: &mut ProtocolController<MockProvider>, request_id: u64| {
@@ -4468,19 +4489,23 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
         // is listed.
         assert_eq!(decoded.flags.0 & (1 << 14) != 0, commands.contains(&14));
         assert_eq!(decoded.flags.0 & (1 << 16) != 0, commands.contains(&0x0010));
+        assert_eq!(decoded.flags.0 & (1 << 15) != 0, commands.contains(&0x000f));
         (commands, decoded.flags.0 & (1 << 7) != 0)
     };
     let mut endpoint = controller(8);
     assert_eq!(
         ids(&mut endpoint, 1),
         (
-            vec![1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x0010, 0x0011, 0x0012],
+            vec![
+                1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x000f, 0x0010, 0x0011, 0x0012
+            ],
             true
         )
     );
     endpoint.set_provider_features(ProviderFeatures {
         controls: false,
         spectrum: false,
+        observation: false,
         ..ProviderFeatures::ALL
     });
     assert_eq!(
@@ -4504,6 +4529,51 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
             panic!("a disabled control provider must refuse");
         };
         assert_eq!(header.status, StatusCode::Unavailable);
+    }
+    // #1586 D6: the session executes an advertised `OBSERVATION_READ`; an endpoint that does not
+    // advertise it answers `UNAVAILABLE` itself.
+    let read = crate::ObservationReadRequest {
+        selections: vec![crate::ObservationReadSelection {
+            strip_id: session::StableId::parse("t1").expect("strip"),
+            section: controls::TapSection::Inserts(session::StableId::parse("comp").expect("id")),
+            tap_id: 1,
+            channels: crate::ParameterChannel::Both,
+        }],
+    };
+    for (request_id, observation) in [(5, false), (6, true)] {
+        endpoint.set_provider_features(ProviderFeatures {
+            observation,
+            ..ProviderFeatures::ALL
+        });
+        let input = full_command(
+            request_id,
+            ExpectedRevision::Any,
+            crate::CommandPayload::ObservationRead(&read),
+        );
+        let prepared = endpoint
+            .prepare_command_frame(
+                &input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
+            .expect("prepare");
+        match (observation, prepared) {
+            (true, PreparedCommandFrame::ObservationRead(prepared)) => {
+                assert_eq!(prepared.request_id().get(), request_id);
+            }
+            (false, PreparedCommandFrame::Immediate(response)) => {
+                let mut output = [0_u8; 2048];
+                let written = response.write_into(&mut output).expect("reply");
+                let crate::DecodedTypedResponseFrame::NonOk { header, .. } =
+                    decode_response(&output[..written])
+                else {
+                    panic!("an unadvertised read must refuse");
+                };
+                assert_eq!(header.status, StatusCode::Unavailable);
+            }
+            _ => panic!("observation {observation}: the read took the wrong path"),
+        }
     }
 }
 
@@ -4899,4 +4969,79 @@ fn a_session_command_completes_once_and_replays_its_exact_bytes() {
         header.header.response().expect("response").status,
         StatusCode::Unavailable
     );
+}
+
+/// #1586 D6: an `OBSERVATION_READ` completes only with the request it prepared. Completed with a
+/// request of the same length and request ID but another selection, or with a longer request, it
+/// answers `Internal` without panicking and leaves the replay cache empty; the prepared request
+/// then completes once and is cached.
+///
+/// Red if the completion records a replay entry for bytes the read was not planned for (or panics
+/// on a longer request's reservation).
+#[test]
+fn an_observation_read_completes_only_with_its_own_request() {
+    let read = |strip: &str, tap_id| crate::ObservationReadRequest {
+        selections: vec![crate::ObservationReadSelection {
+            strip_id: session::StableId::parse(strip).expect("strip"),
+            section: controls::TapSection::Inserts(session::StableId::parse("comp").expect("id")),
+            tap_id,
+            channels: crate::ParameterChannel::Both,
+        }],
+    };
+    let frame = |request: &crate::ObservationReadRequest| {
+        full_command(
+            7,
+            ExpectedRevision::Any,
+            crate::CommandPayload::ObservationRead(request),
+        )
+    };
+    let input = frame(&read("t1", 1));
+    let same_length = frame(&read("t1", 2));
+    let longer = frame(&read("a-much-longer-strip-id", 1));
+    assert_eq!(input.len(), same_length.len());
+    assert!(longer.len() > input.len());
+    let page = crate::ObservationReadPage {
+        observed_sample: 0,
+        rows: std::borrow::Cow::Owned(vec![crate::ObservationReadRow {
+            status: crate::ObservationRowStatus::Unarmed,
+            armed: false,
+            arm_sample: 0,
+            arm_tag: 0,
+            window: None,
+            left: None,
+            right: None,
+            unit: crate::ParameterUnit::Db,
+        }]),
+    };
+    let mut endpoint = controller(8);
+    let prepare = |endpoint: &mut ProtocolController<MockProvider>| {
+        let PreparedCommandFrame::ObservationRead(prepared) = endpoint
+            .prepare_command_frame(
+                &input,
+                &[],
+                &mut DecodeScratch::new(&mut [0_u16; 1024]),
+                2048,
+            )
+            .expect("prepare")
+        else {
+            panic!("the session executes the read");
+        };
+        prepared
+    };
+    let mut output = [0_u8; 2048];
+    for other in [&same_length, &longer] {
+        let prepared = prepare(&mut endpoint);
+        assert!(matches!(
+            endpoint.complete_observation_read(prepared, other, page.clone(), &mut output),
+            Err(CommandFrameProcessError::Internal)
+        ));
+        assert!(endpoint.replay().is_empty(), "no entry for another request");
+    }
+    let prepared = prepare(&mut endpoint);
+    assert!(
+        endpoint
+            .complete_observation_read(prepared, &input, page, &mut output)
+            .is_ok()
+    );
+    assert_eq!(endpoint.replay().len(), 1);
 }
