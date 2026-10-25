@@ -9040,7 +9040,7 @@ mod tests {
             /// [`Self::render`] until the render clock reads `clock`, a block boundary not behind
             /// it.
             fn render_to(&mut self, clock: u64) {
-                assert!(clock >= self.at && clock % QUANTUM == 0);
+                assert!(clock >= self.at && clock.is_multiple_of(QUANTUM));
                 self.render(usize::try_from((clock - self.at) / QUANTUM).expect("blocks"));
                 assert_eq!(self.children.session.test_render_clock(), clock);
             }
