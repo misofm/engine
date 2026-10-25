@@ -2264,6 +2264,10 @@ mod admission_tests {
     /// candidate's promotion makes: a candidate with the service beside a newest plan without it
     /// raises the control-retained peak by the service's bytes (accepted at the peak, refused one
     /// byte below), and beside a newest plan that has it already, by nothing.
+    ///
+    /// #1577: likewise the response capture row. A candidate whose model has more owners per strip
+    /// than the newest plan's raises the peak by the rows' difference, and one with the same row by
+    /// nothing; red if the replacement admission leaves the capture row's growth out.
     #[test]
     fn the_replacement_admission_charges_a_new_spectrum_service_once() {
         let models =
@@ -2288,6 +2292,24 @@ mod admission_tests {
                 verdict(&held, prospective, models, with_cap(7, peak - 1)),
                 Err(CAPS[7].1.to_owned()),
                 "{label}: refused one byte below"
+            );
+        }
+        let mut prospective = candidate(1_000);
+        prospective.capi.response_capture = 900;
+        for (label, newest_row, peak) in [
+            ("a grown capture row", 300, control + 600),
+            ("a kept capture row", 900, control),
+        ] {
+            let mut newest = epoch(1);
+            newest.capi.response_capture = newest_row;
+            let held = [newest];
+            assert_eq!(
+                (
+                    verdict(&held, prospective, models, with_cap(7, peak)),
+                    verdict(&held, prospective, models, with_cap(7, peak - 1)),
+                ),
+                (Ok(()), Err(CAPS[7].1.to_owned())),
+                "{label}: accepted at the peak, refused one byte below"
             );
         }
     }
