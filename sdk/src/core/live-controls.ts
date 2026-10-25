@@ -79,10 +79,7 @@ export interface LiveControlTransport {
  * Optional owner hook used to serialize observation edits with managed subscriptions. It sees the
  * observation edits as the builders made them.
  */
-export type LiveControlBeforeSubmit = (
-  edits: readonly LaneEdit[],
-  managed?: boolean,
-) => void | Promise<void>;
+export type LiveControlBeforeSubmit = (edits: readonly LaneEdit[]) => void | Promise<void>;
 
 function modelOf(session: SessionLike): SessionModel {
   const candidate = session as { readonly toJSON?: unknown; readonly schema_version?: unknown };
@@ -637,15 +634,10 @@ export class EngineLiveControls {
     if (sets.length !== 0) {
       throw new MisoUsageError("one submit sends value edits or observation edits, not both");
     }
-    return this.#submitObservation(edits as readonly LaneEdit[], false);
+    return this.#submitObservation(edits as readonly LaneEdit[]);
   }
 
-  /** @internal Managed observation owner submission with an owner-specific guard bypass. */
-  async submitManaged(...edits: readonly LaneEdit[]): Promise<CommandReport> {
-    return this.#submitObservation(edits, true);
-  }
-
-  async #submitObservation(edits: readonly LaneEdit[], managed: boolean): Promise<CommandReport> {
+  async #submitObservation(edits: readonly LaneEdit[]): Promise<CommandReport> {
     if (edits.length === 0 || edits.length > ABI_LAYOUT.constants.maximumCommandRecords) {
       throw new MisoUsageError(
         `an observation submit must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
@@ -654,7 +646,7 @@ export class EngineLiveControls {
     if (edits.some((edit) => edit.kind !== "observeSubscribe" && edit.kind !== "observeUnsubscribe")) {
       throw new MisoUsageError("a command record carries an observation edit only; value edits are SET_CONTROL");
     }
-    const beforeSubmit = this.#beforeSubmit?.(edits, managed);
+    const beforeSubmit = this.#beforeSubmit?.(edits);
     if (beforeSubmit !== undefined) await beforeSubmit;
     const report = await this.#transport.observe(edits);
     const resultConsistent = report.ok === (report.result === 0);

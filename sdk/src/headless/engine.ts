@@ -27,6 +27,7 @@ import type {
 } from "../core/spectrum.ts";
 import {
   ObservationSubscriptionOwner,
+  observationFrameTransport,
 } from "../core/observation-subscriptions.ts";
 import type {
   ObservationSubscription,
@@ -266,12 +267,14 @@ export class OfflineEngine {
   /**
    * Subscribe to bounded resident observation rows; values are refreshed by `pump()`.
    *
-   * An effect's observation queue holds one subscription per tap until a block drains it. A
-   * subscribe, update or close that finds the slot taken by an earlier one is refused at once with
-   * the typed, retryable `backpressure` error. It never waits: this engine renders only when the
-   * caller does, so the caller calls `render()` and submits again. The same refusal meets a request
-   * made between a rebuild's commit and the render that adopts its plan: the records would name
-   * effects of the plan that renders, and the core admits them against the newest plan.
+   * The subscription is the core's `Observe` edit, sent in a `SESSION_TRANSACTION_APPLY` through
+   * this engine's control entry, and its rows are `OBSERVATION_READ` reads (#1589 D3). An effect's
+   * observation queue holds one `Observe` per tap until a block drains it: a subscribe, update or
+   * close that finds the slot taken by an earlier one is refused at once with the typed, retryable
+   * `backpressure` error. It never waits: this engine renders only when the caller does, so the
+   * caller calls `render()` and submits again. A core refusal rejects with `MisoEngineError` whose
+   * `diagnosticCode` is the core's code (`observation.unavailable` on an engine booted with no
+   * observation taps). `armed()` settles at the `pump()` that reads the arm.
    */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription> {
     return this.#observationOwner().subscribe(request).then((receipt) => receipt.handle);
@@ -348,7 +351,7 @@ export class OfflineEngine {
       // The boundary caches the order by structure epoch: a probe each call, the list when it moved.
       order: this.#boundary.stripOrder(),
     },
-      (edits, managed) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
+      (edits) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits),
       session,
       this.#booted);
   }
@@ -743,8 +746,15 @@ export class OfflineEngine {
   #observationOwner(): ObservationSubscriptionOwner {
     return this.#observationSubscriptions ??= new ObservationSubscriptionOwner({
       observationMap: () => this.observationMap(),
-      readObservations: (selections) => this.readObservations(selections),
-      liveControls: () => this.liveControls(),
+      // The core's own frames through the module's control entry (#1589 D3): `controlFrame` notes
+      // the revision for the transaction queue, and the endpoint's one allocator numbers them.
+      ...observationFrameTransport({
+        send: (frame) => this.controlFrame(frame),
+        requestIds: this.#boundary.controlRequestIds,
+        committedRevision: () => this.#boundary.controlRevision(),
+        maximumFrameBytes: () => this.controlTransactions().maximumFrameBytes,
+      }),
+      sampleRateHz: () => this.#boundary.status().sampleRateHz,
       observationEnded: (listener) => this.#boundary.onControlEvent((event) => {
         // The reliable lane carries it; the core decides what ended, the SDK only reads the frame.
         const ended = event.lane === 0 ? decodeObservationEnded(event.frame) : undefined;

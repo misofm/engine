@@ -85,6 +85,7 @@ import type {
 } from "../core/spectrum.ts";
 import {
   ObservationSubscriptionOwner,
+  observationFrameTransport,
 } from "../core/observation-subscriptions.ts";
 import type {
   ObservationSubscription,
@@ -244,11 +245,14 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   /**
    * Subscribe to bounded resident observation rows; browser delivery is off-render.
    *
-   * A subscribe, update or close refused with `backpressure` (an earlier subscription of the same
-   * tap is not yet drained) waits for the context's next render and is sent again. The wait is
-   * bounded by `requestDeadlineMs` (5,000 ms by default) and ends in the same typed `backpressure`
-   * error, so a context that does not render never holds the caller. Any other refusal is thrown
-   * at once.
+   * The subscription is the core's `Observe` edit and its rows are `OBSERVATION_READ` reads, both
+   * through the worklet's `control` message (#1589 D3), so a subscription survives a rebuild. A
+   * subscribe, update or close refused with `backpressure` (an earlier `Observe` of the same tap is
+   * not yet drained) waits for the context's next render and is sent again. The wait is bounded by
+   * `requestDeadlineMs` (5,000 ms by default) and ends in the same typed `backpressure` error, so a
+   * context that does not render never holds the caller. Any other refusal is thrown at once, as
+   * `MisoEngineError` whose `diagnosticCode` is the core's code (`observation.unavailable` on an
+   * engine booted with no observation taps).
    */
   subscribeObservations(request: ObservationSubscriptionRequest): Promise<ObservationSubscription>;
   /** Subscribe to one selected track response; browser delivery is off-render. */
@@ -921,8 +925,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const getLiveControls = (): Promise<EngineLiveControls> => {
       // Every value edit is a SET_CONTROL transaction, so the semantic controls need no boot word.
       if (semanticLiveControls === undefined) {
-        const pending: Promise<EngineLiveControls> = createBrowserLiveControls(host, (edits, managed) =>
-          observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
+        const pending: Promise<EngineLiveControls> = createBrowserLiveControls(host, (edits) =>
+          observationSubscriptions?.beforeLiveControlSubmit(edits),
         liveSession,
         liveDocument);
         semanticLiveControls = pending;
@@ -934,14 +938,25 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       return semanticLiveControls;
     };
-    // An observation subscription is the one command record left, and the host stages
-    // records only when `observationTaps` is nonzero.
-    const getObservationControls = (): Promise<EngineLiveControls> =>
-      (policy.liveControls?.observationTaps ?? 0) === 0
-        ? Promise.reject(new MisoUsageError(
-          "this engine booted with no observation taps attached; set policy.liveControls.observationTaps",
-        ))
-        : getLiveControls();
+    // A managed subscription is the core's `Observe` edit and its reads are `OBSERVATION_READ`,
+    // both posted as the worklet's `control` message (#1589 D3) with the host's one request-ID
+    // allocator. A reply's revision is noted for the transaction queue, as every frame beside it
+    // is. The core decides whether the session serves the edit: one booted with no observation
+    // taps refuses it `observation.unavailable` (#1589 R1).
+    const observationFrames = async () => {
+      const queue = await createBrowserControlQueue(host);
+      return observationFrameTransport({
+        send: async (frame) => {
+          const reply = await host.control(frame);
+          queue.noteCommit(reply.revision);
+          if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+          return reply.response;
+        },
+        requestIds: queue.requestIds,
+        committedRevision: () => queue.revision,
+        maximumFrameBytes: () => queue.maximumFrameBytes,
+      });
+    };
     const ensureSpectrumWorker = (query: SpectrumQuery): Promise<BrowserSpectrum> => {
       if (spectrum !== undefined) return Promise.resolve(spectrum);
       if (spectrumPromise !== undefined) return spectrumPromise;
@@ -1292,17 +1307,18 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const observationOwner = (): ObservationSubscriptionOwner => observationSubscriptions ??=
       new ObservationSubscriptionOwner({
         observationMap,
-        readObservations,
-        liveControls: getObservationControls,
+        apply: async (edits) => (await observationFrames()).apply(edits),
+        read: async (selections) => (await observationFrames()).read(selections),
+        sampleRateHz: () => shape.sampleRateHz,
         // The core ends a subscription whose effect a rebuild removed with a reliable event; the
         // owner forgets the tap and tells its subscriber (#1562b-K).
         observationEnded: (listener) => host.onControlEvent((event) => {
           const ended = event.lane === 0 ? decodeObservationEnded(event.frame) : undefined;
           if (ended !== undefined) listener(ended);
         }),
-        // The audio thread renders on its own clock, so a subscription refused with backpressure
-        // (an earlier one is not yet drained) may wait for the host's render count to move and be
-        // sent again. The wait is bounded by the engine's request deadline and ends in the same
+        // The audio thread renders on its own clock, so an `Observe` refused with backpressure (an
+        // earlier one is not yet drained) may wait for the host's render count to move and be sent
+        // again. The wait is bounded by the engine's request deadline and ends in the same
         // typed refusal, so a context that does not render never holds the caller.
         renderWait: {
           boundMs: options.requestDeadlineMs ?? 5_000,
