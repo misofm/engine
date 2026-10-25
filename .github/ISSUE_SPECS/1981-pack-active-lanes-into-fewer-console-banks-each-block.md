@@ -95,3 +95,34 @@ Root accepted the scope note's R1-R6 (`scratchpad/opt/scope/1981.md`); where it 
   - gain_pan_ring 9.06 / 11.03 / 8.76 / 8.83
   - console 97.98 / 102.50 / 98.76 / 98.66
 - **Reading:** the regression is the per-block fact on a running grouped unit (the rest query over every slot plus the head tests through `gather_planes`, a few hundred ns per unit). The packer itself costs nothing measurable.
+- Diagnosis follow-up: the attempt-2 records are in `artifacts/steps/b14-1981/attempt2/`.
+
+## Decision record (attempt 3, 2026-10-25)
+
+- Root ruling: `crates/rack` is authorized. The exact per-lane silence fact comes from the chain's own gather; no sampled or rotated facts.
+- `tile_gather`, `AoSoaScratch::gather_lane` and `gather_lane_left` return, per lane, the OR of the bits of every word they moved: one OR per stored row, a side result. The stored words are unchanged (class A). `BankChain::gather` and `gather_mono` (tiled and scalar) fold the tiles and the ragged tail into `BankChain::input_silent_lanes`: the active lanes whose every input word was `+0.0`.
+- A skip reports every active lane. A resident acquisition gathers nothing and reports none. A collapsed gather reads the left plane alone, so its mask is the left plane's (the collapse is armed only where both channels read one source channel).
+- The graph reads the mask after the run and asks `lanes_at_rest` only when some lane's input was silent; a skipped block still asks nothing. The packing gate, `a_refused_pack_is_not_retried` and the allocation gate are unchanged and green.
+- New rack test `the_gather_reports_exactly_the_silent_lanes`. The setup: 19 frames (16 tiled and a tail of 3), both the tiled and the scalar gather, one non-zero word in a tile of a right plane, one in the tail of a left plane, a `-0.0` lane, an inactive silent lane, and a second block that clears a lane. Test value: red when a lane with one non-zero word is reported silent, or a stale mask survives a block. Red first: the tail OR dropped (37), the right plane's OR dropped (35), the mask accumulated across blocks (block 2).
+
+## Evidence (attempt 3)
+
+- **Native.** Candidate `5ed8a1da8`, twin at the merge base `d47d78c88` (`main/`). One invocation each under one exclusive lock, one warmup and two rounds, uncontrolled (loadavg 3.9 and 3.7 at the starts). Validator PASS on both; all 78 digests equal.
+- **Native all-active +0.56 %/+0.52 %** (98.04/98.38 to 98.59/98.89): inside 2 %.
+- **Native rows above +2 %**, rounds 1/2:
+  - dispatch_only +7.5/+3.7 (8.97/8.97 to 9.64/9.30 us)
+  - idle +6.0/0.0 (5.90/6.01 to 6.25/6.01)
+  - nine_track_baseline +3.5/+2.2
+  - gain_pan_live -0.6/+3.4, builtins_only +2.3/+2.8
+  - nine_track_ragged_strip +1.4/+2.6, mono +2.1/+1.1
+  - Every other row is within +1.4 %.
+- **Native wins:** sparse -39.8/-41.1, one_per_bank -74.6/-74.3.
+- **Noise** from the twin's own two rounds: idle 1.9 %, eq_comp_simd1 1.4 %, gain_pan_live 2.2 %, the rest under 1 %. So idle, gain_pan_live and the ragged/nine-track rows sit at about the noise. dispatch_only (+0.3 to +0.7 us) and builtins_only are a small residual: the gather OR runs on every bank, grouped or not.
+- **V8.** Same protocol (loadavg 3.4 at the twin's start, 6.8 at the candidate's); every document digest and the quiet/automated digests equal.
+- **V8 all-active +3.2 %/+3.0 % (237.7/237.7 to 245.2/244.8 us): misses 2 %.**
+- **V8 other rows**, rounds 1/2:
+  - app_shape +4.3/+3.7, sends +5.6/+5.7, toggle +4.2/+5.6
+  - the quiet, restated and automated arms +2.0 to +3.0
+  - sparse -39.1/-39.0, one-per-bank -61.3/-61.6
+  - The twin's own rounds agree within 0.3 %.
+- **Owner question (spec condition):** native holds all-active within 2 % and V8 does not (+3 %). Accept the measured V8 cost for the sparse and one-per-bank wins (-39 % and -61 % in V8, -40 % and -74 % native), or shelve packing.
