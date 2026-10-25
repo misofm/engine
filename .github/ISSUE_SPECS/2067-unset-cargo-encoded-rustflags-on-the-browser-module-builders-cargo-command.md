@@ -29,7 +29,7 @@ that says why. No other change.
 
 ## Paths
 `scripts/build-web-audioworklet.sh`; `scripts/run-wasm-gates.sh`; `.github/workflows/qualification.yml`
-(the three loom steps only); this spec.
+(the three loom steps, the three x86 probe steps and the two wasm-simd check steps); this spec.
 
 ## Decision and evidence record (2026-10-25)
 - Shape: `unset CARGO_ENCODED_RUSTFLAGS` as the first statement of the builder's existing subshell, not
@@ -38,11 +38,14 @@ that says why. No other change.
 - Root widened the slice to the same exposure in `run-wasm-gates.sh` and the loom steps. In
   `run-wasm-gates.sh` the unset is script-wide: the stable host runner (`cargo run -p wasm-gates`) takes
   its x86-64-v3 flags from `.cargo/config.toml`, which an encoded value also replaces, so a guest-only
-  unset still fails. The three loom steps each start with `unset CARGO_ENCODED_RUSTFLAGS;`.
+  unset still fails (root accepted the script-wide scope). The three loom steps each start with
+  `unset CARGO_ENCODED_RUSTFLAGS;`; root then widened it to the five other inline `RUSTFLAGS=` steps of
+  `qualification.yml` (x86 probes, wasm-simd checks), each of which now unsets it on its first line.
 - Correction to the scope note's gate: `--check-pin` cannot be the comparison. The pin is the release
   pin (#1061, docs/RELEASE.md), and the current tree's module differs from it with or without the
   variable (observed `d7440810...`, pin `47e9c699...`). The gate run is the spec's own byte-identity
-  comparison instead.
+  comparison instead. Root confirmed this: the release pin is not re-pinned per change, so byte identity
+  with the build without the variable is the right evidence.
 - PR evidence, with `CARGO_ENCODED_RUSTFLAGS=$'-C\x1fopt-level=1'` exported:
   - Builder before the change: build fails, `lane` refuses wasm32 without simd128 (exit 101).
   - Builder after the change: the module is `d7440810145e3ea9...`, byte-identical to the build without
