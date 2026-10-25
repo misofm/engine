@@ -258,9 +258,17 @@ Review fold-in after attempt 2 (root, 2026-10-25):
   `track_response_*` exports stay for #1580.
 - **`ProtocolEvent`.** No kind for `RESPONSE_READY`: it is the answer to one query, read by that
   query's tag, as a reply is; `onEvent` keeps skipping it on both engines.
-- **Qualification (blocked).** The browser rows render an `OfflineAudioContext` and query after
-  the render, so a query that needs a later block never settles. Firefox has no
-  `OfflineAudioContext.suspend()`, so the rows cannot step an offline render; they need a live
-  `AudioContext`, which needs one more declared trusted click (`qualification.js`
-  `resumeClickPlan` and the `resume-clicks` gate in `run.mjs`), outside this slice's paths.
-
+- **Qualification (root ruling, 2026-10-25).** A capture needs a rendered block after the
+  query, and Firefox has no `OfflineAudioContext.suspend()`, so the browser's track-response rows
+  run on a live `AudioContext` (workload `track-response-live`) started by one more declared
+  trusted click, `#track-response-resume`. `resumeClickPlan` (`qualification.js`) lists it first,
+  and the `resume-clicks` gate in `run.mjs` goes from 3 to 4 declared clicks: a new click for a
+  new row, not a weaker gate. `sdk-live-eq-cuts` keeps its PCM parity on its offline engine
+  (`live-eq-cuts`), with the edits made before the render. Its capture clause moved to the live
+  row's changed publication, as `capturedSample >= appliedAtSample` (the edit's watermark sample):
+  a capture in the very block that applied the edit is legal. Gate 4 now asserts that no response
+  Worker is created, that renders with no edit publish nothing, and that an edit gives exactly one
+  publication. The one-shot row asserts that two concurrent queries settle in turn, and that the
+  section codes are 4, 5, 2. The continuous-spectrum row arms its response query before its
+  offline render and reads it afterwards. New `--self-test-mutations` rows:
+  `sdk-track-response-{worker,unchanged,once,early}` and `sdk-live-response-{serialized,sections}`.
