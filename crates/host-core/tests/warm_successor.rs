@@ -1767,8 +1767,16 @@ fn a_copy_whose_alias_floor_sits_above_its_tap_keeps_that_floor() {
             let mut swapped = alone(&a0, &caps, backend, AHEAD);
             swapped.render(BEFORE);
             swapped.rebuild(&a1);
-            // A1's copy of the old half settles, so a later successor drops it.
+            // A1's copy of the old half settles, and A1 again (A2) drops it with its node: B's
+            // copy, under the same ID, inherits no floor of its own.
             swapped.render(2 * AFTER);
+            swapped.rebuild(&a1);
+            swapped.render(AFTER);
+            assert_eq!(
+                route_floor(swapped.inventory.input_floors(), "t2-main-"),
+                0,
+                "{backend:?}: A2 holds no copy"
+            );
             let held = route_floor(swapped.inventory.input_floors(), "t2-main");
             let tap = arrival_in(&swapped.inventory, &stages("t2", TrackStage::PostFader)[0]);
             assert!(
