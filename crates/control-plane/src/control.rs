@@ -3887,9 +3887,10 @@ where
     /// [`Self::command_with_document`] for an adapter whose preparer keeps its plans' observation
     /// readers in the plan (the browser's, [`crate::RuntimePreparer::kept_observations`]):
     /// `readers` is the reader list of the plan of epoch `epoch`, the one render runs, lent for
-    /// this call only. An `OBSERVATION_READ` reads them through that epoch's index (#1589 R2), so
-    /// the index and the readers are always one plan's, and a tap the swap block carried reads
-    /// the reader it publishes to. Every other command ignores them.
+    /// this call only. An `OBSERVATION_READ` reads them through the running plan's index (#1589
+    /// R2) and faults (`Internal`) when `epoch` is any other plan's, so the index and the readers
+    /// are always one plan's, and a tap the swap block carried reads the reader it publishes to.
+    /// Every other command ignores them.
     pub fn command_with_plan_observations(
         &mut self,
         request: &[u8],

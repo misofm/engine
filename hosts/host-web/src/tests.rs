@@ -8860,65 +8860,83 @@ mod structural_apply {
     /// #1589 R1: a boot word that binds no observation queue (`0`) leaves the browser serving
     /// neither the `Observe` edit nor its read: the edit is refused `observation.unavailable`
     /// before anything commits, and `CAPABILITIES_GET` lists neither `OBSERVATION_READ` nor bit 15.
+    /// Any nonzero word serves both: preparation refuses an effect with more taps than the word,
+    /// so a word of `1` on a session whose one observed effect has one tap binds its queue.
     ///
     /// Test value: red if the session serves the edit on plans with no queue for the tap (an
     /// acknowledged subscription no render ever applies, or an internal fault in place of the
-    /// typed refusal), or if it advertises a read that could answer only `observation.unbound`.
+    /// typed refusal), if it advertises a read that could answer only `observation.unbound`, or
+    /// if it withholds both from a nonzero word below the widest launch effect's tap count.
     #[test]
-    fn a_boot_with_no_observation_taps_serves_neither_observe_nor_its_read() {
+    fn observe_and_its_read_are_served_for_a_nonzero_boot_word_and_refused_for_zero() {
         let model = observed_model();
-        let mut rig = Rig::boot(
-            &model,
-            WebBootOptions {
-                live_control_observation_taps: 0,
-                ..options()
-            },
-            None,
-        );
-        let base = rig.host.committed_revision();
-        let arm = SessionEdit::Observe {
-            strip_id: model.tracks[0].id.clone(),
-            section: controls::TapSection::Inserts(StableId::parse("comp").expect("insert ID")),
-            tap_id: 1,
-            armed: true,
-            window_blocks: 1,
-        };
-        let Outcome::Refused(_, codes) = rig.apply(&[arm], 1) else {
-            panic!("an Observe edit on a plan with no observation queue is accepted")
-        };
-        assert_eq!(codes, ["observation.unavailable"]);
-        assert_eq!(rig.host.committed_revision(), base, "nothing committed");
-
-        let codec = ProtocolCodec::default();
-        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
-        let length = codec
-            .encode_command_frame_into(
-                &TypedCommandFrame {
-                    request_id: RequestId::new(2).expect("nonzero request"),
-                    expected_revision: ExpectedRevision::Any,
-                    payload: CommandPayload::CapabilitiesGet,
+        for taps in [0, 1] {
+            let mut rig = Rig::boot(
+                &model,
+                WebBootOptions {
+                    live_control_observation_taps: taps,
+                    ..options()
                 },
-                &mut bytes,
-            )
-            .expect("a capabilities frame");
-        let (result, reply) = rig.entry(&bytes[..length]);
-        assert_eq!(result, RESULT_OK);
-        let mut fields = [0_u16; 256];
-        let DecodedTypedResponseFrame::Success {
-            payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
-            ..
-        } = codec
-            .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
-            .expect("a capabilities reply")
-        else {
-            panic!("a capabilities reply")
-        };
-        assert!(!capabilities.supported_commands.contains(&0x000f));
-        assert_eq!(
-            capabilities.flags.0 & protocol::CapabilityFlags::OBSERVATION.0,
-            0,
-            "no capability bit 15"
-        );
+                None,
+            );
+            let base = rig.host.committed_revision();
+            let arm = SessionEdit::Observe {
+                strip_id: model.tracks[0].id.clone(),
+                section: controls::TapSection::Inserts(StableId::parse("comp").expect("insert ID")),
+                tap_id: 1,
+                armed: true,
+                window_blocks: 1,
+            };
+            match (taps, rig.apply(&[arm], 1)) {
+                (0, Outcome::Refused(_, codes)) => {
+                    assert_eq!(codes, ["observation.unavailable"]);
+                    assert_eq!(rig.host.committed_revision(), base, "nothing committed");
+                }
+                (0, Outcome::Applied { .. }) => {
+                    panic!("an Observe edit on a plan with no observation queue is accepted")
+                }
+                (_, Outcome::Applied { .. }) => {}
+                (_, Outcome::Refused(_, codes)) => {
+                    panic!("word {taps}: the Observe edit is refused {codes:?}")
+                }
+            }
+
+            let codec = ProtocolCodec::default();
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(
+                    &TypedCommandFrame {
+                        request_id: RequestId::new(2).expect("nonzero request"),
+                        expected_revision: ExpectedRevision::Any,
+                        payload: CommandPayload::CapabilitiesGet,
+                    },
+                    &mut bytes,
+                )
+                .expect("a capabilities frame");
+            let (result, reply) = rig.entry(&bytes[..length]);
+            assert_eq!(result, RESULT_OK);
+            let mut fields = [0_u16; 256];
+            let DecodedTypedResponseFrame::Success {
+                payload: DecodedSuccessResponsePayload::Capabilities(capabilities),
+                ..
+            } = codec
+                .decode_typed_response(&reply, &mut DecodeScratch::new(&mut fields))
+                .expect("a capabilities reply")
+            else {
+                panic!("a capabilities reply")
+            };
+            let served = taps != 0;
+            assert_eq!(
+                capabilities.supported_commands.contains(&0x000f),
+                served,
+                "word {taps}: OBSERVATION_READ listed"
+            );
+            assert_eq!(
+                capabilities.flags.0 & protocol::CapabilityFlags::OBSERVATION.0 != 0,
+                served,
+                "word {taps}: capability bit 15"
+            );
+        }
     }
 
     fn meter_loss(rig: &Rig) -> u64 {
