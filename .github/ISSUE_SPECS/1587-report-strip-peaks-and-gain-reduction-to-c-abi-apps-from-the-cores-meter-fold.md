@@ -214,8 +214,9 @@ Commands: `cargo test --locked -p host-core --all-features`,
 
 - **Taps.** `CapiGainReductionTaps` visits the running epoch's `observations`, every declared tap,
   with `armed` and `arm_sample` from `ObservationReader::read_state` (#1585 D2); a torn read is an
-  unarmed tap for that poll. `ProviderEpoch::observation_strips` (one `u32` per handle, the
-  handle's index in `SessionModel::strips`) is built in `prepare_runtime` and charged in the
+  unarmed tap for that poll. `ProviderEpoch::observation_strips` (one `u32` per handle: the
+  position of its strip's meter consumer, the rule `SessionMeters::resolve` uses, else
+  `u32::MAX`; attempt 2, verifier minor 1) is built in `prepare_runtime` and charged in the
   epoch's observation handle bytes; it does not move the reference session's
   `capi_retained_bytes` (313,505 on this branch with or without the charge; the 608 B above the
   312,897 of the #1587a paragraph came from main).
@@ -228,7 +229,8 @@ Commands: `cargo test --locked -p host-core --all-features`,
   table of 129-256 entries stays refused.
 - **D4.** `meter.gain_reduction.unavailable` and its capi refusal row are deleted.
 - **Tests.**
-  - `gain_reduction_records_read_only_windows_since_the_taps_arm` (capi, gate 2): red if a window
+  - `gain_reduction_records_read_only_windows_since_the_taps_arm` (capi, gate 2; attempt 2: two
+    tracks, the compressor on the second, a gain entry for each): red if a window
     from before the arm sample reaches a record (mutant `arm_sample: 0`: "re-armed, before the
     first window since the arm closes" flags 1, 12.79 dB), if a disarmed tap reports (mutant
     `armed: true, arm_sample: 0`: "disarmed" flags 1), or if a gain entry does not resolve (mutant:
@@ -236,5 +238,11 @@ Commands: `cargo test --locked -p host-core --all-features`,
     disarm moves `arm_sample` past every window the slot holds, so the arm-sample rule covers it.
   - `a_batch_reports_each_strips_last_present_gain_reduction` (host-core, D3's k-frame rule): red
     on the maximum (3.0 for 2.0) and on a fold not reset at a batch's first frame (2.0 kept).
-  - Gate 5: the race table gains `{eq0, gain reduction}` over the race's armed compressor tap.
   - `TestObservationWindows` gains each window's strip reduction word (bits), which gate 2 reads.
+  - Attempt 2 (verifier): the gate 5 race row was removed (no render code path; it guarded
+    nothing). Gate 2 now has two strips: red on mutant `strips.push(0)` for every handle (MUTANT_RESULT).
+  - Docs: peak readings continue across a carried swap; a strip's gain reduction restarts at a
+    rebuild's adoption and is absent until its taps' first window there closes, until #1674's
+    observation half pairs carried readers.
+  - Note for #1674 (verifier nit): the fold reads each tap's slot twice per poll, `read_state`
+    for the arm state and `read` for the window; the pair is not one publication.

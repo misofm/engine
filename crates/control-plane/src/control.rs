@@ -70,8 +70,9 @@ pub struct ProviderEpoch {
     /// browser's). Their slots are `Arc`s shared with the plan's lanes, as the meters' rings are.
     /// The meter delivery's gain reduction reads them (#1587b).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
-    /// Each observation handle's strip (#1587b), in `observations` order: its index in the plan's
-    /// strips (`SessionModel::strips` order, the meter frame's), built with the plan.
+    /// Each observation handle's strip (#1587b), in `observations` order: the position of its
+    /// strip's consumer in `meters` (the meter frame's strip order, as `SessionMeters::resolve`
+    /// finds an entry's), `u32::MAX` for none; built with the plan.
     pub(crate) observation_strips: Box<[u32]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,

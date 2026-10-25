@@ -5834,41 +5834,50 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
     crate::ffi::test_session_destroy(c_session);
 }
 
-/// #1587b gate 2: `{eq0, gain reduction}` beside the output's peak, one batch per window, on a
-/// compressor insert driven past its threshold. Unarmed, the record is `{1, Aggregate, 0, 0.0}`.
+/// #1587b gate 2: two tracks on one source, a compressor insert on the second only, driven past
+/// its threshold; `{first, gain reduction}` (handle 1) and `{second, gain reduction}` (handle 2)
+/// beside the output's peak, one batch per window. The first track has no tap, so its record is
+/// `{1, Aggregate, 0, 0.0}` throughout. For the second: unarmed, `{2, Aggregate, 0, 0.0}`.
 /// Armed at a window's first block, the batch of that window is `VALID` and reads the tap's
 /// window, which opened at the arm: `strip_reduction_db` of the window the session's reader
-/// holds. Disarmed, it is `{1, Aggregate, 0, 0.0}` again, though the reader still holds that
+/// holds. Disarmed, it is `{2, Aggregate, 0, 0.0}` again, though the reader still holds that
 /// window. Re-armed in the middle of a window, the batch at that window's end is still flags `0`:
 /// the reader's newest window opened before the re-arm. The next batch reads the re-armed tap's
 /// first window.
 ///
 /// Test value: red if a window from before the tap's arm sample reaches a record (the fold
 /// ignores `arm_sample`), if a disarmed tap still reports (it ignores the slot's arm state), if a
-/// record carries another value than its tap's window's reduction, or if gain reduction is still
+/// record carries another value than its tap's window's reduction, if a tap's reading lands on
+/// another strip's entry (a handle mapped to the wrong strip), or if gain reduction is still
 /// refused.
 #[test]
 fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
     let mut model = stateless_session(48_000);
-    model.tracks.truncate(1);
-    model.routes.truncate(1);
-    let track = model.tracks[0].id.clone();
-    let protocol::SessionEdit::PutTrackEffect { effect, .. } = put_compressor(&model, 0) else {
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
+    model.tracks[1].source_id = model.tracks[0].source_id.clone();
+    let quiet = model.tracks[0].id.clone();
+    let track = model.tracks[1].id.clone();
+    let protocol::SessionEdit::PutTrackEffect { effect, .. } = put_compressor(&model, 1) else {
         panic!("an insert edit")
     };
-    model.tracks[0].inserts.effects.insert(0, effect);
+    model.tracks[1].inserts.effects.insert(0, effect);
     let document = session::canonical_session_json(&model).expect("compressor session");
     let (c_session, c_plan) = boxed_c_children(&document);
     let window = fixture_window_blocks();
-    let gain_reduction = protocol::MeterEntry {
-        target: protocol::MeterTarget::Strip(track.as_str().into()),
+    let gain_reduction = |id: &session::StableId| protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(id.as_str().into()),
         metric: protocol::MeterMetric::GainReduction,
     };
     assert_eq!(
         configure_meters_c(
             c_session,
             1,
-            vec![gain_reduction, output_peak_entry()],
+            vec![
+                gain_reduction(&quiet),
+                gain_reduction(&track),
+                output_peak_entry()
+            ],
             window
         ),
         (StatusCode::Ok, None)
@@ -5905,15 +5914,24 @@ fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
         assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
         meter_batches_c(c_session)
             .into_iter()
-            .map(|(_, _, _, records)| records[0])
+            .map(|(_, _, _, records)| [records[0], records[1]])
             .collect::<Vec<_>>()
     };
-    let absent = protocol::MeterRecord {
+    let quiet_record = protocol::MeterRecord {
         handle: 1,
         component: protocol::MeterComponent::Aggregate,
         flags: 0,
         value: 0.0,
     };
+    let absent = [
+        quiet_record,
+        protocol::MeterRecord {
+            handle: 2,
+            component: protocol::MeterComponent::Aggregate,
+            flags: 0,
+            value: 0.0,
+        },
+    ];
     // The first sample and reduction of the newest window the session's reader holds.
     let held = || {
         let snapshot = crate::ffi::test_transaction_snapshot(c_session);
@@ -5923,10 +5941,15 @@ fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
         let (_, first, _, reduction) = taps[0].expect("a published window");
         (first, f32::from_bits(reduction))
     };
-    let valid = |value| protocol::MeterRecord {
-        flags: 1,
-        value,
-        ..absent
+    let valid = |value| {
+        [
+            quiet_record,
+            protocol::MeterRecord {
+                flags: 1,
+                value,
+                ..absent[1]
+            },
+        ]
     };
     let mut block = 0;
     assert_eq!(render_until(window, &mut block), [absent], "unarmed");

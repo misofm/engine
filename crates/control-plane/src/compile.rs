@@ -25,8 +25,8 @@ pub(crate) struct PreparedRuntime {
     /// `HostLiveControlHandles::effect_observations` order: kept, not dropped. Empty for a host
     /// whose preparer takes them for itself (the browser's).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
-    /// Each observation handle's strip (#1587b), in `observations` order: its index in the
-    /// session model's strips, the meter frame's strip order. Empty with `observations`.
+    /// Each observation handle's strip (#1587b), in `observations` order: the position of its
+    /// strip's consumer in `meters`, the meter frame's strip order. Empty with `observations`.
     pub(crate) observation_strips: Box<[u32]>,
     pub(crate) plan: PreparedRenderPlan,
     /// The plan's one revision-gate handle, taken before the plan is published (#1502 D6).
@@ -1682,18 +1682,19 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     // `Observe` edit arms. Shrunk to their length first, so the charge below is the allocation.
     let observations = effect_observations.into_boxed_slice();
     // #1587b: each handle's strip, so the meter delivery's gain reduction folds a tap's window
-    // into its strip's word without a search. Every handle names a strip of the plan; one that
-    // did not would get `u32::MAX`, outside every frame, which the fold skips.
+    // into its strip's word without a search. The index is the position of the strip's meter
+    // consumer, the rule `SessionMeters::resolve` uses for a meter entry, so a tap and an entry of
+    // one strip name the same frame strip; a strip with no meter gets `u32::MAX`, outside every
+    // frame, which the fold skips.
     let observation_strips = {
-        let model = compiled.normalized_model();
         let mut strips = Vec::new();
         strips
             .try_reserve_exact(observations.len())
             .map_err(|_| failure(ResourceFault::Allocation))?;
         for handle in &observations {
-            let index = model
-                .strips()
-                .position(|strip| strip.id.as_str() == &*handle.track_id)
+            let index = meters
+                .iter()
+                .position(|meter| meter.track_id == handle.track_id)
                 .and_then(|index| u32::try_from(index).ok())
                 .unwrap_or(u32::MAX);
             strips.push(index);

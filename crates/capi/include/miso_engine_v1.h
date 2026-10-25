@@ -269,8 +269,10 @@ extern "C" {
  * window that has one, VALID when any window has one, else flags 0 and value 0.0. A strip's
  * reading is the deepest reduction among its observation taps that an Observe edit armed, each
  * from its newest window that opened at or after the tap's arm; a tap not armed, or disarmed,
- * gives none. Readings continue across a plan swap that carries the strip; a swap that carries no
- * strip meter restarts the window grid at its first block. A configure is all or nothing: an
+ * gives none. Peak readings continue across a plan swap that carries the strip; a swap that
+ * carries no strip meter restarts the window grid at its first block. A strip's gain reduction
+ * restarts at a rebuild's adoption: it is absent until its taps' first window in the new plan
+ * closes (until carried observation readers are paired across a swap). A configure is all or nothing: an
  * unknown strip is NOT_FOUND (meter.strip.unknown), a period that is not a whole number of windows
  * INVALID_FIELD (meter.period), and a table of more than 128 entries INVALID_FIELD (meter.records,
  * at its 129th entry), so a batch never needs more than its 256 records. Each
