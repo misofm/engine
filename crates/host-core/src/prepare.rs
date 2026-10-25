@@ -4194,6 +4194,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 &waiting,
                 &waiting_routes,
                 live_mute,
+                |route| crossfades_values(&base, route),
             )
         }
         _ => Vec::new(),
@@ -7809,7 +7810,9 @@ struct RouteFade<'a> {
 /// mute is not live (no lane: no value can unmute it before the fire) arms nothing. A route that
 /// follows an automated source mute ([`follows_automated_mute`]) arms as any other (#2011): its
 /// fire composes with the curve it hears. A tap before an armed fader waits for that strip's
-/// fade.
+/// fade. #2077: (a) also takes a lane-less route `model` keeps with the same endpoints and other
+/// values (`retargeted`, [`crossfades_values`]): it fades in at its new values as its old ones
+/// fade out in a fading copy ([`route_copies`]); a kept route this model mutes arms nothing.
 ///
 /// #1877 D2: a route of `waiting_routes` (one whose predecessor entry has not fired, with that
 /// entry) that `committed` holds with the same source, tap and destination is armed again on the
@@ -7823,11 +7826,13 @@ fn added_route_fades<'a>(
     waiting: &[&str],
     waiting_routes: &[(&str, u32)],
     live_mute: impl Fn(&session::Route) -> bool,
+    retargeted: impl Fn(&session::Route) -> bool,
 ) -> Vec<RouteFade<'a>> {
     // #1953a (D15-9): a route `committed` holds under the same ID with another source, tap or
     // destination is a removal plus an addition, so it is not known: it arms as added. #1953b:
     // so is one whose old route has no lane; its removal half fades out as a fading copy
-    // ([`route_copies`]).
+    // ([`route_copies`]). #2077: a known lane-less route whose values change arms as added too
+    // (`retargeted`); its old values fade out in a fading copy.
     let same_endpoints = |route: &session::Route| {
         committed.routes.iter().any(|before| {
             before.id == route.id
@@ -7870,8 +7875,11 @@ fn added_route_fades<'a>(
             // (c): a send of an added strip, from a tap before its fader.
             tap.precedes_fader()
         } else {
-            // (a): an added route between two strips that keep playing.
-            !known(route) && destination_known && (!armed_source || tap.precedes_fader())
+            // (a): an added route between two strips that keep playing, or (#2077) a kept
+            // lane-less route at new values, whose source `retargeted` never names armed (R2).
+            (!known(route) || retargeted(route))
+                && destination_known
+                && (!armed_source || tap.precedes_fader())
         };
         if fade {
             fades.push(RouteFade {
@@ -7886,7 +7894,8 @@ fn added_route_fades<'a>(
 
 /// One fading copy a successor compiles (#1953b): a lane-less route (`post_fader` or `post_pan`
 /// into the output, decision 14's master fold, D15-9) that the transaction removes from, or
-/// re-points on, a strip the successor keeps. The folded route has no live op to ramp in phase 1,
+/// re-points on, a strip the successor keeps, or (#2077) whose values (gain, matrix or mute) it
+/// changes ([`crossfades_values`]). The folded route has no live op to ramp in phase 1,
 /// so the successor compiles the old route beside its own model, under a copy ID, as a transition
 /// route at the predecessor's coefficients, armed to fade *out* from its first block (`f = 0`:
 /// the destination line sits after the op). The copy takes the predecessor route's op state and
@@ -7900,6 +7909,48 @@ struct RouteCopy {
     alias: Box<str>,
     /// The predecessor's fade-out entry a kept copy carries (#1392 D3); `None` for a fresh copy.
     carried: Option<u32>,
+}
+
+/// Whether a successor of `base` crossfades a value change of `after` (#2077): `after` is a
+/// lane-less route (no live rows, so no lane can ramp it) that `committed` holds under its ID with
+/// the same source and destination and other values (gain, matrix or mute: R3, a change of `mute`
+/// alone is a value change). Its old values fade out in a fading copy when `committed` does not
+/// mute it ([`route_copies`]) and its new values fade in when `after` is not muted
+/// ([`added_route_fades`]), both from the swap block: the route's own arm waits for nothing
+/// (`D = 0`), so the swap is its `S` and nothing carries (R1).
+///
+/// R2: never when the source strip's own fade owns the route: a strip with an unfired fade entry
+/// of the predecessor (an added strip still waiting; its fader is shut until its fire, which is
+/// pair-carried) or one a duck of the transaction already silences (the duck overlay's strips and
+/// the transition fallback's). Nor when the predecessor's own arm of the route has not fired: the
+/// route is still silent, and its re-armed, carried entry fades it in at its new values (#1877 D2).
+fn crossfades_values(base: &SuccessorBase<'_>, after: &session::Route) -> bool {
+    if controls::route_rows_live(after) {
+        return false;
+    }
+    let Some(before) = base
+        .committed
+        .routes
+        .iter()
+        .find(|before| before.id == after.id)
+    else {
+        return false;
+    };
+    if before.source != after.source || before.destination != after.destination || before == after {
+        return false;
+    }
+    let (strip, _, _) = source_strip(&after.source);
+    let watch = &base.inventory.fade_watch;
+    let unfired = |owner: FadeArmOwner, id: &str| {
+        base.inventory
+            .fade_arms
+            .iter()
+            .any(|row| row.owner == owner && &*row.id == id && !watch.fired(row.entry))
+    };
+    !base.duck.has_strip(strip)
+        && !base.forced_restart.iter().any(|id| id == strip)
+        && !unfired(FadeArmOwner::Strip, strip)
+        && !unfired(FadeArmOwner::Route, after.id.as_str())
 }
 
 /// The copy ID of a route `original` (#1953b): the shortest `original` followed by hyphens that
@@ -7931,7 +7982,8 @@ fn copy_route_id(original: &str, taken: impl Fn(&str) -> bool) -> Option<session
 /// the caller checks): first each copy of the predecessor whose fade entry has not settled and
 /// whose source strip `model` keeps, then a fresh copy of each lane-less route of `committed` that
 /// `model` lacks, or holds under its ID with another source, tap or destination (a re-point,
-/// D15-9: the removal half), that the session does not mute, from a strip `model` keeps and that
+/// D15-9: the removal half), or (#2077) holds with the same endpoints at other values (its old
+/// values, [`crossfades_values`]), that the session does not mute, from a strip `model` keeps and that
 /// no duck of the transaction already silences (the duck overlay's strips and the transition
 /// fallback's). Each copy ID is free in both models and among the copies before it.
 fn route_copies(base: &SuccessorBase<'_>, model: &SessionModel) -> Vec<RouteCopy> {
@@ -7987,10 +8039,13 @@ fn route_copies(base: &SuccessorBase<'_>, model: &SessionModel) -> Vec<RouteCopy
         if base.duck.has_strip(strip) || base.forced_restart.iter().any(|id| id == strip) {
             continue;
         }
+        // #2077: a kept route at other values is copied too, at its old values (a value change
+        // fades out as a removal does; its kept route fades in, [`added_route_fades`]).
         let kept = model.routes.iter().any(|after| {
             after.id == before.id
                 && after.source == before.source
                 && after.destination == before.destination
+                && !crossfades_values(base, after)
         });
         let destination_kept = match &before.destination {
             session::RouteDestination::OutputInput { output_id } => model
