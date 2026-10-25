@@ -1917,7 +1917,8 @@ fn master_designation_frame(strip: &str, request: u64, revision: u64) -> Vec<u8>
 /// The three `Observe` frames of the observation timeline (#1589c), in order: an arm of a tap the
 /// compressor does not declare (tap 9), the arm of its gain-reduction tap (tap 1) and that tap's
 /// disarm, each with a two-block window, requests 2 to 4 at revision 1 (a monitor edit spends no
-/// revision). Committed as `tests/browser-v1/set-control-frames/observe-{unknown-tap,arm,disarm}.bin`,
+/// revision). The disarm names the arm's tag (#2087): the session's first record, tag 1 (the
+/// refused arm of tap 9 issues none). Committed as `tests/browser-v1/set-control-frames/observe-{unknown-tap,arm,disarm}.bin`,
 /// the frames the raw-Wasm oracle's observation timeline sends.
 fn observation_timeline_frames() -> [(&'static str, Vec<u8>); 3] {
     use protocol::{
@@ -1925,13 +1926,9 @@ fn observation_timeline_frames() -> [(&'static str, Vec<u8>); 3] {
         TypedCommandFrame,
     };
     let frame = |request: u64, tap_id: u32, armed: bool| {
-        let edits = [observe_edit(
-            "track",
-            RACK_INSERTS,
-            "comp",
-            tap_id,
-            2,
-            armed,
+        let edits = [tagged(
+            observe_edit("track", RACK_INSERTS, "comp", tap_id, 2, armed),
+            if armed { 0 } else { 1 },
         )];
         let mut bytes = vec![0_u8; 4_096];
         let length = ProtocolCodec::default()
@@ -4194,8 +4191,8 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     // and the arm of a one-block window in one transaction is the core's re-arm: it restarts the
     // window, and the effect's one-slot queue holds just it.)
     let rearm = [
-        observe_edit_at(&host, 0, 1, 0, 1, 2, false),
-        observe_edit_at(&host, 0, 1, 0, 1, 1, true),
+        observe_edit_at(&mut host, 0, 1, 0, 1, 2, false),
+        observe_edit_at(&mut host, 0, 1, 0, 1, 1, true),
     ];
     assert_eq!(apply_observe(&mut host, &rearm), Ok(()));
     let rearmed_pending = read_taps(&mut host, &[selection]).expect("re-arm pending selected read");
@@ -4384,9 +4381,9 @@ fn observe(
     apply_observe(host, &[edit])
 }
 
-/// The `Observe` edit [`observe`] sends.
+/// The `Observe` edit [`observe`] sends; a disarm names the arm the host has bound now.
 fn observe_edit_at(
-    host: &AudioWorkletEngineHost,
+    host: &mut AudioWorkletEngineHost,
     track: u32,
     rack: u8,
     effect: u32,
@@ -4395,18 +4392,20 @@ fn observe_edit_at(
     armed: bool,
 ) -> protocol::SessionEdit {
     let (strip, effect) = key_at(host, track, rack, effect);
-    observe_edit(
+    let edit = observe_edit(
         core::str::from_utf8(&strip).expect("an ASCII strip ID"),
         rack,
         core::str::from_utf8(&effect).expect("an ASCII effect ID"),
         tap_id,
         window_blocks,
         armed,
-    )
+    );
+    with_bound_tag(host, edit)
 }
 
 /// One `Observe` edit of the tap named by its stable key: the strip's ID, the console slot's or
-/// insert's ID per `rack`, and the tap's ID.
+/// insert's ID per `rack`, and the tap's ID. A disarm names no arm (tag `0`) until [`tagged`] or
+/// [`with_bound_tag`] gives it one (#2087).
 fn observe_edit(
     strip_id: &str,
     rack: u8,
@@ -4427,7 +4426,62 @@ fn observe_edit(
         tap_id,
         armed,
         window_blocks,
+        arm_tag: 0,
     }
+}
+
+/// `edit` with the arm tag `arm_tag` (#2087).
+fn tagged(edit: protocol::SessionEdit, arm_tag: u64) -> protocol::SessionEdit {
+    match edit {
+        protocol::SessionEdit::Observe {
+            strip_id,
+            section,
+            tap_id,
+            armed,
+            window_blocks,
+            ..
+        } => protocol::SessionEdit::Observe {
+            strip_id,
+            section,
+            tap_id,
+            armed,
+            window_blocks,
+            arm_tag,
+        },
+        other => other,
+    }
+}
+
+/// A disarm `edit` naming the arm of its tap the host has bound now (`0` when none is), as a
+/// subscriber that holds the arm names it (#2087); an arm unchanged.
+fn with_bound_tag(
+    host: &mut AudioWorkletEngineHost,
+    edit: protocol::SessionEdit,
+) -> protocol::SessionEdit {
+    let protocol::SessionEdit::Observe {
+        strip_id,
+        section,
+        tap_id,
+        armed: false,
+        ..
+    } = &edit
+    else {
+        return edit;
+    };
+    let key = controls::TapKey {
+        strip: strip_id.clone(),
+        section: section.clone(),
+        tap_id: *tap_id,
+    };
+    let arm_tag = host
+        .ready
+        .as_mut()
+        .expect("ready")
+        .control
+        .observation_bindings()
+        .binding(&key)
+        .map_or(0, |binding| binding.arm_tag);
+    tagged(edit, arm_tag)
 }
 
 /// [`observe`] naming the tap by its stable key, whatever the plan that renders calls its
@@ -4442,17 +4496,9 @@ fn observe_key(
     window_blocks: u32,
     armed: bool,
 ) -> Result<(), Vec<String>> {
-    apply_observe(
-        host,
-        &[observe_edit(
-            strip_id,
-            rack,
-            effect_id,
-            tap_id,
-            window_blocks,
-            armed,
-        )],
-    )
+    let edit = observe_edit(strip_id, rack, effect_id, tap_id, window_blocks, armed);
+    let edit = with_bound_tag(host, edit);
+    apply_observe(host, &[edit])
 }
 
 /// A request ID above every one a test sent before it: the replay cache refuses an ID at or below
@@ -4753,8 +4799,8 @@ fn a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window() {
     // old window and the arm of the new one in one transaction, the core's one re-arm.
     let rearmed = host.status().next_absolute_sample;
     let rearm = [
-        observe_edit_at(&host, 0, 1, 0, 1, 8, false),
-        observe_edit_at(&host, 0, 1, 0, 1, 4, true),
+        observe_edit_at(&mut host, 0, 1, 0, 1, 8, false),
+        observe_edit_at(&mut host, 0, 1, 0, 1, 4, true),
     ];
     assert_eq!(apply_observe(&mut host, &rearm), Ok(()));
     assert!(
@@ -5649,7 +5695,7 @@ fn a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading() {
     let mut host = same_track_observation_host_metered(QUANTUM, WINDOW);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     // One transaction arms both taps; a tap's queue holds one record until a block drains it.
-    let arms = [0, 1].map(|effect| observe_edit_at(&host, 0, RACK_INSERTS, effect, 1, 2, true));
+    let arms = [0, 1].map(|effect| observe_edit_at(&mut host, 0, RACK_INSERTS, effect, 1, 2, true));
     assert_eq!(apply_observe(&mut host, &arms), Ok(()));
     let mut block = 0;
     let mut render_window = |host: &mut AudioWorkletEngineHost| {
@@ -7969,6 +8015,7 @@ mod structural_apply {
             tap_id: 1,
             armed: true,
             window_blocks: 1,
+            arm_tag: 0,
         };
         match rig.apply(&[arm], 1) {
             Outcome::Applied { .. } => {}

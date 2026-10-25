@@ -67,6 +67,7 @@ fn observe(
     tap_id: u32,
     armed: bool,
     window_blocks: u32,
+    arm_tag: u64,
 ) -> SessionEdit {
     SessionEdit::Observe {
         strip_id: id(strip),
@@ -74,6 +75,7 @@ fn observe(
         tap_id,
         armed,
         window_blocks,
+        arm_tag,
     }
 }
 
@@ -84,12 +86,20 @@ fn observe_json(edit: &SessionEdit) -> String {
         tap_id,
         armed,
         window_blocks,
+        arm_tag,
     } = edit
     else {
         panic!("the fixture's transactions hold Observe edits only");
     };
+    // #2087: the SDK's `armTag` (a decimal string, as every 64-bit value of the fixture) is on a
+    // disarm only.
+    let tag = if *armed {
+        String::new()
+    } else {
+        format!(", \"armTag\": \"{arm_tag}\"")
+    };
     format!(
-        "{{ \"stripId\": \"{}\", {}, \"tapId\": {tap_id}, \"armed\": {armed}, \"windowBlocks\": {window_blocks} }}",
+        "{{ \"stripId\": \"{}\", {}, \"tapId\": {tap_id}, \"armed\": {armed}, \"windowBlocks\": {window_blocks}{tag} }}",
         strip_id.as_str(),
         section_json(section),
     )
@@ -236,6 +246,12 @@ fn commands() -> Vec<Command> {
                 u32::try_from(index + 1).expect("small"),
                 index % 3 != 0,
                 [0, 1, 4_096][index % 3],
+                // #2087: a disarm's tag, with every byte of the word set on one of them.
+                if index % 3 == 0 {
+                    u64::MAX - u64::try_from(index).expect("small")
+                } else {
+                    0
+                },
             )
         })
         .collect();
@@ -266,6 +282,7 @@ fn commands() -> Vec<Command> {
                 1,
                 true,
                 4,
+                0,
             )],
         ),
         // A window change of a tap one subscriber holds: the disarm of the old window and the arm
@@ -275,8 +292,15 @@ fn commands() -> Vec<Command> {
             2,
             7,
             &[
-                observe("drums", TapSection::Console(id("desk-comp")), 1, false, 2),
-                observe("drums", TapSection::Console(id("desk-comp")), 1, true, 8),
+                observe(
+                    "drums",
+                    TapSection::Console(id("desk-comp")),
+                    1,
+                    false,
+                    2,
+                    5,
+                ),
+                observe("drums", TapSection::Console(id("desk-comp")), 1, true, 8, 0),
             ],
         ),
         transaction(

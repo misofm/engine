@@ -265,15 +265,17 @@ fn session_with_every_effect(effects: &[&str]) -> String {
 }
 
 /// Arm (`armed`) or disarm the tap `tap_id` of insert `e{effect_index}` of track `t` through the
-/// browser's control entry: one `Observe` edit at the committed revision, request `request`.
-/// `Ok` when the core applied it, else its diagnostic codes.
+/// browser's control entry: one `Observe` edit at the committed revision, request `request`; a
+/// disarm names the arm's tag `arm_tag` (#2087). The reply's arm tag when the core applied it, else
+/// its diagnostic codes.
 fn observe(
     host: &mut AudioWorkletEngineHost,
     request: u64,
     effect_index: usize,
     tap_id: u32,
     armed: bool,
-) -> Result<(), Vec<String>> {
+    arm_tag: u64,
+) -> Result<u64, Vec<String>> {
     use protocol::{
         CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
         RequestId, SessionEdit, SessionRevision, TypedCommandFrame,
@@ -285,6 +287,7 @@ fn observe(
         tap_id,
         armed,
         window_blocks: 2,
+        arm_tag,
     }];
     let codec = ProtocolCodec::default();
     let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
@@ -313,7 +316,11 @@ fn observe(
         )
         .expect("a transaction response")
     {
-        DecodedTypedResponseFrame::Success { .. } => Ok(()),
+        DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+            ..
+        } => Ok(applied.observe_arm_tags[0]),
+        DecodedTypedResponseFrame::Success { .. } => panic!("a transaction reply"),
         DecodedTypedResponseFrame::NonOk { payload, .. } => Err(payload
             .diagnostics
             .iter()
@@ -439,17 +446,20 @@ fn every_metadata_observation_tap_resolves_through_an_observe_edit() {
     let mut request = 0_u64;
     for (effect_index, descriptor) in registry.descriptors().enumerate() {
         for tap in descriptor.observations {
+            let mut arm_tag = 0;
             for armed in [true, false] {
                 request += 1;
                 // Every launch tap is resident, so every one of them binds. The rule the test
                 // states is the general one: resolved, never an unknown tap.
-                assert_eq!(
-                    observe(&mut host, request, effect_index, tap.id.0, armed),
-                    Ok(()),
-                    "{} tap {} resolves and binds",
-                    descriptor.id.as_str(),
-                    tap.id.0
-                );
+                let tag = observe(&mut host, request, effect_index, tap.id.0, armed, arm_tag)
+                    .unwrap_or_else(|codes| {
+                        panic!(
+                            "{} tap {} resolves and binds: {codes:?}",
+                            descriptor.id.as_str(),
+                            tap.id.0
+                        )
+                    });
+                arm_tag = tag;
                 // A tap's queue slot holds one record until a block drains it, and these are
                 // separate transactions, so the next one waits for a render (flow control, #1345
                 // D2).
@@ -461,7 +471,7 @@ fn every_metadata_observation_tap_resolves_through_an_observe_edit() {
 
     // The negative case: a tap id no effect declares does not resolve, and says so as a *tap*.
     assert_eq!(
-        observe(&mut host, request + 1, 0, 4_242, true),
+        observe(&mut host, request + 1, 0, 4_242, true, 0),
         Err(vec!["observation.tap.unknown".to_owned()])
     );
 }

@@ -1053,7 +1053,7 @@ export class ObservationSubscriptionOwner {
       // transaction (#1590 D1): a window change on a tap this handle alone holds is one re-arm in
       // the core (#1584 D3), and one that another subscriber shares is the core's window conflict.
       const edits: ObserveEdit[] = [
-        ...remove.map((entry) => this.#edit(entry, false, entry.windowBlocks)),
+        ...remove.map((entry) => this.#disarm(state, entry)),
         ...add.map((entry) => this.#edit(entry, true, normalized.configuration.windowBlocks)),
       ];
       const applied = await this.#apply(edits, epoch);
@@ -1101,7 +1101,7 @@ export class ObservationSubscriptionOwner {
       const epoch = this.#epoch;
       await this.#waitForPoll();
       // One disarm per selection (#1590 D1): the core disarms a tap when its last subscriber leaves.
-      const edits = state.entries.map((entry) => this.#edit(entry, false, entry.windowBlocks));
+      const edits = state.entries.map((entry) => this.#disarm(state, entry));
       await this.#apply(edits, epoch);
       this.#assertEpoch(epoch);
       state.bindings.clear();
@@ -1320,6 +1320,20 @@ export class ObservationSubscriptionOwner {
       if (armSample > sample) sample = armSample;
     }
     if (state.entries.length !== 0) state.armed.resolve(sample);
+  }
+
+  /**
+   * The disarm of one selection of `state`, naming the arm it ends by the tag that arm's reply gave
+   * (#2087). An `OBSERVATION_ENDED` event can reach this owner after a later commit (in the browser
+   * it comes by message): when the core has already ended the arm and another subscriber has armed
+   * the tap since, the core keeps that subscriber's arm, and the disarm changes nothing.
+   */
+  #disarm(state: HandleState, entry: ResolvedSelection): ObserveEdit {
+    const binding = state.bindings.get(entry.key);
+    if (binding === undefined) {
+      throw armedRefusal("internal", "sdk.observation.unbound", "a selection of an open subscription has no binding");
+    }
+    return Object.freeze({ ...this.#edit(entry, false, entry.windowBlocks), armTag: binding.armTag });
   }
 
   #edit(entry: ResolvedSelection, armed: boolean, windowBlocks: number): ObserveEdit {

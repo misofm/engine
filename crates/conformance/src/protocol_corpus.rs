@@ -256,6 +256,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             tap_id: 1,
             armed: true,
             window_blocks: 4,
+            arm_tag: 0,
         },
     ]
 }

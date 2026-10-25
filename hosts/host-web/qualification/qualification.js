@@ -1328,7 +1328,8 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   const armedList = frames.slice();
 
   const unsubscribed = await request("observe (unsubscribe)", "observe",
-    () => observeThroughSdk(host, { ...subscription, armed: false }));
+    // #2087: a disarm names its arm by the tag the subscribe's reply gave.
+    () => observeThroughSdk(host, { ...subscription, armed: false, armTag: BigInt(subscribed.armTag ?? 0) }));
   // Everything received from here on was polled after the tap was disarmed: the same port, in order.
   const acknowledgedAt = performance.now();
   const acknowledgedAtFrame = frames.length;

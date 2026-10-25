@@ -382,7 +382,8 @@ describe("the observation codec equals the protocol codec's frames (#1589b)", ()
         ? encodeObserveTransaction({
           requestId: BigInt(command.requestId),
           expectedRevision: BigInt(request.expectedRevision),
-          edits: request.edits,
+          // #2087: a disarm's arm tag is a decimal string in the fixture.
+          edits: request.edits.map((edit) => edit.armTag === undefined ? edit : { ...edit, armTag: BigInt(edit.armTag) }),
         })
         : encodeObservationRead(BigInt(command.requestId), request.selections);
       assert.equal(hexOf(bytes), command.hex);
