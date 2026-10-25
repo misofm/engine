@@ -37,3 +37,17 @@ duck-swap, and one gate in the 1324a gate-1 shape (bits against the reference ru
   changes with R4: the bus input is quiet again (`eq1` leaves the set), and `late`'s following send is armed.
 - Fact: in the gate's session, a send's tap node time runs 486 samples behind the block (behind `aux`'s
   limiter), so the gate's curve events sit 486 samples ahead of the render samples where they are heard.
+
+## Decision record (attempt 2, root rulings after verification)
+- MAJOR-1: in `carry_route`, a re-armed six-word successor of a following predecessor keeps its own
+  arm: no `adopt_state` and no comparison. Before this fix the route was dead after its fire
+  (the comparison was left pending, muted, with target `[0; 4]`).
+- MAJOR-2: a following route's fire that comes before its first block (a fresh or a carried route)
+  waits for that block. A fresh route places its cursors at the span start with no `Set`; a carried
+  route runs `place_carried` with the arm still held. Then the fire composes with the curve heard at
+  the fire block and ramps over the armed length. `carry_route` fires a following predecessor's own
+  arm at once (`fire_now`).
+- The gate gains row (d), an added following send fired on its first block, and counts render
+  allocations (`Mode::Count`). A graph unit case covers a delayed armed route.
+- The broken rustdoc link to `grown_strips` (prepare.rs) is now plain text: `transition` is a
+  `control-provider` module, so a link breaks the build without that feature.
