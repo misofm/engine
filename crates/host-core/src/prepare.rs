@@ -1740,9 +1740,10 @@ pub struct SuccessorBase<'a> {
     /// ordinary successor.
     pub warm: Option<&'a WarmLead>,
     /// The strips the transition fallback restarts (#1397 D2 step 1): strip IDs, sorted, the duck
-    /// set [`crate::grown_strips`] computed from the ordinary compile. Preparation restarts each
-    /// one it holds as it restarts a strip its carry join restarts (#1324 D2-D3: every owner
-    /// before the fader and the fader start at rest, and the fader is armed), and lists it in
+    /// set `transition::grown_strips` computed from the ordinary compile (a `control-provider`
+    /// item, so not linked from here). Preparation restarts each one it holds as it restarts a
+    /// strip its carry join restarts (#1324 D2-D3: every owner before the fader and the fader
+    /// start at rest, and the fader is armed), and lists it in
     /// [`PreparedHost::restarted_strips`]. An added strip in it is ignored. Empty, the neutral
     /// value, for every other successor.
     pub forced_restart: &'a [String],
