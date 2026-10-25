@@ -57,6 +57,7 @@ use crate::control_preparation::{
     INPUT_FILTER_TARGET_CAPACITY, InputFilterEdit, InputFilterPreparer,
 };
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
+use crate::duck::DuckOverlay;
 use crate::route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
     route_producer_position, route_record,
@@ -1548,20 +1549,40 @@ impl PlanStateInventory {
     /// declares it differently from A, restarts it the same way (`CONTROL_PROTOCOL_SEMANTICS.md`,
     /// "Sources across a structural transaction"). A source A created fresh and B keeps as A
     /// declares it moves by the donation ([`crate::check_donation`]), never through this base.
+    ///
+    /// Outside phase 1 of a strip removal: [`Self::across_withdrawn_in_phase_one`] with an empty
+    /// overlay.
     #[must_use]
     pub fn across_withdrawn(
         &self,
         withdrawn: &PlanStateInventory,
         withdrawn_plan: &PreparedRenderPlan,
     ) -> Self {
+        self.across_withdrawn_in_phase_one(withdrawn, withdrawn_plan, &NO_DUCK)
+    }
+
+    /// [`Self::across_withdrawn`] while P0's cells hold the duck overlay `duck` (#1325 D6): a
+    /// source the overlay lists keeps its row too. A's transaction removed it, but P0 still
+    /// renders it and its producer is in P0's set while phase 1 runs, so a B that restores it
+    /// with the same declaration and ring configuration carries P0's ring (every PCM frame the
+    /// host was acked for in phase 1 included), and the control plane moves P0's producer into
+    /// B's set after the commit. A B that declares it otherwise starts it fresh.
+    #[must_use]
+    pub fn across_withdrawn_in_phase_one(
+        &self,
+        withdrawn: &PlanStateInventory,
+        withdrawn_plan: &PreparedRenderPlan,
+        duck: &DuckOverlay,
+    ) -> Self {
         let mut base = self.clone();
         base.sources = self
             .sources
             .iter()
             .filter(|row| {
-                withdrawn.source(&row.id).is_some_and(|carried| {
-                    !withdrawn_plan.can_prepare_source_seek(carried.index as usize)
-                })
+                duck.has_source(row.id.as_bytes())
+                    || withdrawn.source(&row.id).is_some_and(|carried| {
+                        !withdrawn_plan.can_prepare_source_seek(carried.index as usize)
+                    })
             })
             .cloned()
             .collect();
@@ -1636,6 +1657,14 @@ pub struct SuccessorBase<'a> {
     /// (`0..=GATE_REVISION_MAX`). Such a successor has no carry retarget to stamp; a preparation
     /// that finds one refuses with `host.successor.monitor`. `false` is the neutral value.
     pub unchanged_revision: bool,
+    /// The duck overlay the predecessor's cells hold (#1325 D6): what phase 1 of a pending strip
+    /// removal ramped to `+0.0` on the predecessor. The preparation composes it into `committed`
+    /// ([`DuckOverlay::apply_to`]: each overlay strip's channels and each overlay route muted),
+    /// so the carry joins the predecessor's values as its cells hold them, and a strip a newer
+    /// transaction restores in phase 1 carries with a retarget from its ducked level instead of
+    /// keeping it. Only a base across a withdrawn candidate holds one: the overlay lives while a
+    /// successor waits. [`DuckOverlay::new`] (empty) is the neutral value.
+    pub duck: &'a DuckOverlay,
     /// The lead [`warm_lead`] returned for this edit (#1354 D4): the successor is compiled with
     /// its floors (every carried node at its predecessor arrival plus `P`, every restarted node at
     /// its arrival, no floor on an added node), every strip of [`WarmLead::restart_whole`] starts
@@ -1669,10 +1698,14 @@ impl<'a> SuccessorBase<'a> {
             observation: &NO_OBSERVATION,
             discontinuity: false,
             unchanged_revision: false,
+            duck: &NO_DUCK,
             warm: None,
         }
     }
 }
+
+/// The overlay of a base outside phase 1: nothing ducks ([`SuccessorBase::new`]).
+static NO_DUCK: DuckOverlay = DuckOverlay::new();
 
 /// The bindings that arm nothing, for a [`SuccessorBase`] of a host without subscriptions.
 pub static NO_OBSERVATION: controls::ObservationBindings = controls::ObservationBindings::new();
@@ -2904,6 +2937,19 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             "host.successor.warm_lead",
         ));
     }
+    // #1325 D6: the base the predecessor's cells hold, with the duck overlay laid over its
+    // model. Every join below reads `committed`, so this one substitution composes the overlay
+    // into the effective values the carry starts from. A control-thread copy that drops with
+    // this call.
+    let ducked_committed = successor.filter(|base| !base.duck.is_empty()).map(|base| {
+        let mut ducked = base.committed.clone();
+        base.duck.apply_to(&mut ducked);
+        ducked
+    });
+    let successor = successor.map(|base| match ducked_committed.as_ref() {
+        Some(committed) => SuccessorBase { committed, ..base },
+        None => base,
+    });
     // #1354a rulings 1-2: the restart set the lead's floors were derived from, and the nodes of
     // the predecessor's graph.
     let warm_restart = warm.map(|lead| {
