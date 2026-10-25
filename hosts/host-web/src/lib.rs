@@ -44,10 +44,10 @@ use engine::realtime::{
 use host_core::{
     CompiledSession, EffectObservationHandle, GainReductionTaps, HostLiveControlRequest,
     HostLiveLanes, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
-    MAXIMUM_VCAS_BOUNDED, MeterCarry, MeterDelivery, MeterFrame, MeterTables, MeterValidity,
-    PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError, SourceSubmission,
-    SuccessorBase, TapView, compile_host_model, compiled_session_shape, control_table_bytes,
-    parse_host_session, source_id_arena_bytes,
+    MAXIMUM_VCAS_BOUNDED, MeterCarry, MeterDelivery, MeterFrame, MeterLevel, MeterTables,
+    MeterValidity, PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError,
+    SourceSubmission, SuccessorBase, TapView, compile_host_model, compiled_session_shape,
+    control_table_bytes, parse_host_session, source_id_arena_bytes,
 };
 use host_core::{
     PreparedSpectrumCaptures, ResponseSnapshotError, ResponseSnapshotSink, SpectrumAnalysis,
@@ -1448,6 +1448,11 @@ struct PlanShape {
     /// while the plan renders (the delivery holds them); a retired plan's are back here, for the
     /// control side to drop.
     meter_tables: Option<MeterTables>,
+    /// The render half of the plan's meter frame ring (#1588 D2): render pushes each frame the
+    /// delivery publishes for this plan, while the protocol's table is on, until it adopts the
+    /// next plan. It travels with the shape, so the block that adopts a plan swaps the producer
+    /// with the tables. `None` only before the host takes it from the control plane.
+    meter_ring: Option<PlanMeterRing>,
     /// The published frame, `3(T + S) + 3` words (issue #1209 D1): `[track0 L, track0 R, .., trackN
     /// L, trackN R, bus0 L, bus0 R, .., busM L, busM R, master L, master R, track0 GR, .., trackN
     /// GR, bus0 GR, .., busM GR, master GR]`, one peak pair and one gain-reduction word per strip.
@@ -1464,6 +1469,13 @@ struct PlanShape {
     /// [`Self::name_successor`], and a gate compares it with `core::ptr::eq`.
     #[cfg(any(test, feature = "test-support"))]
     successor_address: usize,
+}
+
+/// A plan's meter frame ring producer and the provider epoch it serves (#1588 D2, D3): every
+/// frame pushed into it names that epoch ([`MeterFrame::plan_epoch`](host_core::MeterFrame)).
+struct PlanMeterRing {
+    epoch: u64,
+    producer: host_core::MeterFrameProducer,
 }
 
 /// How many replacement plans' tables the host holds at once. After every commit the core holds
@@ -1574,6 +1586,12 @@ struct ReadyOwnership {
     /// rendering plan's meter tables. The poll calls it and copies the frame it publishes into
     /// the plan's [`PlanShape::meter_frame`] and [`PlanShape::meter_header`].
     meters: MeterDelivery,
+    /// The session's meter level word (#1588 D1): the lease sets [`MeterLevel::LEASE`], the
+    /// control plane sets [`MeterLevel::TELEMETRY`] when it accepts a nonempty meter table. Only
+    /// the render half applies it to [`Self::meters`] ([`Self::apply_meter_level`]).
+    meter_level: MeterLevel,
+    /// The word [`Self::apply_meter_level`] last applied: the clients the delivery serves now.
+    meter_applied: u32,
     /// Test-only proof that incomplete master intervals never reach effect-reader scanning.
     #[cfg(test)]
     meter_effect_scan_count: u64,
@@ -1676,7 +1694,18 @@ impl ReadyOwnership {
             // `Ok` only once it has left the plan's tables in the record (it refuses the
             // preparation, before anything is committed, when it cannot). So a committed rebuild
             // always has its tables, and no refusal can follow a commit.
-            let shape = prepared.expect("a committed rebuild's preparer left the plan's tables");
+            let mut shape =
+                prepared.expect("a committed rebuild's preparer left the plan's tables");
+            // #1588 D2: the plan's ring, which the control plane built with the plan, rides its
+            // shape to the block that adopts it.
+            shape.meter_ring = self
+                .control
+                .take_meter_frame_producer(epoch)
+                .map(|producer| PlanMeterRing { epoch, producer });
+            debug_assert!(
+                shape.meter_ring.is_some(),
+                "a published plan has no meter ring"
+            );
             self.pending_shapes.push(PendingShape {
                 epoch,
                 shape: Box::new(shape),
@@ -1822,6 +1851,37 @@ impl ReadyOwnership {
         }
     }
 
+    // REALTIME_POLICY_BEGIN: #1588 D1, the render half's application of the meter level word.
+    /// Apply the session's meter level word from `next_sample`, the next block's first sample
+    /// (#1588 D1). When the word differs from the one last applied, the delivery's level follows
+    /// whether any client is on, and a change that keeps it on restarts the delivery epoch
+    /// ([`MeterDelivery::restart`]): either client's change restarts the epoch once, and a client
+    /// alone sees exactly the level transitions it asks for. The render half calls it before
+    /// each block, so a configure the control half accepted between two blocks turns the level
+    /// on from the next block's first sample, as the C ABI's requested gate does, and the lease
+    /// export calls it at once. Returns whether the publication was cleared, so the caller
+    /// republishes the lease frame. One `Acquire` load; allocation-free.
+    fn apply_meter_level(&mut self, next_sample: u64) -> bool {
+        let word = self.meter_level.load();
+        if word == self.meter_applied {
+            return false;
+        }
+        self.meter_applied = word;
+        let on = word != 0;
+        self.meters.set_level(on, next_sample) || (on && self.meters.restart(next_sample))
+    }
+
+    /// Copy the delivery's frame into the lease frame and its header (#1582 D4).
+    fn publish_lease_frame(&mut self) {
+        publish_web_meter_frame(
+            self.meters.frame(),
+            self.shape.master_track,
+            &mut self.shape.meter_frame,
+            &mut self.shape.meter_header,
+        );
+    }
+    // REALTIME_POLICY_END
+
     // REALTIME_POLICY_BEGIN
     /// Take the tables of the plan whose epoch is `epoch` (#1290a), at the block that adopted it.
     /// The tables it retires stay in the entry for [`Self::reclaim_shapes`]; an entry of an
@@ -1894,6 +1954,9 @@ impl ReadyOwnership {
                     "an adopted plan shape has no meter tables"
                 );
                 if let Some(tables) = self.shape.meter_tables.as_mut() {
+                    // #1588 D3: the adopted plan's frames name its epoch, the epoch of the ring
+                    // its shape carries.
+                    tables.set_plan_epoch(epoch);
                     self.meters.adopt(
                         tables,
                         carried
@@ -3344,16 +3407,14 @@ impl AudioWorkletEngineHost {
         // state and the publication, marks producer-queued intervals from the previous lease for
         // bounded rejection by the next poll, and drives the output meter's gate (#1581 D5); the
         // cleared publication is copied into the page's frame and header.
+        // #1588 D1: the lease is its own bit of the session's level word, applied here at once,
+        // so a lease alone moves the level exactly as before.
         let from = self.status.next_absolute_sample;
-        if let Some(ready) = self.ready.as_mut()
-            && ready.meters.set_level(enabled, from)
-        {
-            publish_web_meter_frame(
-                ready.meters.frame(),
-                ready.shape.master_track,
-                &mut ready.shape.meter_frame,
-                &mut ready.shape.meter_header,
-            );
+        if let Some(ready) = self.ready.as_mut() {
+            ready.meter_level.set(MeterLevel::LEASE, enabled);
+            if ready.apply_meter_level(from) {
+                ready.publish_lease_frame();
+            }
         }
         self.record(RESULT_OK)
     }
@@ -3648,6 +3709,13 @@ impl AudioWorkletEngineHost {
             Err(_) => return self.fail(RESULT_INTERNAL, b"web.internal.output\t$\n"),
         };
         let render_first_sample = self.status.next_absolute_sample;
+        // #1588 D1: a meter client the control half turned on or off since the last block takes
+        // effect from this block's first sample, before the block is observed.
+        if ready.apply_meter_level(render_first_sample)
+            && ready.meter_applied & MeterLevel::LEASE != 0
+        {
+            ready.publish_lease_frame();
+        }
         // #1381a D4: through the plan owner, which adopts a published successor at this block's
         // boundary and continues the clock.
         let result = plan.render(self.status.next_absolute_sample, output);
@@ -3709,6 +3777,11 @@ impl AudioWorkletEngineHost {
                         render_first_sample,
                         next_absolute_sample,
                     );
+                }
+                // #1588 D2: with the protocol's meter table alone, the render half folds after
+                // its block here, since the worklet polls only under the lease.
+                if ready.meter_applied == MeterLevel::TELEMETRY {
+                    poll_meter_delivery(ready, plan, next_absolute_sample);
                 }
                 // #1399: the session's count, loaded after the block that added to it, so the
                 // status is never behind the last rendered block.
@@ -3806,13 +3879,17 @@ impl AudioWorkletEngineHost {
     }
 
     // REALTIME_POLICY_BEGIN
-    /// Drain every finished meter window into the frame buffer (issue #137 D2).
+    /// Drain every finished meter window into the frame buffer (issue #137 D2) and, while the
+    /// protocol's meter table is on, into the rendering plan's frame ring (#1588 D2).
     ///
-    /// Returns the number of complete windows folded by this call. Zero work happens without the
-    /// lease, which a host prepared with `live_control_meter_blocks == 0` never grants.
+    /// Returns the number of complete windows folded by this call. Zero work happens while no
+    /// client is on: without the lease, which a host prepared with
+    /// `live_control_meter_blocks == 0` never grants, and without a meter table. The worklet
+    /// calls it after each block it renders under the lease; with the table alone the render
+    /// export folds after its block itself ([`Self::render_next`]).
     ///
-    /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into a
-    /// buffer allocated at compilation.
+    /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into
+    /// buffers allocated at compilation.
     pub fn poll_meters(&mut self) -> u32 {
         if self.status.state != STATE_READY {
             return 0;
@@ -3821,44 +3898,7 @@ impl AudioWorkletEngineHost {
         let (Some(ready), Some(plan)) = (self.ready.as_mut(), self.plan.as_mut()) else {
             return 0;
         };
-        // #1381a D3: the meter consumers and the observation readers are the active plan's
-        // companions. The downcast allocates and drops nothing.
-        let Some(companions) = plan.active_attachment_mut::<RenderCompanions>() else {
-            return 0;
-        };
-        // #1582 D4: the core delivery folds the windows; this export keeps only the copy. This
-        // function has no runtime-checked `[]` index, so it adds no bounds check of its own. The
-        // one `panic_bounds_check` in this export's call graph is the slot index of the SPSC
-        // queues inlined into `MeterDelivery::poll`, which the ring keeps in range. This export
-        // is called from `process()`, so the shipped artifact's call-graph gate covers it as it
-        // covers the render export.
-        let shape = &mut *ready.shape;
-        let mut taps = WebGainReductionTaps {
-            effect_instances: &shape.effect_instances,
-            observation_tracks: &shape.observation_tracks,
-            effect_observations: &companions.effect_observations,
-            #[cfg(test)]
-            scans: 0,
-        };
-        let published = ready
-            .meters
-            .poll(&mut companions.meters, &mut taps, next_sample);
-        #[cfg(test)]
-        {
-            ready.meter_effect_scan_count =
-                ready.meter_effect_scan_count.saturating_add(taps.scans);
-        }
-        let Some(frame) = published else {
-            return 0;
-        };
-        // R4: one copy per published window.
-        publish_web_meter_frame(
-            frame,
-            shape.master_track,
-            &mut shape.meter_frame,
-            &mut shape.meter_header,
-        );
-        frame.windows
+        poll_meter_delivery(ready, plan, next_sample)
     }
     // REALTIME_POLICY_END
     fn finish_commands(&mut self, result: u32, reason: u32, index: u32, admitted: u32) -> u32 {
@@ -4324,6 +4364,67 @@ impl GainReductionTaps for WebGainReductionTaps<'_> {
         }
     }
 }
+
+// REALTIME_POLICY_BEGIN: #1582 D4, #1588 D2, the render half's meter fold.
+/// Fold at most one closed meter window through the session's delivery (#1582 D4) at
+/// `next_sample`, the next block's first sample, and hand the frame it publishes to the clients
+/// the applied level word names (#1588 D1, D2): to the rendering plan's frame ring while the
+/// protocol's table is on (a full ring drops and counts the frame), and to the lease frame while
+/// the lease is on. Returns the windows the published frame folds, or `0`.
+///
+/// The core delivery folds the windows; the host keeps only the copies. This function has no
+/// runtime-checked `[]` index, so it adds no bounds check of its own. The one
+/// `panic_bounds_check` the fold brings is the slot index of the SPSC queues inlined into
+/// `MeterDelivery::poll`, which the ring keeps in range, and the ring push's own queues are the
+/// same kind. Both callers are on the render thread (`process()`), so the shipped artifact's
+/// call-graph gate covers it.
+fn poll_meter_delivery(ready: &mut ReadyOwnership, plan: &mut WebPlan, next_sample: u64) -> u32 {
+    // #1381a D3: the meter consumers and the observation readers are the active plan's
+    // companions. The downcast allocates and drops nothing.
+    let Some(companions) = plan.active_attachment_mut::<RenderCompanions>() else {
+        return 0;
+    };
+    let shape = &mut *ready.shape;
+    let mut taps = WebGainReductionTaps {
+        effect_instances: &shape.effect_instances,
+        observation_tracks: &shape.observation_tracks,
+        effect_observations: &companions.effect_observations,
+        #[cfg(test)]
+        scans: 0,
+    };
+    let published = ready
+        .meters
+        .poll(&mut companions.meters, &mut taps, next_sample);
+    #[cfg(test)]
+    {
+        ready.meter_effect_scan_count = ready.meter_effect_scan_count.saturating_add(taps.scans);
+    }
+    let Some(frame) = published else {
+        return 0;
+    };
+    // #1588 D2: only while the table is on, and only into the rendering plan's ring, which the
+    // block that adopted the plan swapped in with its tables.
+    if ready.meter_applied & MeterLevel::TELEMETRY != 0
+        && let Some(ring) = shape.meter_ring.as_mut()
+    {
+        debug_assert_eq!(
+            frame.plan_epoch, ring.epoch,
+            "a meter frame went to another plan's ring"
+        );
+        ring.producer.publish_frame(frame);
+    }
+    // R4: one copy per published window, only while the lease is on.
+    if ready.meter_applied & MeterLevel::LEASE != 0 {
+        publish_web_meter_frame(
+            frame,
+            shape.master_track,
+            &mut shape.meter_frame,
+            &mut shape.meter_header,
+        );
+    }
+    frame.windows
+}
+// REALTIME_POLICY_END
 
 /// Copy the core frame into the page's frame words and header (#1582 D4), the layout of
 /// [`PlanShape::meter_frame`]: every strip's peak pair, tracks then submixes (issue #1209 D1, so
@@ -4943,10 +5044,9 @@ impl ControlAdapter for WebAdapter {
     /// names, and [`AudioWorkletEngineHost::control_command_with_document`] passes it beside the
     /// frame.
     const DOCUMENT_TRANSPORT: bool = true;
-    // #1588 R1: the browser's meter batches come from its render half's fold. Its
-    // `METER_DELIVERY` stays off (meter tables refused `meter.unavailable`) until #1588b lands
-    // the render half's ring push in the same commit that turns it on: a table accepted with no
-    // push would be an acknowledged no-op (decision 15 E4).
+    // #1588 R1: the browser's meter batches come from its render half's fold, which pushes each
+    // published frame into the plan's ring while the protocol's table is on (#1588b).
+    const METER_DELIVERY: bool = true;
     const RENDER_METER_FOLD: bool = true;
 }
 
@@ -5577,6 +5677,7 @@ fn build_plan_shape(
         observe_named: zero_u32(total_effects as usize)?,
         in_flight: zero_u32(total_effects as usize)?,
         meter_tables: Some(meter_tables),
+        meter_ring: None,
         meter_frame,
         meter_header,
         #[cfg(any(test, feature = "test-support"))]
@@ -5949,10 +6050,23 @@ fn compile_ready(
     // #1582 D1: the session's one meter delivery takes the boot plan's tables (charged above with
     // the plan's rows) and the output meter's halves; the boot plan's first block is the grid's
     // origin.
-    let meter_tables = shape
+    let mut meter_tables = shape
         .meter_tables
         .take()
         .ok_or_else(|| fixed_diagnostic("web.internal.meter_tables"))?;
+    // #1588 D1, D2: the session's level word, and the boot plan's ring, which the boot plan's
+    // shape carries to the render half; the boot plan's frames name its epoch (D3).
+    let meter_level = control
+        .meter_level()
+        .ok_or_else(|| fixed_diagnostic("web.internal.meter_level"))?;
+    let boot_epoch = control.newest_plan_epoch();
+    meter_tables.set_plan_epoch(boot_epoch);
+    shape.meter_ring = Some(PlanMeterRing {
+        epoch: boot_epoch,
+        producer: control
+            .take_meter_frame_producer(boot_epoch)
+            .ok_or_else(|| fixed_diagnostic("web.internal.meter_ring"))?,
+    });
     let meter_window_frames = options
         .live_control_meter_blocks
         .checked_mul(u64::from(session_quantum_frames))
@@ -5996,6 +6110,8 @@ fn compile_ready(
             meter_window_frames,
             meter_tables,
         ),
+        meter_level,
+        meter_applied: 0,
         #[cfg(test)]
         meter_effect_scan_count: 0,
     };

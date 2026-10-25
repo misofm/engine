@@ -59,14 +59,34 @@ fn document(frames: u64) -> String {
     canonical_session_json(&model).expect("canonical session")
 }
 
+/// The browser boots with the default meter window, the C ABI's at 48 kHz and 128 frames, so both
+/// hosts serve one meter table on one window grid (#1588 D5).
 fn options() -> WebBootOptions {
     WebBootOptions {
         require_sample_rate_hz: RATE,
         require_quantum_frames: QUANTUM,
         source_ring_frames: QUANTUM * 2,
-        ..WebBootOptions::explicit_defaults()
+        ..WebBootOptions::live_control_defaults()
     }
 }
+
+/// #1588 D5's meter table: the output's peak and the track's peak. Both hosts refuse a
+/// gain-reduction entry `meter.gain_reduction.unavailable` until #1587b, which adds the track's.
+fn meter_table() -> Vec<protocol::MeterEntry> {
+    vec![
+        protocol::MeterEntry {
+            target: protocol::MeterTarget::Output,
+            metric: protocol::MeterMetric::Peak,
+        },
+        protocol::MeterEntry {
+            target: protocol::MeterTarget::Strip(TRACK_ID.into()),
+            metric: protocol::MeterMetric::Peak,
+        },
+    ]
+}
+
+/// The meter period of the script's table: two windows of the default meter window.
+const METER_PERIOD_BLOCKS: u32 = 2 * host_web::DEFAULT_METER_BLOCKS;
 
 fn boot_browser(frames: u64) -> AudioWorkletEngineHost {
     AudioWorkletEngineHost::boot(document(frames).as_bytes(), options())
@@ -580,30 +600,10 @@ impl Legs {
     }
 }
 
-/// The lossy lane size a `CAPABILITIES_GET` reply `reply` reports.
-fn capabilities_telemetry_slots(reply: &[u8]) -> u64 {
-    let mut fields = [0_u16; 64];
-    let protocol::DecodedTypedResponseFrame::Success {
-        payload: protocol::DecodedSuccessResponsePayload::Capabilities(value),
-        ..
-    } = protocol::ProtocolCodec::default()
-        .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
-        .expect("a capabilities reply")
-    else {
-        panic!("a capabilities reply")
-    };
-    value.telemetry_slots
-}
-
-/// The `CAPABILITIES_GET` reply `reply` with `added` merged into its ascending command list,
-/// `flags` set and, when `telemetry_slots` is `Some`, that lossy lane size, re-encoded by the codec
-/// so every length field matches. The browser's list must not hold an added ID already.
-fn capabilities_plus(
-    reply: &[u8],
-    added: &[u16],
-    flags: u64,
-    telemetry_slots: Option<u64>,
-) -> Vec<u8> {
+/// The `CAPABILITIES_GET` reply `reply` with `added` merged into its ascending command list and
+/// `flags` set, re-encoded by the codec so every length field matches. The browser's list must not
+/// hold an added ID already.
+fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
     let codec = protocol::ProtocolCodec::default();
     let mut fields = [0_u16; 64];
     let protocol::DecodedTypedResponseFrame::Success {
@@ -639,7 +639,7 @@ fn capabilities_plus(
         control_command_bytes: value.control_command_bytes,
         reliable_response_slots: value.reliable_response_slots,
         reliable_event_slots: value.reliable_event_slots,
-        telemetry_slots: telemetry_slots.unwrap_or(value.telemetry_slots),
+        telemetry_slots: value.telemetry_slots,
         replay_entries: value.replay_entries,
         replay_bytes: value.replay_bytes,
         maximum_cached_response_bytes: value.maximum_cached_response_bytes,
@@ -673,14 +673,13 @@ fn capabilities_plus(
 fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let mut legs = Legs::new();
 
-    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697). #1596 removes
-    // the first remaining exception: until the browser reads spectrum through the frames, the C
-    // ABI's reply is the browser's plus exactly the three spectrum commands (`0x0010`-`0x0012`)
-    // with flag bit 16 (#1595 R2). #1588 removes the second: until the browser serves meter
-    // batches through the frames, the C ABI's lossy meter lane holds one whole batch, 256 slots,
-    // and the browser's keeps two (#1587a, root ruling m2). #1589 removes the third: until the
-    // browser's session serves `OBSERVATION_READ`, the C ABI also lists `0x000f` with flag bit 15
-    // (#1586 R2). Every other step stays byte-equal.
+    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697) and size their
+    // lossy meter lane to one whole meter batch (#1587a, #1588). #1596 removes the first remaining
+    // exception: until the browser reads spectrum through the frames, the C ABI's reply is the
+    // browser's plus exactly the three spectrum commands (`0x0010`-`0x0012`) with flag bit 16
+    // (#1595 R2). #1589 removes the second: until the browser's session serves
+    // `OBSERVATION_READ`, the C ABI also lists `0x000f` with flag bit 15 (#1586 R2). Every other
+    // step stays byte-equal.
     let request = legs.next();
     let bytes = frame(
         request,
@@ -691,27 +690,19 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let (c_result, c_reply) = legs.c.send(&bytes);
     assert_eq!(browser_result, c_result, "1 capabilities: the result codes");
     assert_eq!(
-        capabilities_plus(&browser_reply, &[], 0, None),
+        capabilities_plus(&browser_reply, &[], 0),
         browser_reply,
         "1 capabilities: the browser's reply re-encodes to itself"
-    );
-    // #1588 removes this assertion when it sizes the browser's lane: until then the browser keeps
-    // its two-slot lossy lane, and only the C ABI's grows to one whole meter batch (#1587a).
-    assert_eq!(
-        capabilities_telemetry_slots(&browser_reply),
-        2,
-        "1 capabilities: the browser's lossy lane keeps two slots"
     );
     assert_eq!(
         capabilities_plus(
             &browser_reply,
             &[0x000f, 0x0010, 0x0011, 0x0012],
             protocol::CapabilityFlags::OBSERVATION.0 | protocol::CapabilityFlags::SPECTRUM.0,
-            Some(host_core::MAXIMUM_METER_BATCH_RECORDS as u64)
         ),
         c_reply,
-        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f-0x0012, bits 15 \
-         and 16 and its 256-slot meter lane"
+        "1 capabilities: the C ABI's reply is the browser's plus exactly 0x000f-0x0012 and bits \
+         15 and 16"
     );
 
     // 2. SESSION_SNAPSHOT_GET at offset 0 with 64 bytes, then continuation pages until eof.
@@ -759,56 +750,20 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     );
     legs.drain("after 4");
 
-    // 5. TELEMETRY_CONFIGURE: no meter, LIVE_VALUES_SUPERSEDED at period 1, diagnostics on at
-    // Info. #1583 D4: the C ABI's echo carries its meter window (field 8) and the browser's none,
-    // until #1588 gives the browser a meter delivery; every other field and the header agree.
-    let request = legs.next();
-    let configure = frame(
-        request,
-        ExpectedRevision::Exact(SessionRevision(legs.revision)),
+    // 5. TELEMETRY_CONFIGURE: #1588 D5's meter table at two windows a batch,
+    // LIVE_VALUES_SUPERSEDED at period 1, diagnostics on at Info. Both echoes carry the meter
+    // window (field 8).
+    legs.command(
+        "5 telemetry",
         CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-            // #1583: an empty meter table; #1588 puts a meter entry back.
-            meters: Vec::new(),
-            meter_period_blocks: 0,
+            meters: meter_table(),
+            meter_period_blocks: METER_PERIOD_BLOCKS,
             meter_window_blocks: None,
             counter_ids: vec![CounterId::LiveValuesSuperseded],
             counter_period_blocks: 1,
             diagnostics_enabled: true,
             minimum_diagnostic_severity: DiagnosticSeverity::Info,
         }),
-    );
-    let (browser_result, browser_echo) = legs.browser.send(&configure);
-    let (c_result, c_echo) = legs.c.send(&configure);
-    assert_eq!(browser_result, c_result, "5 telemetry: the result codes");
-    let echo = |reply: &[u8]| {
-        let mut fields = [0_u16; 64];
-        match ProtocolCodec::default()
-            .decode_typed_response(reply, &mut protocol::DecodeScratch::new(&mut fields))
-            .expect("5 telemetry: a reply")
-        {
-            protocol::DecodedTypedResponseFrame::Success {
-                header,
-                payload: protocol::DecodedSuccessResponsePayload::TelemetryConfiguration(value),
-            } => ((header.request_id, header.revision, header.status), value),
-            _ => panic!("5 telemetry: a telemetry echo"),
-        }
-    };
-    let (browser_header, browser_value) = echo(&browser_echo);
-    let (c_header, c_value) = echo(&c_echo);
-    assert_eq!(browser_header, c_header, "5 telemetry: the reply headers");
-    assert_eq!(browser_value.meter_window_blocks, None);
-    assert_eq!(
-        c_value.meter_window_blocks,
-        core::num::NonZeroU32::new(12),
-        "the C ABI's window at 48 kHz and 128 frames"
-    );
-    assert_eq!(
-        TelemetryConfiguration {
-            meter_window_blocks: None,
-            ..c_value
-        },
-        browser_value,
-        "5 telemetry: every other field"
     );
     legs.drain("after 5");
 
@@ -841,11 +796,12 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     legs.revision = revision;
     legs.drain("after 7");
 
-    // 8. Eight render blocks, with a service step after each.
-    for block in 0..8 {
+    // 8. Two meter batches' render blocks, with a service step and a drain after each, so every
+    // `METER_BATCH` is compared where it is staged.
+    for block in 0..2 * u64::from(METER_PERIOD_BLOCKS) {
         legs.block(block);
+        legs.drain(&format!("after block {block}"));
     }
-    legs.drain("after 8");
 
     // 9. COUNTERS_GET for all counters.
     legs.command(
@@ -908,8 +864,7 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     legs.drain("at the end");
 
     // The browser leg published every kind of protocol event it serves, and the C ABI leg's equal
-    // sequence says the same. `METER_BATCH` is not one until #1588 gives the browser a meter
-    // delivery (#1583, step 5).
+    // sequence says the same: step 8's two meter batches among them (#1588 gate 1).
     let kinds: Vec<u16> = legs.events[0]
         .iter()
         .map(|(_, event)| event_message(event))
@@ -922,9 +877,13 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     ] {
         assert!(kinds.contains(&message), "no {name} event in {kinds:04x?}");
     }
-    assert!(
-        !kinds.contains(&MESSAGE_METER_BATCH),
-        "a METER_BATCH with no meter table in {kinds:04x?}"
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|&&message| message == MESSAGE_METER_BATCH)
+            .count(),
+        2,
+        "step 8's two METER_BATCH events in {kinds:04x?}"
     );
 }
 
@@ -1009,10 +968,10 @@ fn telemetry_frame(request: u64, revision: u64) -> Vec<u8> {
         request,
         ExpectedRevision::Exact(SessionRevision(revision)),
         CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-            // #1583: an empty meter table; the browser has no meter delivery until #1588, which
-            // puts a meter entry back.
-            meters: Vec::new(),
-            meter_period_blocks: 0,
+            // #1588 gate 5: the meter table is on, so the browser's render half pushes a frame
+            // into the plan's ring at every closed window.
+            meters: meter_table(),
+            meter_period_blocks: METER_PERIOD_BLOCKS,
             meter_window_blocks: None,
             counter_ids: vec![CounterId::LiveValuesSuperseded],
             counter_period_blocks: 1,
@@ -1245,50 +1204,4 @@ fn both_hosts_read_one_observation_tap_alike() {
         ready |= c_row.status == protocol::ObservationRowStatus::Ready;
     }
     assert!(ready, "vacuous: no window closed");
-}
-
-/// #1588a: until the render half pushes its frames to the control half (#1588b), the browser
-/// refuses a meter table `meter.unavailable`, even booted with a meter window, rather than
-/// acknowledge a table it would never serve.
-///
-/// Test value: red if the browser's meter delivery is turned on before its render push exists,
-/// so a configure is acknowledged and no `METER_BATCH` ever follows.
-#[test]
-fn the_browser_refuses_a_meter_table_until_its_render_push_exists() {
-    let mut browser = Browser {
-        host: AudioWorkletEngineHost::boot(
-            document(8_192).as_bytes(),
-            WebBootOptions {
-                live_control_meter_blocks: 12,
-                ..options()
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic()))),
-    };
-    let configure = frame(
-        1,
-        ExpectedRevision::Exact(SessionRevision(browser.host.committed_revision())),
-        CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
-            meters: vec![protocol::MeterEntry {
-                target: protocol::MeterTarget::Output,
-                metric: protocol::MeterMetric::Peak,
-            }],
-            meter_period_blocks: 12,
-            meter_window_blocks: None,
-            counter_ids: Vec::new(),
-            counter_period_blocks: 0,
-            diagnostics_enabled: false,
-            minimum_diagnostic_severity: DiagnosticSeverity::Info,
-        }),
-    );
-    let (result, reply) = browser.send(&configure);
-    assert_eq!(result, RESULT_OK);
-    let mut fields = [0_u16; 64];
-    let decoded = ProtocolCodec::default()
-        .decode_typed_response(&reply, &mut protocol::DecodeScratch::new(&mut fields))
-        .expect("a reply");
-    let protocol::DecodedTypedResponseFrame::NonOk { payload, .. } = decoded else {
-        panic!("the browser accepted a meter table")
-    };
-    assert_eq!(payload.diagnostics[0].code, "meter.unavailable");
 }
