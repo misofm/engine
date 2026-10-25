@@ -100,14 +100,32 @@ watermark) predates #1325's two-phase machinery. The issue is split:
 - #1877 verify gap (root): a lane-less transition route whose entry fired but has not settled, kept
   unchanged, is re-armed and carried like an unfired one (#1877 D2, D6), so a successor prepared
   after the fire and adopted mid-ramp continues the ramp instead of folding to its constant.
-- Out of this slice: a value change of a lane-less route (old D1 (b)(2)) still steps; a warm
-  successor (#1354) compiles copies with the lead's floors but has no gate.
+- Review fold (attempt 1 verdict, root rulings): phase 1 (`plan_strip_transition`) counts in `C`
+  the lines of every unsettled copy out of a ducked strip, so "remove a route, then remove its
+  track" inside the copy's fade cannot cut its tail (MINOR-1). A carried `Settling(at)` takes
+  `at + own tail - displaced tail`, saturating (NIT-1).
+- Stated limits, each with its successor gate:
+  - Route count: a successor's copies are not counted against `maximum_routes` (`check_counts`
+    reads `next`), so a plan may briefly hold up to that many extra transition routes, one per
+    unsettled copy, until they settle; their bytes are charged. Gate: a session at
+    `maximum_routes` that removes routes prepares, and the copies' bytes are in the report.
+  - Warm successor (#1354, MINOR-3): copies compile with the alias's floor from the lead's floor
+    map, untested. Gate: a warm successor that also removes a lane-less route equals the live-mute
+    reference from its adoption.
+  - Copy ID at the length limit (open question 5): an old ID of 127 bytes takes `-` plus a number
+    on a shortened prefix, which may sort elsewhere among the output's routes, so the output's sum
+    order (not the fade) differs while the copy lives. Gate: a 127-byte route ID removed; the run
+    equals the live-mute reference whose route takes the same copy ID.
+- Successor issue (root files it): a value change of a lane-less route (old D1 (b)(2)) still
+  steps. The same copy machinery owns it: the successor fades out a copy at the old values while
+  the route at the new values fades in.
 
 ## Paths (1953b)
 
 `crates/graph/src/{lib,runtime}.rs`, `crates/host-core/src/prepare.rs`,
 `crates/host-core/tests/successor_swap.rs`, `crates/capi/tests/strip_transitions.rs`, this spec.
-Comment text only, outside the scope note's list: `crates/host-core/src/transition.rs`,
+Root extended the paths to `crates/host-core/src/transition.rs` for MINOR-1. Comment text only,
+outside the scope note's list: `crates/host-core/src/transition.rs`,
 `crates/capi/include/miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md` (the 1953a paragraphs said
 such a route still steps).
 
@@ -119,9 +137,14 @@ such a route still steps).
    at the swap; (b) a second swap prepared after the fire, adopted mid-ramp, keeps the copy; (c) a
    second swap at block 11 drops a settled copy and keeps one whose line still delivers; (d) a
    re-point into the bus equals a live mute of the old route and a live unmute of the new one.
+   Gate 1 (b) also adds, in the second transaction, a user route under the copy's ID with its
+   endpoints: the copy stays renamed and the user route fades in from an empty line.
 2. `a_pending_route_fade_survives_a_second_swap_on_every_width` (d) gains the swap prepared after
    the fire (the #1877 gap).
-3. `capi`'s `a_removed_output_route_fades_out_through_its_line`: the C ABI parity row.
+3. `capi`'s `a_removed_output_route_fades_out_through_its_line`: the C ABI parity row; and
+   `a_strip_removed_during_its_route_copys_fade_waits_for_the_copys_line` (MINOR-1): T2 removes
+   the copy's source track inside its fade; `S` counts the copy's line and every block equals the
+   run whose T2 only live-mutes the track.
 4. `graph`'s `a_fade_arm_fires_at_the_first_block_after_its_first_played_block_plus_d` checks the
    settled flag after each block.
 
@@ -136,3 +159,7 @@ such a route still steps).
   copy; tail ignored; settled ignored; no in-flight re-arm (gate 2); settle at fire (gate 4); b2
   copy only on removal; b2 `known` keeps the lane-less rule. The capi row is red on no copies and
   on no line alias.
+- Review fold mutants, each red: MINOR-1 row with the copy-line term removed (`S` 3200 instead of
+  3712; with the `S` check skipped, block 25 differs: the tail cut); gate 1 (b) user route with no
+  rename (`host.fade.copy`, a duplicate route ID) and with no alias precedence
+  (`host.carry.install`, one line claimed twice).
