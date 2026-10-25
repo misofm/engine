@@ -1551,6 +1551,78 @@ fn a_primed_warm_successor_continues_its_predecessor_bit_for_bit() {
     }
 }
 
+/// A fresh W' of `twin`, compiled with `inventory`'s floors and fed from frame 0, whose live
+/// route `route` (a `pre_fader` twin of a fading copy) is muted over the session mute ramp before
+/// block `mute_block` renders, rendered for `blocks` blocks.
+fn muted_twin(
+    twin: &Session,
+    inventory: &host_core::PlanStateInventory,
+    route: &str,
+    mute_block: usize,
+    blocks: usize,
+    backend: Backend,
+) -> Stream {
+    let caps = gate_caps();
+    let floors = inventory.test_only_floors_only();
+    let (mut reference, mut handles) =
+        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+            &twin.compiled,
+            &caps,
+            &HostLiveControlRequest::default(),
+            SuccessorBase::new(&floors, &twin.model, 2),
+            backend,
+        )
+        .unwrap_or_else(|failure| panic!("the fresh W': {failure:?}"));
+    assert_eq!(reference.inventory.source_read_offset(), 0);
+    let mut gate = reference
+        .plan
+        .take_revision_gate()
+        .expect("the fresh W's gate");
+    let _ = gate.stamp(2).expect("the open revision stamps again");
+    gate.publish(2);
+    let position = host_core::route_producer_position(&handles.route_controls, route)
+        .expect("the pre_fader route is a live send");
+    let values = twin
+        .model
+        .routes
+        .iter()
+        .find(|candidate| candidate.id.as_str() == route)
+        .expect("the route");
+    let matrix = &values.channel_matrix;
+    let mute = host_core::route_record(
+        values.gain_db,
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
+        true,
+        [false; 2],
+        host_core::LiveRamps::for_session(&twin.model).mute_samples,
+    )
+    .expect("a send record");
+    let mut reference = Stream::start(reference, &twin.model, &caps, backend, AHEAD);
+    reference.render(mute_block);
+    let stamp = gate.stamp(3).expect("a legal revision");
+    handles.route_controls[position].write(stamp, mute);
+    gate.publish(3);
+    reference.render(blocks - mute_block);
+    reference
+}
+
+/// The input arrival of `node` in `inventory`.
+fn arrival_in(inventory: &host_core::PlanStateInventory, node: &GraphNodeId) -> u64 {
+    inventory
+        .input_floors()
+        .iter()
+        .find(|(row, _)| row == node)
+        .map_or(0, |(_, arrival)| *arrival)
+}
+
+/// The input arrival of route `id` in `floors`.
+fn route_floor(floors: &[(GraphNodeId, u64)], id: &str) -> u64 {
+    floors
+        .iter()
+        .find(|(node, _)| *node == route_node(id))
+        .map_or(0, |(_, arrival)| *arrival)
+}
+
 /// #2078: a warm successor that also removes a lane-less route. B is gate 1's growth (a muted
 /// limiter track `t3`) without `t2-main` (`post_fader` into the output, which has no lane), so W
 /// compiles the route's fading copy `t2-main-` (#1953b), at its alias's warm floor `a(n) + P`,
@@ -1590,17 +1662,10 @@ fn a_warm_successor_fades_a_removed_lane_less_route_out_through_its_copy() {
         None,
     );
     let twin = Session::compile(finish(twin));
-    let ramp = host_core::LiveRamps::for_session(&twin.model).mute_samples;
-    let floor = |floors: &[(GraphNodeId, u64)], id: &str| {
-        floors
-            .iter()
-            .find(|(node, _)| *node == route_node(id))
-            .map_or(0, |(_, arrival)| *arrival)
-    };
     for &backend in Backend::VECTOR {
         let caps = gate_caps();
         let mut swapped = alone(&a, &caps, backend, AHEAD);
-        let before = floor(swapped.inventory.input_floors(), "t2-main");
+        let before = route_floor(swapped.inventory.input_floors(), "t2-main");
         swapped.render(BEFORE);
         let lead = swapped.grow(&b, &CONFIG);
         assert_eq!(lead, LEAD, "{backend:?}");
@@ -1609,7 +1674,7 @@ fn a_warm_successor_fades_a_removed_lane_less_route_out_through_its_copy() {
             "{backend:?}: nothing restarted"
         );
         assert_eq!(
-            floor(swapped.inventory.input_floors(), "t2-main-"),
+            route_floor(swapped.inventory.input_floors(), "t2-main-"),
             before + LEAD,
             "{backend:?}: the copy arrives at its alias's warm floor"
         );
@@ -1620,52 +1685,132 @@ fn a_warm_successor_fades_a_removed_lane_less_route_out_through_its_copy() {
             [BEFORE],
             "{backend:?}: adopted at once"
         );
-        let floors = swapped.inventory.test_only_floors_only();
-        let (mut reference, mut handles) =
-            host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
-                &twin.compiled,
-                &caps,
-                &HostLiveControlRequest::default(),
-                SuccessorBase::new(&floors, &twin.model, 2),
-                backend,
-            )
-            .unwrap_or_else(|failure| panic!("the fresh W': {failure:?}"));
-        assert_eq!(reference.inventory.source_read_offset(), 0);
-        let mut gate = reference
-            .plan
-            .take_revision_gate()
-            .expect("the fresh W's gate");
-        let _ = gate.stamp(2).expect("the open revision stamps again");
-        gate.publish(2);
-        let position = host_core::route_producer_position(&handles.route_controls, "t2-main-")
-            .expect("the pre_fader route is a live send");
-        let values = twin
-            .model
-            .routes
-            .iter()
-            .find(|route| route.id.as_str() == "t2-main-")
-            .expect("the route");
-        let matrix = &values.channel_matrix;
-        let mute = host_core::route_record(
-            values.gain_db,
-            [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
-            true,
-            [false; 2],
-            ramp,
-        )
-        .expect("a send record");
-        let mut reference = Stream::start(reference, &twin.model, &caps, backend, AHEAD);
-        reference.render(BEFORE + k);
-        let stamp = gate.stamp(3).expect("a legal revision");
-        handles.route_controls[position].write(stamp, mute);
-        gate.publish(3);
-        reference.render(AFTER);
+        let reference = muted_twin(
+            &twin,
+            &swapped.inventory,
+            "t2-main-",
+            BEFORE + k,
+            BEFORE + k + AFTER,
+            backend,
+        );
         for j in 0..AFTER {
             assert_eq!(
                 swapped.blocks[BEFORE + j].bits,
                 reference.blocks[BEFORE + j + k].bits,
                 "{backend:?}: block {j} after the swap"
             );
+        }
+    }
+}
+
+/// #2078: a fading copy whose alias's floor sits above its tap keeps that floor, under a lead and
+/// without one. A0 routes `t2-main` from the limited `t1`'s `post_fader` tap into the output; A1
+/// (ordinary) re-points it to `t2`'s `post_fader` tap under its ID, so the route keeps its floor
+/// `L` (PDC takes the maximum of the floor and the arrival) above its tap's arrival `0`, and A1's
+/// own copy of the old half settles. B removes `t2-main`: its copy `t2-main-` arrives at the
+/// alias's floor, `L` for an ordinary successor and `L + P` for a warm one (B also adds a muted
+/// track with two limiters, `2L` over the output's `L`), not at its tap's arrival. Every block
+/// after the swap equals the fresh W' of [`muted_twin`] (offset by `k` when warm). Both bank widths.
+#[test]
+fn a_copy_whose_alias_floor_sits_above_its_tap_keeps_that_floor() {
+    let a0 = || {
+        let mut model = empty();
+        track(&mut model, "t1", vec![limiter()]);
+        to_output(&mut model, "t1");
+        track(&mut model, "t2", Vec::new());
+        route(
+            &mut model,
+            "t2-main",
+            from_track("t1", SendTap::PostFader),
+            None,
+        );
+        model
+    };
+    let a1 = || {
+        let mut model = a0();
+        model
+            .routes
+            .iter_mut()
+            .find(|route| route.id.as_str() == "t2-main")
+            .expect("the route")
+            .source = from_track("t2", SendTap::PostFader);
+        model
+    };
+    let removed = |grow: bool| {
+        let mut model = a1();
+        model.routes.retain(|route| route.id.as_str() != "t2-main");
+        if grow {
+            let mut second = limiter();
+            second.id = sid("limiter-2");
+            muted_track(&mut model, "t3", vec![limiter(), second]);
+            to_output(&mut model, "t3");
+        }
+        model
+    };
+    let twin = |grow: bool| {
+        let mut model = removed(grow);
+        route(
+            &mut model,
+            "t2-main-",
+            from_track("t2", SendTap::PreFader),
+            None,
+        );
+        Session::compile(finish(model))
+    };
+    let (a0, a1) = (
+        Session::compile(finish(a0())),
+        Session::compile(finish(a1())),
+    );
+    for &backend in Backend::VECTOR {
+        for warm in [false, true] {
+            let caps = gate_caps();
+            let mut swapped = alone(&a0, &caps, backend, AHEAD);
+            swapped.render(BEFORE);
+            swapped.rebuild(&a1);
+            // A1's copy of the old half settles, so a later successor drops it.
+            swapped.render(2 * AFTER);
+            let held = route_floor(swapped.inventory.input_floors(), "t2-main");
+            let tap = arrival_in(&swapped.inventory, &stages("t2", TrackStage::PostFader)[0]);
+            assert!(
+                held > tap,
+                "{backend:?}: the floor {held} sits above the tap's {tap}"
+            );
+            let b = Session::compile(finish(removed(warm)));
+            let swap = swapped.blocks.len();
+            let lead = if warm {
+                swapped.grow(&b, &CONFIG)
+            } else {
+                swapped.rebuild(&b);
+                0
+            };
+            assert_eq!(lead, if warm { LEAD } else { 0 }, "{backend:?}");
+            let floors = swapped.inventory.input_floors();
+            assert_eq!(
+                (
+                    route_floor(floors, "t2-main-"),
+                    route_floor(floors, "t2-main--")
+                ),
+                (held + lead, 0),
+                "{backend:?}, warm {warm}: one copy, at its alias's floor"
+            );
+            let k = (lead / QUANTUM) as usize;
+            swapped.render(AFTER);
+            assert_eq!(swapped.swap_blocks().last(), Some(&swap), "{backend:?}");
+            let reference = muted_twin(
+                &twin(warm),
+                &swapped.inventory,
+                "t2-main-",
+                swap + k,
+                swap + k + AFTER,
+                backend,
+            );
+            for j in 0..AFTER {
+                assert_eq!(
+                    swapped.blocks[swap + j].bits,
+                    reference.blocks[swap + j + k].bits,
+                    "{backend:?}, warm {warm}: block {j} after the swap"
+                );
+            }
         }
     }
 }
