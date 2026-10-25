@@ -16,14 +16,14 @@ use effect_contract::{
     EffectProcessBlock, PrepareEffectLimits, PreparedPorts, PreparedSidechainPort,
 };
 
-const QUANTUM: u32 = 128;
+pub(super) const QUANTUM: u32 = 128;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+pub(super) const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
 
-type Values = [InitialParameterValue; PARAMETER_COUNT * 2];
-type Payload = (Vec<u8>, Vec<u8>, Vec<u8>);
+pub(super) type Values = [InitialParameterValue; PARAMETER_COUNT * 2];
+pub(super) type Payload = (Vec<u8>, Vec<u8>, Vec<u8>);
 
-fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffectRequest<'_> {
+pub(super) fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffectRequest<'_> {
     PrepareEffectRequest {
         sample_rate: rate,
         quantum: QUANTUM,
@@ -44,7 +44,7 @@ fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffectRequest<'
 }
 
 /// One track's initial values, every parameter drawn in its domain.
-fn draw_values(draw: &mut Draw) -> Values {
+pub(super) fn draw_values(draw: &mut Draw) -> Values {
     core::array::from_fn(|slot| {
         let descriptor = &MULTIBAND_COMPRESSOR_PARAMETERS[slot / 2];
         InitialParameterValue {
@@ -64,7 +64,7 @@ fn draw_values(draw: &mut Draw) -> Values {
 
 /// One block's automation for one track: a point per parameter and channel, one time in four, in
 /// the `parameter_index * 2 + channel` order the kernel takes.
-fn draw_spans(draw: &mut Draw, first_sample: u64) -> Vec<PreparedAutomationSpan> {
+pub(super) fn draw_spans(draw: &mut Draw, first_sample: u64) -> Vec<PreparedAutomationSpan> {
     let mut spans = Vec::new();
     for (index, descriptor) in MULTIBAND_COMPRESSOR_PARAMETERS.iter().enumerate() {
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
@@ -85,7 +85,7 @@ fn draw_spans(draw: &mut Draw, first_sample: u64) -> Vec<PreparedAutomationSpan>
 }
 
 /// Binds `requests` under `mask` through the public factory.
-fn bind(
+pub(super) fn bind(
     width: BankWidth,
     requests: &[PrepareEffectRequest<'_>],
     mask: &[bool],
@@ -103,7 +103,7 @@ fn bind(
 }
 
 /// The mask with lanes `0..members` active: the planner's members-first layout.
-fn prefix_mask(width: BankWidth, members: usize) -> Vec<bool> {
+pub(super) fn prefix_mask(width: BankWidth, members: usize) -> Vec<bool> {
     (0..width.lanes() as usize)
         .map(|lane| lane < members)
         .collect()
@@ -117,7 +117,7 @@ fn sections(sizes: StatePayloadSizes) -> Payload {
     )
 }
 
-fn bank_payload(
+pub(super) fn bank_payload(
     bank: &dyn PreparedNativeEffectBank,
     lane: usize,
     sizes: StatePayloadSizes,
@@ -130,7 +130,7 @@ fn bank_payload(
     Ok((common, left, right))
 }
 
-fn payload_of(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> Payload {
+pub(super) fn payload_of(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> Payload {
     let (mut common, mut left, mut right) = sections(sizes);
     effect
         .snapshot_state_payload(
