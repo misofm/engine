@@ -21,3 +21,16 @@ A disarm carries the arm tag that its handle received (`ObserveApplied` already 
 
 ## Paths
 To be set by the scope note: `crates/control-plane/src/control.rs`, `crates/protocol` (OBSERVE edit word), `sdk/src/core/observation-subscriptions.ts`, their tests, the generated schema and docs/CONTROL_PROTOCOL_REGISTRY.md.
+
+## Decision record
+- Scope note (`scope/2087.md`, read at 18c92e5aa, now main's content) sets the paths; root rulings of 2026-10-25:
+  - A disarm carries its handle's arm tag. A tag equal to the live binding's tag applies the disarm as before (a window mismatch stays `observation.not_subscribed`). Tag `0`, or a tag at or above the host's `next_arm_tag` (never issued), is `observation.not_subscribed`. Any other tag commits as a no-op: nothing is written, no record is queued, and the reply reports the binding the transaction began with (`0` when unbound). One place: `ObservationBindings::observe` (`crates/controls/src/observation.rs`), fed the edit's tag and `ObserveContext::next_arm_tag` by the prepare loop (`crates/protocol/src/model.rs`).
+  - Wire: `0801` gains `5: arm-tag U64 O`, present exactly on a disarm (its value, `0` included, is the core's to judge). An arm with field 5 or a disarm without it is `INVALID_FIELD` on encode and decode; prelaunch, no compatibility path. No frame-layout, capability-flag or `ABI_VERSION` change. `crates/protocol/tests/fixtures/observation-frames.json` re-blessed: `observe_window_change` and `observe_padded` changed bytes (they hold disarms); `observe_arm_insert` and the conformance corpus's `Observe` (an arm) did not.
+  - The SDK sends the tag from `ObserveApplied` on every disarm (`close` and `update`), from the handle's own binding.
+- The no-op also removes the second variant (A's disarm after its end and before the event, no re-arm): it commits instead of a spurious `MisoUsageError`.
+- Known limit, not changed: the target check (`observe_target`) still runs first, so a disarm whose effect is removed and not yet back is `observation.address.unknown`; and a second disarm with the same issued tag is now a silent no-op, not `observation.not_subscribed`.
+
+## Evidence (attempt 1)
+- Control plane: `a_disarm_that_names_an_ended_arm_changes_nothing` (`crates/control-plane/tests/observation_bindings.rs`) replaces the tail of `a_removed_effect_ends_its_binding_with_an_event` (#1584 gate 4). Red with the tag check removed from `observe` (main's behaviour): the first stale disarm is refused `observation.not_subscribed`. Red with only the stale-tag no-op removed: B's arm is disarmed (reply tag 3, the disarm record, not B's 2).
+- SDK: `structure-evals.mjs`, "a close behind a late end event does not silence a later subscriber of the tap". Red on a wasm built with the core's tag check removed: B's row reads `unarmed`.
+- Acked-batch: the no-op is decided at preparation, before anything is written; it queues nothing, so no ack precedes a drop.
