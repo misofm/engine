@@ -354,14 +354,11 @@ impl ObservationBindings {
         next_arm_tag: u64,
     ) -> Result<(), ObserveError> {
         if !armed {
+            if self.names_ended_arm(key, arm_tag, next_arm_tag) {
+                return Ok(());
+            }
             if arm_tag == 0 || arm_tag >= next_arm_tag {
                 return Err(ObserveError::NotSubscribed);
-            }
-            if self
-                .binding(key)
-                .is_none_or(|binding| binding.arm_tag != arm_tag)
-            {
-                return Ok(());
             }
         }
         match (self.search(key), armed) {
@@ -402,6 +399,19 @@ impl ObservationBindings {
                 Ok(())
             }
         }
+    }
+
+    /// Whether a disarm of `key` tagged `arm_tag` names an arm the host already ended (#2087): the
+    /// host issued the tag (nonzero and below `next_arm_tag`) and no bound arm of `key` has it. Such
+    /// a disarm changes nothing, whether or not the tap's target still exists, so a caller checks
+    /// this before it resolves the target.
+    #[must_use]
+    pub fn names_ended_arm(&self, key: &TapKey, arm_tag: u64, next_arm_tag: u64) -> bool {
+        arm_tag != 0
+            && arm_tag < next_arm_tag
+            && self
+                .binding(key)
+                .is_none_or(|binding| binding.arm_tag != arm_tag)
     }
 
     /// The records that take this table to `after` for the taps in `touched` (#1584 D3): at most

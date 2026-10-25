@@ -1645,10 +1645,16 @@ impl SessionStore {
                     section: section.clone(),
                     tap_id: *tap_id,
                 };
-                controls::observe_target(&candidate, &key, *window_blocks)
-                    .map_err(observe_refused)?;
                 let (bindings, touched, kept) = observation
                     .get_or_insert_with(|| (observe.bindings.clone(), Vec::new(), Vec::new()));
+                // #2087: a disarm of an arm the host already ended changes nothing, whether or not
+                // its target is still there; it is decided before the target is resolved.
+                let ended_arm =
+                    !*armed && bindings.names_ended_arm(&key, *arm_tag, observe.next_arm_tag);
+                if !ended_arm {
+                    controls::observe_target(&candidate, &key, *window_blocks)
+                        .map_err(observe_refused)?;
+                }
                 bindings
                     .observe(&key, *armed, *window_blocks, *arm_tag, observe.next_arm_tag)
                     .map_err(observe_refused)?;

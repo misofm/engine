@@ -575,10 +575,11 @@ fn a_removed_effect_ends_its_binding_with_an_event() {
 /// already ended: it commits and changes nothing. Subscriber B arms the tap with the same window
 /// (a fresh arm, a fresh tag); A's disarm, late in the browser's message order, still changes
 /// nothing: B's arm stays bound and armed, no record is queued, and the reply reports B's tag. A
-/// tag the host never issued (`0`, or past its counter) is `observation.not_subscribed`.
+/// tag the host never issued (`0`, or past its counter) is `observation.not_subscribed`. A's disarm
+/// while the effect is gone also commits and changes nothing: the tag is checked before the target.
 ///
 /// Red if a disarm that names an ended arm lowers a later subscriber's count (B's rows stop), or
-/// if it is refused as a misuse when it only came late.
+/// if it is refused (a misuse, or a removed target) when it only came late.
 #[test]
 fn a_disarm_that_names_an_ended_arm_changes_nothing() {
     use protocol::EditPath::{Monitor, Rebuild};
@@ -590,6 +591,21 @@ fn a_disarm_that_names_an_ended_arm_changes_nothing() {
     rig.apply(&[remove_insert("comp1")]).expect("a removal");
     rig.render_through_adoption();
     rig.drain();
+    // A closes while the effect is gone: its arm ended, so the disarm commits and changes nothing,
+    // before the target it names is resolved. A tag never issued keeps the address refusal.
+    let length = rig
+        .apply(&[disarm_tagged("comp1", WINDOW_BLOCKS, a)])
+        .expect("a reply");
+    assert_eq!(
+        rig.reply(length),
+        Reply::Applied(Monitor),
+        "the effect is gone"
+    );
+    assert_eq!(rig.observe_arm_tags(length), [0], "no arm is bound");
+    assert_eq!(
+        rig.transact(&[disarm_tagged("comp1", WINDOW_BLOCKS, 0)]),
+        refused("observation.address.unknown", 0)
+    );
     let mut back = put_compressor("comp1", "comp");
     if let SessionEdit::PutTrackEffect { final_position, .. } = &mut back {
         *final_position = 0;
