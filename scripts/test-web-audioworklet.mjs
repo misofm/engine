@@ -1969,6 +1969,18 @@ async function testMainRealm() {
       for (const respond of heldAll) respond();
       heldAll.length = 0;
       assert.equal((await firstSeekAt).result, 0);
+      seekReportReply = (received) => ({
+        requestId: received.requestId, result: 0, report: words,
+      });
+      holdAll = true;
+      const firstReport = seekHost.seekReport("drums");
+      const beforeReportOverflow = events.length;
+      await localErrorResult(seekHost.seekReport("drums"), 6);
+      assert.equal(events.length, beforeReportOverflow, "a second report of a source posts nothing");
+      holdAll = false;
+      for (const respond of heldAll) respond();
+      heldAll.length = 0;
+      assert.equal((await firstReport).result, 0);
       await localErrorResult(seekHost.seekSourceAt({
         sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: -1n,
       }), 1);
@@ -1976,7 +1988,7 @@ async function testMainRealm() {
         requestId: received.requestId, result: 0, report: words,
       });
       assert.deepEqual(await seekHost.seekReport("$timeline"), {
-        tag: "miso.seek-report.v1", requestId: 2, result: 0, report: words,
+        tag: "miso.seek-report.v1", requestId: 3, result: 0, report: words,
       });
       seekReportReply = (received) => ({ requestId: received.requestId, result: 6, report: null });
       assert.deepEqual((await seekHost.seekReport("drums")).report, null);
@@ -1985,11 +1997,25 @@ async function testMainRealm() {
       assert.deepEqual(sourceSeekMessages, [
         { tag: "miso.seek-at.v1", sourceId: "drums", generation: 2n, sourceFrame: 480n,
           anchorSample: 128n, requestId: 1 },
-        { tag: "miso.seek-report.v1", sourceId: "$timeline", requestId: 2 },
-        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 3 },
+        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 2 },
+        { tag: "miso.seek-report.v1", sourceId: "$timeline", requestId: 3 },
         { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 4 },
+        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 5 },
       ]);
       await seekHost.dispose();
+      // An OK reply whose word is a number, not a `bigint`, fails a fresh host.
+      const wordHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      seekReportReply = (received) => ({
+        requestId: received.requestId, result: 0, report: { ...words, generation: 5 },
+      });
+      await errorResult(wordHost.seekReport("drums"), 255);
+      await wordHost.dispose();
     }
 
     // W4-D1: a browser that cannot validate simd128 is refused with the typed record, before any
@@ -2766,6 +2792,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     // Issue #1297a: the anchored seek and seek report calls in order, the results they return,
     // the words a successful read writes, and the record's struct size word.
     seekAt: [], seekAtResult: 0, seekReport: [], seekReportResult: 0, seekReportBytes: 64,
+    seekReportGrowsMemory: false,
     seekReportWords: [5n, 1024n, 48000n, 7n, 9n],
   };
   const watermarkPointer = 66000;
@@ -2945,6 +2972,8 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       calls.seekReport.push([...args, new TextDecoder().decode(
         new Uint8Array(memory.buffer, pointers[2], args[1]).slice())]);
       if (calls.seekReportResult !== 0) return calls.seekReportResult;
+      // The service step the real export runs first may grow the memory.
+      if (calls.seekReportGrowsMemory) growMemory();
       const record = new DataView(memory.buffer, seekReportPointer, 64);
       record.setUint32(0, calls.seekReportBytes, true);
       calls.seekReportWords.forEach((word, index) => record.setBigUint64(8 + index * 8, word, true));
@@ -4519,7 +4548,9 @@ async function testProcessor() {
         [handle, 5, 2n, 480n, 128n, "drums"],
         [handle, 5, 3n, 0n, 100n, "drums"],
       ]);
+      fake.calls.seekReportGrowsMemory = true;
       processor.receive({ tag: "miso.seek-report.v1", requestId: 3, sourceId: "$timeline" });
+      fake.calls.seekReportGrowsMemory = false;
       assert.deepEqual(last(), {
         tag: "miso.seek-report.v1", requestId: 3, result: 0,
         report: {
