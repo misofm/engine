@@ -117,3 +117,27 @@ and #1534 gate 3's worklet commands.
 ## Supersedes and shrinks
 
 - None.
+
+## Evidence and decision record
+
+- **#1588a attempt 1 (2026-10-25), core half landed.** `host_core::{MeterLevel, MeterFrameRing,
+  MeterFrameProducer, MeterFrameConsumer, METER_FRAME_RING_DEPTH}`, `MeterFrame::plan_epoch`,
+  `MeterTables::set_plan_epoch` and `MeterDelivery::restart` (R3: one gate move, shared with
+  `set_level` through one `begin_generation`). The ring is two move-only SPSC queues of eight
+  preallocated boxed frames (free and published, the `response_capture` pattern): a push copies
+  elements into a free frame; strips past the frame's read as absent; no free frame drops and
+  counts. `MeterFrameRing::heap_bytes` is the charge #1588b uses.
+- **R4 amended (implementer, for review).** A ring drop is counted in the ring
+  (`MeterFrameConsumer::dropped_frames`), not in the delivery's `loss_count`: the C ABI's
+  `MeterWindowsLost` does not sum frames' `loss_count`, and adding ring drops to it would move the
+  lease frame's `loss_count` bytes while both clients are on. The browser's lost-window sum is
+  then the ring's drops plus the same fold, unstaged and output-drop terms as the C ABI's.
+- **Blocked: the control half (D4, the web `METER_DELIVERY` flip, the provider window, the
+  `meter.unavailable` deletion).** `ControlAdapter::METER_DELIVERY` drives
+  `crates/control-plane/src/compile.rs`: with it on, boot builds a control-thread `MeterDelivery`
+  over the output meter's reader (the browser's render half then has none, and `take_output_meter`
+  fails its boot), sizes the lossy lane, charges the resolution vectors and the strip-ID text, and
+  sets the provider's window. A browser with a ring source needs compile.rs to build a
+  `SessionMeters` over a `MeterFrameConsumer` and a `MeterLevel` instead, so compile.rs must be
+  authorized; and the flip changes `protocol_cross_host` steps 1 and 5 (the browser's lane and
+  echo), which are #1588b's paths. Not edited.
