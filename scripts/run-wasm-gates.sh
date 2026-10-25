@@ -39,6 +39,10 @@ readonly TARGET="wasm32-unknown-unknown"
 readonly GUEST="wasm_gate_guest.wasm"
 
 cd "$repository_root"
+# Issue #2067: cargo reads CARGO_ENCODED_RUSTFLAGS before RUSTFLAGS and `.cargo/config.toml`, so a
+# caller's exported value would silently replace the guest's `RUSTFLAGS` feature and the host
+# runner's pinned x86-64-v3 flags. Every cargo line here takes its flags from those two sources.
+unset CARGO_ENCODED_RUSTFLAGS
 
 v8_spill=1
 native=1
@@ -73,14 +77,9 @@ run_guest() {
     # Issue #1334: the guest builds on the shipped module's own toolchain, the dated nightly with
     # `-Zbuild-std`, so G5 compares the compiler that ships. The host runner stays on stable.
     channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
-    # Issue #2067: cargo reads CARGO_ENCODED_RUSTFLAGS before RUSTFLAGS, so a caller's exported
-    # value would silently replace the guest's feature flag; the subshell drops it for this build.
-    (
-        unset CARGO_ENCODED_RUSTFLAGS
-        RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$target_directory" \
-            RUSTFLAGS="-C target-feature=$feature" \
-            cargo build --locked --release -Zbuild-std=std,panic_abort --target "$TARGET" -p wasm-gate-guest
-    )
+    RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$target_directory" \
+        RUSTFLAGS="-C target-feature=$feature" \
+        cargo build --locked --release -Zbuild-std=std,panic_abort --target "$TARGET" -p wasm-gate-guest
     cargo run --locked --release -q -p wasm-gates -- \
         "$target_directory/$TARGET/release/$GUEST" --expect-backend "$expected" | tee -a "$evidence"
 }
