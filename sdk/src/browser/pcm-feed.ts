@@ -8,7 +8,7 @@ import {
   Msb1RingObserver,
   Msb1RingWriter,
 } from "./pcm-ring.ts";
-import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
+import type { MisoAudioWorkletHost, MisoSeekReport } from "./shipped-host.d.ts";
 
 export type PcmFeedOperation = "moduleLoad" | "nodeCreate" | "attachPost" | "readyTimeout" | "closed"
   | "prepareState" | "prepareBusy" | "preparePost" | "prepareTimeout" | "prepareSuperseded" | "prepareRefused"
@@ -74,14 +74,26 @@ export interface FeedStartSeek {
   readonly anchorSample: bigint;
 }
 /**
- * How an added source starts in time with the playing stems (issue 1297b D4/D5). The engine has
- * no playhead: `frameAt(anchorSample)` is the app's mapping from a render sample to the source's
- * frame. `prime(seek)` writes the source's PCM into its ring from `seek.frame` at
- * `seek.generation` with the app's own `Msb1RingWriter`; it must not seek the ring, because the
- * SDK has already published the anchored seek in it.
+ * How an added source starts in time with the playing stems (issue 1297b D4/D5, 1297c). Give
+ * exactly one of `frameAt` and `alignTo`. The engine has no playhead: `frameAt(anchorSample)` is
+ * the app's mapping from a render sample to the source's frame. `alignTo` names a playing source
+ * (or `$timeline`) instead: the SDK reads its seek report and starts this one at the frame the
+ * reference reads at the anchor, `sourceFrame + (anchorSample - firstSample)`. `prime(seek)`
+ * writes the source's PCM into its ring from `seek.frame` at `seek.generation` with the app's own
+ * `Msb1RingWriter`; it must not seek the ring, because the SDK has already published the anchored
+ * seek in it.
  */
-export interface FeedStart {
+export type FeedStart = FeedStartAt | FeedStartAligned;
+/** A start at the app's own frame mapping. */
+export interface FeedStartAt {
   frameAt(anchorSample: bigint): bigint;
+  readonly alignTo?: never;
+  prime(seek: FeedStartSeek): void | Promise<void>;
+}
+/** A start aligned to a playing reference source's timeline (issue 1297c). */
+export interface FeedStartAligned {
+  readonly alignTo: string;
+  readonly frameAt?: never;
   prime(seek: FeedStartSeek): void | Promise<void>;
 }
 export interface FeedSource { readonly sourceId: string; readonly channels: 1 | 2; readonly start?: FeedStart }
@@ -109,7 +121,9 @@ export interface EngineFeed {
   /**
    * Resolve once the worklet bound every ring; then start each source that has a `start` (issue
    * 1297b D4), in order. A start reads `nextAbsoluteSample` once, sets the anchor `A` to it plus the
-   * ring's capacity in frames, rounded up to a quantum, asks `frameAt(A)` once, publishes the
+   * ring's capacity in frames, rounded up to a quantum, asks `frameAt(A)` once (or, for `alignTo`,
+   * computes the reference's frame at `A` from its seek report, read before and after the status
+   * read; see `alignedFrame`), publishes the
    * anchored seek in the ring, awaits `prime`, and then sends the same seek to the engine's message
    * handler (`miso.seek-at.v1`), which applies it once. Until it did, the drain reads none of that
    * ring's chunks. An anchor the audio reaches before the handler is late, not lost: the engine
@@ -136,7 +150,7 @@ export interface EngineFeed {
 
 /** The engine side of the feeds linked to one engine (issue 1297b). */
 interface FeedLink {
-  readonly host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt">;
+  readonly host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport">;
   readonly reserveSeekGeneration: () => bigint;
   readonly feeds: Set<LinkedFeed>;
 }
@@ -162,7 +176,7 @@ export interface FeedRetirement {
  * retired by `FeedRetirement`. The SDK's own seam; not an application API.
  */
 export function linkFeedEngine(
-  host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt">,
+  host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport">,
   reserveSeekGeneration: () => bigint,
 ): FeedRetirement {
   const link: FeedLink = { host, reserveSeekGeneration, feeds: new Set() };
@@ -405,8 +419,8 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     ids.add(source.sourceId);
   }
   const starts = options.sources.map((source) => source.start);
-  if (starts.some((start) => start !== undefined && (typeof start?.frameAt !== "function" || typeof start.prime !== "function"))) {
-    throw new MisoUsageError("a feed source start needs frameAt and prime functions");
+  if (starts.some((start) => start !== undefined && ((typeof start?.frameAt === "function") === (typeof start?.alignTo === "string") || typeof start.prime !== "function"))) {
+    throw new MisoUsageError("a feed source start needs a prime function and exactly one of frameAt and alignTo");
   }
   const link = options.engine === undefined ? undefined : feedLinks.get(options.engine.host);
   if (options.engine !== undefined && link === undefined) throw new MisoUsageError("the feed's engine is not one createEngine resolved with");
@@ -470,12 +484,23 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   /** One anchored start (D4): the SDK publishes the seek in the ring once, and the engine's handler applies it once. */
   const startSource = async (host: FeedLink["host"], reserve: () => bigint, entry: { source: FeedSource; start: FeedStart; ring: SharedArrayBuffer }): Promise<void> => {
     const quantum = BigInt(options.quantumFrames);
+    const { alignTo } = entry.start;
+    // Issue 1297c: the reference's report before the status read, so the frame comes from a
+    // report the second read confirms unchanged around the anchor's computation.
+    const reference = alignTo === undefined ? undefined : await readSeekReport(host, entry.source.sourceId, alignTo);
     const status = await host.status();
     if (status.result !== 0) throw refusedStart(entry.source.sourceId, status.result);
     const earliest = status.nextAbsoluteSample + BigInt(capacity) * quantum;
     const anchorSample = (earliest + quantum - 1n) / quantum * quantum;
-    const frame = entry.start.frameAt(anchorSample);
-    if (!nonnegativeI64(frame)) throw new MisoUsageError(`frameAt for source ${entry.source.sourceId} must return a nonnegative bigint within the MSB1 frame domain`);
+    let frame: bigint;
+    if (alignTo === undefined) {
+      frame = entry.start.frameAt!(anchorSample);
+      if (!nonnegativeI64(frame)) throw new MisoUsageError(`frameAt for source ${entry.source.sourceId} must return a nonnegative bigint within the MSB1 frame domain`);
+    } else {
+      frame = alignedFrame(entry.source.sourceId, alignTo, reference!, await readSeekReport(host, entry.source.sourceId, alignTo), anchorSample);
+    }
+    if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
+    if (!live.has(entry.source.sourceId)) return;
     const generation = reserve();
     // The ring's seek is published first: from here the drain reads none of its chunks until the
     // handler applied this seek, so the primed PCM at the new generation waits for it.
@@ -587,6 +612,52 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     close,
   };
   return feed;
+}
+
+/** Bounded reads of a busy seek report (`RESULT_BACKPRESSURE`): render was publishing it. */
+const SEEK_REPORT_ATTEMPTS = 4;
+const RESULT_BACKPRESSURE = 6;
+
+/** Issue 1297c: one seek report of the `alignTo` reference, retried while busy. */
+async function readSeekReport(host: FeedLink["host"], sourceId: string, alignTo: string): Promise<MisoSeekReport> {
+  for (let attempt = 0; attempt < SEEK_REPORT_ATTEMPTS; attempt += 1) {
+    let result: number;
+    let report: MisoSeekReport | null = null;
+    try {
+      ({ result, report } = await host.seekReport(alignTo));
+    } catch (error) {
+      // The wrapper refuses a second unsettled read of one source locally, with the same result.
+      const code = (error as { readonly result?: unknown }).result;
+      if (typeof code !== "number" || !Number.isSafeInteger(code) || code < 0) throw error;
+      result = code;
+    }
+    if (result === RESULT_BACKPRESSURE) continue;
+    if (result !== 0 || report === null) throw refusedStart(sourceId, result);
+    if (report.generation === 0n) {
+      throw new MisoUsageError(`source ${sourceId} cannot align to ${alignTo}: it has not rendered yet; use frameAt`, "feed.align.unrendered");
+    }
+    return report;
+  }
+  throw new MisoUsageError(`source ${sourceId} cannot align to ${alignTo}: its seek report stayed busy after ${SEEK_REPORT_ATTEMPTS} reads; use frameAt`, "feed.align.busy");
+}
+
+/**
+ * Issue 1297c: the frame the reference reads at `anchorSample`, `sourceFrame + (anchorSample -
+ * firstSample)` (source rate equals render rate, D15-12). It holds only while the reference plays
+ * its generation's frames one per sample, so the report read after the anchor was computed must
+ * equal the one read before it: a new seek, or underrun or held frames counted in between,
+ * rejects with the cause, and the app then uses `frameAt`.
+ */
+function alignedFrame(sourceId: string, alignTo: string, before: MisoSeekReport, after: MisoSeekReport, anchorSample: bigint): bigint {
+  const refuse = (cause: string, code: string) => new MisoUsageError(`source ${sourceId} cannot align to ${alignTo}: ${cause}; use frameAt`, code);
+  if (after.generation !== before.generation || after.firstSample !== before.firstSample || after.sourceFrame !== before.sourceFrame) {
+    throw refuse("it seeked while the anchor was computed", "feed.align.reseeked");
+  }
+  if (after.cumulativeUnderrunFrames !== before.cumulativeUnderrunFrames) throw refuse("it underran since its seek report", "feed.align.underrun");
+  if (after.cumulativeHeldFrames !== before.cumulativeHeldFrames) throw refuse("it held frames since its seek report", "feed.align.held");
+  const frame = before.sourceFrame + (anchorSample - before.firstSample);
+  if (!nonnegativeI64(frame)) throw refuse("its frame at the anchor is outside the MSB1 frame domain", "feed.align.domain");
+  return frame;
 }
 
 function refusedStart(sourceId: string, result: number): MisoEngineError {

@@ -281,3 +281,20 @@ the last, checks that the middle ring keeps draining, and runs `prepareSeek` ove
 remains. It is red when the worklet compacts its attach list or passes withdrawn slots to
 prepare-seek. `attachEngineFeed` refuses duplicate source IDs, and a start whose source was detached
 during `ready()` is skipped. Each was red first. The paused-seek test's port clones its messages.
+
+## Record: slice #1297c (2026-10-25)
+
+Paths: `sdk/src/browser/pcm-feed.ts`, `sdk/test/browser-pcm-evals.mjs`, and the README's feed
+section (the spec's deliverable 2; outside the scope note's 1297c list).
+
+- `FeedStart` is `{ frameAt, prime } | { alignTo, prime }`; exactly one of `frameAt` and `alignTo`,
+  else `attachEngineFeed` throws. `alignTo` may name `$timeline` (1297a's reserved report ID).
+- Decision of this slice ("changed since that report"): one report has no baseline for its own
+  counters, so the SDK reads the reference's report before the one status read and again after `A`
+  is computed. The frame is `sourceFrame + (A - firstSample)` from the first. Refusals, each a
+  `MisoUsageError` with `diagnosticCode`, before any ring publish: `feed.align.unrendered`
+  (generation 0), `feed.align.busy` (`RESULT_BACKPRESSURE` on 4 reads, a local or an engine 6),
+  `feed.align.reseeked` (generation, first sample or frame differ), `feed.align.underrun`,
+  `feed.align.held` (the counter moved between the reads), `feed.align.domain`. Another engine
+  result is a `MisoEngineError`. Each rejects `ready()` and closes the feed (1297b's rule).
+- A start whose feed closed, or whose source was detached, during these reads publishes nothing.
