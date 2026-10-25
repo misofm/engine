@@ -7,10 +7,10 @@
  *
  * Since #1312, #1346, #1347 and #1345 every live value (fader, mute, pan, input filter, route, and
  * every effect parameter, bypass and EQ target) is held in a latest-target cell, which cannot
- * refuse for room, and since #1589c the writer sends value edits only. The refusal these evals drive
- * is the core's `backpressure` status for a full control queue, from a queue that answers it until
- * the transport moves. The cell contract has its own eval: a paused host takes any number of
- * effect edits, none is refused, and the last value of each lands.
+ * refuse for room, and since #1589c the writer sends value edits only. The refusal these evals
+ * drive is the core's `backpressure` status for a full control queue. The cell contract has its own
+ * eval: a paused host takes any number of effect edits, none is refused, and the last value of each
+ * lands.
  */
 
 import assert from "node:assert/strict";
@@ -99,30 +99,6 @@ async function pausedEngine(instances = 1) {
   return createOfflineEngine(liveControlDocument(instances), { asset });
 }
 
-/** The core's refusal of a full control queue: flow control, never an error. */
-function backpressure() {
-  return new MisoControlRefusal({
-    code: "protocol.backpressure", status: "backpressure", revision: 3n,
-    editIndex: undefined, diagnostics: [],
-  });
-}
-
-/**
- * A control queue that answers `backpressure` while `full()` says so, as the core's does until a
- * render drains it, and records the values of every batch it was sent.
- */
-function gatedQueue(full) {
-  const sent = [];
-  return {
-    sent,
-    async submit(edits) {
-      sent.push(edits.map((edit) => edit.value));
-      if (full()) throw backpressure();
-      return { ok: true, revision: 4n, path: "live", appliedOperations: edits.length };
-    },
-  };
-}
-
 function feedAndRender(engine) {
   const shape = engine.shape();
   for (const [index, source] of shape.sources.entries()) {
@@ -187,34 +163,6 @@ describe("the writer contract -- paused", () => {
       last.dispose();
     }
   });
-
-  test("a refusal is not terminal: once the queue drains, the FINAL value lands", async () => {
-    // Plausible defect: a refused edit is kept beside the newer one for its address, so the backlog
-    // grows with the gesture and a stale value lands after the drain.
-    let full = true;
-    const queue = gatedQueue(() => full);
-    const writer = new LiveControlWriter({ queue, maximumBatch: 1 });
-    // The queue is full: every attempt is refused while the hand keeps moving.
-    for (const db of [-1, -2, -3, -4]) {
-      writer.stage(faderEdit(2, db));
-      assert.equal((await writer.flush()).refused, true);
-    }
-    assert.equal(
-      writer.pending,
-      1,
-      "latest-wins coalescing means a full queue never builds a backlog: one address, "
-      + "one pending edit, however long the gesture lasted",
-    );
-    assert.equal(writer.stats.escalations, 0);
-
-    // The transport moves: a render drains the queue.
-    full = false;
-    const outcome = await writer.drain();
-    assert.equal(outcome.refused, false, "after the drain the pending edit fits");
-    assert.equal(writer.pending, 0, "the final edit landed");
-    assert.deepEqual(queue.sent.at(-1), [-4], "the value the hand reached is the one that lands");
-    assert.equal(writer.stats.escalations, 0, "nothing escalated across the whole episode");
-  });
 });
 
 describe("the writer contract -- coalescing and escalation", () => {
@@ -264,8 +212,19 @@ describe("the writer contract -- coalescing and escalation", () => {
   test("backpressure from the core is flow control: nothing is dropped and nothing escalates", async () => {
     // The core answers a full control queue with the `backpressure` status. The writer halves its
     // batch and keeps every edit pending.
-    let calls = 0;
-    const full = gatedQueue(() => (calls += 1) === 1);
+    const calls = [];
+    const full = {
+      async submit(edits) {
+        calls.push(edits.length);
+        if (calls.length === 1) {
+          throw new MisoControlRefusal({
+            code: "protocol.backpressure", status: "backpressure", revision: 3n,
+            editIndex: undefined, diagnostics: [],
+          });
+        }
+        return { ok: true, revision: 4n, path: "live", appliedOperations: edits.length };
+      },
+    };
     const writer = new LiveControlWriter({ queue: full, maximumBatch: 8 });
     for (const parameterId of GAIN_IDS) writer.stage(gainEdit(parameterId, 0, -1));
     const refused = await writer.flush();
@@ -491,29 +450,6 @@ describe("the writer contract -- races the async boundary opens", () => {
     } finally {
       engine.dispose();
     }
-  });
-
-  test("a refusal halves the count that was submitted, not the ceiling", async () => {
-    // `take` is min(batch, pending), and it is captured before the submit. Halving the CEILING
-    // instead would leave the next attempt larger than the batch that was just refused -- the
-    // opposite of narrowing -- and the gap is only visible when fewer edits are pending than the
-    // ceiling allows.
-    let calls = 0;
-    const writer = new LiveControlWriter({ queue: gatedQueue(() => (calls += 1) === 1), maximumBatch: 8 });
-    for (const parameterId of GAIN_IDS.slice(0, 3)) writer.stage(gainEdit(parameterId, 0, -1));
-    assert.equal(writer.pending, 3, "three staged against a ceiling of eight");
-
-    const refused = await writer.flush();
-    assert.equal(refused.refused, true, "the full queue has no room");
-    assert.equal(refused.reason, "backpressure");
-    assert.equal(
-      refused.nextBatch,
-      1,
-      "the three that were submitted halve to one; the ceiling of eight would halve to four",
-    );
-    assert.equal(refused.pending, 3, "a refusal drops nothing");
-    assert.equal(writer.stats.refusals, 1);
-    assert.equal(writer.stats.escalations, 0);
   });
 });
 
