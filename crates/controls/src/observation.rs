@@ -167,6 +167,9 @@ pub struct ObserveWrite {
     pub armed: bool,
     /// The window asked for; `0` for a disarm.
     pub window_blocks: u32,
+    /// The record's arm tag (#1585 D4): `0` from [`ObservationBindings::writes_to`]; the
+    /// transaction preparation tags each write from the host's counter, in key order.
+    pub arm_tag: u64,
 }
 
 /// The effect section a tap belongs to: a console slot or an insert of one strip.
@@ -399,8 +402,15 @@ impl ObservationBindings {
                 key: key.clone(),
                 armed,
                 window_blocks,
+                arm_tag: 0,
             })
             .collect()
+    }
+
+    /// The binding of `key`, or `None` when it is not armed.
+    #[must_use]
+    pub fn binding(&self, key: &TapKey) -> Option<&ObservationBinding> {
+        self.search(key).ok().map(|index| &self.bindings[index])
     }
 
     /// Set the tag of the record that armed `key` (#1585 D4). Returns whether `key` is armed; an

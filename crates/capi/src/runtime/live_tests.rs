@@ -2327,6 +2327,11 @@ fn model_only_edits_commit_without_a_plan_rebuild() {
 
 /// The edit path a `SESSION_TRANSACTION_APPLY` success response carries (#1313).
 fn edit_path_of(response: &[u8]) -> protocol::EditPath {
+    applied_of(response).edit_path
+}
+
+/// The `TransactionApplied` fields of a transaction's success response.
+fn applied_of(response: &[u8]) -> protocol::TransactionApplied {
     let mut fields = [0_u16; 64];
     let protocol::DecodedTypedResponseFrame::Success {
         payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
@@ -2337,7 +2342,7 @@ fn edit_path_of(response: &[u8]) -> protocol::EditPath {
     else {
         panic!("expected a transaction success")
     };
-    applied.edit_path
+    applied
 }
 
 /// #1313 gates 1 and 2: the response names how the engine applied the transaction. A fader change
@@ -9466,4 +9471,80 @@ fn an_observe_edit_arms_a_tap_through_the_c_abi() {
         .expect("a published window");
     let quantum = rig.quantum as u64;
     assert_eq!(window, (3, (armed_at + 8) * quantum, 4));
+}
+
+/// #1585 gate 2: each `Observe` reply names the arm tag of the record behind the subscription,
+/// and a commit that ends one names its tag. On the compressor insert's tap: an arm (tag 1), a
+/// second subscriber's arm (still 1), one disarm (still 1), the last disarm (its record, 2); then
+/// an arm (3); one transaction of a join, a disarm, the last disarm and an arm with another
+/// window (3, 3, then the re-arm record's 4 twice); a release and a re-arm with the same window
+/// (no record: 4, 4, and the binding keeps 4); and a `RemoveTrackEffect` of the compressor,
+/// whose reply carries `removed_arm_tags` `[4]` and no `observe_arm_tags`. No other reply carries
+/// `removed_arm_tags`.
+///
+/// Red if a reply cannot be matched to the arm it caused (a join or a kept disarm that reports a
+/// fresh tag, a last disarm that reports the binding's old one, a tag the record was not pushed
+/// with), or if a removed subscription leaves no trace in the reply.
+#[test]
+fn each_observe_reply_names_the_arm_tag_of_its_record() {
+    let document = effect_session(10, 48_000);
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let track = parse_session_json(&document).expect("model").tracks[0]
+        .id
+        .clone();
+    let comp = StableId::parse("comp").expect("compressor");
+    let observe_with = |armed, window_blocks| SessionEdit::Observe {
+        strip_id: track.clone(),
+        section: protocol::control_core::TapSection::Inserts(comp.clone()),
+        tap_id: 1,
+        armed,
+        window_blocks,
+    };
+    let observe = |armed| observe_with(armed, 4);
+    for (armed, tag) in [(true, 1), (true, 1), (false, 1), (false, 2), (true, 3)] {
+        let bytes = rig.transaction(&[observe(armed)]);
+        let (result, response) = rig.send(&bytes);
+        assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
+        let applied = applied_of(&response);
+        assert_eq!(
+            (applied.observe_arm_tags, applied.removed_arm_tags),
+            (vec![tag], Vec::new()),
+            "an arm {armed} replies tag {tag}"
+        );
+        rig.step();
+    }
+    // One transaction: a join and a disarm keep the binding tagged 3; the last disarm and an arm
+    // with another window are one re-arm record, tag 4, which both report.
+    let bytes = rig.transaction(&[
+        observe(true),
+        observe(false),
+        observe(false),
+        observe_with(true, 8),
+    ]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
+    assert_eq!(applied_of(&response).observe_arm_tags, vec![3, 3, 4, 4]);
+    rig.step();
+    // The last disarm and an arm with the same window queue nothing: the tap stays as it was, and
+    // its binding keeps tag 4.
+    let bytes = rig.transaction(&[observe_with(false, 8), observe_with(true, 8)]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
+    assert_eq!(applied_of(&response).observe_arm_tags, vec![4, 4]);
+    rig.step();
+    let bytes = rig.transaction(&[SessionEdit::RemoveTrackEffect {
+        track_id: track.clone(),
+        rack_name: session::RackName::Inserts,
+        effect_id: comp.clone(),
+    }]);
+    let (result, response) = rig.send(&bytes);
+    assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
+    let applied = applied_of(&response);
+    assert_eq!(applied.edit_path, protocol::EditPath::Rebuild);
+    assert_eq!(
+        (applied.observe_arm_tags, applied.removed_arm_tags),
+        (Vec::new(), vec![4]),
+        "the removal names the ended subscription's tag"
+    );
 }

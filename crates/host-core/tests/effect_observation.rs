@@ -1403,3 +1403,110 @@ fn observation_is_identical_across_rack_placement() {
         "the four declared thresholds must give four distinct reductions: {reductions:?}"
     );
 }
+
+/// #1586 D3, D4: host-core's read checks the whole batch before it writes a row. A batch whose
+/// last selection is bad, or whose last selection names an earlier one's tap with other lanes,
+/// leaves every row as it was and names that selection; a good batch reads each tap's own window.
+///
+/// Test value: red if the read writes a row before the whole batch passed (no browser test gives
+/// a partly bad batch a caller-owned output), if the duplicate rule tells two selections of one tap
+/// apart by their lanes, or if a refusal names another selection.
+#[test]
+fn a_read_checks_the_whole_batch_before_it_writes_a_row() {
+    use host_core::observation::{
+        ObservationIndex, ObservationIndexEntry, ObservationReadChannels, ObservationReadError,
+        ObservationReadStatus, ObservationRefusal, ObservationRow, ObservationSelection, read_into,
+    };
+    let mut session = prepare(Leg::AllArmed);
+    subscribe_all(&mut session, true, WINDOW_BLOCKS);
+    let _ = render(&mut session, WINDOW_BLOCKS as usize * 2);
+    let observations = &session.handles.effect_observations;
+    let index = ObservationIndex::new(
+        observations
+            .iter()
+            .enumerate()
+            .map(|(position, handle)| ObservationIndexEntry {
+                strip_id: handle.track_id.clone(),
+                section: handle.address.rack,
+                effect_id: handle.effect_id.clone(),
+                handle: Some(u32::try_from(position).expect("a small plan")),
+                effect: handle.descriptor,
+            })
+            .collect(),
+    )
+    .expect("one entry per instance");
+    let tap_id = observations[0].descriptor.observations[0].id.0;
+    let select = |track: usize, channels| {
+        let handle = &observations[track];
+        ObservationSelection {
+            strip_id: &handle.track_id,
+            section: handle.address.rack,
+            effect_id: &handle.effect_id,
+            tap_id,
+            channels,
+        }
+    };
+    let both = ObservationReadChannels::Both;
+    let sentinel = ObservationRow {
+        status: ObservationReadStatus::Ready,
+        left: Some(-7.0),
+        ..ObservationRow::default()
+    };
+    let refused = |selections: &[ObservationSelection<'_>]| {
+        let mut rows = [sentinel; 3];
+        let error = read_into(&index, observations, selections, |_| (0, false), &mut rows)
+            .expect_err("a refused batch");
+        assert_eq!(rows, [sentinel; 3], "a refused batch writes no row");
+        error
+    };
+    let unknown_tap = ObservationSelection {
+        tap_id: 99,
+        ..select(2, both)
+    };
+    assert_eq!(
+        refused(&[select(0, both), select(1, both), unknown_tap]),
+        ObservationReadError {
+            selection: 2,
+            refusal: ObservationRefusal::UnknownTap,
+        }
+    );
+    assert_eq!(
+        refused(&[
+            select(0, ObservationReadChannels::Left),
+            select(1, both),
+            select(0, ObservationReadChannels::Right),
+        ]),
+        ObservationReadError {
+            selection: 2,
+            refusal: ObservationRefusal::Duplicate,
+        }
+    );
+    let unknown_strip = ObservationSelection {
+        strip_id: "no-such-strip",
+        ..select(1, both)
+    };
+    assert_eq!(
+        refused(&[select(0, both), unknown_strip]),
+        ObservationReadError {
+            selection: 1,
+            refusal: ObservationRefusal::UnknownAddress,
+        }
+    );
+
+    let mut rows = [ObservationRow::default(); 2];
+    read_into(
+        &index,
+        observations,
+        &[select(0, both), select(5, ObservationReadChannels::Right)],
+        |_| (0, false),
+        &mut rows,
+    )
+    .expect("a good batch");
+    for (row, track) in rows.iter().zip([0, 5]) {
+        let window = observations[track].readers[0].read().expect("a window");
+        assert_eq!(row.status, ObservationReadStatus::Ready);
+        assert_eq!(row.window, Some(window));
+    }
+    assert_eq!(rows[1].left, None);
+    assert_eq!(rows[1].right, Some(rows[1].window.expect("a window").right));
+}

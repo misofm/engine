@@ -72,7 +72,11 @@ fn table_descriptor(model: &session::SessionModel, listed: &ControlRow) -> Contr
             let row = if control == controls::BYPASS_CONTROL {
                 rows.bypass
             } else if control == controls::LINK_MODE_CONTROL {
-                rows.link_mode.expect("a listed link mode has a row")
+                match listed.address.section {
+                    Section::Console(_) => rows.console_link_mode,
+                    _ => rows.link_mode,
+                }
+                .expect("a listed link mode has a row")
             } else {
                 rows.parameters
                     .into_iter()

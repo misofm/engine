@@ -1209,7 +1209,7 @@ export const EFFECT_PARAMETER_ROWS: Readonly<Record<string, Readonly<Record<stri
     }
   };
 
-/** The link mode row of each effect that has a choice of it. */
+/** The link mode row of an insert of each effect that has a choice of it. */
 export const EFFECT_LINK_MODE_ROWS: Readonly<Record<string, {
   readonly control: string;
   readonly choices: readonly (readonly [string, number])[];
@@ -1332,7 +1332,161 @@ export const EFFECT_LINK_MODE_ROWS: Readonly<Record<string, {
     }
   };
 
-/** The link mode labels of an effect; `never` for an effect with no choice of it. */
+/**
+ * The link mode row of a console entry of each effect that has a choice of it: `slot` (the
+ * slot's declared mode) and then the insert row's choices.
+ */
+export const EFFECT_CONSOLE_LINK_MODE_ROWS: Readonly<Record<string, {
+  readonly control: string;
+  readonly choices: readonly (readonly [string, number])[];
+}>> =
+  {
+    "miso.compressor": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "slot",
+          0
+        ],
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ],
+        [
+          "average",
+          3
+        ]
+      ]
+    },
+    "miso.de-esser": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "slot",
+          0
+        ],
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ],
+        [
+          "average",
+          3
+        ]
+      ]
+    },
+    "miso.dynamic-eq": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "slot",
+          0
+        ],
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ],
+        [
+          "average",
+          3
+        ]
+      ]
+    },
+    "miso.gate-expander": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "slot",
+          0
+        ],
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ],
+        [
+          "average",
+          3
+        ]
+      ]
+    },
+    "miso.multiband-compressor": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "slot",
+          0
+        ],
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ],
+        [
+          "average",
+          3
+        ]
+      ]
+    },
+    "miso.transient-shaper": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "slot",
+          0
+        ],
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ],
+        [
+          "average",
+          3
+        ]
+      ]
+    },
+    "miso.true-peak-limiter": {
+      "control": "link_mode",
+      "choices": [
+        [
+          "slot",
+          0
+        ],
+        [
+          "dual_mono",
+          1
+        ],
+        [
+          "maximum",
+          2
+        ]
+      ]
+    }
+  };
+
+/** The link mode labels of an insert of an effect; `never` for an effect with no choice of it. */
 export type EffectLinkModeLabel<E extends EffectId> =
     E extends "miso.compressor" ? "dual_mono" | "maximum" | "average" :
     E extends "miso.de-esser" ? "dual_mono" | "maximum" | "average" :
@@ -1343,12 +1497,25 @@ export type EffectLinkModeLabel<E extends EffectId> =
     E extends "miso.true-peak-limiter" ? "dual_mono" | "maximum" :
     never;
 
+/** The link mode labels of a console entry of an effect; `never` for an effect with no choice. */
+export type EffectConsoleLinkModeLabel<E extends EffectId> =
+    E extends "miso.compressor" ? "slot" | "dual_mono" | "maximum" | "average" :
+    E extends "miso.de-esser" ? "slot" | "dual_mono" | "maximum" | "average" :
+    E extends "miso.dynamic-eq" ? "slot" | "dual_mono" | "maximum" | "average" :
+    E extends "miso.gate-expander" ? "slot" | "dual_mono" | "maximum" | "average" :
+    E extends "miso.multiband-compressor" ? "slot" | "dual_mono" | "maximum" | "average" :
+    E extends "miso.transient-shaper" ? "slot" | "dual_mono" | "maximum" | "average" :
+    E extends "miso.true-peak-limiter" ? "slot" | "dual_mono" | "maximum" :
+    never;
+
 /**
  * The edits of one effect instance: each parameter, its bypass and its link mode, as `edit.set`
  * over the row of the instance's own control table. The parameter keys are the catalog's names.
  */
 export abstract class EffectControlBuilders<E extends EffectId> {
   protected abstract readonly effectId: E;
+  /** Whether this instance is a console entry or an insert: their link-mode rows differ. */
+  protected abstract readonly rack: "console" | "inserts";
 
   /** `edit.set` over this instance's address: the row's machine name, the lane and the ramp. */
   protected abstract setRow(
@@ -1394,11 +1561,11 @@ export abstract class EffectControlBuilders<E extends EffectId> {
   }
 
   /**
-   * The link mode of an insert of an effect that has a choice of it. A console slot has no link
-   * mode row, and the core refuses the edit.
+   * The link mode of an instance of an effect that has a choice of it. A console entry also
+   * takes `slot`, the slot's declared mode; an insert refuses it.
    */
-  linkMode(mode: EffectLinkModeLabel<E>): ControlEditSet {
-    const row = EFFECT_LINK_MODE_ROWS[this.effectId];
+  linkMode(mode: EffectLinkModeLabel<E> | EffectConsoleLinkModeLabel<E>): ControlEditSet {
+    const row = (this.rack === "console" ? EFFECT_CONSOLE_LINK_MODE_ROWS : EFFECT_LINK_MODE_ROWS)[this.effectId];
     if (row === undefined) throw new MisoUsageError(`${this.effectId} has no link mode`);
     return this.setRow(row.control, enumValue(row.choices, mode, `${this.effectId} link mode`), "both");
   }

@@ -7,7 +7,7 @@ schemas. Optional/boundary values are represented by the transaction's nested fi
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`06bb3b6f65f39eec`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`5b6cbc157a1f6154`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -126,3 +126,8 @@ move; the 51 others are byte-equal. The frame count stays 54.
 Issue #1369 re-pinned it from `480ffcf546bea7fb`: the console entry appends its required field 4,
 `LINK_MODE` (`slot` 1, `dual_mono` 2, `maximum` 3, `average` 4), so the transaction's console
 entries carry it. The 53 other frames are byte-equal. The frame count stays 54.
+
+Issue #1585 re-pinned it from `06bb3b6f65f39eec`: `TransactionApplied` gains the optional arm-tag
+lists `observe_arm_tags` (field 3) and `removed_arm_tags` (field 4), packed `u64`, and
+`response.session_transaction` carries both. Only that frame moves; the 53 others are byte-equal.
+The frame count stays 54.
