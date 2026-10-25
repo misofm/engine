@@ -176,3 +176,34 @@ All behavioural gates run in `sdk/test/browser-evals.mjs` over the browser engin
 - *Publish the applied-revision watermark in the browser status* (#1349).
 
 Dependent: *Apply session transactions from the headless SDK engine* (#1389).
+
+## Decision record (attempt 1, 2026-10-25)
+
+- **Shared core reused, no core change.** `BrowserEngine` gains `apply`, `replaceSession` (async digest),
+  `revision`, `watermark()` and `applied()` over #1389's `session-edit.ts` and `ProtocolClient`; the
+  refusal types are #1389's (`MisoControlRefusal` in the reply, `MisoEngineError` for a refused call).
+  Only `sdk/src/browser/engine.ts`, `sdk/src/browser/index.ts` (type exports), `sdk/test/browser-evals.mjs`,
+  `sdk/test/barrel-surface.ts` and `sdk/README.md` changed (scope note's paths).
+- **Transport and noteCommit.** The engine's `ProtocolClient` sends `host.control(frame, document)` and
+  hands every reply's `revision` to the host's one queue (`noteCommit`) in that reply's continuation
+  (#1389 root ruling (b)); no blind `revision_conflict` retry.
+- **`revision` (root R2).** The newest of: the queue's revision (its own replies and every noted
+  commit), a decoded `sessionCommitted` event (only while an `onEvent` listener is subscribed: the
+  engine adds no listener of its own, so `host.discardedControlEvents` keeps its meaning) and the
+  watermark's revision. No probe per read.
+- **Watermark.** Subscribed with `host.onWatermark` at boot, before any committing frame; the worklet
+  does not post its boot record, so the first snapshot is the core's boot record `(0, 0, EXACT)`.
+  `applied()` settles only from posts (never at the commit) and rejects at `close()`. A host from
+  `createHost` without `onWatermark` (a test stand-in) makes `applied()` reject `unsupported`
+  (`sdk.host.member`, `onWatermark`) instead of waiting forever; the shipped host always has it.
+  Deviation for root: subscribing unconditionally would break the partial host doubles of eight other
+  eval files outside this slice's paths.
+- **D3 ordering lock superseded** (chain decision 5, #1389 R3): no SDK lock between an edit and the
+  `SET_CONTROL` queue; exact revisions order them. D3 rebinding is #1562b-K's; gate 5 deleted (scope R3).
+  A committed `replaceSession` rebinds `liveControls()` to the new document (the browser caches its
+  live controls, so the next call builds them again); a refused one changes nothing.
+- **D5.** README "Edit a playing session": `blockingRebuilds` (#1294 (b)) is how a non-isolated page's
+  blocking rebuild is reported; no new API.
+- **Gates.** Gates 1-3 and one other-sender case run in `browser-evals.mjs` over a host stand-in whose
+  control plane is a real core (`WasmBoundary`), with scripted watermark posts. No real-browser row
+  (the spec puts real bits in #1295).
