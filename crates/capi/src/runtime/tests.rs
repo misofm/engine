@@ -5448,38 +5448,95 @@ fn a_refused_meter_table_is_typed_and_changes_nothing() {
     crate::ffi::test_session_destroy(c_session);
 }
 
-/// #1583 gates 3 and 4: with the output's peak at twice the window, each batch is two windows:
-/// its span is the first window's start to the second's end, its sequence counts from 1, and its
-/// left and right records are the two windows' maxima of each output plane, `VALID`, with
-/// `CLIPPED` on a plane above 1.0. A track added between two batches does not move the handle,
-/// the span rule or the sequence.
-///
-/// Test value: red on the defect #1583 replaces (one combined block peak per handle, labelled
-/// left), if the fold loses a window's peak (the left peak is the second window's, the right the
-/// first's), if a plane's peak lands on the other plane, or if a structural commit renumbers the
-/// handle or restarts the sequence.
-#[test]
-fn the_output_meter_batch_is_two_windows_of_each_planes_own_peak() {
-    // One track at unity into the output: its identity matrix sends each plane to its own side.
+/// Tracks `eq0` and `eq1` on the fixture source and submix `bus`: `eq0` at unity into the output,
+/// `eq1` with a 0.5 matrix and a post-fader send (route `eq1-main`) into `bus`, and `bus` with a
+/// 0.25 matrix into the output. Every gain is a power of two, so each post-matrix peak is exact:
+/// `eq0` is the source's, `eq1` half of it, `bus` a quarter, and the output one and a quarter.
+fn strip_meter_session() -> session::SessionModel {
+    let matrix = |gain: f32| session::MatrixOrPan::Matrix {
+        ll: gain,
+        lr: 0.0,
+        rl: 0.0,
+        rr: gain,
+        smoothing_samples: 16,
+    };
     let mut model = stateless_session(48_000);
     model.tracks.truncate(1);
     model.routes.truncate(1);
-    model.tracks[0].matrix_or_pan = session::MatrixOrPan::Matrix {
-        ll: 1.0,
-        lr: 0.0,
-        rl: 0.0,
-        rr: 1.0,
-        smoothing_samples: 16,
+    model.tracks[0].matrix_or_pan = matrix(1.0);
+    let bus = session::StableId::parse("bus").expect("bus ID");
+    let mut b = model.tracks[0].clone();
+    b.id = session::StableId::parse("eq1").expect("track ID");
+    b.matrix_or_pan = matrix(0.5);
+    let mut send = model.routes[0].clone();
+    send.id = session::StableId::parse("eq1-main").expect("route ID");
+    send.source = session::RouteSource::Track {
+        track_id: b.id.clone(),
+        tap: session::SendTap::PostFader,
     };
-    let document = session::canonical_session_json(&model).expect("one-track session");
+    send.destination = session::RouteDestination::SubmixInput {
+        submix_id: bus.clone(),
+    };
+    let mut out = model.routes[0].clone();
+    out.id = session::StableId::parse("bus-main").expect("route ID");
+    out.source = session::RouteSource::Submix {
+        submix_id: bus.clone(),
+        tap: session::SendTap::PostPan,
+    };
+    let mut submix = session::Submix::unity(bus, &model.console);
+    submix.matrix_or_pan = matrix(0.25);
+    model.tracks.push(b);
+    model.routes.extend([send, out]);
+    model.submixes.push(submix);
+    model
+}
+
+/// #1583 gates 3 and 4 and #1587a gates 1, 3 and 4: with the table `[{eq0, peak}, {eq1, peak},
+/// {bus, peak}, {output, peak}]` at twice the window, each batch is two windows: its span is the
+/// first window's start to the second's end, its sequence counts from 1, and each entry's left and
+/// right records are its own strip's post-matrix maxima of each plane over the batch, `VALID`, with
+/// `CLIPPED` above 1.0 (`strip_meter_session`'s exact gains are the offline reference). Across
+/// three rebuilds, the batches stay consecutive and nothing is lost: a muted track that sorts first
+/// shifts every strip's position but no handle; while `eq1` is removed its records have flags 0
+/// (and `bus`, fed by nothing, is a valid 0); when `eq1` returns it is `VALID` again under handle 2.
+///
+/// Test value: red on the defect #1583 replaced (one combined block peak per handle), if a record
+/// carries another strip's or the output's peak (a strip resolved by position, or a frame folded
+/// against the retired epoch's strips after a rebuild), if a plane lands on the other plane, if the
+/// fold loses a window's peak, if adoption drops the carried windows or restarts the sequence, if
+/// an absent strip reports a stale value as valid, or if a returned strip moves its handle.
+#[test]
+fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
+    let model = strip_meter_session();
+    let document = session::canonical_session_json(&model).expect("strip meter session");
     let (c_session, c_plan) = boxed_c_children(&document);
     let window = fixture_window_blocks();
+    let strip = |id: &str| protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(id.into()),
+        metric: protocol::MeterMetric::Peak,
+    };
     assert_eq!(
-        configure_meters_c(c_session, 1, vec![output_peak_entry()], 2 * window),
+        configure_meters_c(
+            c_session,
+            1,
+            vec![strip("eq0"), strip("eq1"), strip("bus"), output_peak_entry()],
+            2 * window
+        ),
         (StatusCode::Ok, None)
     );
-    // Window `w`'s left and right peaks, each at one sample of the window's third block.
-    let peaks = [[0.5_f32, 0.25], [0.75, 0.125], [1.5, 0.5], [0.25, 0.375]];
+    // Window `w`'s source left and right peaks, each at one sample of the window's third block.
+    let peaks = [
+        [0.5_f32, 0.25],
+        [0.75, 0.125],
+        [1.5, 0.5],
+        [0.25, 0.375],
+        [0.5, 0.5],
+        [0.25, 0.25],
+        // A returned strip fades in over its first window, so the batch after `eq1` returns
+        // takes its peaks from its second window.
+        [0.25, 0.25],
+        [0.75, 0.75],
+    ];
     let feed = |block: u64| {
         let peak = peaks[(block / window) as usize];
         let mut left = [0.0625_f32; 128];
@@ -5491,55 +5548,89 @@ fn the_output_meter_batch_is_two_windows_of_each_planes_own_peak() {
         submit_c(c_session, 1, block * 128, 48_000, &left, &right, false);
         render_c(c_plan, block);
     };
-    for block in 0..2 * window {
-        feed(block);
-    }
-    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
-    let record = |component, flags, value| protocol::MeterRecord {
-        handle: 1,
-        component,
-        flags,
-        value,
+    // Batch `n`'s source peaks, the maxima of its two windows' peaks.
+    let source = |batch: usize| {
+        let [first, second] = [peaks[2 * batch], peaks[2 * batch + 1]];
+        [first[0].max(second[0]), first[1].max(second[1])]
     };
-    assert_eq!(
-        meter_batches_c(c_session),
-        [(
-            0,
-            2 * window * 128,
-            1,
-            vec![
-                record(protocol::MeterComponent::Left, 1, 0.75),
-                record(protocol::MeterComponent::Right, 1, 0.25),
-            ]
-        )]
+    let records = |handle: u32, peak: Option<[f32; 2]>| {
+        [protocol::MeterComponent::Left, protocol::MeterComponent::Right]
+            .into_iter()
+            .zip(peak.unwrap_or([0.0; 2]))
+            .map(move |(component, value)| protocol::MeterRecord {
+                handle,
+                component,
+                flags: match peak {
+                    None => 0,
+                    Some(_) if value > 1.0 => 1 | 2,
+                    Some(_) => 1,
+                },
+                value,
+            })
+    };
+    let scaled = |peak: [f32; 2], gain: f32| [peak[0] * gain, peak[1] * gain];
+    let expected = |batch: usize, eq1_present: bool| {
+        let peak = source(batch);
+        let bus = if eq1_present { 0.25 } else { 0.0 };
+        let span = window * 128;
+        (
+            2 * batch as u64 * span,
+            2 * (batch as u64 + 1) * span,
+            batch as u64 + 1,
+            records(1, Some(peak))
+                .chain(records(2, eq1_present.then(|| scaled(peak, 0.5))))
+                .chain(records(3, Some(scaled(peak, bus))))
+                .chain(records(4, Some(scaled(peak, 1.0 + bus))))
+                .collect::<Vec<_>>(),
+        )
+    };
+    // Each commit is at the revision the one before it left: 42 at boot.
+    let commit = |request: u64, edits: &[protocol::SessionEdit]| {
+        let transaction = command_bytes_at_revision(
+            request,
+            ExpectedRevision::Exact(SessionRevision(40 + request)),
+            protocol::CommandPayload::SessionTransactionApply(edits),
+        );
+        let (result, response) = command_c(c_session, &transaction);
+        assert_eq!(
+            (result, response_status(&response)),
+            (crate::RESULT_OK, StatusCode::Ok),
+            "commit {request}"
+        );
+        // The commit's `SESSION_COMMITTED`, so the reliable lane has room for the next one.
+        while !event_c(c_session, crate::EVENT_LANE_RELIABLE).1.is_empty() {}
+    };
+    let batch = |index: usize, eq1_present: bool| {
+        for block in 2 * index as u64 * window..2 * (index as u64 + 1) * window {
+            feed(block);
+        }
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+        assert_eq!(
+            meter_batches_c(c_session),
+            [expected(index, eq1_present)],
+            "batch {index}"
+        );
+    };
+    batch(0, true);
+    // Gate 3: a rebuild by a muted track whose ID sorts first, so every strip's position shifts.
+    commit(2, &add_muted_track(&model, "a-muted"));
+    batch(1, true);
+    // Gate 4: `eq1` and its send removed, then returned.
+    commit(3, &remove_track("eq1"));
+    batch(2, false);
+    commit(
+        4,
+        &[
+            protocol::SessionEdit::UpsertTrack {
+                track: model.tracks[1].clone(),
+            },
+            protocol::SessionEdit::UpsertRoute {
+                route: model.routes[1].clone(),
+            },
+        ],
     );
-    // Gate 4: a structural commit between the batches.
-    let transaction = command_bytes_at_revision(
-        2,
-        ExpectedRevision::Exact(SessionRevision(42)),
-        protocol::CommandPayload::SessionTransactionApply(&add_muted_track(&model, "a-muted")),
-    );
-    let (result, response) = command_c(c_session, &transaction);
-    assert_eq!(
-        (result, response_status(&response)),
-        (crate::RESULT_OK, StatusCode::Ok)
-    );
-    for block in 2 * window..4 * window {
-        feed(block);
-    }
-    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
-    assert_eq!(
-        meter_batches_c(c_session),
-        [(
-            2 * window * 128,
-            4 * window * 128,
-            2,
-            vec![
-                record(protocol::MeterComponent::Left, 1 | 2, 1.5),
-                record(protocol::MeterComponent::Right, 1, 0.5),
-            ]
-        )]
-    );
+    batch(3, true);
+    assert_eq!(meter_windows_lost_c(c_session, 100), 0, "no window lost");
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
 }
