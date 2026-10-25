@@ -933,8 +933,9 @@ fn set_track_console_without_set_console_is_refused_and_commits_nothing() {
     }
 }
 
-/// Test value: turns red when `SetTrackEffectOrder` applies an order that lists a strict subset of
-/// the rack (silently dropping the unlisted effect) or accepts one with a duplicated ID.
+/// Test value: turns red when `SetTrackEffectOrder` applies an order that is not an exact
+/// permutation of the rack -- a strict subset silently drops the unlisted effect, and a duplicated
+/// ID refused only after the rack was taken leaves it empty.
 #[test]
 fn an_effect_order_that_is_not_an_exact_permutation_is_refused() {
     let mut before = base();
@@ -952,10 +953,10 @@ fn an_effect_order_that_is_not_an_exact_permutation_is_refused() {
         Err(SessionEditError::InvalidEffectOrder)
     );
     assert_eq!(model, before, "a refused subset order drops no effect");
-    // The store applies edits to a candidate it discards on refusal, so only the refusal is the
-    // contract here.
+    let mut model = before.clone();
     assert_eq!(
-        apply_session_edit(&mut before.clone(), &order(vec![id("eq"), id("eq")])),
+        apply_session_edit(&mut model, &order(vec![id("eq"), id("eq")])),
         Err(SessionEditError::InvalidEffectOrder)
     );
+    assert_eq!(model, before, "a refused duplicated order empties no rack");
 }

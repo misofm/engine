@@ -47,4 +47,7 @@ One row per item. Lines are at ad5c7ae86.
   duplicated ID (`[a, a]` on `[a, b]`), but only in the reorder loop, after `mem::take` has
   emptied the rack, so the refused call leaves the rack empty. The store applies edits to a
   candidate that it discards on refusal (`model.rs` `apply_session_edit(&mut candidate, ...)`), so
-  no committed session changes. The new test asserts the refusal only for that case.
+  no committed session changes.
+- 2026-10-25, root ruling: fix it. `model.rs` now refuses any order that is not an exact
+  permutation (duplicates included) before the rack is taken; the test's `[a, a]` assertion that
+  the model is unchanged was red on the old code and is green now.
