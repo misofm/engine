@@ -207,9 +207,22 @@ export class CanonicalPcmPump {
     }
   }
 
-  async seek(frame) {
+  /**
+   * Reposition every stem to `frame`, clamped to its region, under a new generation. With
+   * `generation` (issue #1644 D3) the pump uses that one, which must be above its own: pass the
+   * generation of a session seek the engine accepted, and only after it did. Without one it uses
+   * its own next generation.
+   */
+  async seek(frame, generation) {
     const target = positiveOrZeroInteger(frame, "frame")
-    this.#generation += 1n
+    if (generation !== undefined) {
+      if (typeof generation !== "bigint" || generation <= this.#generation) {
+        throw new RangeError("seek generation must be a bigint above the pump's own")
+      }
+      this.#generation = generation
+    } else {
+      this.#generation += 1n
+    }
     for (const state of this.#states) {
       state.cursor = Math.min(target, state.frames)
       state.window = null

@@ -96,7 +96,7 @@ export type {
   TransportSnapshot,
   TransportStateName,
 } from "../core/protocol-messages.ts";
-export { MisoControlRefusal } from "../core/errors.ts";
+export { MisoControlRefusal, MisoEngineError, MisoUsageError, SessionSeekProducerError } from "../core/errors.ts";
 export type {
   MasterMeter,
   MeterListener,
