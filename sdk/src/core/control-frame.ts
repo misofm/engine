@@ -418,6 +418,12 @@ export interface ObserveEdit {
   readonly armed: boolean;
   /** Render blocks per window; `0` is the plan's meter window. A disarm names the window it armed. */
   readonly windowBlocks: number;
+  /**
+   * A disarm's tag of the arm it ends, as the arm's reply gave it (`observeArmTags`, #2087); an arm
+   * has none. The core disarms only the arm bound with this tag: a disarm that names an arm the core
+   * already ended changes nothing.
+   */
+  readonly armTag?: bigint;
 }
 
 /** One `OBSERVATION_READ` selection: a tap by its stable address and the lanes to return. @internal */
@@ -448,14 +454,24 @@ function observeEditField(edit: ObserveEdit): Uint8Array {
   if (edit === null || typeof edit !== "object" || typeof edit.armed !== "boolean") {
     throw new MisoUsageError("an Observe edit needs a boolean armed");
   }
+  // #2087: field 5, the arm tag, is present exactly on a disarm.
+  if (edit.armed && edit.armTag !== undefined) {
+    throw new MisoUsageError("an Observe arm carries no armTag");
+  }
+  const fields = [
+    field(1, WIRE_MESSAGE, true, observeAddress(edit.stripId, edit.rack, edit.effectId)),
+    field(2, WIRE_U32, true, u32(requireU32(edit.tapId, "tapId"))),
+    field(3, WIRE_BOOL, true, u8(edit.armed ? 1 : 0)),
+    field(4, WIRE_U32, true, u32(requireU32(edit.windowBlocks, "windowBlocks"))),
+  ];
+  if (!edit.armed) {
+    const tag = new Uint8Array(8);
+    new DataView(tag.buffer).setBigUint64(0, requireU64(edit.armTag, "a disarm's armTag"), true);
+    fields.push(field(5, WIRE_U64, false, tag));
+  }
   return nested(1, true, [
     field(1, WIRE_U16, true, u16(EDIT_OBSERVE)),
-    nested(2, true, [
-      field(1, WIRE_MESSAGE, true, observeAddress(edit.stripId, edit.rack, edit.effectId)),
-      field(2, WIRE_U32, true, u32(requireU32(edit.tapId, "tapId"))),
-      field(3, WIRE_BOOL, true, u8(edit.armed ? 1 : 0)),
-      field(4, WIRE_U32, true, u32(requireU32(edit.windowBlocks, "windowBlocks"))),
-    ]),
+    nested(2, true, fields),
   ]);
 }
 

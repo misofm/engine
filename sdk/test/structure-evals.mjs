@@ -624,4 +624,59 @@ describe("batch 12b review m3 -- an ended event older than the arm is ignored", 
       engine.dispose();
     }
   });
+
+  // #2087: the browser order. A's arm ends with `comp` and the event is late: `comp` comes back, B
+  // arms the tap (a fresh arm), and A closes before the event arrives. A's disarm names A's ended
+  // arm by its tag, so the core keeps B's.
+  // Red if A's close disarms B's arm (B's rows stop), or if it is refused as a misuse.
+  test("a close behind a late end event does not silence a later subscriber of the tap", async () => {
+    const engine = await boot();
+    let deliver;
+    const owner = new ObservationSubscriptionOwner({
+      observationMap: () => engine.observationMap(),
+      ...observationFrameTransport({
+        send: (frame) => engine.controlFrame(frame),
+        requestIds: engine.controlTransactions().requestIds,
+        committedRevision: () => engine.controlRevision(),
+        maximumFrameBytes: () => undefined,
+      }),
+      sampleRateHz: () => engine.shape().sampleRateHz,
+      observationEnded: (listener) => { deliver = listener; return () => {}; },
+    });
+    const selection = tap("t1", "inserts", "comp");
+    const unavailable = () => {
+      try {
+        engine.readObservations([selection]);
+        return false;
+      } catch (error) {
+        return /unavailable/.test(error.message);
+      }
+    };
+    try {
+      run(engine, 0, 2);
+      const a = await owner.subscribe({ selections: [selection], windowBlocks: 2 });
+      const removedAt = rebuild(engine, "remove_comp");
+      let block = await runUntil(engine, 2, 0, unavailable, "the plan without comp renders");
+      // `remove_eq` upserts t1 as booted without `eq`: `comp` comes back under its ID.
+      rebuild(engine, "remove_eq");
+      block = await runUntil(engine, block, 0, () => !unavailable(), "the plan with comp renders");
+      const b = await owner.subscribe({ selections: [selection], windowBlocks: 2 });
+      block = await runUntil(engine, block, 4, async () => {
+        await b.handle.pump();
+        return b.handle.readLatest()[0].status === "ready";
+      }, "B's tap is ready");
+      await a.handle.close();
+      // The end event of the removal arrives now, behind the close.
+      deliver({ sequence: 1n, revision: removedAt, keys: [{ stripId: "t1", rack: "inserts", effectSlotId: "comp", tapId: 1 }] });
+      const before = b.handle.readLatest()[0].window.sequence;
+      run(engine, block, 4);
+      await b.handle.pump();
+      const row = b.handle.readLatest()[0];
+      assert.equal(row.status, "ready", "B's tap is still armed");
+      assert.ok(row.window.sequence > before, "B's tap keeps publishing");
+    } finally {
+      owner.invalidate(true);
+      engine.dispose();
+    }
+  });
 });
