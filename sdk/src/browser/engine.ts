@@ -52,22 +52,11 @@ import type {
   TransportRequest,
   TransportSnapshot,
 } from "../core/protocol-messages.ts";
-import { createTrackResponse } from "./response.ts";
 import { isResponseReady } from "../core/response-frame.ts";
-import type { BrowserTrackResponse } from "./response.ts";
 import { createSpectrum } from "./response.ts";
 import type { BrowserSpectrum } from "./response.ts";
-import {
-  parseTrackResponseState,
-  sameTrackResponseState,
-} from "../core/live-response.ts";
-import type {
-  TrackResponseHostRequest,
-  TrackResponseObservedState,
-  TrackResponseQuery,
-  TrackResponseRead,
-  TrackResponseResult,
-} from "../core/live-response.ts";
+import { TrackResponseRequester } from "../core/live-response.ts";
+import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import type { ResponseWorkerFactory } from "./response-worker.ts";
 import {
   cloneSpectrumCollection,
@@ -409,49 +398,6 @@ function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<Ar
     return new Uint8Array(document);
   }
   return new TextEncoder().encode(document.toJson());
-}
-
-function trackResponseHostRequest(request: TrackResponseQuery): TrackResponseHostRequest {
-  const maximumIdBytes = ABI_LAYOUT.constants.maximumLiveResponseIdBytes;
-  const maximumPoints = ABI_LAYOUT.constants.maximumLiveResponsePoints;
-  const maximumCaptureBytes = ABI_LAYOUT.constants.liveResponseCaptureBytes;
-  if (typeof request.trackId !== "string" || request.trackId.length === 0
-      || new TextEncoder().encode(request.trackId).byteLength > maximumIdBytes) {
-    throw new MisoUsageError("trackId must be a nonempty string within the live response identity bound");
-  }
-  if (request.grid.kind !== "linear" && request.grid.kind !== "logarithmic") {
-    throw new MisoUsageError("grid.kind must be linear or logarithmic");
-  }
-  if (!Number.isSafeInteger(request.grid.points) || request.grid.points < 2 || request.grid.points > maximumPoints) {
-    throw new MisoUsageError(`grid.points must be an integer in 2..=${maximumPoints}`);
-  }
-  if (!Number.isFinite(request.grid.minimumHz) || !Number.isFinite(request.grid.maximumHz)) {
-    throw new MisoUsageError("grid endpoints must be finite");
-  }
-  if (request.grid.kind === "logarithmic" && request.grid.minimumHz <= 0) {
-    throw new MisoUsageError("logarithmic grid minimumHz must be positive");
-  }
-  const channels = request.channels === undefined || request.channels === "both"
-    ? 3 : request.channels === "left" ? 1 : request.channels === "right" ? 2 : undefined;
-  if (channels === undefined) throw new MisoUsageError("channels must be left, right, or both");
-  const maximumResultBytes = request.responseLimits?.maximumResultBytes ?? maximumCaptureBytes;
-  if (!Number.isSafeInteger(maximumResultBytes) || maximumResultBytes < 1 || maximumResultBytes > maximumCaptureBytes) {
-    throw new MisoUsageError(`maximumResultBytes must be an integer in 1..=${maximumCaptureBytes}`);
-  }
-  const requestDeadlineMs = request.responseLimits?.requestDeadlineMs;
-  if (requestDeadlineMs !== undefined
-      && (!Number.isFinite(requestDeadlineMs) || requestDeadlineMs <= 0 || requestDeadlineMs > 2_147_483_647)) {
-    throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
-  }
-  return {
-    trackId: request.trackId,
-    grid: request.grid.kind === "linear" ? 1 : 2,
-    channels,
-    points: request.grid.points,
-    minimumHz: request.grid.minimumHz,
-    maximumHz: request.grid.maximumHz,
-    maximumResultBytes,
-  };
 }
 
 function spectrumTargetId(target: SpectrumQuery["target"]): string {
@@ -798,9 +744,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     });
     let semanticLiveControls: Promise<EngineLiveControls> | undefined;
     let closePromise: Promise<void> | undefined;
-    let trackResponse: BrowserTrackResponse | undefined;
-    let trackResponsePromise: Promise<BrowserTrackResponse> | undefined;
-    let trackResponsePending = false;
+    // The track response queries of this engine (#1579 D4): the same requester as the headless
+    // engine, over the host's `control` message and event lane. Created with the host's one
+    // transaction queue, whose allocator its request IDs come from.
+    let trackResponses: Promise<TrackResponseRequester> | undefined;
+    let trackResponseRequester: TrackResponseRequester | undefined;
     let spectrum: BrowserSpectrum | undefined;
     let spectrumPromise: Promise<BrowserSpectrum> | undefined;
     let spectrumPending = false;
@@ -1330,7 +1278,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             })().catch((error: unknown) => finish(false, error));
           }),
         },
-        responseRead: readTrackResponse,
+        responseRead: queryTrackResponse,
         ...(preparedSpectrum === undefined ? {} : {
           spectrumPrepared: () => preparedSpectrum,
         }),
@@ -1364,87 +1312,40 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       });
       spectrumCleanup = held;
     };
-    const readTrackResponse = async (
-      request: TrackResponseQuery,
-      previousState?: TrackResponseObservedState,
-    ): Promise<TrackResponseRead> => {
-      if (closed) throw new MisoUsageError("the browser engine is closed");
-      if (trackResponsePending) throw new MisoUsageError("a live track response query is already in flight");
-      trackResponsePending = true;
-      try {
-        const hostRequest = trackResponseHostRequest(request);
-        if (typeof host.captureTrackResponse !== "function") {
-          throw new MisoUsageError("the browser host does not support live track responses");
-        }
-        const capture = await host.captureTrackResponse(hostRequest);
-        if (closed) throw new MisoUsageError("the browser engine is closed");
-        if (capture.result !== constantValue("resultCodes", "ok")) {
-          throw new MisoEngineError("the browser host refused the live track response capture", {
-            phase: capture.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
-            code: resultName(capture.result, "call"),
-            result: capture.result,
-          });
-        }
-        let state: TrackResponseObservedState;
-        try {
-          state = parseTrackResponseState(capture.snapshot);
-        } catch (error) {
-          // One-shot queries retain the Worker as the authoritative payload validator. Managed
-          // reads must validate before dispatch because their unchanged path never reaches it.
-          if (previousState !== undefined) throw error;
-          state = Object.freeze({ words: Object.freeze([]) });
-        }
-        const status = async (): Promise<void> => {
-          const current = await host.status();
-          if (current.result !== constantValue("resultCodes", "ok")
-              || current.state !== constantValue("states", "ready")) {
-            const lifecycleResult = current.result !== constantValue("resultCodes", "ok")
-              ? current.result
-              : constantValue("resultCodes", "wrongState");
-            throw new MisoEngineError("the browser host no longer owns a ready live response boundary", {
-              phase: "lifecycle",
-              code: resultName(lifecycleResult, "call"),
-              result: lifecycleResult,
-            });
-          }
-        };
-        if (previousState !== undefined && sameTrackResponseState(previousState, state)) {
-          await status();
-          if (closed) throw new MisoUsageError("the browser engine is closed");
-          return Object.freeze({ changed: false, state });
-        }
-        trackResponsePromise ??= createTrackResponse({
-          ...(preparedModule === undefined ? { moduleUrl: simd128ModuleUrl } : { module: preparedModule }),
-          ...(options.responseWorkerModuleUrl === undefined ? {} : { responseWorkerModuleUrl: options.responseWorkerModuleUrl }),
-          ...(options.createResponseWorker === undefined ? {} : { createWorker: options.createResponseWorker }),
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
-        }).then((client) => {
-          trackResponse = client;
-          return client;
+    const trackResponseClosed = (): MisoUsageError => new MisoUsageError("the browser engine is closed");
+    const requesterOf = (): Promise<TrackResponseRequester> => {
+      if (trackResponses !== undefined) return trackResponses;
+      const created = createBrowserControlQueue(host).then((queue) => {
+        const requester = new TrackResponseRequester({
+          // A frame beside the queue tells it the revision its reply reports (#1389 root ruling (b)).
+          send: async (frame) => {
+            const reply = await host.control(frame);
+            queue.noteCommit(reply.revision);
+            if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+            return reply.response;
+          },
+          onControlEvent: (listener) => host.onControlEvent(listener),
+          nextRequestId: () => queue.requestIds.next(),
         });
-        const client = trackResponse ?? await trackResponsePromise;
-        if (closed) throw new MisoUsageError("the browser engine is closed");
-        const result = await client.query(request, capture);
-        if (closed) {
-          await client.close();
-          throw new MisoUsageError("the browser engine is closed");
-        }
-        await status();
-        if (closed) {
-          await client.close();
-          throw new MisoUsageError("the browser engine is closed");
-        }
-        return Object.freeze({ changed: true, state, result });
-      } finally {
-        trackResponsePending = false;
-      }
-    };
-    const queryTrackResponse = async (request: TrackResponseQuery): Promise<TrackResponseResult> => {
-      const read = await readTrackResponse(request);
-      if (read.result === undefined) throw new MisoEngineError("the live response query returned no result", {
-        phase: "output", code: "abiMismatch", result: 2,
+        if (closed) requester.close(trackResponseClosed());
+        trackResponseRequester = requester;
+        return requester;
       });
-      return read.result;
+      trackResponses = created;
+      // A failed queue probe is not remembered; the next query probes again.
+      created.catch(() => {
+        if (trackResponses === created) trackResponses = undefined;
+      });
+      return created;
+    };
+    /**
+     * One track response, as a C ABI host reads it: a strip `RESPONSE_GET` through the host's
+     * `control` message, then the `RESPONSE_READY` with its tag from the event lane. The capture
+     * runs in the render step, so the query settles after the next rendered block.
+     */
+    const queryTrackResponse = async (request: TrackResponseQuery): Promise<TrackResponseResult> => {
+      if (closed) throw trackResponseClosed();
+      return (await requesterOf()).query(request);
     };
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
@@ -1785,6 +1686,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         editQueue?.close();
         measurementFeeds.close();
         observationSubscriptions?.invalidate(true);
+        // Every pending and queued track response query rejects now, not at its deadline.
+        trackResponseRequester?.close(trackResponseClosed());
         // Edits staged for the host are rejected and no new one is accepted; a transaction already
         // in flight settles.
         void semanticLiveControls?.then((controls) => controls.queue.close(), () => undefined);
@@ -1795,10 +1698,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           const fail = (error: unknown): void => {
             if (!failed) { failed = true; failure = error; }
           };
-          if (trackResponsePromise !== undefined) {
-            // Bounded by BrowserTrackResponse.create's own 5 s deadline; its close is synchronous.
-            try { await (trackResponse ?? await trackResponsePromise)?.close(); } catch { /* host close remains authoritative */ }
-          }
           if (spectrumPromise !== undefined) {
             try {
               await boundedCloseStep("spectrum close", "spectrumCloseTimeout",

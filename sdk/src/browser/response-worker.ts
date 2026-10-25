@@ -4,8 +4,6 @@ import type {
   ResponsePreviewQuery,
   ResponsePreviewResult,
 } from "../core/response.ts";
-import { TrackResponseModule } from "../core/live-response.ts";
-import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import { SpectrumModule } from "../core/spectrum.ts";
 import type { SpectrumQuery, SpectrumResult, SpectrumStreamMetadata } from "../core/spectrum.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
@@ -13,19 +11,15 @@ import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 export type ResponseWorkerRequest =
   | { readonly type: "response-init"; readonly module: WebAssembly.Module; readonly responseLimits: ResponsePreviewLimits }
   | { readonly type: "response-query"; readonly requestId: number; readonly query: ResponsePreviewQuery }
-  | { readonly type: "track-response-init"; readonly module?: WebAssembly.Module; readonly moduleUrl?: string }
-  | { readonly type: "track-response-query"; readonly requestId: number; readonly query: TrackResponseQuery; readonly snapshot: Uint8Array }
   | { readonly type: "spectrum-init"; readonly module?: WebAssembly.Module; readonly moduleUrl?: string }
   | { readonly type: "spectrum-query"; readonly requestId: number; readonly query: SpectrumQuery; readonly snapshot: Uint8Array }
   | { readonly type: "spectrum-stream-query"; readonly requestId: number; readonly query: SpectrumQuery; readonly buffer: ArrayBuffer; readonly byteLength: number; readonly metadata: SpectrumStreamMetadata }
-  | { readonly type: "response-close" | "track-response-close" | "spectrum-close" };
+  | { readonly type: "response-close" | "spectrum-close" };
 
 export type ResponseWorkerReply =
   | { readonly type: "worker-ready" }
   | { readonly type: "response-ready" }
   | { readonly type: "response-result"; readonly requestId: number; readonly result: ResponsePreviewResult }
-  | { readonly type: "track-response-ready" }
-  | { readonly type: "track-response-result"; readonly requestId: number; readonly result: TrackResponseResult }
   | { readonly type: "spectrum-ready" }
   | { readonly type: "spectrum-result"; readonly requestId: number; readonly result: SpectrumResult }
   | { readonly type: "spectrum-stream-result"; readonly requestId: number; readonly resultByteLength: number; readonly buffer: ArrayBuffer; readonly metadata: SpectrumStreamMetadata }
@@ -58,7 +52,6 @@ interface ResponseWorkerScope {
 const candidateScope = (globalThis as unknown as { readonly self?: ResponseWorkerScope }).self ?? globalThis;
 const scope = candidateScope as ResponseWorkerScope;
 let preview: ResponsePreviewModule | undefined;
-let trackResponse: TrackResponseModule | undefined;
 let spectrum: SpectrumModule | undefined;
 
 scope.onmessage = (event) => { void handle(event); };
@@ -70,17 +63,6 @@ async function handle(event: MessageEvent<ResponseWorkerRequest>): Promise<void>
       preview?.close();
       preview = new ResponsePreviewModule(new WebAssembly.Instance(request.module, {}), request.responseLimits);
       scope.postMessage({ type: "response-ready" });
-    } else if (request.type === "track-response-init") {
-      trackResponse?.close();
-      let module = request.module;
-      if (module === undefined) {
-        if (request.moduleUrl === undefined) throw new MisoUsageError("the live response Worker has no engine module");
-        const response = await fetch(request.moduleUrl);
-        if (!response.ok) throw new MisoUsageError(`the live response engine module could not be fetched (${response.status})`);
-        module = await WebAssembly.compile(await response.arrayBuffer());
-      }
-      trackResponse = new TrackResponseModule(new WebAssembly.Instance(module, {}));
-      scope.postMessage({ type: "track-response-ready" });
     } else if (request.type === "spectrum-init") {
       spectrum?.close();
       let module = request.module;
@@ -96,10 +78,6 @@ async function handle(event: MessageEvent<ResponseWorkerRequest>): Promise<void>
       if (preview === undefined) throw new MisoUsageError("the response Worker is not initialized");
       const result = preview.query(request.query);
       scope.postMessage({ type: "response-result", requestId: request.requestId, result }, transferFor(result));
-    } else if (request.type === "track-response-query") {
-      if (trackResponse === undefined) throw new MisoUsageError("the live response Worker is not initialized");
-      const result = trackResponse.querySnapshot(request.query, request.snapshot);
-      scope.postMessage({ type: "track-response-result", requestId: request.requestId, result }, transferForTrackResponse(result));
     } else if (request.type === "spectrum-query") {
       if (spectrum === undefined) throw new MisoUsageError("the spectrum Worker is not initialized");
       const result = spectrum.analyzeSnapshot(request.query, request.snapshot);
@@ -122,8 +100,6 @@ async function handle(event: MessageEvent<ResponseWorkerRequest>): Promise<void>
     } else {
       preview?.close();
       preview = undefined;
-      trackResponse?.close();
-      trackResponse = undefined;
       spectrum?.close();
       spectrum = undefined;
     }
@@ -132,8 +108,7 @@ async function handle(event: MessageEvent<ResponseWorkerRequest>): Promise<void>
     const streamBuffer = request.type === "spectrum-stream-query" ? request.buffer : undefined;
     scope.postMessage({
       type: "response-failure",
-      ...((request.type === "response-query" || request.type === "track-response-query"
-        || request.type === "spectrum-stream-query")
+      ...((request.type === "response-query" || request.type === "spectrum-stream-query")
         ? { requestId: request.requestId } : {}),
       error: serializeError(error),
       ...(streamBuffer === undefined ? {} : { buffer: streamBuffer }),
@@ -151,13 +126,6 @@ function transferFor(result: ResponsePreviewResult): Transferable[] {
     if (section.leftDb !== undefined) buffers.push(section.leftDb.buffer as ArrayBuffer);
     if (section.rightDb !== undefined) buffers.push(section.rightDb.buffer as ArrayBuffer);
   }
-  return buffers;
-}
-
-function transferForTrackResponse(result: TrackResponseResult): Transferable[] {
-  const buffers: ArrayBuffer[] = [result.frequenciesHz.buffer as ArrayBuffer];
-  if (result.leftDb !== undefined) buffers.push(result.leftDb.buffer as ArrayBuffer);
-  if (result.rightDb !== undefined) buffers.push(result.rightDb.buffer as ArrayBuffer);
   return buffers;
 }
 

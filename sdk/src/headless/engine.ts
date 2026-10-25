@@ -16,9 +16,8 @@ import type {
   ObservationReadResult,
   ObservationSelection,
 } from "../core/observation.ts";
-import { trackResponseReadOf } from "../core/live-response.ts";
 import { isResponseReady } from "../core/response-frame.ts";
-import type { TrackResponseObservedState, TrackResponseQuery, TrackResponseRead, TrackResponseResult } from "../core/live-response.ts";
+import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import { cloneSpectrumCollection, cloneSpectrumQuery } from "../core/spectrum.ts";
 import type {
   SpectrumCollection,
@@ -775,11 +774,7 @@ export class OfflineEngine {
         this.#boundary.selectSpectrumStream(query, smoothingMs),
       // A read is one query (it settles after the app's next `render()`); the owner publishes it
       // only when a member field or a curve bit changed.
-      responseRead: async (
-        request: TrackResponseQuery,
-        previousState?: TrackResponseObservedState,
-      ): Promise<TrackResponseRead> =>
-        trackResponseReadOf(await this.#boundary.queryTrackResponse(request), previousState),
+      responseRead: (request: TrackResponseQuery) => this.#boundary.queryTrackResponse(request),
       spectrumStart: (smoothingMs, query) => this.#boundary.startSpectrumStream(smoothingMs, query),
       spectrumRead: (query) => this.#boundary.readSpectrumStream(query),
       spectrumStop: () => this.#boundary.stopSpectrumStream(),
