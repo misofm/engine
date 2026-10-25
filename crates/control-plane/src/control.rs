@@ -4817,7 +4817,8 @@ where
         if !observation_change.ended.is_empty() {
             return Err(SpectrumRefusal::Error(CommandError::Internal));
         }
-        // A withdrawal's own refusal is `Internal`, which the arm below answers as an error.
+        // This assumes a withdrawal refuses only with `Internal` (`promote_pending_provider`),
+        // which the arm below answers as an error, never as a `LimitExceeded` reply.
         let result = self.rebuild_superseding(
             Rebuild::Monitor {
                 model,
@@ -4858,6 +4859,10 @@ where
     /// resumes the panic, so a host that catches it (the C ABI answers `RESULT_INTERNAL`) keeps
     /// the candidate whose revisions it acked. Under `panic = "abort"` nothing unwinds and this
     /// changes nothing. A panic after the commit, which has taken the candidate, is not covered.
+    /// Nor is a panic between the protocol commit (`prepared.commit`) and `withdrawn.take()`: it
+    /// still republishes the candidate, but over a half-committed controller, which then holds the
+    /// successor's model, revision, monitor overlay, observation and send moves while the
+    /// candidate renders (#2010 R2; a successor issue).
     fn rebuild_superseding(
         &mut self,
         kind: Rebuild,

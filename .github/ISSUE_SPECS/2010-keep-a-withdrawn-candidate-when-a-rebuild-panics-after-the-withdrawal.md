@@ -41,7 +41,12 @@ then the next edit and a seek behave as on a session that never saw the call.
 - D3 (scope, R2): the guard covers a panic up to the commit (`withdrawn.take()` in `rebuild`). The
   writes after the last fallible step and before that take (`fold_send_move`, `self.monitor`,
   `self.observation`) would leave a half-committed state on a panic; that is a successor defect
-  (a panic after the commit), not this issue.
+  (a panic after the commit), not this issue. Starting fact for that successor: a panic between the
+  protocol commit (`prepared.commit`) and `withdrawn.take()` still republishes the candidate A, but
+  over a half-committed controller, which then holds B's model, revision, monitor overlay,
+  observation and send moves while A renders.
+- D6 (verifier fold): `docs/REALTIME_DEPENDENCY_POLICY.md` lists the new `catch_unwind` boundary
+  (control thread only; nothing unwinds under `panic = "abort"`).
 - D4 (reach caveat): the release profile is `panic = "abort"` (`Cargo.toml`,
   `docs/REALTIME_DEPENDENCY_POLICY.md`), so a shipped host aborts before any half state exists and the
   `catch_unwind` changes nothing there; no rendered bit moves. The window is reachable where panics
