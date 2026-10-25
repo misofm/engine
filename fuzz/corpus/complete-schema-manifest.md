@@ -1,13 +1,14 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 56 canonical frames: all 16 commands (the
-session transaction contains all 36 allocated `SessionEditOpcode` values), all 18 successful
-responses, all 16 registered non-OK statuses (including typed `BACKPRESSURE`), and all six event
-schemas. Optional/boundary values are represented by the transaction's nested fixture, the optional
+The shared `complete_schema_corpus()` fixture has 59 canonical frames: all 16 commands (the
+session transaction contains all 36 allocated `SessionEditOpcode` values, and `RESPONSE_GET` has a
+configuration and a strip target), all 18 successful responses, all 16 registered non-OK statuses
+(including typed `BACKPRESSURE`), and all seven event schemas (`RESPONSE_READY` in its ready and
+refused forms). Optional/boundary values are represented by the transaction's nested fixture, the optional
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`f4c2fe333739f44d`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`dea650f7e506833e`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -136,3 +137,15 @@ Issue #1586 re-pinned it from `5b6cbc157a1f6154`: `OBSERVATION_READ` (`000f`) ad
 `command.observation_read` (a console slot's tap with the left lane and an insert's with the
 right) and `response.observation_read` (a ready row with both lanes, a pending armed row and an
 unarmed row). The 54 earlier frames are byte-equal. The frame count is 56.
+
+Issue #1578 re-pinned it from `f4c2fe333739f44d`: `RESPONSE_READY` (`8040`) adds
+`command.response_get_strip` (a strip target), `event.response_ready` (a ready event with one side
+and a member of each section) and `event.response_ready_refused` (`NOT_FOUND` with its
+diagnostic), and the static capabilities frame lists `8040` with `000e`, as bit 14 now requires.
+Only `response.capabilities` moves; with its event list patched back and the three new frames
+filtered out, the 56 earlier frames hash to the old pin. The frame count is 59.
+
+Issue #1690 re-pinned it from `cb8db815ed0103a0`: the meter table gains the master target (`3`,
+no strip ID, gain reduction only), so `command.telemetry_configure` and `response.telemetry`
+carry a third entry, the master's gain reduction. Only those two frames move; the 57 others are
+byte-equal. The frame count stays 59.

@@ -75,6 +75,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_replace_document_ptr",
+    "miso_engine_web_v1_resolved_source_ring_frames",
     "miso_engine_web_v1_resource_ptr",
     "miso_engine_web_v1_response_frame_close",
     "miso_engine_web_v1_response_frame_ptr",

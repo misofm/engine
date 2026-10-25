@@ -501,6 +501,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.watermarkSample = this.watermarkView.getBigUint64(16, true);
       this.watermarkCounts = [32, 40, 48].map((offset) => this.watermarkView.getBigUint64(offset, true));
     }
+    // Issue #1406b: the ring the boot resolved, which a zero override leaves to the engine. The
+    // host bounds its in-flight source chunks by it, so no JavaScript holds a copy of the rule.
+    const sourceRingFrames = this.exports.miso_engine_web_v1_resolved_source_ring_frames(this.handle);
+    if (!u32(sourceRingFrames) || sourceRingFrames === 0
+        || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
     this.memoryBytes = this.memoryBuffer.byteLength;
     this.port.postMessage({
       tag: "miso.ready.v1",
@@ -509,6 +514,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       backend: this.backend,
       resources: this.resources,
       memoryBytes: this.memoryBytes,
+      sourceRingFrames,
     });
     this.ready = true;
     return RESULT_OK;

@@ -136,7 +136,8 @@ pub use builtins::{MeterMetricSet, MeterTap};
 pub use control_provider::{
     CatalogResources, ControlCatalog, MAXIMUM_METER_BATCH_RECORDS, PlanSampleSource,
     ResponseFrameError, SessionControlProvider, SessionControlProviderError,
-    SessionControlProviderResources, StagedCatalog, StagedValues, serve_response_frame,
+    SessionControlProviderResources, StagedCatalog, StagedValues, response_ready_event,
+    serve_response_frame,
 };
 #[cfg(all(feature = "control-provider", feature = "test-support"))]
 pub use control_provider::{
@@ -246,10 +247,11 @@ pub use spectrum_service::{
 };
 #[cfg(feature = "control-provider")]
 pub use transition::{
-    DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError, plan_strip_transition,
+    DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError, grown_strips,
+    plan_strip_transition,
 };
 #[cfg(feature = "control-provider")]
-pub use warm::{PrimedCandidate, publish_primed};
+pub use warm::{PrimedCandidate, fall_back_to_transition, publish_primed};
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).
 ///

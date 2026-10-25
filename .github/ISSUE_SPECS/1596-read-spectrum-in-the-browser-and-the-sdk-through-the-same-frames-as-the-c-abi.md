@@ -192,3 +192,22 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   so the new stream's first epoch can equal the old one's. A true stream identity needs a start
   generation in `SpectrumService` (host-core); #1597 deletes the staging analysis, which ends the
   case.
+- #1596b facts (attempt 1): the codec is `sdk/src/core/spectrum-frame.ts`, held to
+  `crates/protocol/tests/fixtures/spectrum-frames.json` (`spectrum_frames.rs`); no schema change.
+  The headless boot still stages its taps (R2's kept path): a headless engine adopts a plan only
+  when its caller renders, so taps sent after boot could not be in effect before `createEngine`
+  resolves. The boot's one `SPECTRUM_CONFIGURE` is then equal (no change) or retunes the hop
+  without a plan, and `adopted_epoch == configured_epoch` at once. Root ruling (2026-10-25): this
+  boot choice stands for #1596b; #1597 owns the boot route once the staging exports go, and must
+  give a headless boot its taps in the first plan (sample 0 armable). A refused spectrum call raises `MisoEngineError` with
+  `code` the result class of the status (as `responseRefusalResult`) and the core's code as
+  `diagnosticCode`; a `spectrum.*` `MisoErrorCode` member needs `errors.ts`. A stream reply has
+  no floor or token: a stream `SpectrumResult` reports the analysis floor (-120 dB) and
+  `snapshotToken = windows`. `resultBytes` keeps the old record's formula. Headless result changes: with no
+  taps, `armSpectrum`/`cancelSpectrum` return `invalidArgument` (the core's `NOT_FOUND`,
+  `spectrum.unprepared`) where they returned `unsupported`, and `readSpectrum` throws
+  `MisoEngineError` (`spectrum.unprepared`) where it threw `MisoUsageError`;
+  `readSpectrumStream` throws on every refusal where it returned `{ metadata }` on
+  `backpressure` or `renderRejected`; `startSpectrumStream` throws where it returned `ok: false`. Gate 3 is in
+  `spectrum-evals.mjs`; the #852 hop-probe boot evals in `boot-evals.mjs` became the bit-16 and
+  copied-hop evals.

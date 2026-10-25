@@ -455,9 +455,8 @@ pub struct MeterFrame {
     /// The provider epoch of the plan whose strips the frame covers (#1588 D3): its
     /// [`MeterTables`]' epoch ([`MeterTables::set_plan_epoch`]), `0` for the boot plan. A reader
     /// that holds the strip list of one epoch resolves its strips again when a frame names another.
-    /// The C ABI's delivery fills it at each adoption. The browser's render half does not fill it
-    /// yet: its frames reach the control plane through the plan's own ring, which names the epoch
-    /// (#1588b fills it and checks it against the ring's).
+    /// Both hosts fill it at each adoption; the browser's render half also checks it against the
+    /// epoch of the plan ring it pushes the frame into (#1588b).
     pub plan_epoch: u64,
     /// The frame's validity bits.
     pub validity: MeterValidity,
@@ -499,7 +498,9 @@ impl MeterFrame {
     /// The master strip's gain reduction (#1690 D1): strip `master`'s word when that strip is in
     /// the frame and an armed tap's window folded into it, else `None` -- absent, not zero, when
     /// no strip is the master or the master published nothing (zero reads as "not reducing").
-    /// Every host reads the master's reading through this one function, from the same frame.
+    /// The browser's lease frame reads it through this function; every `METER_BATCH`, on both
+    /// hosts, reads the shared gain row of [`MeterBatchFold::push_with_strips`], with the same
+    /// predicate.
     #[must_use]
     #[inline]
     pub fn master_gain_reduction(&self, master: Option<u32>) -> Option<f32> {
@@ -758,8 +759,10 @@ impl MeterTables {
     }
 
     /// Name the plan the tables serve by its provider epoch (#1588 D3): every frame published
-    /// from them carries it in [`MeterFrame::plan_epoch`]. Set on a control thread, before the
-    /// tables reach [`MeterDelivery::adopt`]; an adoption keeps the successor's epoch.
+    /// from them carries it in [`MeterFrame::plan_epoch`]. Set before or at the adoption: the C
+    /// ABI sets it on its control thread before the tables reach [`MeterDelivery::adopt`], the
+    /// browser on its render thread at the adoption block, just before. An adoption keeps the
+    /// successor's epoch. A scalar store; allocation-free.
     pub fn set_plan_epoch(&mut self, epoch: u64) {
         self.frame.plan_epoch = epoch;
     }
@@ -1190,8 +1193,11 @@ impl MeterFrameProducer {
             return false;
         };
         copy_frame(&mut slot, frame);
-        // The published queue holds every frame the free queue does not, so it has room.
-        let _ = self.published.try_push(slot);
+        // The published queue holds every frame the free queue does not, so it has room. The
+        // unreachable refusal is forgotten, not dropped: no free joins the render thread's code.
+        if let Err(full) = self.published.try_push(slot) {
+            core::mem::forget(full);
+        }
         true
     }
 }

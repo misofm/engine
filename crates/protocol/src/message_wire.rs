@@ -436,10 +436,11 @@ macro_rules! control_code_table {
 mod response;
 pub use response::{
     RESPONSE_BYPASS_CONTROL, ResponseConfiguration, ResponseConfigurationKind, ResponseCurves,
-    ResponseGetRequest, ResponseGrid, ResponseOverride, ResponseResult, ResponseTarget,
-    response_result_encoded_len,
+    ResponseGetRequest, ResponseGrid, ResponseMember, ResponseMemberKind, ResponseMemberSection,
+    ResponseOverride, ResponseReady, ResponseReadyOutcome, ResponseResult, ResponseTarget,
+    TrackResponseCapture, response_ready_encoded_bound, response_result_encoded_len,
 };
-pub(crate) use response::{write_response_request, write_response_result};
+pub(crate) use response::{write_response_ready, write_response_request, write_response_result};
 
 mod spectrum;
 pub use spectrum::{
@@ -1115,7 +1116,8 @@ pub enum CounterId {
     MeterWindowsLost = 22,
 }
 
-/// What a meter table entry measures (#1583 D1): the session output, or a strip by its stable ID.
+/// What a meter table entry measures (#1583 D1, #1690 D3): the session output, a strip by its
+/// stable ID, or the master strip.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum MeterTarget {
     /// The session output.
@@ -1123,15 +1125,20 @@ pub enum MeterTarget {
     /// The track or submix of this stable ID. The entry stays in the table while no plan has the
     /// strip; its records carry no valid bit until a commit brings the ID back.
     Strip(Box<str>),
+    /// The strip the `master` monitor row designates now (#1690 D3), whichever strip that is: the
+    /// entry follows the row, and stays in the table while no strip is the master, its records
+    /// then carrying no valid bit. Valid with [`MeterMetric::GainReduction`] only.
+    Master,
 }
 
 impl MeterTarget {
-    /// The wire code: output `1`, strip `2`.
+    /// The wire code: output `1`, strip `2`, master `3`.
     #[must_use]
     pub const fn code(&self) -> u8 {
         match self {
             Self::Output => 1,
             Self::Strip(_) => 2,
+            Self::Master => 3,
         }
     }
 }
@@ -1142,7 +1149,7 @@ impl MeterTarget {
 pub enum MeterMetric {
     /// The left and right sample peak.
     Peak = 1,
-    /// The strip's gain reduction (a strip entry only).
+    /// A strip's gain reduction (a strip or master entry only).
     GainReduction = 2,
 }
 
@@ -1174,7 +1181,7 @@ pub const MAXIMUM_METER_ENTRIES: usize = 256;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TelemetryConfiguration {
     /// The meter table (#1583 D1): entry `i` is handle `i + 1`, 0 to 256 entries, no duplicate,
-    /// no gain reduction of the output.
+    /// no gain reduction of the output, no peak of the master.
     pub meters: Vec<MeterEntry>,
     /// Blocks per meter batch; nonzero when the table is not empty.
     pub meter_period_blocks: u32,
@@ -1315,6 +1322,10 @@ pub enum BackpressureQueueKind {
     ReplayCache = 6,
     /// The spectrum capture's one-shot arm slot (#1944): capacity 1, no queue generation.
     SpectrumArm = 7,
+    /// The session's one track-response capture (#1578 D3): capacity 1, no queue generation. A
+    /// strip `RESPONSE_GET` is refused while a capture is in flight or its `RESPONSE_READY` is
+    /// unread.
+    ResponseCapture = 8,
 }
 
 impl BackpressureQueueKind {
@@ -1326,12 +1337,16 @@ impl BackpressureQueueKind {
             5 => Ok(Self::Telemetry),
             6 => Ok(Self::ReplayCache),
             7 => Ok(Self::SpectrumArm),
+            8 => Ok(Self::ResponseCapture),
             _ => Err(DecodeError::InvalidTlv),
         }
     }
 
     const fn has_generation(self) -> bool {
-        !matches!(self, Self::ReplayCache | Self::SpectrumArm)
+        !matches!(
+            self,
+            Self::ReplayCache | Self::SpectrumArm | Self::ResponseCapture
+        )
     }
 }
 
@@ -2238,6 +2253,7 @@ impl ProtocolCodec {
             ) {
                 (1, None) => MeterTarget::Output,
                 (2, Some(id)) => MeterTarget::Strip(id.into()),
+                (3, None) => MeterTarget::Master,
                 _ => return Err(DecodeError::InvalidField),
             };
             let metric =
@@ -2624,9 +2640,9 @@ fn check_counter_ids(ids: &[CounterId], allow_empty: bool) -> Result<(), DecodeE
     Ok(())
 }
 
-/// The meter table rules (#1583 D2), `INVALID_FIELD` on encode and on decode: at most 256
-/// entries, a strip ID that is a stable ID, no gain reduction of the output, no duplicate entry,
-/// and a nonzero period when the table is not empty.
+/// The meter table rules (#1583 D2, #1690 D3), `INVALID_FIELD` on encode and on decode: at most
+/// 256 entries, a strip ID that is a stable ID, no gain reduction of the output, the master's gain
+/// reduction only, no duplicate entry, and a nonzero period when the table is not empty.
 fn meter_table_is_valid(value: &TelemetryConfiguration) -> bool {
     let meters = &value.meters;
     meters.len() <= MAXIMUM_METER_ENTRIES
@@ -2635,6 +2651,7 @@ fn meter_table_is_valid(value: &TelemetryConfiguration) -> bool {
             let target = match &entry.target {
                 MeterTarget::Output => entry.metric != MeterMetric::GainReduction,
                 MeterTarget::Strip(id) => valid_stable_id(id),
+                MeterTarget::Master => entry.metric == MeterMetric::GainReduction,
             };
             target
                 && meters
@@ -3098,7 +3115,7 @@ pub(crate) fn write_telemetry_configuration(
     for entry in &value.meters {
         sink.nested_spec(schema::telemetry_configuration::METER, &mut |sink| {
             let strip = match &entry.target {
-                MeterTarget::Output => None,
+                MeterTarget::Output | MeterTarget::Master => None,
                 MeterTarget::Strip(id) => Some(id),
             };
             sink.message_header(
@@ -4546,7 +4563,9 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & (1 << 11) != 0) != (has_command(0x000b) && has_event(0x8030)))
         || ((value.flags.0 & CapabilityFlags::SESSION_EVENT_STREAM.0 != 0) != session_family)
         || ((value.flags.0 & (1 << 13) != 0) != (has_command(0x0008) && has_event(0x8010)))
+        // Bit 14 means `RESPONSE_GET` and its `RESPONSE_READY` event together (#1578 D1).
         || ((value.flags.0 & (1 << 14) != 0) != has_command(0x000e))
+        || (has_command(0x000e) != has_event(0x8040))
         // `OBSERVATION_READ` and bit 15 together, and both ride the session family, since the
         // `Observe` edit that arms a tap is a transaction's (#1586 D6).
         || ((value.flags.0 & CapabilityFlags::OBSERVATION.0 != 0) != has_command(0x000f))
@@ -4572,9 +4591,12 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
 }
 fn allocated_id(id: u16, event: bool) -> bool {
     if event {
-        // `0x8002` is retired: never allocated again, never advertised (#1628).
-        matches!(id, 0x8001 | 0x8010 | 0x8011 | 0x8020 | 0x8021 | 0x8030)
-            && !crate::wire::is_retired_message_id(id)
+        // `0x8002` is retired: never allocated again, never advertised (#1628). `0x8040` is
+        // `RESPONSE_READY` (#1578).
+        matches!(
+            id,
+            0x8001 | 0x8010 | 0x8011 | 0x8020 | 0x8021 | 0x8030 | 0x8040
+        ) && !crate::wire::is_retired_message_id(id)
     } else {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
         // `0x000f` is `OBSERVATION_READ` (#1586), `0x0010` is `SPECTRUM_CONFIGURE` (#1594),

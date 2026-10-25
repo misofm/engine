@@ -193,7 +193,10 @@ given a live unmute at that block (`an_added_route_fades_in_after_its_line_fills
 route into the output, which has no lane, binds live for that plan only so it can ramp, and loses
 the fold there. A muted route, a route whose destination strip is added, a following route with
 an automated source mute and a declared discontinuity arm nothing; a removed or re-pointed route
-still steps (#1953). The frozen exported set is now 15
+still steps (#1953). A later structural transaction adopted before an added route's fade has run
+keeps it as #1392 keeps a strip's (#1877): the successor re-arms the route with its own target and
+ramp, a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never
+runs again (`a_pending_route_fade_survives_a_second_swap_on_every_width`). The frozen exported set is now 15
 `miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
 where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
 defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops
@@ -476,9 +479,10 @@ counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSE
 the frame-derived telemetry configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
 queue (#1629).
 
-**Meter batches (#1583, #1587a, #1587b, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
-table of stable targets: entry `i` (handle `i + 1`) is the output or a strip by its ID, with a
-metric (peak or gain reduction). A handle is the table's, so a structural commit never moves it.
+**Meter batches (#1583, #1587a, #1587b, #1690b, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
+table of stable targets: entry `i` (handle `i + 1`) is the output, a strip by its ID or the master
+(#1690b), with a metric (peak or gain reduction; the output takes peak only and the master gain
+reduction only, any other pair `INVALID_FIELD` at the codec). A handle is the table's, so a structural commit never moves it.
 The C ABI session owns one meter delivery from boot over the session's output meter and the
 running plan's strip meters, one post-matrix meter per strip whose queue is as deep as the output
 meter's (eight), and its echo carries the meter window in blocks (`meter_window_blocks`,
@@ -512,6 +516,15 @@ record's observation entries into the plan's attachment, and the promotion pairs
 from them (#1674's observation half, #1587b), never from a list made at preparation. A swap that
 does not carry the effect restarts its taps: an armed tap is prepared armed (#1584), and the
 strip's gain reduction is absent until the tap's first window in the new plan closes.
+The master's gain-reduction entry (#1690b) is the same record for the strip the core's `master`
+row names (`SessionState::master_strip`), resolved by ID in the one meter staging both hosts share:
+at each adopted plan, and again after a live or monitor commit that moves or clears the row, so
+it follows the row with no reconfigure (a rebuild's successor resolves it at its own first
+frame, and the plan still rendering keeps its master until then, as the browser does). With no
+master, or a master without a reading, the record has flags 0 and value 0.0; the entry stays in
+the table, and a configure with no master is accepted. The browser's `masterGrDb` reads the same
+strip's reading through `MeterFrame::master_gain_reduction` (#1690a), and the master parity row
+holds the two equal bit for bit, and absent together.
 The control thread adopts each swap when it reclaims the displaced plan, whose clock gives the
 adoption sample. The lossy meter lane holds one batch whole (256 slots; the counter-snapshot lane keeps
 two). `METER_WINDOWS_LOST` counts every closed window that reached no batch: the windows render
@@ -1374,3 +1387,27 @@ after every edit and zero render-thread allocations, `runtime::live_tests::an_ob
 and the parity row `protocol_cross_host::both_hosts_read_one_observation_tap_alike`. After a
 rebuild that carries a tapped effect the read follows the carried tap: the promotion pairs the
 carried readers from the swap block's record (#1674's observation half, #1587b).
+
+## Issue 1578 track response
+
+A strip `RESPONSE_GET` (`000e`, target 3) crosses `miso_engine_v1_submit_command` to the session
+provider, which checks it (the core's checks, `response.rate.session`, the strip, the bound of its
+event at the strip's owner count against the control frame limit and `maximum_reply_bytes`), arms
+the session's one response capture (#1577) and answers its tag; the capture's result arrives as
+one reliable `RESPONSE_READY` (`8040`) through `miso_engine_v1_dequeue_event`. No C symbol or
+struct changes; the capability report lists `8040` with `000e` under flag bit 14, and the
+capability vectors pinned in `crates/capi/src/runtime/tests.rs` re-pin for it. `SessionState::service`
+turns the delivered result into the event (`host_core::response_ready_event`, #1578 D5) and moves
+it into the protocol controller's one cell; a full reliable queue, a held cell or an outstanding
+structural transaction keeps it for the next `service`, an event the frame limit cannot carry
+becomes its `LIMIT_EXCEEDED` `response.reply_too_large` refusal, and the capture is released once
+its event's frame has reached the host. The response capture's charge
+(`host_core::response_capture_ceiling`) adds the event's member table, which is allocated while
+the result's is still held. The gates are `crates/capi/tests/response_strip.rs`:
+`end_to_end_then_removed_strip` (no event before a render; one event after one render whose curves
+and owners are bit-equal to `compose_track_response` over a `PreparedHost` of the same document;
+one event across a rebuild; `NOT_FOUND` `response.strip.removed` for a strip a superseding removal
+took), `one_in_flight_none_lost_and_replay` (`BACKPRESSURE` `response.capture.pending` with queue
+kind 8 while one is in flight; held, not lost, behind a full reliable queue; a replay returns the
+same tag and arms nothing; released after delivery) and
+`a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal`.

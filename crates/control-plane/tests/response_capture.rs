@@ -578,7 +578,12 @@ fn live(used: bench_support::alloc::Counters) -> u64 {
 ///
 /// Test value: red if the job's charge leaves out a part of the job (the collector's table or its
 /// three identities per owner), or the result's leaves out a part of the result that persists
-/// across calls (the curves, the member table, the member identities or a strip ID).
+/// across calls (the curves, the member table, the member identities or a strip ID). #1578 D4:
+/// the same capture armed by a strip `RESPONSE_GET` and delivered by `service` as its
+/// `RESPONSE_READY` event, held in the controller's cell, stays within `result_bytes` too.
+///
+/// Test value (#1578): red if the event path holds more than the result's charge, for example a
+/// delivery that keeps the result beside its event.
 #[test]
 fn a_capture_at_the_bound_stays_within_its_charge() {
     bench_support::alloc::assert_installed();
@@ -611,6 +616,88 @@ fn a_capture_at_the_bound_stays_within_its_charge() {
             .expect("a track response")
             .frequencies_hz
             .len(),
+        host_core::RESPONSE_MAXIMUM_POINTS
+    );
+
+    // #1578 D4: through the protocol path, held as the event in the controller's cell.
+    let request = protocol::ResponseGetRequest {
+        target: protocol::ResponseTarget::Strip("eq0".to_owned()),
+        grid: protocol::ResponseGrid::Logarithmic,
+        points: u32::try_from(host_core::RESPONSE_MAXIMUM_POINTS).expect("points"),
+        minimum_hz: 20.0,
+        maximum_hz: 20_000.0,
+        channels: protocol::ParameterChannel::Both,
+        sections: false,
+        overrides: Vec::new(),
+        configuration_id: None,
+        sample_rate_hz: None,
+        quantum_frames: None,
+        maximum_prepared_bytes: None,
+        maximum_state_bytes: None,
+        maximum_scratch_bytes: None,
+        maximum_automation_spans: None,
+        maximum_reply_bytes: None,
+    };
+    rig.request += 1;
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; 1 << 16];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(rig.request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Any,
+                payload: CommandPayload::ResponseGet(&request),
+            },
+            &mut bytes,
+        )
+        .expect("a request frame");
+    bytes.truncate(length);
+    rig.session.service().expect("service");
+    let mark = bench_support::alloc::current_thread_counters();
+    let length = rig.session.command(&bytes, 65_536).expect("the request");
+    let mut fields = [0_u16; 64];
+    assert!(matches!(
+        codec
+            .decode_typed_response(
+                rig.session.command_response(length),
+                &mut DecodeScratch::new(&mut fields)
+            )
+            .expect("a reply"),
+        DecodedTypedResponseFrame::Success {
+            payload: DecodedSuccessResponsePayload::ResponseResult(protocol::ResponseResult::Tag(
+                _
+            )),
+            ..
+        }
+    ));
+    rig.block();
+    rig.session.service().expect("service");
+    let held = live(bench_support::alloc::current_thread_delta_since(mark));
+    assert!(
+        held <= charge.result_bytes,
+        "the held event: {held} of {} bytes",
+        charge.result_bytes
+    );
+    let length = rig
+        .session
+        .dequeue_event(EventLane::Reliable, 65_536)
+        .expect("dequeue")
+        .expect("the event");
+    let mut fields = [0_u16; 64];
+    let event = codec
+        .decode_typed_event(
+            rig.session.command_response(length),
+            &mut DecodeScratch::new(&mut fields),
+        )
+        .expect("an event");
+    let protocol::DecodedEventPayload::ResponseReady(event) = event.payload else {
+        panic!("the RESPONSE_READY");
+    };
+    let protocol::ResponseReadyOutcome::Ready(capture) = event.outcome else {
+        panic!("a capture");
+    };
+    assert_eq!(
+        capture.frequencies_hz.len(),
         host_core::RESPONSE_MAXIMUM_POINTS
     );
 }

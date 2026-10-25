@@ -480,6 +480,63 @@ impl SessionControlProvider {
         self.response_capture.poll(model)
     }
 
+    /// Serve a strip `RESPONSE_GET` (#1578 D3): the core's checks in the core's order (an empty
+    /// override list: the codec refuses any), the session-rate rule, the strip, then the bound of
+    /// its event (`response_ready_encoded_bound` at the strip's owner count, at most the smaller of
+    /// the reply bound and `maximum_reply_bytes`), and only then [`Self::arm_response_capture`]. The
+    /// reply is the capture's tag, written after its job is in the render queue; its result arrives
+    /// as one `RESPONSE_READY`. A refusal arms nothing.
+    fn arm_strip_response(
+        &mut self,
+        model: &SessionModel,
+        strip_id: &str,
+        request: &ResponseGetRequest,
+    ) -> Result<ResponseResult, ResponseProviderError> {
+        let grid = preview_grid(request);
+        check_response_request(model.sample_rate_hz, grid, request.overrides.len(), true)
+            .map_err(query_refusal)?;
+        if request.sample_rate_hz.is_some() || request.quantum_frames.is_some() {
+            return Err(refuse(StatusCode::InvalidField, "response.rate.session"));
+        }
+        let unknown = || refuse(StatusCode::NotFound, "control.address.unknown");
+        let owners = crate::response_capture::strip_owners(model, strip_id).ok_or_else(unknown)?;
+        let bound = request
+            .maximum_reply_bytes
+            .map_or(self.maximum_reply_bytes, |bytes| {
+                self.maximum_reply_bytes
+                    .min(usize::try_from(bytes).unwrap_or(usize::MAX))
+            });
+        let points = request.points as usize;
+        if !protocol::response_ready_encoded_bound(points, request.channels, owners)
+            .is_some_and(|length| length <= bound)
+        {
+            return Err(refuse(
+                StatusCode::LimitExceeded,
+                "response.reply_too_large",
+            ));
+        }
+        let channels = ResponseChannels::from_raw(request.channels as u8)
+            .ok_or_else(|| refuse(StatusCode::Internal, "response.internal"))?;
+        let tag = self
+            .response_capture
+            .arm(model, strip_id, grid, channels)
+            .map_err(|refusal| match refusal {
+                crate::ResponseCaptureRefusal::UnknownStrip => unknown(),
+                crate::ResponseCaptureRefusal::Pending => {
+                    refuse(StatusCode::Backpressure, "response.capture.pending")
+                }
+                crate::ResponseCaptureRefusal::Grid
+                    if !(2..=crate::RESPONSE_MAXIMUM_POINTS).contains(&points) =>
+                {
+                    refuse(StatusCode::InvalidField, "response.points")
+                }
+                crate::ResponseCaptureRefusal::Grid => {
+                    refuse(StatusCode::InvalidField, "response.grid")
+                }
+            })?;
+        Ok(ResponseResult::Tag(tag))
+    }
+
     /// End a delivered capture ([`crate::ResponseCaptureClient::release`]).
     pub fn release_response_capture(&mut self) {
         self.response_capture.release();
@@ -621,6 +678,17 @@ impl SessionControlProvider {
         );
     }
 
+    /// Record the session's `transition_reprepare_refusals` count (#1397 D2 step 3): the
+    /// transition re-preparations across a withdrawn donor that were refused, each a defect. The
+    /// control plane copies it in beside `strips_restarted`; it stays 0 in a correct build.
+    pub fn set_transition_reprepare_refusals(&mut self, count: u64) {
+        set_counter(
+            &mut self.counter_snapshot,
+            CounterId::TransitionReprepareRefusals,
+            count,
+        );
+    }
+
     /// Record the session's `live_block_errors` count (#1521): the blocks render refused after
     /// the block took its live snapshot, over every plan the session adopted. The control plane
     /// copies the render-side mirror in beside `strips_restarted`; it stays 0 in a correct build.
@@ -731,7 +799,8 @@ enum CheckedTarget<'a> {
 }
 
 /// The checks every `RESPONSE_GET` meets first, whatever the endpoint: the target is a
-/// configuration or an address (the strip target is served by a later slice, #1578), then the
+/// configuration or an address (a session provider serves the strip target before this, #1578
+/// D3, so here it is `response.target.unavailable`: the session-less entry has no strip), then the
 /// core's own checks in the core's order (rate, points, override count, axis, override values), so
 /// the refusal of a request that is wrong in several ways is the same on every host. It returns the
 /// target the request names and its grid.
@@ -749,8 +818,21 @@ fn response_preflight(
             ));
         }
     };
+    let grid = preview_grid(request);
+    check_response_request(
+        sample_rate_hz,
+        grid,
+        request.overrides.len(),
+        request.overrides.iter().all(|row| row.value.is_finite()),
+    )
+    .map_err(query_refusal)?;
+    Ok((target, grid))
+}
+
+/// The axis a `RESPONSE_GET` asks for.
+fn preview_grid(request: &ResponseGetRequest) -> ResponsePreviewGrid {
     let points = request.points as usize;
-    let grid = match request.grid {
+    match request.grid {
         ResponseGrid::Linear => ResponsePreviewGrid::Linear {
             points,
             minimum_hz: request.minimum_hz,
@@ -761,15 +843,74 @@ fn response_preflight(
             minimum_hz: request.minimum_hz,
             maximum_hz: request.maximum_hz,
         },
+    }
+}
+
+/// The `RESPONSE_READY` event of one delivered capture (#1578 D5): a track response fills the
+/// capture's fields; a failure is its status (`NOT_FOUND` for a removed strip, `UNAVAILABLE` for an
+/// owner without a response, `LIMIT_EXCEEDED` for a capacity bound, `INTERNAL` otherwise) and its
+/// code. The sequence is the controller's to write; it moves every buffer and copies none.
+#[must_use]
+pub fn response_ready_event(ready: crate::ResponseReady) -> protocol::ResponseReady {
+    let outcome = match ready.result {
+        Ok(response) => protocol::ResponseReadyOutcome::Ready(protocol::TrackResponseCapture {
+            captured_sample: response.captured_sample,
+            sample_rate_hz: response.sample_rate_hz,
+            floor_db: response.floor_db,
+            frequencies_hz: response.frequencies_hz,
+            left_db: response.left_db,
+            right_db: response.right_db,
+            excluded_count: response.excluded_count,
+            members: response
+                .members
+                .into_iter()
+                .map(|member| protocol::ResponseMember {
+                    section: match member.section {
+                        crate::ResponseMemberSection::Builtins => {
+                            protocol::ResponseMemberSection::Builtins
+                        }
+                        crate::ResponseMemberSection::Console(id) => {
+                            protocol::ResponseMemberSection::Console(id.into_string())
+                        }
+                        crate::ResponseMemberSection::Inserts(id) => {
+                            protocol::ResponseMemberSection::Inserts(id.into_string())
+                        }
+                    },
+                    effect: member.native_id.into_string(),
+                    kind: match member.kind {
+                        crate::ResponseMemberKind::ParametricEq => {
+                            protocol::ResponseMemberKind::ParametricEq
+                        }
+                        crate::ResponseMemberKind::InputFilters => {
+                            protocol::ResponseMemberKind::InputFilters
+                        }
+                        crate::ResponseMemberKind::Unavailable => {
+                            protocol::ResponseMemberKind::Unavailable
+                        }
+                    },
+                    bypassed: member.bypassed,
+                    enabled_left: member.enabled_left,
+                    enabled_right: member.enabled_right,
+                    section_count: member.section_count,
+                })
+                .collect(),
+        }),
+        Err(failure) => protocol::ResponseReadyOutcome::Refused {
+            status: match failure {
+                crate::ResponseCaptureFailure::StripRemoved => StatusCode::NotFound,
+                crate::ResponseCaptureFailure::Unsupported => StatusCode::Unavailable,
+                crate::ResponseCaptureFailure::Capacity => StatusCode::LimitExceeded,
+                crate::ResponseCaptureFailure::Internal => StatusCode::Internal,
+            },
+            diagnostic: failure.code().to_owned(),
+        },
     };
-    check_response_request(
-        sample_rate_hz,
-        grid,
-        request.overrides.len(),
-        request.overrides.iter().all(|row| row.value.is_finite()),
-    )
-    .map_err(query_refusal)?;
-    Ok((target, grid))
+    protocol::ResponseReady {
+        sequence: 0,
+        request_tag: ready.tag,
+        strip_id: ready.strip_id.into_string(),
+        outcome,
+    }
 }
 
 /// Serve one `RESPONSE_GET` for a session endpoint: the rate and quantum are the committed
@@ -1272,6 +1413,9 @@ impl ControlProvider for SessionControlProvider {
         model: &SessionModel,
         request: &ResponseGetRequest,
     ) -> Result<ResponseResult, ResponseProviderError> {
+        if let ResponseTarget::Strip(strip_id) = &request.target {
+            return self.arm_strip_response(model, strip_id, request);
+        }
         serve_response(self.maximum_reply_bytes, model, request)
     }
 
@@ -3509,6 +3653,66 @@ mod tests {
         )
         .expect("provider");
         (provider, clock)
+    }
+
+    /// #1578 D3: a strip `RESPONSE_GET` meets the core's checks, the session-rate rule, the
+    /// strip and its event bound before it arms; each refusal arms nothing, so the first request
+    /// that passes is tag 1; that one answers its tag, and the next, while the capture is in
+    /// flight, is `BACKPRESSURE` `response.capture.pending`.
+    ///
+    /// Test value: red if a refused strip request arms a capture (leaving a tag no event will
+    /// answer), if the event bound is not checked against `maximum_reply_bytes` before arming, or if
+    /// a refusal maps to the wrong status or code.
+    #[test]
+    fn a_strip_request_is_checked_before_it_arms() {
+        let model = nine_track();
+        let (mut provider, _clock) = provider_of(&model);
+        let strip = |strip: &str| ResponseGetRequest {
+            target: ResponseTarget::Strip(strip.to_owned()),
+            ..response_request()
+        };
+        let mut refusal = |request: &ResponseGetRequest| {
+            let error = provider.response_get(&model, request).expect_err("refused");
+            (error.status, error.code)
+        };
+        let mut points = strip("eq0");
+        points.points = 1;
+        assert_eq!(
+            refusal(&points),
+            (StatusCode::InvalidField, "response.points")
+        );
+        let mut rate = strip("eq0");
+        rate.sample_rate_hz = Some(RATE);
+        assert_eq!(
+            refusal(&rate),
+            (StatusCode::InvalidField, "response.rate.session")
+        );
+        assert_eq!(
+            refusal(&strip("nope")),
+            (StatusCode::NotFound, "control.address.unknown")
+        );
+        let mut small = strip("eq0");
+        let owners = crate::response_capture::strip_owners(&model, "eq0").expect("eq0");
+        let bound = protocol::response_ready_encoded_bound(64, ParameterChannel::Both, owners)
+            .expect("a bound");
+        small.maximum_reply_bytes = Some(u32::try_from(bound - 1).expect("bound"));
+        assert_eq!(
+            refusal(&small),
+            (StatusCode::LimitExceeded, "response.reply_too_large")
+        );
+        small.maximum_reply_bytes = Some(u32::try_from(bound).expect("bound"));
+        assert_eq!(
+            provider.response_get(&model, &small),
+            Ok(ResponseResult::Tag(1)),
+            "a bound that fits arms tag 1: no refusal armed"
+        );
+        let error = provider
+            .response_get(&model, &strip("eq1"))
+            .expect_err("pending");
+        assert_eq!(
+            (error.status, error.code),
+            (StatusCode::Backpressure, "response.capture.pending")
+        );
     }
 
     fn page(

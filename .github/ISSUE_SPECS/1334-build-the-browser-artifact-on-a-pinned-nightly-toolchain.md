@@ -65,7 +65,7 @@ shape (no atomics, unshared memory), so its risk is reviewed apart from threadin
   `+simd128`, the strip flag and both remaps, and add
   `--remap-path-prefix=$(RUSTUP_TOOLCHAIN="$channel" rustc --print sysroot)=/rustc-sysroot`,
   because build-std compiles std from the sysroot's `rust-src` and embeds that absolute path. No
-  `+atomics`, no shared or imported memory: that is #1332. The `parameter-metadata` run stays on
+  `+atomics`, no shared or imported memory: that is #1380 (a slice of #1332). The `parameter-metadata` run stays on
   stable.
 - D3. **Install everywhere the builder runs.** `artifact`, `artifact-identity`, `sdk` and
   `wasm-guests` in `qualification.yml`, and the qualify step in `npm-publish.yml`, install the

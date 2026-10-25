@@ -203,6 +203,12 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   C calls themselves (engine create and destroy, compile, command submit, session and plan
   destroy), each with the handle and storage contract stated beside it; it installs no allocator
   and calls no render entry.
+- `crates/capi/tests/response_strip.rs` (#1578): sends a strip `RESPONSE_GET` through the
+  exported `miso_engine_v1_submit_command` and reads its `RESPONSE_READY` through
+  `miso_engine_v1_dequeue_event`, and compares the curves with the core's own. Its unsafe is the
+  C calls themselves (engine create and destroy, compile, command submit, render, service, event
+  dequeue, session and plan destroy), each with the handle and storage contract stated beside it;
+  it installs no allocator.
 - `crates/capi/tests/session_replace.rs` (#1386): sends `SESSION_REPLACE` through the exported
   `miso_engine_v1_submit_document_command` and the equal transaction through
   `miso_engine_v1_submit_command` on a twin, and compares replies, events and rendered blocks.
@@ -478,6 +484,10 @@ names a kernel, and costs build time and artifact size, never speed.
   `tools/bench`. In a release artifact each of those is a diagnostic that no longer
   fires; none of them is load-bearing for a call that does not panic, so behaviour on a passing host
   is unchanged.
+- `rebuild_superseding` in `crates/control-plane/src/control.rs` (#2010) runs a rebuild under
+  `catch_unwind`, republishes a withdrawn candidate the rebuild did not take, then resumes the
+  panic. It runs on the control thread only, never in render. Under `panic = "abort"` nothing
+  unwinds, so it changes nothing in a release build.
 - Embedders must read this as: **the C ABI does not convert a panic into `RESULT_INTERNAL` in a
   release build of `libcapi`.** A panic is an engine defect, and unwinding across a C or
   Wasm frame is undefined by either ABI, so aborting is the honest contract. `RESULT_INTERNAL` stays

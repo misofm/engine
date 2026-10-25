@@ -4168,6 +4168,15 @@ pub extern "C" fn miso_engine_web_v1_source_frames(handle: u32, index: u32) -> u
     })
 }
 
+/// Return the per-source ring frames the boot resolved, or zero for an invalid handle (#1406b).
+///
+/// A zero `sourceRingFrames` boot option selects the engine's default ring; this is the one place
+/// a host reads the ring it got, so no host holds a copy of the rule.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_resolved_source_ring_frames(handle: u32) -> u32 {
+    render_locked(|| with_host(handle, 0, AudioWorkletEngineHost::source_ring_frames))
+}
+
 /// Return the stable status address or zero for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_status_ptr(handle: u32) -> u32 {
@@ -5302,6 +5311,30 @@ mod spectrum_ffi_tests {
             .hop_frames();
         assert_eq!(stream_hop_metadata().hop_frames, expected);
         assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    }
+
+    /// Issue #1406b: the export answers the ring the boot resolved, the engine's default ring on a
+    /// zero override and the override itself otherwise, and zero without a live handle.
+    #[test]
+    fn source_ring_frames_export_reports_the_resolved_ring() {
+        no_live_host();
+        assert_eq!(miso_engine_web_v1_resolved_source_ring_frames(0), 0);
+        for (override_frames, expected) in [
+            (0, crate::default_source_ring_frames(48_000, 128)),
+            (1_280, 1_280),
+        ] {
+            let document = stage_ordinary_output_boot();
+            BOOT_STAGING
+                .with(|slot| slot.borrow_mut().options.source_ring_frames = override_frames);
+            let handle = miso_engine_web_v1_boot(document.len() as u32);
+            assert_ne!(handle, 0, "boot with ring override {override_frames}");
+            assert_eq!(
+                miso_engine_web_v1_resolved_source_ring_frames(handle),
+                expected
+            );
+            assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+            assert_eq!(miso_engine_web_v1_resolved_source_ring_frames(handle), 0);
+        }
     }
 
     #[test]

@@ -4,44 +4,55 @@ import type { CommandReasonName } from "../generated/catalog.ts";
 import {
   StructView,
   constantValue,
-  defaultSourceRingFrames,
   structBytes,
   writeBootOptions,
 } from "./abi.ts";
 import type { BootOptions } from "./abi.ts";
 import { MisoEngineAsset } from "./asset.ts";
-import { controlCallFailure } from "./control-frame.ts";
+import { controlCallFailure, encodeRevisionProbe, malformed } from "./control-frame.ts";
 import { readControlStripOrderSync } from "./control-list.ts";
 import type { ControlStripOrder } from "./control-list.ts";
 import { ControlRequestIds } from "./control-queue.ts";
 import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from "./errors.ts";
-import { TrackResponseModule } from "./live-response.ts";
+import { TrackResponseRequester } from "./live-response.ts";
 import { watermarkSnapshot } from "./session-edit.ts";
 import type { WatermarkSnapshot } from "./session-edit.ts";
-import type {
-  TrackResponseObservedState,
-  TrackResponseQuery,
-  TrackResponseRead,
-  TrackResponseResult,
-} from "./live-response.ts";
+import type { TrackResponseQuery, TrackResponseResult } from "./live-response.ts";
+import { decodeCapabilitiesReply } from "./protocol-messages.ts";
 import {
-  SpectrumModule,
   cloneSpectrumCollection,
   cloneSpectrumQuery,
-  spectrumChannelsRaw,
-  spectrumTargetId,
-  spectrumTargetRaw,
   stageSpectrumCollectionRequest,
   stageSpectrumRequest,
 } from "./spectrum.ts";
 import type {
   SpectrumCollection,
+  SpectrumConfigureOptions,
+  SpectrumConfigured,
+  SpectrumHopFrames,
   SpectrumQuery,
   SpectrumResult,
   SpectrumStreamSelection,
   SpectrumStreamRead,
   SpectrumStreamStart,
 } from "./spectrum.ts";
+import {
+  decodeSpectrumCaptureReply,
+  decodeSpectrumConfiguredReply,
+  decodeSpectrumStreamReply,
+  encodeSpectrumCommand,
+} from "./spectrum-frame.ts";
+import {
+  spectrumCallResult,
+  spectrumConfigureRequest,
+  spectrumConfiguredOf,
+  spectrumMetadataOf,
+  spectrumRefusalError,
+  spectrumResultOfStream,
+  spectrumResultOfWindow,
+  spectrumSelection,
+} from "./spectrum.ts";
+import type { SpectrumFrameReply, SpectrumFrameRequest } from "./spectrum-frame.ts";
 import {
   decodeObservationRows,
   enrichObservationMap,
@@ -85,20 +96,16 @@ type ExportTable = Record<ExportName, (...args: (number | bigint)[]) => number |
   readonly memory: WebAssembly.Memory;
 };
 
-const SPECTRUM_HOP_CAPABILITY = "miso_engine_web_v1_spectrum_hop_capability";
-const SPECTRUM_HOP_BOOT = "miso_engine_web_v1_boot_with_spectrum_hop";
+// The browser's spectrum-hop exports: the SDK no longer calls them (#1596 D2, the hop rides
+// `SPECTRUM_CONFIGURE`), so a module that lacks them stays valid; #1597 deletes them.
 const OPTIONAL_ADDITIVE_EXPORTS: ReadonlySet<string> = new Set([
-  SPECTRUM_HOP_CAPABILITY,
-  SPECTRUM_HOP_BOOT,
+  "miso_engine_web_v1_spectrum_hop_capability",
+  "miso_engine_web_v1_boot_with_spectrum_hop",
 ]);
-type SpectrumHopFrames = 256 | 512 | 1024 | 2048;
 type ExportFunction = (...args: (number | bigint)[]) => number | bigint;
-
 function exportsOf(instance: WebAssembly.Instance): ExportTable {
   const table = instance.exports as Record<string, unknown>;
   for (const name of ABI_LAYOUT.exports) {
-    // These are additive spectrum-hop exports. An older asset remains valid for the legacy boot
-    // path and is checked only when a caller explicitly requests the prepared spectrum hop.
     if (OPTIONAL_ADDITIVE_EXPORTS.has(name)) continue;
     if (typeof table[name] !== "function") {
       throw new MisoEngineError(`the engine asset does not export ${name}`, {
@@ -129,48 +136,16 @@ function optionalExport(exports: ExportTable, name: string): ExportFunction | un
   }
 }
 
-function spectrumHopRefusal(name: string, reason: string): MisoEngineError {
-  return new MisoEngineError(
-    `the engine asset cannot honor an explicit spectrum hop: ${reason}`,
-    {
-      phase: "asset",
-      code: "abiMismatch",
-      result: constantValue("resultCodes", "abiMismatch"),
-      diagnostics: [{ code: "sdk.asset.capability", path: name }],
-    },
-  );
-}
+/** Capability flag bit 16 of `CAPABILITIES_GET` (#1594 D10): the core serves the spectrum frames. */
+const CAPABILITY_SPECTRUM = 1n << 16n;
 
-function requireSpectrumHopCapability(
-  exports: ExportTable,
-  spectrumHopFrames: SpectrumHopFrames | undefined,
-): ExportFunction | undefined {
-  if (spectrumHopFrames === undefined) return undefined;
-
-  const capability = optionalExport(exports, SPECTRUM_HOP_CAPABILITY);
-  if (capability === undefined) {
-    throw spectrumHopRefusal(SPECTRUM_HOP_CAPABILITY, "the capability export is missing");
-  }
-  let value: number | bigint;
-  try {
-    value = capability();
-  } catch (error) {
-    throw spectrumHopRefusal(
-      SPECTRUM_HOP_CAPABILITY,
-      `the capability export could not be queried: ${(error as Error).message}`,
-    );
-  }
-  if (value !== 1) {
-    throw spectrumHopRefusal(
-      SPECTRUM_HOP_CAPABILITY,
-      `the capability export returned ${String(value)} instead of 1`,
-    );
-  }
-  const spectrumHopBoot = optionalExport(exports, SPECTRUM_HOP_BOOT);
-  if (spectrumHopBoot === undefined) {
-    throw spectrumHopRefusal(SPECTRUM_HOP_BOOT, "the spectrum-hop boot export is missing");
-  }
-  return spectrumHopBoot;
+function spectrumCapabilityRefusal(reason: string): MisoEngineError {
+  return new MisoEngineError(`the engine cannot serve the spectrum frames: ${reason}`, {
+    phase: "asset",
+    code: "unsupported",
+    result: constantValue("resultCodes", "unsupported"),
+    diagnostics: [{ code: "sdk.asset.capability", path: "CAPABILITIES_GET.flags.spectrum" }],
+  });
 }
 
 function validateSpectrumHopFrames(value: unknown): SpectrumHopFrames | undefined {
@@ -179,6 +154,19 @@ function validateSpectrumHopFrames(value: unknown): SpectrumHopFrames | undefine
     return value;
   }
   throw new MisoUsageError("spectrumHopFrames must be one of 256, 512, 1024, or 2048");
+}
+
+/** The answer of a spectrum call on a disposed engine: there is no session to ask. */
+function unsupportedCall(): EngineCallResult {
+  return Object.freeze({ ok: false, result: constantValue("resultCodes", "unsupported"), code: "unsupported" });
+}
+
+function spectrumKey(target: SpectrumQuery["target"], channels: string): string {
+  return JSON.stringify([target.kind, target.kind === "output" ? target.outputId : target.trackId, channels]);
+}
+
+function wantsSpectrum(snapshot: BootSnapshot): boolean {
+  return snapshot.spectrumQuery !== undefined || snapshot.spectrumCollection !== undefined;
 }
 
 interface BootSnapshot {
@@ -226,7 +214,7 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
 export interface SessionShape {
   readonly sampleRateHz: number;
   readonly quantumFrames: number;
-  /** The ring the engine derived, from the published rule applied to the reported shape. */
+  /** The ring the engine resolved at boot, read back through its export (#1406b). */
   readonly sourceRingFrames: number;
   readonly backend: "scalar" | "simd128";
   readonly sources: readonly SourceShape[];
@@ -334,6 +322,9 @@ export interface MeterFrame {
   readonly submixGrDb: Float32Array;
 }
 
+/** The error of a call on a disposed engine, and of a track response query it left pending. */
+const DISPOSED = "this engine was disposed; boot a new one";
+
 /** A staged-and-booted engine instance. */
 export class WasmBoundary {
   readonly #exports: ExportTable;
@@ -355,8 +346,7 @@ export class WasmBoundary {
   readonly #stripOrders = new Map<bigint, ControlStripOrder>();
   /** Meter windows dropped because no list named their structure epoch. */
   #unnamedMeterWindows = 0n;
-  #trackResponse: TrackResponseModule | undefined;
-  #spectrum: SpectrumModule | undefined;
+  #trackResponse: TrackResponseRequester | undefined;
   #spectrumQuery: SpectrumQuery | undefined;
   #spectrumCollection: SpectrumCollection | undefined;
   #spectrumActiveQuery: SpectrumQuery | undefined;
@@ -392,8 +382,8 @@ export class WasmBoundary {
   ): Promise<WasmBoundary> {
     const snapshot = snapshotBootOptions(options);
     const exports = exportsOf(await asset.instantiate());
-    const staged = stage(exports, document, snapshot.options, snapshot.spectrumHopFrames);
-    return new WasmBoundary(
+    const staged = stage(exports, document, snapshot.options);
+    const boundary = new WasmBoundary(
       exports,
       staged.handle,
       staged.optionBytes,
@@ -401,6 +391,14 @@ export class WasmBoundary {
       snapshot.spectrumQuery,
       snapshot.spectrumCollection,
     );
+    try {
+      if (wantsSpectrum(snapshot)) boundary.#requireSpectrumCapability();
+      boundary.#configureBootSpectrum(snapshot);
+    } catch (error) {
+      boundary.dispose();
+      throw error;
+    }
+    return boundary;
   }
 
   /**
@@ -416,26 +414,68 @@ export class WasmBoundary {
    */
   reboot(document: Uint8Array, options: BootOptions = {}): void {
     const snapshot = snapshotBootOptions(options);
-    // Capability refusal must happen while the current handle is still live. The validated
-    // additive export is passed into `stage`, so this preflight also avoids a second probe after
-    // the current session has been disposed.
-    const spectrumHopBoot = requireSpectrumHopCapability(this.#exports, snapshot.spectrumHopFrames);
+    // A capability refusal happens while the current handle is still live: the module, and so its
+    // answer, is the one the next session boots on.
+    if (wantsSpectrum(snapshot) && this.#handle !== 0) this.#requireSpectrumCapability();
     this.dispose();
     this.#stripOrder = undefined;
     this.#stripOrders.clear();
-    const staged = stage(
-      this.#exports,
-      document,
-      snapshot.options,
-      snapshot.spectrumHopFrames,
-      spectrumHopBoot,
-    );
+    const staged = stage(this.#exports, document, snapshot.options);
     this.#handle = staged.handle;
     this.#optionBytes = staged.optionBytes;
     this.#metersAttached = (snapshot.options.liveControls?.meterBlocks ?? 0) > 0;
     this.#spectrumQuery = snapshot.spectrumQuery;
     this.#spectrumCollection = snapshot.spectrumCollection;
     this.#spectrumActiveQuery = snapshot.spectrumQuery;
+    try {
+      if (wantsSpectrum(snapshot)) this.#requireSpectrumCapability();
+      this.#configureBootSpectrum(snapshot);
+    } catch (error) {
+      this.dispose();
+      throw error;
+    }
+  }
+
+  /** Refuse, with `sdk.asset.capability`, an engine whose `CAPABILITIES_GET` lacks flag bit 16. */
+  #requireSpectrumCapability(): void {
+    const requestId = this.#controlRequestIds.next();
+    const reply = decodeCapabilitiesReply(this.controlFrame(encodeRevisionProbe(requestId)));
+    if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+    if (!reply.ok) throw spectrumCapabilityRefusal(`CAPABILITIES_GET was refused with ${reply.status}`);
+    if ((reply.value.flags & CAPABILITY_SPECTRUM) === 0n) {
+      throw spectrumCapabilityRefusal("capability flag bit 16 is clear");
+    }
+  }
+
+  /**
+   * D2 of #1596 for the headless engine: one `SPECTRUM_CONFIGURE` of the boot's taps with the
+   * policy's hop. The boot staged the same taps, so the first plan carries them and the reply
+   * reports `adoptedEpoch === configuredEpoch` at once: an equal configuration changes nothing, and
+   * a hop retunes the taps without a plan (#1594 D4). The headless engine renders only when its
+   * caller does, so a configuration the first plan did not carry could not be adopted before boot
+   * returns; that is why the boot still stages the taps until #1597.
+   */
+  #configureBootSpectrum(snapshot: BootSnapshot): void {
+    const configuration = snapshot.spectrumCollection ?? snapshot.spectrumQuery;
+    if (configuration === undefined) return;
+    const hopFrames = snapshot.spectrumHopFrames;
+    const { request } = spectrumConfigureRequest(configuration, hopFrames === undefined ? undefined : { hopFrames });
+    const reply = this.#spectrumCommand(request, decodeSpectrumConfiguredReply);
+    if (!reply.ok) throw spectrumRefusalError("the engine refused the boot spectrum configuration", reply, "boot");
+    if (reply.value.adoptedEpoch !== reply.value.configuredEpoch) {
+      throw malformed("the boot spectrum configuration was not carried by the first plan");
+    }
+  }
+
+  /** Send one spectrum command through the control entry and decode its reply. */
+  #spectrumCommand<T>(
+    request: SpectrumFrameRequest,
+    decode: (bytes: Uint8Array) => SpectrumFrameReply<T>,
+  ): SpectrumFrameReply<T> {
+    const requestId = this.#controlRequestIds.next();
+    const reply = decode(this.controlFrame(encodeSpectrumCommand(requestId, request)));
+    if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+    return reply;
   }
 
   /** The exact bytes written to the options block, for the scratch/worklet equality rule. */
@@ -449,7 +489,7 @@ export class WasmBoundary {
 
   #live(): number {
     if (this.#handle === 0) {
-      throw new MisoUsageError("this engine was disposed; boot a new one");
+      throw new MisoUsageError(DISPOSED);
     }
     return this.#handle;
   }
@@ -513,9 +553,9 @@ export class WasmBoundary {
     return Object.freeze({
       sampleRateHz,
       quantumFrames,
-      // The ring is an input word with no readback export, so it is *derived* from the rule the
-      // generated document publishes, applied to the shape the boot just reported.
-      sourceRingFrames: defaultSourceRingFrames(sampleRateHz, quantumFrames),
+      // The ring the boot resolved, read back from the engine (#1406b): an override as given, or on
+      // a zero override the engine's default ring.
+      sourceRingFrames: Number(this.#exports.miso_engine_web_v1_resolved_source_ring_frames(handle)),
       backend: backendValue === constantValue("backends", "simd128") ? "simd128" : "scalar",
       sources: Object.freeze(sources),
       tracks,
@@ -866,233 +906,136 @@ export class WasmBoundary {
     );
   }
 
-  /** Capture and evaluate one immutable selected-track response at the current render boundary. */
-  queryTrackResponse(request: TrackResponseQuery): TrackResponseResult {
-    this.#trackResponse ??= new TrackResponseModule(this.#exports);
-    return this.#trackResponse.queryActive(request, this.#live());
+  /**
+   * The response of one track, as a C ABI host reads it (#1579a D1, D2): a strip `RESPONSE_GET`
+   * through the control entry, then the `RESPONSE_READY` with its tag from the event lane. The core
+   * captures in its render step, so the promise settles after the next `render()`, at the latest
+   * when the request deadline passes. Queries run one at a time, in call order.
+   * A query made from inside an event callback sends its frame there, which runs a nested event
+   * drain: the events still queued reach the other listeners before the callback returns.
+   */
+  queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult> {
+    try {
+      this.#live();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    this.#trackResponse ??= new TrackResponseRequester({
+      send: (frame) => this.controlFrame(frame),
+      onControlEvent: (listener) => this.onControlEvent(listener),
+      nextRequestId: () => this.#controlRequestIds.next(),
+    });
+    return this.#trackResponse.query(request);
   }
 
-  /** Internal managed read: capture state first and evaluate only after a semantic change. */
-  queryTrackResponseIfChanged(
-    request: TrackResponseQuery,
-    previousState?: TrackResponseObservedState,
-  ): TrackResponseRead {
-    this.#trackResponse ??= new TrackResponseModule(this.#exports);
-    return this.#trackResponse.queryActiveIfChanged(request, this.#live(), previousState);
+  /**
+   * Set, change or remove the spectrum taps of the running session (`SPECTRUM_CONFIGURE`, #1596
+   * D5). A change of taps prepares a replacement plan, adopted at a later render block: the reply
+   * reports `rebuild` and the epochs, and the taps are in effect once a spectrum reply reports
+   * `adoptedEpoch === configuredEpoch`. A core refusal throws `MisoEngineError` whose
+   * `diagnosticCode` is the core's code (`spectrum.target.unknown`, `spectrum.budget`, ...).
+   */
+  configureSpectrum(
+    configuration: SpectrumQuery | SpectrumCollection,
+    options?: SpectrumConfigureOptions,
+  ): SpectrumConfigured {
+    this.#live();
+    const { request, query, collection } = spectrumConfigureRequest(configuration, options);
+    const reply = this.#spectrumCommand(request, decodeSpectrumConfiguredReply);
+    if (!reply.ok) throw spectrumRefusalError("the engine refused the spectrum configuration", reply);
+    this.#spectrumQuery = query;
+    this.#spectrumCollection = collection;
+    const active = this.#spectrumActiveQuery;
+    // A collection keeps the selection of an entry it still holds (#1594 D6); a single form selects
+    // its one entry.
+    this.#spectrumActiveQuery = query ?? (active !== undefined && collection !== undefined
+      && collection.entries.some((entry) =>
+        spectrumKey(entry.target, entry.channels ?? "both") === spectrumKey(active.target, active.channels ?? "both"))
+      ? active : undefined);
+    return spectrumConfiguredOf(reply.value);
   }
 
-  /** Arm the one prepared spectrum boundary for its next complete window. */
+  /** Arm the selected spectrum capture for its next complete window (`SPECTRUM_CAPTURE` arm). */
   armSpectrum(): EngineCallResult {
-    const query = this.#spectrumActiveQuery;
-    if (query === undefined) {
-      return Object.freeze({ ok: false, result: constantValue("resultCodes", "unsupported"), code: "unsupported" });
-    }
-    const result = Number(this.#exports.miso_engine_web_v1_spectrum_arm(this.#live()));
-    return Object.freeze({
-      ok: result === constantValue("resultCodes", "ok"),
-      result,
-      code: resultName(result, "call"),
-    });
+    if (this.#handle === 0) return unsupportedCall();
+    return spectrumCallResult(this.#spectrumCommand({ op: "capture", capture: "arm" }, decodeSpectrumCaptureReply));
   }
 
-  /** Atomically select one exact target and channel mask from the prepared collection. */
+  /** Select one exact entry of the configured collection (`SPECTRUM_CAPTURE` select). */
   selectSpectrum(query: SpectrumQuery): EngineCallResult {
-    const collection = this.#spectrumCollection;
-    if (collection === undefined) {
-      return Object.freeze({ ok: false, result: constantValue("resultCodes", "unsupported"), code: "unsupported" });
-    }
-    const selected = cloneSpectrumQuery(query);
-    const channels = spectrumChannelsRaw(selected.channels);
-    const targetKey = JSON.stringify(selected.target);
-    const requestedChannels = selected.channels ?? "both";
-    const prepared = collection.entries.some((entry) =>
-      JSON.stringify(entry.target) === targetKey
-      && (entry.channels ?? "both") === requestedChannels);
-    if (!prepared) {
-      return Object.freeze({ ok: false, result: constantValue("resultCodes", "invalidArgument"), code: "invalidArgument" });
-    }
-    const id = new TextEncoder().encode(spectrumTargetId(selected.target));
-    const pointer = Number(this.#exports.miso_engine_web_v1_spectrum_target_id_ptr());
-    const capacity = Number(this.#exports.miso_engine_web_v1_spectrum_target_id_capacity());
-    if (pointer <= 0 || id.byteLength > capacity) {
-      throw new MisoEngineError("the engine returned insufficient spectrum selection staging", {
-        phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-      });
-    }
-    new Uint8Array(this.#exports.memory.buffer, pointer, id.byteLength).set(id);
-    const result = Number(this.#exports.miso_engine_web_v1_spectrum_select(
-      this.#live(), spectrumTargetRaw(selected.target), channels, id.byteLength,
-    ));
-    if (result === constantValue("resultCodes", "ok")) this.#spectrumActiveQuery = selected;
-    return Object.freeze({
-      ok: result === constantValue("resultCodes", "ok"),
-      result,
-      code: resultName(result, "call"),
-    });
+    if (this.#handle === 0) return unsupportedCall();
+    const selected = spectrumSelection(query);
+    const reply = this.#spectrumCommand({
+      op: "capture",
+      capture: "select",
+      target: selected.target,
+      channels: selected.channels ?? "both",
+    }, decodeSpectrumCaptureReply);
+    if (reply.ok) this.#spectrumActiveQuery = selected;
+    return spectrumCallResult(reply);
   }
 
-  /** Atomically update the active collection entry and smoothing profile. */
+  /**
+   * Select one exact entry and set the running stream's smoothing (`SPECTRUM_STREAM` select): the
+   * core restarts the stream on the entry and reports its metadata.
+   */
   selectSpectrumStream(query: SpectrumQuery, smoothingMs: number): SpectrumStreamSelection {
-    const collection = this.#spectrumCollection;
-    if (collection === undefined) {
-      return Object.freeze({
-        ok: false,
-        result: constantValue("resultCodes", "unsupported"),
-        code: "unsupported",
-      });
-    }
-    const selected = cloneSpectrumQuery(query);
-    const channels = spectrumChannelsRaw(selected.channels);
-    const targetKey = JSON.stringify(selected.target);
-    const requestedChannels = selected.channels ?? "both";
-    const prepared = collection.entries.some((entry) =>
-      JSON.stringify(entry.target) === targetKey
-      && (entry.channels ?? "both") === requestedChannels);
-    if (!prepared) {
-      return Object.freeze({
-        ok: false,
-        result: constantValue("resultCodes", "invalidArgument"),
-        code: "invalidArgument",
-      });
-    }
-    const id = new TextEncoder().encode(spectrumTargetId(selected.target));
-    const pointer = Number(this.#exports.miso_engine_web_v1_spectrum_target_id_ptr());
-    const capacity = Number(this.#exports.miso_engine_web_v1_spectrum_target_id_capacity());
-    if (pointer <= 0 || id.byteLength > capacity) {
-      throw new MisoEngineError("the engine returned insufficient spectrum selection staging", {
-        phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-      });
-    }
-    new Uint8Array(this.#exports.memory.buffer, pointer, id.byteLength).set(id);
-    const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_select(
-      this.#live(), spectrumTargetRaw(selected.target), channels, id.byteLength, smoothingMs,
-    ));
-    if (result !== constantValue("resultCodes", "ok")) {
-      return Object.freeze({ ok: false, result, code: resultName(result, "call") });
-    }
-    const metadata = this.#spectrumModule().streamMetadata(selected);
+    if (this.#handle === 0) return unsupportedCall();
+    const selected = spectrumSelection(query);
+    const reply = this.#spectrumCommand({
+      op: "stream",
+      stream: "select",
+      target: selected.target,
+      channels: selected.channels ?? "both",
+      smoothingMs,
+    }, decodeSpectrumStreamReply);
+    if (!reply.ok) return spectrumCallResult(reply);
     this.#spectrumActiveQuery = selected;
-    return Object.freeze({
-      ok: true,
-      result,
-      code: resultName(result, "call"),
-      metadata,
-    });
+    return Object.freeze({ ...spectrumCallResult(reply), metadata: spectrumMetadataOf(reply.value) });
   }
 
-  /** Read and analyze a completed spectrum window; `undefined` means the fixed window is pending. */
+  /** Read the completed one-shot window, analyzed; `undefined` means it is still pending. */
   readSpectrum(): SpectrumResult | undefined {
-    const query = this.#spectrumActiveQuery;
-    if (query === undefined) throw new MisoUsageError("this engine has no prepared spectrum boundary");
-    const result = Number(this.#exports.miso_engine_web_v1_spectrum_read(
-      this.#live(),
-      spectrumChannelsRaw(query.channels),
-    ));
-    if (result === constantValue("resultCodes", "backpressure")) return undefined;
-    if (result !== constantValue("resultCodes", "ok")) {
-      throw new MisoEngineError("the engine refused the spectrum capture read", {
-        phase: result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
-        code: resultName(result, "call"),
-        result,
-      });
-    }
-    this.#spectrum ??= new SpectrumModule(this.#exports);
-    return this.#spectrum.analyzeCurrent(query);
+    if (this.#handle === 0) throw new MisoUsageError("this engine has no prepared spectrum boundary: it was disposed");
+    const reply = this.#spectrumCommand({
+      op: "capture",
+      capture: "read",
+      channels: this.#spectrumActiveQuery?.channels ?? "both",
+    }, decodeSpectrumCaptureReply);
+    if (!reply.ok) throw spectrumRefusalError("the engine refused the spectrum capture read", reply, "lifecycle");
+    if (reply.value.status === "pending") return undefined;
+    if (reply.value.window === undefined) throw malformed("a spectrum read answered done");
+    return spectrumResultOfWindow(reply.value.window);
   }
 
-  /** Start the managed continuous spectrum stream for the prepared boundary. */
+  /** Start the continuous stream on the selected entry (`SPECTRUM_STREAM` start). */
   startSpectrumStream(smoothingMs = 100, _query?: SpectrumQuery): SpectrumStreamStart {
-    const query = _query ?? this.#spectrumActiveQuery;
-    if (query === undefined) {
-      throw new MisoUsageError("this engine has no prepared spectrum boundary");
-    }
-    const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_start(
-      this.#live(), smoothingMs,
-    ));
-    const metadata = this.#spectrumModule().streamMetadata(query);
-    return Object.freeze({
-      ok: result === constantValue("resultCodes", "ok"),
-      result,
-      code: resultName(result, "call"),
-      metadata,
-    });
+    this.#live();
+    const reply = this.#spectrumCommand({ op: "stream", stream: "start", smoothingMs }, decodeSpectrumStreamReply);
+    if (!reply.ok) throw spectrumRefusalError("the engine refused the spectrum stream start", reply);
+    return Object.freeze({ ...spectrumCallResult(reply), metadata: spectrumMetadataOf(reply.value) });
   }
 
-  /** Read and analyze one managed stream window, or return its explicit availability state. */
-  readSpectrumStream(queryOverride?: SpectrumQuery): SpectrumStreamRead {
-    const query = queryOverride ?? this.#spectrumActiveQuery;
-    if (query === undefined) {
-      throw new MisoUsageError("this engine has no prepared spectrum boundary");
-    }
-    const prepared = this.#spectrumQuery;
-    const collection = this.#spectrumCollection;
-    if (prepared !== undefined) {
-      const preparedTarget = JSON.stringify(prepared.target);
-      if (preparedTarget !== JSON.stringify(query.target)
-          || (prepared.channels ?? "both") !== (query.channels ?? "both")) {
-        throw new MisoUsageError("the spectrum stream query differs from the prepared boundary");
-      }
-      const preparedMaximum = prepared.spectrumLimits?.maximumCaptureBytes
-        ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
-      const requestedMaximum = query.spectrumLimits?.maximumCaptureBytes ?? preparedMaximum;
-      if (!Number.isSafeInteger(requestedMaximum) || requestedMaximum < 1 || requestedMaximum > preparedMaximum) {
-        throw new MisoUsageError("the spectrum stream capture limit exceeds the prepared bound");
-      }
-    } else if (collection !== undefined) {
-      const requestedChannels = query.channels ?? "both";
-      const preparedEntry = collection.entries.some((entry) =>
-        JSON.stringify(entry.target) === JSON.stringify(query.target)
-        && (entry.channels ?? "both") === requestedChannels);
-      if (!preparedEntry) throw new MisoUsageError("the spectrum stream query differs from the prepared collection");
-    }
-    const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_read(this.#live()));
-    const metadata = this.#spectrumModule().streamMetadata(query);
-    const backpressure = constantValue("resultCodes", "backpressure");
-    const renderRejected = constantValue("resultCodes", "renderRejected");
-    const ok = constantValue("resultCodes", "ok");
-    if (result === backpressure || result === renderRejected) {
-      return Object.freeze({ metadata });
-    }
-    if (result !== ok) {
-      throw new MisoEngineError("the engine refused the spectrum stream read", {
-        phase: result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
-        code: resultName(result, "call"),
-        result,
-      });
-    }
-    if (metadata.status !== "ready") return Object.freeze({ metadata });
-    return this.#spectrumModule().analyzeStreamCurrent(query);
+  /** Read the stream once: its metadata, and with `ready` the smoothed window (`SPECTRUM_STREAM` read). */
+  readSpectrumStream(_query?: SpectrumQuery): SpectrumStreamRead {
+    this.#live();
+    const reply = this.#spectrumCommand({ op: "stream", stream: "read" }, decodeSpectrumStreamReply);
+    if (!reply.ok) throw spectrumRefusalError("the engine refused the spectrum stream read", reply);
+    const metadata = spectrumMetadataOf(reply.value);
+    const result = spectrumResultOfStream(reply.value);
+    return Object.freeze(result === undefined ? { metadata } : { metadata, result });
   }
 
-  /** Stop the managed continuous spectrum stream. */
+  /** Stop the continuous stream (`SPECTRUM_STREAM` stop). */
   stopSpectrumStream(): EngineCallResult {
-    if (this.#spectrumQuery === undefined && this.#spectrumCollection === undefined) {
-      return Object.freeze({ ok: false, result: constantValue("resultCodes", "unsupported"), code: "unsupported" });
-    }
-    const result = Number(this.#exports.miso_engine_web_v1_spectrum_stream_stop(this.#live()));
-    return Object.freeze({
-      ok: result === constantValue("resultCodes", "ok"),
-      result,
-      code: resultName(result, "call"),
-    });
+    if (this.#handle === 0) return unsupportedCall();
+    return spectrumCallResult(this.#spectrumCommand({ op: "stream", stream: "stop" }, decodeSpectrumStreamReply));
   }
 
-  /** Cancel a pending spectrum capture. */
+  /** Cancel a pending one-shot capture (`SPECTRUM_CAPTURE` cancel). */
   cancelSpectrum(): EngineCallResult {
-    if (this.#spectrumQuery === undefined && this.#spectrumCollection === undefined) {
-      return Object.freeze({ ok: false, result: constantValue("resultCodes", "unsupported"), code: "unsupported" });
-    }
-    const result = Number(this.#exports.miso_engine_web_v1_spectrum_cancel(this.#live()));
-    return Object.freeze({
-      ok: result === constantValue("resultCodes", "ok"),
-      result,
-      code: resultName(result, "call"),
-    });
-  }
-
-  #spectrumModule(): SpectrumModule {
-    this.#spectrum ??= new SpectrumModule(this.#exports);
-    return this.#spectrum;
+    if (this.#handle === 0) return unsupportedCall();
+    return spectrumCallResult(this.#spectrumCommand({ op: "capture", capture: "cancel" }, decodeSpectrumCaptureReply));
   }
 
   /**
@@ -1618,10 +1561,9 @@ export class WasmBoundary {
    */
   dispose(): void {
     if (this.#handle === 0) return;
-    this.#trackResponse?.close();
+    // A pending query rejects now, with the error a call on a disposed engine gets.
+    this.#trackResponse?.close(new MisoUsageError(DISPOSED));
     this.#trackResponse = undefined;
-    this.#spectrum?.close();
-    this.#spectrum = undefined;
     this.#spectrumQuery = undefined;
     this.#spectrumCollection = undefined;
     this.#spectrumActiveQuery = undefined;
@@ -1698,8 +1640,6 @@ function stage(
   exports: ExportTable,
   document: Uint8Array,
   options: BootOptions,
-  spectrumHopFrames: SpectrumHopFrames | undefined,
-  preflightedSpectrumHopBoot?: ExportFunction,
 ): { handle: number; optionBytes: Uint8Array } {
   // 1. `abi_version` -- already pinned by `asset.instantiate()`, re-read here so this function is
   //    the published sequence rather than an abbreviation of it.
@@ -1713,15 +1653,12 @@ function stage(
     });
   }
 
-  // The additive capability is checked after the ABI guard but before any options or document
-  // staging. Reboot supplies its pre-disposal result here so a failed explicit probe cannot
-  // destroy the current live session.
-  const spectrumHopBoot = preflightedSpectrumHopBoot
-    ?? requireSpectrumHopCapability(exports, spectrumHopFrames);
-
   // 2. `boot_options_ptr` -- module-owned, zero-default, stable for the module's lifetime.
   const optionsPointer = Number(exports.miso_engine_web_v1_boot_options_ptr());
   const optionBytes = writeBootOptions(exports.memory, optionsPointer, options);
+  // The boot's spectrum taps are staged so the first plan carries them (#1596 R2): a headless
+  // engine cannot adopt a later plan before its caller renders. Every later spectrum call is a
+  // frame; #1597 removes this staging with the exports it writes.
   if (options.spectrumCollection !== undefined) {
     stageSpectrumCollectionRequest(exports, options.spectrumCollection);
   } else {
@@ -1738,12 +1675,7 @@ function stage(
   new Uint8Array(exports.memory.buffer, documentPointer, document.byteLength).set(document);
 
   // 4. `boot(len)`.
-  const handle = spectrumHopFrames === undefined
-    ? Number(exports.miso_engine_web_v1_boot(document.byteLength))
-    : Number((spectrumHopBoot as ExportFunction)(
-      document.byteLength,
-      spectrumHopFrames,
-    ));
+  const handle = Number(exports.miso_engine_web_v1_boot(document.byteLength));
   if (handle === 0) {
     throw bootFailure(exports, documentPointer, "the engine refused to boot the document");
   }
