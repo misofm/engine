@@ -62,13 +62,13 @@ use crate::route_controls::{
     route_producer_position, route_record,
 };
 use crate::source::{ControlSourceBuilder, SourceControlSet};
-use crate::transition::DuckOverlay;
 use crate::spectrum::{
     SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
     SpectrumCaptureRequest, SpectrumCaptureResources, SpectrumPrepareError,
     prepare_capture_collection, spectrum_capture_collection_resources,
 };
 use crate::spectrum_service::{PreparedSpectrumCaptures, SpectrumPreparation};
+use crate::transition::DuckOverlay;
 
 /// The jump lengths a plan's cell holds for `model` (#1639 D1): its `control_smoothing` keys in
 /// samples, the values of [`LiveRamps::for_session`]. Preparation seeds every plan's cell with
@@ -2176,13 +2176,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // model. Every join below reads `committed`, so this one substitution composes the overlay
     // into the effective values the carry starts from. A control-thread copy that drops with
     // this call.
-    let ducked_committed = successor
-        .filter(|base| !base.duck.is_empty())
-        .map(|base| {
-            let mut ducked = base.committed.clone();
-            base.duck.apply_to(&mut ducked);
-            ducked
-        });
+    let ducked_committed = successor.filter(|base| !base.duck.is_empty()).map(|base| {
+        let mut ducked = base.committed.clone();
+        base.duck.apply_to(&mut ducked);
+        ducked
+    });
     let successor = successor.map(|base| match ducked_committed.as_ref() {
         Some(committed) => SuccessorBase { committed, ..base },
         None => base,
