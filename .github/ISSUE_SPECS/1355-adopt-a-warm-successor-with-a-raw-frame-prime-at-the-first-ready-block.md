@@ -247,3 +247,67 @@ prime with the same source-read sample and `k` as the sources. Its readiness is 
 (#1641's amendment: command queue empty and no held anchored seek before the end of the prime
 window), and its prime advances it by `k` blocks. So the timeline moves exactly as the sources'
 frames move, and a held anchored seek is never skipped.
+
+## Decision record (attempt 1, 2026-10-25)
+
+Scope note R1-R5 and root's decisions of 2026-10-24 apply. Amendments, each against today's code:
+
+- **D5, where the prime runs.** `adopt_predecessor` gets no block start (`carry_from` passes none,
+  and the predecessor's `next_block_sample` is 0 for a plan that never rendered). So the carry
+  pushes the predecessor's pending words (L2's grown lanes; L3's edge and claim pending, read
+  before the strip-delay section moves the claim line), and the successor's first block replays
+  the prime at its block entry, before its sources begin, from `S + O_W - P = S + O_A` (the block's
+  own clock). Same block, same order of words; a block refused before that point primes on its
+  retry. The prime section is `graph::install_prime_carry(plan, P / q, claims, sidechains)`,
+  installed by preparation for every warm successor with `P > 0`, charged with
+  `graph::prime_carry_retained_bytes`.
+- **D4/D5, driver methods.** `prime_block_at(&mut self, source_read_sample, moves)` replays one
+  block of the timeline (B16-R3) and every moved source, so a source two claims read is primed
+  once. The planes are the driver's `played_planes`; a block that played nothing (region end) is
+  pushed as `+0.0`.
+- **L2 is every track line on a moved source.** A lane that grew by `P` takes the predecessor's
+  pending words, then the prime; a lane the strip-delay section moves (a restarted track, whose
+  floor stays its arrival, 1354a) takes the prime too, so its line holds the stream's tail.
+- **L3 takes the head of its stream, not the tail (#1402 D2 amended).** A restarted key keeps its
+  claim line (`c_W = c_A`), so the edge grows by `P` alone: the edge line holds the first `λ_W`
+  words of (edge pending, claim pending, prime) and the key's own line the rest.
+  `CompensationDelay::push` (tail) became `fill_head`; #1402's unit test adds the shorter edge.
+- **D3 narrowed (1354a verifier).** The fill writes: a grown lane its whole ring, a moved lane
+  `min(P, ring)`, nothing on a track whose source does not carry, an added track or a restarted
+  lane. `prime_bytes_of` counts exactly that, from the compiled strip delays (claim lines
+  included), in `warm_lead` and in preparation alike. The L3 term stays #1354b's.
+- **Guard (1354a).** Adoption fills by construction: a warm successor always has the prime
+  section, and every carried hand-over of it fills; a refused carry is counted and debug-asserts.
+  Readiness is the publisher's: published `Primed` (#1403), the prime never underruns. No
+  production path requests warm mode yet; `SuccessorBase::new` still sets `warm: None`.
+- **`SourceControlSet::test_only_prime_flag`** (test-support) lets the gates set the carried ring's
+  flag after `adopt_persisting` (D3). #1403 adds the production write.
+- **Gates (R3).** 48 kHz, every vector width (`Backend::VECTOR`); gate 6 at all four rates. Gate 5
+  is 1354b's. Gate 4's pause case is not separate: a block never rendered is a check never made.
+
+Found, not fixed (1354a's): an edit that re-points a track to an added source during a growth is
+refused `host.successor.warm_invariant` (the join restarts it, `R` does not hold it). The new
+count already excludes its line.
+
+Test value:
+- Gate 1: a prime that never runs (the lines left at rest, or #1283 D4's head-aligned fill)
+  repeats `P` frames on every carried track. Red.
+- Gate 2: an ordinary rebuild that re-creates the claim lines at rest, or a second prime that
+  drops the grown lines' pending words, drops `ΣP` frames; so does an offset without the lead
+  (the second prime's sample underflows). Red.
+- Gate 3: zeros in the L3 line, or a tail fill, or a restarted key whose kept line takes no
+  prime, put a hole in track 2's detector. Red.
+- Gate 4: a check that answers ready without asking the flagged rings claims before the frames
+  arrive and its prime underruns. Red.
+- Gate 6: a prime that stages anything on render allocates. Red.
+- Count: a count over every claim line (1354a's) charges a kept line its whole ring and a
+  re-pointed track's line. Red.
+
+Mutants run (each red unless stated), one run each: prime never runs (gate 1); offset without
+the lead (gates 2, 3, 6); no L3 fill (gate 3); moved lanes take no prime (gate 3); tail fill for
+L3 (gate 3 and the runtime unit test); readiness always true (gate 4, then the prime's
+debug assertion aborts); driver ignores flagged rings (gate 4); a `Vec` in the prime (render
+aborts); no grown-line pending (gates 2, 3); rebuild re-creates track lines at rest (gate 2);
+grown lanes not filled (gates 1-4); count of whole rings (count test); count of non-carried
+tracks (count test). **Not red:** a prime labelled one block late (the timeline history and seek
+report labels): PCM is sequential in the ring, so no gate here sees the label. Known gap.
