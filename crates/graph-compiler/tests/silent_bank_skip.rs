@@ -577,12 +577,23 @@ enum Twin {
     Unpacked,
 }
 
+/// The packing gate's discontinuity: from this block on, the render clock runs [`SEEK_JUMP`] blocks
+/// ahead, while strips are displaced (asserted).
+const SEEK: u64 = 545;
+const SEEK_JUMP: u64 = 10;
+
 fn gate_one(layout: RightNegative, kind: Twin) {
     let blocks = TAIL + 40;
-    let schedules = schedules(blocks, 0x1107);
+    let jump = if kind == Twin::Unpacked { SEEK_JUMP } else { 0 };
+    let schedules = schedules(blocks + jump as usize, 0x1107);
     let mut model = session(layout);
     if kind == Twin::Unpacked {
         resting_second_bank(&mut model);
+        // Two strips whose compressor links its detectors (#1369): a move must carry the lane's
+        // link (#1371) with the rest of its state.
+        for track in [9, 17] {
+            model.tracks[track].console[1].link_mode = session::ConsoleLinkMode::Maximum;
+        }
     }
     let mut skip = bind(&model, &schedules, true);
     let mut twin = bind(&model, &schedules, true);
@@ -596,9 +607,13 @@ fn gate_one(layout: RightNegative, kind: Twin) {
     let mut silent_master = [0_usize; 2];
     let mut skipped = vec![0_u64; blocks];
     for block in 0..blocks as u64 {
+        if jump != 0 && block == SEEK {
+            assert!(skip.displaced() > 0, "strips are displaced at the seek");
+        }
+        let time = if block >= SEEK { block + jump } else { block };
         let before = skip.skips();
-        skip.render(block, true, &mut skip_pcm);
-        twin.render(block, kind == Twin::Unpacked, &mut twin_pcm);
+        skip.render(time, true, &mut skip_pcm);
+        twin.render(time, kind == Twin::Unpacked, &mut twin_pcm);
         for (index, (a, b)) in skip_pcm.iter().zip(&twin_pcm).enumerate() {
             assert_eq!(
                 fold_nan(a.to_bits()),
