@@ -172,12 +172,12 @@ fn oracle_signals() -> (Vec<f32>, Vec<f32>) {
     let tau = core::f64::consts::TAU;
     let left = (0..FRAMES)
         .map(|frame| {
-            let decay = (-((frame % 960) as f64) / 192.0).exp();
-            (0.5 * decay * (tau * 440.0 * frame as f64 / 48_000.0).sin()) as f32
+            let decay = math::exp(-((frame % 960) as f64) / 192.0);
+            (0.5 * decay * math::sin(tau * 440.0 * frame as f64 / 48_000.0)) as f32
         })
         .collect();
     let right = (0..FRAMES)
-        .map(|frame| (0.05 * (tau * 330.0 * frame as f64 / 48_000.0).sin()) as f32)
+        .map(|frame| (0.05 * math::sin(tau * 330.0 * frame as f64 / 48_000.0)) as f32)
         .collect();
     (left, right)
 }

@@ -3996,9 +3996,8 @@ impl<L: Lane> LimiterCore<L> {
     fn set_lane_link(&mut self, lane: usize, link: LinkMode) {
         let before = self.coefficients.links;
         self.coefficients.set_lane_link(lane, link, self.active);
-        for padded in 0..L::WIDTH {
-            if self.active & (1 << padded) == 0 && self.coefficients.links[padded] != before[padded]
-            {
+        for (padded, was) in before.iter().enumerate().take(L::WIDTH) {
+            if self.active & (1 << padded) == 0 && self.coefficients.links[padded] != *was {
                 self.rest_link(padded);
             }
         }

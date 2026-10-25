@@ -276,7 +276,7 @@ fn deviation(rendered: &[f32], model: &[f64]) -> f64 {
         .iter()
         .zip(model)
         .filter(|(_, model)| model.abs() >= 1.0e-3)
-        .map(|(rendered, model)| (20.0 * (f64::from(*rendered) / model).abs().log10()).abs())
+        .map(|(rendered, model)| (20.0 * math::log10((f64::from(*rendered) / model).abs())).abs())
         .fold(0.0, f64::max)
 }
 
@@ -380,10 +380,10 @@ fn ceiling_signals() -> (Vec<f32>, Vec<f32>) {
     let step = core::f64::consts::TAU * 0.49;
     let burst = |frame: usize| if (frame / 600) % 4 == 3 { 0.0 } else { 1.0 };
     let left = (0..FRAMES)
-        .map(|frame| (burst(frame) * (step * frame as f64).sin() * 1.4125) as f32)
+        .map(|frame| (burst(frame) * math::sin(step * frame as f64) * 1.4125) as f32)
         .collect();
     let right = (0..FRAMES)
-        .map(|frame| (burst(frame) * (step * frame as f64 + 0.37).sin() * 0.1413) as f32)
+        .map(|frame| (burst(frame) * math::sin(step * frame as f64 + 0.37) * 0.1413) as f32)
         .collect();
     (left, right)
 }
@@ -396,7 +396,7 @@ fn ceiling_signals() -> (Vec<f32>, Vec<f32>) {
 fn no_switch_puts_a_sample_over_the_ceiling() {
     let (source_left, source_right) = ceiling_signals();
     let values = values_with(CEILING, RELEASE, 0.0);
-    let ceiling = 10.0_f64.powf(f64::from(CEILING) / 20.0);
+    let ceiling = math::db_to_gain(f64::from(CEILING));
     let mut worst = f64::NEG_INFINITY;
     for width in widths() {
         let lanes = lanes(width);
@@ -434,7 +434,7 @@ fn no_switch_puts_a_sample_over_the_ceiling() {
                             .collect();
                         let estimate =
                             reference_true_peak_estimate(&measured).expect("finite output");
-                        let margin = 20.0 * (estimate / ceiling).log10();
+                        let margin = 20.0 * math::log10(estimate / ceiling);
                         worst = worst.max(margin);
                         assert!(
                             estimate <= ceiling,
