@@ -148,3 +148,74 @@ has asymmetric input filters, an EQ insert and an EQ console slot, and a compres
 ## Supersedes and shrinks
 
 - Shrinks #763 (see #1573's amendment record): the track response reaches the C ABI.
+
+## Decision and evidence record
+
+**Split (scope note, root, 2026-10-24).** #1578a (protocol, carries the schema-hash re-pin): D1, D2
+and the controller half of D3/D4. #1578b (serving): D3's provider path, D4's delivery in
+`SessionState::service`, D5, D6 and `crates/capi/tests/response_strip.rs`. Root decisions R1-R5
+of the scope note stand (R1 release on an empty cell, R2 the controller's check only for a strip
+target and after the replay cache, R3 the bound at 127-byte identities, R4 the two capi tests,
+R5 the queue after #1586b).
+
+**#1578a, attempt 1 (implementer, 2026-10-25).**
+
+- D1: `MessageId::ResponseReady = 0x8040`; `allocated_id` lists it; the registry lists it exactly
+  when `features.response` is set; the invariant adds `has_command(0x000e) == has_event(0x8040)`.
+- D2: `ResponseReady { sequence, request_tag, strip_id, outcome }`, with `ResponseReadyOutcome::
+  Ready(TrackResponseCapture)` or `Refused { status, diagnostic }`, so a refusal with curves cannot
+  be built and the encoder checks the rest. Implementer reading of "the codec refuses every other
+  shape": a stable strip ID; a refusal is one of `NOT_FOUND`, `UNAVAILABLE`, `LIMIT_EXCEEDED`,
+  `INTERNAL` with a 1-127-byte diagnostic and no capture field or member; a capture has at least
+  two finite axis points, a finite floor, one or two finite sides of the axis's length; a member's
+  slot ID is present exactly for console and inserts, its effect is 1-127 bytes, `section_count`
+  is at most 32 and neither mask sets a bit at or above it. `response_ready_encoded_bound` is the
+  larger of the ready form and a refusal with a 127-byte diagnostic.
+- D3 (controller half): a strip `RESPONSE_GET` while the cell is held is `BACKPRESSURE`
+  `response.capture.pending` before the provider. Implementer decision I1: the mandatory
+  backpressure record names a new queue kind, `BackpressureQueueKind::ResponseCapture = 8`
+  (capacity 1, occupancy 1, no generation), on #1944's precedent for the spectrum arm slot, and
+  every `RESPONSE_GET` `BACKPRESSURE` (the provider's `Pending` in #1578b too) carries it. Kind 9
+  is now the first refused code. Root to confirm.
+- D4 (controller half): one `response_ready: Option<ResponseReady>` cell. `enqueue_response_ready_
+  event(revision, event)` writes the next reliable sequence into the event, sizes the frame, queues
+  `ReliablePayload::ResponseReady { event_sequence }` and moves the event into the cell; on any
+  refusal (structural transaction outstanding or queue full, cell held, not served, unencodable)
+  it returns `ResponseReadyEnqueueError { reason, event }` with the event unchanged and no
+  sequence used. The cell is emptied only after a successful encode in
+  `dequeue_reliable_event_frame_into`; `response_ready_pending()` is R1's query.
+- Acked-batch question: the event's ack is the `RESPONSE_GET` tag reply (#1578b). No path of
+  #1578a drops an event: every refusal hands it back, a short output keeps it, and only a
+  delivered frame empties the cell.
+- Advertisement: from this slice the C ABI lists `0x8040` (it lists `0x000e`), while its provider
+  still refuses a strip target with `response.target.unavailable` until #1578b, so no tag is
+  issued and no event is owed.
+- **Re-pin.** `COMPLETE_SCHEMA_HASH` `f4c2fe333739f44d` -> `cb8db815ed0103a0`, 56 -> 59 frames:
+  `command.response_get_strip`, `event.response_ready`, `event.response_ready_refused`, and
+  `response.capabilities` lists `0x8040`. Check: with the capabilities frame's event field patched
+  back (length 14 -> 12, `0x8040` -> padding) and the three new frames filtered out, the 56 frames
+  hash to `f4c2fe333739f44d` (scratch example, not committed).
+- Files outside the spec's list, each forced by the wire change: `crates/capi/src/runtime/tests.rs`
+  (two pinned capability vectors gain `0x8040`), `crates/protocol/tests/sdk_message_fixture.rs` and
+  `sdk/test/fixtures/protocol-messages.json` (the full capabilities fixture lists `0x8040`, which
+  the invariant now requires; re-blessed), `crates/conformance/{src/main.rs,tests/mutation_million.rs}`,
+  `scripts/check-protocol-wasm-parity.sh` and `docs/CONTROL_PROTOCOL_CONFORMANCE.md` (the re-pin
+  set). `crates/control-plane/src/control.rs` maps the two new `EventEgressError` variants.
+- Tests and test value (each red first on a recorded mutant):
+  - `response_ready_round_trips_both_forms_and_refuses_every_other_shape` (message_wire): red if a
+    field or member is lost in the round trip or one D2 presence rule is not enforced in either
+    direction. Mutants: a refusal that admits a capture sample; no mask check; a builtins member
+    that admits a slot ID. All red.
+  - `response_ready_encoded_bound_is_the_largest_frame_exactly` (message_wire): red if the bound
+    drifts from the encoder. Mutants: five member scalars; the refused form ignored. Both red.
+  - `a_response_ready_event_is_held_until_delivered_and_holds_off_a_strip_request` (controller):
+    red if a refused enqueue loses or alters the event, the cell empties before delivery or never,
+    a second event overwrites a held one, or a strip request reaches the provider while an event is
+    unread. Mutants: no strip check; the queue-full refusal keeps the written sequence; no clear on
+    delivery; a clear on a failed encode; no occupied check. All red.
+  - Rewritten `a_capability_frame_must_tie_bit_14_to_the_response_command_and_event` (controller):
+    red if the registry stops listing `0x8040` with `0x000e` or the invariant stops tying the
+    flag, command and event. Mutants: no pairing clause; the registry never lists `0x8040`. Both
+    red.
+  - `a_backpressure_payload_naming_the_retired_automation_queue_is_refused` (one row): red if kind 8
+    stops decoding or decodes with a generation. Mutant: kind 8 given a generation. Red.
