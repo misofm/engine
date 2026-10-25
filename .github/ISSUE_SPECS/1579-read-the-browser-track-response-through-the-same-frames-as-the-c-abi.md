@@ -191,10 +191,10 @@ SDK public behaviour changes (record them in the changelog with the PR):
 3. A headless query no longer returns the state before the next render: it reads the state the
    next block applied (gate 2). A headless `subscribeTrackResponse` and `pump()` settle only when
    the app renders.
-4. Headless; the browser follows in #1579b. `rackValue` is the decision-17 section code: input
+4. Both engines (the browser since #1579b). `rackValue` is the decision-17 section code: input
    `4`, console `5`, inserts `2` (was 0, 4, 2). Rack names do not change. `snapshotToken` is the
    request tag; `resultBytes` the event frame's length; `enabledLeft`/`enabledRight` have one entry
-   per section the core reports. The browser engine keeps the capture record's values until #1579b.
+   per section the core reports.
 5. A refusal raises `MisoEngineError` whose `code` is the core's diagnostic (for example
    `response.reply_too_large`, was `refusedBudget`) and whose `result` is the mapped result class.
    `responseRefusalResult` now maps `backpressure` to `backpressure` (was `internal`).
@@ -241,3 +241,26 @@ Review fold-in after attempt 2 (root, 2026-10-25):
   eval holds one corrupt frame per rule.
 - A query made from an event callback runs a nested event drain (documented on
   `queryTrackResponse`).
+
+## Decision record (#1579b, 2026-10-25)
+
+- **Seam.** The browser engine's `queryTrackResponse` and `responseRead` are one
+  `TrackResponseRequester` over `host.control` and `host.onControlEvent`, with request IDs from the
+  host's one transaction-queue allocator; `close()` rejects every pending and queued query at once.
+  `responseRead` returns the decoded result, and the managed owner publishes only when
+  `sameTrackResponseResult` (every member field, every curve bit) says it changed (D4). Retained
+  bytes are the result's frame bytes (no state key any more).
+- **Deleted.** `BrowserTrackResponse`, `createTrackResponse`, the Worker's `track-response-*`
+  messages, `TrackResponseModule`, `parseTrackResponseState`, `sameTrackResponseState`,
+  `TrackResponseObservedState`, `TrackResponseRead`, `trackResponseStateOf`,
+  `trackResponseReadOf`, `TrackResponseCapture`, `TrackResponseHost`, `TrackResponseHostRequest`
+  and `trackResponseHostRequest`, with their tests. The worklet's capture and the
+  `track_response_*` exports stay for #1580.
+- **`ProtocolEvent`.** No kind for `RESPONSE_READY`: it is the answer to one query, read by that
+  query's tag, as a reply is; `onEvent` keeps skipping it on both engines.
+- **Qualification (blocked).** The browser rows render an `OfflineAudioContext` and query after
+  the render, so a query that needs a later block never settles. Firefox has no
+  `OfflineAudioContext.suspend()`, so the rows cannot step an offline render; they need a live
+  `AudioContext`, which needs one more declared trusted click (`qualification.js`
+  `resumeClickPlan` and the `resume-clicks` gate in `run.mjs`), outside this slice's paths.
+
