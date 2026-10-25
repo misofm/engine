@@ -41,18 +41,21 @@
 //!
 //! # `sourceRing`: the default ring is a rule, not a number
 //!
-//! `default_source_ring_frames` covers `SOURCE_STALL_TOLERANCE_MS` of audio, rounded up to a whole
-//! number of quanta, plus one quantum held by the consumer and one in the recycle path. A consumer
-//! that wants the ring the engine will actually pick — for sizing its own producer — needs the two
-//! inputs to that rule, not a rate-specific answer. Both are transcribed, so the SDK derives the
-//! ring from the shape the boot itself reported instead of holding a private copy of `100`.
+//! `default_source_ring_frames` (#1406 D2) is the stall ring -- `SOURCE_STALL_TOLERANCE_MS` of
+//! audio rounded up to a whole number of quanta, plus one quantum held by the consumer and one in
+//! the recycle path -- plus the largest warm-successor prime, `primeGrowths` times the largest
+//! launch latency at the rate rounded up to whole quanta, plus one more quantum. A consumer that
+//! wants the ring the engine will actually pick -- for sizing its own producer -- needs the
+//! inputs to that rule, not a rate-specific answer. All of them are transcribed, so the SDK
+//! derives the ring from the shape the boot itself reported instead of holding a private copy of
+//! `100`, of `+ 2` or of `+ 1`.
 
 use core::mem::offset_of;
 
 use serde::Serialize;
 
 use crate::json::{self, Entries};
-use host_core::RESPONSE_MAXIMUM_POINTS;
+use host_core::{LAUNCH_SAMPLE_RATES, RESPONSE_MAXIMUM_POINTS};
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
     BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
@@ -108,6 +111,23 @@ pub const SCHEMA: &str = "miso.web.abi-layout.v1";
 /// a consumer deriving the ring from a reported shape needs the whole rule, and `+ 2` inside
 /// `default_source_ring_frames` is otherwise a number the SDK would have to know privately.
 pub const SOURCE_RING_RESERVE_QUANTA: u32 = 2;
+
+/// The growths the default source ring holds a prime for (#1406 D3): `p_max_samples` is this many
+/// times the largest launch latency, rounded up to whole quanta (#1286 D3 item 1).
+pub const SOURCE_RING_PRIME_GROWTHS: u32 = 4;
+
+/// The quantum the default source ring holds beyond the largest prime (#1406 D2): readiness asks
+/// for `k + 1` blocks queued past the consumer for a lead of `k` quanta. Published, so no consumer
+/// holds a private `+ 1`.
+pub const SOURCE_RING_PRIME_RESERVE_QUANTA: u32 = 1;
+
+/// The largest latency a launch effect declares at `sample_rate_hz`, in samples: the true-peak
+/// limiter's `N + 6` with `N = fs / 100` (`crates/true-peak-limiter`), the `L_max(fs)` of
+/// `p_max_samples` (#1286 D3 item 1).
+#[must_use]
+pub const fn source_ring_prime_latency_samples(sample_rate_hz: u32) -> u32 {
+    sample_rate_hz / 100 + 6
+}
 
 /// The lifecycle stages a typed SDK error can be raised at, in the order a session passes through
 /// them.
@@ -1619,6 +1639,15 @@ pub fn render() -> String {
             source_ring: SourceRing {
                 stall_tolerance_ms: SOURCE_STALL_TOLERANCE_MS,
                 reserve_quanta: SOURCE_RING_RESERVE_QUANTA,
+                prime_growths: SOURCE_RING_PRIME_GROWTHS,
+                prime_reserve_quanta: SOURCE_RING_PRIME_RESERVE_QUANTA,
+                prime_latency_samples: LAUNCH_SAMPLE_RATES
+                    .iter()
+                    .map(|rate| PrimeLatency {
+                        sample_rate_hz: rate.0,
+                        samples: source_ring_prime_latency_samples(rate.0),
+                    })
+                    .collect(),
             },
         },
     };
@@ -1670,6 +1699,18 @@ struct NamedValue<'a> {
 struct SourceRing {
     stall_tolerance_ms: u32,
     reserve_quanta: u32,
+    prime_growths: u32,
+    prime_reserve_quanta: u32,
+    /// One row per launch rate, in [`LAUNCH_SAMPLE_RATES`] order.
+    prime_latency_samples: Vec<PrimeLatency>,
+}
+
+/// One `sourceRing.primeLatencySamples` row: `L_max(fs)` at one launch rate.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrimeLatency {
+    sample_rate_hz: u32,
+    samples: u32,
 }
 
 /// The `constants` object: the named code tables, then the scalar bounds, then `sourceRing`.

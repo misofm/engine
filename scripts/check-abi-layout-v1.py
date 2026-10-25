@@ -31,8 +31,10 @@ they are the rules here:
   cannot come back;
 * `errorPhases` is the six-phase vocabulary, and does not contain the dead two-phase `compile`
   spelling;
-* the `sourceRing` rule carries both of its inputs, since a consumer that has only one of them
-  cannot derive the ring at all.
+* the `sourceRing` rule carries every one of its inputs (#1406 D3): the stall ring's two and the
+  warm-successor prime's three -- `primeGrowths`, `primeReserveQuanta` and one
+  `primeLatencySamples` row per launch rate -- since a consumer that lacks any of them cannot
+  derive the ring the engine picks.
 
 `--self-test` runs every rule against a valid document and against its own red mutation, so the
 validator is proved to discriminate before it is trusted.
@@ -587,10 +589,21 @@ def validate(document: object) -> None:
                 f"constants.{name} is {constants[name]}, expected {expected}")
 
     ring = constants["sourceRing"]
-    require(isinstance(ring, dict) and set(ring) == {"stallToleranceMs", "reserveQuanta"},
-            "sourceRing carries exactly its two inputs")
+    require(isinstance(ring, dict) and set(ring) == {
+        "stallToleranceMs", "reserveQuanta", "primeGrowths", "primeReserveQuanta",
+        "primeLatencySamples",
+    }, "sourceRing carries exactly its five inputs")
     require(ring["stallToleranceMs"] == 100, "the stall tolerance is 100 ms")
     require(ring["reserveQuanta"] == 2, "the ring reserves two quanta")
+    require(ring["primeGrowths"] == 4, "the ring holds a prime for four growths")
+    require(ring["primeReserveQuanta"] == 1, "the ring reserves one quantum past the prime")
+    # `L_max(fs) = fs / 100 + 6`, the true-peak limiter's latency, at each launch rate in order.
+    require(ring["primeLatencySamples"] == [
+        {"sampleRateHz": 44100, "samples": 447},
+        {"sampleRateHz": 48000, "samples": 486},
+        {"sampleRateHz": 88200, "samples": 888},
+        {"sampleRateHz": 96000, "samples": 966},
+    ], "primeLatencySamples is L_max at each launch rate")
 
 
 def self_test() -> int:
@@ -702,6 +715,17 @@ def self_test() -> int:
     def wrong_ring_reserve(document: dict) -> None:
         document["constants"]["sourceRing"]["reserveQuanta"] = 1
 
+    def drop_ring_key(key: str):
+        def drop(document: dict) -> None:
+            del document["constants"]["sourceRing"][key]
+        return drop
+
+    def private_prime_reserve(document: dict) -> None:
+        document["constants"]["sourceRing"]["primeReserveQuanta"] = 0
+
+    def wrong_prime_latency(document: dict) -> None:
+        document["constants"]["sourceRing"]["primeLatencySamples"][3]["samples"] = 960
+
     def prepare_config_returns(document: dict) -> None:
         document["structures"]["prepareConfig"] = {"bytes": 192, "fields": []}
 
@@ -763,6 +787,10 @@ def self_test() -> int:
         ("a retired prepared-command export returns", retired_export_returns),
         ("a source-ring input is dropped", drop_ring_input),
         ("the source-ring reserve is wrong", wrong_ring_reserve),
+        ("the prime growth count is dropped", drop_ring_key("primeGrowths")),
+        ("the prime reserve quantum is dropped", drop_ring_key("primeReserveQuanta")),
+        ("the prime reserve quantum is kept private", private_prime_reserve),
+        ("a launch rate's prime latency is wrong", wrong_prime_latency),
         ("the 192-byte prepare config returns", prepare_config_returns),
         ("the ABI version goes stale", stale_abi_version),
         ("a retired result name returns", duplicate_result_name),

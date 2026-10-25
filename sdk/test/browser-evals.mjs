@@ -298,7 +298,7 @@ describe("the browser open sequence", () => {
     });
     assert.equal(shape.sampleRateHz, 96_000);
     assert.equal(shape.quantumFrames, 127);
-    assert.equal(shape.sourceRingFrames, 9_906);
+    assert.equal(shape.sourceRingFrames, 14_097);
   });
 
   test("a context that comes back at the wrong rate is closed and retried", async () => {

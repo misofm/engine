@@ -202,14 +202,27 @@ export function writeBootOptions(
  * Derive the per-source ring the engine will pick for a shape, from the *published rule*.
  *
  * The effective ring is not readable back across the ABI -- it is an input word and no export
- * reports it -- so a producer that must size itself applies the rule. Both of its inputs come from
- * the generated document, so this function holds no private copy of `100` or of `2`.
+ * reports it -- so a producer that must size itself applies the rule (#1406 D3): the stall ring
+ * (`ceil(stall / q) + reserveQuanta` quanta) plus the largest warm-successor prime
+ * (`primeGrowths * ceil(L_max / q)` quanta, `L_max` the rate's `primeLatencySamples`) plus
+ * `primeReserveQuanta`. Every input comes from the generated document, so this function holds no
+ * private copy of `100`, `2`, `4`, `+ 1` or a latency. A zero quantum, or a rate the document has
+ * no latency row for (one the engine refuses to boot), returns zero.
  */
 export function defaultSourceRingFrames(sampleRateHz: number, quantumFrames: number): number {
   if (quantumFrames === 0) return 0;
-  const { stallToleranceMs, reserveQuanta } = ABI_LAYOUT.constants.sourceRing;
+  const {
+    stallToleranceMs,
+    reserveQuanta,
+    primeGrowths,
+    primeReserveQuanta,
+    primeLatencySamples,
+  } = ABI_LAYOUT.constants.sourceRing;
+  const latency = primeLatencySamples.find((row) => row.sampleRateHz === sampleRateHz);
+  if (latency === undefined) return 0;
   const stallFrames = Math.floor((sampleRateHz * stallToleranceMs) / 1000);
-  const quanta = Math.ceil(stallFrames / quantumFrames) + reserveQuanta;
+  const quanta = Math.ceil(stallFrames / quantumFrames) + reserveQuanta
+    + primeGrowths * Math.ceil(latency.samples / quantumFrames) + primeReserveQuanta;
   return quanta * quantumFrames;
 }
 
