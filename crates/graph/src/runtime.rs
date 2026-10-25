@@ -14695,15 +14695,6 @@ mod tests {
         }
     }
 
-    /// The dedication copy is skipped for exactly the shape that is only a copy, and for nothing
-    /// else.
-    ///
-    /// Red mutations (`tests/MUTATIONS.md`): drop the `staged` clause -- the delayed case admits
-    /// and the delay line stops being pumped; drop the `sidechain` clause -- the sidechained case
-    /// admits; accept two inputs -- the summed case admits and a summand is lost; accept
-    /// `inputs[0] == output` -- the already-in-place case admits, which is a no-op redirect that
-    /// hides the clause; widen past `BankMember` -- the `Effect` case admits and the effect's own
-    /// processing is skipped along with the copy.
     /// Issue #1782a: a move in a pack group whose positions do not start the map's table.
     ///
     /// Test value: red when the map's index spaces disagree for a group whose `base` is not zero
@@ -14766,6 +14757,15 @@ mod tests {
         );
     }
 
+    /// The dedication copy is skipped for exactly the shape that is only a copy, and for nothing
+    /// else.
+    ///
+    /// Red mutations (`tests/MUTATIONS.md`): drop the `staged` clause -- the delayed case admits
+    /// and the delay line stops being pumped; drop the `sidechain` clause -- the sidechained case
+    /// admits; accept two inputs -- the summed case admits and a summand is lost; accept
+    /// `inputs[0] == output` -- the already-in-place case admits, which is a no-op redirect that
+    /// hides the clause; widen past `BankMember` -- the `Effect` case admits and the effect's own
+    /// processing is skipped along with the copy.
     #[test]
     fn bank_gather_source_admits_only_the_dedication_copy() {
         fn member(

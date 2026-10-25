@@ -169,6 +169,24 @@ export class MisoUsageError extends Error {
 }
 
 /**
+ * A producer failed after the engine had accepted the session seek (issue #1644 D3): the engine's
+ * timeline and every source are at `generation`, the producers before `producerIndex` were
+ * repositioned, and that one and the ones after it were not. `cause` is the producer's error.
+ * Reposition the rest under `generation`; the seek is not to be sent again.
+ */
+export class SessionSeekProducerError extends Error {
+  readonly generation: bigint;
+  readonly producerIndex: number;
+
+  constructor(generation: bigint, producerIndex: number, cause: unknown) {
+    super(`the engine applied the session seek at generation ${generation}, but producer ${producerIndex} failed to reposition`, { cause });
+    this.name = "SessionSeekProducerError";
+    this.generation = generation;
+    this.producerIndex = producerIndex;
+  }
+}
+
+/**
  * A control transaction the core refused (#1563 D4).
  *
  * `code` is the core's own, the first diagnostic's stable dotted code (`control.domain`,
