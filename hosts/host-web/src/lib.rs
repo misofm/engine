@@ -1158,8 +1158,8 @@ pub struct WebStatus {
     /// Prepared quantum.
     pub quantum_frames: u32,
     /// The structural commands this instance's control half ran in place of its render half
-    /// (#1290a D6, #1294b), saturating: [`AudioWorkletEngineHost::blocking_rebuilds`], written
-    /// after every control call that may publish a replacement plan. A page without cross-origin
+    /// (#1290a D6, #1294b), saturating: [`AudioWorkletEngineHost::blocking_rebuilds`], refreshed
+    /// as every exported call records its result; zero after a dispose. A page without cross-origin
     /// isolation runs each rebuild in the worklet's message handler, so each one counts here.
     pub blocking_rebuilds: u32,
     /// Exact next render time.
@@ -2436,9 +2436,7 @@ impl AudioWorkletEngineHost {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let request = &buffers.control_request[..len as usize];
-        let result = ready.run_command(request, CONTROL_FRAME_BYTES, analysis);
-        self.status.blocking_rebuilds = ready.blocking_rebuilds;
-        match result {
+        match ready.run_command(request, CONTROL_FRAME_BYTES, analysis) {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
                 self.record(RESULT_OK)
@@ -2470,9 +2468,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let result = ready.declare_discontinuity(analysis);
-        self.status.blocking_rebuilds = ready.blocking_rebuilds;
-        match result {
+        match ready.declare_discontinuity(analysis) {
             Ok(()) => self.record(RESULT_OK),
             Err(error) => self.refuse_control(&error),
         }
@@ -3633,9 +3629,7 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         };
-        let result = ready.session_seek(analysis, generation, timeline_frame, anchor_sample);
-        self.status.blocking_rebuilds = ready.blocking_rebuilds;
-        match result {
+        match ready.session_seek(analysis, generation, timeline_frame, anchor_sample) {
             Ok(()) => self.record(RESULT_OK),
             Err(SessionSeekFailure::Seek(failure)) => {
                 let code = self.refuse_source(failure);
@@ -3920,8 +3914,12 @@ impl AudioWorkletEngineHost {
         self.record(RESULT_OK)
     }
 
+    /// Every control call returns its result through here, so the status's `blocking_rebuilds`
+    /// word (#1294b) is refreshed in this one place: current after the control call that rebuilt,
+    /// zero after a dispose (the ready half is gone), as [`Self::blocking_rebuilds`] reports.
     fn record(&mut self, code: u32) -> u32 {
         self.status.last_result = code;
+        self.status.blocking_rebuilds = self.blocking_rebuilds();
         code
     }
 
