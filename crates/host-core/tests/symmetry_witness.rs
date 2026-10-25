@@ -946,6 +946,7 @@ fn an_observe_record_never_moves_the_witness() {
             tap_index: 0,
             armed: true,
             window_blocks: 1,
+            arm_tag: 0,
         },
     );
     render(&mut console, 1);

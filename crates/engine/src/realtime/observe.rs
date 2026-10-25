@@ -12,8 +12,10 @@
 //! # The seqlock
 //!
 //! A window travels as five `u64` words through the engine's one single-writer seqlock
-//! (`seqlock.rs`, #1482 D3), embedded in the slot so the slot stays one allocation. The publisher
-//! is the record's only writer by ownership: it is not `Clone`. A read is bounded to
+//! (`seqlock.rs`, #1482 D3), embedded in the slot so the slot stays one allocation. The tap's arm
+//! state (armed, the arm sample and the arm tag, #1585 D2) is three more words of the same record,
+//! so a reader takes the window and the arm state of one publication. The publisher is the
+//! record's only writer by ownership: it is not `Clone`. A read is bounded to
 //! `seqlock::MAXIMUM_READ_ATTEMPTS` attempts and reports absence when every one tore.
 //!
 //! Under `wasm32-unknown-unknown` without the `atomics` target feature -- the browser-local
@@ -64,6 +66,28 @@ pub struct ObservationWindow {
 /// exact and `-0.0` survives.
 const WINDOW_WORDS: usize = 5;
 
+/// The words of one slot: the window's five, then the arm state's three (`armed` as `0` or `1`,
+/// `arm_sample`, `arm_tag`), all in one sequence-locked record (#1585 R1).
+const SLOT_WORDS: usize = WINDOW_WORDS + 3;
+
+/// One tap's whole published state, taken in one locked read (#1585 D2): its latest window and its
+/// arm state, from the same publication.
+///
+/// Render is the only writer of both. Before any arm the state is unarmed, with sample `0` and tag
+/// `0`. `arm_sample` is the first sample of the block that applied the tap's last arm or disarm;
+/// `arm_tag` is that record's tag, `0` for none.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ObservationState {
+    /// The newest window, or `None` before the first.
+    pub window: Option<ObservationWindow>,
+    /// Whether the tap is armed.
+    pub armed: bool,
+    /// The first sample of the block that applied the last arm or disarm (`0` before any).
+    pub arm_sample: u64,
+    /// The tag of the record that armed or disarmed the tap (`0` for none).
+    pub arm_tag: u64,
+}
+
 impl ObservationWindow {
     const fn to_words(self) -> [u64; WINDOW_WORDS] {
         [
@@ -92,8 +116,8 @@ impl ObservationWindow {
 /// The shared conflating cell. Not constructed directly: [`observation_slot`] makes the pair.
 #[derive(Debug)]
 pub struct ObservationSlot {
-    /// The published window, in `ObservationWindow::to_words` order.
-    words: PublishedWords<WINDOW_WORDS>,
+    /// The published window, in `ObservationWindow::to_words` order, then the arm state.
+    words: PublishedWords<SLOT_WORDS>,
     /// The reader's own single-writer word.
     consumed: AtomicU64,
 }
@@ -102,9 +126,9 @@ pub struct ObservationSlot {
 ///
 /// The cell is one `Arc` allocation shared by the two endpoints, charged as every shared lane is
 /// (`SharedAllocation`: the two reference counts, then the slot, #1584). The endpoints themselves
-/// are one pointer each and are counted by whatever owns them. The slot is 56 bytes since #1482
-/// (the seqlock's `u64` counter, five window words and the reader's `consumed` word), so the
-/// allocation is 72; before #1584 the charge omitted the 16-byte header.
+/// are one pointer each and are counted by whatever owns them. The slot is 80 bytes since #1585
+/// (the seqlock's `u64` counter, five window words, three arm words and the reader's `consumed`
+/// word; 56 before), so the allocation is 96; before #1584 the charge omitted the 16-byte header.
 #[must_use]
 pub const fn observation_slot_retained_bytes() -> usize {
     core::alloc::Layout::new::<super::SharedAllocation<ObservationSlot>>().size()
@@ -126,7 +150,7 @@ pub struct ObservationReader {
 #[must_use]
 pub fn observation_slot() -> (ObservationPublisher, ObservationReader) {
     let slot = Arc::new(ObservationSlot {
-        words: PublishedWords::new(ObservationWindow::default().to_words()),
+        words: PublishedWords::new([0; SLOT_WORDS]),
         consumed: AtomicU64::new(0),
     });
     let reader = Arc::clone(&slot);
@@ -138,12 +162,42 @@ pub fn observation_slot() -> (ObservationPublisher, ObservationReader) {
 
 // REALTIME_POLICY_BEGIN
 impl ObservationPublisher {
-    /// Overwrite the cell with `window`. Wait-free: five word stores and two counter stores.
+    /// Overwrite the cell's window with `window`, keeping the arm state. Wait-free: the writer's
+    /// own eight loads, eight word stores and two counter stores.
     ///
     /// Latest wins, always. There is no full, no backpressure and no return value, because there
     /// is no outcome a render thread could act on.
     pub fn publish(&self, window: ObservationWindow) {
-        self.slot.words.publish(&window.to_words());
+        let [.., armed, arm_sample, arm_tag] = self.slot.words.writer_words();
+        let [first_sample, end_sample, sequence, blocks, lanes] = window.to_words();
+        self.slot.words.publish(&[
+            first_sample,
+            end_sample,
+            sequence,
+            blocks,
+            lanes,
+            armed,
+            arm_sample,
+            arm_tag,
+        ]);
+    }
+
+    /// Overwrite the cell's arm state, keeping the window (#1585 D2): one publication of the whole
+    /// record, so no reader pairs a window with another publication's arm state. Wait-free, as
+    /// [`Self::publish`].
+    pub fn publish_arm(&self, armed: bool, arm_sample: u64, arm_tag: u64) {
+        let [first_sample, end_sample, sequence, blocks, lanes, ..] =
+            self.slot.words.writer_words();
+        self.slot.words.publish(&[
+            first_sample,
+            end_sample,
+            sequence,
+            blocks,
+            lanes,
+            u64::from(armed),
+            arm_sample,
+            arm_tag,
+        ]);
     }
 
     /// The newest window sequence the reader says it has consumed. One load.
@@ -161,8 +215,31 @@ impl ObservationReader {
     /// comes back is exactly one publication.
     #[must_use]
     pub fn read(&self) -> Option<ObservationWindow> {
-        let window = ObservationWindow::from_words(self.slot.words.read().ok()?);
-        (window.sequence != 0).then_some(window)
+        self.read_state()?.window
+    }
+
+    /// The tap's newest window and arm state, from one publication, or `None` if the read tore
+    /// (#1585 D2). Bounded as [`Self::read`] is.
+    #[must_use]
+    pub fn read_state(&self) -> Option<ObservationState> {
+        let [
+            first_sample,
+            end_sample,
+            sequence,
+            blocks,
+            lanes,
+            armed,
+            arm_sample,
+            arm_tag,
+        ] = self.slot.words.read().ok()?;
+        let window =
+            ObservationWindow::from_words([first_sample, end_sample, sequence, blocks, lanes]);
+        Some(ObservationState {
+            window: (window.sequence != 0).then_some(window),
+            armed: armed != 0,
+            arm_sample,
+            arm_tag,
+        })
     }
 
     /// Record that everything up to and including `sequence` has been consumed.
