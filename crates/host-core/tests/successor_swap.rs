@@ -11096,7 +11096,8 @@ fn a_changed_lane_delay_restarts_only_its_lane_on_every_width() {
 /// the swap block on equals B with the send muted, rendered fresh from frame 0, given a live unmute
 /// at the swap block: the new destination hears a fade from the fire block and A's ramp does not
 /// carry. The oracle can fail: the unmute one block late differs, and the control, which keeps the
-/// send where it was, carries the ramp in flight.
+/// send where it was, carries the ramp in flight. (c) A re-point from a lane-less route arms
+/// nothing: it steps on both sides until 1953b.
 fn a_repointed_send_fades_in_at_its_new_destination(backend: Backend) {
     let feed = Feed::new(SOURCE, 1);
     let a_model = send_session(false);
@@ -11217,6 +11218,20 @@ fn a_repointed_send_fades_in_at_its_new_destination(backend: Backend) {
             "{backend:?} {case}: the fire block is observable"
         );
     }
+    // (c) A re-point from a lane-less route (`eq0-main`, `post_pan` into the output) still steps
+    // on both sides until 1953b: its removal cannot ramp, so its addition arms nothing.
+    let mut lane_less = with_muted_output_track(a_model.clone());
+    let route = route_mut(&mut lane_less, "eq0-main");
+    assert!(!controls::route_rows_live(route), "eq0-main has no lane");
+    route.destination = session::RouteDestination::SubmixInput {
+        submix_id: id("bus2"),
+    };
+    let stepped = swap_to(&Session::compile(lane_less));
+    assert_eq!(
+        stepped.arms[0],
+        Vec::<(u32, u32)>::new(),
+        "{backend:?} (c): a re-point from a lane-less route arms nothing"
+    );
     let carried = swap_to(&kept);
     let unmoved = fade_run(&kept, &[], &[&feed], None, &[], backend);
     assert_ne!(
