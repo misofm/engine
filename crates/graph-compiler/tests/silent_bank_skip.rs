@@ -775,6 +775,49 @@ fn a_skipping_block_allocates_nothing() {
     assert!(before.lane_moves() > 0, "the packer moved lanes");
 }
 
+/// Issue #1981: a pack shape the chains refuse, whose facts do not change, is attempted once and
+/// not again. `ch00` keeps the collapse-armed mono bank running with packable lanes beside it, and
+/// `ch17` runs in the padded stereo bank; the only lower bank that runs is the mono one, and the
+/// chains refuse a move between differently armed banks. No ride: the second bank rests and does
+/// not run.
+///
+/// Test value: red when the packer retries a refused move every block although nothing it decides
+/// on changed (the `PackGroup::dirty` bit), a standing render cost no bit shows.
+#[test]
+fn a_refused_pack_is_not_retried() {
+    let blocks = 200;
+    let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
+        .map(|track| {
+            let kind = if track == 0 || track == 17 {
+                Block::Signal(0.1)
+            } else {
+                Block::Silence
+            };
+            vec![kind; blocks].into()
+        })
+        .collect();
+    let mut model = session(first_sixteen);
+    model.automation.clear();
+    resting_second_bank(&mut model);
+    let mut bound = bind(&model, &schedules, false);
+    let mut pcm = vec![0.0_f32; bound.frames * 2];
+    let mut settled = 0;
+    for block in 0..blocks as u64 {
+        if block == 60 {
+            settled = graph::test_only_bank_pack_attempts(&bound.plan);
+        }
+        bound.render(block, true, &mut pcm);
+    }
+    let attempts = graph::test_only_bank_pack_attempts(&bound.plan);
+    eprintln!("attempts by block 60 {settled}, by the end {attempts}");
+    assert!(settled > 0, "the packer tried the refused move");
+    assert_eq!(bound.lane_moves(), 0, "every move was refused");
+    assert_eq!(
+        attempts, settled,
+        "no attempt after the shape settled: the same facts make the same refusal"
+    );
+}
+
 /// Give the second bank (`ch08..ch16`) the 0 dB compressor threshold the other banks have, so its
 /// strips rest once silent and can take a running strip from a higher bank (issue #1981);
 /// `ch11`'s ride still keeps that bank rendering every block.

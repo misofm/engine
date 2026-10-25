@@ -6213,6 +6213,17 @@ pub fn test_only_bank_lane_moves(plan: &PreparedRenderPlan) -> u64 {
         .map_or(0, |executor| executor.runtime.lane_moves())
 }
 
+/// Test-only (issue #1981): the swaps the per-block packer attempted in a graph plan, made or
+/// refused; zero for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_pack_attempts(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| executor.runtime.pack_attempts())
+}
+
 /// Test-only (issue #1981): the strips of a graph plan's pack groups not at their home lane; zero
 /// for any other plan and under the identity map.
 #[cfg(any(test, feature = "test-support"))]

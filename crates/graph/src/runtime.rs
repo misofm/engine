@@ -5182,19 +5182,11 @@ impl Runtime {
                     },
                     defer,
                 };
-                // Issue #1981: the packer's input fact, for a grouped unit only (at most eight
-                // lanes; ungrouped units pay one load): which lanes' inputs are exact `+0.0`, by
-                // the head test the chain's own skip uses.
+                // Issue #1981: a grouped unit's packer fact is read after its chain runs (one load
+                // for an ungrouped unit); the skip counter says whether the chain skipped.
                 let grouped = lane_map.group(index).map(|(group, _)| group);
-                let silent = if grouped.is_some() {
-                    (0..lanes.min(8)).fold(0_u32, |mask, lane| {
-                        mask | (u32::from(BankMembers::input_is_positive_zero(
-                            &planes, lane, frames,
-                        )) << lane)
-                    })
-                } else {
-                    0
-                };
+                let skips = chain.silent_skips();
+                let words = frames;
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
                 set_block_time(chain, block_time);
                 if let Some(symmetric) = input_symmetric {
@@ -5218,12 +5210,25 @@ impl Runtime {
                 } else {
                     chain.run(&mut planes, frames, first_sample, snapshot)?;
                 }
-                // Issue #1981: the rest half of the fact, asked only when some input was silent.
+                // Issue #1981: the packer's fact, which lanes had an exact `+0.0` input and are at
+                // rest for the coming block. A skipped block proved it for every lane, so it scans
+                // nothing (silence costs no work). Otherwise one rest query, and the skip's own
+                // head test only on the lanes at rest; a running unit's rest mask is usually
+                // empty. The input buffers are the producers', which this unit never writes; a
+                // wrong fact would only cost a bank run, never a bit.
                 if let Some(group) = grouped {
-                    let quiet = if silent == 0 {
-                        0
+                    let populated = (1_u32 << lanes.min(8)) - 1;
+                    let quiet = if chain.silent_skips() != skips {
+                        populated
                     } else {
-                        silent & chain.lanes_at_rest()
+                        let rest = chain.lanes_at_rest() & populated;
+                        (0..lanes.min(8))
+                            .filter(|lane| (rest >> lane) & 1 != 0)
+                            .fold(0_u32, |mask, lane| {
+                                mask | (u32::from(BankMembers::input_is_positive_zero(
+                                    &planes, lane, words,
+                                )) << lane)
+                            })
                     };
                     lane_map.record_facts(group, index, lanes, quiet);
                 }
@@ -9371,6 +9376,11 @@ pub(crate) struct PackGroup {
     /// (issue #1981: idle for [`PACK_IDLE_BLOCKS`] blocks or more). Zero, with `displaced` zero,
     /// lets [`Runtime::pack_lanes`] pass the group by at the cost of one load.
     packable: u32,
+    /// Something the packer decides on changed since its last step, or that step spent its whole
+    /// budget (issue #1981): a strip's idle count crossed [`PACK_IDLE_BLOCKS`] either way, a
+    /// strip moved, or the plan is new. Clear, the same facts would make the same refused
+    /// attempts, so [`Runtime::pack_lanes`] passes the group by.
+    dirty: bool,
 }
 
 impl PackGroup {
@@ -9424,6 +9434,10 @@ pub(crate) struct LaneMap {
     /// evidence only.
     #[cfg(any(test, feature = "test-support"))]
     lane_moves: u64,
+    /// The swaps [`Runtime::pack_lanes`] attempted, made or refused (issue #1981): test evidence
+    /// only.
+    #[cfg(any(test, feature = "test-support"))]
+    pack_attempts: u64,
 }
 
 /// Why [`Runtime::swap_bank_lanes`] moved nothing. Every refusal leaves the plan as it was.
@@ -9543,6 +9557,7 @@ impl LaneMap {
                 master,
                 displaced: 0,
                 packable: 0,
+                dirty: true,
             });
         }
         Self::from_groups(groups, units.len(), 2 * widest_folded * frames, scratch)
@@ -9569,6 +9584,7 @@ impl LaneMap {
             group.base = u32::try_from(local.len()).expect("a position fits");
             group.displaced = 0;
             group.packable = 0;
+            group.dirty = true;
             let span = (group.last - group.first + 1) as usize * group.width as usize;
             local.extend(
                 (0..span).map(|position| u32::try_from(position).expect("a position fits")),
@@ -9590,6 +9606,8 @@ impl LaneMap {
             swap_scratch: vec![0; scratch].into_boxed_slice(),
             #[cfg(any(test, feature = "test-support"))]
             lane_moves: 0,
+            #[cfg(any(test, feature = "test-support"))]
+            pack_attempts: 0,
         }
     }
 
@@ -9666,6 +9684,7 @@ impl LaneMap {
         let after = u32::from(away(strip_a)) + u32::from(away(strip_b));
         if let Some(group) = self.groups.get_mut(group) {
             group.displaced = (group.displaced + after).saturating_sub(before);
+            group.dirty = true;
         }
         true
     }
@@ -9685,6 +9704,7 @@ impl LaneMap {
         } else {
             pack.packable
         };
+        let mut crossed = false;
         for lane in 0..lanes {
             let Some(&strip) = pack
                 .local(unit, lane)
@@ -9695,15 +9715,19 @@ impl LaneMap {
             let Some(idle) = self.idle.get_mut(base + strip as usize) else {
                 continue;
             };
+            let was = *idle >= PACK_IDLE_BLOCKS;
             *idle = if (quiet >> lane) & 1 != 0 {
                 idle.saturating_add(1)
             } else {
                 0
             };
-            packable += u32::from(*idle >= PACK_IDLE_BLOCKS);
+            let is = *idle >= PACK_IDLE_BLOCKS;
+            crossed |= was != is;
+            packable += u32::from(is);
         }
         if let Some(group) = self.groups.get_mut(group) {
             group.packable = packable;
+            group.dirty |= crossed;
         }
     }
 
@@ -9887,6 +9911,12 @@ impl Runtime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn lane_moves(&self) -> u64 {
         self.lane_map.lane_moves
+    }
+
+    /// The swaps the packer attempted, made or refused (issue #1981). Off the render thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn pack_attempts(&self) -> u64 {
+        self.lane_map.pack_attempts
     }
 
     /// The strips of every pack group not at their home position (issue #1981). Off the render
@@ -10191,7 +10221,8 @@ impl Runtime {
     /// that is always exact: each chain still decides its skip from this block's own input and
     /// rest, so a strip packed on a stale fact costs its bank one rendered block, never a bit.
     ///
-    /// A group with no packable strip and no displaced one is passed by at one load. Bounded and
+    /// A group with no packable strip and no displaced one, or whose facts have not changed since
+    /// its last step (`PackGroup::dirty`), is passed by at one load. Bounded and
     /// allocation-free: per group, at most `W` moves and `span` attempts ([`Self::pack_group`]).
     pub(crate) fn pack_lanes(&mut self) {
         #[cfg(any(test, feature = "test-support"))]
@@ -10202,7 +10233,7 @@ impl Runtime {
             let Some(pack) = self.lane_map.groups.get(group).copied() else {
                 return;
             };
-            if pack.packable != 0 || pack.displaced != 0 {
+            if pack.dirty && (pack.packable != 0 || pack.displaced != 0) {
                 self.pack_group(group, pack);
             }
         }
@@ -10244,8 +10275,11 @@ impl Runtime {
         };
         let moved = self.swap_bank_lanes(a, b).is_ok();
         #[cfg(any(test, feature = "test-support"))]
-        if moved {
-            self.lane_map.lane_moves = self.lane_map.lane_moves.saturating_add(1);
+        {
+            self.lane_map.pack_attempts = self.lane_map.pack_attempts.saturating_add(1);
+            if moved {
+                self.lane_map.lane_moves = self.lane_map.lane_moves.saturating_add(1);
+            }
         }
         moved
     }
@@ -10271,13 +10305,18 @@ impl Runtime {
     /// map, whose fused epilogue costs nothing extra.
     ///
     /// Budget: at most `W` moves (`B`, one bank's state per block, the worst swap cost) and
-    /// `span` attempts per group per block.
+    /// `span` attempts per group per block. A step runs only while the group's `dirty` bit is set:
+    /// a refused shape whose facts do not change is attempted once, not every block.
     fn pack_group(&mut self, group: usize, pack: PackGroup) {
         let width = pack.width as usize;
         let units = (pack.last as usize + 1).saturating_sub(pack.first as usize);
         let span = units * width;
         let budget = width;
         let (mut moves, mut attempts) = (0_usize, 0_usize);
+        // A move sets the bit again (`LaneMap::record_swap`), and so does a spent budget below.
+        if let Some(group) = self.lane_map.groups.get_mut(group) {
+            group.dirty = false;
+        }
         'pack: for position in (width..span).rev() {
             if moves >= budget || attempts >= span {
                 break;
@@ -10348,6 +10387,12 @@ impl Runtime {
                     moves += 1;
                 }
             }
+        }
+        // A spent budget may have left work: look again next block.
+        if (moves >= budget || attempts >= span)
+            && let Some(group) = self.lane_map.groups.get_mut(group)
+        {
+            group.dirty = true;
         }
     }
 }
@@ -15021,6 +15066,7 @@ mod tests {
             master: FoldTarget::Output,
             displaced: 0,
             packable: 0,
+            dirty: true,
         };
         let mut map = LaneMap::from_groups(vec![group(0, 1), group(2, 4)], 5, 0, 0);
         assert_eq!(
