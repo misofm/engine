@@ -334,7 +334,7 @@ warm edit would be `LeadBound`.
 
 ## Decision record (slice 1397a, attempt 1, 2026-10-25)
 
-Scope note R1-R4 apply (root accepted them). This change is D1 (both arms) and deliverable 5.
+Scope note R1-R4 apply (root accepted them). This slice is D1 (both arms), D2, D3, D5, deliverable 3 (the injected refusal) and deliverable 5.
 
 - **D1 routing.** `rebuild` plans the transition over the ordinary successor's
   `restarted_strips()`, classifies, and for any `Warm` answer prepares the warm successor with its
@@ -358,11 +358,34 @@ Scope note R1-R4 apply (root accepted them). This change is D1 (both arms) and d
   #1403 gate 3's supersession row (the same edit: remove track 2 and its source over a pending
   W): `not_before = S`, the removed source fed only up to `S`, adoption at `S`, A continued with
   track 2 live-muted for 64 blocks. Deliverable 5 rewrites #1403 gate 2's test; its old
-  assertions are deleted. A `lead_samples == 0` row is not tested: no shape that `warm_lead`
-  answers with a zero lead was found in the control plane's session family (no submixes).
-- **Not in this change:** D2 (`fall_back_to_transition`, `grown_strips`,
-  `SuccessorBase::forced_restart`), D3, D5, the injected-refusal hook and gates 3 and 4. The
-  `Unavailable` arm still takes today's path.
+  assertions are deleted.
+- **Zero lead (D1's second arm).** No edit of the control-plane gates' session family (no
+  submixes) gets `Warm` with `lead_samples == 0` from `warm_lead` (probed: a carried post-fader
+  stage of the edited strip always keeps a positive lead). The gate injects that answer through a
+  `test-support` seam (`WarmLead::test_only_zero_lead`, `test_set_next_zero_lead`) and checks
+  the routing: `NoEarlierThan(S)`, no record, the whole restart in `restarted_strips()` and
+  ducked, `EXACT`. Red with the zero lead published `Primed`, and red without the transition
+  planned again over the warm successor's restarts.
+- **D2 shape.** `host_core::fall_back_to_transition(base, next, ordinary, inventory, prepare)`
+  (`warm.rs`) is step 1: `grown_strips` over the ordinary compile (before it drops and before any
+  join), then `prepare` with `SuccessorBase::forced_restart`. Steps 2-5 (donation after the
+  preparation, the refusal, the publication with `S` and `TRANSITION_FALLBACK`) are the control
+  plane's one rebuild path (R3): the submit-time arm is `WarmDecision::Unavailable` in
+  `rebuild`; the donor arm is `Rebuild::Transition`, run by `fall_back_pending_warm` (the body
+  of #1358's deadline step: withdraw, re-prepare across the donor, publish; on a refusal
+  republish the donor whole, count `transition_reprepare_refusals`, debug-assert unless
+  injected). Until #1358 calls it, it is reached through `test_fall_back_to_transition`. The
+  record of W is never dropped on a refusal: the withdrawal of the epoch it names keeps it, so
+  "set again" is that it stays. The donor arm skips the admission, as D2 says.
+- **`grown_strips` limit (R1).** Route and output-path lines and arrivals only: no sidechain
+  line and no #1324 D1 closure (1397b, after 1324b).
+- **Counter.** `transition_reprepare_refusals` is served through the existing counter ID with a
+  new `SessionControlProvider::set_transition_reprepare_refusals` (`control_provider.rs`), and
+  `grown_strips` / `fall_back_to_transition` are re-exported from `host-core/src/lib.rs`: two
+  files outside the scope note's paths, each a one-item addition.
+- **Gates 3 and 4** are control-plane unit tests at 48 kHz on this build's width. Gate 4's
+  deadline steps are two `test_fall_back_to_transition` calls; its refused edit is a
+  supersession over the effect-state cap.
 
 Paths moving rendered bits: only a session that holds a `WarmConfig` (none in production). Class A
 for every other session.
