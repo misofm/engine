@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { digestPlanes, effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+
+// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
+const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 
 const WINDOW_FRAMES = 2_048;
 const CHANNELS = "both";
@@ -46,7 +48,7 @@ function queryFor(target, channels = CHANNELS) {
   return {
     target,
     channels,
-    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+    spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
   };
 }
 
@@ -260,42 +262,16 @@ test("candidate Wasm spectrum query captures all graph targets through explicit 
     "the post-input and post-matrix taps must observe the EQ in the prepared graph");
 });
 
-/**
- * The real asset with every export access recorded while `watch.on`: what reaches the engine
- * through the old spectrum exports, and how many control frames reach it.
- */
-function watchedAsset(asset) {
-  const watch = { on: false, spectrumExports: new Set(), controlCommands: 0 };
-  const fake = {
-    instantiate: async () => {
-      const instance = await asset.instantiate();
-      const exports = new Proxy(instance.exports, {
-        get(target, name, receiver) {
-          if (watch.on && typeof name === "string") {
-            if (name.startsWith("miso_engine_web_v1_spectrum_")) watch.spectrumExports.add(name);
-            if (name === "miso_engine_web_v1_control_command") watch.controlCommands += 1;
-          }
-          return Reflect.get(target, name, receiver);
-        },
-      });
-      return new Proxy(instance, {
-        get(target, name, receiver) {
-          return name === "exports" ? exports : Reflect.get(target, name, receiver);
-        },
-      });
-    },
-  };
-  return { fake, watch };
-}
-
-test("candidate Wasm headless spectrum runs on the frames alone: one-shot, stream and reconfiguration (#1596 gate 3)", {
+// #1596 gate 3 and #1597: the boot's tap is in the plan of the first block, so a capture armed
+// before any block covers sample 0; then a stream and a reconfiguration, all through the frames.
+test("candidate Wasm headless spectrum: a boot tap armed before the first block, a stream and a reconfiguration", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
-  const { fake, watch } = watchedAsset(await candidateAsset());
   const output = queryFor({ kind: "output", outputId: "out" });
   const track = queryFor({ kind: "trackPostPan", trackId: "t" });
-  const engine = await createOfflineEngine(spectrumDocument(4 * WINDOW_FRAMES), { asset: fake, spectrum: output });
-  watch.on = true;
+  const engine = await createOfflineEngine(spectrumDocument(4 * WINDOW_FRAMES), {
+    asset: await candidateAsset(), spectrum: output,
+  });
   let subscription;
   try {
     const blocksPerWindow = WINDOW_FRAMES / engine.shape().quantumFrames;
@@ -328,11 +304,8 @@ test("candidate Wasm headless spectrum runs on the frames alone: one-shot, strea
     assertSpectrumResult(engine.readSpectrum(), track, armedAt);
   } finally {
     await subscription?.close();
-    watch.on = false;
     engine.dispose();
   }
-  assert.ok(watch.controlCommands > 0, "the calls went through the control entry");
-  assert.deepEqual([...watch.spectrumExports], [], "an SDK path called an old spectrum export");
 });
 
 test("candidate Wasm spectrum arm, cancel, and dispose preserve lifecycle refusals", {
@@ -451,7 +424,7 @@ test("candidate Wasm managed spectrum honors exact H256 and H1024 spans, bounds,
       assert.deepEqual(subscription.configuration, {
         target: query.target,
         channels: "both",
-        spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+        spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
         smoothingMs,
         cadenceMs: 1,
       });
@@ -460,8 +433,8 @@ test("candidate Wasm managed spectrum honors exact H256 and H1024 spans, bounds,
         maximumRetainedBytes: 16 * 1024 * 1024,
         maximumDeliveredBytesPerSecond: 16 * 1024 * 1024,
         maximumCadenceMs: 60_000,
-        maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
-        maximumResultBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+        maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES,
+        maximumResultBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES,
         hopFrames,
       });
 
@@ -789,7 +762,7 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
       { target: firstQuery.target, channels: "both" },
       { target: secondQuery.target, channels: "both" },
     ],
-    maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+    maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES,
   };
   let activeQuery = firstQuery;
   let activeSmoothing = 0;
@@ -1202,7 +1175,7 @@ test("managed spectrum recovery rejection publishes a cadence-gated gap and pres
 test("managed spectrum fulfilled-invalid recovery rejects without a fallback publication", async () => {
   const query = queryFor({ kind: "output", outputId: "out" });
   const invalidRecovery = managedRead(query, "ready", 1, 1n);
-  invalidRecovery.result.resultBytes = BigInt(ABI_LAYOUT.constants.spectrumCaptureBytes) + 1n;
+  invalidRecovery.result.resultBytes = BigInt(SPECTRUM_MAXIMUM_CAPTURE_BYTES) + 1n;
   const queued = [
     managedRead(query, "gap", 0, 1n),
     invalidRecovery,

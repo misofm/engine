@@ -1,7 +1,9 @@
 use core::mem::{offset_of, size_of, size_of_val};
 
 use builtins::MeterSnapshot;
-use host_core::SpectrumSmoothingConfig;
+use host_core::{
+    SpectrumCaptureCollectionRequest, SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget,
+};
 // #1582 D3: the strip word's conversion and fold moved into the core under these names.
 use host_core::meters::{
     reduction_db as observed_decibels, strip_reduction_db as strip_reduction_decibels,
@@ -20,17 +22,6 @@ fn one_track_session(quantum: u32) -> String {
     model.tracks.truncate(1);
     model.routes.truncate(1);
     canonical_session_json(&model).expect("canonical one-track session")
-}
-
-fn one_track_resource_session(quantum: u32) -> String {
-    let mut model = parse_session_json(&one_track_session(quantum)).expect("one-track session");
-    model.console.pre_insert.clear();
-    model.console.post_insert.clear();
-    for track in &mut model.tracks {
-        track.console.clear();
-        track.inserts.effects.clear();
-    }
-    canonical_session_json(&model).expect("canonical resource session")
 }
 
 /// The browser fixture's identity session, re-shaped for one test.
@@ -69,8 +60,7 @@ fn boot_options(quantum: u32) -> WebBootOptions {
 /// past its buffer. A boot of a short, mono session never meets either; only a rebuild does.
 #[test]
 fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlong_id() {
-    let projection = project_buffers(1, 48_000, 128, boot_options(128), (false, (0, 0)))
-        .expect("bridge projection");
+    let projection = project_buffers(1, 48_000, 128, boot_options(128)).expect("bridge projection");
     let mut buffers = allocate_buffers(projection).expect("staging");
     assert_eq!(buffers.source_id.len(), session::STABLE_ID_MAXIMUM_BYTES);
     assert_eq!(
@@ -126,7 +116,6 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
         shape.sample_rate_hz,
         shape.quantum_frames,
         options,
-        (false, (0, 0)),
     )
     .expect("bridge projection");
     projected_retained_bytes(
@@ -976,7 +965,6 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             shape.sample_rate_hz,
             shape.quantum_frames,
             options,
-            (false, (0, 0)),
         )
         .expect("bridge projection");
         assert_eq!(projection.command_records, expected_records, "{name}");
@@ -4185,17 +4173,6 @@ fn bus_meter_host_with(
     meter_blocks: u64,
     source_quanta: u64,
 ) -> AudioWorkletEngineHost {
-    bus_meter_host_with_spectrum(quantum, buses, meter_blocks, source_quanta, None)
-}
-
-/// [`bus_meter_host_with`] booted with `spectrum` (issue #1581 gate 2).
-fn bus_meter_host_with_spectrum(
-    quantum: u32,
-    buses: bool,
-    meter_blocks: u64,
-    source_quanta: u64,
-    spectrum: Option<SpectrumPreparationRequest>,
-) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/observation-frame-shape.json"
     ))
@@ -4238,13 +4215,12 @@ fn bus_meter_host_with_spectrum(
         live_control_meter_blocks: meter_blocks,
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot_with_spectrum(document.as_bytes(), options, spectrum)
-        .unwrap_or_else(|failure| {
-            panic!(
-                "bus meter boot: {}",
-                String::from_utf8_lossy(failure.diagnostic())
-            )
-        })
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+        panic!(
+            "bus meter boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
 }
 
 /// Issue #1448 D6: after a window is lost on one or two meters, the poll that recovers publishes
@@ -4389,22 +4365,76 @@ fn the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix() {
     assert_eq!(header.master_gr_present, 0);
 }
 
-/// Issue #1581 gate 2: a boot with a spectrum capture meters the submixes as the plain boot does,
-/// so the bus fixture's frame is the plain boot's, word for word, with nonzero submix peaks.
+/// Configure one stereo spectrum tap on `host` through its command entry, before its first block,
+/// as the SDK's boot does (#1597): the reply reports the tap adopted at once.
+fn configure_spectrum_before_the_first_block(
+    host: &mut AudioWorkletEngineHost,
+    target_kind: protocol::SpectrumTargetKind,
+    target_id: &str,
+) {
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
+        ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
+    };
+    let configure = protocol::SpectrumConfigureRequest {
+        form: protocol::SpectrumForm::Single,
+        entries: vec![protocol::SpectrumEntry {
+            target_kind,
+            target_id: target_id.to_owned(),
+            channels: protocol::ParameterChannel::Both,
+        }],
+        maximum_capture_bytes: host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES,
+        hop_frames: None,
+    };
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; 4_096];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Any,
+                payload: CommandPayload::SpectrumConfigure(&configure),
+            },
+            &mut bytes,
+        )
+        .expect("a configure frame");
+    let len = u32::try_from(length).expect("a short frame");
+    host.control_request_mut(len).expect("the request staging")[..length]
+        .copy_from_slice(&bytes[..length]);
+    assert_eq!(host.control_command(len), RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let DecodedTypedResponseFrame::Success {
+        payload: DecodedSuccessResponsePayload::SpectrumConfigured(reply),
+        ..
+    } = codec
+        .decode_typed_response(
+            host.control_response(),
+            &mut DecodeScratch::new(&mut fields),
+        )
+        .expect("a configure reply")
+    else {
+        panic!("the configure was refused");
+    };
+    assert_eq!(reply.adopted_epoch, reply.configured_epoch);
+}
+
+/// Issue #1581 gate 2: a session with a spectrum tap meters the submixes as the plain boot does,
+/// so the bus fixture's frame is the plain boot's, word for word, with nonzero submix peaks. The
+/// tap is configured before the first block (#1597), as a boot's taps are.
 ///
 /// Red on the base: the spectrum entries metered the tracks alone, so the submix pairs stayed `0`.
 #[test]
-fn a_spectrum_boot_meters_every_submix_like_the_plain_boot() {
+fn a_spectrum_tap_meters_every_submix_like_the_plain_boot() {
     const QUANTUM: u32 = 128;
     const BLOCKS: u64 = 8;
     let mut plain = bus_meter_host(QUANTUM, true);
     let expected = bus_meter_frame(&mut plain, BLOCKS);
-    let spectrum = SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
-        target: SpectrumTarget::Output("main-out".into()),
-        channels: SpectrumChannels::Stereo,
-        maximum_capture_bytes: u64::MAX,
-    });
-    let mut host = bus_meter_host_with_spectrum(QUANTUM, true, 2, 64, Some(spectrum));
+    let mut host = bus_meter_host_with(QUANTUM, true, 2, 64);
+    configure_spectrum_before_the_first_block(
+        &mut host,
+        protocol::SpectrumTargetKind::Output,
+        "main-out",
+    );
     let frame = bus_meter_frame(&mut host, BLOCKS);
     let tracks = 3;
     for (word, peak) in frame
@@ -4421,7 +4451,7 @@ fn a_spectrum_boot_meters_every_submix_like_the_plain_boot() {
             .iter()
             .map(|word| word.to_bits())
             .collect::<Vec<_>>(),
-        "the spectrum boot's frame is the plain boot's"
+        "the configured session's frame is the plain boot's"
     );
 }
 
@@ -5853,73 +5883,6 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     assert_eq!(miso_engine_web_v1_source_count(handle), 0);
 }
 
-/// The spectrum hop a boot names reaches the browser's stream cadence, for a single capture and
-/// for a collection (whose entry is selected first), and a boot that names no hop keeps the
-/// default cadence. Each row was its own test.
-#[test]
-fn ordinary_spectrum_hops_reach_the_browser_stream_cadence() {
-    let document = one_track_resource_session(128);
-    let target = SpectrumTarget::TrackPostMatrix("eq0".into());
-    let single = || {
-        SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
-            target: target.clone(),
-            channels: SpectrumChannels::Stereo,
-            maximum_capture_bytes: u64::MAX,
-        })
-    };
-    let collection = || {
-        SpectrumPreparationRequest::Collection(SpectrumCaptureCollectionRequest {
-            entries: vec![host_core::SpectrumCaptureCollectionEntry {
-                target: target.clone(),
-                channels: SpectrumChannels::Stereo,
-            }],
-            maximum_capture_bytes: u64::MAX,
-        })
-    };
-    let default_hop = SpectrumCadence::new(48_000, 128)
-        .expect("default cadence")
-        .hop_frames();
-    for (label, request, hop, select, expected_hop) in [
-        ("single, explicit hop", single(), Some(256), false, 256),
-        (
-            "collection, explicit hop",
-            collection(),
-            Some(1024),
-            true,
-            1024,
-        ),
-        ("single, omitted hop", single(), None, false, default_hop),
-    ] {
-        let hop = hop.map(|frames| SpectrumHop::new(frames).expect("supported hop"));
-        let mut host = AudioWorkletEngineHost::boot_with_spectrum_config(
-            document.as_bytes(),
-            boot_options(128),
-            Some(request),
-            hop,
-        )
-        .expect(label);
-        if select {
-            assert_eq!(
-                host.select_spectrum_target(target.as_ref(), SpectrumChannels::Stereo, None, None),
-                Ok(false),
-                "{label}"
-            );
-        }
-        host.start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
-            .expect(label);
-        let cadence = host.spectrum_stream_cadence().expect(label);
-        assert_eq!(
-            (
-                cadence.sample_rate_hz(),
-                cadence.quantum_frames(),
-                cadence.hop_frames()
-            ),
-            (48_000, 128, expected_hop),
-            "{label}"
-        );
-    }
-}
-
 // Issue #1213: browser live commands address submix strips. The index word is a strip index:
 // tracks first, then submixes in canonical order.
 
@@ -6653,18 +6616,18 @@ enum CompanionCapture {
     Collection,
 }
 
-fn companion_request(capture: CompanionCapture) -> Option<SpectrumPreparationRequest> {
+fn companion_request(capture: CompanionCapture) -> Option<host_core::SpectrumPreparation> {
     let target = SpectrumTarget::TrackPostMatrix("eq0".into());
     match capture {
         CompanionCapture::None => None,
-        CompanionCapture::Single => {
-            Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
+        CompanionCapture::Single => Some(host_core::SpectrumPreparation::Single(
+            SpectrumCaptureRequest {
                 target,
                 channels: SpectrumChannels::Stereo,
                 maximum_capture_bytes: u64::MAX,
-            }))
-        }
-        CompanionCapture::Collection => Some(SpectrumPreparationRequest::Collection(
+            },
+        )),
+        CompanionCapture::Collection => Some(host_core::SpectrumPreparation::Collection(
             SpectrumCaptureCollectionRequest {
                 entries: vec![host_core::SpectrumCaptureCollectionEntry {
                     target,
@@ -7066,15 +7029,10 @@ mod structural_apply {
     }
 
     impl Rig {
-        fn boot(
-            model: &SessionModel,
-            options: WebBootOptions,
-            spectrum: Option<SpectrumPreparationRequest>,
-        ) -> Self {
+        fn boot(model: &SessionModel, options: WebBootOptions) -> Self {
             let document = canonical_session_json(model).expect("canonical session");
-            let host =
-                AudioWorkletEngineHost::boot_with_spectrum(document.as_bytes(), options, spectrum)
-                    .expect("the session boots");
+            let host = AudioWorkletEngineHost::boot(document.as_bytes(), options)
+                .expect("the session boots");
             Self {
                 host,
                 block: 0,
@@ -7240,16 +7198,16 @@ mod structural_apply {
     /// Gate 1, in its single-thread form: the structural transaction returns before the render
     /// half adopts, and from the adoption block on every block equals a fresh boot of the committed
     /// model fed the same PCM from frame zero.
-    fn gap_free_acceptance(spectrum: impl Fn() -> Option<SpectrumPreparationRequest>) {
+    fn gap_free_acceptance() {
         let model = gate_model();
         let committed = with_muted_track(&model, ADDED);
 
-        let mut fresh = Rig::boot(&committed, options(), spectrum());
+        let mut fresh = Rig::boot(&committed, options());
         for _ in 0..BLOCKS {
             fresh.step();
         }
 
-        let mut rig = Rig::boot(&model, options(), spectrum());
+        let mut rig = Rig::boot(&model, options());
         for _ in 0..APPLY_BEFORE {
             rig.step();
         }
@@ -7344,256 +7302,7 @@ mod structural_apply {
     /// `apply` blocks until adoption (the plan that renders would already be the successor).
     #[test]
     fn a_rebuild_swaps_without_a_gap() {
-        gap_free_acceptance(|| None);
-    }
-
-    fn single_capture() -> Option<SpectrumPreparationRequest> {
-        Some(SpectrumPreparationRequest::Single(SpectrumCaptureRequest {
-            target: SpectrumTarget::TrackPostMatrix(model_track_id().into()),
-            channels: SpectrumChannels::Stereo,
-            maximum_capture_bytes: u64::MAX,
-        }))
-    }
-
-    fn model_track_id() -> String {
-        gate_model().tracks[3].id.as_str().to_owned()
-    }
-
-    // Issue #1290d2: the spectrum part of gate 7. A rebuild keeps a running stream, an armed
-    // one-shot and a collection's selection, because the session's spectrum monitor installs the
-    // successor's prepared captures, which the browser's preparer returns to it (#1596 D3), at the
-    // plan's promotion (the service step after the adoption block). The browser keeps the running
-    // stream as its parity row; the one-shot and the collection carry are `host-core`'s
-    // `tests/successor_swap.rs` (`spectrum_carry`).
-
-    /// A run long enough for several windows of the 2048-frame capture (16 blocks each).
-    const SPECTRUM_BLOCKS: u64 = 48;
-    /// The block before which the rebuild runs: inside the window that opened before it.
-    const SPECTRUM_APPLY_BEFORE: u64 = 21;
-
-    /// One read of the managed stream: the result word, the metadata and the held window.
-    #[derive(Clone, Copy, Debug)]
-    struct StreamRead {
-        result: u32,
-        metadata: SpectrumStreamMetadata,
-        window: Option<SpectrumContinuousWindow>,
-    }
-
-    impl Rig {
-        fn read_stream(&mut self) -> StreamRead {
-            let result = self.host.read_spectrum_stream(None);
-            StreamRead {
-                result,
-                metadata: *self
-                    .host
-                    .spectrum_stream_metadata()
-                    .expect("a spectrum service"),
-                window: self.host.spectrum_stream_window().copied(),
-            }
-        }
-    }
-
-    fn assert_same_stream(got: &[StreamRead], want: &[StreamRead], label: &str) {
-        assert_eq!(got.len(), want.len());
-        for (block, (got, want)) in got.iter().zip(want).enumerate() {
-            let at = format!("{label}: block {block}");
-            assert_eq!(got.result, want.result, "{at}: result");
-            let (g, w) = (&got.metadata, &want.metadata);
-            assert_eq!(g.status, w.status, "{at}: status");
-            assert_eq!(g.capture_epoch, w.capture_epoch, "{at}: capture epoch");
-            assert_eq!(g.sequence, w.sequence, "{at}: sequence");
-            assert_eq!(g.windows, w.windows, "{at}: windows");
-            assert_eq!(g.dropped_captures, w.dropped_captures, "{at}: dropped");
-            assert_eq!(g.captured_sample, w.captured_sample, "{at}: captured");
-            assert_eq!(g.target_kind, w.target_kind, "{at}: target");
-            assert_eq!(g.channels, w.channels, "{at}: channels");
-            match (&got.window, &want.window) {
-                (None, None) => {}
-                (Some(g), Some(w)) => {
-                    assert_eq!(g.first_sample, w.first_sample, "{at}: window start");
-                    assert_eq!(g.sequence, w.sequence, "{at}: window sequence");
-                    assert_eq!(g.stream_epoch, w.stream_epoch, "{at}: window epoch");
-                    assert!(
-                        g.left
-                            .iter()
-                            .zip(&w.left)
-                            .all(|(a, b)| a.to_bits() == b.to_bits())
-                            && g.right
-                                .iter()
-                                .zip(&w.right)
-                                .all(|(a, b)| a.to_bits() == b.to_bits()),
-                        "{at}: the planes equal the reference's bit for bit"
-                    );
-                }
-                _ => panic!("{at}: one side holds a window and the other does not"),
-            }
-        }
-    }
-
-    /// `model` booted with `spectrum`, `setup` run on the host, then the stream read after every
-    /// block of [`SPECTRUM_BLOCKS`]. With `rebuild`, the muted track is added before block
-    /// [`SPECTRUM_APPLY_BEFORE`] (it sorts first, so every strip index shifts) and the service
-    /// step runs after block `service_after`.
-    fn run_stream(
-        model: &SessionModel,
-        spectrum: &impl Fn() -> Option<SpectrumPreparationRequest>,
-        setup: &impl Fn(&mut Rig),
-        rebuild: Option<u64>,
-    ) -> (Rig, Vec<StreamRead>) {
-        let mut rig = Rig::boot(model, options(), spectrum());
-        setup(&mut rig);
-        let mut reads = Vec::new();
-        for block in 0..SPECTRUM_BLOCKS {
-            if rebuild.is_some() && block == SPECTRUM_APPLY_BEFORE {
-                let base = rig.host.committed_revision();
-                assert_eq!(
-                    rig.apply(&add_muted_track(model, ADDED), 1),
-                    Outcome::Applied {
-                        path: EditPath::Rebuild,
-                        revision: base + 1
-                    }
-                );
-            }
-            rig.step();
-            if rebuild == Some(block) {
-                assert_eq!(rig.host.service(), RESULT_OK);
-            }
-            reads.push(rig.read_stream());
-        }
-        (rig, reads)
-    }
-
-    fn start_stream(rig: &mut Rig) {
-        rig.host
-            .start_spectrum_stream(SpectrumSmoothingConfig::default(), None)
-            .expect("start the stream");
-    }
-
-    /// The swap leaves every read of a running stream equal to a fresh boot of the committed
-    /// model's: same epoch, no gap, no failure, and the same planes.
-    fn stream_continues(
-        spectrum: impl Fn() -> Option<SpectrumPreparationRequest>,
-        setup: impl Fn(&mut Rig),
-        service_after: u64,
-    ) {
-        let model = gate_model();
-        let committed = with_muted_track(&model, ADDED);
-        let (_, reference) = run_stream(&committed, &spectrum, &setup, None);
-        let (rig, reads) = run_stream(&model, &spectrum, &setup, Some(service_after));
-        assert_eq!(rig.epoch(), 1);
-        assert_same_stream(&reads, &reference, "the stream across the swap");
-        for read in &reads {
-            assert!(
-                !matches!(
-                    read.metadata.status,
-                    SpectrumStreamStatus::Failed
-                        | SpectrumStreamStatus::Gap
-                        | SpectrumStreamStatus::Inactive
-                        | SpectrumStreamStatus::Stopped
-                ),
-                "no failed epoch, no gap: {:?}",
-                read.metadata
-            );
-            assert_eq!(
-                read.metadata.capture_epoch, reads[0].metadata.capture_epoch,
-                "one capture epoch throughout"
-            );
-        }
-        let last = reads.last().expect("reads");
-        assert_eq!(last.metadata.status, SpectrumStreamStatus::Ready);
-        assert!(
-            last.window.expect("a window").first_sample
-                >= (SPECTRUM_APPLY_BEFORE + 1) * u64::from(QUANTUM),
-            "the stream delivers windows from after the swap"
-        );
-    }
-
-    /// Gate 7, spectrum part (single capture). Test value: red if the browser's preparer keeps the
-    /// successor's capture from the session (the promotion then removes the service), or if the
-    /// stream restarts at the swap (a new epoch, a gap or a failed read). The service step runs
-    /// right after the adoption block and long after it: between the two the carried capture is
-    /// served by the reader the service already holds.
-    #[test]
-    fn a_running_spectrum_stream_continues_across_a_rebuild() {
-        stream_continues(single_capture, start_stream, SPECTRUM_APPLY_BEFORE);
-        stream_continues(single_capture, start_stream, SPECTRUM_BLOCKS - 3);
-    }
-
-    /// Issue #1593 gate 8. Test value: red if the browser preparer prepares a successor with its
-    /// own copy of the boot request instead of the session's configuration (the removed target is
-    /// then refused `host.spectrum.target`), or if the promotion of a successor prepared with no
-    /// configuration leaves the boot plan's service reading.
-    #[test]
-    fn removing_the_spectrum_target_strip_is_accepted_and_drops_the_service() {
-        let model = gate_model();
-        let target = model.tracks[3].id.clone();
-        let route = model
-            .routes
-            .iter()
-            .find(|route| {
-                matches!(&route.source, RouteSource::Track { track_id, .. } if *track_id == target)
-            })
-            .expect("the target's route")
-            .id
-            .clone();
-        let mut rig = Rig::boot(&model, options(), single_capture());
-        start_stream(&mut rig);
-        while rig.block < SPECTRUM_APPLY_BEFORE {
-            rig.step();
-        }
-        assert_eq!(
-            rig.read_stream().metadata.status,
-            SpectrumStreamStatus::Ready,
-            "the boot plan's stream reads a window"
-        );
-        let base = rig.host.committed_revision();
-        let edits = [
-            SessionEdit::RemoveRoute { route_id: route },
-            SessionEdit::RemoveTrack { track_id: target },
-        ];
-        assert_eq!(
-            rig.apply(&edits, 1),
-            Outcome::Applied {
-                path: EditPath::Rebuild,
-                revision: base + 1
-            },
-            "the edit is never refused for a spectrum entry"
-        );
-        // D7: until render adopts the successor, a service step keeps the running plan's service.
-        assert_eq!(rig.host.service(), RESULT_OK);
-        assert_eq!(
-            rig.host
-                .spectrum_stream_metadata()
-                .expect("the running plan's service reads until adoption")
-                .status,
-            SpectrumStreamStatus::Ready
-        );
-        // The removed strip ramps out, then render adopts the successor at `S` (#1325 D3); until
-        // then a service step keeps the running plan's service.
-        rig.step();
-        while rig.epoch() == 0 {
-            assert_eq!(rig.host.service(), RESULT_OK);
-            assert_eq!(
-                rig.host
-                    .spectrum_stream_metadata()
-                    .expect("the running plan's service reads until adoption")
-                    .status,
-                SpectrumStreamStatus::Ready
-            );
-            assert!(rig.block < 64, "render adopts the successor");
-            rig.step();
-        }
-        assert_eq!(rig.epoch(), 1, "render adopted the successor");
-        assert_eq!(rig.host.service(), RESULT_OK);
-        assert!(
-            rig.host.spectrum_stream_metadata().is_none(),
-            "the successor has no spectrum observer, so the browser holds no service"
-        );
-        assert_eq!(
-            rig.host.arm_spectrum(),
-            spectrum_result(SpectrumServiceError::Unprepared)
-        );
-        rig.step();
+        gap_free_acceptance();
     }
 
     /// Everything a refusal must leave as it was.
@@ -7621,11 +7330,11 @@ mod structural_apply {
         refusal: impl FnOnce(&mut Rig, &SessionModel) -> String,
     ) -> String {
         let model = gate_model();
-        let mut without = Rig::boot(&model, options, None);
+        let mut without = Rig::boot(&model, options);
         for _ in 0..BLOCKS {
             without.step();
         }
-        let mut with = Rig::boot(&model, options, None);
+        let mut with = Rig::boot(&model, options);
         for _ in 0..APPLY_BEFORE {
             with.step();
         }
@@ -7701,13 +7410,13 @@ mod structural_apply {
     fn a_transaction_over_the_memory_budget_is_refused_and_changes_nothing() {
         let model = gate_model();
         let fits_one_plan =
-            exact_retained_report_total(Rig::boot(&model, options(), None).host.resources());
+            exact_retained_report_total(Rig::boot(&model, options()).host.resources());
         let tight = WebBootOptions {
             maximum_memory_bytes: fits_one_plan,
             ..options()
         };
         // The budget boots the session (the boot is inclusive of its own total) ...
-        Rig::boot(&model, tight, None);
+        Rig::boot(&model, tight);
         // ... and refuses a second plan beside it.
         let refused = assert_refusal_changes_nothing(tight, |rig, model| {
             let revision = rig.host.committed_revision();
@@ -7727,7 +7436,7 @@ mod structural_apply {
             maximum_memory_bytes: fits_one_plan * 2,
             ..options()
         };
-        let mut rig = Rig::boot(&model, roomy, None);
+        let mut rig = Rig::boot(&model, roomy);
         assert!(matches!(
             rig.apply(&add_muted_track(&model, ADDED), 1),
             Outcome::Applied { .. }
@@ -7767,7 +7476,7 @@ mod structural_apply {
             SessionEdit::UpsertTrack { track },
             SessionEdit::UpsertRoute { route },
         ];
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         let ids = |host: &AudioWorkletEngineHost| {
             host.live_control_tracks()
                 .iter()
@@ -7939,7 +7648,7 @@ mod structural_apply {
             crate::ffi::miso_engine_web_v1_declare_discontinuity(u32::MAX),
             RESULT_INVALID_ARGUMENT
         );
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         let floored = latency(&rig);
         assert!(floored > 0, "the limiter delays A");
         for _ in 0..APPLY_BEFORE {
@@ -7979,7 +7688,7 @@ mod structural_apply {
         )
         .expect("canonical session");
         let committed = parse_session_json(&document).expect("the committed model parses");
-        let mut fresh = Rig::boot(&committed, options(), None);
+        let mut fresh = Rig::boot(&committed, options());
         let natural = latency(&fresh);
         assert!(natural < floored, "B's natural latency is lower");
         assert_eq!(
@@ -8072,7 +7781,7 @@ mod structural_apply {
                     track_id: model.tracks[0].id.clone(),
                 },
             ];
-            let mut rig = Rig::boot(&model, options(), None);
+            let mut rig = Rig::boot(&model, options());
             for _ in 0..APPLY_BEFORE {
                 rig.step();
             }
@@ -8180,7 +7889,7 @@ mod structural_apply {
     fn paused_structural_edits_all_commit_and_the_newest_renders_as_a_fresh_boot() {
         const EDITS: u64 = 8;
         let model = gate_model();
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         for _ in 0..APPLY_BEFORE {
             rig.step();
         }
@@ -8236,7 +7945,7 @@ mod structural_apply {
         )
         .expect("canonical session");
         let committed = parse_session_json(&document).expect("the committed model parses");
-        let mut fresh = Rig::boot(&committed, options(), None);
+        let mut fresh = Rig::boot(&committed, options());
         for _ in 0..BLOCKS {
             fresh.step();
         }
@@ -8307,7 +8016,7 @@ mod structural_apply {
             SessionEdit::UpsertRoute { route },
         ];
         let second = [SessionEdit::UpsertSource { source: later }];
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         rig.step();
         assert!(matches!(
             rig.apply(&first, 1),
@@ -8399,7 +8108,7 @@ mod structural_apply {
                 effect,
             }]
         };
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         rig.step();
         assert!(matches!(
             rig.apply(&put(restarted), 1),
@@ -8479,7 +8188,7 @@ mod structural_apply {
     /// The frames a fresh boot of `model` publishes over `blocks` blocks, polled after each, keyed
     /// by the window's first sample: what the swapped host must publish for the same window.
     fn fresh_windows(model: &SessionModel, blocks: u64) -> Vec<Published> {
-        let mut rig = Rig::boot(model, options(), None);
+        let mut rig = Rig::boot(model, options());
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         poll_cadence(&mut rig, blocks, 1, 0)
     }
@@ -8503,7 +8212,7 @@ mod structural_apply {
         let model = gate_model();
         let mut source = model.sources[0].clone();
         source.id = StableId::parse("a-unused").expect("source ID");
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         assert!(poll_blocks(&mut rig, 6) > 0, "the boot plan's windows fold");
         let generation = rig.host.meter_header().reserved[0];
@@ -8551,7 +8260,7 @@ mod structural_apply {
     #[test]
     fn the_headers_structure_epoch_is_the_control_lists() {
         let model = gate_model();
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         let boot = rig.host.meter_header().structure_epoch;
         assert_eq!(boot, 1, "the boot list is the first structure");
         let delay = SessionEdit::SetControl {
@@ -8669,7 +8378,7 @@ mod structural_apply {
         let apply_before = 5;
         let reference = fresh_windows(&committed, 8);
 
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         let before = poll_cadence(&mut rig, apply_before, 1, 0);
         let last = before.last().expect("the boot plan published windows");
@@ -8817,7 +8526,7 @@ mod structural_apply {
         let with_added = with_muted_track(&model, ADDED);
         let reference = fresh_windows(&model, 10);
 
-        let mut rig = Rig::boot(&with_added, options(), None);
+        let mut rig = Rig::boot(&with_added, options());
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         // Windows close after the odd blocks; polling after the even blocks leaves each window
         // queued for one block. The transaction runs before block 5, so block 6 adopts the
@@ -8899,7 +8608,7 @@ mod structural_apply {
         let committed = with_muted_track(&model, ADDED);
         let reference = fresh_windows(&committed, 12);
 
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         let before = poll_cadence(&mut rig, 6, 2, 1);
         let last = before.last().expect("the boot plan published windows");
@@ -8943,7 +8652,7 @@ mod structural_apply {
             parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
                 .expect("accepted command fixture");
         model.tracks[0].inserts.effects[0] = observed_compressor_insert();
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         rig.step();
         assert_eq!(
             observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
@@ -9026,7 +8735,6 @@ mod structural_apply {
                     live_control_observation_taps: taps,
                     ..options()
                 },
-                None,
             );
             let base = rig.host.committed_revision();
             let arm = SessionEdit::Observe {
@@ -9104,7 +8812,7 @@ mod structural_apply {
     #[test]
     fn windows_an_added_strip_cannot_describe_are_counted_and_the_next_frame_is_the_successors() {
         let model = gate_model();
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         assert!(poll_blocks(&mut rig, 6) > 0);
         let published = *rig.host.meter_header();
@@ -9264,7 +8972,7 @@ mod structural_apply {
         let mut model = observed_model();
         // The duck-swap's wait for `S` (#1324a) plays past the fixture source's last frame.
         model.sources[0].frames = 1 << 20;
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         rig.step();
         assert_eq!(
@@ -9351,7 +9059,7 @@ mod structural_apply {
     #[test]
     fn a_removed_inserts_subscription_ends_with_an_event_and_has_no_slot() {
         let model = observed_model();
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         rig.step();
         assert_eq!(
             observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
@@ -9454,7 +9162,7 @@ mod structural_apply {
             live_control_observation_taps: 4,
             ..boot_options(QUANTUM)
         };
-        let mut rig = Rig::boot(&empty, options, None);
+        let mut rig = Rig::boot(&empty, options);
         assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
         let track = |index: usize, id: &str| {
             let mut track = full.tracks[index].clone();
@@ -9590,7 +9298,7 @@ mod structural_apply {
             live_control_meter_blocks: WINDOW,
             ..boot_options(QUANTUM)
         };
-        let mut rig = Rig::boot(&empty, options, None);
+        let mut rig = Rig::boot(&empty, options);
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         // Four blocks: the master's window [0, 3) publishes and the next opens at block 3.
         for _ in 0..4 {
@@ -9707,7 +9415,7 @@ mod structural_apply {
         // activation, block 3, on the boot grid), and the first track adopted at block 1. The
         // activation moves to the new grid's origin, so the first frame, strips and master paired,
         // is [1, 4).
-        let mut rig = Rig::boot(&empty, options, None);
+        let mut rig = Rig::boot(&empty, options);
         assert_eq!(rig.host.render_next(), RESULT_OK);
         assert_eq!(rig.host.set_meter_lease(true), RESULT_OK);
         assert!(matches!(
@@ -9806,7 +9514,7 @@ mod structural_apply {
             live_control_observation_taps: 4,
             ..boot_options(QUANTUM)
         };
-        let mut rig = Rig::boot(&model, options, None);
+        let mut rig = Rig::boot(&model, options);
         assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
         let revision = rig.host.committed_revision();
         assert_eq!(
@@ -9916,7 +9624,7 @@ mod structural_apply {
     /// The latency and tail words a fresh boot of `model` reports, the oracle a rebuilt plan's
     /// record is compared with.
     fn plan_latency_of_boot(model: &SessionModel) -> WebPlanLatency {
-        let mut fresh = Rig::boot(model, options(), None);
+        let mut fresh = Rig::boot(model, options());
         assert_eq!(fresh.host.read_plan_latency(), RESULT_OK);
         *fresh.host.plan_latency()
     }
@@ -9934,7 +9642,7 @@ mod structural_apply {
     fn the_plan_latency_record_follows_the_active_plan() {
         const LIMITER_ID: &str = "added-limiter";
         let model = gate_model();
-        let mut rig = Rig::boot(&model, options(), None);
+        let mut rig = Rig::boot(&model, options());
         assert_eq!(PLAN_LATENCY_BYTES, 64);
 
         // A host that is not ready refuses and leaves the record alone.

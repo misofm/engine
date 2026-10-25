@@ -312,11 +312,8 @@ export: `control_command` runs `SessionState::command` in the message handler, w
 frees, so its allocations are control allocations too. Since #1570b the event entry `control_event`
 is the same kind: the worklet's message handler drains the reliable lane and then the lossy lane
 through it, after every message and service step, and posts each frame to the page. The
-render-locked count stays exactly zero. The spectrum
-request and collection accessors (`spectrum_request_*`, `spectrum_collection_*`) are outside both
-sets: the worklet calls them only during boot, before the `boot` export, where the collection
-staging is sized and allocated by design. `miso_engine_web_v1_spectrum_selection_epoch` is outside
-both sets too: neither worklet calls it, and it is not wrapped.
+render-locked count stays exactly zero. The browser has no spectrum export: spectrum is the
+session's `SPECTRUM_*` frames through `control_command` (#1597).
 
 ### Test-only counting allocators
 
@@ -380,13 +377,10 @@ Approved unsafe code that runs on a render thread, per entry:
   render-locked window. The body of `miso_engine_web_v1_render` holds no unsafe block. The staging
   slices of `source_submit` and `source_seek` run in the PCM-feed worklet's `process()` before
   each render and in the engine worklet's source and seek handlers. The render-locked staging
-  reads `spectrum_read`, `spectrum_stream_read` and `track_response_capture` reach only
-  `copy_live_record`, through `write_spectrum_window` and `spectrum_failure` (the two spectrum
-  reads) and through `run_live_response_capture`, `live_response_failure` and
-  `LiveResponseCaptureSink` (the capture). `read_live_record` is reached only from the
-  worker-side analysis exports (`spectrum_analysis`, `spectrum_stream_analysis`,
-  `spectrum_stream_analysis_configure` and `track_response_analysis`), none of which is
-  render-locked or called by either worklet. The five session-less `response_frame_*` exports
+  read `track_response_capture` reaches only `copy_live_record`, through
+  `run_live_response_capture`, `live_response_failure` and `LiveResponseCaptureSink`.
+  `read_live_record` is reached only from the worker-side analysis export
+  `track_response_analysis`, which is not render-locked or called by either worklet. The five session-less `response_frame_*` exports
   (#1574) are control work of the response-preview instance of the same kind: they stage one
   `RESPONSE_GET` frame and answer one frame through `host_core::serve_response_frame`, and no
   worklet calls them. Its
@@ -396,12 +390,10 @@ Approved unsafe code that runs on a render thread, per entry:
   runs from instantiation and is never reset. Calls outside every window are not counted: the boot
   exports themselves, the unwrapped boot accessors, `dispose`, `render_allocation_count`, `service`
   and `control_allocation_count` (the control counter counts every call outside a window, #1381a). The
-  worklet calls render-locked exports during boot too: the eleven staging accessors of set 2, and
-  `spectrum_target_id_ptr` and `spectrum_target_id_capacity`, which `stageSpectrumRequest` calls
-  before the boot export. Those calls are counted, and today they make no allocator call: the
-  stagings they touch are allocated outside any window, by boot's `reserve_stagings`
-  (`hosts/host-web/src/ffi.rs:617-626`) or, before the `boot` export, on first touch by the
-  unwrapped `spectrum_request_ptr`. Qualification reads the count of each instance before its
+  worklet calls render-locked exports during boot too: the eleven staging accessors of set 2.
+  Those calls are counted, and today they make no allocator call: the stagings they touch are
+  allocated outside any window, by boot's `reserve_stagings` (`hosts/host-web/src/ffi.rs`).
+  Qualification reads the count of each instance before its
   `dispose` and asserts it is zero, so a boot-time allocation inside a window fails it as a
   render-time one does.
 - Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs`,

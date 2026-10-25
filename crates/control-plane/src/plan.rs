@@ -340,6 +340,22 @@ impl<A: ControlAdapter> PlanState<A> {
         })
     }
 
+    /// Adopt the published candidate in place before the plan's first block (#1597), for
+    /// [`crate::SessionState::command_with_plan`]: the owner's
+    /// [`RealtimePlanOwner::adopt_before_first_block`], then the epoch store a rendered block
+    /// makes, so the session's next service step promotes the candidate. The adopted plan is the
+    /// one the first block renders, so the relay sees no swap at that block, as for a first plan.
+    /// Returns whether it adopted.
+    pub(crate) fn adopt_before_first_block(&mut self) -> bool {
+        if self.owner.adopt_before_first_block() != engine::realtime::SwapOutcome::Applied {
+            return false;
+        }
+        let epoch = self.owner.active_epoch().0;
+        self.rendered_epoch = epoch;
+        self.shared.active_epoch.store(epoch, Ordering::Release);
+        true
+    }
+
     /// Clones the any-thread query projection the adapter installs beside the plan.
     pub fn queries(&self) -> PlanQueries<A> {
         PlanQueries {

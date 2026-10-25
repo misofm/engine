@@ -161,7 +161,7 @@ impl Rig {
     fn new(left_gain_db: Option<f32>) -> Self {
         let (document, revision) = document(left_gain_db);
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(&document, limits(), Box::new(Preparer), None)
+            compile_children::<Adapter>(&document, limits(), Box::new(Preparer))
                 .expect("boot compile");
         Self {
             session,

@@ -434,92 +434,6 @@ export interface MisoTrackResponseCaptureReply {
   readonly snapshot: Uint8Array;
 }
 
-/// The track targets follow the `post_input` and `post_pan` taps (decision 12, issue #1096); their
-/// wire codes, `1` and `2`, are unchanged.
-export type MisoSpectrumTarget = "trackPostInput" | "trackPostPan" | "output";
-export type MisoSpectrumChannels = "left" | "right" | "both";
-
-/** One prepared spectrum boundary passed to the Worklet during boot. */
-export interface MisoSpectrumBootOptions {
-  readonly target: MisoSpectrumTarget;
-  readonly targetId: string;
-  readonly channels: MisoSpectrumChannels;
-  readonly maximumCaptureBytes: number;
-}
-
-/** Several exact graph boundaries prepared for one atomic managed spectrum owner. */
-export interface MisoSpectrumCollectionEntry {
-  readonly target: MisoSpectrumTarget;
-  readonly targetId: string;
-  readonly channels: MisoSpectrumChannels;
-}
-
-/** Caller-sized collection staging; the limit covers all retained entries. */
-export interface MisoSpectrumCollectionBootOptions {
-  readonly entries: readonly MisoSpectrumCollectionEntry[];
-  readonly maximumCaptureBytes: number;
-}
-
-export type MisoSpectrumOperation = "arm" | "read" | "cancel";
-
-/** Reply for one bounded spectrum arm/read/cancel request. */
-export interface MisoSpectrumReply {
-  readonly tag: "miso.spectrum.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly operation: MisoSpectrumOperation;
-  readonly snapshot: Uint8Array;
-}
-
-/** Raw generated metadata copied from one managed stream read. */
-export interface MisoSpectrumStreamMetadata {
-  readonly structSize: number;
-  readonly abiVersion: number;
-  readonly result: number;
-  readonly status: number;
-  readonly target: number;
-  readonly channels: number;
-  readonly sampleRateHz: number;
-  readonly quantumFrames: number;
-  readonly hopFrames: number;
-  readonly sourceUnderrun: number;
-  readonly captureEpoch: bigint;
-  readonly sequence: bigint;
-  readonly droppedCaptures: bigint;
-  readonly windows: bigint;
-  readonly capturedSample: bigint;
-  readonly endSample: bigint;
-  readonly analysisEpoch: bigint;
-  readonly historyStartSample: bigint;
-  readonly smoothingMs: number;
-}
-
-export interface MisoSpectrumStreamStartReply {
-  readonly tag: "miso.spectrum.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly operation: "streamStart" | "streamStop";
-  readonly metadata: MisoSpectrumStreamMetadata;
-}
-
-export interface MisoSpectrumSelectionReply {
-  readonly tag: "miso.spectrum.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly operation: "select" | "streamSelect";
-  readonly metadata?: MisoSpectrumStreamMetadata;
-}
-
-export interface MisoSpectrumStreamReadReply {
-  readonly tag: "miso.spectrum.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly operation: "streamRead";
-  readonly byteLength: number;
-  readonly buffer: ArrayBuffer;
-  readonly metadata: MisoSpectrumStreamMetadata;
-}
-
 /// One decimated meter window (issue 137 D2, extended by issue 143).
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
@@ -701,8 +615,6 @@ export interface MisoWebBootOptions {
   sourceRingFrames: number;
   /// Total boot memory budget, or `0n` for the engine-owned default ceiling.
   maximumMemoryBytes: bigint;
-  /// Prepared continuous-spectrum hop in frames, or `0` for the engine-derived default.
-  spectrumHopFrames: number;
   /// Reserved (offset 32 of the boot options): must be exactly `0n`. It was the live-command queue
   /// size; the command staging now exists exactly when `liveControlObservationTaps !== 0n`, and the
   /// main-realm host's bound on commands in flight is `maximumCommandRecords` (issue #1565).
@@ -722,9 +634,6 @@ export interface MisoWebBootOptions {
   /// row (`SET_CONTROL`), as on every host, and the core holds it by strip ID. With no tap on the
   /// strip `masterGrDb` is `null`.
   reserved2: bigint;
-  /// One optional prepared graph boundary; `null` retains no capture storage.
-  spectrum?: MisoSpectrumBootOptions | null;
-  spectrumCollection?: MisoSpectrumCollectionBootOptions | null;
 }
 
 export interface MisoWebResourceReport {
@@ -993,31 +902,6 @@ export interface MisoAudioWorkletHost {
   captureTrackResponse(
     request: MisoTrackResponseCaptureRequest,
   ): Promise<MisoTrackResponseCaptureReply>;
-  /// Arm the prepared spectrum boundary for its next complete window.
-  armSpectrum(): Promise<MisoSpectrumReply>;
-  /// Read one completed spectrum window; `result: 6` carries an empty pending snapshot.
-  readSpectrum(request: { readonly channels: MisoSpectrumChannels }): Promise<MisoSpectrumReply>;
-  /// Cancel the prepared spectrum boundary and discard any pending window.
-  cancelSpectrum(): Promise<MisoSpectrumReply>;
-  /// Start the continuously scheduled spectrum boundary.
-  startSpectrumStream(smoothingMs?: number): Promise<MisoSpectrumStreamStartReply>;
-  /// Select one prepared collection entry before starting its managed stream.
-  selectSpectrum(request: {
-    readonly target: MisoSpectrumTarget;
-    readonly targetId: string;
-    readonly channels: MisoSpectrumChannels;
-  }): Promise<MisoSpectrumSelectionReply>;
-  /// Atomically update the active collection entry and smoothing profile.
-  selectSpectrumStream(request: {
-    readonly target: MisoSpectrumTarget;
-    readonly targetId: string;
-    readonly channels: MisoSpectrumChannels;
-    readonly smoothingMs: number;
-  }): Promise<MisoSpectrumSelectionReply>;
-  /// Read one scheduled stream window into a caller-owned reusable buffer.
-  readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
-  /// Stop the continuously scheduled spectrum boundary.
-  stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
   /// Read the compiled session's canonical source order (issues 137 D1, 207).
   ///
   /// `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every

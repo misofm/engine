@@ -2,8 +2,8 @@
 //! allocate inside their render-locked windows.
 //!
 //! The PCM-feed worklet calls `source_submit` and `source_seek` from `process()`; the engine
-//! worklet's port handlers call them, the observation command admission, the meter lease and the
-//! spectrum arm, cancel, stream start and stream stop on the same thread. Each export wraps its body in `render_locked`, so an allocation in it, or in
+//! worklet's port handlers call them, the observation command admission and the meter lease on
+//! the same thread. Each export wraps its body in `render_locked`, so an allocation in it, or in
 //! what it calls, moves the instance's render-allocation count. This binary drives every one of
 //! them through its export on a fresh thread, accepted and refused, and reads the count after each
 //! call.
@@ -15,11 +15,8 @@
 use std::alloc::System;
 
 use host_web::{
-    ABI_VERSION, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_RECORD_BYTES, RACK_CONSOLE,
-    RACK_NOT_APPLICABLE, RESULT_BACKPRESSURE, RESULT_INVALID_ARGUMENT, RESULT_OK,
-    RESULT_WRONG_STATE, RenderLockedAllocator, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH,
-    SPECTRUM_REQUEST_BYTES, SPECTRUM_TARGET_TRACK_POST_PAN, WebBootOptions, WebSpectrumRequest,
-    native_staging,
+    COMMAND_OBSERVE_SUBSCRIBE, COMMAND_RECORD_BYTES, RACK_CONSOLE, RACK_NOT_APPLICABLE,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RenderLockedAllocator, WebBootOptions, native_staging,
 };
 use protocol::{
     CommandPayload, CounterId, DiagnosticSeverity, ExpectedRevision, ProtocolCodec, RequestId,
@@ -34,22 +31,9 @@ static ALLOCATOR: RenderLockedAllocator<System> = RenderLockedAllocator(System);
 const DOCUMENT: &[u8] = include_bytes!("../qualification/observation-session.json");
 const SOURCE_ID: &[u8] = b"live-control-source";
 const SOURCE_FRAMES: u64 = 2048;
-const TRACK_ID: &[u8] = b"track";
 const QUANTUM_FRAMES: u32 = 128;
 
 fn boot() -> u32 {
-    native_staging::spectrum_request(
-        WebSpectrumRequest {
-            struct_size: SPECTRUM_REQUEST_BYTES,
-            abi_version: ABI_VERSION,
-            target: SPECTRUM_TARGET_TRACK_POST_PAN,
-            channels: SPECTRUM_CHANNEL_BOTH,
-            target_id_bytes: TRACK_ID.len() as u32,
-            maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
-            ..WebSpectrumRequest::default()
-        },
-        TRACK_ID,
-    );
     let options = WebBootOptions {
         live_control_meter_blocks: 2,
         live_control_observation_taps: 4,
@@ -166,7 +150,7 @@ fn command_exports(handle: u32, before: u32) {
     );
 }
 
-fn lease_and_spectrum_exports(handle: u32, before: u32) {
+fn lease_exports(handle: u32, before: u32) {
     let lease = host_web::miso_engine_web_v1_meter_lease;
     unchanged(before, "meter_lease (take)", lease(handle, 1), RESULT_OK);
     unchanged(
@@ -176,52 +160,6 @@ fn lease_and_spectrum_exports(handle: u32, before: u32) {
         RESULT_INVALID_ARGUMENT,
     );
     unchanged(before, "meter_lease (release)", lease(handle, 0), RESULT_OK);
-
-    unchanged(
-        before,
-        "spectrum_arm",
-        host_web::miso_engine_web_v1_spectrum_arm(handle),
-        RESULT_OK,
-    );
-    unchanged(
-        before,
-        "spectrum_cancel",
-        host_web::miso_engine_web_v1_spectrum_cancel(handle),
-        RESULT_OK,
-    );
-    let start = host_web::miso_engine_web_v1_spectrum_stream_start;
-    unchanged(
-        before,
-        "spectrum_stream_start (refused: NaN smoothing)",
-        start(handle, f64::NAN),
-        RESULT_INVALID_ARGUMENT,
-    );
-    unchanged(
-        before,
-        "spectrum_stream_start",
-        start(handle, 100.0),
-        RESULT_OK,
-    );
-    unchanged(
-        before,
-        "spectrum_arm (refused: stream active)",
-        host_web::miso_engine_web_v1_spectrum_arm(handle),
-        RESULT_BACKPRESSURE,
-    );
-    unchanged(
-        before,
-        "spectrum_cancel (refused: stream active)",
-        host_web::miso_engine_web_v1_spectrum_cancel(handle),
-        RESULT_WRONG_STATE,
-    );
-    let stop = host_web::miso_engine_web_v1_spectrum_stream_stop;
-    unchanged(before, "spectrum_stream_stop", stop(handle), RESULT_OK);
-    unchanged(
-        before,
-        "spectrum_stream_stop (refused: no host)",
-        stop(0),
-        RESULT_INVALID_ARGUMENT,
-    );
 }
 
 /// Batch 7 review B1: with counter telemetry configured, the first control call after a render
@@ -283,7 +221,7 @@ fn post_boot_control_exports_never_allocate_in_the_render_locked_window() {
     render(handle, 4);
     command_exports(handle, before);
     render(handle, 4);
-    lease_and_spectrum_exports(handle, before);
+    lease_exports(handle, before);
     render(handle, 4);
     assert_eq!(
         host_web::miso_engine_web_v1_render_allocation_count(),

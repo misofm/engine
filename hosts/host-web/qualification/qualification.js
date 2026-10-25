@@ -38,11 +38,11 @@ const RING_BLOCKS = STALL_RING_FRAMES / QUANTUM_FRAMES;
 // underrun) peaks at 0.
 const UNSUBSCRIBE_PEAK_FLOOR = 0.05;
 const MINIMUM_STALL_MS = 100;
-// Issue #1333 D3 / Amendment 1: the staging-read rows. One 2,048-frame spectrum window is sixteen
-// blocks, the observation session's whole declared source region.
+// Issue #1333 D3: the staging-read row renders the observation session's whole declared source
+// region.
 const STAGING_READ_BLOCKS = OBSERVATION_BLOCKS;
 const STAGING_READ_FRAMES = STAGING_READ_BLOCKS * QUANTUM_FRAMES;
-const SPECTRUM_CAPTURE_BYTES = 1 << 20;
+const TRACK_RESPONSE_MAXIMUM_BYTES = 1 << 20;
 const RESULT_OK = 0;
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 const ARTIFACT_URL = "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm";
@@ -1520,35 +1520,19 @@ async function runStallQualification(createHost, sessionDocument) {
   };
 }
 
-/// Issue #1333 D3 / Amendment 1: the worklet's staging reads, each inside a render-locked window.
-///
-/// The observation session boots with a two-entry spectrum collection -- the track's post-pan
-/// boundary and the main output -- and selects the second entry, so each spectrum read resolves a
-/// collection's selected entry, the path that once cloned its target on every read. Two instances,
-/// because one offline render cannot both complete a one-shot window and stream one: `oneShot`
-/// reads a completed one-shot window, then an observation row, then a track response, then a
-/// stream read just after its start; `stream` renders with the stream already running and reads a
-/// completed stream window. Each reports its own count before its dispose.
-async function runStagingReadRun(createHost, sessionDocument, streaming) {
+/// Issue #1333 D3: the worklet's staging reads, each inside a render-locked window: an observation
+/// row and a track response over a rendered session. The instance reports its count before its
+/// dispose. The browser reads spectrum through the session's frames, on the control side (#1597).
+async function runStagingReadRun(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, STAGING_READ_FRAMES, SAMPLE_RATE);
   const host = await createHost({
     context,
     document: sessionDocument,
-    options: {
-      ...bootOptions(
-        STAGING_READ_FRAMES,
-        LIVE_CONTROL_METER_BLOCKS,
-        OBSERVATION_TAPS,
-      ),
-      spectrum: null,
-      spectrumCollection: {
-        entries: [
-          { target: "trackPostPan", targetId: "track", channels: "both" },
-          { target: "output", targetId: "main-out", channels: "both" },
-        ],
-        maximumCaptureBytes: SPECTRUM_CAPTURE_BYTES * 2,
-      },
-    },
+    options: bootOptions(
+      STAGING_READ_FRAMES,
+      LIVE_CONTROL_METER_BLOCKS,
+      OBSERVATION_TAPS,
+    ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
@@ -1565,63 +1549,37 @@ async function runStagingReadRun(createHost, sessionDocument, streaming) {
     });
     if (acknowledgement.result !== RESULT_OK) throw new Error("staging-read prefill rejected");
   }
-  const selected = await host.selectSpectrum({
-    target: "output", targetId: "main-out", channels: "both",
+  const subscribed = await host.observe({
+    subscriptions: [{
+      stripId: "track",
+      rack: 1,
+      effectId: "comp",
+      tapId: OBSERVATION_TAP_ID,
+      windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
+      armed: true,
+    }],
   });
-  const run = { selectResult: selected.result };
-  if (streaming) {
-    run.streamStartResult = (await host.startSpectrumStream(0)).result;
-    await context.startRendering();
-    const read = await host.readSpectrumStream(new ArrayBuffer(SPECTRUM_CAPTURE_BYTES));
-    run.streamReadResult = read.result;
-    run.streamReadBytes = read.byteLength;
-  } else {
-    const subscribed = await host.observe({
-      subscriptions: [{
-        stripId: "track",
-        rack: 1,
-        effectId: "comp",
-        tapId: OBSERVATION_TAP_ID,
-        windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
-        armed: true,
-      }],
-    });
-    run.subscribeResult = subscribed.result;
-    await context.startRendering();
-    const spectrum = await host.readSpectrum({ channels: "both" });
-    run.spectrumReadResult = spectrum.result;
-    run.spectrumReadBytes = spectrum.snapshot.byteLength;
-    const observation = await host.readObservations({
-      selections: [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: OBSERVATION_TAP_ID, channels: 3 }],
-    });
-    run.observationReadResult = observation.result;
-    run.observationRows = observation.rows.length;
-    const response = await host.captureTrackResponse({
-      trackId: "track",
-      grid: 1,
-      channels: 3,
-      points: 5,
-      minimumHz: 20,
-      maximumHz: 20_000,
-      maximumResultBytes: SPECTRUM_CAPTURE_BYTES,
-    });
-    run.trackResponseResult = response.result;
-    run.trackResponseBytes = response.snapshot.byteLength;
-    run.streamStartResult = (await host.startSpectrumStream(0)).result;
-    const read = await host.readSpectrumStream(new ArrayBuffer(SPECTRUM_CAPTURE_BYTES));
-    run.streamReadResult = read.result;
-    run.streamReadBytes = read.byteLength;
-  }
+  const run = { subscribeResult: subscribed.result };
+  await context.startRendering();
+  const observation = await host.readObservations({
+    selections: [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: OBSERVATION_TAP_ID, channels: 3 }],
+  });
+  run.observationReadResult = observation.result;
+  run.observationRows = observation.rows.length;
+  const response = await host.captureTrackResponse({
+    trackId: "track",
+    grid: 1,
+    channels: 3,
+    points: 5,
+    minimumHz: 20,
+    maximumHz: 20_000,
+    maximumResultBytes: TRACK_RESPONSE_MAXIMUM_BYTES,
+  });
+  run.trackResponseResult = response.result;
+  run.trackResponseBytes = response.snapshot.byteLength;
   run.renderAllocations = await renderAllocationCount(host);
   await host.dispose();
   return run;
-}
-
-async function runStagingReadQualification(createHost, sessionDocument) {
-  return {
-    oneShot: await runStagingReadRun(createHost, sessionDocument, false),
-    stream: await runStagingReadRun(createHost, sessionDocument, true),
-  };
 }
 
 export async function runQualification() {
@@ -1800,7 +1758,7 @@ export async function runQualification() {
   }
   let stagingReads;
   try {
-    stagingReads = await runStagingReadQualification(
+    stagingReads = await runStagingReadRun(
       createMisoAudioWorkletHost,
       observationDocument,
     );
@@ -1847,8 +1805,7 @@ export async function runQualification() {
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
       { workload: "stall", count: stall.renderAllocations },
-      { workload: "staging-reads-one-shot", count: stagingReads.oneShot.renderAllocations },
-      { workload: "staging-reads-stream", count: stagingReads.stream.renderAllocations },
+      { workload: "staging-reads", count: stagingReads.renderAllocations },
     ],
     sdkResponse,
     // Every `AudioContext.resume()` of the page, for the `resume-clicks` gate: `declared` is the click

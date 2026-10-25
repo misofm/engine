@@ -130,7 +130,7 @@ impl Rig {
 
     fn with_session(document: &str, limits: ControlLimits) -> Self {
         let CompiledChildren { session, plan } =
-            compile_children::<Adapter>(document, limits, Box::new(ObservingPreparer), None)
+            compile_children::<Adapter>(document, limits, Box::new(ObservingPreparer))
                 .expect("boot compile");
         Self {
             session,

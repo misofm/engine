@@ -21,9 +21,8 @@ use std::sync::Mutex;
 
 use controls::{ControlAddress, Owner, Section};
 use host_web::{
-    ABI_VERSION, RESULT_OK, RenderLockedAllocator, SPECTRUM_CAPTURE_BYTES, SPECTRUM_CHANNEL_BOTH,
-    SPECTRUM_REQUEST_BYTES, SPECTRUM_TARGET_TRACK_POST_PAN, WebBootOptions, WebSpectrumRequest,
-    companion_drops_on_this_thread, native_staging,
+    RESULT_OK, RenderLockedAllocator, WebBootOptions, companion_drops_on_this_thread,
+    native_staging,
 };
 use protocol::{
     CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
@@ -586,19 +585,34 @@ fn a_superseded_candidate_with_a_spectrum_hand_over_costs_no_render_call_an_allo
     let (render_allocations, drops_in_render, epochs) = std::thread::spawn(|| {
         let base = model();
         let target = base.tracks[3].id.as_str().to_owned();
-        native_staging::spectrum_request(
-            WebSpectrumRequest {
-                struct_size: SPECTRUM_REQUEST_BYTES,
-                abi_version: ABI_VERSION,
-                target: SPECTRUM_TARGET_TRACK_POST_PAN,
-                channels: SPECTRUM_CHANNEL_BOTH,
-                target_id_bytes: target.len() as u32,
-                maximum_capture_bytes: SPECTRUM_CAPTURE_BYTES as u64,
-                ..WebSpectrumRequest::default()
-            },
-            target.as_bytes(),
-        );
         let handle = boot(&base);
+        // #1597: the boot's tap is one configure before the first block, adopted in place.
+        let configure = protocol::SpectrumConfigureRequest {
+            form: protocol::SpectrumForm::Single,
+            entries: vec![protocol::SpectrumEntry {
+                target_kind: protocol::SpectrumTargetKind::TrackPostPan,
+                target_id: target,
+                channels: protocol::ParameterChannel::Both,
+            }],
+            maximum_capture_bytes: host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES,
+            hop_frames: None,
+        };
+        let codec = ProtocolCodec::default();
+        let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+        let length = codec
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(1).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::SpectrumConfigure(&configure),
+                },
+                &mut bytes,
+            )
+            .expect("a configure frame");
+        let (result, _) =
+            native_staging::control_command(handle, &bytes[..length]).expect("a live handle");
+        assert_eq!(result, RESULT_OK, "the boot configure");
+        assert_eq!(native_staging::active_plan_epoch(handle), Some(1));
         let mut render_allocations = 0;
         let mut drops_in_render = 0;
         let mut epochs = Vec::new();
@@ -606,8 +620,8 @@ fn a_superseded_candidate_with_a_spectrum_hand_over_costs_no_render_call_an_allo
             feed(handle, block);
             if block == APPLY_BEFORE {
                 for (request, edits) in [
-                    (1, add_muted_track(&base)),
-                    (2, add_muted_track_as(&with_muted_track(&base), "a-muted-b")),
+                    (2, add_muted_track(&base)),
+                    (3, add_muted_track_as(&with_muted_track(&base), "a-muted-b")),
                 ] {
                     let revision = host_web::miso_engine_web_v1_control_revision(handle);
                     let (result, response) =
@@ -618,7 +632,7 @@ fn a_superseded_candidate_with_a_spectrum_hand_over_costs_no_render_call_an_allo
                 }
                 assert_eq!(
                     native_staging::active_plan_epoch(handle),
-                    Some(0),
+                    Some(1),
                     "neither candidate rendered"
                 );
             }
@@ -640,8 +654,8 @@ fn a_superseded_candidate_with_a_spectrum_hand_over_costs_no_render_call_an_allo
     })
     .join()
     .expect("the run completes");
-    let mut expected = vec![0; APPLY_BEFORE];
-    expected.extend(vec![2; BLOCKS - APPLY_BEFORE]);
+    let mut expected = vec![1; APPLY_BEFORE];
+    expected.extend(vec![3; BLOCKS - APPLY_BEFORE]);
     assert_eq!(
         epochs, expected,
         "the replacement is adopted; T1's candidate never rendered"

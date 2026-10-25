@@ -165,9 +165,6 @@ pub(crate) fn compile_children(
             document,
             ControlLimits::from(limits),
             Box::new(CapiPreparer),
-            // #1593 D2: the C ABI has no boot input for a spectrum configuration (#1594 adds the
-            // message).
-            None,
         )?;
     Ok(CompiledChildren {
         session,

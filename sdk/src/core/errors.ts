@@ -22,7 +22,6 @@ export type MisoErrorCode =
  * A code the SDK itself raises when a bounded wait does not settle. It comes from the SDK, not
  * from the engine, so an error that carries it has no engine `result`.
  *
- * - `spectrumCloseTimeout`: the spectrum Worker's close did not settle while `close()` waited.
  * - `hostDisposeTimeout`: the worklet host did not answer its dispose request.
  * - `contextCloseTimeout`: `AudioContext.close()` did not settle (it also covers the boot-path
  *   context closes).
@@ -30,7 +29,6 @@ export type MisoErrorCode =
  *   `SPECTRUM_CONFIGURE`, #1596 D2) did not answer within `requestDeadlineMs`.
  */
 export type SdkTimeoutCode =
-  | "spectrumCloseTimeout"
   | "hostDisposeTimeout"
   | "contextCloseTimeout"
   | "bootConfigureTimeout";
