@@ -3433,8 +3433,7 @@ where
     }
 
     /// Makes the next transition re-preparation across a donor refuse after its preparation, as
-    /// a defect would, and marks the refusal injected, so #1397 D2 step 3's debug assertion does
-    /// not fire for it (#1397 deliverable 3). Taken once, by that re-preparation on this thread.
+    /// a defect would (#1397 deliverable 3). Taken once, by that re-preparation on this thread.
     #[cfg(feature = "test-support")]
     pub fn test_refuse_next_reprepare(&mut self) {
         let _ = self;
@@ -3449,15 +3448,15 @@ where
         TEST_NEXT_ZERO_LEAD.with(|state| state.replace(Some(restart_whole)));
     }
 
-    /// The transition fallback across the pending `Primed` candidate, as #1358's deadline step
-    /// runs it (#1397 D2), for the gates until that step exists.
+    /// The warm-successor deadline step (#1358 D3), as the hosts' service steps will run it
+    /// (#1360 D2, #1361).
     ///
     /// # Errors
     ///
-    /// As the deadline step's own body (`fall_back_pending_warm`): an internal fault.
+    /// As the step itself (`check_prime_deadline`): an internal fault.
     #[cfg(feature = "test-support")]
-    pub fn test_fall_back_to_transition(&mut self) -> Result<TransitionStep, CommandError> {
-        self.fall_back_pending_warm()
+    pub fn test_check_prime_deadline(&mut self) -> Result<Option<TransitionStep>, CommandError> {
+        self.check_prime_deadline()
     }
 
     /// The session's `transition_reprepare_refusals` count (#1397 D2 step 3).
@@ -5140,6 +5139,49 @@ where
         }
     }
 
+    /// The warm-successor deadline step (#1358 D3): run once per control call while a `Primed`
+    /// record is held. `None` when there is no record, its deadline has not passed
+    /// ([`host_core::warm::prime_deadline_samples`] render samples past its `not_before`; a paused
+    /// render clock never passes it), or the record is stale (not the newest epoch: it is dropped
+    /// and nothing is withdrawn). Past the deadline it runs the transition fallback, whose one
+    /// withdrawal answers it: render adopted W first (`Taken`, `Nothing`: the record drops and the
+    /// revision completes `EXACT` through the watermark), the transition was published in W's
+    /// place, or the re-preparation was refused and W was republished whole with its record, so
+    /// the next call's step is past the deadline at once.
+    ///
+    /// **Acked-batch question (D4): can an ack ever precede a drop? No.** The step drops only a
+    /// record; every candidate it withdraws is either the donor of a transition prepared from the
+    /// committed model or republished whole, and it adds no queue. One step does at most one
+    /// withdrawal, one re-preparation and one republication, and never waits on render.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(
+            dead_code,
+            reason = "#1360 and #1361 wire the hosts' service steps to it"
+        )
+    )]
+    pub(crate) fn check_prime_deadline(&mut self) -> Result<Option<TransitionStep>, CommandError> {
+        let Some(record) = self.primed else {
+            return Ok(None);
+        };
+        let model = self.controller.session().compiled().normalized_model();
+        let (sample_rate_hz, quantum_frames) = (model.sample_rate_hz, model.quantum_frames);
+        match host_core::warm::check_prime_deadline(
+            &self.publisher,
+            self.newest_plan_epoch(),
+            &record,
+            sample_rate_hz,
+            quantum_frames,
+        ) {
+            host_core::warm::DeadlineStep::Pending => Ok(None),
+            host_core::warm::DeadlineStep::Stale => {
+                self.primed = None;
+                Ok(None)
+            }
+            host_core::warm::DeadlineStep::Due => self.fall_back_pending_warm().map(Some),
+        }
+    }
+
     /// Withdraws the pending candidate, rebuilds, and republishes the candidate when the rebuild
     /// does not take it: the one supersession path of a transaction, a declared discontinuity and
     /// a monitor change.
@@ -5207,7 +5249,8 @@ where
     }
 
     /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
-    /// step #1358's deadline step runs once W is not ready by its deadline.
+    /// step the deadline step (`check_prime_deadline`, #1358 D3) runs once W is not ready by its
+    /// deadline.
     ///
     /// It withdraws W. A `Taken` or `Nothing` withdrawal means render adopted W, and nothing is
     /// done. A withdrawn W is the donor of [`Rebuild::Transition`]: the committed model is
@@ -5218,16 +5261,18 @@ where
     /// peak (#1398 D4, #1403).
     ///
     /// **A refused re-preparation is a defect (D2 step 3).** W is republished whole, its record is
-    /// set again unchanged, `transition_reprepare_refusals` rises, and a debug assertion fires
-    /// unless the refusal was injected (`test_refuse_next_reprepare`). W's revision stays pending
-    /// and the next step retries. **Acked-batch question (D4): can an ack ever precede a drop?
-    /// No:** W drops only after its replacement is prepared from the committed model, which holds
+    /// set again unchanged and `transition_reprepare_refusals` rises (counted, not asserted: root
+    /// ruling on #1358). W's revision stays pending and the next step retries. **Acked-batch
+    /// question (D4): can an ack ever precede a drop? No:** W drops only after its replacement is prepared from the committed model, which holds
     /// every acked edit, and its rings move by a donation checked before anything is published.
     #[cfg_attr(
         not(feature = "test-support"),
-        expect(dead_code, reason = "#1358's deadline step is its production caller")
+        expect(
+            dead_code,
+            reason = "its caller, the deadline step, is not yet wired (#1360)"
+        )
     )]
-    pub(crate) fn fall_back_pending_warm(&mut self) -> Result<TransitionStep, CommandError> {
+    fn fall_back_pending_warm(&mut self) -> Result<TransitionStep, CommandError> {
         let Some(record) = self.primed else {
             return Ok(TransitionStep::NotPending);
         };
@@ -5249,18 +5294,21 @@ where
         match withdrawn.as_ref() {
             None => return Ok(TransitionStep::NotPending),
             Some(candidate) if candidate.epoch().0 != record.epoch => {
-                // A record of another epoch is stale and was dropped with the withdrawal.
+                // A record of another epoch is stale and was dropped with the withdrawal; the
+                // deadline step's epoch check makes this unreachable (#1358 D3).
                 if let Some(candidate) = withdrawn.take() {
                     self.publisher.republish(candidate);
                 }
+                debug_assert!(
+                    false,
+                    "#1358 D3: a withdrawal of another epoch than the record's"
+                );
                 return Ok(TransitionStep::NotPending);
             }
             Some(_) => {}
         }
         #[cfg(feature = "test-support")]
         let injected = TEST_REFUSE_REPREPARE.with(|state| state.replace(false));
-        #[cfg(not(feature = "test-support"))]
-        let injected = false;
         // A refusal republishes W whole, as a panic before the commit does (#2010).
         let result = self.rebuild_withdrawn(
             Rebuild::Transition {
@@ -5275,15 +5323,13 @@ where
         );
         match result {
             Ok(_) => Ok(TransitionStep::Published),
-            Err(error) => {
+            Err(_) => {
                 // W's record stays: the withdrawal of the epoch it names keeps it.
                 debug_assert_eq!(self.primed, Some(record));
+                // Root ruling (#1358): a refusal is counted, never asserted, since a real one
+                // reaches this path once the deadline step is wired (#1360).
                 self.transition_reprepare_refusals =
                     self.transition_reprepare_refusals.saturating_add(1);
-                debug_assert!(
-                    injected,
-                    "#1397 D2 step 3: a transition re-preparation was refused: {error:?}"
-                );
                 Ok(TransitionStep::Refused)
             }
         }
@@ -8831,7 +8877,7 @@ mod tests {
     /// continued" is A rendered on with no growth and the same live commands, bit for bit.
     #[cfg(feature = "test-support")]
     mod warm_successor {
-        use super::super::{CommandError, TransitionStep};
+        use super::super::{CommandError, SourceFailure, TransitionStep};
         use crate::EventLane;
         use crate::{
             CompiledChildren, ControlAdapter, ControlLimits, PlanResources, RuntimePreparer,
@@ -8844,7 +8890,7 @@ mod tests {
         use host_core::{
             CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
             HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost,
-            PrimedCandidate, SourceSubmission, SuccessorBase, WarmConfig,
+            PrimedCandidate, SourceControlError, SourceSubmission, SuccessorBase, WarmConfig,
             prepare_host_runtime_with_live_lanes, prepare_host_runtime_with_live_lanes_successor,
         };
         use protocol::{
@@ -8869,6 +8915,9 @@ mod tests {
         const LEAD: u64 = 512;
         /// Blocks rendered before an edit.
         const BEFORE: usize = 6;
+        /// `prime_deadline_samples(48_000, 128)` (#1358 D1): one stall tolerance in whole quanta,
+        /// 4,864, plus `P_MAX` 2,048, plus one quantum.
+        const DEADLINE: u64 = 7_040;
         /// How far ahead a ready host feeds: `P / q + 1` blocks, and one more.
         const AHEAD: u64 = LEAD / QUANTUM + 2;
         const CONFIG: WarmConfig = WarmConfig {
@@ -9106,6 +9155,8 @@ mod tests {
             epochs: Vec<u64>,
             /// The boot plan's epoch.
             boot: u64,
+            /// Whether [`Self::render`] runs the service step after each block.
+            serviced: bool,
         }
 
         impl Rig {
@@ -9166,6 +9217,7 @@ mod tests {
                     stop_at: None,
                     blocks: Vec::new(),
                     epochs: Vec::new(),
+                    serviced: true,
                 }
             }
 
@@ -9182,21 +9234,29 @@ mod tests {
                         };
                         while *next < until {
                             let range = *next as usize..(*next + QUANTUM) as usize;
-                            self.children
-                                .session
-                                .submit(
-                                    id.as_bytes(),
-                                    SourceSubmission {
-                                        generation: 1,
-                                        start_frame: *next,
-                                        sample_rate_hz: 48_000,
-                                        planes: &[&planes[0][range.clone()], &planes[1][range]],
-                                        frames: QUANTUM as u32,
-                                        end_of_region: false,
-                                    },
-                                )
-                                .unwrap_or_else(|error| panic!("{id} at {next}: {error:?}"));
-                            *next += QUANTUM;
+                            match self.children.session.submit(
+                                id.as_bytes(),
+                                SourceSubmission {
+                                    generation: 1,
+                                    start_frame: *next,
+                                    sample_rate_hz: 48_000,
+                                    planes: &[&planes[0][range.clone()], &planes[1][range]],
+                                    frames: QUANTUM as u32,
+                                    end_of_region: false,
+                                },
+                            ) {
+                                Ok(_) => *next += QUANTUM,
+                                // A source added after boot (W's `c-source`) queues from its
+                                // frame 0 while W waits, so its ring fills before any plan reads
+                                // it and stays full once one does (its consumer starts at that
+                                // backlog, behind the shared read clock): the chunk is refused,
+                                // not taken, and offered again at the next block. A full ring of a
+                                // source every plan carries from boot is a defect.
+                                Err(SourceFailure::Control(SourceControlError::Chunk(
+                                    ::source::HostChunkError::Full { .. },
+                                ))) if !matches!(*id, SOURCE | AUX | UNUSED) => break,
+                                Err(error) => panic!("{id} at {next}: {error:?}"),
+                            }
                         }
                     }
                     let mut samples = [f32::NAN; 2 * QUANTUM as usize];
@@ -9217,8 +9277,36 @@ mod tests {
                             .test_active_epoch()
                             .load(std::sync::atomic::Ordering::Acquire),
                     );
-                    self.children.session.service().expect("service");
+                    if self.serviced {
+                        self.children.session.service().expect("service");
+                    }
                 }
+            }
+
+            /// [`Self::render`] until the render clock reads `clock`, a block boundary not behind
+            /// it.
+            fn render_to(&mut self, clock: u64) {
+                assert!(clock >= self.at && clock.is_multiple_of(QUANTUM));
+                self.render(usize::try_from((clock - self.at) / QUANTUM).expect("blocks"));
+                assert_eq!(self.children.session.test_render_clock(), clock);
+            }
+
+            /// One control call's deadline step (#1358 D3).
+            fn deadline(&mut self) -> Option<TransitionStep> {
+                self.children
+                    .session
+                    .test_check_prime_deadline()
+                    .expect("deadline step")
+            }
+
+            /// The committed revision.
+            fn revision(&self) -> u64 {
+                self.children
+                    .session
+                    .test_controller()
+                    .session()
+                    .revision()
+                    .0
             }
 
             /// A render call at the wrong sample: render adopts a due, ready candidate at the
@@ -9646,22 +9734,9 @@ mod tests {
             assert_eq!(rig.blocks[..s_block], reference.blocks[..]);
         }
 
-        /// #1397 gate 4, the transition across a donor. W (the growth, plus a source `c` fed from
-        /// frame 0 and an audible track on it) waits `Primed`, frames withheld. A fallback with
-        /// the injected refusal counts one `transition_reprepare_refusals`, keeps W pending with
-        /// its record, and W is not adopted. The next fallback publishes the transition
-        /// `NoEarlierThan(S)` and drops the record; a structural edit refused while it waits
-        /// republishes it. Adopted at `S`, it completes W's revision as `TRANSITION_FALLBACK`,
-        /// with `c` played from the donor's ring and no underrun.
-        ///
-        /// Test value: a refusal that drops the revision or the donor leaves nothing to adopt or
-        /// no record to retry from; a fallback that drops the donor before preparing loses `c`'s
-        /// acked frames (an underrun); a republish that resets the word reports `EXACT`.
-        #[test]
-        fn a_transition_across_a_donor_survives_a_refusal() {
-            let mut rig = Rig::new(Some(CONFIG));
-            rig.ahead = 1;
-            rig.render(BEFORE);
+        /// The growth W of #1397 gate 4: [`growth`], plus a source `c-source` and an audible track
+        /// `tc` on it, so W adds a ring the host feeds.
+        fn growth_with_source() -> Vec<SessionEdit> {
             let model = session_a();
             let template = model.sources[0].clone();
             let source = Source {
@@ -9684,33 +9759,60 @@ mod tests {
                 SessionEdit::UpsertTrack { track },
                 SessionEdit::UpsertRoute { route },
             ]);
-            assert!(matches!(rig.rebuild(&edits), PlanAdoption::Primed { .. }));
+            edits
+        }
+
+        /// #1358 gate 5's setup: W ([`growth_with_source`]) waits `Primed` with frames withheld
+        /// until its deadline, and the deadline step there, with #1397's injected refusal,
+        /// withdraws W, is refused and republishes W whole. Returns the rig, W's record and its
+        /// revision, after asserting the refusal: W is back in the mailbox with its record, one
+        /// `transition_reprepare_refusals`, the revision pending, nothing adopted.
+        fn refused_at_the_deadline() -> (Rig, PrimedCandidate, u64) {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            assert!(matches!(
+                rig.rebuild(&growth_with_source()),
+                PlanAdoption::Primed { .. }
+            ));
             rig.feeds.push(("c-source", pcm(17), 0));
             let record = rig.primed().expect("W's record");
-            let revision = rig
-                .children
-                .session
-                .test_controller()
-                .session()
-                .revision()
-                .0;
-            rig.render(1);
-
+            let revision = rig.revision();
+            rig.render_to(record.not_before + DEADLINE);
             rig.children.session.test_refuse_next_reprepare();
-            assert_eq!(
-                rig.children.session.test_fall_back_to_transition().ok(),
-                Some(TransitionStep::Refused)
-            );
+            assert_eq!(rig.deadline(), Some(TransitionStep::Refused));
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
             assert_eq!(rig.children.session.test_transition_reprepare_refusals(), 1);
             assert_eq!(rig.primed(), Some(record), "W keeps its record");
             assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
             rig.render(1);
             assert!(rig.swaps().is_empty(), "W is still pending, unready");
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert!(watermark.revision < revision, "W's revision is pending");
+            (rig, record, revision)
+        }
 
-            assert_eq!(
-                rig.children.session.test_fall_back_to_transition().ok(),
-                Some(TransitionStep::Published)
-            );
+        /// #1358 gate 5 (and #1397 gate 4), a refused re-preparation at the deadline: the setup
+        /// [`refused_at_the_deadline`], then three runs.
+        /// 1. The next deadline step withdraws W again and publishes the transition
+        ///    `NoEarlierThan(S)` and drops the record; a structural edit refused while it waits
+        ///    republishes it. Adopted at `S`, it completes W's revision as `TRANSITION_FALLBACK`,
+        ///    with `c` played from the donor's ring and no underrun.
+        /// 2. W's frames are queued and render adopts W before the next step, which finds it
+        ///    taken: nothing is published and the revision completes `EXACT`.
+        /// 3. A structural edit supersedes W (#1310) before the next step: its adoption reports
+        ///    `EXACT | SUPERSEDED`, no transition is published, and `c` plays with no underrun.
+        ///
+        /// Test value: a refusal that keeps the donor outside the mailbox or drops the record
+        /// leaves the revision pending forever (no step runs without a record, and a superseding
+        /// edit never takes the donor, so `c`'s acked chunks are lost); a fallback that drops the
+        /// donor before preparing loses `c`'s acked frames (an underrun); a republish that resets
+        /// the words reports `EXACT`; a step that ignores `Taken` publishes over the adopted W.
+        #[test]
+        fn a_refused_fallback_at_the_deadline_keeps_the_donor_pending() {
+            // Run 1.
+            let (mut rig, _, revision) = refused_at_the_deadline();
+            assert_eq!(rig.deadline(), Some(TransitionStep::Published));
             let Some(PlanAdoption::NoEarlierThan(s)) =
                 rig.children.session.test_take_published_adoption()
             else {
@@ -9727,7 +9829,6 @@ mod tests {
                 .sum();
             assert!(rig.transact(&muted_track("t4", 2)).is_err(), "B is refused");
             rig.children.session.limits.maximum_effect_state_bytes = cap;
-
             rig.ahead = AHEAD;
             let s_block = usize::try_from(s / QUANTUM).expect("block");
             rig.render(s_block + 8 - rig.blocks.len());
@@ -9737,7 +9838,263 @@ mod tests {
                 (watermark.revision, watermark.outcome_flags),
                 (revision, OUTCOME_TRANSITION_FALLBACK)
             );
+            assert_eq!(watermark.transition_fallback, 1);
             assert_eq!(rig.underruns(), 0, "c plays from the donor's ring");
+
+            // Run 2.
+            let (mut rig, _, revision) = refused_at_the_deadline();
+            rig.ahead = AHEAD;
+            rig.serviced = false;
+            rig.render(1);
+            rig.serviced = true;
+            let adopted = rig.blocks.len() - 1;
+            assert_eq!(rig.swaps(), [adopted], "render adopts W");
+            assert_eq!(rig.deadline(), Some(TransitionStep::NotPending));
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
+            assert_eq!(rig.primed(), None);
+            rig.render(4);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision, OUTCOME_EXACT)
+            );
+            assert_eq!(watermark.transition_fallback, 0);
+            assert_eq!(rig.underruns(), 0);
+
+            // Run 3.
+            let (mut rig, _, revision) = refused_at_the_deadline();
+            assert_eq!(rig.rebuild(&remove_track("t3")), PlanAdoption::Next);
+            assert_eq!(rig.primed(), None);
+            assert_eq!(rig.deadline(), None, "no record, no step");
+            rig.ahead = AHEAD;
+            rig.render(8);
+            assert_eq!(rig.swaps().len(), 1, "B is adopted");
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision + 1, OUTCOME_EXACT | OUTCOME_SUPERSEDED)
+            );
+            assert_eq!(watermark.transition_fallback, 0);
+            assert_eq!(rig.underruns(), 0, "every chunk submitted for c is played");
+        }
+
+        /// #1358 gates 1 and 3, never fed, in two arms: the growth W, whose `not_before` is the
+        /// render clock at publication, and W with track 2's removal, which ducks track 2, so its
+        /// `not_before` is the duck's `S`, past publication. The carried sources are fed no frame
+        /// past what A needs. With render paused, 1,000 deadline steps publish nothing. The step at
+        /// render clock `not_before + 7,040 - q` publishes nothing; the step at `not_before +
+        /// 7,040` withdraws W and publishes the transition, whose adoption completes W's revision
+        /// as `TRANSITION_FALLBACK`, `transition_fallback` 1. Until the step, the output is A
+        /// continued (with track 2 live-muted at the edit's block in the second arm).
+        ///
+        /// Test value: a deadline that never fires leaves the edit pending forever; one counted
+        /// from publication instead of `not_before` (second arm), one quantum short, or one taken
+        /// as the stall ring (7,296) fires at the wrong call; one counted in control calls falls
+        /// back on a paused host (no wall-clock sleep: scope note R2 refuses one).
+        #[test]
+        fn a_warm_candidate_not_ready_by_its_deadline_takes_the_transition() {
+            for ducks in [false, true] {
+                let mut rig = Rig::new(Some(CONFIG));
+                rig.ahead = 1;
+                rig.render(BEFORE);
+                let mut edits = growth();
+                if ducks {
+                    edits.extend(remove_track("eq1"));
+                }
+                let published = rig.children.session.test_render_clock();
+                let PlanAdoption::Primed { not_before, .. } = rig.rebuild(&edits) else {
+                    panic!("W is warm")
+                };
+                assert_eq!(not_before > published, ducks);
+                let record = rig.primed().expect("W's record");
+                let revision = rig.revision();
+                // Gate 3: a paused host.
+                for _ in 0..1_000 {
+                    assert_eq!(rig.deadline(), None, "paused");
+                }
+                assert_eq!(rig.children.session.test_take_published_adoption(), None);
+                rig.render_to(not_before + DEADLINE - QUANTUM);
+                assert_eq!(rig.deadline(), None, "one quantum short");
+                assert_eq!(rig.children.session.test_take_published_adoption(), None);
+                assert_eq!(rig.primed(), Some(record));
+                rig.render(1);
+                let stepped = rig.blocks.len();
+                assert_eq!(rig.deadline(), Some(TransitionStep::Published));
+                let Some(PlanAdoption::NoEarlierThan(s)) =
+                    rig.children.session.test_take_published_adoption()
+                else {
+                    panic!("the transition is a duck-swap")
+                };
+                assert_eq!(rig.primed(), None);
+                rig.ahead = AHEAD;
+                let s_block = usize::try_from(s / QUANTUM).expect("block");
+                rig.render(s_block + 1 - rig.blocks.len());
+                assert_eq!(rig.swaps(), [s_block]);
+                let watermark = rig.children.plan.queries().watermark().expect("watermark");
+                assert_eq!(
+                    (watermark.revision, watermark.outcome_flags),
+                    (revision, OUTCOME_TRANSITION_FALLBACK)
+                );
+                assert_eq!(watermark.transition_fallback, 1);
+                let mut continued = Rig::new(None);
+                continued.render(BEFORE);
+                if ducks {
+                    assert!(matches!(
+                        continued.transact(&[builtin("eq1", 6, 1.0)]),
+                        Ok(EditPath::Live)
+                    ));
+                }
+                continued.render(stepped - BEFORE);
+                assert_eq!(rig.blocks[..stepped], continued.blocks[..], "A continued");
+            }
+        }
+
+        /// #1358 gate 2, render adopts first: W's deadline passes with its frames withheld, then
+        /// the frames are queued and render adopts W in one block before the next control call.
+        /// That call's deadline step finds W taken: it publishes nothing and drops the record, the
+        /// revision completes `EXACT`, `transition_fallback` stays 0, and the output is A
+        /// continued.
+        ///
+        /// Test value: a step that ignores `Taken`, or falls back without withdrawing, publishes a
+        /// second swap over the adopted plan.
+        #[test]
+        fn a_candidate_render_adopts_past_its_deadline_completes_exact() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let PlanAdoption::Primed { not_before, .. } = rig.rebuild(&growth()) else {
+                panic!("W is warm")
+            };
+            let revision = rig.revision();
+            rig.render_to(not_before + DEADLINE + QUANTUM);
+            rig.ahead = AHEAD;
+            rig.serviced = false;
+            rig.render(1);
+            rig.serviced = true;
+            assert_eq!(rig.swaps(), [rig.blocks.len() - 1], "render adopts W");
+            assert!(rig.primed().is_some(), "no service step ran");
+            let taken = super::super::test_lifecycle_counters().candidate_taken;
+            assert_eq!(rig.deadline(), Some(TransitionStep::NotPending));
+            assert_eq!(
+                super::super::test_lifecycle_counters().candidate_taken,
+                taken + 1,
+                "the withdrawal found W taken"
+            );
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
+            assert_eq!(rig.primed(), None);
+            rig.render(4);
+            assert_eq!(rig.swaps().len(), 1);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision, OUTCOME_EXACT)
+            );
+            assert_eq!(watermark.transition_fallback, 0);
+            let mut continued = Rig::new(None);
+            continued.render(rig.blocks.len());
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
+        }
+
+        /// #1358 gate 4, a superseded candidate's deadline is not used. The session's mute ramp
+        /// is 24,000 samples. W (the growth) waits `Primed`, frames withheld; before W's deadline
+        /// a structural edit B removes W's track and track 2. B grows nothing over the running
+        /// plan, so it is a two-phase removal published `NoEarlierThan(S)`, `S` past W's
+        /// `not_before + 7,040`. Deadline steps after every block from W's deadline to `S`
+        /// publish nothing and withdraw nothing, and render adopts B at `S` with
+        /// `transition_fallback` 0. The same with W adopted by render first. Then, with frames
+        /// withheld, B's supersession is refused by the effect-state cap set one below what B's
+        /// admission needs: W is republished with its record, and the step at W's deadline
+        /// withdraws W and publishes the transition, which completes W's revision as
+        /// `TRANSITION_FALLBACK`.
+        ///
+        /// Test value: an unkeyed step together with a record kept across the supersession
+        /// withdraws B at W's deadline and loses its `S`; a record dropped on the refused
+        /// supersession leaves W pending forever, since the step runs only while a record exists.
+        #[test]
+        fn a_superseded_candidates_deadline_is_not_used() {
+            let mut slow = session_a();
+            slow.control_smoothing = Some(session::ControlSmoothing {
+                mute_ms: 500.0,
+                ..session::CONTROL_SMOOTHING_DEFAULT
+            });
+            assert_eq!(slow.control_smoothing_samples().mute, 24_000);
+            let mut b = remove_track("t3").to_vec();
+            b.extend(remove_track("eq1"));
+            for adopted in [false, true] {
+                let mut rig = Rig::boot(Some(CONFIG), limits(), &slow);
+                rig.ahead = if adopted { AHEAD } else { 1 };
+                rig.render(BEFORE);
+                let PlanAdoption::Primed { not_before, .. } = rig.rebuild(&growth()) else {
+                    panic!("W is warm")
+                };
+                rig.render(if adopted { 2 } else { 1 });
+                assert_eq!(rig.swaps().len(), usize::from(adopted));
+                let p = rig.children.session.test_render_clock();
+                let s = (p + QUANTUM + 24_000).div_ceil(QUANTUM) * QUANTUM;
+                assert!(s > not_before + DEADLINE);
+                assert_eq!(rig.rebuild(&b), PlanAdoption::NoEarlierThan(s));
+                let epoch = rig.children.session.newest_plan_epoch();
+                let withdrawn = super::super::test_lifecycle_counters().candidate_withdrawn;
+                rig.ahead = 1;
+                rig.render_to(not_before + DEADLINE);
+                while rig.at < s {
+                    assert_eq!(rig.deadline(), None);
+                    assert_eq!(rig.children.session.test_take_published_adoption(), None);
+                    rig.render(1);
+                }
+                assert_eq!(rig.children.session.newest_plan_epoch(), epoch, "B stays");
+                assert_eq!(
+                    super::super::test_lifecycle_counters().candidate_withdrawn,
+                    withdrawn,
+                    "no step withdraws B"
+                );
+                let s_block = usize::try_from(s / QUANTUM).expect("block");
+                assert_eq!(rig.swaps().len(), usize::from(adopted), "B waits for S");
+                rig.render(1);
+                assert_eq!(rig.swaps().last(), Some(&s_block), "B at S");
+                let watermark = rig.children.plan.queries().watermark().expect("watermark");
+                assert_eq!(watermark.transition_fallback, 0);
+            }
+
+            let mut rig = Rig::boot(Some(CONFIG), limits(), &slow);
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            assert!(matches!(
+                rig.rebuild(&growth()),
+                PlanAdoption::Primed { .. }
+            ));
+            let record = rig.primed().expect("W's record");
+            let revision = rig.revision();
+            rig.render(1);
+            let held = rig.children.session.held_epochs().expect("held");
+            let needs: u64 = held
+                .as_slice()
+                .iter()
+                .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                .sum();
+            let cap = rig.children.session.limits.maximum_effect_state_bytes;
+            rig.children.session.limits.maximum_effect_state_bytes = needs - 1;
+            assert!(rig.transact(&b).is_err(), "B is refused");
+            rig.children.session.limits.maximum_effect_state_bytes = cap;
+            assert_eq!(rig.primed(), Some(record), "W keeps its record");
+            assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+            rig.render_to(record.not_before + DEADLINE - QUANTUM);
+            assert_eq!(rig.deadline(), None);
+            rig.render(1);
+            assert_eq!(rig.deadline(), Some(TransitionStep::Published));
+            let Some(PlanAdoption::NoEarlierThan(s)) =
+                rig.children.session.test_take_published_adoption()
+            else {
+                panic!("the transition is a duck-swap")
+            };
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.render(s_block + 1 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision, OUTCOME_TRANSITION_FALLBACK)
+            );
         }
 
         /// Gate 1, the admission: a warm candidate C is admitted against the reprepare peak. With
