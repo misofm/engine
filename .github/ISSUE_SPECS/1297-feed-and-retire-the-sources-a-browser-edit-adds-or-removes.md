@@ -275,3 +275,9 @@ Attempt 2 (verifier findings of attempt 1):
 - One test composes the prelude with the shipped engine worklet class (stub exports): one
   `miso.seek-at.v1` through `receive`, then the drain consumes the epoch (red when the engine's
   handler is renamed). `Msb1RingWriter.seek`'s anchor is documented as the SDK start's.
+
+Attempt 3 (test gap of attempt 2): the detach test runs three sources, detaches the first and then
+the last, checks that the middle ring keeps draining, and runs `prepareSeek` over the ring that
+remains. It is red when the worklet compacts its attach list or passes withdrawn slots to
+prepare-seek. `attachEngineFeed` refuses duplicate source IDs, and a start whose source was detached
+during `ready()` is skipped. Each was red first. The paused-seek test's port clones its messages.
