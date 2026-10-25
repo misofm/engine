@@ -13,6 +13,8 @@ import { createEngine } from "../src/browser/engine.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
+import { decodeResponseEnvelope } from "../src/core/control-frame.ts";
+import { MisoEngineError } from "../src/core/errors.ts";
 import { onEndpointIds } from "./control-support.mjs";
 import { moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
@@ -34,28 +36,33 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 /**
  * A browser engine over a served core that staged the boot's taps, as the worklet boot does.
  * `harness.frames` counts the frames the page sent; `harness.hold`, when set, holds the reply of the
- * next frame (the core has served it) until that promise settles.
+ * next frame after `harness.holdAfter` more (the core has served it) until that promise settles.
+ * `reply(response)` may change a served reply, and `harness.disposed` counts host disposals.
  */
-async function served({ spectrum, spectrumCollection, policy, afterCall } = {}) {
+async function served({ spectrum, spectrumCollection, policy, afterCall, reply, harness: given, requestDeadlineMs } = {}) {
   const document = sessionDocument({ frames: 64 * 2_048 });
   const core = await WasmBoundary.boot(await candidateAsset(), new TextEncoder().encode(document), {
     ...(spectrum === undefined ? {} : { spectrum }),
     ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
   });
   const forward = onEndpointIds(core.controlRequestIds, (frame) => core.controlFrame(frame));
-  const harness = { frames: 0, hold: undefined, hostOptions: undefined };
+  const harness = Object.assign(given ?? {}, { frames: 0, hold: undefined, holdAfter: 0, hostOptions: undefined, disposed: 0 });
   let block = 0;
   const host = {
     async control(frame) {
       harness.frames += 1;
-      const response = forward(frame);
-      const hold = harness.hold;
-      harness.hold = undefined;
+      const response = reply === undefined ? forward(frame) : reply(forward(frame));
+      let hold;
+      if (harness.hold !== undefined && harness.holdAfter-- === 0) {
+        hold = harness.hold;
+        harness.hold = undefined;
+        harness.holdAfter = 0;
+      }
       if (hold !== undefined) await hold;
       return { tag: "miso.control.v1", requestId: harness.frames, result: 0, response, revision: core.controlRevision() };
     },
     onControlEvent: () => () => {},
-    async dispose() { core.dispose(); },
+    async dispose() { harness.disposed += 1; core.dispose(); },
   };
   const render = (blocks = 1) => {
     for (let index = 0; index < blocks; index += 1) {
@@ -76,6 +83,7 @@ async function served({ spectrum, spectrumCollection, policy, afterCall } = {}) 
     ...(spectrum === undefined ? {} : { spectrum }),
     ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
     ...(policy === undefined ? {} : { policy }),
+    ...(requestDeadlineMs === undefined ? {} : { requestDeadlineMs }),
     scratchBoot: async () => ({ sampleRateHz: 48_000, quantumFrames: QUANTUM, tracks: ["t"], submixes: [] }),
     createContext: () => ({
       sampleRate: 48_000,
@@ -90,7 +98,7 @@ async function served({ spectrum, spectrumCollection, policy, afterCall } = {}) 
     },
   });
   afterCall?.();
-  return { engine: await pending, render, harness };
+  return { engine: await pending, render, harness, core };
 }
 
 /** Render while `promise` is pending, one block per turn, and return what it settles to. */
@@ -143,7 +151,9 @@ test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in 
 
 test("a run-time configure that adds a tap keeps the stream on the kept tap (#1596 gate 4)", SKIP, async (t) => {
   // Red if `configureSpectrum` restarts or ends a stream on a tap the new configuration keeps:
-  // the stream would answer `warming`, `gap` or `failed`, or a new capture epoch, after it.
+  // the stream would answer `warming`, `gap` or `failed`, or a new capture epoch, after it. Red too
+  // if the engine does not take the new taps as its own (a subscription or a query of the added tap
+  // is refused), or if a one-shot query is let onto the capture a managed stream holds.
   t.mock.timers.enable({ apis: ["setInterval"] });
   // The core keeps a stream across a configure within the collection form (#1594 D6); a change
   // between the single form and a collection ends it.
@@ -153,6 +163,7 @@ test("a run-time configure that adds a tap keeps the stream on the kept tap (#15
   try {
     const subscription = await engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0, cadenceMs: 1 });
     const before = await nextReady(subscription, render);
+    await assert.rejects(engine.querySpectrum(OUTPUT), /managed spectrum stream holds the capture/);
     const configured = await engine.configureSpectrum(BOTH);
     assert.equal(configured.rebuild, true);
     assert.ok(configured.configuredEpoch > configured.adoptedEpoch);
@@ -162,6 +173,12 @@ test("a run-time configure that adds a tap keeps the stream on the kept tap (#15
     assert.equal(after.metadata.captureEpoch, before.metadata.captureEpoch);
     assert.ok(after.metadata.sequence > before.metadata.sequence);
     await subscription.close();
+    render();
+    const added = await engine.subscribeSpectrum({ ...TRACK, smoothingMs: 0, cadenceMs: 1 });
+    assert.deepEqual((await nextReady(added, render)).metadata.target, TRACK.target);
+    await added.close();
+    const result = await rendering(engine.querySpectrum(TRACK), render);
+    assert.deepEqual(result.target, TRACK.target);
   } finally {
     await engine.close();
   }
@@ -182,15 +199,19 @@ test("a one-shot query on a collection selects its entry first", SKIP, async () 
   }
 });
 
-test("a one-shot query past its deadline cancels its arm behind it, so the next query arms", SKIP, async () => {
-  // Red if a query that stopped waiting leaves its arm standing: the next arm is then refused
-  // `spectrum.busy`. Red too if a single-form query of another target is armed: an arm names no
-  // target, so its window would be the configured tap's under the other target's name.
-  const { engine, render, harness } = await served({ spectrum: OUTPUT });
+test("a one-shot query arms past an arm it does not own, and past its own timed-out arm", SKIP, async () => {
+  // Red if a query arms over an arm left standing (a stale arm whose undo was lost, or its own
+  // timed-out one): the arm is then refused `spectrum.busy` for good. Red too if a single-form query
+  // of another target is armed: an arm names no target, so its window would be the configured tap's
+  // under the other target's name.
+  const { engine, render, harness, core } = await served({ spectrum: OUTPUT });
   try {
     await assert.rejects(engine.querySpectrum(TRACK), /not the configured tap/);
+    assert.equal(core.armSpectrum().ok, true, "a stale arm stands");
+    assert.deepEqual((await rendering(engine.querySpectrum(OUTPUT), render)).target, OUTPUT.target);
     let release;
     harness.hold = new Promise((resolve) => { release = resolve; });
+    harness.holdAfter = 1;
     await assert.rejects(engine.querySpectrum({ ...OUTPUT, spectrumLimits: { requestDeadlineMs: 10 } }), /deadline/);
     release();
     const result = await rendering(engine.querySpectrum(OUTPUT), render);
@@ -248,4 +269,41 @@ test("closing the last spectrum subscription waits for the owner's automatic rea
   } finally {
     await engine.close();
   }
+});
+
+test("the boot refuses an engine without spectrum frames, and a configure past its deadline", SKIP, async () => {
+  // Red if the boot accepts a core whose CAPABILITIES_GET clears flag bit 16, if a refused boot
+  // leaves the host undisposed, or if a boot configure that never answers is reported as the
+  // caller's usage error rather than a boot failure.
+  const clearBit16 = (response) => {
+    let capabilities;
+    try { capabilities = decodeResponseEnvelope(response, 0x0001); } catch { return response; }
+    const flags = capabilities.fields.find((row) => row.id === 27);
+    flags.value[2] &= ~1;
+    return response;
+  };
+  const refused = {};
+  await assert.rejects(served({ spectrum: OUTPUT, reply: clearBit16, harness: refused }), (error) => {
+    assert.ok(error instanceof MisoEngineError);
+    assert.equal(error.phase, "asset");
+    assert.equal(error.diagnosticCode, "sdk.asset.capability");
+    return true;
+  });
+  assert.equal(refused.disposed, 1, "the refused boot disposed its host");
+  let release;
+  const late = { hold: new Promise((resolve) => { release = resolve; }), holdAfter: 2 };
+  const timedOut = {};
+  // The boot's frames: the queue's revision probe, the capability probe, then the configure.
+  await assert.rejects(served({
+    spectrum: OUTPUT,
+    requestDeadlineMs: 50,
+    harness: timedOut,
+    afterCall: () => Object.assign(timedOut, late),
+  }).catch((error) => { release(); throw error; }), (error) => {
+    assert.ok(error instanceof MisoEngineError);
+    assert.equal(error.phase, "boot");
+    assert.equal(error.diagnosticCode, "sdk.boot.deadline");
+    return true;
+  });
+  assert.equal(timedOut.disposed, 1);
 });

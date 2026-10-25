@@ -414,8 +414,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * Dispose the worklet host, then close its context. Safe to call more than once.
    *
    * Each step that can hang waits at most 10 s. A step that does not settle rejects `close()` with
-   * a `lifecycle` `MisoEngineError` whose code names it (`spectrumCloseTimeout`,
-   * `hostDisposeTimeout`, `contextCloseTimeout`); the context close is still attempted. A settled
+   * a `lifecycle` `MisoEngineError` whose code names it (`hostDisposeTimeout`,
+   * `contextCloseTimeout`); the context close is still attempted. A settled
    * close is not run again: every later call returns the same promise.
    */
   close(): Promise<void>;
@@ -538,9 +538,19 @@ async function configureBootSpectrum(
   signal: AbortSignal | undefined,
 ): Promise<ControlTransactionQueue> {
   const started = Date.now();
-  const queue = await awaitSpectrum(createBrowserControlQueue(host), started, deadlineMs, signal);
+  // The boot's own deadline is a boot failure, not a usage error of the caller's.
+  const expired = (): Error => new MisoEngineError(
+    `the boot spectrum configuration did not complete within ${deadlineMs} ms`,
+    {
+      phase: "boot",
+      code: "wrongState",
+      result: constantValue("resultCodes", "wrongState"),
+      diagnostics: [{ code: "sdk.boot.deadline", path: "requestDeadlineMs" }],
+    },
+  );
+  const queue = await awaitSpectrum(createBrowserControlQueue(host), started, deadlineMs, signal, expired);
   const requestId = queue.requestIds.next();
-  const probe = await awaitSpectrum(host.control(encodeRevisionProbe(requestId)), started, deadlineMs, signal);
+  const probe = await awaitSpectrum(host.control(encodeRevisionProbe(requestId)), started, deadlineMs, signal, expired);
   queue.noteCommit(probe.revision);
   if (probe.result !== 0) throw controlCallFailure(probe.result, probe.response);
   const capabilities = decodeCapabilitiesReply(probe.response);
@@ -557,6 +567,7 @@ async function configureBootSpectrum(
     started,
     deadlineMs,
     signal,
+    expired,
   );
   if (!reply.ok) throw spectrumRefusalError("the engine refused the boot spectrum configuration", reply, "boot");
   if (reply.value.adoptedEpoch !== reply.value.configuredEpoch) {
@@ -612,19 +623,20 @@ async function awaitSpectrum<T>(
   started: number,
   deadline: number,
   signal: AbortSignal | undefined,
+  expired: () => Error = () => new MisoUsageError("spectrum query exceeded its deadline"),
 ): Promise<T> {
   // A request may still reject after the total deadline has elapsed before this wrapper is called.
   // Observe it even when there is no time left, so deadline refusal never creates an unhandled
   // host/Worker rejection.
   void promise.catch(() => undefined);
   const remaining = deadline - (Date.now() - started);
-  if (remaining <= 0) throw new MisoUsageError("spectrum query exceeded its deadline");
+  if (remaining <= 0) throw expired();
   signal?.throwIfAborted();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   try {
     return await new Promise<T>((resolve, reject) => {
-      timer = setTimeout(() => reject(new MisoUsageError("spectrum query exceeded its deadline")), remaining);
+      timer = setTimeout(() => reject(expired()), remaining);
       onAbort = () => reject(signal?.reason ?? new MisoUsageError("spectrum query was aborted"));
       signal?.addEventListener("abort", onAbort, { once: true });
       promise.then(resolve, reject);
@@ -785,6 +797,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let spectrumQuery: SpectrumQuery | undefined = preparedSpectrum;
     let spectrumCollection: SpectrumCollection | undefined = preparedSpectrumCollection;
     let spectrumPending = false;
+    // Whether a managed stream start is in flight or its stream runs: the capture is the stream's,
+    // so a one-shot query is refused, and a start is refused while a query runs (the core would
+    // answer the overlap `spectrum.busy` only for some of its orders).
+    let spectrumStreamHeld = false;
     let closed = false;
     // Issue #1644 D3: the largest generation a session seek of this object has used; every source
     // and the timeline start at 1.
@@ -960,6 +976,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           sendQuietly({ op: "stream", stream: "stop" });
           observationSubscriptions?.invalidateSpectrum();
         }
+        spectrumStreamHeld = false;
         throw error;
       }
     };
@@ -1006,8 +1023,13 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       return Object.freeze({ ...spectrumCallResult(reply), metadata: spectrumMetadataOf(reply.value) });
     };
     const startSpectrumStream = async (smoothingMs: number, query?: SpectrumQuery): Promise<SpectrumStreamStart> => {
+      if (spectrumPending) throw new MisoUsageError("a one-shot spectrum query is in flight");
+      spectrumStreamHeld = true;
       const reply = await streamFrame({ op: "stream", stream: "start", smoothingMs }, query);
-      if (!reply.ok) throw spectrumRefusalError("the engine refused the spectrum stream start", reply);
+      if (!reply.ok) {
+        spectrumStreamHeld = false;
+        throw spectrumRefusalError("the engine refused the spectrum stream start", reply);
+      }
       return Object.freeze({ ...spectrumCallResult(reply), metadata: spectrumMetadataOf(reply.value) });
     };
     const readSpectrumStream = async (query?: SpectrumQuery): Promise<SpectrumStreamRead> => {
@@ -1017,8 +1039,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       const result = spectrumResultOfStream(reply.value);
       return Object.freeze(result === undefined ? { metadata } : { metadata, result });
     };
-    const stopSpectrumStream = async (): Promise<EngineCallResult> =>
-      spectrumCallResult(await streamFrame({ op: "stream", stream: "stop" }));
+    const stopSpectrumStream = async (): Promise<EngineCallResult> => {
+      const reply = await streamFrame({ op: "stream", stream: "stop" });
+      // A stop gives the capture back, whatever the core answers (a stream it already ended).
+      spectrumStreamHeld = false;
+      return spectrumCallResult(reply);
+    };
     const observationOwner = (): ObservationSubscriptionOwner => observationSubscriptions ??=
       new ObservationSubscriptionOwner({
         observationMap,
@@ -1157,6 +1183,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
       if (spectrumPending) throw new MisoUsageError("a spectrum query is already in flight");
+      if (spectrumStreamHeld) throw new MisoUsageError("a managed spectrum stream holds the capture");
       const selected = spectrumSelection(request);
       const channels = selected.channels ?? "both";
       const deadline = queryDeadline(request);
@@ -1176,16 +1203,17 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             op: "capture", capture: "select", target: selected.target, channels,
           }, decodeSpectrumCaptureReply), started, deadline, options.signal);
           if (!selection.ok) throw spectrumRefusalError("the engine refused the spectrum selection", selection);
-          // A select that changes the entry arms it for the core, not for this caller (#1592 D4):
-          // give that arm back, so the arm below is this query's own.
-          const released = await awaitSpectrum(
-            spectrumFrame({ op: "capture", capture: "cancel" }, decodeSpectrumCaptureReply),
-            started,
-            deadline,
-            options.signal,
-          );
-          if (!released.ok) throw spectrumRefusalError("the engine refused the spectrum capture cancel", released);
         }
+        // Give back any arm this query does not own before it arms: a collection select arms the
+        // entry for the core (#1592 D4), and an earlier query's undo may have been lost (a cancel
+        // refused under backpressure), which would leave every later arm `spectrum.busy`.
+        const released = await awaitSpectrum(
+          spectrumFrame({ op: "capture", capture: "cancel" }, decodeSpectrumCaptureReply),
+          started,
+          deadline,
+          options.signal,
+        );
+        if (!released.ok) throw spectrumRefusalError("the engine refused the spectrum capture cancel", released);
         armed = true;
         const arm = await awaitSpectrum(
           spectrumFrame({ op: "capture", capture: "arm" }, decodeSpectrumCaptureReply),
