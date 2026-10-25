@@ -931,6 +931,8 @@ pub type TestOwnerState = (u64, Box<str>, Box<str>, u64, String, Vec<u32>, Vec<u
 thread_local! {
     static TEST_FAULT_STATE: core::cell::Cell<([Option<TestStructuralFaultPhase>; 2], usize)> =
         const { core::cell::Cell::new(([None; 2], 0)) };
+    static TEST_PUBLISHED_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
+        const { core::cell::Cell::new(None) };
     static TEST_NEXT_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
         const { core::cell::Cell::new(None) };
     /// The source-read offset the next plan this thread prepares is given (#1396 deliverable 3).
@@ -1002,6 +1004,7 @@ pub fn test_reset_lifecycle_observer() {
     TEST_FAULT_STATE.with(|state| state.set(([None; 2], 0)));
     TEST_OWNER_STATE.with(|state| state.set(TestOwnerCounters::default()));
     TEST_NEXT_ADOPTION.with(|state| state.set(None));
+    TEST_PUBLISHED_ADOPTION.with(|state| state.set(None));
     TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(None));
     TEST_HOLD_RECLAMATION.with(|state| state.set(false));
 }
@@ -1198,6 +1201,16 @@ pub struct SessionState<A: ControlAdapter> {
     /// The session's meter delivery when its control plane serves the meter batches (#1583 D5,
     /// R2: the C ABI's), built at boot over the output meter's reader and a requested gate.
     pub(crate) meters: Option<SessionMeters>,
+    /// The session's warm-successor bounds (#1403 D1), set when the session is created: with
+    /// `None`, no rebuild is classified and every rebuild takes today's path. Every product
+    /// session holds `None` until #1360 and #1361 build the production bounds.
+    pub(crate) warm: Option<host_core::WarmConfig>,
+    /// The record of the pending candidate published `Primed` (#1403 D4), at most one because at
+    /// most one candidate is pending. Set by the publication; dropped when render adopts it
+    /// (`synchronize_plan_epochs`), by a withdrawal that does not return its candidate
+    /// (`withdraw_pending_candidate`), and when a supersession or a declared stop drops the
+    /// candidate (#1310 D5 step 6). A refused supersession republishes the candidate and keeps it.
+    pub(crate) primed: Option<host_core::PrimedCandidate>,
 }
 
 /// The meter delivery a control plane serves (#1583 D5, #1587a): the delivery over the output
@@ -2690,6 +2703,20 @@ where
         TEST_NEXT_ADOPTION.with(|state| state.set(Some(adoption)));
     }
 
+    /// The adoption the last structural publication on this thread was committed with (#1403
+    /// gates), taken once: `None` when nothing was published since the last call.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_published_adoption(&mut self) -> Option<PlanAdoption> {
+        let _ = self;
+        TEST_PUBLISHED_ADOPTION.with(core::cell::Cell::take)
+    }
+
+    /// The record of the pending warm candidate (#1403 D4), if one is pending.
+    #[cfg(feature = "test-support")]
+    pub fn test_primed(&self) -> Option<host_core::PrimedCandidate> {
+        self.primed
+    }
+
     /// The provider's counter snapshot, every counter, as `COUNTERS_GET` would read it now, without
     /// running a control call (and so without the service step's refresh).
     #[cfg(feature = "test-support")]
@@ -2845,6 +2872,13 @@ where
 
         if active_epoch > self.providers.epoch {
             self.promote_pending_provider(active_epoch)?;
+        }
+        // #1403 D4: render adopted the warm candidate, or a candidate published after it.
+        if self
+            .primed
+            .is_some_and(|record| self.providers.epoch >= record.epoch)
+        {
+            self.primed = None;
         }
 
         // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
@@ -4051,16 +4085,26 @@ where
             engine::realtime::Withdrawal::Withdrawn(candidate) => {
                 #[cfg(feature = "test-support")]
                 update_test_owners(|owners| owners.candidate_withdrawn += 1);
+                // #1403 D4: the record goes with its candidate to the path that withdrew it; a
+                // record of another epoch is stale.
+                if self
+                    .primed
+                    .is_some_and(|record| record.epoch != candidate.epoch().0)
+                {
+                    self.primed = None;
+                }
                 Ok(Some(candidate))
             }
             engine::realtime::Withdrawal::Taken => {
                 #[cfg(feature = "test-support")]
                 update_test_owners(|owners| owners.candidate_taken += 1);
+                self.primed = None;
                 self.promote_pending_provider(newest)?;
                 Ok(None)
             }
             // An earlier withdrawal found it taken: render runs it.
             engine::realtime::Withdrawal::Nothing => {
+                self.primed = None;
                 self.promote_pending_provider(newest)?;
                 Ok(None)
             }
@@ -4240,19 +4284,22 @@ where
                 .spectrum
                 .successor_configuration(prospective.normalized_model()),
         };
-        let prepared_runtime = prepare_runtime::<A>(
-            &*self.preparer,
-            prospective,
-            self.limits,
-            spectrum_configuration
-                .as_ref()
-                .map(|configuration| &configuration.preparation),
-            Some(base),
-            &self.live_values_superseded,
-            self.observation_slots_high_water,
-            self.capture_owners_high_water,
-        )
-        .map_err(spectrum_invariant)?;
+        let prepare = |base: SuccessorBase<'_>| {
+            prepare_runtime::<A>(
+                &*self.preparer,
+                prospective,
+                self.limits,
+                spectrum_configuration
+                    .as_ref()
+                    .map(|configuration| &configuration.preparation),
+                Some(base),
+                &self.live_values_superseded,
+                self.observation_slots_high_water,
+                self.capture_owners_high_water,
+            )
+            .map_err(spectrum_invariant)
+        };
+        let mut prepared_runtime = prepare(base)?;
         // #1325 D7: after preparation, the pure transition step against the plan the successor
         // displaces. A declared discontinuity need not continue the running plan's output
         // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
@@ -4265,10 +4312,48 @@ where
                     .map_err(|_| CommandError::Internal)?,
             )
         };
+        let quantum = prospective.normalized_model().quantum_frames;
+        // #1403 D2: with the session's warm bounds, the edit is classified against the plan it
+        // displaces, from the ordinary successor's inventory (#1354a ruling 1). A growth whose
+        // duck set is empty -- it removes no strip, no phase 1 is pending, and nothing restarts
+        // (the ordinary join's restarts and the lead's whole restarts are the warm successor's
+        // `restarted_strips()`, #1354 D4) -- is prepared warm, admitted with the reprepare peak
+        // and published `Primed`. Every other answer takes today's path until #1397.
+        let mut warm_lead_blocks = None;
+        if let (Some(config), Some(transition)) = (self.warm, transition.as_ref())
+            && !transition.ducks()
+            && duck.is_empty()
+            && prepared_runtime.inventory.restarted_strips().is_empty()
+        {
+            let decision = host_core::warm_lead(
+                prospective,
+                &prepare_caps(self.limits),
+                base,
+                &prepared_runtime.inventory,
+                &config,
+            )
+            .map_err(|diagnostics| spectrum_invariant(prepare_failure(diagnostics)))?;
+            if let host_core::WarmDecision::Warm(lead) = decision
+                && lead.lead_samples > 0
+                && lead.restart_whole.is_empty()
+            {
+                let lead_blocks = u32::try_from(lead.lead_samples / u64::from(quantum))
+                    .map_err(|_| CommandError::Internal)?;
+                drop(prepared_runtime);
+                prepared_runtime = prepare(SuccessorBase {
+                    warm: Some(&lead),
+                    ..base
+                })?;
+                if !prepared_runtime.inventory.restarted_strips().is_empty() {
+                    debug_assert!(false, "#1354 D4: a warm successor restarts exactly R");
+                    return Err(CommandError::Internal);
+                }
+                warm_lead_blocks = Some(lead_blocks);
+            }
+        }
         let next_duck = transition
             .as_ref()
             .map(|transition| duck.joined(transition));
-        let quantum = prospective.normalized_model().quantum_frames;
         let PreparedRuntime {
             sources,
             strips,
@@ -4332,7 +4417,18 @@ where
         let held = self.held_epochs()?;
         let models = self.held_models()?;
         let limits = self.limits;
-        let admit = |held: &[LiveEpochResources], models: &[session::ResourceEstimate]| {
+        // #1403 D2: a warm candidate is admitted with the reprepare peak too, beside the held
+        // plans that are not candidates (every parked epoch and the running plan).
+        let peak = |running: usize| {
+            if warm_lead_blocks.is_some() {
+                AdmissionPeak::WithReprepare { running }
+            } else {
+                AdmissionPeak::Single
+            }
+        };
+        let admit = |held: &[LiveEpochResources],
+                     models: &[session::ResourceEstimate],
+                     admission: AdmissionPeak| {
             validate_replacement_peak(
                 held,
                 ProspectivePlan {
@@ -4342,9 +4438,15 @@ where
                 },
                 compiled_model_admission_over(models, prospective.resource_estimate())?,
                 limits,
+                admission,
             )
         };
-        if let Err(failure) = admit(held.as_slice(), models.as_slice()) {
+        let running = held
+            .as_slice()
+            .len()
+            .checked_sub(self.pending_providers.len())
+            .ok_or(CommandError::Internal)?;
+        if let Err(failure) = admit(held.as_slice(), models.as_slice(), peak(running)) {
             // Batch 15a review fold, item 2: a refusal is permanent only if the edit cannot fit
             // even beside the newest plan alone and the committed model, which is all a retry
             // meets once render has adopted every pending candidate (the plans before it are
@@ -4357,8 +4459,12 @@ where
             return Err(
                 match held.split_last().filter(|(_, older)| !older.is_empty()) {
                     Some((newest, _))
-                        if admit(core::slice::from_ref(newest), &models.as_slice()[..1])
-                            .is_ok() =>
+                        if admit(
+                            core::slice::from_ref(newest),
+                            &models.as_slice()[..1],
+                            peak(1),
+                        )
+                        .is_ok() =>
                     {
                         CommandError::Backpressure
                     }
@@ -4694,6 +4800,32 @@ where
             // withdrawn candidate, drops below as a commit's displaced model does.
             Rebuild::Discontinuity(model) | Rebuild::Monitor { model, .. } => (None, Some(*model)),
         };
+        // #1403 D3: a warm candidate's flags and `Primed` schedule, after the last fallible step
+        // and before its set takes any producer or donated ring: each entry it holds vacant is
+        // then a ring it carries from the plan it displaces, whose producer is still in that
+        // plan's set, or, across a withdrawn candidate, in the withdrawn candidate's.
+        let primed = warm_lead_blocks.map(|lead_blocks| {
+            let (running, withdrawn_sources) = if superseding {
+                let len = self.pending_providers.len();
+                let holder = match len {
+                    1 => &self.providers,
+                    _ => &self.pending_providers[len - 2],
+                };
+                (holder, self.pending_providers.last())
+            } else {
+                (
+                    self.pending_providers.last().unwrap_or(&self.providers),
+                    None,
+                )
+            };
+            host_core::publish_primed(
+                reservation.inner.as_mut().expect("reservation is live"),
+                &running.sources,
+                &candidate_provider.sources,
+                withdrawn_sources.map(|withdrawn| &withdrawn.sources),
+                lead_blocks,
+            )
+        });
         // B19-R7: the rebuild's own send moves ramp from its successor's first block.
         fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
@@ -4925,10 +5057,28 @@ where
             reports.retain(|(row, _)| *row != donor_epoch);
         }
         reports.push((epoch, A::Row::from(resources)));
+        #[cfg(feature = "test-support")]
+        TEST_PUBLISHED_ADOPTION.with(|state| {
+            state.set(
+                reservation
+                    .inner
+                    .as_ref()
+                    .map(PlanReplacementReservation::adoption),
+            );
+        });
         // #1310 D5 step 4: B is published only now, owning every donated ring and record. Its
         // payload carries the revision its gate carries, for the watermark's claim settle (#1482
         // R1).
         reservation.commit(revision);
+        // #1403 D4: B is the one pending candidate now. A record that named a candidate B
+        // superseded drops with it (#1310 D5 step 6, #1323's stop); B's own replaces it.
+        debug_assert!(
+            self.primed.is_none_or(|record| superseded
+                .as_ref()
+                .is_some_and(|(_, donor)| donor.epoch == record.epoch)),
+            "a record names the one pending candidate"
+        );
+        self.primed = primed;
         drop(reports);
         #[cfg(feature = "test-support")]
         {
