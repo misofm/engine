@@ -440,7 +440,12 @@ and 1325a merged).
 - **Deleted (the 1325a interim).** The restore refusal in `rebuild`; the two restore assertions in
   `strip_transitions.rs`'s gate-1 test; `plan_swap_race.rs`'s `removal`/`restore_retries`/`retried`
   fields, the retry wait, the `in_phase_one` arm and the withdrawal term (the race's
-  `race_over` wait for the last adoption stays: removals still adopt at `S`).
+  `race_over` wait for the last adoption stays: removals still adopt at `S`). With the retry gone,
+  the paced race (two blocks between admissions) met an add during its removal's phase 1, which now
+  supersedes it, and its `superseded == 0` check went red; the paced mode now also waits for the
+  watermark to report the last admission before the next edit, which is what "each candidate
+  adopted before the next" meant before removals adopted at `S`. The back-to-back race restores
+  `a-race` in phase 1 on every other edit and settles to a fresh plan of the final model.
 - **Paths.** `crates/host-core/src/prepare.rs` (the base field, its composition, the phase-one
   inventory), `transition.rs`, `crates/control-plane/src/control.rs`, the capi tests, the header
   paragraph (comments only) and `docs/C_ABI_V1_QUALIFICATION.md`.
