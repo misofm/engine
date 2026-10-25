@@ -283,24 +283,55 @@ fn change(position: usize, armed: bool) -> ObservationChange {
 }
 
 /// The `Observe` edits of `changes` (#1590): each producer's strip, insert and tap by stable key,
-/// with the test's window (a disarm names the window it was armed with).
-fn observe_edits(rig: &Rig, changes: &[ObservationChange]) -> Vec<SessionEdit> {
-    let producers = rig.session.test_effect_producers();
+/// with the test's window (a disarm names the window it was armed with, and the tag of the arm
+/// bound now, #2087).
+fn observe_edits(rig: &mut Rig, changes: &[ObservationChange]) -> Vec<SessionEdit> {
+    let keys: Vec<TapKey> = {
+        let producers = rig.session.test_effect_producers();
+        changes
+            .iter()
+            .map(|change| {
+                let producer = &producers[change.position];
+                TapKey {
+                    strip: StableId::parse(&producer.track_id).expect("strip"),
+                    section: TapSection::Inserts(
+                        StableId::parse(&producer.effect_id).expect("insert"),
+                    ),
+                    tap_id: producer.descriptor.observations[change.tap_index as usize]
+                        .id
+                        .0,
+                }
+            })
+            .collect()
+    };
     changes
         .iter()
-        .map(|change| {
-            let producer = &producers[change.position];
+        .zip(keys)
+        .map(|(change, key)| {
+            let arm_tag = if change.armed {
+                0
+            } else {
+                bound_tag(rig, &key)
+            };
             SessionEdit::Observe {
-                strip_id: StableId::parse(&producer.track_id).expect("strip"),
-                section: TapSection::Inserts(StableId::parse(&producer.effect_id).expect("insert")),
-                tap_id: producer.descriptor.observations[change.tap_index as usize]
-                    .id
-                    .0,
+                strip_id: key.strip,
+                section: key.section,
+                tap_id: key.tap_id,
                 armed: change.armed,
                 window_blocks: WINDOW_BLOCKS,
+                arm_tag,
             }
         })
         .collect()
+}
+
+/// The tag of the arm of `key` the host has bound now, or `0` when none is (#2087): what a
+/// subscriber that holds the arm names in its disarm.
+fn bound_tag(rig: &mut Rig, key: &TapKey) -> u64 {
+    rig.session
+        .observation_bindings()
+        .binding(key)
+        .map_or(0, |binding| binding.arm_tag)
 }
 
 /// The refusal of an `Observe` transaction whose armed taps' ended event would outgrow one
@@ -536,11 +567,28 @@ fn a_removed_effect_ends_its_binding_with_an_event() {
         };
         assert_eq!(event.event_sequence, commit.event_sequence + 1, "{what}");
     }
-    // #1584 gate 4: the binding ended with its effect for good. The compressor put back under its
-    // ID is not subscribed, so a disarm is `observation.not_subscribed` and queues nothing.
+}
+
+/// #2087 (and #1584 gate 4): a binding ends with its effect for good, and a disarm names the arm it
+/// ends by tag. Subscriber A arms `comp1`'s tap; the compressor is removed (A's arm ends) and put
+/// back under its ID. A's disarm then, before anyone arms the tap again, names an arm the host
+/// already ended: it commits and changes nothing. Subscriber B arms the tap with the same window
+/// (a fresh arm, a fresh tag); A's disarm, late in the browser's message order, still changes
+/// nothing: B's arm stays bound and armed, no record is queued, and the reply reports B's tag. A
+/// tag the host never issued (`0`, or past its counter) is `observation.not_subscribed`.
+///
+/// Red if a disarm that names an ended arm lowers a later subscriber's count (B's rows stop), or
+/// if it is refused as a misuse when it only came late.
+#[test]
+fn a_disarm_that_names_an_ended_arm_changes_nothing() {
+    use protocol::EditPath::{Monitor, Rebuild};
     let mut rig = Rig::new();
     rig.subscribe("comp1");
+    let a = bound_tag(&mut rig, &key("comp1"));
+    assert_ne!(a, 0, "A's arm is tagged");
+    rig.render();
     rig.apply(&[remove_insert("comp1")]).expect("a removal");
+    rig.render_through_adoption();
     rig.drain();
     let mut back = put_compressor("comp1", "comp");
     if let SessionEdit::PutTrackEffect { final_position, .. } = &mut back {
@@ -548,15 +596,51 @@ fn a_removed_effect_ends_its_binding_with_an_event() {
     }
     assert_eq!(
         rig.transact(&[back]),
-        Reply::Applied(protocol::EditPath::Rebuild),
+        Reply::Applied(Rebuild),
         "the compressor put back"
     );
+    rig.render_through_adoption();
     assert!(rig.session.observation_bindings().is_empty());
-    assert_eq!(
-        rig.transact(&[observe("comp1", false, WINDOW_BLOCKS)]),
-        refused("observation.not_subscribed", 0)
-    );
+    assert_eq!(rig.session.observation_armed(), 0);
+    // A closes before it saw the end: nothing to disarm, and not a misuse.
+    let length = rig
+        .apply(&[disarm_tagged("comp1", WINDOW_BLOCKS, a)])
+        .expect("a reply");
+    assert_eq!(rig.reply(length), Reply::Applied(Monitor));
+    assert_eq!(rig.observe_arm_tags(length), [0], "no arm is bound");
+    assert!(rig.session.observation_bindings().is_empty());
     assert_eq!(rig.queued("comp1"), 0);
+
+    // B arms the tap again with the same window.
+    let length = rig
+        .apply(&[observe("comp1", true, WINDOW_BLOCKS)])
+        .expect("a reply");
+    assert_eq!(rig.reply(length), Reply::Applied(Monitor));
+    let b = rig.observe_arm_tags(length)[0];
+    assert!(b > a, "B's arm {b} is a fresh one after A's {a}");
+    rig.render();
+    assert_eq!(rig.session.observation_armed(), 1);
+    assert_eq!(rig.queued("comp1"), 1, "B's arm");
+    // A's late disarm names its ended arm: B keeps the tap.
+    let length = rig
+        .apply(&[disarm_tagged("comp1", WINDOW_BLOCKS, a)])
+        .expect("a reply");
+    assert_eq!(rig.reply(length), Reply::Applied(Monitor));
+    assert_eq!(rig.observe_arm_tags(length), [b], "the arm bound is B's");
+    assert_eq!(bound_tag(&mut rig, &key("comp1")), b);
+    rig.render();
+    assert_eq!(rig.session.observation_armed(), 1, "B's arm stays armed");
+    assert_eq!(rig.queued("comp1"), 1, "no disarm record");
+    // A tag the host never issued is the caller's misuse.
+    for never in [0, u64::MAX] {
+        assert_eq!(
+            rig.transact(&[disarm_tagged("comp1", WINDOW_BLOCKS, never)]),
+            refused("observation.not_subscribed", 0),
+            "tag {never}"
+        );
+    }
+    assert_eq!(rig.session.observation_armed(), 1);
+    assert_eq!(rig.queued("comp1"), 1);
 }
 
 /// The room for the end event is checked with the commit's own event before anything changes (the
@@ -1536,9 +1620,28 @@ fn the_binding_table_charge_covers_its_kept_capacity_and_a_later_sets_text() {
     );
 }
 
-/// An `Observe` of tap 1 (gain reduction) of `strip`'s `comp` insert.
+/// An `Observe` arm of tap 1 (gain reduction) of `strip`'s `comp` insert.
 fn observe(strip: &str, armed: bool, window_blocks: u32) -> SessionEdit {
+    assert!(armed, "a disarm names its arm's tag: `disarm`");
     observe_tap(strip, "comp", 1, armed, window_blocks)
+}
+
+/// The disarm of tap 1 of `strip`'s `comp` insert with `window_blocks`, naming the arm the host has
+/// bound now (`0` when none is).
+fn disarm(rig: &mut Rig, strip: &str, window_blocks: u32) -> SessionEdit {
+    disarm_tagged(strip, window_blocks, bound_tag(rig, &key(strip)))
+}
+
+/// The disarm of tap 1 of `strip`'s `comp` insert with `window_blocks`, naming the arm `arm_tag`.
+fn disarm_tagged(strip: &str, window_blocks: u32, arm_tag: u64) -> SessionEdit {
+    SessionEdit::Observe {
+        strip_id: StableId::parse(strip).expect("strip"),
+        section: TapSection::Inserts(StableId::parse("comp").expect("insert")),
+        tap_id: 1,
+        armed: false,
+        window_blocks,
+        arm_tag,
+    }
 }
 
 fn observe_tap(
@@ -1554,6 +1657,7 @@ fn observe_tap(
         tap_id,
         armed,
         window_blocks,
+        arm_tag: 0,
     }
 }
 
@@ -1729,20 +1833,16 @@ fn an_observe_transaction_arms_shares_and_disarms_the_tap() {
     assert_eq!(rig.session.observation_bindings(), &bindings);
     assert_eq!(rig.queued("comp1"), 1);
     // One subscriber leaves: the other keeps the tap publishing.
-    assert_eq!(
-        rig.transact(&[observe("comp1", false, WINDOW_BLOCKS)]),
-        Reply::Applied(Monitor)
-    );
+    let leave = disarm(&mut rig, "comp1", WINDOW_BLOCKS);
+    assert_eq!(rig.transact(&[leave]), Reply::Applied(Monitor));
     assert_eq!(rig.queued("comp1"), 1, "the first disarm queues nothing");
     rig.render_blocks(u64::from(WINDOW_BLOCKS));
     assert_eq!(rig.window("comp1").expect("still armed").sequence, 2);
 
     // The last subscriber moves to window 8 in one transaction: one re-arm.
+    let leave = disarm(&mut rig, "comp1", WINDOW_BLOCKS);
     assert_eq!(
-        rig.transact(&[
-            observe("comp1", false, WINDOW_BLOCKS),
-            observe("comp1", true, 8),
-        ]),
+        rig.transact(&[leave, observe("comp1", true, 8),]),
         Reply::Applied(Monitor)
     );
     assert_eq!(rig.queued("comp1"), 2, "one re-arm record");
@@ -1755,10 +1855,8 @@ fn an_observe_transaction_arms_shares_and_disarms_the_tap() {
         "the re-arm restarts the window with eight blocks"
     );
     // The last disarm queues the disarm, and nothing is published after it.
-    assert_eq!(
-        rig.transact(&[observe("comp1", false, 8)]),
-        Reply::Applied(Monitor)
-    );
+    let leave = disarm(&mut rig, "comp1", 8);
+    assert_eq!(rig.transact(&[leave]), Reply::Applied(Monitor));
     assert_eq!(rig.queued("comp1"), 3, "the disarm record");
     assert!(rig.session.observation_bindings().is_empty());
     let last = rig.window("comp1").expect("a window").sequence;
@@ -1801,8 +1899,8 @@ fn refusals_change_nothing() {
             "observation.tap.unknown",
         ),
         (observe("comp1", true, 4_097), "observation.window"),
-        (observe("comp1", false, 4), "observation.not_subscribed"),
-        (observe("comp3", false, 8), "observation.not_subscribed"),
+        (disarm(&mut rig, "comp1", 4), "observation.not_subscribed"),
+        (disarm(&mut rig, "comp3", 8), "observation.not_subscribed"),
     ];
     for (edit, code) in cases {
         let revision = rig.revision();
@@ -1855,7 +1953,8 @@ fn a_full_queue_refuses_the_disarm_with_backpressure_and_changes_nothing() {
     let bindings = rig.session.observation_bindings().clone();
     let request = rig.next_request;
     rig.next_request += 1;
-    let bytes = rig.frame(request, &[observe("comp1", false, WINDOW_BLOCKS)]);
+    let leave = disarm(&mut rig, "comp1", WINDOW_BLOCKS);
+    let bytes = rig.frame(request, &[leave]);
     assert!(matches!(
         rig.session.command(&bytes, 65_536),
         Err(CommandError::Backpressure)
@@ -2018,9 +2117,8 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
     );
     // The commit moved the counter past the tags its preparation issued: a later record's tag is
     // fresh.
-    let length = rig
-        .apply(&[observe("comp3", false, WINDOW_BLOCKS)])
-        .expect("a reply");
+    let leave = disarm(&mut rig, "comp3", WINDOW_BLOCKS);
+    let length = rig.apply(&[leave]).expect("a reply");
     let later = rig.observe_arm_tags(length);
     assert!(
         later.len() == 1 && later[0] > replied[1],
@@ -2029,11 +2127,9 @@ fn an_observe_in_a_structural_transaction_arms_the_new_effect_and_keeps_the_carr
     // #1585 D5 (root ruling): a disarm of a tap whose effect the same transaction removes has no
     // record to publish, so it replies `0` and issues no tag: the next record takes the next one.
     rig.render();
+    let leave = disarm(&mut rig, "comp1", WINDOW_BLOCKS);
     let length = rig
-        .apply(&[
-            observe("comp1", false, WINDOW_BLOCKS),
-            remove_insert("comp1"),
-        ])
+        .apply(&[leave, remove_insert("comp1")])
         .expect("a reply");
     assert_eq!(
         rig.reply(length),
@@ -2078,7 +2174,8 @@ fn an_observe_on_a_superseded_candidate_reaches_its_replacement() {
         );
         let mut second = vec![put_compressor("comp4", "comp-c")];
         if rearm {
-            second.push(observe("comp3", false, WINDOW_BLOCKS));
+            let leave = disarm(&mut rig, "comp3", WINDOW_BLOCKS);
+            second.push(leave);
             second.push(observe("comp3", true, 8));
         }
         let length = rig.apply(&second).expect("a reply");

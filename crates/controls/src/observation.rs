@@ -332,18 +332,38 @@ impl ObservationBindings {
     /// subscriber, an arm with the same window adds one, a disarm with the same window removes one
     /// and the binding goes at `0`. The window compared is the one asked for.
     ///
+    /// A disarm names the arm it ends by `arm_tag`, the tag its arm's reply gave (#2087); an arm
+    /// ignores it. A disarm whose tag is the bound arm's applies as above. A tag the host issued
+    /// (nonzero and below `next_arm_tag`) that names no bound arm of `key` is a disarm of an arm
+    /// the host already ended: the binding of `key`, if any, is a later subscriber's, so the disarm
+    /// changes nothing and is not an error.
+    ///
     /// # Errors
     ///
     /// [`ObserveError::WindowConflict`] for an arm of a tap bound with another window,
     /// [`ObserveError::Subscribers`] for an arm of a tap that has `u32::MAX` subscribers, and
-    /// [`ObserveError::NotSubscribed`] for a disarm of a tap that is not bound or bound with another
-    /// window. A refusal changes nothing.
+    /// [`ObserveError::NotSubscribed`] for a disarm whose tag the host never issued (`0`, or at or
+    /// above `next_arm_tag`), or whose tag is the bound arm's and whose window is not. A refusal
+    /// changes nothing.
     pub fn observe(
         &mut self,
         key: &TapKey,
         armed: bool,
         window_blocks: u32,
+        arm_tag: u64,
+        next_arm_tag: u64,
     ) -> Result<(), ObserveError> {
+        if !armed {
+            if arm_tag == 0 || arm_tag >= next_arm_tag {
+                return Err(ObserveError::NotSubscribed);
+            }
+            if self
+                .binding(key)
+                .is_none_or(|binding| binding.arm_tag != arm_tag)
+            {
+                return Ok(());
+            }
+        }
         match (self.search(key), armed) {
             (Err(index), true) => {
                 self.bindings.insert(

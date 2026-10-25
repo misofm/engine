@@ -360,6 +360,10 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
             spec.field_count(&[(fields[1], console.len()), (ramp_field, present)])?
         }
         (_, (Some(ramp_field), present)) => spec.field_count(&[(ramp_field, present)])?,
+        // #2087: the arm tag is present exactly on a disarm.
+        (SessionEdit::Observe { armed, .. }, _) => {
+            spec.field_count(&[(fields[4], usize::from(!*armed))])?
+        }
         _ => spec.field_count(&[])?,
     };
     tx_start_message(sink, count)?;
@@ -564,13 +568,24 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
             tap_id,
             armed,
             window_blocks,
+            arm_tag,
         } => {
+            // #2087: a disarm names its arm by tag (field 5, always written; the core refuses
+            // `0`), and an arm has none.
+            if *armed && *arm_tag != 0 {
+                return Err(EncodeError::InvalidField);
+            }
             tx_message(sink, fields[0], |v| {
                 tx_observe_address(v, strip_id, section)
             })?;
             tx_u32(sink, fields[1], *tap_id)?;
             tx_bool(sink, fields[2], *armed)?;
-            tx_u32(sink, fields[3], *window_blocks)
+            tx_u32(sink, fields[3], *window_blocks)?;
+            if *armed {
+                Ok(())
+            } else {
+                tx_u64(sink, fields[4], *arm_tag)
+            }
         }
     }?;
     match (ramp_field, edit.ramp_samples()) {
@@ -1328,13 +1343,26 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         crate::SessionEditOpcode::Observe => {
             let (strip_id, section) =
                 parse_observe_address(payload.nested_value(one_spec!(payload, fields[0])?)?)?;
+            let armed = parse_bool(one_spec!(payload, fields[2])?)?;
+            // #2087: the arm tag is present exactly on a disarm. Its value is the core's to
+            // judge: `0` is a tag the host never issued (`observation.not_subscribed`).
+            let arm_tag = payload
+                .optional_one(fields[4].id, fields[4].wire.raw())?
+                .map(read_u64_exact)
+                .transpose()?;
+            let arm_tag = match (armed, arm_tag) {
+                (true, None) => 0,
+                (false, Some(tag)) => tag,
+                _ => return Err(DecodeError::InvalidField),
+            };
             Ok(SessionEdit::Observe {
                 strip_id,
                 section,
                 tap_id: read_u32_exact(one_spec!(payload, fields[1])?)?,
-                armed: parse_bool(one_spec!(payload, fields[2])?)?,
+                armed,
                 // Not bounded here: the core refuses a window above the maximum, naming the edit.
                 window_blocks: read_u32_exact(one_spec!(payload, fields[3])?)?,
+                arm_tag,
             })
         }
     }

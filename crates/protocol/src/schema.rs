@@ -2110,9 +2110,11 @@ pub(crate) mod session {
         pub(crate) const TAP_ID: FieldSpec = FieldSpec::req(2, Wire::U32);
         pub(crate) const ARMED: FieldSpec = FieldSpec::req(3, Wire::Bool);
         pub(crate) const WINDOW_BLOCKS: FieldSpec = FieldSpec::req(4, Wire::U32);
+        /// #2087: the tag the disarmed arm's reply gave, present exactly on a disarm.
+        pub(crate) const ARM_TAG: FieldSpec = FieldSpec::opt(5, Wire::U64);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "Observe",
-            fields: &[ADDRESS, TAP_ID, ARMED, WINDOW_BLOCKS],
+            fields: &[ADDRESS, TAP_ID, ARMED, WINDOW_BLOCKS, ARM_TAG],
         };
     }
 

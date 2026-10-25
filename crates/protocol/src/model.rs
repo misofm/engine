@@ -375,6 +375,12 @@ pub enum SessionEdit {
         /// [`controls::MAXIMUM_OBSERVATION_WINDOW_BLOCKS`]. A disarm names the window it subscribed
         /// with.
         window_blocks: u32,
+        /// A disarm's tag of the arm it ends (#2087): the tag its arm's reply gave
+        /// (`observe_arm_tags`). The host disarms only when it names the bound arm; a tag the
+        /// host issued that names an arm the host already ended (an effect removed and added
+        /// back, and another subscriber armed since) changes nothing. `0` on an arm, and on the
+        /// wire it is present exactly on a disarm.
+        arm_tag: u64,
     },
 }
 
@@ -1627,6 +1633,7 @@ impl SessionStore {
                 tap_id,
                 armed,
                 window_blocks,
+                arm_tag,
             } = edit
             {
                 let observe_refused = |error| refused(SessionEditError::Observe(error));
@@ -1643,7 +1650,7 @@ impl SessionStore {
                 let (bindings, touched, kept) = observation
                     .get_or_insert_with(|| (observe.bindings.clone(), Vec::new(), Vec::new()));
                 bindings
-                    .observe(&key, *armed, *window_blocks)
+                    .observe(&key, *armed, *window_blocks, *arm_tag, observe.next_arm_tag)
                     .map_err(observe_refused)?;
                 kept.push(
                     bindings
@@ -2122,6 +2129,7 @@ mod tests {
                 tap_id: 1,
                 armed: true,
                 window_blocks: 4,
+                arm_tag: 0,
             },
         ];
         let refusal = |error| {

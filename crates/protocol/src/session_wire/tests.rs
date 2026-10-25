@@ -1998,10 +1998,12 @@ fn set_control_refuses_an_address_that_breaks_its_rules() {
 /// #1584 D1, gate 5: `Observe` round-trips with a console slot and an insert, armed and disarmed,
 /// window `0` and the maximum; its address is the control list's address message with a strip
 /// owner, a console or inserts section and its slot ID, and each other shape is refused at decode.
+/// #2087: the arm tag (field 5) is present exactly on a disarm, `0` included: an arm with a tag is
+/// refused at encode and at decode, and a disarm without one at decode.
 ///
 /// Red if the codec accepts an address the op cannot use (a `control` or `lane` field, a route,
-/// VCA or session owner, a builtins or own section, a missing ID), or if a field is dropped or
-/// swapped on the way through.
+/// VCA or session owner, a builtins or own section, a missing ID), if a field is dropped or
+/// swapped on the way through, or if the arm tag is accepted where it is not part of the edit.
 #[test]
 fn observe_round_trips_and_refuses_an_address_it_cannot_use() {
     let edits = vec![
@@ -2011,6 +2013,7 @@ fn observe_round_trips_and_refuses_an_address_it_cannot_use() {
             tap_id: 1,
             armed: true,
             window_blocks: 0,
+            arm_tag: 0,
         },
         SessionEdit::Observe {
             strip_id: id("drums"),
@@ -2018,6 +2021,15 @@ fn observe_round_trips_and_refuses_an_address_it_cannot_use() {
             tap_id: 7,
             armed: false,
             window_blocks: controls::MAXIMUM_OBSERVATION_WINDOW_BLOCKS,
+            arm_tag: u64::MAX,
+        },
+        SessionEdit::Observe {
+            strip_id: id("drums"),
+            section: controls::TapSection::Inserts(id("comp")),
+            tap_id: 7,
+            armed: false,
+            window_blocks: 1,
+            arm_tag: 0,
         },
     ];
     let bytes = encode(&edits);
@@ -2025,6 +2037,77 @@ fn observe_round_trips_and_refuses_an_address_it_cannot_use() {
         .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 128]))
         .expect("Observe decodes");
     assert_eq!(decoded.edits, edits);
+
+    // #2087: an arm with a tag has no encoding.
+    let tagged_arm = [SessionEdit::Observe {
+        strip_id: id("vocal"),
+        section: controls::TapSection::Console(id("glue")),
+        tap_id: 1,
+        armed: true,
+        window_blocks: 0,
+        arm_tag: 3,
+    }];
+    let codec = ProtocolCodec::default();
+    let transaction = SessionTransactionFrame {
+        request_id: RequestId::new(9).expect("request"),
+        expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
+        edits: &tagged_arm,
+    };
+    assert_eq!(
+        codec.encoded_session_transaction_len(&transaction),
+        Err(EncodeError::InvalidField),
+        "an arm with a tag"
+    );
+    // #2087: field 5 at decode, present on an arm and absent on a disarm.
+    let observe_edit = |armed: bool, arm_tag: Option<u64>| {
+        let address_field = |spec: FieldSpec, value: &[u8]| {
+            (spec.id, spec.wire.raw(), spec.mandatory, value.to_vec())
+        };
+        let address = raw_message(vec![
+            address_field(schema::control_address::OWNER_KIND, &[2]),
+            address_field(schema::control_address::OWNER_ID, b"drums"),
+            address_field(schema::control_address::SECTION, &[2]),
+            address_field(schema::control_address::SLOT_ID, b"comp"),
+        ]);
+        let mut fields = vec![
+            (1, WIRE_MESSAGE, true, address),
+            (2, WIRE_U32, true, 7_u32.to_le_bytes().to_vec()),
+            (3, WIRE_BOOL, true, vec![u8::from(armed)]),
+            (4, WIRE_U32, true, 1_u32.to_le_bytes().to_vec()),
+        ];
+        if let Some(tag) = arm_tag {
+            fields.push((
+                5,
+                schema::Wire::U64.raw(),
+                false,
+                tag.to_le_bytes().to_vec(),
+            ));
+        }
+        let edit = raw_message(vec![
+            (
+                1,
+                schema::Wire::U16.raw(),
+                true,
+                crate::SessionEditOpcode::Observe
+                    .raw()
+                    .to_le_bytes()
+                    .to_vec(),
+            ),
+            (2, WIRE_MESSAGE, true, raw_message(fields)),
+        ]);
+        parse_edit(Message::nested(&edit).expect("edit"))
+    };
+    assert_eq!(observe_edit(false, Some(0)), Ok(edits[2].clone()));
+    assert_eq!(
+        observe_edit(true, Some(3)),
+        Err(DecodeError::InvalidField),
+        "an arm with a tag"
+    );
+    assert_eq!(
+        observe_edit(false, None),
+        Err(DecodeError::InvalidField),
+        "a disarm without a tag"
+    );
 
     use schema::control_address as a;
     let field =

@@ -9501,6 +9501,7 @@ fn an_observe_edit_arms_a_tap_through_the_c_abi() {
         tap_id: 1,
         armed: true,
         window_blocks: 4,
+        arm_tag: 0,
     }]);
     let (result, response) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
@@ -9548,16 +9549,18 @@ fn each_observe_reply_names_the_arm_tag_of_its_record() {
         .id
         .clone();
     let comp = StableId::parse("comp").expect("compressor");
-    let observe_with = |armed, window_blocks| SessionEdit::Observe {
+    // A disarm names the tag of the arm it ends (#2087), here the arm bound when it is sent.
+    let observe_with = |armed, window_blocks, arm_tag| SessionEdit::Observe {
         strip_id: track.clone(),
         section: protocol::control_core::TapSection::Inserts(comp.clone()),
         tap_id: 1,
         armed,
         window_blocks,
+        arm_tag: if armed { 0 } else { arm_tag },
     };
-    let observe = |armed| observe_with(armed, 4);
+    let observe = |armed, arm_tag| observe_with(armed, 4, arm_tag);
     for (armed, tag) in [(true, 1), (true, 1), (false, 1), (false, 2), (true, 3)] {
-        let bytes = rig.transaction(&[observe(armed)]);
+        let bytes = rig.transaction(&[observe(armed, 1)]);
         let (result, response) = rig.send(&bytes);
         assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
         let applied = applied_of(&response);
@@ -9571,10 +9574,10 @@ fn each_observe_reply_names_the_arm_tag_of_its_record() {
     // One transaction: a join and a disarm keep the binding tagged 3; the last disarm and an arm
     // with another window are one re-arm record, tag 4, which both report.
     let bytes = rig.transaction(&[
-        observe(true),
-        observe(false),
-        observe(false),
-        observe_with(true, 8),
+        observe(true, 0),
+        observe(false, 3),
+        observe(false, 3),
+        observe_with(true, 8, 0),
     ]);
     let (result, response) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
@@ -9582,7 +9585,7 @@ fn each_observe_reply_names_the_arm_tag_of_its_record() {
     rig.step();
     // The last disarm and an arm with the same window queue nothing: the tap stays as it was, and
     // its binding keeps tag 4.
-    let bytes = rig.transaction(&[observe_with(false, 8), observe_with(true, 8)]);
+    let bytes = rig.transaction(&[observe_with(false, 8, 4), observe_with(true, 8, 0)]);
     let (result, response) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
     assert_eq!(applied_of(&response).observe_arm_tags, vec![4, 4]);
@@ -10128,7 +10131,7 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
             unit: protocol::ParameterUnit::Db,
         }
     );
-    let observe = |armed| SessionEdit::Observe {
+    let observe = |armed, arm_tag| SessionEdit::Observe {
         strip_id: track.clone(),
         section: protocol::control_core::TapSection::Inserts(
             StableId::parse("comp").expect("compressor"),
@@ -10136,8 +10139,9 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
         tap_id: 1,
         armed,
         window_blocks: 4,
+        arm_tag,
     };
-    let arm_tag = rig.observe_tags(&[observe(true)])[0];
+    let arm_tag = rig.observe_tags(&[observe(true, 0)])[0];
     assert_eq!(
         row(&mut rig),
         protocol::ObservationReadRow {
@@ -10211,7 +10215,7 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
         );
     }
 
-    let disarm_tag = rig.observe_tags(&[observe(false)])[0];
+    let disarm_tag = rig.observe_tags(&[observe(false, arm_tag)])[0];
     assert!(disarm_tag > arm_tag, "the last disarm is its own record");
     assert_eq!(
         row(&mut rig).status,

@@ -5883,7 +5883,7 @@ fn add_muted_copy(
     [protocol::SessionEdit::UpsertTrack { track }, route]
 }
 
-/// The `Observe` edit of `track`'s compressor tap (#1587b).
+/// The `Observe` arm of `track`'s compressor tap (#1587b).
 fn observe_compressor(
     track: &session::StableId,
     armed: bool,
@@ -5897,6 +5897,7 @@ fn observe_compressor(
         tap_id: 1,
         armed,
         window_blocks,
+        arm_tag: 0,
     }
 }
 
@@ -6009,6 +6010,7 @@ fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
         (StatusCode::Ok, None)
     );
     let mut request = 2;
+    // A disarm names its arm's tag (#2087): the session's first arm takes tag 1.
     let mut observe = |armed: bool| {
         let edit = protocol::SessionEdit::Observe {
             strip_id: track.clone(),
@@ -6018,6 +6020,7 @@ fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
             tap_id: 1,
             armed,
             window_blocks: u32::try_from(window).expect("window"),
+            arm_tag: if armed { 0 } else { 1 },
         };
         let (result, response) = command_c(c_session, &transaction_at(request, 42, &[edit]));
         assert_eq!(
