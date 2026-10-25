@@ -385,11 +385,14 @@ pub fn plan_strip_transition(
 /// moves in `ordinary`, the inventory of `next` compiled as an ordinary successor (#1285 floors, no
 /// lead), sorted by ID. Called on that compile, before any carry join reads it (round-9 M1).
 ///
-/// A strip is in the set when a node of it arrives later in `ordinary` than in `predecessor`
-/// (each plan's [`crate::PlanStateInventory::input_floors`], the arrivals it renders), or when an
-/// outgoing compensation line of it (a route's, or its path into the output) changes length: a
-/// line that changes length restarts with a gap. When the output's arrival grows, every strip of
-/// both plans is in the set. An added strip never is: it is #1288's to arm.
+/// A strip is in the set when a node of it that both plans hold arrives later in `ordinary` than
+/// in `predecessor` (each plan's [`crate::PlanStateInventory::input_floors`], the arrivals it
+/// renders), or when an outgoing edge of it that both plans hold (a route, or its path into the
+/// output) has a compensation line whose length changes: a line that changes length restarts
+/// with a gap. A node or an edge only one plan holds moves no timing of the other: an added send
+/// or a removed route does not duck its source. When the output's arrival grows, every strip of
+/// both plans that reaches the output in `next` is in the set. An added strip never is: it is
+/// #1288's to arm.
 ///
 /// **Limit (#1397a):** a sidechain line is not read, and #1324 D1's sidechain closure is not run
 /// over the set: a carried effect keyed from a tap before the fader of a strip in the set is not
@@ -417,54 +420,94 @@ pub fn grown_strips(
             _ => crate::prepare::strip_owner(&routes, node).map(|(strip, _)| strip.to_owned()),
         }
     };
+    let in_both = |id: &str| {
+        crate::prepare::committed_has_strip(committed, id)
+            && crate::prepare::committed_has_strip(next, id)
+    };
+    let held = crate::prepare::session_graph_nodes(committed);
     let arrival = |floors: &[(GraphNodeId, u64)], node: &GraphNodeId| {
         floors
-            .binary_search_by(|(held, _)| held.cmp(node))
+            .binary_search_by(|(other, _)| other.cmp(node))
             .map_or(0, |index| floors[index].1)
     };
     let mut grown: BTreeSet<String> = BTreeSet::new();
     let mut output_grew = false;
     for (node, samples) in ordinary.input_floors() {
-        if *samples > arrival(predecessor.input_floors(), node) {
-            if matches!(node, GraphNodeId::Output { .. }) {
+        let output = matches!(node, GraphNodeId::Output { .. });
+        if (output || held.contains(node)) && *samples > arrival(predecessor.input_floors(), node) {
+            if output {
                 output_grew = true;
             } else if let Some(strip) = owner(node) {
                 grown.insert(strip);
             }
         }
     }
+    // An edge both plans hold: a route of both models from the same source, or a strip's path
+    // into the output (`TrackMain`) of a strip of both.
+    let edge_in_both = |edge: &GraphEdgeId| match edge {
+        GraphEdgeId::RouteSource { route_id } | GraphEdgeId::RouteDestination { route_id } => {
+            let find = |model: &'_ SessionModel| {
+                model
+                    .routes
+                    .iter()
+                    .find(|route| route.id.as_str() == route_id.as_str())
+                    .map(|route| (route.source.clone(), route.destination.clone()))
+            };
+            find(committed).is_some_and(|before| find(next) == Some(before))
+        }
+        GraphEdgeId::TrackMain { .. } => true,
+        GraphEdgeId::EffectSidechain { .. } => false,
+    };
     let lines =
         |inventory: &crate::PlanStateInventory| -> BTreeMap<GraphEdgeId, (u64, GraphNodeId)> {
             inventory
                 .delay_lines()
                 .iter()
-                .filter(|line| !matches!(line.edge, GraphEdgeId::EffectSidechain { .. }))
+                .filter(|line| edge_in_both(&line.edge))
                 .map(|line| (line.edge.clone(), (line.samples, line.source.clone())))
                 .collect()
         };
     let (before, after) = (lines(predecessor), lines(ordinary));
     for (edge, (_, source)) in before.iter().chain(&after) {
         if before.get(edge).map(|line| line.0) != after.get(edge).map(|line| line.0)
+            && held.contains(source)
             && let Some(strip) = owner(source)
         {
             grown.insert(strip);
         }
     }
-    let in_both = |id: &str| {
-        crate::prepare::committed_has_strip(committed, id)
-            && crate::prepare::committed_has_strip(next, id)
-    };
     if output_grew {
-        grown.extend(
-            committed
-                .tracks
-                .iter()
-                .map(|track| track.id.as_str())
-                .chain(committed.submixes.iter().map(|submix| submix.id.as_str()))
-                .map(str::to_owned),
-        );
+        grown.extend(reaching_output(next));
     }
     grown.into_iter().filter(|id| in_both(id)).collect()
+}
+
+/// The strips of `model` that reach its output through their routes, directly or through
+/// submixes.
+fn reaching_output(model: &SessionModel) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut reaching: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let before = reaching.len();
+        for route in &model.routes {
+            let source = match &route.source {
+                RouteSource::Track { track_id, .. } => track_id.as_str(),
+                RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
+            };
+            let reaches = match &route.destination {
+                session::RouteDestination::OutputInput { .. } => true,
+                session::RouteDestination::SubmixInput { submix_id } => {
+                    reaching.contains(submix_id.as_str())
+                }
+            };
+            if reaches {
+                reaching.insert(source);
+            }
+        }
+        if reaching.len() == before {
+            return reaching.into_iter().map(str::to_owned).collect();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -753,6 +796,124 @@ mod tests {
             transition.compensation(),
             p1.report.latency_samples,
             "C is the sum of b-main's two lines"
+        );
+    }
+
+    /// `grown_strips` over `first -> second`: the predecessor prepared fresh, `second` prepared
+    /// as its ordinary successor.
+    fn grown(first: &SessionModel, second: &SessionModel) -> Vec<String> {
+        let (first, second) = (compile(first), compile(second));
+        let p0 = crate::prepare::prepare_host_runtime(&first, &caps()).expect("prepares");
+        let p1 = crate::prepare::prepare_host_runtime_successor(
+            &second,
+            &caps(),
+            SuccessorBase::new(&p0.inventory, first.normalized_model(), 2),
+        )
+        .expect("the successor prepares");
+        super::grown_strips(
+            &p0.inventory,
+            first.normalized_model(),
+            second.normalized_model(),
+            &p1.inventory,
+        )
+    }
+
+    fn compressor(name: &str) -> session::Effect {
+        session::Effect {
+            identity: session::EffectIdentity::Native {
+                effect_id: id("miso.compressor"),
+            },
+            ..limiter(name)
+        }
+    }
+
+    /// #1397 D2 step 4, `grown_strips`'s rules, on [`model`] (output latency 486, `a`'s limiter):
+    /// - a line alone: a limiter on `c` raises `r`'s input, so `b`'s `pre_fader` send line into
+    ///   `r` grows while `b`'s nodes and the output's arrival stay: `[b, c, r]`;
+    /// - the output alone: with `b` feeding only `r` and a routeless track `d`, a second limiter
+    ///   on `a` raises the output's arrival, which neither `b`'s nodes nor its line show: every
+    ///   strip that reaches the output, `[a, b, c, r]`, and not `d`;
+    /// - an added send, a removed route, and a node only the successor holds, move nothing: `[]`.
+    ///
+    /// Test value: without the line rule `b` drops from the first set; without the output rule
+    /// `b` drops from the second; an output rule over every strip adds `d`; a line or node read
+    /// from one plan alone ducks `b` (the added send, the removed route) or `a` (the node).
+    #[test]
+    fn grown_strips_reads_lines_nodes_and_the_output() {
+        let base = model();
+        let with = |edit: &dyn Fn(&mut SessionModel)| {
+            let mut next = base.clone();
+            edit(&mut next);
+            next
+        };
+        let track = |model: &mut SessionModel, name: &str| -> usize {
+            model
+                .tracks
+                .iter()
+                .position(|track| track.id.as_str() == name)
+                .expect("a track")
+        };
+        let limited_c = with(&|next| {
+            let c = track(next, "c");
+            next.tracks[c].inserts.effects.push(limiter("lim-c"));
+        });
+        assert_eq!(grown(&base, &limited_c), ["b", "c", "r"], "a line alone");
+
+        let only_send = with(&|next| {
+            next.routes.retain(|route| route.id.as_str() != "b-main");
+            let mut d = next.tracks[0].clone();
+            d.id = id("d");
+            d.inserts.effects.clear();
+            next.tracks.push(d);
+            next.tracks
+                .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        });
+        let mut louder = only_send.clone();
+        let a = track(&mut louder, "a");
+        louder.tracks[a].inserts.effects.push(limiter("lim-2"));
+        assert_eq!(
+            grown(&only_send, &louder),
+            ["a", "b", "c", "r"],
+            "the output alone"
+        );
+
+        let added_send = with(&|next| {
+            let mut send = next
+                .routes
+                .iter()
+                .find(|route| route.id.as_str() == "b-main")
+                .expect("b-main")
+                .clone();
+            send.id = id("b-out");
+            send.source = RouteSource::Track {
+                track_id: id("b"),
+                tap: SendTap::PreFader,
+            };
+            next.routes.push(send);
+            next.routes
+                .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        });
+        assert_eq!(
+            grown(&base, &added_send),
+            Vec::<String>::new(),
+            "an added send"
+        );
+        let removed_route = with(&|next| {
+            next.routes.retain(|route| route.id.as_str() != "b-main");
+        });
+        assert_eq!(
+            grown(&base, &removed_route),
+            Vec::<String>::new(),
+            "a removed route"
+        );
+        let added_node = with(&|next| {
+            let a = track(next, "a");
+            next.tracks[a].inserts.effects.push(compressor("comp-a"));
+        });
+        assert_eq!(
+            grown(&base, &added_node),
+            Vec::<String>::new(),
+            "an added node"
         );
     }
 }

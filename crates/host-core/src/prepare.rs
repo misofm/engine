@@ -1922,7 +1922,7 @@ fn tap_before_fader(tap: session::SendTap) -> bool {
 /// The graph nodes a plan compiled from `model` has (#1354a): every strip's seven stages and
 /// its effects, every route and every output. The compiler emits no other node kind
 /// (`graph-compiler` `compile_graph`; a compensation line is not a node of the schedule).
-fn session_graph_nodes(model: &SessionModel) -> BTreeSet<GraphNodeId> {
+pub(crate) fn session_graph_nodes(model: &SessionModel) -> BTreeSet<GraphNodeId> {
     const STAGES: [TrackStage; 7] = [
         TrackStage::Input,
         TrackStage::PostInputBuiltins,
