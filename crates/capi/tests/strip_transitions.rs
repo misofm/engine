@@ -1348,18 +1348,21 @@ fn a_sidechain_consumer_ducks_with_its_restarted_source() {
     }
 }
 
-/// #1324b gate 9's session: `t2` routes from its `post_fader` tap into submix `bu`, which holds a
-/// true-peak limiter and routes into the output; `t3` holds a true-peak limiter, then a compressor
+/// #1324b gate 9's session: `t2` (a true-peak limiter, latency `L`) and the plain `t4` route from
+/// their `post_fader` taps into submix `bu`, which holds a true-peak limiter and routes into the
+/// output, so `t4`'s line into `bu` is `L`; `t3` holds two true-peak limiters, then a compressor
 /// keyed from `bu`'s `input` tap at a threshold every nonzero key exceeds, and routes into the
-/// output. So `t3`'s sidechain line is the limiter's latency `L`.
+/// output. So `t3`'s sidechain line is `L` and the output arrives at `2L`.
 fn gate_nine_model() -> SessionModel {
     let fixture = session::parse_session_json(FIXTURE).expect("fixture");
     let mut model = gate_model();
     let mut t2 = plain_track(&fixture, "t2", "src-b");
-    t2.inserts.effects.clear();
+    t2.inserts.effects = vec![native("lim2", "miso.true-peak-limiter")];
+    let t4 = plain_track(&fixture, "t4", "src-a");
     let mut t3 = plain_track(&fixture, "t3", "src-a");
     t3.inserts.effects = vec![
         native("lim3", "miso.true-peak-limiter"),
+        native("lim3b", "miso.true-peak-limiter"),
         keyed_compressor(
             "key",
             session::RouteSource::Submix {
@@ -1369,7 +1372,7 @@ fn gate_nine_model() -> SessionModel {
             -80.0,
         ),
     ];
-    model.tracks = vec![t2, t3];
+    model.tracks = vec![t2, t3, t4];
     let mut bu = session::Submix::unity(id("bu"), &model.console);
     bu.inserts
         .effects
@@ -1396,6 +1399,14 @@ fn gate_nine_model() -> SessionModel {
         ),
         route(
             &fixture,
+            "t4-bu",
+            track_tap("t4", session::SendTap::PostFader),
+            session::RouteDestination::SubmixInput {
+                submix_id: id("bu"),
+            },
+        ),
+        route(
+            &fixture,
             "t3-main",
             track_tap("t3", session::SendTap::PostPan),
             out,
@@ -1404,18 +1415,19 @@ fn gate_nine_model() -> SessionModel {
     model
 }
 
-/// #1324b gate 9 through the C entries. One transaction removes `t2`, adds `t1` (a true-peak
-/// limiter, reading `t2`'s source) routed from its `post_fader` tap into `bu`, and removes `bu`'s
-/// limiter. `bu` restarts and `t3` stays carried under D1's exemption (the only line into `bu`'s
-/// `Input` stage comes from added `t1`), while `t3`'s sidechain line shrinks from `L` to 0.
-/// (a) The watermark's first sample is `S = ceil_q(p + q + N + L)`: `C` is `t3`'s sidechain line
-/// plus `t2`'s line into `bu` (0). (b) Every block before `t1`'s fire block (the first at or after
-/// `S + L`) equals the reference that makes no structural edit and live-mutes `t2` and `bu` at the
-/// same point. Bit-identical.
+/// #1324b gate 9 through the C entries. One transaction removes `t2` and `t4`, adds `t1` (two
+/// true-peak limiters, reading `t2`'s source) routed from its `post_fader` tap into `bu`, and
+/// removes `bu`'s limiter. `bu` restarts and `t3` stays carried under D1's exemption (the only line
+/// into `bu`'s `Input` stage comes from added `t1`), while `t3`'s sidechain line shrinks from `L`
+/// to 0. (a) The watermark's first sample is `S = ceil_q(p + q + N + 2L)`: `C` is `t3`'s sidechain
+/// line `L` plus the longest line into `bu`, `t4`'s `L`; every route line out of a ducked strip is
+/// at most `L`. (b) Every block before `t1`'s fire block (the first at or after `S + 2L`) equals the
+/// reference that makes no structural edit and live-mutes `t2`, `t4` and `bu` at the same point.
+/// Bit-identical.
 ///
-/// Test value: red if `C` counts route lines only (`S` lands before the sidechain line empties, so
-/// the successor drops the last of `t2`'s fade from `t3`'s detector), or if the exemption is
-/// missing (`t3` ducks needlessly).
+/// Test value: red if `C` counts route lines only or omits the line into `bu` (`S` lands before
+/// the key's path empties, so the successor drops the last of the fade from `t3`'s detector), or
+/// if the exemption is missing (`t3` ducks needlessly).
 #[test]
 fn a_shortened_sidechain_line_from_a_restarted_submix_drops_no_fade_sample() {
     assert_installed();
@@ -1430,9 +1442,10 @@ fn a_shortened_sidechain_line_from_a_restarted_submix_drops_no_fade_sample() {
         "the sidechain line reaches past the rounding of S without it"
     );
     let mut t1 = plain_track(&fixture, "t1", "src-b");
-    t1.inserts
-        .effects
-        .push(native("lim1", "miso.true-peak-limiter"));
+    t1.inserts.effects = vec![
+        native("lim1", "miso.true-peak-limiter"),
+        native("lim1b", "miso.true-peak-limiter"),
+    ];
     let mut bu = before.submixes[0].clone();
     bu.inserts.effects.clear();
     let edit = vec![
@@ -1440,6 +1453,10 @@ fn a_shortened_sidechain_line_from_a_restarted_submix_drops_no_fade_sample() {
             route_id: id("t2-bu"),
         },
         SessionEdit::RemoveTrack { track_id: id("t2") },
+        SessionEdit::RemoveRoute {
+            route_id: id("t4-bu"),
+        },
+        SessionEdit::RemoveTrack { track_id: id("t4") },
         SessionEdit::UpsertTrack { track: t1 },
         SessionEdit::UpsertRoute {
             route: route(
@@ -1457,6 +1474,7 @@ fn a_shortened_sidechain_line_from_a_restarted_submix_drops_no_fade_sample() {
     let run = duck_run(&before, &[(K + 1, edit, EditPath::Rebuild)], fire, &frame_b);
     assert_eq!(run.adopted.map(|(first, ..)| first), Some(s));
     let mut mutes = strip_mutes(&before, "t2", true);
+    mutes.extend(strip_mutes(&before, "t4", true));
     mutes.extend(strip_mutes(&before, "bu", true));
     let reference = duck_run(&before, &[(K + 1, mutes, EditPath::Live)], fire, &frame_b);
     for block in 0..fire {

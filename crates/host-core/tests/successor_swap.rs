@@ -4157,51 +4157,112 @@ fn track_key(track: &str, tap: session::SendTap) -> RouteSource {
     }
 }
 
-/// #1324b gate 7 and D1's sidechain closure on every width, on the control thread. B adds an
-/// insert to `eq0` (or, in the last row, to the bus), which restarts it; `keys` are the keyed
-/// inserts A and B share. The restart set is closed over the sidechain edges: a strip keyed from a
-/// restarted strip's `insert_return` or `pre_fader` tap joins it, and so, on a second round, does a
-/// strip keyed from that one; a track's `input` tap and a `post_fader` tap add nothing, and nor
-/// does a submix's `input` tap whose line keeps its length. Each strip in the set is armed. Red if
-/// the closure ignores sidechains, stops after one round, adds an `input`- or `post_fader`-tap
-/// consumer, or adds a consumer of a submix's `input` tap whose line keeps its length.
+/// How a row of [`a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width`] edits A.
+#[derive(Clone, Copy, PartialEq)]
+enum Restart {
+    /// An insert added to `eq0`.
+    Insert,
+    /// `eq0`'s `delay_samples` changed (its delay line restarts).
+    Delay,
+    /// An insert added to the bus.
+    Bus,
+    /// An insert added to the bus, and a latent insert to the muted `late` that feeds it, so the
+    /// bus input, which carried `aux` also feeds, arrives at `eq1`'s limited key: the key's line
+    /// shrinks from the limiter's latency to 0.
+    BusLater,
+}
+
+/// #1324b gate 7 and D1's sidechain closure on every width, on the control thread. B restarts
+/// `eq0` (an insert, or its `delay_samples`) or the bus; `keys` are the keyed inserts A and B share.
+/// The restart set is closed over the sidechain edges: a strip keyed from a restarted strip's
+/// `post_input`, `insert_send`, `insert_return` or `pre_fader` tap joins it, and so, on a second
+/// round, does a strip keyed from that one; a `post_fader` tap adds nothing, and a track's `input`
+/// tap adds nothing unless its delay line restarts. A submix's `input` tap adds nothing while its
+/// line keeps its length, and adds its consumer when the line changes and a carried strip feeds
+/// the submix. Each strip in the set is armed. Red if the closure ignores sidechains or a tap kind,
+/// stops after one round, adds a `post_fader` or a plain `input`-tap consumer, misses a restarted
+/// delay line, or gets either submix rule wrong.
 #[test]
 fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
     let bus = || RouteSource::Submix {
         submix_id: id(ROUTE_BUS),
         tap: session::SendTap::Input,
     };
-    // A row: its name, the keyed inserts (strip, key source) and the expected restart set.
-    type Row<'a> = (&'a str, Vec<(&'a str, RouteSource)>, &'a [&'a str]);
-    let rows: [Row<'_>; 5] = [
+    // A row: its name, its edit, the keyed inserts (strip, key source) and the restart set.
+    type Row<'a> = (&'a str, Restart, Vec<(&'a str, RouteSource)>, &'a [&'a str]);
+    let keyed = |tap| vec![("eq1", track_key("eq0", tap))];
+    let rows: [Row<'_>; 9] = [
         (
             "insert_return",
-            vec![("eq1", track_key("eq0", session::SendTap::InsertReturn))],
+            Restart::Insert,
+            keyed(session::SendTap::InsertReturn),
+            &["eq0", "eq1"],
+        ),
+        (
+            "post_input",
+            Restart::Insert,
+            keyed(session::SendTap::PostInput),
+            &["eq0", "eq1"],
+        ),
+        (
+            "insert_send",
+            Restart::Insert,
+            keyed(session::SendTap::InsertSend),
             &["eq0", "eq1"],
         ),
         (
             "input",
-            vec![("eq1", track_key("eq0", session::SendTap::Input))],
+            Restart::Insert,
+            keyed(session::SendTap::Input),
             &["eq0"],
         ),
         (
+            "input behind a restarted delay line",
+            Restart::Delay,
+            keyed(session::SendTap::Input),
+            &["eq0", "eq1"],
+        ),
+        (
             "post_fader",
-            vec![("eq1", track_key("eq0", session::SendTap::PostFader))],
+            Restart::Insert,
+            keyed(session::SendTap::PostFader),
             &["eq0"],
         ),
         (
             "a chain",
+            Restart::Insert,
             vec![
                 ("eq1", track_key("eq0", session::SendTap::PreFader)),
                 ("aux", track_key("eq1", session::SendTap::InsertReturn)),
             ],
             &["aux", "eq0", "eq1"],
         ),
-        ("a kept bus line", vec![("eq1", bus())], &[ROUTE_BUS]),
+        (
+            "a kept bus line",
+            Restart::Bus,
+            vec![("eq1", bus())],
+            &[ROUTE_BUS],
+        ),
+        (
+            "a moved bus line",
+            Restart::BusLater,
+            vec![("eq1", bus())],
+            &[ROUTE_BUS, "eq1", "late"],
+        ),
     ];
     for backend in backends() {
-        for (what, keys, restarted) in &rows {
-            let mut a_model = route_fade_base_limited(false);
+        for (what, edit, keys, restarted) in &rows {
+            let mut a_model = with_route(
+                route_fade_base_limited(false),
+                "aux-bus",
+                "aux",
+                session::SendTap::PostFader,
+                into_bus(),
+                false,
+            );
+            if *edit == Restart::BusLater {
+                add_limiter(&mut a_model, "eq1", "eq1-lim");
+            }
             for (strip, source) in keys {
                 track_mut(&mut a_model, strip)
                     .inserts
@@ -4209,16 +4270,23 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
                     .push(keyed_insert("key", source.clone()));
             }
             let mut b_model = a_model.clone();
-            if *what == "a kept bus line" {
-                b_model.submixes[0]
+            match edit {
+                Restart::Insert => track_mut(&mut b_model, "eq0")
                     .inserts
                     .effects
-                    .push(transparent_insert());
-            } else {
-                track_mut(&mut b_model, "eq0")
+                    .push(transparent_insert()),
+                Restart::Delay => {
+                    let builtins = &mut track_mut(&mut b_model, "eq0").builtins;
+                    builtins.left.delay_samples = 32;
+                    builtins.right.delay_samples = 32;
+                }
+                Restart::Bus | Restart::BusLater => b_model.submixes[0]
                     .inserts
                     .effects
-                    .push(transparent_insert());
+                    .push(transparent_insert()),
+            }
+            if *edit == Restart::BusLater {
+                add_limiter(&mut b_model, "late", "lim");
             }
             let a = Session::compile(a_model);
             let b = Session::compile(b_model);
@@ -4241,10 +4309,9 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
             assert_eq!(set, *restarted, "{what}");
             let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
                 .expect("a graph plan");
-            assert_eq!(
-                arms.len(),
-                restarted.len(),
-                "{what}: each restarted strip is armed"
+            assert!(
+                arms.len() >= restarted.len() - usize::from(restarted.contains(&"late")),
+                "{what}: each audible restarted strip is armed"
             );
         }
     }

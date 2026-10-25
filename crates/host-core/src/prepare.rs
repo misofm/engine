@@ -4432,7 +4432,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // they are; only their outputs are filtered here.
     let mut restarted = core::mem::take(&mut strip_carry.restarted);
     restarted.extend(core::mem::take(&mut effect_carry.restarted));
-    restarted.extend(core::mem::take(&mut strip_delay_carry.restarted));
+    // #1324 D1: a strip whose delay line restarts steps its `input` tap at `S`.
+    let mut delay_restarted = core::mem::take(&mut strip_delay_carry.restarted);
+    delay_restarted.sort_unstable();
+    delay_restarted.dedup();
+    restarted.extend(delay_restarted.iter().cloned());
     restarted.sort_unstable();
     restarted.dedup();
     if let (Some(lead), Some(restart)) = (warm, &warm_restart) {
@@ -4463,6 +4467,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             model,
             &base.inventory.delay_lines,
             &delay_lines,
+            &delay_restarted,
             &mut restarted,
         );
     }
@@ -7520,7 +7525,9 @@ pub(crate) fn sidechain_line_samples(
 /// #1324 D1's exemption of a submix's `input` tap whatever its arrival: every line into submix
 /// `submix`'s `Input` stage, in `committed` and in `model`, comes from a ducked strip (`ducked`,
 /// which holds the removed strips) or, in `model`, from an added one. Its input then holds exact
-/// `+0.0` from the end of the duck until the fire.
+/// `+0.0` from the end of the duck until the fire. A route of `model` from a tap before the fader
+/// that follows an automated source mute cannot be armed (#2011) and restarts at its prepared
+/// value at `S`, so a stage it feeds is not quiet.
 pub(crate) fn submix_input_is_quiet(
     committed: &SessionModel,
     model: &SessionModel,
@@ -7537,8 +7544,10 @@ pub(crate) fn submix_input_is_quiet(
         .filter(into)
         .all(|route| ducked(source_strip(&route.source).0))
         && model.routes.iter().filter(into).all(|route| {
-            let source = source_strip(&route.source).0;
-            !committed_has_strip(committed, source) || ducked(source)
+            let (source, tap, _) = source_strip(&route.source);
+            (!committed_has_strip(committed, source) || ducked(source))
+                && !(tap.precedes_fader()
+                    && follows_automated_mute(controls::ModelView::whole(model), route))
         })
 }
 
@@ -7547,15 +7556,18 @@ pub(crate) fn submix_input_is_quiet(
 /// restarted strip that follows a restarted owner with state (`post_input`, `insert_send`,
 /// `insert_return`, `pre_fader`) joins the set, repeated until no strip is added. A track's
 /// `input` tap is its raw source, and a `post_fader` or `post_pan` tap holds exact `+0.0` from
-/// the end of the duck until the fire, so neither adds its consumer. A submix's `input` tap adds
-/// its consumer only when the sidechain's line changes length (`before` is the predecessor's
-/// lines, `after` the successor's) and a line into the submix's `Input` stage comes from a strip
-/// neither ducked nor added ([`submix_input_is_quiet`]). Console slots have no sidechain.
+/// the end of the duck until the fire, so neither adds its consumer, unless the strip's own delay
+/// line restarts (`delay_restarted`, sorted): the `input` tap is that line's output, which then
+/// starts at rest at `S`, so it adds its consumer, a track's or a submix's. Otherwise a submix's
+/// `input` tap adds its consumer only when the sidechain's line changes length (`before` is the
+/// predecessor's lines, `after` the successor's) and the submix's input is not quiet
+/// ([`submix_input_is_quiet`]). Console slots have no sidechain.
 fn close_over_sidechains(
     committed: &SessionModel,
     model: &SessionModel,
     before: &[graph::GraphDelayLine],
     after: &[graph::GraphDelayLine],
+    delay_restarted: &[Box<str>],
     restarted: &mut Vec<Box<str>>,
 ) {
     loop {
@@ -7573,6 +7585,7 @@ fn close_over_sidechains(
             }
             match tap {
                 session::SendTap::PostFader | session::SendTap::PostPan => false,
+                session::SendTap::Input if held(delay_restarted, source) => true,
                 session::SendTap::Input => {
                     let port = sidechain.port_id.as_str();
                     let id = effect.id.as_str();
