@@ -104,6 +104,22 @@ back in over `N` from `S`, and a restored source declared as before carries the 
 and producer, with every frame accepted for it in phase 1 (#1325 D6).
 `crates/capi/tests/strip_transitions.rs` holds the gates.
 
+A transaction whose replacement restarts a strip it keeps is a duck-swap (#1324, decision 15
+D15-7, D15-9): the strips are the replacement's `restarted_strips()`, every strip with an owner the
+carry joins cannot continue (an insert added, removed or reordered, `delay_samples`, a value the
+plan keeps prepared, such as the true-peak limiter's `lookahead_ms`). Phase 1 ducks them as it
+ducks a removed strip, with their routes whose tap precedes the fader, in the same transaction and
+under one `S`; `C` covers every route out of a ducked strip. The replacement restarts each such
+strip's owners before its fader (its input section, its effects, the compensation lines on its
+chain and on those routes, and their live lanes) and its fader, keeps its matrix and its
+post-fader routes carrying the ducked tail, and arms the fader and those routes (#1288, #1363 D1
+(c)) to fade in over `N` from the first block at or after `S + D`, `D` the strip's latency before
+its fader. A planned duck-swap completes as `EXACT`, never as the transition fallback. A revert
+before `S` inherits `S` and fades the strip back in from it. Known limits of this slice: a carried
+effect whose sidechain reads a ducked strip's pre-fader tap still steps at `S` (#1324b), and a
+pre-fader route that follows its source's automated mute has no fade arm, so it restarts at its
+prepared value at `S`.
+
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
 structural, compiling and swapping a replacement plan, except the live values of a strip (#1554,

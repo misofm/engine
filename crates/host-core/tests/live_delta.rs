@@ -3362,8 +3362,8 @@ fn with_linked_console() -> SessionModel {
 /// instance with D3's glide (the edit's length, an explicit 0, else `LiveRamps::link_samples`), if
 /// a console entry on `slot` is resolved against anything but the slot's declared mode (so a move
 /// to the declared mode writes a glide, or an override's write is lost), or if a slot's declared
-/// mode, a structural edit (decision 17 C5), or the multiband compressor's link (#1367) is acked
-/// live.
+/// mode or a structural edit (decision 17 C5) is acked live, or if the multiband compressor's link
+/// (#1367b) is not one glide record too.
 #[test]
 fn a_link_change_is_one_glide_record_with_the_edits_ramp() {
     let current = with_linked_console();
@@ -3439,7 +3439,7 @@ fn a_link_change_is_one_glide_record_with_the_edits_ramp() {
         ),
         Err(LiveRebuild::Structure)
     );
-    // The multiband compressor's link is not per lane yet (#1367): its row says so.
+    // The multiband compressor glides as well (#1367b): one record on its own instance.
     let mut multiband = current.clone();
     multiband.tracks[0].inserts.effects[1].identity = EffectIdentity::Native {
         effect_id: id("miso.multiband-compressor"),
@@ -3449,10 +3449,17 @@ fn a_link_change_is_one_glide_record_with_the_edits_ramp() {
         next.tracks[0].inserts.effects[1].link_mode = session::LinkMode::Maximum;
     });
     assert_eq!(
-        classify_live_delta(&multiband, &next, ramps, &EditRamps::new()).map(|_| ()),
-        Err(LiveRebuild::RebuildOnly(RebuildReason::RuledLiveNotBuilt {
-            issue: 1367
-        }))
+        classify_live_delta(&multiband, &next, ramps, &EditRamps::new()).map(|delta| {
+            delta
+                .effects
+                .iter()
+                .map(|entry| (entry.address, entry.records.clone()))
+                .collect::<Vec<_>>()
+        }),
+        Ok(vec![(
+            LiveEffectAddress::insert(1),
+            vec![glide(effect_contract::LinkMode::Maximum, 480)]
+        )])
     );
 }
 

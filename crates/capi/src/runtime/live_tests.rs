@@ -1495,6 +1495,21 @@ fn a_replayed_live_edit_writes_nothing() {
     assert_eq!(rig.summary().0, revision);
 }
 
+/// Every word of the plan's watermark: `(revision, first sample, flags, exact, fallback,
+/// superseded)`.
+fn watermark_words(rig: &Rig) -> (u64, u64, u64, u64, u64, u64) {
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    (
+        watermark.revision,
+        watermark.first_sample,
+        watermark.outcome_flags,
+        watermark.exact_count,
+        watermark.transition_fallback_count,
+        watermark.superseded_count,
+    )
+}
+
 /// The plan's watermark as a host reads it: `(revision, first sample, flags, exact count)`.
 fn watermark(rig: &Rig) -> (u64, u64, u64, u64) {
     let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
@@ -1713,6 +1728,13 @@ fn a_live_fader_left_undrained_before_a_carrying_structural_commit_is_baked() {
 }
 
 fn assert_rebuilds(document: &str, edits: &[SessionEdit], label: &str) {
+    assert_rebuilds_ducking(document, edits, &[], label);
+}
+
+/// [`assert_rebuilds`] for a rebuild that restarts the strips `ducked`: a duck-swap, whose phase 1
+/// writes exactly one ramped mute to each channel of each of them on the rendering plan (#1324a,
+/// #1325 D2) and nothing else to any cell.
+fn assert_rebuilds_ducking(document: &str, edits: &[SessionEdit], ducked: &[&str], label: &str) {
     let mut rig = Rig::new(document);
     rig.step();
     let (revision, _, epoch, pending) = rig.summary();
@@ -1724,12 +1746,26 @@ fn assert_rebuilds(document: &str, edits: &[SessionEdit], label: &str) {
         (revision + 1, 1),
         "{label}: a rebuild prepares a candidate"
     );
-    assert!(
-        rig.current_cells()
-            .iter()
-            .all(|&cells| cells == ([0; 4], 0)),
-        "{label}: the rendering plan got no write"
-    );
+    let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
+    let cells: Vec<(&str, [u64; 4], u64)> = snapshot
+        .strip_cells
+        .iter()
+        .filter(|(epoch, ..)| *epoch == snapshot.provider_epoch)
+        .map(|(_, id, fader, matrix)| (&**id, *fader, *matrix))
+        .collect();
+    assert!(!cells.is_empty(), "{label}");
+    for (id, fader, matrix) in cells {
+        let expected = if ducked.contains(&id) {
+            [0, 0, 1, 1]
+        } else {
+            [0; 4]
+        };
+        assert_eq!(
+            (fader, matrix),
+            (expected, 0),
+            "{label}: the rendering plan got no write but the duck's, on {id}"
+        );
+    }
 }
 
 fn with_model(document: &str, change: impl FnOnce(&mut SessionModel)) -> String {
@@ -4574,18 +4610,21 @@ mod set_control {
         let model = parse_session_json(&document).expect("model");
         let track = model.tracks[0].clone();
         let name = track.id.as_str();
-        assert_rebuilds(
+        // A changed `delay_samples` restarts the strip: a duck-swap (#1324a).
+        assert_rebuilds_ducking(
             &document,
             &[set(builtin(name, DELAY_SAMPLES, Lane::Both), 64.0, None)],
+            &[name],
             "delay by address",
         );
         // The whole builtin section with the same delay is the same rebuild.
         let mut builtins = track.builtins.clone();
         builtins.left.delay_samples = 64;
         builtins.right.delay_samples = 64;
-        assert_rebuilds(
+        assert_rebuilds_ducking(
             &document,
             &protocol::control_core::builtins_edits(&track.id, &builtins),
+            &[name],
             "delay in the whole builtin section",
         );
         let route_id = model.routes[0].id.clone();
@@ -8256,7 +8295,19 @@ fn in_place_commands_equal_full_commands_through_the_c_abi() {
         );
         if step % 25 == 0 {
             assert_eq!(observed(&mut fast), observed(&mut full), "step {step}");
-            assert_eq!(watermark(&fast), watermark(&full), "step {step}");
+            // The whole watermark, its counters included: a drawn edit that restarts a strip is a
+            // duck-swap adopted at its `S` (#1324a), so the next step's edit may supersede it,
+            // alike on both paths.
+            assert_eq!(
+                watermark_words(&fast),
+                watermark_words(&full),
+                "step {step}"
+            );
+            assert_eq!(
+                watermark_words(&fast).4,
+                0,
+                "step {step}: no transition fallback"
+            );
             assert_eq!(fast.summary(), full.summary(), "step {step}");
         }
     }

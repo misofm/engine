@@ -1742,6 +1742,36 @@ pub(super) fn feed_and_render_until_direct(
     (blocks, block)
 }
 
+/// Renders through the plan owner alone, the first half of `PlanState::render`, block by block
+/// from `sample` until a block applies a swap: a rebuild that restarts a strip is a duck-swap,
+/// adopted at its `S` (#1324a), so the swap window may open blocks after the commit. The swap
+/// block's report and its first sample. The blocks before it swap nothing, so the epoch the second
+/// half would publish for them is the one already published.
+pub(super) fn render_owner_until_swap(
+    children: &mut CompiledChildren,
+    pcm: &mut [f32; 256],
+    sample: u64,
+) -> (engine::realtime::RealtimeRenderReport, u64) {
+    let mut at = sample;
+    loop {
+        assert!(at < sample + 64 * 128, "a swap within 64 blocks");
+        let report = children
+            .plan
+            .test_owner_mut()
+            .render_contiguous(
+                RenderIo {
+                    output: PlanarBufferMut::try_new(pcm, 2, 128, 128).expect("output"),
+                },
+                at,
+            )
+            .expect("a block");
+        if report.swap == engine::realtime::SwapOutcome::Applied {
+            return (report, at);
+        }
+        at += 128;
+    }
+}
+
 fn assert_bit_identical(label: &str, first: u64, actual: &[Vec<f32>], expected: &[Vec<f32>]) {
     assert_eq!(actual.len(), expected.len());
     for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
@@ -3124,8 +3154,8 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
 /// (#1310 gate 4). The edit fits beside the eight-EQ plan alone, which is all a retry meets once
 /// render adopts it, so the refusal is retryable `Backpressure`, not a permanent compile rejection
 /// (batch 15a review fold, item 2). Inside the window the nine-EQ plan is reclaimed, so the edit
-/// sits beside the eight-EQ plan alone and is admitted; its plan is adopted at the next block,
-/// and the report table holds three rows meanwhile. Red if the lag refusal is kept (the window
+/// sits beside the eight-EQ plan alone and is admitted; its plan is adopted at its duck-swap's
+/// `S` (#1324a), and the report table holds three rows meanwhile. Red if the lag refusal is kept (the window
 /// answers `Backpressure`), if the admission pairs the candidate with the atomic's retired row
 /// (`effect.resource.limit`), or if the three-plan refusal is permanent.
 #[test]
@@ -3198,17 +3228,8 @@ fn a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan() {
     // eight-EQ plan is republished and adopted below.
     let pending = children.session.command(&request, 4_096);
 
-    // First half of `PlanState::render`: swap to the eight-EQ plan.
-    let report = children
-        .plan
-        .test_owner_mut()
-        .render_contiguous(
-            RenderIo {
-                output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
-            },
-            128,
-        )
-        .expect("swapping block");
+    // First half of `PlanState::render`: swap to the eight-EQ plan, at its duck-swap's `S`.
+    let (report, swapped_at) = render_owner_until_swap(&mut children, &mut pcm, 128);
     assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
     let window = children.session.command(&request, 4_096);
     let window_revision = children.session.test_controller().session().revision().0;
@@ -3245,14 +3266,8 @@ fn a_valid_edit_inside_the_swap_window_is_admitted_against_the_running_plan() {
         ),
         "the eight-EQ plan rendering beside nine EQs fits; only a retired row says it does not"
     );
-    // The window's plan is adopted at the next block.
-    children
-        .plan
-        .render(
-            256,
-            PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
-        )
-        .expect("adopting block");
+    // The window's plan, a duck-swap too, is adopted at its own `S`.
+    feed_and_render_until_direct(&mut children, &[], swapped_at / 128 + 1, 44);
     assert_eq!(children.plan.owner().active_epoch().0, 2);
 }
 
