@@ -1634,3 +1634,62 @@ fn a_removed_or_repointed_send_ramps_out_then_in_at_s() {
         }
     }
 }
+
+/// #1953b, the C ABI's parity row: the gate session plus `b`'s `post_fader` route `b-out` into the
+/// output, which has no lane (decision 14's fold) and, behind `a`'s limiter, a compensation line of
+/// `L`. After block `K` one transaction removes it: a rebuild with no phase 1, adopted at the next
+/// block as `EXACT`, whose fading copy of the route fades out from there over `N` through the
+/// removed route's line, and no block from the transaction on allocates or frees on the render
+/// thread. Every block equals the session with `b-out` from `pre_fader` (a unity fader moves no bit,
+/// and that route has a lane) given a live mute at the same point.
+///
+/// Test value: red when the control plane prepares the successor without the copy (the route
+/// steps out at the adoption) or the copy's line restarts at rest (the `L` samples the removed
+/// route's line held are lost).
+#[test]
+fn a_removed_output_route_fades_out_through_its_line() {
+    assert_installed();
+    let fixture = session::parse_session_json(FIXTURE).expect("fixture");
+    let with_route = |tap| {
+        let mut model = gate_model();
+        model.routes.push(route(
+            &fixture,
+            "b-out",
+            track_tap("b", tap),
+            output(&fixture),
+        ));
+        model
+            .routes
+            .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        model
+    };
+    let base = with_route(session::SendTap::PostFader);
+    let latency = Rig::boot(&base).latency();
+    assert!(latency > 0, "b-out carries a line");
+    let last = K + 1 + (N + latency).div_ceil(Q) + 4;
+    let removed = vec![SessionEdit::RemoveRoute {
+        route_id: id("b-out"),
+    }];
+    let run = duck_run(
+        &base,
+        &[(K + 1, removed, EditPath::Rebuild)],
+        last,
+        &frame_b,
+    );
+    let (first_sample, flags, [before, after]) = run.adopted.expect("adopted");
+    assert_eq!(first_sample, (K + 1) * Q, "adopted at the next block");
+    assert_eq!(flags, OUTCOME_EXACT);
+    assert_eq!(before, after, "no transition fallback");
+    assert_eq!(run.churn, 0, "render allocates nothing");
+    let reference_model = with_route(session::SendTap::PreFader);
+    let mute = upsert_route(&reference_model, "b-out", &|route| route.mute = true);
+    let reference = duck_run(
+        &reference_model,
+        &[(K + 1, mute, EditPath::Live)],
+        last,
+        &frame_b,
+    );
+    for (block, (bits, want)) in run.blocks.iter().zip(&reference.blocks).enumerate() {
+        same(bits, want, block as u64);
+    }
+}
