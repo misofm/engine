@@ -67,3 +67,31 @@ documented, measured choice.
   adopted lane move only for a `Reposition` with no stage ramp on a curve that moves between `start - 1`
   and `start` and whose new table equals the old one at `start - 1` (today a chord of up to about 1.7e-4
   on this ride, gone after the fix); flat rides, moves in flight and real table changes are unchanged.
+
+## Decision record (fix D, attempt 1, 2026-10-25)
+
+- Owner approval: the owner approved fix D on 2026-10-25 as a class-B change (root's brief). Options A,
+  B and C are closed: step 0 found no table-bit difference (C has no trigger), and a tolerance (B)
+  would mask the real cause.
+- #1648 D2 amendment (root, 2026-10-25): at a `Reposition` the adoption compares the new curve with
+  the old curve at the same node time. With no stage ramp (`remaining == 0`, held or free) that is
+  `span.start - 1`, where the stage's target was taken; inside a free stage's ramp it stays the ramp's
+  end (U3 fold 2); a held stage in a mute or unmute ramp and `Adoption::Compare` still compare at
+  `span.start`. A step of the new table at `span.start` is still compared at `span.start` and jumps
+  (B17-R13). No tracked #1648 ruling or derivation text exists (its spec has left
+  `.github/ISSUE_SPECS/`); `settle_adoption`'s doc comment carries the amended rule.
+- Change: `settle_adoption` (`crates/builtins-compiler/src/lib.rs`) sets `at = span.start - 1` for a
+  `Reposition` whose stage runs no ramp and whose table has no step at `span.start`; the compare, the
+  seed and the jump decision are otherwise unchanged. The step-0 row is un-ignored and takes the
+  outcome check (`OUTCOME_EXACT`, adopted) of the no-move block that
+  `a_level_move_across_a_table_change_keeps_its_length` held; that block is deleted.
+- G1: the row is green after the fix and red before it (first difference block 4, sample 0, as
+  step 0). G2: every existing adoption and automation row stays green (`builtins-compiler`, `capi`,
+  `host-core` `stored_fader_automation`, `host-web` with `test-support`, `control-plane`).
+- Bit-move evidence (PR evidence, scratch worktree and target dir, removed): an allocation-free probe
+  in `settle_adoption` computed the old decision beside the new one over those five packages' full
+  test runs. The new branch fired 176 times; the jump decision or seed value changed in 4 of them,
+  all in the new row (two channels times two rebuilds, at 512 and 1,152), each a free stage with no
+  ramp on a moving ride whose new table equals the stage's target at `start - 1` (old: jump; new: no
+  jump). The other 172 jumped on both compares (a real table change), so no other rendered bit moved.
+  No test reaches a held stage with no ramp (a settled mute) at a `Reposition`.
