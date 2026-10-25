@@ -670,65 +670,70 @@ fn a_skipping_block_allocates_nothing() {
 
 // ---- Gate 3 (issue #1782a) ----------------------------------------------------------------------
 
-/// Where each track renders, as `(unit, lane)`, in a plan of [`session`] (`inserts`: with
-/// tracks 0..8 given an EQ insert): home `(track - first) / W, (track - first) % W` from its
-/// group's first unit, `first` being the group's first track, until a forced move trades two;
-/// `None` for a track in no group, which never moves.
+/// Where each grouped track renders, as `(unit, lane)`, read from the plan itself: each pack
+/// group `graph::test_only_pack_groups` reports is `(first unit, last unit, lanes per unit)`, and
+/// each of its units' `PlanUnitEligibility::lane_tracks` names the track bind put on each lane
+/// (its home). A track in no group is `None` and never moves.
 ///
-/// The groups, as `(first track, tracks)`, follow from the width. The mono tracks 0..8 and the
-/// stereo tracks 8..20 are one group at eight lanes and two at four (the mono banks are no peers
-/// of the stereo ones there: the arm64 leg's layout). With the insert, tracks 0..8 are one bank
-/// at eight lanes, which is no group, and a group of two banks at four. So the stereo tracks are
-/// a group at both widths, and every move pairs two mono or two stereo tracks.
+/// What the plans group, for the record (the test asserts none of it): a group is a run of
+/// adjacent peer banks, and every console bank of [`session`] has one slot program (input
+/// builtins, EQ, compressor, limiter, fader, matrix), gathers directly and folds into the master;
+/// the mono collapse arming is joined after bind and is no group term. So all of the session's
+/// banks are one group at both widths: `(20, 22, 8)` at eight lanes and `(20, 24, 4)` at four.
+/// With the EQ insert on tracks 0..8 their banks hold one slot more and are no peers of the
+/// others: at eight lanes they are one unit, which is no group (a group has two or more), so
+/// the group is `(21, 22, 8)`; at four lanes they are two units and a group of their own,
+/// `[(20, 21, 4), (22, 24, 4)]`.
 struct Placement {
     at: Vec<Option<(usize, usize)>>,
+    /// Each track's group, by its index in the report.
+    group: Vec<Option<usize>>,
 }
 
 impl Placement {
     fn of(plan: &PreparedRenderPlan) -> Self {
-        Self::new(plan, false)
-    }
-
-    fn new(plan: &PreparedRenderPlan, inserts: bool) -> Self {
         let groups = graph::test_only_pack_groups(plan);
-        let width = groups.first().map_or(0, |group| group.2 as usize);
-        let expected: &[(usize, usize)] = match (width, inserts) {
-            (8, false) => &[(0, TRACKS)],
-            (8, true) => &[(8, TRACKS - 8)],
-            (4, _) => &[(0, 8), (8, TRACKS - 8)],
-            _ => &[],
-        };
-        assert_eq!(
-            groups.len(),
-            expected.len(),
-            "the pack groups at {width} lanes: {groups:?}"
-        );
+        assert!(!groups.is_empty(), "the plan has a pack group");
+        let rows = plan.unit_eligibility();
         let mut at = vec![None; TRACKS];
-        for (&(first, last, lanes), &(track, tracks)) in groups.iter().zip(expected) {
-            let (first, lanes) = (first as usize, lanes as usize);
-            let units = last as usize - first + 1;
-            assert_eq!(
-                units,
-                tracks.div_ceil(lanes),
-                "the group of tracks {track}..{}: {groups:?}",
-                track + tracks
-            );
-            for index in 0..tracks {
-                at[track + index] = Some((first + index / lanes, index % lanes));
+        let mut group = vec![None; TRACKS];
+        for (index, &(first, last, _)) in groups.iter().enumerate() {
+            for unit in first as usize..=last as usize {
+                let row = rows
+                    .iter()
+                    .find(|row| row.unit as usize == unit)
+                    .expect("a grouped unit's row");
+                assert!(row.banked, "a grouped unit is a bank");
+                for (lane, track) in row.lane_tracks.iter().enumerate() {
+                    let track: usize = track[2..].parse().expect("chNN");
+                    assert!(at[track].is_none(), "ch{track:02} is in one group");
+                    at[track] = Some((unit, lane));
+                    group[track] = Some(index);
+                }
             }
         }
-        Self { at }
+        Self { at, group }
     }
 
-    /// Whether track `track` is in a group.
-    fn placed(&self, track: usize) -> bool {
-        self.at[track].is_some()
+    /// Whether tracks `x` and `y` are in one group, so the plan lets them trade lanes.
+    fn together(&self, x: usize, y: usize) -> bool {
+        self.group[x].is_some() && self.group[x] == self.group[y]
+    }
+
+    /// Whether track `track`'s group holds `ch00`, the master's first contributor, which stores:
+    /// a group without it folds onto a live master.
+    fn with_store(&self, track: usize) -> bool {
+        self.group[track].is_some() && self.group[track] == self.group[0]
     }
 
     /// Trade the lanes tracks `x` and `y` render at.
     fn swap(&mut self, plan: &mut PreparedRenderPlan, x: usize, y: usize) {
+        assert!(
+            self.together(x, y),
+            "ch{x:02} and ch{y:02} are in one group"
+        );
         let (Some(a), Some(b)) = (self.at[x], self.at[y]) else {
-            panic!("ch{x:02} and ch{y:02} are in a group");
+            unreachable!("grouped tracks are placed");
         };
         assert!(
             graph::test_only_swap_bank_lanes(plan, a, b),
@@ -924,9 +929,10 @@ fn a_moved_strip_renders_the_bits_of_an_unmoved_one() {
     gate_three(&model, true);
 }
 
-/// Gate 3 over `model` (`inserts`: tracks 0..8 carry the EQ insert); the moves of a track in no
-/// group are left out, which only the insert layout at eight lanes has (its mono bank is one
-/// unit).
+/// Gate 3 over `model`; a move of two tracks the plan does not group together is left out
+/// ([`Placement`]: only the insert layout's mono tracks at eight lanes). At every width it must
+/// still make the regression row's two moves, a move of the store lane `ch00` (`inserts`
+/// false), and a move in a group that folds onto a live master (`inserts` true); else it fails.
 fn gate_three(model: &SessionModel, inserts: bool) {
     let blocks = 560;
     let schedules = schedules(blocks, 0x1782);
@@ -937,7 +943,8 @@ fn gate_three(model: &SessionModel, inserts: bool) {
         TRACKS as u64,
         "every track folds into the master"
     );
-    let mut placement = Placement::new(&moved.before.plan, inserts);
+    let mut placement = Placement::of(&moved.before.plan);
+    let (mut regression, mut store_lane, mut live_master) = (0, 0, 0);
     let frames = moved.before.frames;
     let mut moved_pcm = vec![0.0_f32; frames * 2];
     let mut home_pcm = vec![0.0_f32; frames * 2];
@@ -953,7 +960,7 @@ fn gate_three(model: &SessionModel, inserts: bool) {
                     "the successor takes the carry"
                 );
             }
-            placement = Placement::new(&moved.after.plan, inserts);
+            placement = Placement::of(&moved.after.plan);
         }
         let (moved_plan, home_plan) = if block < SWAP {
             (&mut moved.before, &mut home.before)
@@ -961,7 +968,10 @@ fn gate_three(model: &SessionModel, inserts: bool) {
             (&mut moved.after, &mut home.after)
         };
         for &(at, x, y) in &MOVES {
-            if at == block && placement.placed(x) && placement.placed(y) {
+            if at == block && placement.together(x, y) {
+                regression += usize::from(at == 440);
+                store_lane += usize::from(x == 0 || y == 0);
+                live_master += usize::from(!placement.with_store(x));
                 placement.swap(&mut moved_plan.plan, x, y);
             }
         }
@@ -987,6 +997,15 @@ fn gate_three(model: &SessionModel, inserts: bool) {
         }
     }
     assert!(displaced_skips > 0, "a displaced group skipped a bank");
+    assert_eq!(regression, 2, "the regression row's two moves were made");
+    if inserts {
+        assert!(
+            live_master > 0,
+            "a move in a group that folds onto a live master"
+        );
+    } else {
+        assert!(store_lane > 0, "the store lane moved");
+    }
     for (side, (moved, home)) in [(&moved.before, &home.before), (&moved.after, &home.after)]
         .into_iter()
         .enumerate()
