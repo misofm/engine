@@ -8,10 +8,10 @@ import { constantValue } from "../src/core/abi.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
 import { decodeObservationReadReply, encodeObservationRead } from "../src/core/control-frame.ts";
-import { MisoEngineError } from "../src/core/errors.ts";
+import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { effect, session } from "../src/core/session.ts";
-import { transaction } from "../src/core/session-transaction.ts";
+import { encodeSessionTransaction, transaction } from "../src/core/session-transaction.ts";
 import { RACKS } from "../src/internal/rack.ts";
 import { createEngine } from "../src/browser/engine.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
@@ -884,6 +884,76 @@ describe("#1589 gate 3 -- a subscription keeps reporting across a rebuild", () =
       await acrossRebuild(engine, () => rig.render());
     } finally {
       await engine.close();
+    }
+  });
+});
+
+describe("#1589b -- the frame transport's resend and frame rules", () => {
+  const tapOf = (trackId) => ({ trackId, rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" });
+
+  // Red if an `Observe` refused `revision_conflict` (another sender committed after the browser
+  // queue last saw the revision) is thrown instead of sent again at the revision the refusal names.
+  test("an Observe that another sender's commit made stale is sent again at the newer revision", async () => {
+    const rig = await coreRig();
+    const engine = await rig.browser();
+    try {
+      // The first subscription opens the browser's queue at the current revision.
+      const first = await engine.subscribeObservations({ selections: [tapOf("t")], windowBlocks: 2 });
+      rig.render();
+      await first.close();
+      rig.render();
+      // Another sender commits between the browser's revision read and its send: the core sees a
+      // structural edit first, then the browser's `Observe` at the revision before it.
+      rig.inject = () => {
+        rig.inject = undefined;
+        rig.core.controlFrame(encodeSessionTransaction(
+          transaction(compSession()).upsertTrack("t2", { source: "a", inserts: [compressor()] }).build(),
+          { requestId: rig.core.controlRequestIds.next(), expectedRevision: rig.core.controlRevision() },
+        ));
+        return undefined;
+      };
+      const before = rig.log.length;
+      const again = await engine.subscribeObservations({ selections: [tapOf("t")], windowBlocks: 2 });
+      const sent = rig.log.slice(before);
+      assert.equal(sent.length, 2, "the stale send and its resend");
+      assert.equal(sent[0].payload, sent[1].payload, "the resend carries the same edits");
+      for (let block = 0; block < 4; block += 1) rig.render();
+      await again.pump();
+      assert.ok(await again.armed() > 0n, "the resent arm is in effect");
+      await again.close();
+    } finally {
+      await engine.close();
+    }
+  });
+
+  // Red if a read of more bindings than one reply frame can carry (`64 + 192 n` bytes) is sent as
+  // one read (the core refuses `observation.frame`), or if an `Observe` transaction over the frame
+  // limit is sent instead of refused before it leaves the SDK.
+  test("a read past one reply frame is split, and a transaction past the frame is refused before it is sent", async () => {
+    const tracks = Array.from({ length: 100 }, (_unused, index) => `t${index}`);
+    const engine = await createOfflineEngine(compSession(tracks), { asset, liveControls: { observationTaps: 4 } });
+    const sent = transactionsOf(engine);
+    try {
+      const limit = engine.controlTransactions().maximumFrameBytes;
+      assert.ok(limit !== undefined && Math.floor((limit - 64) / 192) < tracks.length, `the frame (${limit} bytes) holds fewer rows than taps`);
+      await assert.rejects(
+        engine.subscribeObservations({ selections: tracks.map(tapOf), windowBlocks: 2 }),
+        (error) => error instanceof MisoUsageError && /one control frame holds/.test(error.message),
+      );
+      assert.deepEqual(sent, [], "nothing was sent");
+      const handles = [];
+      for (let start = 0; start < tracks.length; start += 50) {
+        handles.push(await engine.subscribeObservations({
+          selections: tracks.slice(start, start + 50).map(tapOf), windowBlocks: 2,
+        }));
+      }
+      for (let block = 0; block < 4; block += 1) engine.render();
+      await handles[0].pump();
+      for (const handle of handles) {
+        assert.ok(handle.readLatest().every((row) => row.status === "ready"));
+      }
+    } finally {
+      engine.dispose();
     }
   });
 });
