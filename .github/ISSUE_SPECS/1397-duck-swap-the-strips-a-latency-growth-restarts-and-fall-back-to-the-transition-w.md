@@ -347,7 +347,7 @@ Scope note R1-R4 apply (root accepted them). This slice is D1 (both arms), D2, D
 - **Inherited overlay (#1403 NIT-1).** The warm arm now skips only an inherited overlay that ducks
   a strip (`duck.strips().is_empty()`): a superseding growth over a W whose overlay holds only a
   removed source no strip read is warm. A growth while a phase 1 that ducks a strip is pending
-  keeps today's path (`NoEarlierThan(S' >= S)`, no record): output-correct, but not warm.
+  takes the transition (attempt 2, below).
 - **Sidechain limit (R1).** `S` counts route lines only (#1324a's `C`). A `post_fader` or
   `post_pan` sidechain line out of a ducked strip into a carried node is not in `C` until 1397b
   (with 1324b), so such a line that W shortens can drop its last nonzero samples at the adoption.
@@ -389,3 +389,27 @@ Scope note R1-R4 apply (root accepted them). This slice is D1 (both arms), D2, D
 
 Paths moving rendered bits: only a session that holds a `WarmConfig` (none in production). Class A
 for every other session.
+
+## Decision record (slice 1397a, attempt 2, 2026-10-25)
+
+- **MAJOR-1.** `grown_strips` gets a host-core unit test (`transition::tests`) with a line-only
+  arm (a limiter on `c` raises `r`'s input, so `b`'s send line into `r` grows: `[b, c, r]`) and
+  an output-only arm (`b` feeds only `r`; a second limiter on `a` raises the output: every strip
+  that reaches it, `[a, b, c, r]`). Each is red with its rule removed.
+- **MAJOR-2 (root ruling).** A growth (`warm_lead` answers `Warm` or `Unavailable`) submitted
+  while a phase 1 that ducks a strip is pending takes the transition: its duck joins the overlay,
+  it is published `NoEarlierThan(S' >= S)` with no record, and it reports `TRANSITION_FALLBACK`.
+  The control-plane row compares A continued (both tracks live-muted at the two edits' blocks) up
+  to `S'` and a fresh plan of the committed session from `S'` for 64 blocks. Red on attempt 1's
+  routing (outcome `EXACT`; with that assertion removed, the output differs before `S'`).
+- **MINOR-1.** `grown_strips` reads only nodes the predecessor's graph holds and lines of edges
+  both plans hold (a route of both models with the same ends, a strip's path into the output);
+  the output rule takes only strips that reach the output in the successor. One assertion each
+  (an added send, a removed route, an added node, a routeless track).
+- **MINOR-2. #1360 and #1361 are blocked by 1397b.** They make `WarmConfig` a production value.
+  Until 1397b counts `post_fader`/`post_pan` sidechain lines in `C` and runs the sidechain closure
+  in `grown_strips`, a production warm session could drop a shortened key line's last nonzero
+  samples at an adoption, so neither may ship before 1397b.
+- **NITs.** The duplicated #1325 D7 comment is gone; the test entry's doc names the private
+  method in plain text; the injected refusal is taken from its hook when the fallback starts and
+  travels on `Rebuild::Transition`.
