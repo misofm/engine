@@ -4594,9 +4594,13 @@ pub struct GraphFadeArm {
     pub delay_samples: u32,
     /// The fade's length: the session mute ramp.
     pub ramp_samples: u32,
+    /// The samples after the fade's end before its entry settles ([`GraphFadeArmWatch::settled`]):
+    /// a fading copy's destination-edge line, which still delivers the fade (#1953b); 0 for every
+    /// other arm.
+    pub tail_samples: u32,
 }
 
-/// What one fade arm fades in (issues #1288 D2, #1363 D3).
+/// What one fade arm fades in or out (issues #1288 D2, #1363 D3, #1953b).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphFadeTarget {
     /// A strip's fader lane, a populated lane of a fader bank.
@@ -4605,6 +4609,10 @@ pub enum GraphFadeTarget {
     /// or a transition route, #1363 D2; a following one, #2011), as [`GraphLiveRoute::unit`]
     /// names it.
     Route(u32),
+    /// A fading copy's op (#1953b): the runtime unit of a transition route that a successor
+    /// compiles for a lane-less route it removes or re-points, at the predecessor's coefficients.
+    /// It fades *out*, to `[+0.0; 4]` and muted, over the arm's ramp.
+    RouteOut(u32),
 }
 
 /// Where one installed fade arm is (issue #1288 D3).
@@ -4614,8 +4622,18 @@ enum FadeArmState {
     Waiting,
     /// The fade fires at the first block that starts at or after this sample.
     FireAt(u64),
-    /// Fired.
+    /// Fired; the entry settles at the first block that starts at or after this sample: the
+    /// fire's block plus the ramp and the arm's tail (#1953b).
+    Settling(u64),
+    /// Fired and settled.
     Done,
+}
+
+impl FadeArmState {
+    /// Whether the fade has fired: settling or done.
+    const fn fired(self) -> bool {
+        matches!(self, Self::Settling(_) | Self::Done)
+    }
 }
 
 /// One installed fade arm (issue #1288 D3): plain data, sized at installation.
@@ -4626,6 +4644,7 @@ struct FadeArm {
     claim: Option<usize>,
     delay_samples: u32,
     ramp_samples: u32,
+    tail_samples: u32,
     state: FadeArmState,
 }
 
@@ -4635,7 +4654,7 @@ struct FadeArm {
 #[must_use]
 pub fn fade_arm_table_bytes(arms: usize, pairs: usize) -> Option<u64> {
     arms.checked_mul(
-        core::mem::size_of::<FadeArm>() + core::mem::size_of::<core::sync::atomic::AtomicBool>(),
+        core::mem::size_of::<FadeArm>() + core::mem::size_of::<core::sync::atomic::AtomicU8>(),
     )
     .and_then(|bytes| {
         pairs
@@ -4687,7 +4706,9 @@ impl GraphExecutor {
                 GraphFadeTarget::Fader(fader) => {
                     self.runtime.has_strip_lane(BuiltinStripOwner::Fader, fader)
                 }
-                GraphFadeTarget::Route(unit) => self.runtime.has_live_route(unit),
+                GraphFadeTarget::Route(unit) | GraphFadeTarget::RouteOut(unit) => {
+                    self.runtime.has_live_route(unit)
+                }
             };
             if !exists {
                 return Err(GraphCarryInstallError::StripLaneOutOfRange);
@@ -4719,6 +4740,9 @@ impl GraphExecutor {
                 GraphFadeTarget::Route(unit) => {
                     self.runtime.arm_route_fade_in(unit, arm.ramp_samples)
                 }
+                GraphFadeTarget::RouteOut(unit) => {
+                    self.runtime.arm_route_fade_out(unit, arm.ramp_samples)
+                }
             };
             if !armed {
                 entries.push(None);
@@ -4739,6 +4763,7 @@ impl GraphExecutor {
                 claim,
                 delay_samples: arm.delay_samples,
                 ramp_samples: arm.ramp_samples,
+                tail_samples: arm.tail_samples,
                 state: FadeArmState::Waiting,
             });
         }
@@ -4771,37 +4796,60 @@ impl GraphExecutor {
     }
 }
 
-/// Which entries of a plan's fade table have fired (issue #1392, root ruling of attempt 2): one
-/// flag per entry, set by render (a release store, no lock) and read by the control thread, which
-/// drops a fired arm's inventory row so a successor neither carries nor re-arms it. A flag read
-/// clear while render fires the entry only costs a re-armed entry that its carry copies `Done`.
+/// Which entries of a plan's fade table have fired, and which have settled (issue #1392, root
+/// ruling of attempt 2; #1953b): one flag word per entry, set by render (a release store, no lock;
+/// render is the only writer) and read by the control thread, which drops a fired arm's
+/// inventory row so a successor neither carries nor re-arms it. A flag read clear while render
+/// fires the entry only costs a re-armed entry that its carry copies fired.
+///
+/// An entry settles once its fade has ended and, for a fading copy, its destination line has
+/// delivered it ([`GraphFadeArm::tail_samples`]): until then a route's op still ramps (or its line
+/// still holds the fade), so a successor keeps it live and carries its state.
 #[derive(Clone, Debug, Default)]
-pub struct GraphFadeArmWatch(std::sync::Arc<[core::sync::atomic::AtomicBool]>);
+pub struct GraphFadeArmWatch(std::sync::Arc<[core::sync::atomic::AtomicU8]>);
+
+/// The watch flag of an entry that fired.
+const WATCH_FIRED: u8 = 1;
+/// The watch flag of an entry that settled.
+const WATCH_SETTLED: u8 = 2;
 
 impl GraphFadeArmWatch {
     fn new(entries: usize) -> Self {
         Self(
             (0..entries)
-                .map(|_| core::sync::atomic::AtomicBool::new(false))
+                .map(|_| core::sync::atomic::AtomicU8::new(0))
                 .collect(),
         )
     }
 
     // REALTIME_POLICY_BEGIN
-    /// Mark `entry` fired. Render-thread code: one atomic store.
-    fn set(&self, entry: usize) {
+    /// Raise `flags` on `entry`. Render-thread code: one load and one atomic store (render is the
+    /// only writer, so no read-modify-write is needed).
+    fn set(&self, entry: usize, flags: u8) {
         if let Some(flag) = self.0.get(entry) {
-            flag.store(true, core::sync::atomic::Ordering::Release);
+            let held = flag.load(core::sync::atomic::Ordering::Relaxed);
+            flag.store(held | flags, core::sync::atomic::Ordering::Release);
         }
     }
     // REALTIME_POLICY_END
 
+    fn flags(&self, entry: u32) -> u8 {
+        self.0
+            .get(entry as usize)
+            .map_or(0, |flag| flag.load(core::sync::atomic::Ordering::Acquire))
+    }
+
     /// Whether `entry` has fired; `false` past the table.
     #[must_use]
     pub fn fired(&self, entry: u32) -> bool {
-        self.0
-            .get(entry as usize)
-            .is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Acquire))
+        self.flags(entry) & WATCH_FIRED != 0
+    }
+
+    /// Whether `entry` has settled (#1953b): fired, its ramp ended and its tail delivered; `false`
+    /// past the table.
+    #[must_use]
+    pub fn settled(&self, entry: u32) -> bool {
+        self.flags(entry) & WATCH_SETTLED != 0
     }
 
     /// Heap bytes the watch holds: its flags and the shared allocation's two reference counts;
@@ -4811,7 +4859,7 @@ impl GraphFadeArmWatch {
         match self.0.len() {
             0 => 0,
             _ => {
-                core::mem::size_of_val::<[core::sync::atomic::AtomicBool]>(&self.0)
+                core::mem::size_of_val::<[core::sync::atomic::AtomicU8]>(&self.0)
                     + WATCH_HEADER_BYTES
             }
         }
@@ -4860,11 +4908,12 @@ pub fn install_fade_arm_carry(
 
 // REALTIME_POLICY_BEGIN
 /// Copy each carried fade arm's state from the displaced plan's table (issue #1392 D3, D8): a
-/// copied `Done` leaves the pending count. A route entry that takes `Done` (#1877 D6: the
-/// displaced route fired after this plan's preparation re-armed it) fires its own arm here, so
-/// the route never waits for a fire its table no longer holds; the live-send section that runs
-/// after this one then gives a carried route the displaced route's ramp. A strip's lane import,
-/// which runs before, already overwrote its arm. Bounded by `pairs`; allocation-free.
+/// copied `Done` leaves the pending count. A route entry that takes a fired state (#1877 D6: the
+/// displaced route fired after this plan's preparation re-armed it; #1953b: it fired before, and
+/// its ramp or its copy's tail is still in flight) fires its own arm here, so the route never
+/// waits for a fire its table no longer holds; the live-send section that runs after this one
+/// then gives a carried route the displaced route's ramp. A strip's lane import, which runs
+/// before, already overwrote its arm. Bounded by `pairs`; allocation-free.
 fn carry_fade_arms(
     runtime: &mut runtime::Runtime,
     arms: &mut [FadeArm],
@@ -4880,14 +4929,25 @@ fn carry_fade_arms(
         ) else {
             continue;
         };
-        if own.state != FadeArmState::Done && from.state == FadeArmState::Done {
-            *pending = pending.saturating_sub(1);
-            fired.set(pair.successor as usize);
-            if let GraphFadeTarget::Route(unit) = own.target {
+        if !own.state.fired() && from.state.fired() {
+            fired.set(pair.successor as usize, WATCH_FIRED);
+            if let GraphFadeTarget::Route(unit) | GraphFadeTarget::RouteOut(unit) = own.target {
                 runtime.fire_route_fade_in(unit);
             }
         }
-        own.state = from.state;
+        if own.state != FadeArmState::Done && from.state == FadeArmState::Done {
+            *pending = pending.saturating_sub(1);
+            fired.set(pair.successor as usize, WATCH_SETTLED);
+        }
+        // #1953b: a settling entry settles when this plan's own tail has passed: a kept copy
+        // whose line grew waits for the growth. A shorter line never settles it earlier: the
+        // line carry is head-aligned, so the fade's last samples may still be in it.
+        own.state = match from.state {
+            FadeArmState::Settling(at) => FadeArmState::Settling(at.saturating_add(u64::from(
+                own.tail_samples.saturating_sub(from.tail_samples),
+            ))),
+            state => state,
+        };
     }
 }
 // REALTIME_POLICY_END
@@ -4895,8 +4955,9 @@ fn carry_fade_arms(
 // REALTIME_POLICY_BEGIN
 /// Advance every pending fade arm at the block that starts at `block_start` (issue #1288 D3):
 /// a waiting arm whose source played this block (or that waits for none) is scheduled
-/// `delay_samples` later, and an arm whose sample has come fires its lane's fade-in. Bounded by
-/// the table; allocation-free.
+/// `delay_samples` later, an arm whose sample has come fires its lane's fade (in, or out for a
+/// fading copy, #1953b), and a fired arm settles once its ramp and its tail have passed. Bounded
+/// by the table; allocation-free.
 fn step_fade_arms(
     runtime: &mut runtime::Runtime,
     arms: &mut [FadeArm],
@@ -4930,11 +4991,24 @@ fn step_fade_arms(
                     }
                 }
                 // #1363 D3: before the route's op runs, so this block's live value drains after.
-                GraphFadeTarget::Route(unit) => runtime.fire_route_fade_in(unit),
+                // #1953b: a fading copy's arm fires the same way, to silence.
+                GraphFadeTarget::Route(unit) | GraphFadeTarget::RouteOut(unit) => {
+                    runtime.fire_route_fade_in(unit);
+                }
             }
+            arm.state = FadeArmState::Settling(
+                block_start
+                    .saturating_add(u64::from(arm.ramp_samples))
+                    .saturating_add(u64::from(arm.tail_samples)),
+            );
+            fired.set(entry, WATCH_FIRED);
+        }
+        if let FadeArmState::Settling(at) = arm.state
+            && at <= block_start
+        {
             arm.state = FadeArmState::Done;
             *pending = pending.saturating_sub(1);
-            fired.set(entry);
+            fired.set(entry, WATCH_SETTLED);
         }
     }
 }

@@ -18,7 +18,8 @@
 //! A structural transaction that removes or re-points a route with a live lane between two strips
 //! it keeps ducks that route alone the same way (issue #1953a, D15-9: a re-point is a removal plus
 //! an addition, and the successor arms the re-pointed route's fade-in). A lane-less route into an
-//! output keeps the master fold and is not ducked.
+//! output keeps the master fold and is not ducked: its successor fades it out from adoption as a
+//! fading copy (#1953b).
 //!
 //! The running plan keeps a [`DuckOverlay`] while the successor waits: the strips and routes
 //! phase 1 wrote, the removed sources that still feed that plan, and `S`. A later transaction in
@@ -240,10 +241,10 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// ([`StripTransition::restored_sources`]). The routes to duck alone (#1953a) are every route of
 /// `base.committed` with a live lane that `next` drops or re-points (another source, tap or
 /// destination), whose source and destination strips `next` keeps and nothing ducks; a lane-less
-/// route keeps the fold and is not one (1953b). The records are the classifier's for the running
-/// plan's base with `overlay` laid over it, against the same with each strip to duck muted on both
-/// channels, each of its routes whose tap precedes the fader muted and each route to duck alone
-/// muted, all at `next`'s mute ramp:
+/// route keeps the fold and is not one: the successor fades it out as a fading copy (#1953b).
+/// The records are the classifier's for the running plan's base with `overlay` laid over it,
+/// against the same with each strip to duck muted on both channels, each of its routes whose tap
+/// precedes the fader muted and each route to duck alone muted, all at `next`'s mute ramp:
 /// exactly the records a value-only transaction making those mutes would write, so a strip or route
 /// already in the overlay gets no second write. `C` reads the running plan's compensation lines
 /// (`base.inventory`), keyed by the route's two edges, which add, over every route out of a
@@ -318,7 +319,8 @@ pub fn plan_strip_transition(
     // strip's route. A route of a strip ducked now or earlier, or into one, stays as it is: that
     // strip's own duck silences it. A route already muted, in the overlay, or following an
     // automated mute (#2011's) is skipped. A lane-less route (`post_fader` or `post_pan` into an
-    // output) keeps the master fold and still steps at adoption: 1953b's.
+    // output) keeps the master fold: its successor fades it out from adoption as a fading copy
+    // (#1953b).
     let quiet = |id: &str| {
         transition
             .strips
@@ -383,7 +385,18 @@ pub fn plan_strip_transition(
         .filter(|route| ducked(route_source_id(route)) || duck_route(route))
         .map(route_line)
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        // #1953b: and the lines of every fading copy out of a ducked strip whose fade has not
+        // settled: the copy leaves with its strip at `S`, so its fade tail must have left its
+        // destination line by then.
+        .max(
+            base.inventory
+                .unsettled_route_copies()
+                .filter(|copy| ducked(route_source_id(copy)))
+                .map(route_line)
+                .max()
+                .unwrap_or(0),
+        );
     // #1324 D4: and the longest sidechain path into a carried node that the successor can
     // shorten, so it holds only exact `+0.0` at `S`. A strip is carried when `next` keeps it and
     // neither the successor nor the overlay restarts it. Each sidechain line from a ducked strip's

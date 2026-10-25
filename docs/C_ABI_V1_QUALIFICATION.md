@@ -199,9 +199,13 @@ the successor is adopted at `S`; a re-pointed route is a removal plus an additio
 its new destination from `S`, while its source strip plays on
 (`capi`'s `a_removed_or_repointed_send_ramps_out_then_in_at_s`, `host-core`'s
 `a_repointed_send_fades_in_at_its_new_destination_on_every_width`). A removed or re-pointed
-`post_fader` or `post_pan` route into the output keeps the fold and still steps, and a route
-re-pointed from one steps on both sides, with no fade in at its new destination (1953b takes both
-halves). A later structural transaction adopted before an added route's fade has run
+`post_fader` or `post_pan` route into the output keeps the fold, so phase 1 cannot ramp it
+(#1953b): the successor compiles a fading copy of the old route, a transition route at the
+predecessor's coefficients that fades out from the adoption block over the session mute ramp
+through the old route's own compensation line, and later successors keep the copy, carrying its
+ramp and its line, until its fade has settled; a route re-pointed from one fades in at its new
+destination as an added route does (`capi`'s `a_removed_output_route_fades_out_through_its_line`,
+`host-core`'s `a_removed_or_repointed_lane_less_route_fades_out_through_its_line_on_every_width`). A later structural transaction adopted before an added route's fade has run
 keeps it as #1392 keeps a strip's (#1877): the successor re-arms the route with its own target and
 ramp, a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never
 runs again (`a_pending_route_fade_survives_a_second_swap_on_every_width`). The frozen exported set is now 15
