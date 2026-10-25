@@ -825,8 +825,10 @@ impl PreparedHost {
     /// insert added, removed or reordered, or a session console slot added, removed or moved) is
     /// listed too, even when its remaining owners carry (D15-9). A strip whose surviving insert
     /// (an insert present in both plans' chains) is not banked in both plans, or differs, is
-    /// listed as well: its insert starts at rest on the swap. Sorted. Added strips are not
-    /// listed, and neither is any strip of a plan prepared without a predecessor.
+    /// listed as well: its insert starts at rest on the swap. So is a strip a warm lead restarts
+    /// whole, and, closed over the sidechain edges, a strip with an insert keyed from a listed
+    /// strip's tap behind a restarted owner (#1324 D1). Sorted. Added strips are not listed, and
+    /// neither is any strip of a plan prepared without a predecessor.
     /// *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it.
     #[must_use]
     pub fn restarted_strips(&self) -> &[Box<str>] {
@@ -2231,9 +2233,11 @@ fn prime_bytes_of(
 ///
 /// At a declared discontinuity nothing leads, so the answer is [`WarmDecision::Ordinary`].
 ///
-/// **Limits of this slice (#1354b).** Step 2's sidechain closure and step 6's submix
-/// `input`-tap rule are not applied: a consumer keyed from a restarted strip's `post_input`,
-/// `insert_send`, `insert_return` or `pre_fader` tap stays carried, and no L3 line is primed.
+/// **Limits of this slice (#1354b).** Step 2's sidechain closure holds for `R`'s join part only:
+/// `ordinary`'s restart set is closed over the sidechain edges (#1324 D1). A consumer keyed from a
+/// strip step 6 restarts whole is not in `R` when the floors are derived (the successor restarts
+/// it after them, with its floor `a + P`), step 6's submix `input`-tap rule is not applied, and no
+/// L3 line is primed.
 ///
 /// # Errors
 ///

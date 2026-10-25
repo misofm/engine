@@ -432,7 +432,7 @@ route_mute's `a_rebuild_that_adds_a_mute_entry_keeps_the_sends_ramp` and
 the scalar oracle the strip restarts, so its `pre_fader` send restarts with it).
 
 **Known limits.** (1) A carried effect whose sidechain reads a ducked strip's pre-fader tap steps
-at `S` (1324b). (2) A pre-fader route that follows its source's automated mute has no six-word op,
+at `S` (1324b; closed by the 1324b record below). (2) A pre-fader route that follows its source's automated mute has no six-word op,
 so it cannot be armed: it restarts at its prepared value at `S` (a step in). Arming a following
 route needs graph work outside this slice: #2011. (3) A restarted submix's
 `D` adds the longest line of any route into it, not only of a line that starts at rest (D3 says
@@ -504,4 +504,51 @@ that restart an input section (a rate or control-kind change) are refused by bot
 only on a plain plan, which has no duck and no arm. Listing such strips in `restarted_strips()`
 was tried: it changes only plain plans (three host-core tests restart their strips whole, with no
 duck to cover it) and nothing a live host renders, so it was not kept.
+
+## Slice 1324b record (implementer, 2026-10-25)
+
+Scope (scope note): D1's sidechain closure, D4's sidechain terms of `C` (with the submix
+`input`-tap exemption), gates 7 and 9. Closes 1324a's limit (1).
+
+- **D1** (`prepare.rs`, `close_over_sidechains`): after the joins and the warm lead's whole
+  restarts, a strip of both plans with an insert keyed (successor model) from a restarted strip's
+  `post_input`, `insert_send`, `insert_return` or `pre_fader` tap joins the restart set, repeated
+  until no strip joins. A track's `input` tap and a `post_fader`/`post_pan` tap add nothing. A
+  submix's `input` tap adds its consumer only when the sidechain's compensation line changes length
+  (predecessor's line against the successor's; the line-length form of "the stage arrives at its
+  predecessor arrival plus `P`") and some line into the stage, in either plan, comes from a strip
+  neither ducked (removed or restarted) nor added (`submix_input_is_quiet`). The whole-strip filter,
+  the arm and `restarted_strips()` then treat a joined strip as any restarted strip. The closure
+  is not order-free when the exemption flips on a later round (a strip that joined earlier stays);
+  that only ducks more, never less.
+- **D4** (`transition.rs`): `C` also takes, into each carried strip (in `next`, not restarted, not
+  in the overlay), every sidechain line from a now-ducked strip's `post_fader`/`post_pan` tap, and
+  for a now-ducked submix whose `input` tap keys it under the exemption, that line plus the longest
+  route line into the submix (running plan's lines).
+- **Warm lead.** `warm_lead`'s `R` is the ordinary successor's `restarted_strips()`, so it is now
+  closed over sidechains for its join part. A consumer of a strip restarted whole is closed only
+  in the warm successor itself, after the floors (`warm_lead` doc limit; #1354b).
+
+**Bits that move (intended change only).** A carried strip keyed from a restarted strip's tap
+behind a restarted owner (or, outside the exemption, from a restarted submix's `input` tap) now
+ducks, restarts before its fader and fades in; a duck-swap with a sidechain line of the D4 kinds
+waits longer for `S`; a warm lead's `R` holds such closure strips, which take floor `a` instead of
+`a + P`. No existing test changed: host-core, capi, control-plane and host-web suites pass
+unmodified.
+
+**Limit 3 (a restarted submix's `D` counts every input route's line)** is D3's arm delay, not the
+`input`-tap part (D1's exemption and D4's `C` term); it stays open, unchanged by this slice.
+
+**Tests (each red first on a mutant).**
+- capi `a_sidechain_consumer_ducks_with_its_restarted_source` (gate 7 (a)(b) through the C
+  entries): red with the closure off (block 7 differs from the reference that mutes `a`) and with
+  a track's `input` tap joining (block 7 differs from the run with no transaction).
+- capi `a_shortened_sidechain_line_from_a_restarted_submix_drops_no_fade_sample` (gate 9): red with
+  `C`'s sidechain terms off and with the exemption off (`S` 3072, not `ceil_q(p + q + N + L)`).
+- host-core `a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width` (gate 7's
+  membership at `Simd8` and `Simd4`, plus a two-round chain, a `post_fader` key and a submix
+  `input` key whose line keeps its length): red with the closure off, after one round, with
+  `post_fader` joining, without the line-length check, and with a track's `input` tap joining.
+- host-core `transition::tests::c_counts_a_post_fader_sidechain_line_into_a_carried_node` (D4's
+  `post_fader` term; feature `control-provider`): red with that term off (`C` 0, not 486).
 

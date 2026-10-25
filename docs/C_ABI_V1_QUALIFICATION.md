@@ -114,11 +114,16 @@ strip's owners before its fader (its input section, its effects, the compensatio
 chain and on those routes, and their live lanes) and its fader, keeps its matrix and its
 post-fader routes carrying the ducked tail, and arms the fader and those routes (#1288, #1363 D1
 (c)) to fade in over `N` from the first block at or after `S + D`, `D` the strip's latency before
-its fader. A planned duck-swap completes as `EXACT`, never as the transition fallback. A revert
-before `S` inherits `S` and fades the strip back in from it. Known limits of this slice: a carried
-effect whose sidechain reads a ducked strip's pre-fader tap still steps at `S` (#1324b), and a
-pre-fader route that follows its source's automated mute has no fade arm, so it restarts at its
-prepared value at `S`.
+its fader. A strip whose insert is keyed from a restarted strip's `post_input`, `insert_send`,
+`insert_return` or `pre_fader` tap is restarted and duck-swapped with it, repeated until no strip
+joins; a track's `input` tap, a `post_fader` or `post_pan` tap, and a submix's `input` tap whose
+sidechain line keeps its length or whose every incoming line comes from a ducked or an added strip
+add nothing. `C` also counts each sidechain line a replacement can shorten: from a ducked strip's
+`post_fader` or `post_pan` tap into a carried strip, and from a ducked submix's `input` tap kept by
+the last rule, plus the longest route line into that submix. A planned duck-swap completes as
+`EXACT`, never as the transition fallback. A revert before `S` inherits `S` and fades the strip
+back in from it. Known limit: a pre-fader route that follows its source's automated mute has no
+fade arm, so it restarts at its prepared value at `S` (#2011).
 
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
