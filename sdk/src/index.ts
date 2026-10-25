@@ -143,7 +143,51 @@ export type {
   ControlTransactionRequest,
   ControlWireAddress,
 } from "./core/control-frame.ts";
-export * from "./core/control-list.ts";
+// Named, not `export *`: `core/control-list.ts` also exports the `@internal` section reader the
+// observation map shares (#1590 D3), which is not public API.
+export {
+  CONTROL_LIST_PAGE_ROWS,
+  CONTROL_LIST_RESTARTS,
+  CONTROL_LIST_STALE,
+  decodeControlListPage,
+  decodeControlStatePage,
+  encodeControlListRequest,
+  readControlList,
+  readControlState,
+  readControlStripOrder,
+  readControlStripOrderSync,
+  stripEffectOf,
+  stripOrderOf,
+} from "./core/control-list.ts";
+export type {
+  ControlChoice,
+  ControlClassName,
+  ControlFamilyName,
+  ControlHeader,
+  ControlHeaderAddress,
+  ControlList,
+  ControlListEntry,
+  ControlListFilter,
+  ControlListPage,
+  ControlListRequest,
+  ControlListTransport,
+  ControlOwnerHeader,
+  ControlOwnerHeaderKind,
+  ControlPageRefusal,
+  ControlPageResult,
+  ControlRampRowName,
+  ControlReasonName,
+  ControlRouteEnds,
+  ControlScopeName,
+  ControlSectionHeader,
+  ControlState,
+  ControlStatePage,
+  ControlStripOrder,
+  ControlTaperName,
+  ControlTapName,
+  ControlUnitName,
+  ControlValueKind,
+} from "./core/control-list.ts";
 export {
   COUNTER_IDS,
   ProtocolClient,

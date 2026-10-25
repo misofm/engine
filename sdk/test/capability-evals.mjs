@@ -171,7 +171,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // cannot read the count that the browser host and the C ABI report (#1399 verdict m1).
     const engine = await createOfflineEngine(sessionDocument(), {
       asset,
-      liveControls: { meterBlocks: 0, observationTaps: 0 },
+      liveControls: { meterBlocks: 0 },
     });
     try {
       assert.equal(engine.status().liveValuesSuperseded, 0n);
@@ -332,7 +332,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     try {
       engine = await createOfflineEngine(PARITY.session, {
         asset,
-        liveControls: { meterBlocks: 1, observationTaps: 8 },
+        liveControls: { meterBlocks: 1 },
       });
     } finally {
       delete asset.instantiate;
@@ -381,7 +381,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       asset,
       liveControls: {
         meterBlocks,
-        observationTaps: 1,
       },
     });
     try {
@@ -443,7 +442,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       asset,
       liveControls: {
         meterBlocks,
-        observationTaps: 0,
       },
     });
     try {
@@ -494,7 +492,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       asset,
       liveControls: {
         meterBlocks,
-        observationTaps: 0,
       },
     });
     try {
@@ -530,7 +527,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // `sdk.observation.map` and every read, the track's own included, fails with it.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: { observationTaps: 2 },
     });
     try {
       const map = engine.observationMap();
@@ -560,7 +556,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // The arm is kind 7 at the bus's strip index through the shipped module.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: { observationTaps: 2 },
     });
     try {
       const map = engine.sessionMap();
@@ -604,7 +599,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // "no track 'bus'" before anything is submitted.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: { observationTaps: 2 },
     });
     try {
       const binding = engine.observationMap().bindings.find((row) => row.trackId === "bus");

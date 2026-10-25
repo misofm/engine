@@ -157,7 +157,6 @@ fn applied(response: &[u8]) -> (EditPath, u64) {
 fn boot(model: &SessionModel) -> u32 {
     let options = WebBootOptions {
         live_control_meter_blocks: 2,
-        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     };
     let document = canonical_session_json(model).expect("canonical session");

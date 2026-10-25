@@ -931,9 +931,7 @@ function validateSdkResponse(browserName, response) {
   gate(browserName, "sdk-observation-subscription", liveU64(resident.subscriptionId)
     && liveU64(resident.owner) && liveU64(resident.epoch)
     && resident.bounds?.maximumHandles > 0
-    && resident.bounds?.maximumBindings > 0
     && resident.bounds?.maximumSelections > 0
-    && resident.bounds?.maximumWindowBlocks > 0
     && resident.bounds?.maximumCadenceMs > 0,
   "resident observation subscription did not publish bounded owner identity and limits");
   // #1589 D4 (R4): `armed()` settled with the arm sample render applied, and no window it was given

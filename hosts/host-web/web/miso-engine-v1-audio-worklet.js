@@ -37,20 +37,6 @@ const SEEK_REPORT_WORDS = [
 ];
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
-// Issue #137 D2/D3.
-const OBSERVATION_SELECTION_BYTES = 32;
-const OBSERVATION_RESULT_BYTES = 96;
-const MAXIMUM_OBSERVATION_READS = 256;
-const OBSERVATION_MAP_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "effectSlotId", "nativeEffectId", "tapIds",
-];
-const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
-const OBSERVATION_CHANNELS = new Set([1, 2, 3]);
-const OBSERVATION_STATUSES = new Set([1, 2, 3]);
-const OBSERVATION_ROW_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "tapId", "channels", "status", "sampleRateHz",
-  "firstSample", "endSample", "sequence", "blocks", "leftPresent", "rightPresent", "left", "right",
-];
 // The telemetry window: 128 blocks is ~341 ms at 48 kHz with a 128-frame quantum, long enough for
 // a millisecond-resolution clock to accumulate a usable ratio and short enough to be a live meter.
 const TELEMETRY_WINDOW_BLOCKS = 128;
@@ -58,7 +44,7 @@ const TELEMETRY_WINDOW_BLOCKS = 128;
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "reserved2",
+  "reserved3", "reserved2",
 ];
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
@@ -80,21 +66,6 @@ const CONTROL_DOCUMENT_FIELDS = [...CONTROL_FIELDS, "document"];
 const CONTROL_EVENT_LANES = [0, 1];
 const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
 const LEASE_FIELDS = ["tag", "requestId", "enabled"];
-
-// Decision 12 (#1096): an effect is addressed as `1` inserts or `3` console. The retired `simd1`
-// (`0`) and `simd2` (`2`) codes are refused and never reallocated.
-const RACK_INSERTS = 1;
-const RACK_CONSOLE = 3;
-const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
-
-function validObservationAddress(address) {
-  return exactFields(address, OBSERVATION_ADDRESS_FIELDS)
-    && u32(address.trackIndex)
-    && effectRack(address.rack)
-    && u32(address.effectIndex)
-    && u32(address.tapId) && address.tapId > 0
-    && u32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
-}
 
 /// The render clock (issue #137 D3).
 ///
@@ -218,8 +189,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.telemetryBudgetMs = 0;
     this.telemetryPeakMs = 0;
     this.telemetryDeadlineMisses = 0;
-    this.observations = Object.freeze([]);
-    this.observationSelectionView = null;
     // Issue #1562 (batch 7 CI fold): every persistent view over the module's memory is registered
     // here by `bindView`, so a growth of that memory (a control allocation, counted on the control
     // side and no fault) re-cuts them all in `rebindMemoryViews`, in a message handler and never
@@ -305,11 +274,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       return this.exports.miso_engine_web_v1_boot_result();
     }
     this.backend = "simd128";
-    // Boot allocated the observation staging (issue #1333 D5), so this query allocates nothing
-    // and cannot grow linear memory. Read it before caching any views all the same: a view taken
-    // before a growth would be detached.
-    const observationStagingPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
-    if (!u32(observationStagingPointer) || observationStagingPointer === 0) return RESULT_INTERNAL;
     this.memoryBuffer = this.exports.memory.buffer;
     this.sourceIdPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_ID);
     this.sourceIdCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_ID);
@@ -429,77 +393,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       rows.push({ id, channels, frames });
     }
     return rows;
-  }
-
-  /// Issue #143, #1562b: the observation bindings of the plan that renders, in the prepared
-  /// owner's stable map order, or `null` for a binding the engine cannot have written. A binding
-  /// names a strip by its index in that plan's strip order (the tracks, then the submixes), which
-  /// is the control list's order at [`Self::renderingStructureEpoch`]. A rebuild changes the
-  /// bindings at the block that adopts it, so every map request reads them again: a reboot or a
-  /// swap cannot retain an old numeric owner address behind a stable SDK selection. Control side
-  /// only; allocates.
-  readObservationBindings() {
-    const count = this.exports.miso_engine_web_v1_observation_count(this.handle);
-    if (!u32(count)) return null;
-    const idPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
-    const idCapacity = this.exports.miso_engine_web_v1_observation_id_capacity();
-    if (!u32(idPointer) || idPointer === 0 || !u32(idCapacity) || idCapacity === 0) return null;
-    const readId = (length) => {
-      if (!u32(length) || length === 0 || length > idCapacity) return null;
-      const bytes = new Uint8Array(this.memoryBuffer, idPointer, length);
-      let id = "";
-      for (let byte = 0; byte < length; byte += 1) {
-        if (bytes[byte] > 0x7f) return null;
-        id += String.fromCharCode(bytes[byte]);
-      }
-      return id;
-    };
-    const bindings = [];
-    for (let index = 0; index < count; index += 1) {
-      const trackIndex = this.exports.miso_engine_web_v1_observation_track_index(this.handle, index);
-      const rack = this.exports.miso_engine_web_v1_observation_rack(this.handle, index);
-      const effectIndex = this.exports.miso_engine_web_v1_observation_effect_index(this.handle, index);
-      const effectSlotId = readId(
-        this.exports.miso_engine_web_v1_observation_effect_slot_id(this.handle, index),
-      );
-      const nativeEffectId = readId(
-        this.exports.miso_engine_web_v1_observation_native_effect_id(this.handle, index),
-      );
-      const tapCount = this.exports.miso_engine_web_v1_observation_tap_count(this.handle, index);
-      if (!u32(trackIndex) || !effectRack(rack) || !u32(effectIndex)
-          || effectSlotId === null || nativeEffectId === null || !u32(tapCount)
-          || tapCount === 0 || tapCount > 32) return null;
-      const tapIds = [];
-      for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
-        const tapId = this.exports.miso_engine_web_v1_observation_tap_id(
-          this.handle, index, tapIndex,
-        );
-        if (!u32(tapId) || tapId === 0) return null;
-        tapIds.push(tapId);
-      }
-      bindings.push(Object.freeze({
-        trackIndex,
-        rack,
-        effectIndex,
-        effectSlotId,
-        nativeEffectId,
-        tapIds: Object.freeze(tapIds),
-      }));
-    }
-    return Object.freeze(bindings);
-  }
-
-  /// Issue #1562b: the structure epoch of the plan that renders, read from its meter header (the
-  /// header the module publishes through `meter_header_ptr` is the rendering plan's, with or
-  /// without a meter lease). It is the number of the control list whose strip order the plan's
-  /// bindings and frames follow. `0` for a header the memory cannot hold. Control side only.
-  renderingStructureEpoch() {
-    const pointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
-    if (!u32(pointer) || pointer === 0
-        || pointer + METER_HEADER_BYTES > this.memoryBuffer.byteLength) return 0;
-    const header = new DataView(this.memoryBuffer, pointer, METER_HEADER_BYTES);
-    return header.getUint32(METER_HEADER_STRUCTURE_EPOCH, true)
-      + header.getUint32(METER_HEADER_STRUCTURE_EPOCH + 4, true) * 4294967296;
   }
 
   /// Cut one persistent view over the module's memory and remember how, so a growth of that memory
@@ -658,8 +551,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// clone `postMessage` performs is the only allocation left, and it is the one the ABI cannot
   /// avoid.
   bindLiveControls(init) {
-    // Issue #207: source introspection and the observation bindings are control-path state, read
-    // here once at boot and again by the request handlers (a rebuild can change both, #1562b). The
+    // Issue #207: source introspection is control-path state, read here once at boot and again by
+    // the request handlers (a rebuild can change it, #1562b). The
     // construction path and the handlers are the ones that may allocate; `process()` never touches
     // them. A headless consumer of the session map cannot otherwise learn which sources a
     // compiled session declares, how many channels each carries, or which frames it is waiting
@@ -668,19 +561,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (sources === null) return false;
     this.sources = sources;
     this.sourceCount = sources.length;
-    const observations = this.readObservationBindings();
-    if (observations === null) return false;
-    this.observations = observations;
-    const observationSelectionPointer = this.exports.miso_engine_web_v1_observation_selection_ptr();
-    const observationSelectionBytes = this.exports.miso_engine_web_v1_observation_selection_bytes();
-    const observationSelectionCapacity = this.exports.miso_engine_web_v1_observation_selection_capacity();
-    if (!u32(observationSelectionPointer) || observationSelectionPointer === 0
-        || observationSelectionBytes !== OBSERVATION_SELECTION_BYTES
-        || !u32(observationSelectionCapacity)
-        || observationSelectionCapacity < 1
-        || observationSelectionCapacity > MAXIMUM_OBSERVATION_READS) return false;
-    this.bindView("observationSelectionView", DataView, observationSelectionPointer,
-      observationSelectionCapacity * observationSelectionBytes);
 
     const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
       this.handle,
@@ -691,7 +571,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       BUFFER_METER_FRAME,
     );
     this.metersAttached = init.options.liveControlMeterBlocks !== 0n;
-    this.observationAttached = init.options.liveControlObservationTaps !== 0n;
     if (this.metersAttached) {
       const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
       if (!u32(headerPointer) || headerPointer === 0) return false;
@@ -746,15 +625,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     const liveControlWords = [
       options.reserved1, options.liveControlMeterBlocks,
-      options.liveControlObservationTaps, options.reserved2,
+      options.reserved3, options.reserved2,
     ];
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // Offsets 32 and 56 are reserved and must be zero (issue #1565a D4, issue #1689 D2): a
-    // writer that still sets a retired word is refused, never ignored.
-    if (options.reserved1 !== 0n || options.reserved2 !== 0n) {
-      throw new RangeError("Invalid observation boot option");
+    // Offsets 32, 48 and 56 are reserved and must be zero (issue #1565a D4, #1590 D5, #1689 D2):
+    // a writer that still sets a retired word is refused, never ignored.
+    if (options.reserved1 !== 0n || options.reserved3 !== 0n || options.reserved2 !== 0n) {
+      throw new RangeError("Invalid reserved boot option");
     }
     const view = new DataView(this.exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);
     view.setUint32(0, BOOT_OPTIONS_BYTES, true);
@@ -784,8 +663,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
       "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes", "graphMetadataBytes",
       "graphDelayBytes", "largestNamedAllocationBytes",
-      // Issue #143: carved from the report's first reserved word; zero for a session prepared
-      // with `liveControlObservationTaps === 0n`.
+      // Issue #143: carved from the report's first reserved word.
       "observationRetainedBytes",
     ];
     const resources = {
@@ -997,26 +875,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         })),
         metersAttached: this.metersAttached === true,
       });
-    } else if (message?.tag === "miso.observationmap.v1"
-        && exactFields(message, ["tag", "requestId"])) {
-      // The bindings are the rendering plan's (a rebuild changes them at its adoption block), and
-      // the reply names the structure epoch of the control list whose strip order they follow.
-      const bindings = this.readObservationBindings();
-      if (bindings === null) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      this.observations = bindings;
-      this.port.postMessage({
-        tag: "miso.observationmap.v1",
-        requestId: message.requestId,
-        result: RESULT_OK,
-        structureEpoch: this.renderingStructureEpoch(),
-        bindings: this.observations,
-      });
-    } else if (message?.tag === "miso.observation.v1"
-        && exactFields(message, ["tag", "requestId", "selections"])) {
-      this.receiveObservationRead(message);
     } else if (message?.tag === "miso.renderallocations.v1"
         && exactFields(message, ["tag", "requestId"])) {
       // Issue #1333 D3: the allocator calls this instance made inside render-locked windows --
@@ -1048,98 +906,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
     }
-  }
-
-  receiveObservationRead(message) {
-    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !Array.isArray(message.selections)
-        || message.selections.length === 0
-        || message.selections.length > MAXIMUM_OBSERVATION_READS
-        || !message.selections.every(validObservationAddress)
-        || this.observationSelectionView === null) {
-      if (this.observationSelectionView === null && Array.isArray(message.selections)
-          && message.selections.length > 0 && message.selections.length <= MAXIMUM_OBSERVATION_READS
-          && message.selections.every(validObservationAddress)) {
-        this.port.postMessage({
-          tag: "miso.observation.v1",
-          requestId: message.requestId,
-          result: RESULT_UNSUPPORTED,
-          rows: [],
-        });
-      } else {
-        this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-      }
-      return;
-    }
-    const view = this.observationSelectionView;
-    const count = message.selections.length;
-    for (let index = 0; index < count; index += 1) {
-      const selection = message.selections[index];
-      const offset = index * OBSERVATION_SELECTION_BYTES;
-      view.setUint32(offset, OBSERVATION_SELECTION_BYTES, true);
-      view.setUint32(offset + 4, ABI_VERSION, true);
-      view.setUint32(offset + 8, selection.trackIndex, true);
-      view.setUint32(offset + 12, selection.rack, true);
-      view.setUint32(offset + 16, selection.effectIndex, true);
-      view.setUint32(offset + 20, selection.tapId, true);
-      view.setUint32(offset + 24, selection.channels, true);
-      view.setUint32(offset + 28, 0, true);
-    }
-    const result = this.exports.miso_engine_web_v1_observation_read(this.handle, count);
-    if (result !== RESULT_OK) {
-      this.port.postMessage({
-        tag: "miso.observation.v1",
-        requestId: message.requestId,
-        result,
-        rows: [],
-      });
-      return;
-    }
-    const resultPointer = this.exports.miso_engine_web_v1_observation_result_ptr();
-    const resultBytes = this.exports.miso_engine_web_v1_observation_result_bytes();
-    if (!u32(resultPointer) || resultPointer === 0
-        || resultBytes !== count * OBSERVATION_RESULT_BYTES) {
-      this.sticky(RESULT_INTERNAL, message.requestId);
-      return;
-    }
-    const output = new DataView(this.memoryBuffer, resultPointer, resultBytes);
-    const rows = [];
-    for (let index = 0; index < count; index += 1) {
-      const offset = index * OBSERVATION_RESULT_BYTES;
-      if (output.getUint32(offset, true) !== OBSERVATION_RESULT_BYTES
-          || output.getUint32(offset + 4, true) !== ABI_VERSION
-          || output.getUint32(offset + 36, true) !== 0
-          || output.getUint32(offset + 84, true) !== 0
-          || output.getUint32(offset + 88, true) !== 0
-          || output.getUint32(offset + 92, true) !== 0) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      const row = Object.freeze({
-        trackIndex: output.getUint32(offset + 12, true),
-        rack: output.getUint32(offset + 16, true),
-        effectIndex: output.getUint32(offset + 20, true),
-        tapId: output.getUint32(offset + 24, true),
-        channels: output.getUint32(offset + 28, true),
-        status: output.getUint32(offset + 8, true),
-        sampleRateHz: output.getUint32(offset + 32, true),
-        firstSample: output.getBigUint64(offset + 40, true),
-        endSample: output.getBigUint64(offset + 48, true),
-        sequence: output.getBigUint64(offset + 56, true),
-        blocks: output.getUint32(offset + 64, true),
-        leftPresent: output.getUint32(offset + 68, true),
-        rightPresent: output.getUint32(offset + 72, true),
-        left: output.getFloat32(offset + 76, true),
-        right: output.getFloat32(offset + 80, true),
-      });
-      rows.push(row);
-    }
-    this.port.postMessage({
-      tag: "miso.observation.v1",
-      requestId: message.requestId,
-      result: RESULT_OK,
-      rows,
-    });
   }
 
   receiveSource(message) {

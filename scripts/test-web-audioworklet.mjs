@@ -55,12 +55,13 @@ const qualificationUrl = qualificationModuleIndex === -1
 const limits = Object.freeze({
   sourceRingFrames: 256,
   maximumMemoryBytes: 0n,
-  // Issue #137 D1/D2 and #143 D3: the live-control words. `reserved1` (offset 32, issue #1565)
-  // and `reserved2` (offset 56, the master boot word until issue #1689) must be zero. All zero is
-  // "no meter observers, no observation capacity"; the live-control tests below override them.
+  // Issue #137 D1/D2: the live-control meter word. `reserved1` (offset 32, issue #1565),
+  // `reserved3` (offset 48, the observation-taps word until issue #1590) and `reserved2` (offset
+  // 56, the master boot word until issue #1689) must be zero; the live-control tests below
+  // override the meter word.
   reserved1: 0n,
   liveControlMeterBlocks: 2n,
-  liveControlObservationTaps: 2n,
+  reserved3: 0n,
   reserved2: 0n,
 });
 
@@ -529,7 +530,8 @@ async function testMainRealm() {
         ["u64 bound", plainOptions({ maximumMemoryBytes: 0x1_0000_0000_0000_0000n })],
         ["reserved1 nonzero", plainOptions({ reserved1: 1n })],
         ["reserved1 type", plainOptions({ reserved1: 0 })],
-        ["observation taps bound", plainOptions({ liveControlObservationTaps: 17n })],
+        // Issue #1590 gate 4: the retired observation-taps word is refused.
+        ["reserved3 nonzero", plainOptions({ reserved3: 4n })],
         // Issue #1689 gate 2: the retired master word is refused at both ends of its range.
         ["reserved2 one", plainOptions({ reserved2: 1n })],
         ["reserved2 all ones", plainOptions({ reserved2: 0xffff_ffff_ffff_ffffn })],
@@ -689,7 +691,7 @@ async function testMainRealm() {
           maximumMemoryBytes: 0n,
           reserved1: 0n,
           liveControlMeterBlocks: 7n,
-          liveControlObservationTaps: 0n,
+          reserved3: 0n,
           reserved2: 0n,
         };
         const expectedOptions = { ...options };
@@ -722,7 +724,7 @@ async function testMainRealm() {
           await addGate.started;
           options.sourceRingFrames = 128;
           options.liveControlMeterBlocks = 99n;
-          factory.options = { ...options, liveControlObservationTaps: 4n };
+          factory.options = { ...options, reserved3: 4n };
           factory.context = replacementContext;
           factory.preparedModule = replacementModule;
           factory.simd128ModuleUrl = "mutated-simd.wasm";
@@ -734,7 +736,7 @@ async function testMainRealm() {
           context.renderQuantumSize = 128;
           options.sourceRingFrames = 256;
           options.liveControlMeterBlocks = 101n;
-          factory.options = { ...options, liveControlObservationTaps: 8n };
+          factory.options = { ...options, reserved3: 8n };
           readyPause.release();
           hostValue = await boot;
           const node = FakeNode.latest;
@@ -2104,13 +2106,6 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     2: 64, 3: 2 * quantum * 4, 4: 256, 5: 2 * quantum * 4,
     7: meterFrameFloats * 4,
   };
-  // Issue #143: the additive observation ABI is present even in this hermetic processor fake.
-  // This fixture does not model a compiled observation row, but the worklet still prewarms and
-  // discovers the fixed staging views before it can publish `miso.ready.v1`.
-  const observationIdPointer = 17500;
-  const observationSelectionPointer = 18000;
-  const observationResultPointer = 19000;
-  const observationSelectionCapacity = 4;
   calls.meterLease = [];
   calls.meterWindows = 0;
   const boot = () => {
@@ -2238,22 +2233,6 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     },
     miso_engine_web_v1_source_channels: (_handle, index) => sourceRows[index]?.channels ?? 0,
     miso_engine_web_v1_source_frames: (_handle, index) => sourceRows[index]?.frames ?? 0n,
-    miso_engine_web_v1_observation_count: () => 0,
-    miso_engine_web_v1_observation_id_ptr: () => observationIdPointer,
-    miso_engine_web_v1_observation_id_capacity: () => 128,
-    miso_engine_web_v1_observation_track_index: () => 0,
-    miso_engine_web_v1_observation_rack: () => 1,
-    miso_engine_web_v1_observation_effect_index: () => 0,
-    miso_engine_web_v1_observation_effect_slot_id: () => 0,
-    miso_engine_web_v1_observation_native_effect_id: () => 0,
-    miso_engine_web_v1_observation_tap_count: () => 0,
-    miso_engine_web_v1_observation_tap_id: () => 0,
-    miso_engine_web_v1_observation_selection_ptr: () => observationSelectionPointer,
-    miso_engine_web_v1_observation_selection_bytes: () => 32,
-    miso_engine_web_v1_observation_selection_capacity: () => observationSelectionCapacity,
-    miso_engine_web_v1_observation_read: () => 0,
-    miso_engine_web_v1_observation_result_ptr: () => observationResultPointer,
-    miso_engine_web_v1_observation_result_bytes: (_handle, count = 0) => count * 96,
     miso_engine_web_v1_service: (handle) => {
       calls.service.push(handle);
       return calls.serviceResult;
@@ -2617,25 +2596,25 @@ async function testQualificationBoot({
       label === "renderCorpusSegment" || label === "typedUnsupportedAttestation");
     assert(plain.every(({ options }) => options.options.reserved1 === 0n
       && options.options.liveControlMeterBlocks === 0n
-      && options.options.liveControlObservationTaps === 0n
+      && options.options.reserved3 === 0n
       && options.options.reserved2 === 0n),
     "qualification boot contract: plain option variant changed");
     const liveControlOptions = observed
       .find(({ label }) => label === "runLiveControlQualification").options.options;
     assert.equal(liveControlOptions.reserved1, 0n);
     assert.equal(liveControlOptions.liveControlMeterBlocks, 2n);
-    assert.equal(liveControlOptions.liveControlObservationTaps, 0n);
+    assert.equal(liveControlOptions.reserved3, 0n);
     assert.equal(liveControlOptions.reserved2, 0n);
     const observationOptions = observed.find(({ label }) => label === "runObservationRun").options.options;
     assert.equal(observationOptions.reserved1, 0n);
     assert.equal(observationOptions.liveControlMeterBlocks, 2n);
-    assert.equal(observationOptions.liveControlObservationTaps, 4n);
+    assert.equal(observationOptions.reserved3, 0n);
     assert.equal(observationOptions.reserved2, 0n);
     // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields.
     const stagingReadOptions = observed.find(({ label }) => label === "runStagingReadRun").options.options;
     assert.equal(stagingReadOptions.reserved1, 0n);
     assert.equal(stagingReadOptions.liveControlMeterBlocks, 2n);
-    assert.equal(stagingReadOptions.liveControlObservationTaps, 4n);
+    assert.equal(stagingReadOptions.reserved3, 0n);
     assert.equal(stagingReadOptions.reserved2, 0n);
 
     const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");
@@ -3855,39 +3834,16 @@ async function testProcessor() {
     }
 
     {
-      // Issue #1562b: a rebuild can change the committed sources and, at its adoption block, the
-      // observation bindings, so both maps are read from the engine at each request. Red if the
-      // worklet answers from the boot's rows (a source added by a rebuild would never be listed),
-      // or if the observation map does not name the structure epoch of the plan that renders.
+      // Issue #1562b: a rebuild can change the committed sources, so the session map is read from
+      // the engine at each request. Red if the worklet answers from the boot's rows (a source
+      // added by a rebuild would never be listed). (#1590 deleted the observation map.)
       const { processor, fake } = makeProcessor();
-      const left = new Float32Array(64);
-      const right = new Float32Array(64);
       fake.sourceRows.push({ id: "zz-added", channels: 1, frames: 480n });
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 1 });
       assert.deepEqual(
         processor.port.posts.at(-1).message.sources.map((source) => source.id),
         ["bass", "drums", "zz-added"],
         "the session map lists a source a rebuild added",
-      );
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 2 });
-      const before = processor.port.posts.at(-1).message;
-      assert.equal(before.tag, "miso.observationmap.v1");
-      assert.equal(before.structureEpoch, 1, "the boot plan's list");
-      assert.deepEqual([...before.bindings], []);
-
-      // A replacement plan waits: the rendering plan's epoch is still the boot's.
-      fake.commitMeterSuccessor();
-      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 3 });
-      assert.equal(processor.port.posts.at(-1).message.structureEpoch, 1, "not adopted yet");
-      // The adopting block: the successor's header is the rendering plan's now.
-      fake.calls.adoptOnNextRender = true;
-      assert.equal(processor.process([], [[left, right]]), true);
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 4 });
-      assert.equal(
-        processor.port.posts.at(-1).message.structureEpoch,
-        2,
-        "the adopted plan's list",
       );
     }
 

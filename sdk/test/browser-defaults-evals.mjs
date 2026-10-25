@@ -272,7 +272,7 @@ test("preparation compiles once, disposes scratch, and yields fresh stateful liv
   });
   const bytes = await moduleBytes();
   const document = new TextEncoder().encode(sessionDocument({ effects: { preInsert: effects.slice(0, 2), inserts: effects.slice(2) }, frames: 16384 }));
-  const options = { liveControls: { meterBlocks: 2, observationTaps: 1 } };
+  const options = { liveControls: { meterBlocks: 2 } };
   let compiles = 0, disposals = 0; const compile = WebAssembly.compile; const dispose = WasmBoundary.prototype.dispose;
   WebAssembly.compile = async (...args) => { compiles++; return compile(...args); };
   WasmBoundary.prototype.dispose = function () { disposals++; return dispose.call(this); };
@@ -379,25 +379,26 @@ test("preparation admits several independent mono and stereo sources", async () 
 });
 
 
-for (const initialLiveControls of [undefined, {}, { observationTaps: 0 }, { observationTaps: 4 }]) {
-  test(`observation attachment uses captured boot policy: ${JSON.stringify(initialLiveControls)}`, async () => {
-    // The value controls need no boot word (every edit is a SET_CONTROL transaction); only the
-    // observation records need taps, and that word is read from the policy captured before the
-    // scratch boot, not from the caller's object as it is when the host boots.
-    const attached = (initialLiveControls?.observationTaps ?? 0) > 0;
+for (const initialLiveControls of [undefined, {}, { meterBlocks: 0 }, { meterBlocks: 4 }]) {
+  test(`the live-control word uses captured boot policy: ${JSON.stringify(initialLiveControls)}`, async () => {
+    // The value controls need no boot word (every edit is a SET_CONTROL transaction), and every
+    // plan binds every declared observation tap (#1590 D5); the meter word is read from the
+    // policy captured before the scratch boot, not from the caller's object as it is when the
+    // host boots.
+    const captured = initialLiveControls?.meterBlocks;
     const policy = initialLiveControls === undefined ? {} : { liveControls: { ...initialLiveControls } };
     let maps = 0; const frames = []; const closed = [];
     const engine = await createEngine({
       document: new Uint8Array([1]), policy,
       scratchBoot: async () => {
         policy.liveControls ??= {};
-        policy.liveControls.observationTaps = attached ? 0 : 4;
+        policy.liveControls.meterBlocks = (captured ?? 0) + 7;
         return shape;
       },
       createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
         audioWorklet: { async addModule() {} }, async close() { closed.push("context"); } }),
       createHost: async request => {
-        assert.equal((request.options.liveControls?.observationTaps ?? 0) > 0, attached);
+        assert.equal(request.options.liveControls?.meterBlocks, captured);
         return {
           async sessionMap() { maps++; return { sources: [], metersAttached: false }; },
           control: scriptedControl({ frames }),

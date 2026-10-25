@@ -18,7 +18,7 @@
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
 | `tests::native_set_control_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runSetControlTimeline` (#1565A D6) | have `control_command` stage the committed frame's cells one block later (move the service step's publication after the render) | the native digest and the shipped module's digest move together and stop matching the pin |
 | `tests::set_control_frames_are_the_committed_fixtures` (#1565A D6) | change one byte of the encoder's request ID in `set_control_timeline_frames` | the committed frame fixture differs from the encoded frame |
-| `tests::the_boot_words_at_offsets_32_and_56_are_reserved` (#1565A gate 2; the staging half deleted by #1589c) | drop the `reserved1 != 0` refusal in `validate_options` | the nonzero word boots |
+| `tests::the_retired_boot_words_are_reserved` (#1565A gate 2, #1590 gate 4; renamed from `the_boot_words_at_offsets_32_and_56_are_reserved` by #1590; the staging half deleted by #1589c) | drop the `reserved1 != 0` refusal in `validate_options` | the nonzero word boots |
 | `tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing` (#137 E5) | make `live_control_request` use `blocks` frames instead of `blocks * quantum_frames` for the meter period | a window closes mid-block, `poll_meters` reports more windows than blocks rendered, and the cadence assertion fails |
 | `tests/matrix.rs::explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted` (#137 D1) | drop `self.smoothing_samples[lane] = samples;` from `MatrixStage::set_target_over` | the second retarget runs over the prepared window of `0` instead of the requested `4` and settles on the first frame |
 | `builtins-compiler::live_control_requests_are_validated_sealed_and_charged_per_track` (#137 D1) | delete the `control_tracks.insert` / `known_tracks.contains` legs in `prepare_session_builtins_with_live_controls` | the duplicate and unknown-track requests are accepted instead of producing `builtin.control.duplicate` / `builtin.control.unknown_track` |
@@ -50,7 +50,7 @@ restored. Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), `-C target-feature=+avx2,+f
 | gate | mutation | observed red |
 |---|---|---|
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4) | publish the negative decibels raw instead of the declared `PeakMagnitude` fold | the app's `Math.max(0, -6)` is `0` and the frame reads dead; the "positive magnitude, not a negative decibel" assertion fires |
-| `tests::a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` (E9; renamed by #1589c) | bind the computed tap instead of refusing it | `Ok` where `Err(ComputedTap)` was required — a bound computed tap is a lane that never publishes |
+| control-plane `observation_bindings::a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` (E9; renamed by #1589c, moved from host-web `tests` by #1590) | bind the computed tap instead of refusing it | `Ok` where `Err(ComputedTap)` was required — a bound computed tap is a lane that never publishes |
 | `round_trip::every_metadata_observation_tap_resolves_through_an_observe_edit` (E9; through the core's `Observe` edit since #1589c) | offset the tap id by one in the lowering (equivalent to a hand-edited id in the document) | `miso.compressor tap 1 resolves and binds`: `Err(["observation.tap.unknown"])` |
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D6) | `master_gr_present = 1` unconditionally | `no designation means absent, never zero`: `Some(0.0)` where `None` was required |
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D5) | keep the pre-#143 `2T + 2` frame shape | the frame is 8 words where `3T + 3 = 12` was required |
@@ -451,8 +451,7 @@ and the mutation was reverted.
 | `test-web-audioworklet.mjs` worklet construction (#1210 D3) | drop the header `submix_count` == enumerated count check | `a submix count the meter header disagrees with must fail initialization` |
 | `check-session-map-shape.py --self-test` (#1210) | the host list or the worklet reply without `submixes` | both new self-test mutations are caught (17 in all) |
 | `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word`, `tests::a_bus_limiter_can_be_the_designated_master` (#1213 gates 5, 6) | restore #1207's GR-fold skip of strip indices `>= T` | the bus word stays `0` and `master_gr_present` is `0` |
-| `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word` (#1213, K2 verdict (a)) | `observation_selection_for_address` looks up `ready.tracks` only | the selected read at the bus's strip index is `InvalidSelection` |
-| `capability-evals.mjs` bus selected read (#1213, K2 verdict (a), `check-sdk-headless.sh`) | the same tracks-only lookup, artifact rebuilt | `readObservations` fails with `invalidArgument` |
+| (retired by #1590: `observation_selection_for_address` and the numeric read are deleted; the bus test and `capability-evals.mjs` read the bus tap by its stable key through `OBSERVATION_READ`) | | |
 | `capability-evals.mjs` bus refusal classifier (#1213 D5a, `check-sdk-headless.sh`) | the SDK classifier compares against the track count | the bus's missing insert reports `unknownTrack` |
 | `capability-evals.mjs` bus solo refusal (#1213 D4, #1212 NIT-2, `check-sdk-headless.sh`) | delete the `solo_safe` check before `set_solo`, artifact rebuilt | the shipped admission reports reason 2, not 12 |
 | `test-web-audioworklet.mjs` worklet eq-config classifier (#1213 D5a; attempt 2 MINOR-3) | compare `message.trackIndex >= this.trackCount` | the bus's missing insert reports `2` (`unknownTrack`), not `4` |
@@ -470,9 +469,7 @@ Chromium leg of `qualification/run.mjs`.
 | same | `dealloc` (or `realloc`) skips `count_if_locked` | the in-window count of 5 fails |
 | same | `render_locked` never clears the flag | `the window clears the flag when it returns` |
 | `const _: () = assert!(!needs_drop::<..>())` in `ffi.rs` | add a `Vec<u8>` field to `BootStaging` | `error[E0080]`: `assertion failed: !needs_drop::<RefCell<BootStaging>>()` |
-| `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserve_stagings` | `a staging accessor allocated inside its render-locked window`: 7 |
-| same | drop `observation_staging()` from `reserve_stagings` | the same assertion: 6 |
-| same | drop the `reserve_stagings()` call from `boot_staged`'s success path, which both boot exports share | the same assertion: 13 |
+| (retired by #1590: `tests/render_locked_staging.rs`, `reserve_stagings` and the observation staging are deleted; no staging is left for a booted instance to allocate in a render-locked window) | | |
 | `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` returns `Some(self.captures[self.selected.unwrap_or(0)].channels())` (a mask while nothing is selected) | `Some(Left)` where `None` is expected; no other host-core or host-web test goes red |
 | `check-web-audioworklet-callgraph.py --self-test` (h2) | the destructor-registration test is `False` | both (h2) cases |
 | same, (h3) | the atomic-wait test is `False` | (h3) `wait32` and `wait64` |

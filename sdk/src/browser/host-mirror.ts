@@ -1,4 +1,4 @@
-import { ABI_LAYOUT } from "../generated/abi.ts";
+import { refuseRetiredObservationTaps } from "../internal/retired-options.ts";
 import type { BootOptions } from "../core/abi.ts";
 import { MisoUsageError } from "./../core/errors.ts";
 import type { MisoWebBootOptions } from "./shipped-host.d.ts";
@@ -45,23 +45,14 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
       "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
     );
   }
-  const observationTaps = word("liveControls.observationTaps", liveControls?.observationTaps);
-
-  // The engine refuses this at boot with `web.options.live_controls`. Catching it here turns a
-  // boot-time refusal into a caller-time message, without duplicating the engine's authority: the
-  // engine still refuses if this check is wrong.
-  if (observationTaps > BigInt(ABI_LAYOUT.constants.maximumObservationTaps)) {
-    throw new MisoUsageError(
-      `liveControlObservationTaps is capped at ${ABI_LAYOUT.constants.maximumObservationTaps}`,
-    );
-  }
+  refuseRetiredObservationTaps(liveControls);
 
   return {
     sourceRingFrames: nonNegative("sourceRingFrames", options.sourceRingFrames ?? 0),
     maximumMemoryBytes: options.maximumMemoryBytes ?? 0n,
     reserved1: 0n,
     liveControlMeterBlocks: word("liveControls.meterBlocks", liveControls?.meterBlocks),
-    liveControlObservationTaps: observationTaps,
+    reserved3: 0n,
     reserved2: 0n,
   };
 }

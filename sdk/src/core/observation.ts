@@ -1,14 +1,8 @@
 import { CATALOG } from "../generated/catalog.ts";
 import type { EffectDescriptor } from "../generated/catalog.ts";
-import { MisoEngineError, MisoUsageError } from "./errors.ts";
-import { RACKS } from "../internal/rack.ts";
+import { MisoUsageError } from "./errors.ts";
 
-/**
- * Where an observed effect lives: a session console slot or one of the track's inserts.
- *
- * A binding's `effectIndex` is the live address within it -- the slot's index in the session's slot
- * order, or the insert's index in the track's chain -- exactly as a live-control edit addresses it.
- */
+/** Where an observed effect lives: a session console slot or one of the strip's inserts. */
 export type ObservationRack = "console" | "inserts";
 
 /** The independent lanes a caller wants copied from one resident observation. */
@@ -26,19 +20,23 @@ export interface ObservationSelection {
   readonly channels: ObservationChannels;
 }
 
-/** One current prepared effect that owns one or more resident observation taps. */
+/**
+ * One effect of the running session that owns one or more resident observation taps, named by
+ * stable IDs only (#1590 D3, ruling C2): the strip, the console slot's or insert's ID, the effect
+ * identity and its declared taps.
+ */
 export interface ObservationBinding {
   readonly trackId: string;
   readonly rack: ObservationRack;
-  readonly effectIndex: number;
   readonly effectSlotId: string;
   readonly nativeEffectId: string;
   readonly tapIds: readonly number[];
 }
 
 /**
- * The current owner map used to resolve stable selections to numeric Wasm addresses for a read.
- * An observation record does not use it: it names its tap by stable key and the core resolves it.
+ * The effects of the running session that declare taps, from the core's control list and the
+ * generated catalog (#1590 D3). A subscription checks a selection against it before any edit; the
+ * edit and the read name their tap by stable key and the core resolves it.
  */
 export interface ObservationMap {
   readonly bindings: readonly ObservationBinding[];
@@ -71,78 +69,10 @@ export interface ObservationReadResult {
 /** The generated catalog row describing one effect-owned observation tap. */
 export type ObservationDescriptor = EffectDescriptor["observations"][number];
 
-/** Numeric address carried by the additive Wasm request/reply boundary. */
-export interface ObservationAddress {
-  readonly trackIndex: number;
-  readonly rack: number;
-  readonly effectIndex: number;
-  readonly tapId: number;
-  readonly channels: number;
-}
-
-/** Numeric row copied from the fixed Wasm result records. */
-export interface RawObservationRow extends ObservationAddress {
-  readonly status: number;
-  readonly sampleRateHz: number;
-  readonly firstSample: bigint;
-  readonly endSample: bigint;
-  readonly sequence: bigint;
-  readonly blocks: number;
-  readonly leftPresent: number;
-  readonly rightPresent: number;
-  readonly left: number;
-  readonly right: number;
-}
-
-/** Raw binding shape returned by the shipped Worklet host before SDK enrichment. */
-export interface RawObservationBinding {
-  readonly trackIndex: number;
-  readonly rack: number;
-  readonly effectIndex: number;
-  readonly effectSlotId: string;
-  readonly nativeEffectId: string;
-  readonly tapIds: readonly number[];
-}
-
-/** The observation rack codes, from the generated layout's `racks` table (`internal/rack.ts`). */
-const RACK_VALUES: Readonly<Record<ObservationRack, number>> = RACKS;
-
 const RACK_NAMES: readonly ObservationRack[] = ["console", "inserts"];
-const CHANNEL_VALUES: Readonly<Record<ObservationChannels, number>> = Object.freeze({
-  left: 1,
-  right: 2,
-  both: 3,
-});
 const CHANNEL_NAMES: readonly ObservationChannels[] = ["left", "right", "both"];
-const STATUS_NAMES: readonly ObservationStatus[] = ["pending", "unarmed", "ready"];
 
 export const MAXIMUM_OBSERVATION_READS = 256;
-
-export function observationRackValue(rack: ObservationRack): number {
-  return RACK_VALUES[rack];
-}
-
-export function observationChannelsValue(channels: ObservationChannels): number {
-  return CHANNEL_VALUES[channels];
-}
-
-function rackName(value: number): ObservationRack {
-  const name = RACK_NAMES.find((candidate) => RACK_VALUES[candidate] === value);
-  if (name === undefined) throw new Error(`unknown observation rack ${value}`);
-  return name;
-}
-
-function channelsName(value: number): ObservationChannels {
-  const name = CHANNEL_NAMES[value - 1];
-  if (name === undefined) throw new Error(`unknown observation channel mask ${value}`);
-  return name;
-}
-
-function statusName(value: number): ObservationStatus {
-  const name = STATUS_NAMES[value - 1];
-  if (name === undefined) throw new Error(`unknown observation status ${value}`);
-  return name;
-}
 
 function u32(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
@@ -180,193 +110,4 @@ export function validateObservationSelections(selections: readonly ObservationSe
     if (seen.has(key)) throw new MisoUsageError(`observation selection ${index} duplicates an earlier target`);
     seen.add(key);
   });
-}
-
-/**
- * Enrich the numeric owner map with canonical strip IDs from the same current owner.
- *
- * `strips` is the strip order (issue #1210 D5): the tracks, then the submixes, each in canonical
- * order. A binding's `trackIndex` is a strip index, so a bus effect's binding names its submix
- * (the `trackId` field keeps its spelling, P17).
- */
-export function enrichObservationMap(
-  strips: readonly string[],
-  raw: readonly RawObservationBinding[],
-): ObservationMap {
-  const bindings = raw.map((binding, index) => {
-    if (!Number.isSafeInteger(binding.trackIndex) || binding.trackIndex < 0
-        || binding.trackIndex >= strips.length || typeof strips[binding.trackIndex] !== "string"
-        || !Number.isSafeInteger(binding.effectIndex) || binding.effectIndex < 0
-        || !RACK_NAMES.some((name) => RACK_VALUES[name] === binding.rack)
-        || typeof binding.effectSlotId !== "string"
-        || binding.effectSlotId.length === 0 || typeof binding.nativeEffectId !== "string"
-        || binding.nativeEffectId.length === 0 || !Array.isArray(binding.tapIds)
-        || binding.tapIds.length === 0 || binding.tapIds.some((tapId) => !Number.isSafeInteger(tapId)
-          || tapId <= 0 || tapId > 0xffff_ffff)) {
-      throw new MisoEngineError("the engine returned a malformed observation map", {
-        phase: "output",
-        code: "abiMismatch",
-        result: 2,
-        diagnostics: [{ code: "sdk.observation.map", path: String(index) }],
-      });
-    }
-    return Object.freeze({
-      trackId: strips[binding.trackIndex]!,
-      rack: rackName(binding.rack),
-      effectIndex: binding.effectIndex,
-      effectSlotId: binding.effectSlotId,
-      nativeEffectId: binding.nativeEffectId,
-      tapIds: Object.freeze([...binding.tapIds]),
-    });
-  });
-  return Object.freeze({ bindings: Object.freeze(bindings) });
-}
-
-/**
- * Replace the placeholder track index in resolved addresses using the current strip map: the
- * tracks, then the submixes (issue #1210 D5), so a selection naming a submix resolves to its strip
- * index.
- */
-export function resolveObservationAddressesWithTracks(
-  map: ObservationMap,
-  strips: readonly string[],
-  selections: readonly ObservationSelection[],
-): readonly ObservationAddress[] {
-  validateObservationSelections(selections);
-  return Object.freeze(selections.map((selection) => {
-    const binding = map.bindings.find((candidate) => candidate.trackId === selection.trackId
-      && candidate.rack === selection.rack
-      && candidate.effectSlotId === selection.effectSlotId);
-    if (binding === undefined || !binding.tapIds.includes(selection.tapId)) {
-      throw new MisoEngineError("the selected observation is unavailable in the current owner", {
-        phase: "output",
-        code: "unsupported",
-        result: 7,
-        diagnostics: [{ code: "sdk.observation.selection", path: selection.effectSlotId }],
-      });
-    }
-    const trackIndex = strips.indexOf(selection.trackId);
-    if (trackIndex < 0) {
-      throw new MisoEngineError("the selected observation track is unavailable in the current owner", {
-        phase: "output",
-        code: "unsupported",
-        result: 7,
-        diagnostics: [{ code: "sdk.observation.track", path: selection.trackId }],
-      });
-    }
-    return Object.freeze({
-      trackIndex,
-      rack: observationRackValue(binding.rack),
-      effectIndex: binding.effectIndex,
-      tapId: selection.tapId,
-      channels: observationChannelsValue(selection.channels),
-    });
-  }));
-}
-
-function descriptorFor(nativeEffectId: string, tapId: number): ObservationDescriptor {
-  const effect = CATALOG.effects.find((candidate) => candidate.id === nativeEffectId);
-  const descriptor = effect?.observations.find((candidate) => candidate.id === tapId);
-  if (descriptor === undefined || descriptor.subscribable !== true) {
-    throw new MisoEngineError("the engine returned an unknown observation descriptor", {
-      phase: "asset",
-      code: "abiMismatch",
-      result: 2,
-      diagnostics: [{ code: "sdk.observation.descriptor", path: `${nativeEffectId}/${tapId}` }],
-    });
-  }
-  return descriptor;
-}
-
-/** Decode copied rows into owned public values while preserving the owner's raw units and timing. */
-export function decodeObservationRows(
-  map: ObservationMap,
-  strips: readonly string[],
-  selections: readonly ObservationSelection[],
-  addresses: readonly ObservationAddress[],
-  rows: readonly RawObservationRow[],
-  sampleRateHz: number,
-): readonly ObservationReadResult[] {
-  if (rows.length !== selections.length || addresses.length !== selections.length) {
-    throw new MisoEngineError("the engine returned the wrong observation row count", {
-      phase: "output",
-      code: "abiMismatch",
-      result: 2,
-      diagnostics: [{ code: "sdk.observation.rows", path: "$" }],
-    });
-  }
-  const result = rows.map((row, index) => {
-    const selection = selections[index]!;
-    const address = addresses[index]!;
-    const binding = map.bindings.find((candidate) => candidate.trackId === selection.trackId
-      && candidate.rack === selection.rack && candidate.effectSlotId === selection.effectSlotId);
-    if (binding === undefined || row.trackIndex !== address.trackIndex || row.rack !== address.rack
-        || row.effectIndex !== address.effectIndex || row.tapId !== address.tapId
-        || row.channels !== address.channels || row.sampleRateHz !== sampleRateHz
-        || ![1, 2, 3].includes(row.status) || ![1, 2, 3].includes(row.channels)
-        || ![0, 1].includes(row.leftPresent) || ![0, 1].includes(row.rightPresent)
-        || !Number.isFinite(row.left) || !Number.isFinite(row.right)) {
-      throw new MisoEngineError("the engine returned a malformed observation row", {
-        phase: "output",
-        code: "abiMismatch",
-        result: 2,
-        diagnostics: [{ code: "sdk.observation.row", path: String(index) }],
-      });
-    }
-    const status = statusName(row.status);
-    const expectedLeft = status === "ready"
-      && (address.channels === 1 || address.channels === 3) ? 1 : 0;
-    const expectedRight = status === "ready"
-      && (address.channels === 2 || address.channels === 3) ? 1 : 0;
-    if (row.leftPresent !== expectedLeft || row.rightPresent !== expectedRight) {
-      throw new MisoEngineError("the engine returned an invalid observation channel projection", {
-        phase: "output",
-        code: "abiMismatch",
-        result: 2,
-        diagnostics: [{ code: "sdk.observation.channels", path: String(index) }],
-      });
-    }
-    const descriptor = descriptorFor(binding.nativeEffectId, selection.tapId);
-    let window: ObservationWindow | undefined;
-    if (status === "ready") {
-      if (row.firstSample < 0n || row.endSample <= row.firstSample || row.sequence <= 0n
-          || row.blocks <= 0 || !Number.isSafeInteger(row.blocks)) {
-        throw new MisoEngineError("the engine returned an invalid observation window", {
-          phase: "output",
-          code: "abiMismatch",
-          result: 2,
-          diagnostics: [{ code: "sdk.observation.window", path: String(index) }],
-        });
-      }
-      window = Object.freeze({
-        firstSample: row.firstSample,
-        endSample: row.endSample,
-        sequence: row.sequence,
-        blocks: row.blocks,
-      });
-    } else if (row.firstSample !== 0n || row.endSample !== 0n || row.sequence !== 0n
-        || row.blocks !== 0 || row.leftPresent !== 0 || row.rightPresent !== 0) {
-      throw new MisoEngineError("the engine returned historical data for an unavailable observation", {
-        phase: "output",
-        code: "abiMismatch",
-        result: 2,
-        diagnostics: [{ code: "sdk.observation.availability", path: String(index) }],
-      });
-    }
-    return Object.freeze({
-      trackId: strips[address.trackIndex] ?? selection.trackId,
-      rack: selection.rack,
-      effectSlotId: binding.effectSlotId,
-      tapId: selection.tapId,
-      nativeEffectId: binding.nativeEffectId,
-      descriptor,
-      channels: selection.channels,
-      sampleRateHz,
-      status,
-      ...(row.leftPresent === 1 ? { left: row.left } : {}),
-      ...(row.rightPresent === 1 ? { right: row.right } : {}),
-      ...(window === undefined ? {} : { window }),
-    });
-  });
-  return Object.freeze(result);
 }

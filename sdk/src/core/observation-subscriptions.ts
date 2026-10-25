@@ -19,6 +19,8 @@ import type {
   ObserveEdit,
 } from "./control-frame.ts";
 import type { ControlRequestIds } from "./control-queue.ts";
+import { stripSections } from "./control-list.ts";
+import type { ControlStripOrder } from "./control-list.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
 import type { MisoDiagnostic } from "./errors.ts";
 import {
@@ -68,21 +70,21 @@ import type { EngineCallResult } from "./boundary.ts";
  */
 const MAXIMUM_ADMISSION_RETRIES = 8;
 
-/** The bounded configuration accepted by `subscribeObservations`. */
+/**
+ * The bounded configuration accepted by `subscribeObservations`: the client's own work (#1590 D2).
+ * The core bounds the window (`observation.window`) and the arms (one per declared tap, shared by
+ * its subscribers).
+ */
 export interface ObservationSubscriptionLimits {
   readonly maximumHandles?: number;
-  readonly maximumBindings?: number;
   readonly maximumSelections?: number;
-  readonly maximumWindowBlocks?: number;
   readonly maximumCadenceMs?: number;
 }
 
 /** The finite SDK-side limits used when the caller does not provide overrides. */
 export const DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS = Object.freeze({
   maximumHandles: 64,
-  maximumBindings: MAXIMUM_OBSERVATION_READS,
   maximumSelections: MAXIMUM_OBSERVATION_READS,
-  maximumWindowBlocks: 4_096,
   maximumCadenceMs: 60_000,
 });
 
@@ -123,9 +125,7 @@ export interface ObservationSubscriptionConfiguration {
 
 export interface ObservationSubscriptionBounds {
   readonly maximumHandles: number;
-  readonly maximumBindings: number;
   readonly maximumSelections: number;
-  readonly maximumWindowBlocks: number;
   readonly maximumCadenceMs: number;
   readonly maximumReadSelections: number;
 }
@@ -281,9 +281,7 @@ export interface ObservationSubscriptionTransport {
 
 interface EffectiveLimits {
   readonly maximumHandles: number;
-  readonly maximumBindings: number;
   readonly maximumSelections: number;
-  readonly maximumWindowBlocks: number;
   readonly maximumCadenceMs: number;
 }
 
@@ -295,6 +293,10 @@ interface ResolvedSelection {
   readonly key: string;
 }
 
+/**
+ * One selection of one handle (#1590 D1): the handle's own arm of its tap. The core shares one arm
+ * between the subscribers of a tap and window and counts them, so the SDK keeps no reference count.
+ */
 interface BindingState {
   readonly key: string;
   readonly baseKey: string;
@@ -302,7 +304,6 @@ interface BindingState {
   readonly windowBlocks: number;
   readonly nativeEffectId: string;
   readonly descriptor: ObservationDescriptor;
-  refs: number;
   latest: ObservationReadResult | undefined;
   lastSequence: bigint | undefined;
   nativeMissed: bigint;
@@ -355,6 +356,8 @@ interface HandleState {
   epoch: bigint;
   configuration: ObservationSubscriptionConfiguration;
   entries: readonly ResolvedSelection[];
+  /** This handle's arm of each selection, by `ResolvedSelection.key`. */
+  readonly bindings: Map<string, BindingState>;
   /** The selections the engine ended. */
   ended: readonly ObservationSelection[];
   callback: ((notification: ObservationSubscriptionNotification) => void) | undefined;
@@ -400,16 +403,11 @@ function canonicalLimits(overrides: ObservationSubscriptionLimits | undefined): 
   };
   const subscriptionLimits = {
     maximumHandles: value("maximumHandles", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumHandles),
-    maximumBindings: value("maximumBindings", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumBindings),
     maximumSelections: value("maximumSelections", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumSelections),
-    maximumWindowBlocks: value("maximumWindowBlocks", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumWindowBlocks),
     maximumCadenceMs: value("maximumCadenceMs", DEFAULT_OBSERVATION_SUBSCRIPTION_LIMITS.maximumCadenceMs),
   };
   if (subscriptionLimits.maximumSelections > MAXIMUM_OBSERVATION_READS) {
     throw new MisoUsageError(`maximumSelections cannot exceed ${MAXIMUM_OBSERVATION_READS}`);
-  }
-  if (subscriptionLimits.maximumBindings > MAXIMUM_OBSERVATION_READS) {
-    throw new MisoUsageError(`maximumBindings cannot exceed ${MAXIMUM_OBSERVATION_READS}`);
   }
   return Object.freeze(subscriptionLimits);
 }
@@ -431,15 +429,14 @@ function normalizedRequest(
   if (request.selections.length > subscriptionLimits.maximumSelections) {
     throw new MisoUsageError(`observation subscription selections are capped at ${subscriptionLimits.maximumSelections}`);
   }
-  // `readObservations` also validates, but admission must happen before the live-control
-  // transaction. Calling it here avoids reserving a binding for a malformed target.
+  // `readObservations` also validates, but admission must happen before the `Observe`
+  // transaction. Calling it here sends no edit for a malformed target.
   validateObservationSelections(request.selections);
   const selections = request.selections.map((selection) => cloneSelection(selection));
-  if (!Number.isSafeInteger(request.windowBlocks)
-      || request.windowBlocks <= 0 || request.windowBlocks > subscriptionLimits.maximumWindowBlocks) {
-    throw new MisoUsageError(
-      `observation windowBlocks must be an integer in 1..=${subscriptionLimits.maximumWindowBlocks}`,
-    );
+  // The core bounds the window (`observation.window`, #1584 D2); the SDK refuses only what is not
+  // a window at all.
+  if (!Number.isSafeInteger(request.windowBlocks) || request.windowBlocks <= 0) {
+    throw new MisoUsageError("observation windowBlocks must be a positive integer");
   }
   const cadenceMs = request.cadenceMs ?? 100;
   if (!Number.isSafeInteger(cadenceMs) || cadenceMs <= 0 || cadenceMs > subscriptionLimits.maximumCadenceMs) {
@@ -465,8 +462,8 @@ function normalizedRequest(
 }
 
 function mapSelection(map: ObservationMap, selection: ObservationSelection, windowBlocks: number): ResolvedSelection {
-  // A session whose plans bind no observation tap (#1589 R1: booted with no observation taps) has
-  // an empty map; its refusal is the core's `observation.unavailable`, before any edit is sent.
+  // A session whose plans bind no observation tap (no effect declares one; #1590 D5) has an
+  // empty map; its refusal is the core's `observation.unavailable`, before any edit is sent.
   if (map.bindings.length === 0) {
     throw new MisoEngineError("this session binds no observation tap", {
       phase: "output",
@@ -620,6 +617,22 @@ function fullFrameRefusal(error: unknown): unknown {
   );
 }
 
+/**
+ * The core's subscriber refusals are the caller's misuse (#1590 D1): another window on a tap a
+ * subscriber holds, and a disarm of a tap not bound with that window. They reach the caller as
+ * `MisoUsageError` with the core's code; every other refusal is unchanged.
+ */
+function subscriberUsageError(error: unknown): unknown {
+  if (!(error instanceof MisoEngineError)) return error;
+  if (error.diagnosticCode === "observation.window_conflict") {
+    return new MisoUsageError("observation window conflicts with a managed subscriber", error.diagnosticCode);
+  }
+  if (error.diagnosticCode === "observation.not_subscribed") {
+    return new MisoUsageError("the observation is not subscribed with that window", error.diagnosticCode);
+  }
+  return error;
+}
+
 /** The engine's one command entry, as the observation owner sends frames through it (#1589 D3). */
 export interface ObservationFrameEndpoint {
   /** Send one command frame and return its reply; a failed call throws (`controlCallFailure`). */
@@ -650,9 +663,11 @@ export function observationFrameTransport(
   const apply = async (edits: readonly ObserveEdit[]): Promise<ObserveApplied> => {
     let expectedRevision = await endpoint.committedRevision();
     for (let attempt = 0; ; attempt += 1) {
+      // The ceiling first: an endpoint may learn it with a frame of its own (the headless queue's
+      // revision probe), which must not take a request ID after this transaction's.
+      const limit = endpoint.maximumFrameBytes();
       const requestId = endpoint.requestIds.next();
       const frame = encodeObserveTransaction({ requestId, expectedRevision, edits });
-      const limit = endpoint.maximumFrameBytes();
       if (limit !== undefined && frame.length > limit) {
         throw new MisoUsageError(
           `the observation transaction needs ${frame.length} bytes and one control frame holds ${limit}; subscribe fewer taps at once`,
@@ -690,28 +705,151 @@ export function observationFrameTransport(
     }
   };
   const read = async (selections: readonly ObservationFrameSelection[]): Promise<ObservationReadPage> => {
-    const limit = endpoint.maximumFrameBytes();
-    const perRead = limit === undefined
-      ? OBSERVATION_READ_MAXIMUM_SELECTIONS
-      : Math.max(1, Math.min(
-        OBSERVATION_READ_MAXIMUM_SELECTIONS,
-        Math.floor((limit - OBSERVATION_READ_BASE_BYTES) / OBSERVATION_READ_ROW_BYTES),
-      ));
-    const rows: ObservationFrameRow[] = [];
-    let observedSample = 0n;
-    for (let start = 0; start < selections.length; start += perRead) {
-      const chunk = selections.slice(start, start + perRead);
-      const requestId = endpoint.requestIds.next();
-      const reply = decodeObservationReadReply(await endpoint.send(encodeObservationRead(requestId, chunk)));
-      if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
-      if (!reply.ok) throw observationRefusal("the engine refused the observation read", reply.status, reply.diagnostics);
-      if (reply.value.rows.length !== chunk.length) throw malformed("an observation page holds the wrong row count");
-      rows.push(...reply.value.rows);
-      observedSample = reply.value.observedSample;
-    }
-    return Object.freeze({ observedSample, rows: Object.freeze(rows) });
+    const steps = observationReadSteps(endpoint.requestIds, endpoint.maximumFrameBytes(), selections);
+    let step = steps.next();
+    while (step.done !== true) step = steps.next(await endpoint.send(step.value));
+    return step.value;
   };
   return { apply, read };
+}
+
+/**
+ * The frames of one `OBSERVATION_READ` page: a read of more selections than one reply frame can
+ * carry (`64 + 192 n` bytes, #1586 D4) is sent as several reads, in order; the rows are one page.
+ * Each step yields a request frame and takes its reply.
+ */
+function* observationReadSteps(
+  requestIds: ControlRequestIds,
+  maximumFrameBytes: number | undefined,
+  selections: readonly ObservationFrameSelection[],
+): Generator<Uint8Array, ObservationReadPage, Uint8Array> {
+  const perRead = maximumFrameBytes === undefined
+    ? OBSERVATION_READ_MAXIMUM_SELECTIONS
+    : Math.max(1, Math.min(
+      OBSERVATION_READ_MAXIMUM_SELECTIONS,
+      Math.floor((maximumFrameBytes - OBSERVATION_READ_BASE_BYTES) / OBSERVATION_READ_ROW_BYTES),
+    ));
+  const rows: ObservationFrameRow[] = [];
+  let observedSample = 0n;
+  for (let start = 0; start < selections.length; start += perRead) {
+    const chunk = selections.slice(start, start + perRead);
+    const requestId = requestIds.next();
+    const reply = decodeObservationReadReply(yield encodeObservationRead(requestId, chunk));
+    if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+    if (!reply.ok) throw observationRefusal("the engine refused the observation read", reply.status, reply.diagnostics);
+    if (reply.value.rows.length !== chunk.length) throw malformed("an observation page holds the wrong row count");
+    rows.push(...reply.value.rows);
+    observedSample = reply.value.observedSample;
+  }
+  return Object.freeze({ observedSample, rows: Object.freeze(rows) });
+}
+
+/**
+ * The observation map of a strip order (#1590 D3): one binding per console slot or insert whose
+ * effect declares a tap, in the control list's order, with the effect identity its section header
+ * names and the taps the generated catalog declares for that effect. Stable IDs only (C2).
+ */
+export function observationMapOf(order: ControlStripOrder): ObservationMap {
+  const bindings: ObservationBinding[] = [];
+  for (const section of stripSections(order)) {
+    const effect = CATALOG.effects.find((candidate) => candidate.id === section.effect);
+    if (effect === undefined || effect.observations.length === 0) continue;
+    bindings.push(Object.freeze({
+      trackId: section.stripId,
+      rack: section.rack,
+      effectSlotId: section.sectionId,
+      nativeEffectId: section.effect,
+      tapIds: Object.freeze(effect.observations.map((tap) => tap.id)),
+    }));
+  }
+  return Object.freeze({ bindings: Object.freeze(bindings) });
+}
+
+/** The map's binding of a selection, or the `sdk.observation.selection` refusal. */
+function selectedBinding(map: ObservationMap, selection: ObservationSelection): ObservationBinding {
+  const binding = map.bindings.find((candidate) => candidate.trackId === selection.trackId
+    && candidate.rack === selection.rack && candidate.effectSlotId === selection.effectSlotId);
+  if (binding === undefined || !binding.tapIds.includes(selection.tapId)) {
+    throw new MisoEngineError("the selected observation is unavailable in the current owner", {
+      phase: "output",
+      code: "unsupported",
+      result: 7,
+      diagnostics: [{ code: "sdk.observation.selection", path: selection.effectSlotId }],
+    });
+  }
+  return binding;
+}
+
+/** The send an `OBSERVATION_READ` of `readObservations` goes through, synchronous or not. */
+export interface ObservationReadEndpoint<R> {
+  readonly send: (frame: Uint8Array) => R;
+  readonly requestIds: ControlRequestIds;
+  readonly maximumFrameBytes: number | undefined;
+}
+
+/**
+ * `readObservations` over `OBSERVATION_READ` (#1590 Q2): each selection is checked against `map`
+ * (the effect and its tap exist) before any frame is sent, read with its own lanes, and returned
+ * with the catalog's descriptor and the reply's status, lanes and window.
+ */
+export function readObservationResults(
+  map: ObservationMap,
+  selections: readonly ObservationSelection[],
+  sampleRateHz: number,
+  endpoint: ObservationReadEndpoint<Uint8Array>,
+): readonly ObservationReadResult[];
+export function readObservationResults(
+  map: ObservationMap,
+  selections: readonly ObservationSelection[],
+  sampleRateHz: number,
+  endpoint: ObservationReadEndpoint<Promise<Uint8Array>>,
+): Promise<readonly ObservationReadResult[]>;
+export function readObservationResults(
+  map: ObservationMap,
+  selections: readonly ObservationSelection[],
+  sampleRateHz: number,
+  endpoint: ObservationReadEndpoint<Uint8Array | Promise<Uint8Array>>,
+): readonly ObservationReadResult[] | Promise<readonly ObservationReadResult[]> {
+  validateObservationSelections(selections);
+  const bindings = selections.map((selection) => selectedBinding(map, selection));
+  const descriptors = selections.map((selection, index) => tapDescriptor(bindings[index]!, selection.tapId));
+  const frames = selections.map((selection) => Object.freeze({
+    stripId: selection.trackId,
+    rack: selection.rack,
+    effectId: selection.effectSlotId,
+    tapId: selection.tapId,
+    channels: selection.channels,
+  }));
+  const results = (page: ObservationReadPage): readonly ObservationReadResult[] => Object.freeze(
+    page.rows.map((row, index) => {
+      const selection = selections[index]!;
+      return Object.freeze({
+        trackId: selection.trackId,
+        rack: selection.rack,
+        effectSlotId: selection.effectSlotId,
+        tapId: selection.tapId,
+        nativeEffectId: bindings[index]!.nativeEffectId,
+        descriptor: descriptors[index]!,
+        channels: selection.channels,
+        sampleRateHz,
+        status: row.status,
+        ...(row.status === "ready" && row.left !== undefined ? { left: row.left } : {}),
+        ...(row.status === "ready" && row.right !== undefined ? { right: row.right } : {}),
+        ...(row.status === "ready" && row.window !== undefined ? { window: row.window } : {}),
+      });
+    }),
+  );
+  const steps = observationReadSteps(endpoint.requestIds, endpoint.maximumFrameBytes, frames);
+  const drive = (step: IteratorResult<Uint8Array, ObservationReadPage>):
+    readonly ObservationReadResult[] | Promise<readonly ObservationReadResult[]> => {
+    while (step.done !== true) {
+      const reply = endpoint.send(step.value);
+      if (reply instanceof Promise) return reply.then((bytes) => drive(steps.next(bytes)));
+      step = steps.next(reply);
+    }
+    return results(step.value);
+  };
+  return drive(steps.next());
 }
 
 class ObservationSubscriptionImpl implements ObservationSubscription {
@@ -804,7 +942,6 @@ export class ObservationSubscriptionOwner {
   #nextSpectrumHandle = 1n;
   #nextSpectrumJob = 1n;
   #handles = new Map<bigint, HandleState>();
-  #bindings = new Map<string, BindingState>();
   #responseHandles = new Map<bigint, ResponseHandleState>();
   #responseJobs = new Map<string, ResponseJobState>();
   #spectrumHandles = new Map<bigint, SpectrumHandleState>();
@@ -882,30 +1019,17 @@ export class ObservationSubscriptionOwner {
       const map = await this.#map(epoch);
       const entries = normalized.configuration.selections.map((selection) =>
         mapSelection(map, selection, normalized.configuration.windowBlocks));
-      if (entries.some((entry) => {
-        const managed = [...this.#bindings.values()].find((binding) => binding.baseKey === entry.baseKey);
-        return managed !== undefined && managed.key !== entry.key;
-      })) {
-        throw new MisoUsageError("observation window conflicts with a managed subscriber");
-      }
-      const newEntries = this.#newEntries(entries);
-      if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
-        throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
-      }
-      const edits = newEntries.map((entry) => this.#edit(entry, true, normalized.configuration.windowBlocks));
-      await this.#preflight(newEntries, epoch);
+      // One arm per selection (#1590 D1). The core shares an arm between the subscribers of a tap
+      // and window, and refuses another window on a held tap (`observation.window_conflict`).
+      const edits = entries.map((entry) => this.#edit(entry, true, normalized.configuration.windowBlocks));
       const applied = await this.#apply(edits, epoch);
       this.#assertEpoch(epoch);
       const state = this.#newHandle(normalized.configuration, entries, normalized.callback, normalized.onEnd);
-      newEntries.forEach((entry, index) => {
-        this.#bindings.set(entry.key, this.#newBinding(entry, applied!, applied!.observeArmTags[index]!));
-      });
-      entries.filter((entry) => !newEntries.includes(entry)).forEach((entry) => {
-        const held = this.#bindings.get(entry.key);
-        if (held !== undefined) held.refs += 1;
+      entries.forEach((entry, index) => {
+        state.bindings.set(entry.key, this.#newBinding(entry, applied!, applied!.observeArmTags[index]!));
       });
       this.#handles.set(state.id, state);
-      // A subscription that joins bindings already armed resolves with their arm sample at once.
+      // A subscription that joins arms already read armed resolves with their arm sample at once.
       this.#settleArmed(state);
       this.#startTimer();
       return this.#receipt(state);
@@ -925,46 +1049,18 @@ export class ObservationSubscriptionOwner {
       const desiredByKey = new Map(entries.map((entry) => [entry.key, entry] as const));
       const remove = state.entries.filter((entry) => !desiredByKey.has(entry.key));
       const add = entries.filter((entry) => !currentByKey.has(entry.key));
-      const conflicts = entries.filter((entry) => {
-        const base = [...this.#bindings.values()].find((binding) => binding.baseKey === entry.baseKey);
-        if (base === undefined || base.key === entry.key) return false;
-        const ownedByThisHandle = state.entries.some((current) => current.key === base.key);
-        return !ownedByThisHandle || base.refs > 1;
-      });
-      if (conflicts.length > 0) {
-        throw new MisoUsageError("observation window conflicts with a managed subscriber");
-      }
-      const newEntries = add.filter((entry) => !this.#bindings.has(entry.key));
-      if (this.#bindings.size + newEntries.length > this.#subscriptionLimits.maximumBindings) {
-        throw new MisoUsageError(`managed observation bindings are capped at ${this.#subscriptionLimits.maximumBindings}`);
-      }
-      // The bindings this handle alone holds and drops: each holds one core reference, which a
-      // disarm ends. A window change is the disarm of the old window and the arm of the new one in
-      // one transaction, which the core applies as one re-arm (#1584 gate 1).
-      const release = remove.filter((entry) => {
-        const binding = this.#bindings.get(entry.key);
-        return binding !== undefined && binding.refs === 1;
-      });
+      // The disarms of the selections it drops, then the arms of the selections it adds, in one
+      // transaction (#1590 D1): a window change on a tap this handle alone holds is one re-arm in
+      // the core (#1584 D3), and one that another subscriber shares is the core's window conflict.
       const edits: ObserveEdit[] = [
-        ...release.map((entry) => this.#edit(entry, false, entry.windowBlocks)),
-        ...newEntries.map((entry) => this.#edit(entry, true, normalized.configuration.windowBlocks)),
+        ...remove.map((entry) => this.#edit(entry, false, entry.windowBlocks)),
+        ...add.map((entry) => this.#edit(entry, true, normalized.configuration.windowBlocks)),
       ];
-      // A tap this handle alone re-arms with another window reads armed now; only the others must
-      // read unarmed before they are acquired.
-      await this.#preflight(newEntries.filter((entry) => !release.some((released) => released.baseKey === entry.baseKey)), epoch);
       const applied = await this.#apply(edits, epoch);
       this.#assertEpoch(epoch);
-      release.forEach((entry) => this.#bindings.delete(entry.key));
-      remove.filter((entry) => !release.includes(entry)).forEach((entry) => {
-        const binding = this.#bindings.get(entry.key);
-        if (binding !== undefined) binding.refs -= 1;
-      });
-      newEntries.forEach((entry, index) => {
-        this.#bindings.set(entry.key, this.#newBinding(entry, applied!, applied!.observeArmTags[release.length + index]!));
-      });
-      add.filter((entry) => !newEntries.includes(entry)).forEach((entry) => {
-        const held = this.#bindings.get(entry.key);
-        if (held !== undefined) held.refs += 1;
+      remove.forEach((entry) => state.bindings.delete(entry.key));
+      add.forEach((entry, index) => {
+        state.bindings.set(entry.key, this.#newBinding(entry, applied!, applied!.observeArmTags[remove.length + index]!));
       });
       // `armed()` follows the selections: a configuration that removed or added one is another wait,
       // and a wait still pending on the old one is closed.
@@ -1004,18 +1100,11 @@ export class ObservationSubscriptionOwner {
       this.#assertHandle(state);
       const epoch = this.#epoch;
       await this.#waitForPoll();
-      const disarm = state.entries.filter((entry) => {
-        const binding = this.#bindings.get(entry.key);
-        return binding !== undefined && binding.refs === 1;
-      });
-      const edits = disarm.map((entry) => this.#edit(entry, false, entry.windowBlocks));
+      // One disarm per selection (#1590 D1): the core disarms a tap when its last subscriber leaves.
+      const edits = state.entries.map((entry) => this.#edit(entry, false, entry.windowBlocks));
       await this.#apply(edits, epoch);
       this.#assertEpoch(epoch);
-      disarm.forEach((entry) => this.#bindings.delete(entry.key));
-      state.entries.filter((entry) => !disarm.includes(entry)).forEach((entry) => {
-        const binding = this.#bindings.get(entry.key);
-        if (binding !== undefined) binding.refs -= 1;
-      });
+      state.bindings.clear();
       this.#handles.delete(state.id);
       state.closed = true;
       state.armed.reject(armedRefusal(
@@ -1035,7 +1124,7 @@ export class ObservationSubscriptionOwner {
     this.#assertHandle(state);
     const rows: ObservationReadResult[] = [];
     for (const entry of state.entries) {
-      const row = this.#bindings.get(entry.key)?.latest;
+      const row = state.bindings.get(entry.key)?.latest;
       if (row !== undefined) rows.push(projectRow(row, entry.selection.channels));
     }
     return Object.freeze(rows);
@@ -1061,8 +1150,8 @@ export class ObservationSubscriptionOwner {
       const stop = this.#transport.spectrumStop?.();
       if (stop !== undefined) void Promise.resolve(stop).catch(() => undefined);
     }
+    for (const state of this.#handles.values()) state.bindings.clear();
     this.#handles.clear();
-    this.#bindings.clear();
     this.#responseHandles.clear();
     this.#responseJobs.clear();
     this.#spectrumHandles.clear();
@@ -1096,17 +1185,17 @@ export class ObservationSubscriptionOwner {
     const lost = new Set(ended.keys.map((key) => keyFor({
       trackId: key.stripId, rack: key.rack, effectSlotId: key.effectSlotId, tapId: key.tapId, channels: "both",
     })));
-    const gone = new Set<string>();
-    for (const binding of [...this.#bindings.values()]) {
-      if (!lost.has(binding.baseKey)) continue;
-      // An event of a commit at or before this arm's reply ended an earlier arm of the tap (the
-      // event came late, behind a removal and a re-add); this arm is the core's now.
-      if (ended.revision <= binding.armRevision) continue;
-      this.#bindings.delete(binding.key);
-      gone.add(binding.baseKey);
-    }
-    if (gone.size === 0) return;
     for (const state of [...this.#handles.values()]) {
+      const gone = new Set<string>();
+      for (const binding of [...state.bindings.values()]) {
+        if (!lost.has(binding.baseKey)) continue;
+        // An event of a commit at or before this arm's reply ended an earlier arm of the tap (the
+        // event came late, behind a removal and a re-add); this arm is the core's now.
+        if (ended.revision <= binding.armRevision) continue;
+        state.bindings.delete(binding.key);
+        gone.add(binding.baseKey);
+      }
+      if (gone.size === 0) continue;
       const dropped = state.entries.filter((entry) => gone.has(entry.baseKey));
       if (dropped.length === 0) continue;
       state.armed.reject(armedRefusal(
@@ -1163,6 +1252,7 @@ export class ObservationSubscriptionOwner {
       epoch: this.#epoch,
       configuration,
       entries: Object.freeze([...entries]),
+      bindings: new Map(),
       ended: Object.freeze([]),
       callback,
       onEnd,
@@ -1186,7 +1276,6 @@ export class ObservationSubscriptionOwner {
       windowBlocks: entry.windowBlocks,
       nativeEffectId: entry.binding.nativeEffectId,
       descriptor: tapDescriptor(entry.binding, entry.selection.tapId),
-      refs: 1,
       latest: undefined,
       lastSequence: undefined,
       nativeMissed: 0n,
@@ -1195,6 +1284,17 @@ export class ObservationSubscriptionOwner {
       armRevision: applied.revision,
     };
     binding.latest = pendingBindingRow(binding, this.#transport.sampleRateHz());
+    // A handle that joins an arm another handle of this owner holds (the core reported the same
+    // tag) starts from that handle's latest read of it, as the tap is the same arm.
+    for (const state of this.#handles.values()) {
+      const held = state.bindings.get(entry.key);
+      if (held === undefined || held.armTag !== armTag) continue;
+      binding.latest = held.latest;
+      binding.lastSequence = held.lastSequence;
+      binding.nativeMissed = held.nativeMissed;
+      binding.armSample = held.armSample;
+      break;
+    }
     return binding;
   }
 
@@ -1210,38 +1310,16 @@ export class ObservationSubscriptionOwner {
     });
   }
 
-  #newEntries(entries: readonly ResolvedSelection[]): readonly ResolvedSelection[] {
-    return entries.filter((entry) => !this.#bindings.has(entry.key));
-  }
-
   /** Resolve `state.armed` once every selection's binding read armed with its own tag. */
   #settleArmed(state: HandleState): void {
     if (state.armed.settled) return;
     let sample = 0n;
     for (const entry of state.entries) {
-      const armSample = this.#bindings.get(entry.key)?.armSample;
+      const armSample = state.bindings.get(entry.key)?.armSample;
       if (armSample === undefined) return;
       if (armSample > sample) sample = armSample;
     }
     if (state.entries.length !== 0) state.armed.resolve(sample);
-  }
-
-  /**
-   * A new binding's tap must read unarmed: one armed already is held by someone else (another
-   * sender's `Observe`), whose window this owner cannot share.
-   */
-  async #preflight(newEntries: readonly ResolvedSelection[], epoch: bigint): Promise<void> {
-    if (newEntries.length === 0) return;
-    const page = await this.#transport.read(newEntries.map((entry) => frameSelection(entry.selection)));
-    this.#assertEpoch(epoch);
-    if (page.rows.length !== newEntries.length) {
-      throw new MisoEngineError("the observation preflight returned the wrong row count", {
-        phase: "output", code: "abiMismatch", result: 2,
-      });
-    }
-    if (page.rows.some((row) => row.status !== "unarmed")) {
-      throw new MisoUsageError("the observation is already armed by another subscriber and cannot be acquired");
-    }
   }
 
   #edit(entry: ResolvedSelection, armed: boolean, windowBlocks: number): ObserveEdit {
@@ -1293,7 +1371,7 @@ export class ObservationSubscriptionOwner {
       } catch (error) {
         if (!(error instanceof MisoEngineError) || error.code !== "backpressure" || wait === undefined
             || attempt >= MAXIMUM_ADMISSION_RETRIES) {
-          throw error;
+          throw subscriberUsageError(error);
         }
         // Renders on their own clock: wait for one within the bound, then send the same edits
         // again. When the bound passes without a render the refusal stands, so a context that does
@@ -1309,27 +1387,33 @@ export class ObservationSubscriptionOwner {
   }
 
   async #refresh(epoch = this.#epoch): Promise<void> {
-    if (this.#bindings.size === 0) return;
-    const bindings = [...this.#bindings.values()];
-    if (bindings.length > MAXIMUM_OBSERVATION_READS) {
-      throw new MisoUsageError(`managed observation reads are capped at ${MAXIMUM_OBSERVATION_READS}`);
+    const bindings = [...this.#handles.values()].flatMap((state) => [...state.bindings.values()]);
+    if (bindings.length === 0) return;
+    // One read row per tap: handles that share a tap read the same row, and the plan bounds the
+    // taps (one arm per declared tap, #1584 D3).
+    const taps = new Map<string, number>();
+    const selections: ObservationFrameSelection[] = [];
+    for (const binding of bindings) {
+      if (taps.has(binding.baseKey)) continue;
+      taps.set(binding.baseKey, selections.length);
+      selections.push(frameSelection(binding.selection));
     }
-    const page = await this.#transport.read(bindings.map((binding) => frameSelection(binding.selection)));
+    const page = await this.#transport.read(selections);
     this.#assertEpoch(epoch);
-    if (page.rows.length !== bindings.length) {
+    if (page.rows.length !== selections.length) {
       throw new MisoEngineError("the observation read returned the wrong row count", {
         phase: "output", code: "abiMismatch", result: 2,
       });
     }
     const sampleRateHz = this.#transport.sampleRateHz();
-    const superseded = new Set<string>();
-    page.rows.forEach((row, index) => {
-      const binding = bindings[index]!;
+    const superseded = new Set<BindingState>();
+    bindings.forEach((binding) => {
+      const row = page.rows[taps.get(binding.baseKey)!]!;
       if (binding.armSample === undefined) {
         if (row.armed && row.armTag === binding.armTag) binding.armSample = row.armSample;
-        // By the reference rule a newer `Observe` of the tap is sent only after this binding's last
-        // subscription closed, so a newer tag on a pending binding is an inconsistent state.
-        else if (row.armTag > binding.armTag) superseded.add(binding.key);
+        // The core shares an arm while a subscriber holds it, so a newer arm of the tap while this
+        // binding still holds it (unread) is an inconsistent state.
+        else if (row.armTag > binding.armTag) superseded.add(binding);
       }
       const result = bindingRow(binding, row, sampleRateHz);
       const previous = binding.lastSequence;
@@ -1342,7 +1426,7 @@ export class ObservationSubscriptionOwner {
       binding.latest = result;
     });
     for (const state of this.#handles.values()) {
-      if (state.entries.some((entry) => superseded.has(entry.key))) {
+      if ([...state.bindings.values()].some((binding) => superseded.has(binding))) {
         state.armed.reject(armedRefusal(
           "internal", "sdk.observation.superseded", "a read showed a newer arm on a pending observation binding",
         ));
@@ -1377,7 +1461,7 @@ export class ObservationSubscriptionOwner {
       let nativeMissed = 0n;
       let skipped = 0n;
       for (const entry of state.entries) {
-        const binding = this.#bindings.get(entry.key);
+        const binding = state.bindings.get(entry.key);
         const row = binding?.latest;
         if (binding === undefined || row?.status !== "ready" || row.window === undefined) continue;
         const sequence = row.window.sequence;

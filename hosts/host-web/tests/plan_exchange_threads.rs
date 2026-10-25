@@ -70,7 +70,6 @@ fn document() -> String {
 fn options() -> WebBootOptions {
     WebBootOptions {
         live_control_meter_blocks: 2,
-        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     }
 }
