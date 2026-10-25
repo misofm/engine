@@ -7687,12 +7687,11 @@ where
         self.observation_armed
     }
 
-    /// Admits a batch of subscription changes, then queues it (#1676 D1, attempt 2). Test support
-    /// (#1590): no host calls it; a host arms or disarms a tap with the core's `Observe` edit, which
-    /// runs the same admission (`admit_observation_batch`). A change names the producer's
-    /// position in the newest plan's effect producers and the tap, as
-    /// `resolve_observation_key` returns them. The admission rules below are tested here
-    /// because an edit cannot reach every one of them (the edit nets each tap to one change).
+    /// Admits a batch of subscription changes with nothing queued (#1676 D1, attempt 2; #1584 D4):
+    /// the core's `Observe` edit, which must finish other checks before the first write, admits its
+    /// net changes here and pushes them after, with nothing pushed to any observation queue in
+    /// between. A change names the producer's position in the newest plan's effect producers and
+    /// the tap, as [`Self::resolve_observation_key`] returns them.
     ///
     /// Three checks run before anything is written, in this order, and a refusal names the first
     /// change in the iterator's order that breaks the first check that fails:
@@ -7706,7 +7705,7 @@ where
     ///    armed add their key's encoded bytes, disarms of armed taps remove theirs, and the rest
     ///    change nothing (#1685 D1). A batch that would leave armed taps whose one
     ///    `OBSERVATION_ENDED` event, every key with its real IDs, outgrows the control frame
-    ///    (`observation_frame_bytes`) is [`ObservationRefusal::Limit`], at the arm that
+    ///    ([`Self::observation_frame_bytes`]) is [`ObservationRefusal::Limit`], at the arm that
     ///    crosses after every removal of the batch is counted. A retry of the same batch never
     ///    succeeds until another tap is disarmed.
     /// 3. **The room.** Each producer's observation queue holds one record per declared tap until
@@ -7715,34 +7714,14 @@ where
     ///    [`ObservationRefusal::NoProducer`]. These two are one check: the first change in order
     ///    that names no producer or a producer without the room the batch needs is refused.
     ///
-    /// Then every change is queued. A refusal writes nothing observable, so it is whole and
-    /// precedes every acknowledgement. The call is linear in the batch, reads the per-slot state
-    /// the pushes keep and per-producer scratch sized with the plan, and allocates nothing, so it
-    /// runs in the browser worklet's message handler, on the audio thread between render quanta.
+    /// A refusal writes nothing observable, so it is whole and precedes every acknowledgement. The
+    /// check is linear in the batch and reads the per-slot state the pushes keep and per-producer
+    /// scratch sized with the plan; it allocates nothing itself (the edit that calls it builds its
+    /// list of changes on the control thread).
     ///
     /// # Errors
     ///
     /// [`ObservationRefusal`], as above. Nothing was queued and no state moved.
-    ///
-    /// # Panics
-    ///
-    /// Never in practice: the room check covers every push of the batch on the one control thread,
-    /// so a push that is refused after it is an engine fault, which would break the whole-batch
-    /// promise and is not returned as a typed refusal.
-    #[cfg(feature = "test-support")]
-    pub fn test_admit_and_push_observation_batch(
-        &mut self,
-        changes: impl Iterator<Item = ObservationChange> + Clone,
-    ) -> Result<(), ObservationRefusal> {
-        self.admit_observation_batch(changes.clone())?;
-        self.push_admitted_observation_batch(changes);
-        Ok(())
-    }
-
-    /// The three admission checks (listed at `test_admit_and_push_observation_batch`), with
-    /// nothing queued: the core's `Observe` edit (#1584 D4), which must finish other checks before
-    /// the first write, admits first and pushes after them, with nothing pushed to any observation
-    /// queue in between.
     pub(crate) fn admit_observation_batch(
         &mut self,
         changes: impl Iterator<Item = ObservationChange> + Clone,
@@ -7791,16 +7770,6 @@ where
             }
         }
         Ok(())
-    }
-
-    /// Queues a batch [`Self::admit_observation_batch`] admitted, with no observation record queued
-    /// since: the room it checked is still there, so no push can be refused.
-    #[cfg(feature = "test-support")]
-    fn push_admitted_observation_batch(
-        &mut self,
-        changes: impl Iterator<Item = ObservationChange>,
-    ) {
-        self.push_tagged_observation_batch(changes.map(|change| (change, 0)));
     }
 
     /// Queues an admitted batch with each record's tag (#1585 D4): the tag a
@@ -8784,6 +8753,174 @@ mod tests {
             assert!(producer.publish_frame(&reducing(0)));
             render(&mut children, 0);
             assert_eq!(batches(&mut children), vec![(0, vec![3.0])]);
+        }
+    }
+
+    /// #1676 the admission rules an `Observe` edit cannot reach (#1590 moved them here from the
+    /// integration tests, where they ran through a public batch entry no host calls): the edit
+    /// resolves every key to a producer and a declared tap, and nets each tap to one change, so a
+    /// tap with no slot, a position past the producers and a second naming of a tap reach
+    /// `admit_observation_batch` only through an engine fault. The edit maps each to
+    /// `CommandError::Internal`; these tests hold that the check itself refuses, at the right
+    /// index, before anything is queued.
+    #[cfg(feature = "test-support")]
+    mod observation_admission {
+        use crate::{
+            CompiledChildren, ControlAdapter, ControlLimits, ObservationChange, ObservationRefusal,
+            PlanResources, RuntimePreparer, compile_children,
+        };
+        use host_core::{
+            CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+            HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost, SuccessorBase,
+            prepare_host_runtime_with_live_lanes, prepare_host_runtime_with_live_lanes_successor,
+        };
+
+        /// Three tracks, `comp1` to `comp3`, each with one compressor insert `comp` (one tap).
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/compressor-dynamic-bank-observation.json");
+
+        struct Adapter;
+
+        impl ControlAdapter for Adapter {
+            type Row = PlanResources;
+            const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+            const OBSERVE_EDIT: bool = true;
+        }
+
+        /// A preparer that binds a queue slot for every declared tap.
+        struct Preparer;
+
+        impl RuntimePreparer for Preparer {
+            fn prepare(
+                &self,
+                compiled: &CompiledSession,
+                caps: &HostPrepareCaps,
+                lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
+                successor: Option<SuccessorBase<'_>>,
+                superseded: &LiveValuesSuperseded,
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
+                let live = HostLiveControlRequest {
+                    observation_taps: 4,
+                    ..HostLiveControlRequest::default()
+                };
+                let (host, handles) = match successor {
+                    Some(base) => prepare_host_runtime_with_live_lanes_successor(
+                        compiled, caps, &live, lanes, base, superseded,
+                    ),
+                    None => prepare_host_runtime_with_live_lanes(
+                        compiled, caps, &live, lanes, superseded,
+                    ),
+                }?;
+                Ok((host, handles, None))
+            }
+        }
+
+        fn limits() -> ControlLimits {
+            ControlLimits {
+                source_ring_frames: 1_024,
+                maximum_automation_spans_per_block: 128,
+                maximum_document_bytes: 1_000_000,
+                maximum_diagnostic_bytes: 4_096,
+                maximum_tracks: 100,
+                maximum_sources: 100,
+                maximum_routes: 100,
+                maximum_effects: 100,
+                maximum_graph_session_plus_plan_bytes: 1_000_000_000,
+                maximum_source_total_bytes: 100_000_000,
+                maximum_source_overhead_bytes: 100_000_000,
+                maximum_effect_state_bytes: 1_000_000_000,
+                maximum_effect_scratch_bytes: 1_000_000_000,
+                maximum_builtin_retained_bytes: 1_000_000_000,
+                maximum_control_retained_bytes: 100_000_000,
+                maximum_named_allocation_bytes: 1_000_000_000,
+                maximum_meter_streams: 4_096,
+                maximum_meter_items: 1 << 20,
+                maximum_meter_bytes: 1 << 26,
+                maximum_control_frame_bytes: 65_536,
+                maximum_replay_bytes: 262_144,
+                maximum_replay_entries: 16,
+                maximum_submixes: 0,
+                maximum_vcas: 0,
+                maximum_vca_reach_pairs: u64::MAX,
+                maximum_replacement_peak_bytes: u64::MAX,
+            }
+        }
+
+        const fn change(position: usize, tap_index: u32) -> ObservationChange {
+            ObservationChange {
+                position,
+                tap_index,
+                armed: true,
+                window_blocks: 4,
+            }
+        }
+
+        /// The free room of every producer's observation queue, and the armed count: what a refused
+        /// admission must leave as it was.
+        fn state(children: &CompiledChildren<Adapter>) -> (Vec<usize>, usize) {
+            (
+                children
+                    .session
+                    .test_effect_producers()
+                    .iter()
+                    .map(host_core::EffectControlProducer::observe_available_capacity)
+                    .collect(),
+                children.session.observation_armed(),
+            )
+        }
+
+        /// Test value: red if admission takes a tap index past the producer's menu (the record
+        /// would be queued and never applied), takes a position past the producers, or lets a
+        /// batch name one tap twice (the frame check counts each tap once, so `[disarm A, arm A,
+        /// arm B]` with the frame full would admit an event over it), or if a refusal names
+        /// another change or moves the queues or the armed count.
+        #[test]
+        fn a_tap_with_no_slot_a_missing_producer_and_a_second_naming_are_refused() {
+            let mut children =
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer)).expect("boot");
+            let producers = children.session.test_effect_producers().len();
+            let menu =
+                u32::try_from(children.session.test_effect_producers()[0].observe_capacity())
+                    .expect("a small menu");
+            let before = state(&children);
+            let session = &mut children.session;
+            assert_eq!(
+                session.admit_observation_batch([change(0, 0), change(0, menu)].into_iter()),
+                Err(ObservationRefusal::Unbound { index: 1 }),
+                "the tap past the menu, at its own index"
+            );
+            assert_eq!(
+                session.admit_observation_batch([change(0, 0), change(producers, 0)].into_iter()),
+                Err(ObservationRefusal::NoProducer { index: 1 }),
+                "the position past the producers"
+            );
+            assert_eq!(
+                session.admit_observation_batch(
+                    [change(0, 0), change(1, 0), change(0, 0)].into_iter()
+                ),
+                Err(ObservationRefusal::Duplicate { index: 2 }),
+                "the second naming of a tap"
+            );
+            assert_eq!(
+                state(&children),
+                before,
+                "a refusal queues and moves nothing"
+            );
+            // The marks of the refused batches do not leak: the same taps named once are admitted.
+            assert_eq!(
+                children
+                    .session
+                    .admit_observation_batch([change(0, 0), change(1, 0)].into_iter()),
+                Ok(())
+            );
         }
     }
 

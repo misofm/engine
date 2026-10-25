@@ -87,6 +87,17 @@ own.
 - `tools/parameter-metadata/src/abi_layout.rs`, `tools/parameter-metadata/tests/abi_layout.rs`,
   `tools/realtime-policy/render-thread-exports.json`, `scripts/check-abi-layout-v1.py` and its
   self-test fixture, `scripts/check-web-audioworklet.sh`, `scripts/test-web-audioworklet.mjs`.
+- Authorized by root during attempt 1 (each for the purpose its decision-record entry gives):
+  `hosts/host-web/tests/{control_parity,empty_boot,plan_exchange_threads,protocol_cross_host,render_locked_source,render_locked_staging,structural_apply_realtime}.rs`,
+  `hosts/host-web/tests/browser-v1/{browser-correctness.js,direct-oracle.mjs,expected.json}`,
+  `hosts/host-web/qualification/{rebuild-cost.mjs,sdk-response-entry.ts}`,
+  `hosts/host-web/MUTATIONS.md`, `tools/parameter-metadata/tests/{round_trip,control_command_heap}.rs`,
+  `scripts/{check-browser-expected-resources.py,web-mixing-automation-benchmark.mjs}`,
+  `sdk/src/generated/abi.ts` (regenerated), `sdk/src/core/control-list.ts` (`stripSections`),
+  `sdk/README.md`, `docs/{CONTROL_PROTOCOL_REGISTRY.md,CONTROL_PROTOCOL_SEMANTICS.md,EFFECT_OBSERVATION_V1.md}`,
+  `crates/control-plane/src/{compile.rs,adapter.rs,control.rs}`,
+  `crates/control-plane/tests/observation_bindings.rs`, `crates/effect-compiler/src/prepare.rs`,
+  `crates/effect-contract/src/live.rs`.
 
 ## Non-goals
 
@@ -220,6 +231,31 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
   `EFFECT_OBSERVATION_V1.md`'s "Plan replacement drops subscriptions" is now "Plan replacement keeps
   subscriptions", as #1584/#1585 made true; `CONTROL_PROTOCOL_SEMANTICS.md` and `adapter.rs` name
   the edit as the queues' one writer.
+- **Checkpoint 5 (review fold, M1-M4, N1).**
+  - M1: the retained-projection test has one bound per representative, in thousandths of the
+    projection, at the measured `gap / projection` plus about 8 %: identity 10.97 -> 11.850,
+    nine-track 11.07 -> 11.960, console 6.00 -> 6.480 (the console's bound fell from the shared 7).
+    The checkpoint-3 note above (one multiplier of 12) is superseded.
+  - M2: `test_admit_and_push_observation_batch` and `push_admitted_observation_batch` are gone.
+    Every integration test that armed or disarmed a tap (restart keeps the binding, removal ends
+    with an event, room for the end, a strip removal gives one event, ended bytes, push writes the
+    table, armed count across a rebuild) now sends the core's `Observe` edit; a second disarm in
+    the armed-count test is now the core's `observation.not_subscribed`, and the refused push is
+    the edit's `Backpressure`. The three rules the edit cannot reach (`Unbound`, `NoProducer`,
+    `Duplicate`; the edit maps each to `CommandError::Internal`) are one unit test in
+    control.rs's `tests::observation_admission`, calling the `pub(crate)` `admit_observation_batch`.
+    `admission_allocates_nothing` is deleted: the edit path allocates its change list
+    (`admit_observe_writes`), so the property it defended no longer holds on any production path;
+    the doc that claimed it is corrected. `test_effect_producers` stays (the integration tests find
+    producers and their queue room through it).
+  - M3: `sdk/src/internal/rack.ts` and the unused `RACK` constant of `console-evals.mjs` are
+    deleted; the layout's `racks` table stays (the benchmark script and the layout gate read it).
+  - M4: the authorized-paths list above names every path root authorized in this attempt.
+  - N1: the retired-`observationTaps` refusal is one internal helper
+    (`sdk/src/internal/retired-options.ts`) called by `abi.ts`, `boundary.ts` and `host-mirror.ts`.
+- **Known residual (M5, root files a successor):** a disarm does not carry the arm tag of the
+  arm it ends, so a handle's close cannot be told apart from another handle's on the same tap
+  and window in the core's records.
 
 ### Deleted or rewritten tests and their holders
 
@@ -253,3 +289,8 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
 | control-plane `a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming` | rewritten over `rig.apply(Observe)`: a disarm the transaction undoes frees no room, and two arms of one tap count once |
 | control-plane `every_insert_of_a_sixty_four_track_session_subscribes_at_the_browser_frame`, `a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits` | rewritten over `rig.apply(Observe)`; claims kept, the change index of a refusal no longer exists on the edit path |
 | host-web `a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` | moved to control-plane `observation_bindings` unchanged |
+| control-plane `a_change_for_a_tap_with_no_slot_is_refused_and_queues_nothing` | moved into control.rs `tests::observation_admission::a_tap_with_no_slot_a_missing_producer_and_a_second_naming_are_refused` (with `NoProducer` and `Duplicate`) |
+| control-plane `admission_allocates_nothing` | deleted: no production path is allocation-free any more (the edit allocates its change list) |
+| control-plane restart, removal, room-for-the-end, strip-removal, ended-bytes, push-writes-table, armed-count tests | re-aimed onto the `Observe` edit (`Rig::observe` sends it); claims kept |
+| control-plane `a_restart_keeps_the_binding_and_ends_nothing` | repaired: its link-mode change has been live since #1371 and rebuilt nothing (a mutant that drops `comp1`'s binding at a rebuild left it green); it now restarts the effect with an own-input sidechain, and the same mutant turns it red |
+| sdk `console-evals` unused `RACK` constant | deleted with `internal/rack.ts` |

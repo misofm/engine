@@ -1135,17 +1135,18 @@ fn retained_projection_budget_diagnostic_names_projected_bytes() {
 fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() {
     // #239 ruling 5459221452 authorizes an A5 boundary that deliberately leaves the
     // transactionally rolled-back preparation delta out of the pre-prepare projection. These
-    // three shipped shapes pin that drift: the largest measured `gap / projection` is the
-    // nine-track EQ's 954,987 / 86,248 = 11.07 (re-pinned by #1590, which deleted the 55,527-byte
-    // observation staging from the projection and the exact row alike: the gaps did not move,
-    // 955,059 before). Twelve leaves 8.4% headroom for harmless allocator/layout movement while
-    // still making any material projector drift an explicit review and re-pin. In particular,
-    // dropping a projected retained row cannot hide behind the deliberately broad rollback
-    // allowance.
-    const MAXIMUM_PREPARATION_GAP_MULTIPLIER: u64 = 12;
+    // three shipped shapes pin that drift, each with its own bound in thousandths of the
+    // projection: the measured `gap / projection` plus about 8% headroom for harmless
+    // allocator/layout movement, so any material projector drift is an explicit review and
+    // re-pin. Dropping a projected retained row cannot hide behind the deliberately broad rollback
+    // allowance. Re-pinned by #1590, which deleted the 55,527-byte observation staging from the
+    // projection and the exact row alike (the gaps did not move, the ratios rose):
+    // identity 628,275 / 57,268 = 10.97, nine-track 954,987 / 86,248 = 11.07, console
+    // 3,846,216 / 640,894 = 6.00 (its bound did not rise: the shared multiplier was 7).
     let representatives = [
         (
             "identity-one-track",
+            11_850_u64,
             one_track_session(128),
             WebBootOptions {
                 source_ring_frames: 128,
@@ -1154,6 +1155,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "parametric-eq-nine-track",
+            11_960_u64,
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1162,6 +1164,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "console-sixty-four-track",
+            6_480_u64,
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
@@ -1171,7 +1174,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
     ];
 
-    for (name, document, options) in representatives {
+    for (name, bound_permille, document, options) in representatives {
         let projection = retained_projection(document.as_bytes(), options);
         let host =
             AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
@@ -1182,8 +1185,9 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
             panic!("{name}: projection {projection} exceeds exact retained aggregate {exact}")
         });
         let maximum_gap = projection
-            .checked_mul(MAXIMUM_PREPARATION_GAP_MULTIPLIER)
-            .expect("bounded representative projection");
+            .checked_mul(bound_permille)
+            .expect("bounded representative projection")
+            / 1_000;
         assert!(
             gap <= maximum_gap,
             "{name}: exact/projection drift gap {gap} exceeds documented bound {maximum_gap} (projection {projection}, exact {exact})"

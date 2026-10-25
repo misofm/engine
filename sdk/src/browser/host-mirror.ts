@@ -1,3 +1,4 @@
+import { refuseRetiredObservationTaps } from "../internal/retired-options.ts";
 import type { BootOptions } from "../core/abi.ts";
 import { MisoUsageError } from "./../core/errors.ts";
 import type { MisoWebBootOptions } from "./shipped-host.d.ts";
@@ -44,12 +45,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
       "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
     );
   }
-  // Issue #1590 D5: the retired observation-taps word is refused the same way.
-  if ((liveControls as { observationTaps?: unknown } | undefined)?.observationTaps !== undefined) {
-    throw new MisoUsageError(
-      "liveControls.observationTaps was retired (issue #1590): every plan binds every declared observation tap",
-    );
-  }
+  refuseRetiredObservationTaps(liveControls);
 
   return {
     sourceRingFrames: nonNegative("sourceRingFrames", options.sourceRingFrames ?? 0),

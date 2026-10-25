@@ -2,6 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { AbiStructureName } from "../generated/abi.ts";
 import { MisoUsageError } from "./errors.ts";
 import type { SpectrumCollection, SpectrumQuery } from "./spectrum.ts";
+import { refuseRetiredObservationTaps } from "../internal/retired-options.ts";
 
 /**
  * Structure access by field *name*, resolved through the generated layout.
@@ -170,12 +171,7 @@ export function writeBootOptions(
       "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
     );
   }
-  // Issue #1590 D5: the retired observation-taps word is refused the same way.
-  if ((options.liveControls as { observationTaps?: unknown } | undefined)?.observationTaps !== undefined) {
-    throw new MisoUsageError(
-      "liveControls.observationTaps was retired (issue #1590): every plan binds every declared observation tap",
-    );
-  }
+  refuseRetiredObservationTaps(options.liveControls);
   const bytes = structBytes("bootOptions");
   if (pointer === 0) {
     throw new MisoUsageError("the engine returned a null boot options pointer");

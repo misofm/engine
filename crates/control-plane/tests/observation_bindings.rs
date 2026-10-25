@@ -12,9 +12,8 @@ mod adoption;
 
 use control_plane::{
     CommandError, CompileFailure, CompiledChildren, ControlAdapter, ControlLimits, EventLane,
-    ObservationChange, ObservationKeyError, ObservationKeyRef, ObservationRefusal, PlanResources,
-    PlanState, ResolvedObservationTap, ResourceFault, RuntimePreparer, SessionState,
-    compile_children,
+    ObservationChange, ObservationKeyError, ObservationKeyRef, PlanResources, PlanState,
+    ResolvedObservationTap, ResourceFault, RuntimePreparer, SessionState, compile_children,
 };
 use controls::{TapKey, TapSection};
 use host_core::{
@@ -214,7 +213,7 @@ impl Rig {
         self.session.command(&bytes, 65_536)
     }
 
-    /// Arm tap 0 (gain reduction) of `strip`'s `comp` insert, as the browser's kind 7 does.
+    /// Arm tap 0 (gain reduction) of `strip`'s `comp` insert with the core's `Observe` edit.
     fn subscribe(&mut self, strip: &str) {
         let position = self.position(strip);
         self.observe(position, true).expect("admitted");
@@ -225,15 +224,10 @@ impl Rig {
         self.observe(position, false).expect("admitted");
     }
 
-    /// Arm or disarm tap 0 of the producer at `position`, as a batch of one: the one way a host
-    /// queues an observation record (#1676).
-    fn observe(&mut self, position: usize, armed: bool) -> Result<(), ObservationRefusal> {
-        self.batch(&[change(position, armed)])
-    }
-
-    fn batch(&mut self, changes: &[ObservationChange]) -> Result<(), ObservationRefusal> {
-        self.session
-            .test_admit_and_push_observation_batch(changes.iter().copied())
+    /// Arm or disarm tap 0 of the producer at `position` with one `Observe` transaction, the
+    /// one way a host queues an observation record (#1676, #1590).
+    fn observe(&mut self, position: usize, armed: bool) -> Result<(), String> {
+        observe_transaction(self, &[change(position, armed)])
     }
 
     fn position(&self, strip: &str) -> usize {
@@ -334,15 +328,6 @@ fn key(strip: &str) -> TapKey {
     }
 }
 
-fn insert_address(strip: &str, control: u32) -> ControlAddress {
-    ControlAddress {
-        owner: Owner::Strip(StableId::parse(strip).expect("strip")),
-        section: Section::Inserts(StableId::parse("comp").expect("insert")),
-        control,
-        lane: Lane::Both,
-    }
-}
-
 fn remove_insert(strip: &str) -> SessionEdit {
     SessionEdit::RemoveTrackEffect {
         track_id: StableId::parse(strip).expect("strip"),
@@ -388,47 +373,6 @@ fn committed(events: &[(u64, DecodedEventPayload<'static>)]) -> usize {
         .count()
 }
 
-/// A change whose producer has no observation slot for its tap is refused as `Unbound` before
-/// anything is queued, ahead of the room check, and the same producer's real tap is still admitted
-/// afterwards.
-///
-/// Red if the core admits a tap index past the producer's observation menu: the record would be
-/// queued and acknowledged, and the render side would never apply it.
-#[test]
-fn a_change_for_a_tap_with_no_slot_is_refused_and_queues_nothing() {
-    let mut rig = Rig::new();
-    let position = rig.position("comp1");
-    let capacity = rig.session.test_effect_producers()[position].observe_capacity();
-    let free = rig.session.test_effect_producers()[position].observe_available_capacity();
-    let past = ObservationChange {
-        tap_index: u32::try_from(capacity).expect("a small menu"),
-        ..change(position, true)
-    };
-    assert_eq!(
-        rig.batch(&[past]),
-        Err(ObservationRefusal::Unbound { index: 0 }),
-        "the tap past the menu"
-    );
-    assert_eq!(
-        rig.batch(&[change(position, true), past]),
-        Err(ObservationRefusal::Unbound { index: 1 }),
-        "at its own index, before the room check"
-    );
-    assert_eq!(
-        rig.session.test_effect_producers()[position].observe_available_capacity(),
-        free,
-        "a refusal queues nothing"
-    );
-    assert_eq!(
-        rig.session.observation_armed(),
-        0,
-        "a refusal moves nothing"
-    );
-    assert!(rig.session.observation_bindings().is_empty());
-    rig.observe(position, true)
-        .expect("the real tap is admitted");
-}
-
 /// The push is the acknowledgement: it writes the table with it, a disarm clears it, and a push
 /// the lane refuses writes nothing.
 ///
@@ -449,7 +393,7 @@ fn a_push_writes_the_table_and_a_refused_push_writes_nothing() {
     let refused = rig.observe(position, false);
     assert_eq!(
         refused,
-        Err(ObservationRefusal::Full { index: 0 }),
+        Err("Backpressure".to_owned()),
         "the queue has no room for the disarm"
     );
     assert_eq!(rig.session.observation_bindings().len(), 2);
@@ -467,23 +411,47 @@ fn a_push_writes_the_table_and_a_refused_push_writes_nothing() {
     );
 }
 
-/// A subscription survives a rebuild that restarts its effect (here a link-mode change): the
-/// table is unchanged and the transaction ends nothing, so no `OBSERVATION_ENDED` follows the
+/// A subscription survives a rebuild that restarts its effect (here a sidechain routed from the
+/// strip's own input: a new graph edge, a prepared change of the instance): the table is
+/// unchanged and the transaction ends nothing, so no `OBSERVATION_ENDED` follows the
 /// `SESSION_COMMITTED`. (That the restarted tap is armed and opens at the adoption block is
 /// host-core's gate.)
 ///
-/// Red if a rebuild empties the table or ends a binding whose effect is still there.
+/// Red if a rebuild empties the table or ends a binding whose effect is still there. (#1590: the
+/// link-mode change this test made is live since #1371, so it rebuilt nothing; the edit is now a
+/// real restart.)
 #[test]
 fn a_restart_keeps_the_binding_and_ends_nothing() {
     let mut rig = Rig::new();
     rig.subscribe("comp1");
     let revision = rig.revision();
-    rig.apply(&[SessionEdit::set_control(
-        insert_address("comp1", controls::LINK_MODE_CONTROL),
-        effect_contract::LinkMode::Average as u32 as f32,
-        None,
-    )])
-    .expect("a rebuild");
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let track = model
+        .tracks
+        .iter()
+        .find(|track| track.id.as_str() == "comp1")
+        .expect("comp1");
+    let mut effect = track.inserts.effects[0].clone();
+    effect.sidechain = SidechainDeclaration::Routed(session::Sidechain {
+        source: session::RouteSource::Track {
+            track_id: track.id.clone(),
+            tap: session::SendTap::Input,
+        },
+        port_id: StableId::parse("sidechain-in").expect("a port ID"),
+    });
+    let length = rig
+        .apply(&[SessionEdit::PutTrackEffect {
+            track_id: track.id.clone(),
+            rack_name: RackName::Inserts,
+            final_position: 0,
+            effect,
+        }])
+        .expect("a reply");
+    assert_eq!(
+        rig.reply(length),
+        Reply::Applied(protocol::EditPath::Rebuild),
+        "a restart is a rebuild"
+    );
     assert_eq!(rig.revision(), revision + 1);
     assert_eq!(rig.session.observation_bindings().len(), 1);
     assert_eq!(
@@ -1342,41 +1310,6 @@ fn every_insert_of_a_sixty_four_track_session_subscribes_at_the_browser_frame() 
     }
 }
 
-/// Admission allocates nothing (#1685 gate 3): the browser runs it in the worklet's message
-/// handler, on the audio thread. Arms, a refusal at the frame and disarms are admitted under the
-/// calling thread's allocation counters, after one warm-up batch.
-///
-/// Red if admission sizes a key by encoding it (into a buffer, or into owned keys), or allocates
-/// scratch per batch.
-#[test]
-fn admission_allocates_nothing() {
-    let mut small = limits();
-    small.maximum_control_frame_bytes = 4_096;
-    let mut rig = Rig::with_session(&sixty_four_track_session(), small);
-    let positions: Vec<usize> = (0..64)
-        .map(|index| rig.insert_position(&format!("t{index:02}"), "comp"))
-        .collect();
-    let arms: Vec<ObservationChange> = positions.iter().map(|p| change(*p, true)).collect();
-    let disarms: Vec<ObservationChange> = positions.iter().map(|p| change(*p, false)).collect();
-    // Warm the statics and the queues' first touch.
-    rig.batch(&arms[..1]).expect("one arm");
-    rig.render();
-    rig.batch(&disarms[..1]).expect("one disarm");
-    rig.render();
-    let mark = bench_support::alloc::current_thread_counters();
-    let refused = rig.batch(&arms);
-    let first = rig.batch(&arms[..32]);
-    // Disarms of other producers: a queue holds one record per tap until a render drains it.
-    let second = rig.batch(&disarms[32..48]);
-    let allocations = bench_support::alloc::current_thread_delta_since(mark).allocations;
-    assert!(
-        matches!(refused, Err(ObservationRefusal::Limit(_))),
-        "{refused:?}"
-    );
-    assert_eq!((first, second), (Ok(()), Ok(())));
-    assert_eq!(allocations, 0, "admission allocated");
-}
-
 /// A rebuild keeps the armed count and bytes of the taps it carries, so the frame bound holds across
 /// plans.
 ///
@@ -1413,13 +1346,18 @@ fn the_armed_count_follows_the_bindings_across_a_rebuild() {
         ended_frame_bytes(&kept),
         "the successor's bytes are the kept keys'"
     );
-    // The successor knows them armed: disarming one lowers the count, a second disarm does not.
+    // The successor knows them armed: disarming one lowers the count, and a second disarm of it
+    // is the core's `observation.not_subscribed`, which moves nothing.
     let position = rig.insert_position("comp1", "ins01");
-    for expected in [1, 1] {
-        rig.observe(position, false).expect("a disarm is admitted");
-        rig.render();
-        assert_eq!(rig.session.observation_armed(), expected);
-    }
+    rig.observe(position, false).expect("a disarm is admitted");
+    rig.render();
+    assert_eq!(rig.session.observation_armed(), 1);
+    assert!(
+        rig.observe(position, false)
+            .is_err_and(|refusal| refusal.contains("observation.not_subscribed")),
+        "a second disarm of a tap no subscriber holds"
+    );
+    assert_eq!(rig.session.observation_armed(), 1);
 }
 
 /// The memory reserved for the ended-event cells follows the observation slots the session has had,

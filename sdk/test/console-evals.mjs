@@ -27,7 +27,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
@@ -38,7 +37,6 @@ import { moduleBytes, ramp } from "./support.mjs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 const CONTENT = `blake3:${"0".repeat(64)}`;
-const RACK = Object.fromEntries(ABI_LAYOUT.constants.racks.map((row) => [row.name, row.value]));
 
 let asset;
 let scratch;

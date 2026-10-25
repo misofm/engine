@@ -7,6 +7,7 @@ import {
   writeBootOptions,
 } from "./abi.ts";
 import type { BootOptions } from "./abi.ts";
+import { refuseRetiredObservationTaps } from "../internal/retired-options.ts";
 import { MisoEngineAsset } from "./asset.ts";
 import { controlCallFailure, encodeRevisionProbe, malformed } from "./control-frame.ts";
 import { readControlStripOrderSync } from "./control-list.ts";
@@ -168,12 +169,7 @@ function snapshotBootOptions(options: BootOptions): BootSnapshot {
         "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
       );
     }
-    // Issue #1590 D5: the retired observation-taps word is refused the same way.
-    if ((options.liveControls as { observationTaps?: unknown }).observationTaps !== undefined) {
-      throw new MisoUsageError(
-        "liveControls.observationTaps was retired (issue #1590): every plan binds every declared observation tap",
-      );
-    }
+    refuseRetiredObservationTaps(options.liveControls);
     const { meterBlocks } = options.liveControls!;
     return Object.freeze({
       ...(meterBlocks === undefined ? {} : { meterBlocks }),
