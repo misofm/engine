@@ -284,10 +284,11 @@ impl World {
             tap_index,
             armed,
             window_blocks,
+            ..
         } = record
         {
             self.writers[lane]
-                .try_push_observe(tap_index, armed, window_blocks)
+                .try_push_observe(tap_index, armed, window_blocks, 0)
                 .expect("room");
             return;
         }
@@ -489,6 +490,7 @@ const fn observe(armed: bool) -> EffectControlRecord {
         tap_index: 0,
         armed,
         window_blocks: 1,
+        arm_tag: 0,
     }
 }
 

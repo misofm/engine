@@ -12,62 +12,44 @@ use effect_contract::ParameterUnit;
 use host_web::{
     AudioWorkletEngineHost, COMMAND_REASON_NONE, COMMAND_RECORD_BYTES, RESULT_OK, WebBootOptions,
 };
+use serde_json::{Value, json};
 
-fn builtin_rows(document: &str) -> Vec<&str> {
-    let builtins_start = document
-        .find("\"builtins\": {")
-        .expect("document names builtins");
-    let effects_start = document[builtins_start..]
-        .find("\"effects\": [")
-        .expect("document closes builtins before effects")
-        + builtins_start;
-    document[builtins_start..effects_start]
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("{ \"id\":") && line.contains("\"scope\":"))
-        .collect()
+/// The metadata document, parsed.
+fn metadata() -> Value {
+    serde_json::from_str(&parameter_metadata::render()).expect("the metadata is JSON")
 }
 
-fn quoted_field<'a>(row: &'a str, field: &str) -> &'a str {
-    let marker = format!("\"{field}\": \"");
-    let start = row
-        .find(&marker)
-        .unwrap_or_else(|| panic!("builtin row names {field}: {row}"))
-        + marker.len();
-    let end = row[start..].find('"').expect("builtin field closes") + start;
-    &row[start..end]
+fn builtin_rows(document: &Value) -> &[Value] {
+    document["builtins"]["parameters"]
+        .as_array()
+        .expect("document names builtin parameters")
 }
 
-fn raw_field<'a>(row: &'a str, field: &str) -> &'a str {
-    let marker = format!("\"{field}\": ");
-    let start = row
-        .find(&marker)
-        .unwrap_or_else(|| panic!("row names {field}: {row}"))
-        + marker.len();
-    let end = row[start..].find([',', '\n']).expect("raw field closes") + start;
-    row[start..end].trim()
+fn quoted_field<'a>(row: &'a Value, field: &str) -> &'a str {
+    row[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("row names string {field}: {row}"))
 }
 
-fn effect_parameter_rows<'a>(document: &'a str, effect_id: &str) -> Vec<&'a str> {
-    let effect_start = document
-        .find(&format!("\"id\": \"{effect_id}\""))
-        .unwrap_or_else(|| panic!("metadata names effect {effect_id}"));
-    let parameters_start = document[effect_start..]
-        .find("\"parameters\": [")
+/// A scalar field as the document spells it.
+fn raw_field(row: &Value, field: &str) -> String {
+    assert!(row.get(field).is_some(), "row names {field}: {row}");
+    row[field].to_string()
+}
+
+fn effect_json<'a>(document: &'a Value, effect_id: &str) -> &'a Value {
+    document["effects"]
+        .as_array()
+        .expect("document names effects")
+        .iter()
+        .find(|effect| effect["id"] == effect_id)
+        .unwrap_or_else(|| panic!("metadata names effect {effect_id}"))
+}
+
+fn effect_parameter_rows<'a>(document: &'a Value, effect_id: &str) -> &'a [Value] {
+    effect_json(document, effect_id)["parameters"]
+        .as_array()
         .expect("effect carries parameters")
-        + effect_start;
-    let ports_start = document[parameters_start..]
-        .find("\"ports\": [")
-        .expect("effect closes parameters before ports")
-        + parameters_start;
-    document[parameters_start..ports_start]
-        .split("        {\n")
-        .skip(1)
-        .map(|row| {
-            let end = row.find("\n        }").expect("parameter row closes");
-            &row[..end]
-        })
-        .collect()
 }
 
 fn unit_name(unit: ParameterUnit) -> &'static str {
@@ -87,12 +69,12 @@ fn unit_name(unit: ParameterUnit) -> &'static str {
 /// makes the fixed semantic anchors fail, and duplicating a name violates the emitted table check.
 #[test]
 fn builtin_metadata_has_authoritative_units_and_unique_keys() {
-    let document = parameter_metadata::render();
+    let document = metadata();
     let rows = builtin_rows(&document);
     assert_eq!(rows.len(), BUILTIN_PARAMETER_DESCRIPTORS.len());
 
     let mut names = std::collections::HashSet::new();
-    for row in &rows {
+    for row in rows {
         let name = quoted_field(row, "name");
         assert!(!name.is_empty(), "builtin keys are nonempty");
         assert!(names.insert(name), "builtin keys are unique: {name}");
@@ -101,7 +83,7 @@ fn builtin_metadata_has_authoritative_units_and_unique_keys() {
     for descriptor in &BUILTIN_PARAMETER_DESCRIPTORS {
         let row = rows
             .iter()
-            .find(|row| row.contains(&format!("\"name\": \"{}\"", descriptor.name)))
+            .find(|row| row["name"] == descriptor.name)
             .unwrap_or_else(|| panic!("metadata emits builtin {}", descriptor.name));
         let expected = match descriptor.name {
             "hpf_hz" | "lpf_hz" => ParameterUnit::Hz,
@@ -117,11 +99,7 @@ fn builtin_metadata_has_authoritative_units_and_unique_keys() {
             "{descriptor:?}"
         );
         assert!(
-            row.contains(&format!(
-                "\"unit\": {}, \"unitName\": \"{}\"",
-                expected as u32,
-                unit_name(expected)
-            )),
+            row["unit"] == expected as u32 && row["unitName"] == unit_name(expected),
             "{} carries its explicit unit",
             descriptor.name
         );
@@ -135,7 +113,7 @@ fn builtin_metadata_has_authoritative_units_and_unique_keys() {
 /// they use the same block-rate, linear-64 live path as the existing numeric rows.
 #[test]
 fn parametric_eq_catalog_preserves_old_rows_and_appends_prepared_cuts() {
-    let document = parameter_metadata::render();
+    let document = metadata();
     let rows = effect_parameter_rows(&document, "miso.parametric-eq");
     let old = [
         (1, "band-1-enabled", "0.0"),
@@ -325,15 +303,11 @@ fn stage(host: &mut AudioWorkletEngineHost, kind: u32, rack: u8, effect_index: u
 /// effect the catalog does not carry fails the lookup.
 #[test]
 fn every_metadata_effect_parameter_is_a_control_row_with_the_same_liveness() {
-    let document = parameter_metadata::render();
+    let document = metadata();
     let registry = launch_native_effect_registry().expect("launch registry");
     assert!(!registry.is_empty());
     for descriptor in registry.descriptors() {
         let effect = descriptor.id.as_str();
-        assert!(
-            document.contains(&format!("\"id\": \"{effect}\"")),
-            "every registered effect is in the metadata: {effect}"
-        );
         let catalog = controls::effect_table_rows(effect)
             .unwrap_or_else(|| panic!("the control catalog carries {effect}"));
         let rows = effect_parameter_rows(&document, effect);
@@ -389,7 +363,7 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
         COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_REASON_UNKNOWN_TAP,
     };
 
-    let document = parameter_metadata::render();
+    let document = metadata();
     let registry = launch_native_effect_registry().expect("launch registry");
     let ids: Vec<&'static str> = registry
         .descriptors()
@@ -399,16 +373,14 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
     // Every declared tap is in the document, and every effect has the key even when empty.
     let mut declared = 0_usize;
     for descriptor in registry.descriptors() {
-        assert!(
-            document.contains("\"observations\": ["),
-            "the observations key is never absent"
-        );
+        let observations = effect_json(&document, descriptor.id.as_str())["observations"]
+            .as_array()
+            .expect("the observations key is never absent");
         for tap in descriptor.observations {
             assert!(
-                document.contains(&format!(
-                    "\"id\": {}, \"name\": \"{}\"",
-                    tap.id.0, tap.display_name
-                )),
+                observations
+                    .iter()
+                    .any(|row| row["id"] == tap.id.0 && row["name"] == tap.display_name),
                 "{} tap {} is in the metadata",
                 descriptor.id.as_str(),
                 tap.id.0
@@ -491,17 +463,16 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
 fn every_published_sidechain_port_prepares_and_an_unpublished_one_does_not() {
     use effect_contract::{PortLayout, PortRole};
 
-    let document = parameter_metadata::render();
+    let document = metadata();
     let registry = launch_native_effect_registry().expect("launch registry");
 
     // Every declared port is in the document, and every effect has the key.
     let mut rows = 0_usize;
     let mut sidechains: Vec<(&'static str, &'static str)> = Vec::new();
     for descriptor in registry.descriptors() {
-        assert!(
-            document.contains("\"ports\": ["),
-            "the ports key is never absent"
-        );
+        let ports = effect_json(&document, descriptor.id.as_str())["ports"]
+            .as_array()
+            .expect("the ports key is never absent");
         for port in descriptor.ports {
             let role = match port.role {
                 PortRole::MainInput => "mainInput",
@@ -509,14 +480,16 @@ fn every_published_sidechain_port_prepares_and_an_unpublished_one_does_not() {
                 PortRole::SidechainInput => "sidechainInput",
             };
             assert_eq!(port.layout, PortLayout::DualMonoPlanar);
+            let row = json!({
+                "id": port.id.as_str(),
+                "role": port.role as u32,
+                "roleName": role,
+                "required": port.required,
+                "layout": 1,
+                "layoutName": "dualMonoPlanar",
+            });
             assert!(
-                document.contains(&format!(
-                    "{{ \"id\": \"{}\", \"role\": {}, \"roleName\": \"{role}\", \
-\"required\": {}, \"layout\": 1, \"layoutName\": \"dualMonoPlanar\" }}",
-                    port.id.as_str(),
-                    port.role as u32,
-                    port.required
-                )),
+                ports.contains(&row),
                 "{} port {} is in the metadata",
                 descriptor.id.as_str(),
                 port.id.as_str()

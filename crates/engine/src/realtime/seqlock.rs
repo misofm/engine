@@ -143,6 +143,19 @@ impl<const N: usize> PublishedWords<N> {
         self.sequence_lock
             .store(opening.wrapping_add(1), Ordering::Release);
     }
+
+    /// The words the writer last published, read by the writer itself (#1585 R1): an owner that
+    /// publishes the record in parts reads its own words, changes its part and publishes them all.
+    /// Plain loads with no sequence check, because no other thread writes the record and a thread
+    /// always sees its own stores. Only the record's one writer may call it.
+    #[inline]
+    pub(crate) fn writer_words(&self) -> [u64; N] {
+        let mut words = [0_u64; N];
+        for (word, cell) in words.iter_mut().zip(&self.words) {
+            *word = cell.load(Ordering::Relaxed);
+        }
+        words
+    }
 }
 
 impl<const N: usize> PublishedWordsWriter<N> {
