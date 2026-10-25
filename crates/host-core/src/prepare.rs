@@ -57,6 +57,7 @@ use crate::control_preparation::{
     INPUT_FILTER_TARGET_CAPACITY, InputFilterEdit, InputFilterPreparer,
 };
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
+use crate::duck::DuckOverlay;
 use crate::route_controls::{
     RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
     route_producer_position, route_record,
@@ -68,7 +69,6 @@ use crate::spectrum::{
     prepare_capture_collection, spectrum_capture_collection_resources,
 };
 use crate::spectrum_service::{PreparedSpectrumCaptures, SpectrumPreparation};
-use crate::transition::DuckOverlay;
 
 /// The jump lengths a plan's cell holds for `model` (#1639 D1): its `control_smoothing` keys in
 /// samples, the values of [`LiveRamps::for_session`]. Preparation seeds every plan's cell with

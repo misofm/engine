@@ -100,6 +100,7 @@ pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+pub mod duck;
 #[cfg(feature = "control-provider")]
 pub mod live_delta;
 pub mod meters;
@@ -138,6 +139,7 @@ pub use control_provider::{
 pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
+pub use duck::DuckOverlay;
 pub use engine::LAUNCH_SAMPLE_RATES;
 pub use engine::realtime::{
     ObserverCarry, ObserverKind, ResponseSnapshotAvailability, ResponseSnapshotCapture,
@@ -231,8 +233,7 @@ pub use spectrum_service::{
 };
 #[cfg(feature = "control-provider")]
 pub use transition::{
-    DuckOverlay, DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError,
-    plan_strip_transition,
+    DuckRouteRecord, DuckStripRecords, StripTransition, StripTransitionError, plan_strip_transition,
 };
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).
