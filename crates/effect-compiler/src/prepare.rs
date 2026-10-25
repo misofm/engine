@@ -1748,8 +1748,8 @@ pub fn attach_effect_live_controls(
 /// The control-side reader half of one prepared effect instance's observation taps (issue #143).
 ///
 /// Addressed exactly as an [`EffectControlProducer`] is -- by `(track_id, address)` -- because a
-/// subscription and the parameter commands it correlates with address the same instance through
-/// the same numbers. `readers[i]` belongs to `descriptor.observations[i]`.
+/// subscription and the live values it correlates with address the same instance through the same
+/// numbers. `readers[i]` belongs to `descriptor.observations[i]`.
 pub struct EffectObservationHandle {
     /// Normalized identity of the strip (a track or a submix) this instance belongs to.
     pub track_id: Box<str>,

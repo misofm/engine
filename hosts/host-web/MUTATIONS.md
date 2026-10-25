@@ -50,7 +50,7 @@ restored. Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), `-C target-feature=+avx2,+f
 | gate | mutation | observed red |
 |---|---|---|
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4) | publish the negative decibels raw instead of the declared `PeakMagnitude` fold | the app's `Math.max(0, -6)` is `0` and the frame reads dead; the "positive magnitude, not a negative decibel" assertion fires |
-| `tests::a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` (E9; renamed by #1589c) | bind the computed tap instead of refusing it | `Ok` where `Err(ComputedTap)` was required — a bound computed tap is a lane that never publishes |
+| control-plane `observation_bindings::a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` (E9; renamed by #1589c, moved from host-web `tests` by #1590) | bind the computed tap instead of refusing it | `Ok` where `Err(ComputedTap)` was required — a bound computed tap is a lane that never publishes |
 | `round_trip::every_metadata_observation_tap_resolves_through_an_observe_edit` (E9; through the core's `Observe` edit since #1589c) | offset the tap id by one in the lowering (equivalent to a hand-edited id in the document) | `miso.compressor tap 1 resolves and binds`: `Err(["observation.tap.unknown"])` |
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D6) | `master_gr_present = 1` unconditionally | `no designation means absent, never zero`: `Some(0.0)` where `None` was required |
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D5) | keep the pre-#143 `2T + 2` frame shape | the frame is 8 words where `3T + 3 = 12` was required |

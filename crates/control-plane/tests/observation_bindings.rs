@@ -12,9 +12,9 @@ mod adoption;
 
 use control_plane::{
     CommandError, CompileFailure, CompiledChildren, ControlAdapter, ControlLimits, EventLane,
-    ObservationChange, ObservationKeyError, ObservationKeyRef, ObservationLimit,
-    ObservationRefusal, PlanResources, PlanState, ResolvedObservationTap, ResourceFault,
-    RuntimePreparer, SessionState, compile_children,
+    ObservationChange, ObservationKeyError, ObservationKeyRef, ObservationRefusal, PlanResources,
+    PlanState, ResolvedObservationTap, ResourceFault, RuntimePreparer, SessionState,
+    compile_children,
 };
 use controls::{TapKey, TapSection};
 use host_core::{
@@ -41,8 +41,9 @@ struct Adapter;
 impl ControlAdapter for Adapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
-    // #1584: the core's `Observe` edit, as the C ABI serves it. The browser-path tests here push
-    // through `admit_and_push_observation_batch` and never send the edit.
+    // #1584: the core's `Observe` edit, as both hosts serve it. The admission-rule tests here push
+    // through the test hook `test_admit_and_push_observation_batch` (an edit nets each tap to one
+    // change, so it cannot reach every rule); the others send the edit.
     const OBSERVE_EDIT: bool = true;
 }
 
@@ -232,12 +233,12 @@ impl Rig {
 
     fn batch(&mut self, changes: &[ObservationChange]) -> Result<(), ObservationRefusal> {
         self.session
-            .admit_and_push_observation_batch(changes.iter().copied())
+            .test_admit_and_push_observation_batch(changes.iter().copied())
     }
 
     fn position(&self, strip: &str) -> usize {
         self.session
-            .effect_producers()
+            .test_effect_producers()
             .iter()
             .position(|producer| {
                 &*producer.track_id == strip && producer.address == LiveEffectAddress::insert(0)
@@ -284,6 +285,44 @@ fn change(position: usize, armed: bool) -> ObservationChange {
         tap_index: 0,
         armed,
         window_blocks: if armed { WINDOW_BLOCKS } else { 0 },
+    }
+}
+
+/// The `Observe` edits of `changes` (#1590): each producer's strip, insert and tap by stable key,
+/// with the test's window (a disarm names the window it was armed with).
+fn observe_edits(rig: &Rig, changes: &[ObservationChange]) -> Vec<SessionEdit> {
+    let producers = rig.session.test_effect_producers();
+    changes
+        .iter()
+        .map(|change| {
+            let producer = &producers[change.position];
+            SessionEdit::Observe {
+                strip_id: StableId::parse(&producer.track_id).expect("strip"),
+                section: TapSection::Inserts(StableId::parse(&producer.effect_id).expect("insert")),
+                tap_id: producer.descriptor.observations[change.tap_index as usize]
+                    .id
+                    .0,
+                armed: change.armed,
+                window_blocks: WINDOW_BLOCKS,
+            }
+        })
+        .collect()
+}
+
+/// The refusal of an `Observe` transaction whose armed taps' ended event would outgrow one
+/// control frame (#1685): a resource limit, never backpressure.
+const FRAME_LIMIT: &str = "CompileRejected(Resource(Limit))";
+
+/// Send `changes` as one `Observe` transaction through the core's command entry (#1590): `Ok` when
+/// it is applied, else the call's error or the reply's refusal, as text.
+fn observe_transaction(rig: &mut Rig, changes: &[ObservationChange]) -> Result<(), String> {
+    let edits = observe_edits(rig, changes);
+    match rig.apply(&edits) {
+        Err(error) => Err(format!("{error:?}")),
+        Ok(length) => match rig.reply(length) {
+            Reply::Applied(_) => Ok(()),
+            refused => Err(format!("{refused:?}")),
+        },
     }
 }
 
@@ -359,8 +398,8 @@ fn committed(events: &[(u64, DecodedEventPayload<'static>)]) -> usize {
 fn a_change_for_a_tap_with_no_slot_is_refused_and_queues_nothing() {
     let mut rig = Rig::new();
     let position = rig.position("comp1");
-    let capacity = rig.session.effect_producers()[position].observe_capacity();
-    let free = rig.session.effect_producers()[position].observe_available_capacity();
+    let capacity = rig.session.test_effect_producers()[position].observe_capacity();
+    let free = rig.session.test_effect_producers()[position].observe_available_capacity();
     let past = ObservationChange {
         tap_index: u32::try_from(capacity).expect("a small menu"),
         ..change(position, true)
@@ -376,7 +415,7 @@ fn a_change_for_a_tap_with_no_slot_is_refused_and_queues_nothing() {
         "at its own index, before the room check"
     );
     assert_eq!(
-        rig.session.effect_producers()[position].observe_available_capacity(),
+        rig.session.test_effect_producers()[position].observe_available_capacity(),
         free,
         "a refusal queues nothing"
     );
@@ -494,7 +533,7 @@ fn a_removed_effect_ends_its_binding_with_an_event() {
         assert_eq!(rig.session.observation_bindings().len(), 1, "{what}");
         assert!(
             rig.session
-                .effect_producers()
+                .test_effect_producers()
                 .iter()
                 .filter(|producer| &*producer.track_id == "comp1")
                 .all(|producer| producer.observe_capacity() == 0),
@@ -644,7 +683,7 @@ fn a_strip_removed_with_many_subscribed_inserts_gives_one_event_with_every_key()
         for id in &ids {
             let position = rig
                 .session
-                .effect_producers()
+                .test_effect_producers()
                 .iter()
                 .position(|producer| &*producer.track_id == "comp1" && &*producer.effect_id == id)
                 .expect("the insert has a producer");
@@ -743,7 +782,7 @@ fn an_end_event_over_one_control_frame_refuses_the_removal_and_changes_nothing()
             rig.drain();
             let position = rig
                 .session
-                .effect_producers()
+                .test_effect_producers()
                 .iter()
                 .position(|producer| &*producer.track_id == "comp1" && &*producer.effect_id == id)
                 .expect("the insert has a producer");
@@ -803,12 +842,13 @@ fn an_end_event_over_one_control_frame_refuses_the_removal_and_changes_nothing()
 #[test]
 fn a_stable_key_resolves_on_the_newest_plan_and_an_unknown_key_is_refused() {
     let resolve = |rig: &Rig, strip: &str, rack: LiveEffectRack, effect: &str, tap: u32| {
-        rig.session.resolve_observation_key(&ObservationKeyRef {
-            strip_id: strip.as_bytes(),
-            rack,
-            effect_id: effect.as_bytes(),
-            tap_id: tap,
-        })
+        rig.session
+            .test_resolve_observation_key(&ObservationKeyRef {
+                strip_id: strip.as_bytes(),
+                rack,
+                effect_id: effect.as_bytes(),
+                tap_id: tap,
+            })
     };
     let mut rig = Rig::new();
     let before = rig.position("comp2");
@@ -862,7 +902,7 @@ fn a_stable_key_resolves_on_the_newest_plan_and_an_unknown_key_is_refused() {
         })
     );
     assert_eq!(
-        &*rig.session.effect_producers()[after].track_id,
+        &*rig.session.test_effect_producers()[after].track_id,
         "comp2",
         "the position names the producer of the key's strip"
     );
@@ -911,7 +951,7 @@ impl Rig {
     /// The position of the producer of `strip`'s insert `id`.
     fn insert_position(&self, strip: &str, id: &str) -> usize {
         self.session
-            .effect_producers()
+            .test_effect_producers()
             .iter()
             .position(|producer| &*producer.track_id == strip && &*producer.effect_id == id)
             .expect("the insert has a producer")
@@ -937,7 +977,7 @@ impl Rig {
     /// Every observation slot of the newest plan.
     fn slots(&self) -> usize {
         self.session
-            .effect_producers()
+            .test_effect_producers()
             .iter()
             .map(host_core::EffectControlProducer::observe_capacity)
             .sum()
@@ -1006,14 +1046,18 @@ fn the_ended_bytes_are_the_encoded_event_of_the_armed_keys() {
     .map(|extra| format!("i{}", "x".repeat(*extra)))
     .collect();
     rig.add_inserts(&ids);
-    assert_eq!(rig.session.observation_ended_bytes(), 0, "nothing armed");
+    assert_eq!(
+        rig.session.test_observation_ended_bytes(),
+        0,
+        "nothing armed"
+    );
     let mut armed = Vec::new();
     for id in &ids {
         let position = rig.insert_position("comp1", id);
         rig.observe(position, true).expect("the frame has room");
         armed.push(("comp1".to_owned(), id.clone()));
         assert_eq!(
-            rig.session.observation_ended_bytes(),
+            rig.session.test_observation_ended_bytes(),
             ended_frame_bytes(&armed),
             "{} armed keys",
             armed.len()
@@ -1024,10 +1068,10 @@ fn the_ended_bytes_are_the_encoded_event_of_the_armed_keys() {
     rig.observe(position, false).expect("a disarm");
     armed.retain(|(_, id)| id != &ids[3]);
     assert_eq!(
-        rig.session.observation_ended_bytes(),
+        rig.session.test_observation_ended_bytes(),
         ended_frame_bytes(&armed)
     );
-    assert_eq!(rig.session.observation_frame_bytes(), 65_536);
+    assert_eq!(rig.session.test_observation_frame_bytes(), 65_536);
 }
 
 /// `comp1` renamed to a strip ID of the longest length, so its ended keys are as long as the keys
@@ -1106,66 +1150,70 @@ fn long_capacity() -> (usize, usize, usize) {
     )
 }
 
-/// The edge (#1685 gate 2). Keys are sized so that one 1 KiB frame holds exactly `k` of them, by
-/// the real codec: `k` arms are admitted, arm `k + 1` is refused `Limit` at its index, naming the
-/// bytes it would need and the frame, before it is acknowledged and with nothing moved or queued;
-/// a disarm later in the same batch makes room; and removing the strip commits with one
-/// `OBSERVATION_ENDED` that holds all `k` keys and fits the frame. One tap more, pushed past
+/// The edge (#1685 gate 2), through the core's `Observe` edit (#1590). Keys are sized so that one
+/// 1 KiB frame holds exactly `k` of them, by the real codec: `k` arms are admitted, arm `k + 1` is
+/// refused as the frame's resource limit before it is acknowledged and with nothing moved or
+/// queued; a disarm later in the same transaction makes room; and removing the strip commits with
+/// one `OBSERVATION_ENDED` that holds all `k` keys and fits the frame. One tap more, pushed past
 /// admission, reaches the over-frame defence.
 ///
 /// Red if the byte count is off by one key or by the frame header (arm `k + 1` is admitted, or arm
-/// `k` refused), if a refused batch moves the armed bytes or queues a record, if an arm of an armed
-/// tap counts again, if the refusal names the wrong change, if a disarm in the batch is not counted
-/// against its arms, or if the commit can emit an event over one frame.
+/// `k` refused), if a refused transaction moves the armed bytes or queues a record, if an arm of
+/// an armed tap counts again, if a disarm in the transaction is not counted against its arms, or
+/// if the commit can emit an event over one frame.
 #[test]
 fn a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits() {
     let (k, fits, over) = long_capacity();
     assert!(k >= 2, "the small frame still holds some keys: {k}");
     assert!(fits <= 1_024 && over > 1_024);
-    let limit = |index: usize| {
-        Err(ObservationRefusal::Limit(ObservationLimit {
-            index,
-            event_bytes: over,
-            frame_bytes: 1_024,
-        }))
-    };
+    let limit = || Err(FRAME_LIMIT.to_owned());
     let (mut rig, positions) = long_rig(k + 1);
     for position in &positions[..k] {
-        rig.observe(*position, true).expect("the frame has room");
+        observe_transaction(&mut rig, &[change(*position, true)]).expect("the frame has room");
+        rig.render();
     }
     assert_eq!(rig.session.observation_armed(), k);
-    assert_eq!(rig.session.observation_ended_bytes(), fits);
-    rig.render();
-    // Re-arming an armed tap adds nothing.
-    rig.observe(positions[0], true)
-        .expect("a window change adds no tap");
+    assert_eq!(rig.session.test_observation_ended_bytes(), fits);
+    // A second subscriber of an armed tap adds nothing.
+    observe_transaction(&mut rig, &[change(positions[0], true)])
+        .expect("a second subscriber adds no tap");
     rig.render();
     let room = |rig: &Rig| -> Vec<usize> {
         rig.session
-            .effect_producers()
+            .test_effect_producers()
             .iter()
             .map(host_core::EffectControlProducer::observe_available_capacity)
             .collect()
     };
     let (bindings, free) = (rig.session.observation_bindings().clone(), room(&rig));
-    assert_eq!(rig.observe(positions[k], true), limit(0));
     assert_eq!(
-        rig.batch(&[change(positions[1], true), change(positions[k], true)]),
-        limit(1),
-        "the second change crosses: the first re-arms an armed tap"
+        observe_transaction(&mut rig, &[change(positions[k], true)]),
+        limit()
+    );
+    assert_eq!(
+        observe_transaction(
+            &mut rig,
+            &[change(positions[1], true), change(positions[k], true)]
+        ),
+        limit(),
+        "the second arm crosses: the first is a second subscriber of an armed tap"
     );
     assert_eq!(
         rig.session.observation_armed(),
         k,
         "a refusal moves nothing"
     );
-    assert_eq!(rig.session.observation_ended_bytes(), fits);
+    assert_eq!(rig.session.test_observation_ended_bytes(), fits);
     assert_eq!(room(&rig), free, "a refusal queues nothing");
     rig.render();
     assert_eq!(rig.session.observation_bindings(), &bindings);
-    // A disarm later in the batch makes room for an arm earlier in it.
-    rig.batch(&[change(positions[k], true), change(positions[0], false)])
-        .expect("a disarm in the batch makes room");
+    // A disarm later in the transaction makes room for an arm earlier in it: tap 1 has one
+    // subscriber, so its disarm ends its binding.
+    observe_transaction(
+        &mut rig,
+        &[change(positions[k], true), change(positions[1], false)],
+    )
+    .expect("a disarm in the transaction makes room");
     assert_eq!(rig.session.observation_armed(), k);
     rig.render();
     // Remove every subscribed target: `k` keys in one event that fits one frame.
@@ -1174,7 +1222,7 @@ fn a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits
         .expect("the removal of every subscribed tap commits");
     assert_eq!(rig.revision(), before + 1);
     assert_eq!(rig.session.observation_armed(), 0);
-    assert_eq!(rig.session.observation_ended_bytes(), 0);
+    assert_eq!(rig.session.test_observation_ended_bytes(), 0);
     let events = rig.drain();
     let ended = ended(&events);
     assert_eq!(ended.len(), 1, "one event");
@@ -1197,7 +1245,7 @@ fn a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits
             .expect("a producer")
             .expect("room in the queue");
     }
-    assert_eq!(over_rig.session.observation_ended_bytes(), over);
+    assert_eq!(over_rig.session.test_observation_ended_bytes(), over);
     over_rig.render();
     let revision = over_rig.revision();
     let refused = over_rig.apply(&remove_long_strip());
@@ -1241,12 +1289,13 @@ fn sixty_four_track_session() -> String {
     session::canonical_session_json(&model).expect("a valid session")
 }
 
-/// The large session (#1685 gate 1), at the core every host calls: a 64-track session with one
-/// compressor insert per track subscribes the compressor's meter tap on every insert, in one batch,
-/// at the browser's 16 KiB frame: all 64 are admitted. At a 4 KiB frame, which a C ABI host may
-/// configure, the event of 64 such keys does not fit (a key is at least 80 encoded bytes), so the
-/// arm that crosses is refused at its index and exactly the taps whose keys fit are admitted
-/// one by one.
+/// The large session (#1685 gate 1), through the core's `Observe` edit (#1590): a 64-track session
+/// with one compressor insert per track subscribes the compressor's meter tap on every insert, in
+/// one transaction, at the browser's 16 KiB frame: all 64 are admitted. At a 4 KiB frame, which a C
+/// ABI host may configure, the event of 64 such keys does not fit (a key is at least 80 encoded
+/// bytes), and 64 edits do not fit one command frame either, so the taps are armed one
+/// transaction each: exactly the taps whose keys fit are admitted, and the arm that crosses is
+/// refused as the frame's resource limit with nothing moved.
 ///
 /// Red if admission still assumes the longest IDs (the cap of #1676 refuses the 52nd tap at
 /// 16 KiB), or if it admits an event over the frame at 4 KiB.
@@ -1269,23 +1318,21 @@ fn every_insert_of_a_sixty_four_track_session_subscribes_at_the_browser_frame() 
             .expect("one key fits");
         let all: Vec<ObservationChange> = positions.iter().map(|p| change(*p, true)).collect();
         if fit == 64 {
-            rig.batch(&all).expect("every insert subscribes");
+            observe_transaction(&mut rig, &all).expect("every insert subscribes");
         } else {
+            for arm in &all[..fit] {
+                observe_transaction(&mut rig, &[*arm]).expect("a tap that fits");
+                rig.render();
+            }
             assert_eq!(
-                rig.batch(&all),
-                Err(ObservationRefusal::Limit(ObservationLimit {
-                    index: fit,
-                    event_bytes: ended_frame_bytes(&keys[..=fit]),
-                    frame_bytes: frame as usize,
-                })),
-                "{frame}"
+                observe_transaction(&mut rig, &all[fit..=fit]),
+                Err(FRAME_LIMIT.to_owned()),
+                "{frame}: the arm that crosses"
             );
-            assert_eq!(rig.session.observation_armed(), 0, "{frame}");
-            rig.batch(&all[..fit]).expect("the taps that fit");
         }
         assert_eq!(rig.session.observation_armed(), fit, "{frame}");
         assert_eq!(
-            rig.session.observation_ended_bytes(),
+            rig.session.test_observation_ended_bytes(),
             ended_frame_bytes(&keys[..fit]),
             "{frame}"
         );
@@ -1362,7 +1409,7 @@ fn the_armed_count_follows_the_bindings_across_a_rebuild() {
         .map(|id| ("comp1".to_owned(), (*id).to_owned()))
         .collect();
     assert_eq!(
-        rig.session.observation_ended_bytes(),
+        rig.session.test_observation_ended_bytes(),
         ended_frame_bytes(&kept),
         "the successor's bytes are the kept keys'"
     );
@@ -1428,44 +1475,57 @@ fn the_reserve_follows_the_slots_and_a_shrunk_plan_keeps_the_larger_reserve() {
     );
 }
 
-/// A batch that names one tap twice is refused at the second naming, before the cap and the room
-/// are judged, and moves nothing (#1676, batch 13b fold). The frame check counts each tap's state
-/// once, so `[disarm A, arm A, arm B]` with the frame full and `A` armed counts the disarm as a
-/// removal, does not count the re-arm, and admits `B`: an event over the frame. The shipped effects declare one tap
-/// each, so the queue's one slot happens to refuse that batch as `Full`; an effect with two taps,
-/// or a C ABI edit that names a tap twice, would not.
+/// An `Observe` transaction that names one tap twice is admitted as the tap's one net change
+/// (#1590, through the core's edit; #1676, batch 13b fold). The frame check counts each tap's
+/// state once, so with the frame full and `A` armed, `[disarm A, arm A, arm B]` leaves `A` armed
+/// and adds `B`: it is refused as the frame's limit. With room for one more tap, `[arm B, arm B]`
+/// arms `B` once and is admitted.
 ///
-/// Red if the core does not refuse a second naming of a tap itself (the batch is then refused as
-/// `Full` at change 0, or as `Limit` at change 0 for `[arm B, arm B]`), or names the wrong change.
+/// Red if the core counts a disarm the transaction undoes as a removal (it admits `B`: an event
+/// over the frame), or counts a tap the transaction arms twice as two taps (the second
+/// transaction is refused), or if a refusal moves the armed count or queues a record.
 #[test]
 fn a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming() {
-    let (cap, _, _) = long_capacity();
-    let (mut rig, positions) = long_rig(cap + 1);
+    // Short IDs at a 4 KiB frame, so three edits fit one command frame and the frame holds
+    // `cap` of the session's 64 taps.
+    const FRAME: u64 = 4_096;
+    let mut small = limits();
+    small.maximum_control_frame_bytes = FRAME;
+    let mut rig = Rig::with_session(&sixty_four_track_session(), small);
+    let keys: Vec<(String, String)> = (0..64)
+        .map(|index| (format!("t{index:02}"), "comp".to_owned()))
+        .collect();
+    let cap = (1..=64)
+        .take_while(|count| ended_frame_bytes(&keys[..*count]) <= FRAME as usize)
+        .last()
+        .expect("one key fits");
+    assert!(cap < 64, "the frame holds fewer than every tap: {cap}");
+    let positions: Vec<usize> = (0..=cap)
+        .map(|index| rig.insert_position(&format!("t{index:02}"), "comp"))
+        .collect();
     for position in &positions[..cap] {
-        rig.observe(*position, true).expect("under the cap");
+        observe_transaction(&mut rig, &[change(*position, true)]).expect("under the cap");
+        rig.render();
     }
-    rig.render();
     let room = |rig: &Rig| -> Vec<usize> {
         rig.session
-            .effect_producers()
+            .test_effect_producers()
             .iter()
             .map(host_core::EffectControlProducer::observe_available_capacity)
             .collect()
     };
     let free = room(&rig);
     assert_eq!(
-        rig.batch(&[
-            change(positions[0], false),
-            change(positions[0], true),
-            change(positions[cap], true),
-        ]),
-        Err(ObservationRefusal::Duplicate { index: 1 }),
-        "the re-arm of a tap the batch disarms is its second naming"
-    );
-    assert_eq!(
-        rig.batch(&[change(positions[cap], true), change(positions[cap], true)]),
-        Err(ObservationRefusal::Duplicate { index: 1 }),
-        "two arms of one tap are refused as such, not as the frame"
+        observe_transaction(
+            &mut rig,
+            &[
+                change(positions[0], false),
+                change(positions[0], true),
+                change(positions[cap], true),
+            ]
+        ),
+        Err(FRAME_LIMIT.to_owned()),
+        "the re-arm of a tap the transaction disarms leaves it armed: no room for B"
     );
     assert_eq!(
         rig.session.observation_armed(),
@@ -1473,10 +1533,15 @@ fn a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming() {
         "a refusal moves nothing"
     );
     assert_eq!(room(&rig), free, "a refusal queues nothing");
-    // The same taps named once each, in later batches, are admitted: the marks of a refused batch
-    // do not leak into the next one.
-    rig.batch(&[change(positions[cap], true), change(positions[0], false)])
-        .expect("each tap named once");
+    // A disarm makes room for one tap; two arms of it in one transaction are one tap.
+    observe_transaction(&mut rig, &[change(positions[0], false)]).expect("a disarm");
+    rig.render();
+    assert_eq!(rig.session.observation_armed(), cap - 1);
+    observe_transaction(
+        &mut rig,
+        &[change(positions[cap], true), change(positions[cap], true)],
+    )
+    .expect("two arms of one tap are one tap");
     assert_eq!(rig.session.observation_armed(), cap);
 }
 
@@ -1613,7 +1678,7 @@ impl Rig {
 
     /// The records queued so far on `strip`'s `comp` insert's observation queue.
     fn queued(&self, strip: &str) -> u64 {
-        self.session.effect_producers()[self.position(strip)].observe_success_count()
+        self.session.test_effect_producers()[self.position(strip)].observe_success_count()
     }
 
     /// The newest window `strip`'s `comp` insert's gain-reduction reader holds.
@@ -2179,4 +2244,91 @@ fn a_live_commit_queues_its_observation_records_before_it_publishes_the_revision
         .window("comp1")
         .expect("armed in the block that applied the revision");
     assert_eq!((window.first_sample, window.blocks), (first_sample, 1));
+}
+
+/// Issue #143 E9: a `Computed` tap is declared, validated and **refused**.
+///
+/// No launch effect declares one, so the rule is unreachable from a live session and would
+/// otherwise be a branch nothing ever takes. The lowering is exercised directly against a
+/// synthetic descriptor that declares both cost classes, which is the only honest way to gate a
+/// rule whose production reachability is zero by design.
+///
+/// Red mutation: bind the computed tap instead of refusing it -> the second case returns `Ok` and
+/// the assertion fails. A bound computed tap would be a lane that never publishes: a meter frozen
+/// at zero with no way for the caller to learn why.
+#[test]
+fn a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown() {
+    use effect_contract::{
+        EffectDescriptor, EffectId, LinkModeSet, ObservationCadence, ObservationChannels,
+        ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationTapId,
+        ParameterUnit,
+    };
+
+    const fn tap(
+        id: u32,
+        cost: ObservationCost,
+        cadence: ObservationCadence,
+    ) -> ObservationDescriptor {
+        ObservationDescriptor {
+            id: ObservationTapId(id),
+            display_name: "Gain Reduction",
+            display_unit: "dB",
+            kind: ObservationKind::GainReductionDb,
+            unit: ParameterUnit::Db,
+            cost,
+            cadence,
+            fold: ObservationFold::PeakMagnitude,
+            channels: ObservationChannels::Shared,
+            minimum: 0.0,
+            maximum: 100.0,
+        }
+    }
+    static MENU: [ObservationDescriptor; 2] = [
+        tap(1, ObservationCost::Resident, ObservationCadence::PerBlock),
+        tap(2, ObservationCost::Computed, ObservationCadence::PerWindow),
+    ];
+    static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+        id: match EffectId::new("test.observation") {
+            Ok(value) => value,
+            Err(_) => panic!("fixture id"),
+        },
+        display_name: "Observation fixture",
+        contract_major: 1,
+        contract_minor: 1,
+        state_layout_version: 1,
+        supported_link_modes: LinkModeSet::ALL,
+        lane_link: false,
+        parameters: &[],
+        ports: &[],
+        qualities: &[],
+        tail_and_rest: |_, _| effect_contract::NodeTailBound {
+            tail: effect_contract::TailSamples::Finite(0),
+            tail_every_peak: effect_contract::TailSamples::Infinite,
+            rest: effect_contract::RestBound::Unstated,
+            composition: effect_contract::CompositionBound::Unstated,
+        },
+        observations: &MENU,
+    };
+
+    // The control plane resolves the tap (#1677); moved here from host-web by #1590, as the
+    // function is this crate's.
+    let reason = |tap_id: u32| control_plane::resolve_observation_tap(&DESCRIPTOR, tap_id);
+    // The resident tap resolves and binds.
+    assert_eq!(reason(1), Ok(0));
+    // The computed tap resolves and is refused for what it is -- never `UnknownTap`, which would
+    // say the address was wrong, and never silently bound.
+    assert_eq!(
+        reason(2),
+        Err(control_plane::ObservationKeyError::ComputedTap)
+    );
+    // A tap id the menu does not declare stays `UnknownTap` on the same descriptor, and so does
+    // the reserved zero.
+    assert_eq!(
+        reason(3),
+        Err(control_plane::ObservationKeyError::UnknownTap)
+    );
+    assert_eq!(
+        reason(0),
+        Err(control_plane::ObservationKeyError::UnknownTap)
+    );
 }

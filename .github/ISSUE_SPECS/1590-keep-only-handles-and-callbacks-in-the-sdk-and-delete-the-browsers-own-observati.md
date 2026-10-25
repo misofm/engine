@@ -203,6 +203,23 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
   628,283 -> 628,275; nine-track 955,059 -> 954,987), but the ratio the test bounds rose
   (nine-track 954,987 / 86,248 = 11.07). The multiplier is re-pinned by its own rule from 7 to 12
   (8.4 % headroom). Flagged for review: a ratio bound whose base shrank.
+- **Checkpoint 4 (root's #1589c follow-ups).** control-plane: the public
+  `admit_and_push_observation_batch` is gone; the batch admission stays as the test-support hook
+  `test_admit_and_push_observation_batch`, because an `Observe` edit nets each tap to one change
+  and cannot reach every admission rule (the slot, duplicate and room checks the core's edit path
+  relies on). `effect_producers` became the test-support `test_effect_producers` (no caller but the
+  tests); `resolve_observation_key`, `observation_ended_bytes` and `observation_frame_bytes` became
+  `pub(crate)` (the core uses them) with test-support `test_*` wrappers. The three named tests go
+  through `rig.apply(Observe)`; the 64-track test arms one tap per transaction at 4 KiB, because 64
+  edits do not fit one 4 KiB command frame, and the duplicate test uses the 64-track session's short
+  IDs at 4 KiB, because three longest-ID edits do not fit a 1 KiB frame. The edge refusal on the
+  edit path is the resource limit without a change index, so the index assertions became
+  refusal-and-nothing-moved assertions. `a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown`
+  moved from host-web `tests` to control-plane `observation_bindings`. Prose: `live.rs` no longer
+  names `miso.command.v1` as live; `prepare.rs` no longer names the browser's numeric selection;
+  `EFFECT_OBSERVATION_V1.md`'s "Plan replacement drops subscriptions" is now "Plan replacement keeps
+  subscriptions", as #1584/#1585 made true; `CONTROL_PROTOCOL_SEMANTICS.md` and `adapter.rs` name
+  the edit as the queues' one writer.
 
 ### Deleted or rewritten tests and their holders
 
@@ -233,3 +250,6 @@ qualification run of #1530 and #1535 on Chromium, Firefox and WebKit.
 | `test-web-audioworklet.mjs` observation map epoch block | the map is gone; the session-map half stays |
 | `protocol_cross_host` `both_hosts_read_one_observation_tap_alike` | rewritten: both hosts answer the same `OBSERVATION_READ` frame |
 | sdk `browser-evals` "generated u64 offsets preserve BigInt", its `observationResult` leaves | the leaves read `seekReport`'s u64 fields |
+| control-plane `a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming` | rewritten over `rig.apply(Observe)`: a disarm the transaction undoes frees no room, and two arms of one tap count once |
+| control-plane `every_insert_of_a_sixty_four_track_session_subscribes_at_the_browser_frame`, `a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits` | rewritten over `rig.apply(Observe)`; claims kept, the change index of a refusal no longer exists on the edit path |
+| host-web `a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` | moved to control-plane `observation_bindings` unchanged |
