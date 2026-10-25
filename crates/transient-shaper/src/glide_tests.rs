@@ -745,3 +745,79 @@ fn a_glide_lands_on_its_target_law_and_a_resting_lane_never_leaves_its_own() {
     }
     lane::each_lane!(|L| check::<L>());
 }
+
+/// **The collapsed body.** A collapse-eligible bank (every lane's channels equal) whose lane 0
+/// glides renders collapsed blocks (`process_bank_mono`) that are the left plane of a dual bank
+/// fed `L == R`, bit for bit, and after the disengage copy the two banks render and hold the same
+/// words: a collapsed block advances the glide as the dual one does. At `Simd4` and `Simd8`.
+#[test]
+fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
+    for &width in BankWidth::ALL {
+        let lanes = width.lanes() as usize;
+        let values = oracle_values();
+        let requests: Vec<_> = (0..lanes)
+            .map(|lane| request(&values, RATE, LINKS[lane % LINKS.len()]))
+            .collect();
+        let (mut dual, mut collapsed) = (
+            Under::new(Some(width), &requests),
+            Under::new(Some(width), &requests),
+        );
+        for under in [&mut dual, &mut collapsed] {
+            assert!(
+                under.retarget(0, LinkMode::Average, 300),
+                "a supported glide"
+            );
+        }
+        let (source, _) = oracle_signals();
+        let offsets = vec![0_u32; lanes + 1];
+        for block in 0..16 {
+            let first = block * BLOCK;
+            let plane = interleave(&vec![source[first..first + BLOCK].to_vec(); lanes]);
+            let (mut dual_left, mut dual_right) = (plane.clone(), plane.clone());
+            dual.process(&mut dual_left, &mut dual_right, first as u64, &[], &offsets);
+            let (mut mono_left, mut mono_right) = (plane.clone(), plane);
+            let (Under::Bank(bank, _), true) = (&mut collapsed, block < 4) else {
+                collapsed.process(&mut mono_left, &mut mono_right, first as u64, &[], &offsets);
+                assert_eq!(
+                    (bits(&mono_left), bits(&mono_right)),
+                    (bits(&dual_left), bits(&dual_right)),
+                    "{width:?} block {block}: the disengaged bank parted from the dual one"
+                );
+                continue;
+            };
+            bank.process_bank_mono(
+                EffectBankProcessBlock::new(
+                    &mut mono_left,
+                    &mut mono_right,
+                    None,
+                    BLOCK as u32,
+                    width,
+                    first as u64,
+                    &[],
+                    &offsets,
+                    QUANTUM,
+                )
+                .expect("a well-shaped bank block"),
+            );
+            assert_eq!(
+                bits(&mono_left),
+                bits(&dual_left),
+                "{width:?} block {block}: a collapsed glide block is not the dual one"
+            );
+            if block == 3 {
+                bank.desymmetrize_channels();
+                for lane in 0..lanes {
+                    assert_eq!(
+                        collapsed.link_words(lane),
+                        dual.link_words(lane),
+                        "{width:?} lane {lane}: the disengaged weights"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn bits(values: &[f32]) -> Vec<u32> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
