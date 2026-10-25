@@ -2036,6 +2036,7 @@ mod tests {
             fn adopt_predecessor(
                 &mut self,
                 predecessor: &mut dyn PreparedPlanExecutor,
+                _block_start: u64,
             ) -> CarryOutcome {
                 self.hooks.fetch_add(1, Ordering::Relaxed);
                 HOOK_IN_RENDER_SCOPE.set(Some(audit::is_render_scope_active()));
