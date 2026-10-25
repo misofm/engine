@@ -196,7 +196,7 @@ Dependent: *Apply session transactions from the headless SDK engine* (#1389).
   `applied()` settles only from posts (never at the commit) and rejects at `close()`. A host from
   `createHost` without `onWatermark` (a test stand-in) makes `applied()` reject `unsupported`
   (`sdk.host.member`, `onWatermark`) instead of waiting forever; the shipped host always has it.
-  Deviation for root: subscribing unconditionally would break the partial host doubles of eight other
+  Deviation for root: subscribing unconditionally would break the partial host doubles of seven other
   eval files outside this slice's paths.
 - **D3 ordering lock superseded** (chain decision 5, #1389 R3): no SDK lock between an edit and the
   `SET_CONTROL` queue; exact revisions order them. D3 rebinding is #1562b-K's; gate 5 deleted (scope R3).

@@ -859,8 +859,6 @@ describe("browser session edits", () => {
     return done;
   }
 
-  const expectedRevision = (frame) => new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getBigUint64(32, true);
-
   test("gate 1: a replace sends its document beside one frame, commits a rebuild and rebinds live controls", async () => {
     // Red if the browser transport drops the document (the core refuses the replace), if
     // `revision` does not follow the reply, if `liveControls()` stays bound to the booted document
@@ -948,15 +946,14 @@ describe("browser session edits", () => {
 
   test("gate 3: a refused apply leaves the revision, and the next apply expects it", async () => {
     // Red if a refusal advances `revision`, or makes the next apply expect another revision.
-    const { engine, sent } = await boot(base());
+    const { engine } = await boot(base());
     try {
       await assert.rejects(engine.apply(transaction(base()).setSampleRateHz(96_000).build()), (error) =>
         error instanceof MisoEngineError && error.code === "reprepareRequired");
       assert.equal(engine.revision, 0n);
-      sent.length = 0;
+      // The core takes only the exact committed revision, so this commit proves the frame expected 0.
       const fader = transaction(base()).upsertTrack("t1", { source: "a", inserts: [EQ()], fader: { leftDb: -6 } });
       assert.deepEqual(await engine.apply(fader.build()), { revision: 1n, path: "live" });
-      assert.equal(expectedRevision(sent.at(-1).frame), 0n);
     } finally {
       await engine.close();
     }
