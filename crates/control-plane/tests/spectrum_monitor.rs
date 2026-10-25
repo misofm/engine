@@ -400,7 +400,7 @@ impl Rig {
 
     /// The session's spectrum state: configuration, both epochs, and the pending plans' epochs.
     fn spectrum_state(&self) -> (Option<SpectrumConfiguration>, u64, u64, Vec<u64>) {
-        let monitor = self.session.test_spectrum();
+        let monitor = self.session.spectrum_monitor();
         (
             monitor.configuration().cloned(),
             monitor.configured_epoch(),
@@ -439,7 +439,7 @@ impl Rig {
     fn read_stream(&mut self) -> Read {
         let (service, analysis) = self
             .session
-            .test_spectrum_mut()
+            .spectrum_monitor_mut()
             .service_and_analysis_mut()
             .expect("a configured session has a service");
         service
@@ -457,7 +457,7 @@ impl Rig {
     fn start_stream(&mut self) {
         let (service, analysis) = self
             .session
-            .test_spectrum_mut()
+            .spectrum_monitor_mut()
             .service_and_analysis_mut()
             .expect("a configured session has a service");
         service
@@ -474,7 +474,7 @@ impl Rig {
 
     fn service(&mut self) -> &mut SpectrumService {
         self.session
-            .test_spectrum_mut()
+            .spectrum_monitor_mut()
             .service_and_analysis_mut()
             .expect("a configured session has a service")
             .0
@@ -634,8 +634,8 @@ macro_rules! one_window {
 #[test]
 fn the_first_plan_reads_the_reference_window() {
     let mut rig = Rig::new(Some(configuration()));
-    assert_eq!(rig.session.test_spectrum().configured_epoch(), 1);
-    assert_eq!(rig.session.test_spectrum().adopted_epoch(), 1);
+    assert_eq!(rig.session.spectrum_monitor().configured_epoch(), 1);
+    assert_eq!(rig.session.spectrum_monitor().adopted_epoch(), 1);
     let got: SpectrumSnapshot = one_window!(rig.service(), rig.block());
     let mut reference = Reference::new();
     let want: SpectrumSnapshot = one_window!(reference.service, reference.block());
@@ -669,7 +669,7 @@ fn the_first_plan_reads_the_reference_window() {
 fn the_configuration_is_in_no_revision_and_no_snapshot() {
     let mut configured = Rig::new(Some(configuration()));
     let mut plain = Rig::new(None);
-    let monitor = plain.session.test_spectrum();
+    let monitor = plain.session.spectrum_monitor();
     assert!(monitor.configuration().is_none() && monitor.service().is_none());
     assert!(monitor.analysis().is_none());
     assert_eq!(
@@ -677,7 +677,7 @@ fn the_configuration_is_in_no_revision_and_no_snapshot() {
         (0, 0)
     );
     assert_eq!(
-        configured.session.test_spectrum().configuration(),
+        configured.session.spectrum_monitor().configuration(),
         Some(&configuration())
     );
     let revision = |rig: &Rig| rig.session.test_controller().session().revision();
@@ -862,7 +862,7 @@ fn a_structural_edit_carries_the_stream() {
         rig.rebuild(&edits);
         plain.rebuild(&edits);
     });
-    let monitor = rig.session.test_spectrum();
+    let monitor = rig.session.spectrum_monitor();
     assert_eq!(monitor.configuration(), Some(&collection()));
     assert_eq!(
         (monitor.configured_epoch(), monitor.adopted_epoch()),
@@ -921,7 +921,7 @@ fn a_removed_target_drops_its_entry_and_its_arm() {
         plain.rebuild(&remove_track("eq1"));
     });
     assert_continuous(&reads);
-    let monitor = rig.session.test_spectrum();
+    let monitor = rig.session.spectrum_monitor();
     let SpectrumPreparation::Collection(kept) = &monitor
         .configuration()
         .expect("one entry stays")
@@ -948,11 +948,11 @@ fn a_removed_target_drops_its_entry_and_its_arm() {
 
     rig.rebuild(&remove_track("eq0"));
     plain.rebuild(&remove_track("eq0"));
-    let monitor = rig.session.test_spectrum();
+    let monitor = rig.session.spectrum_monitor();
     assert!(monitor.configuration().is_none());
     assert_eq!(monitor.configured_epoch(), 3);
     rig.until_promoted();
-    let monitor = rig.session.test_spectrum();
+    let monitor = rig.session.spectrum_monitor();
     assert!(monitor.service().is_none() && monitor.analysis().is_none());
     assert_eq!(monitor.adopted_epoch(), 3);
     assert_eq!(
@@ -974,9 +974,9 @@ fn a_removed_target_drops_its_entry_and_its_arm() {
         armed.service().read(SpectrumChannels::Left),
         Ok(None)
     ));
-    assert_eq!(armed.session.test_spectrum().adopted_epoch(), 1);
+    assert_eq!(armed.session.spectrum_monitor().adopted_epoch(), 1);
     armed.until_promoted();
-    assert_eq!(armed.session.test_spectrum().adopted_epoch(), 2);
+    assert_eq!(armed.session.spectrum_monitor().adopted_epoch(), 2);
     assert!(matches!(
         armed.service().read(SpectrumChannels::Left),
         Err(SpectrumServiceError::Dropped)
@@ -1013,7 +1013,7 @@ fn a_refused_transaction_changes_no_spectrum_state() {
     rig.session
         .test_set_structural_faults([Some(TestStructuralFaultPhase::ProtocolCommit), None]);
     assert!(rig.apply(&[route, track]).is_err(), "a commit fault");
-    let monitor = rig.session.test_spectrum();
+    let monitor = rig.session.spectrum_monitor();
     assert_eq!(monitor.configuration(), Some(&collection()));
     assert_eq!(
         (monitor.configured_epoch(), monitor.adopted_epoch()),
@@ -1082,7 +1082,7 @@ fn an_observer_is_never_carried_onto_a_strip_of_another_kind() {
         SessionEdit::UpsertRoute { route: out },
     ]);
     assert_eq!(
-        rig.session.test_spectrum().configuration(),
+        rig.session.spectrum_monitor().configuration(),
         Some(&configuration),
         "the submix keeps the entry"
     );
@@ -1221,7 +1221,7 @@ fn a_configure_at_revision_zero_reads_the_reference_window() {
     );
     assert_eq!((reply.configured_epoch, reply.adopted_epoch), (1, 0));
     rig.until_promoted();
-    let monitor = rig.session.test_spectrum();
+    let monitor = rig.session.spectrum_monitor();
     assert_eq!(monitor.configuration(), Some(&configuration()));
     assert_eq!(
         (monitor.configured_epoch(), monitor.adopted_epoch()),
@@ -1360,7 +1360,7 @@ fn an_equal_or_hop_only_configure_publishes_no_plan() {
 
     let (service, analysis) = rig
         .session
-        .test_spectrum_mut()
+        .spectrum_monitor_mut()
         .service_and_analysis_mut()
         .expect("a service");
     service.stop_stream(Some(analysis));
@@ -1386,12 +1386,12 @@ fn an_equal_or_hop_only_configure_publishes_no_plan() {
         .expect("hop only while pending");
     assert!(!pending.rebuild);
     rig.until_promoted();
-    let monitor = rig.session.test_spectrum();
+    let monitor = rig.session.spectrum_monitor();
     assert_eq!(monitor.adopted_epoch(), monitor.configured_epoch());
     assert_eq!(monitor.configured_epoch(), pending.configured_epoch);
     let (service, analysis) = rig
         .session
-        .test_spectrum_mut()
+        .spectrum_monitor_mut()
         .service_and_analysis_mut()
         .expect("a service");
     service.stop_stream(Some(analysis));
@@ -1443,7 +1443,7 @@ fn a_configure_keeps_adds_and_removes_taps() {
     assert!(rig.session.test_pending_providers().is_empty());
     assert_continuous(&reads);
     assert_eq!(
-        rig.session.test_spectrum().adopted_epoch(),
+        rig.session.spectrum_monitor().adopted_epoch(),
         added.configured_epoch
     );
 
@@ -1463,7 +1463,7 @@ fn a_configure_keeps_adds_and_removes_taps() {
     let removed = rig.configure(&none).expect("remove every tap");
     assert!(removed.rebuild);
     rig.until_promoted();
-    let monitor = rig.session.test_spectrum();
+    let monitor = rig.session.spectrum_monitor();
     assert!(monitor.configuration().is_none());
     assert!(monitor.service().is_none() && monitor.analysis().is_none());
     assert_eq!(monitor.adopted_epoch(), removed.configured_epoch);
@@ -1551,7 +1551,7 @@ fn a_refused_configure_changes_nothing_and_a_pending_edit_is_superseded() {
     assert_eq!(after.exact, watermark.exact + 1);
     assert_eq!((after.transition_fallback, after.superseded), (0, 0));
     assert_eq!(
-        rig.session.test_spectrum().configuration(),
+        rig.session.spectrum_monitor().configuration(),
         Some(&configuration())
     );
 }
