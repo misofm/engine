@@ -352,14 +352,14 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 /// What phase 1 of a structural transaction to `next` writes on the plan `base` describes (#1325
 /// D1, D2, D7).
 ///
-/// `base.committed` is the running plan's committed model and `base.monitor.committed` the
-/// monitor overlay its cells hold; `overlay` is the running plan's [`DuckOverlay`], empty outside
-/// phase 1. The strips to duck are every strip of `base.committed` that `next` does not hold and
-/// `overlay` does not list; the sources `overlay` lists that `next` keeps are restored
-/// ([`StripTransition::restored_sources`]). The records are the classifier's for the running plan's base with
-/// `overlay` laid over it, against the same with each strip to duck muted on both channels and
-/// each of its routes whose tap precedes the fader muted, all at `next`'s mute ramp: exactly the
-/// records a value-only transaction making those mutes would write, so a strip or route
+/// `base.committed` is the running plan's committed model and `base.monitor.committed` the monitor
+/// overlay its cells hold; `overlay` is the running plan's [`DuckOverlay`], empty outside phase 1.
+/// The strips to duck are every strip of `base.committed` that `next` does not hold and `overlay`
+/// does not list; the sources `overlay` lists that `next` keeps are restored
+/// ([`StripTransition::restored_sources`]). The records are the classifier's for the running plan's
+/// base with `overlay` laid over it, against the same with each strip to duck muted on both
+/// channels and each of its routes whose tap precedes the fader muted, all at `next`'s mute ramp:
+/// exactly the records a value-only transaction making those mutes would write, so a strip or route
 /// already in the overlay gets no second write. `C` reads the running plan's compensation lines
 /// (`base.inventory`), keyed by the route's two edges, which add.
 ///

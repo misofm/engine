@@ -339,25 +339,25 @@ extern "C" {
  * committed session, whether or not its plan has been swapped in yet, with one exception: a source
  * the transaction removed (issue 1325).
  *
- * Removing a strip in two phases (issue 1325). A transaction that removes a track or a submix
- * does not cut it at the swap. Phase 1: before the command returns OK, the strip's fader is muted
- * on both channels on the running plan with the session's mute_ms ramp N, and so is each of its
- * routes whose tap precedes the fader. Phase 2: the replacement plan is adopted no earlier than
- * S = ceil_q(p + q + N + C), where p is the render clock after the mutes were written, q the
- * render quantum and C the longest compensation delay of a route out of a removed strip. The
- * watermark reports the transaction's revision first at S. Until then a source the transaction
- * removed still feeds the running plan: its submissions and seeks are accepted and its PCM plays
- * the fade, so the host keeps feeding it. From the adoption on it is refused as
- * "source.id.unknown", and PCM accepted for it that render has not read is discarded with the
- * running plan. A later transaction before S writes no second fade for a strip already fading,
- * and its replacement is adopted no earlier than the same S. A transaction before S that restores
- * a removed strip commits too, and its replacement is adopted no earlier than the same S: the strip
- * fades back in from S over the session's mute_ms ramp, and so does each of its routes whose tap
- * precedes the fader. A restored source declared as before keeps its ring: the PCM accepted for it
- * in phase 1 plays, and the host keeps feeding it without a seek. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
- * A source whose declaration the transaction changed restarts like an added one: in a new ring at
- * generation 1, frame 0, with the PCM accepted for it before the command discarded with its plan;
- * the host restarts its feed.
+ * Removing a strip in two phases (issue 1325). A transaction that removes a track or a submix does
+ * not cut it at the swap. Phase 1: before the command returns OK, the strip's fader is muted on
+ * both channels on the running plan with the session's mute_ms ramp N, and so is each of its routes
+ * whose tap precedes the fader. Phase 2: the replacement plan is adopted no earlier than
+ * S = ceil_q(p + q + N + C), where p is the render clock after the mutes were written, q the render
+ * quantum and C the longest compensation delay of a route out of a removed strip. The watermark
+ * reports the transaction's revision first at S. Until then a source the transaction removed still
+ * feeds the running plan: its submissions and seeks are accepted and its PCM plays the fade, so the
+ * host keeps feeding it. From the adoption on it is refused as "source.id.unknown", and PCM
+ * accepted for it that render has not read is discarded with the running plan. A later transaction
+ * before S writes no second fade for a strip already fading, and its replacement is adopted no
+ * earlier than the same S. A transaction before S that restores a removed strip commits too, and
+ * its replacement is adopted no earlier than the same S: the strip fades back in from S over the
+ * session's mute_ms ramp, and so does each of its routes whose tap precedes the fader. A restored
+ * source declared as before keeps its ring: the PCM accepted for it in phase 1 plays, and the host
+ * keeps feeding it without a seek. A source the transaction added starts at generation 1, frame 0,
+ * until the host seeks it. A source whose declaration the transaction changed restarts like an
+ * added one: in a new ring at generation 1, frame 0, with the PCM accepted for it before the
+ * command discarded with its plan; the host restarts its feed.
  *
  * A transaction behind an unadopted replacement (issue 1310). A SESSION_TRANSACTION_APPLY that
  * needs a new plan while an earlier transaction's replacement plan has not been adopted by render

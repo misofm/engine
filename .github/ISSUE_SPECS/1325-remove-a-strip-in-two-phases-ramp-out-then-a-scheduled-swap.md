@@ -464,6 +464,13 @@ and 1325a merged).
   1408, not 3584; gate 3's test is red too); fresh ring (P0's row dropped) and no producer move
   and restored source kept in the overlay (each: the first submit after the restore is refused).
 
+- PR evidence (the verifier's probe, not a committed test: one test per claim): a remove, restore,
+  remove of `b` and `src-b` in one phase 1 matches gate 1's reference bit for bit, `src-b` is
+  accepted until the adoption and refused after it, and the adoption is at `S = 3584`.
+- Merge with #1354a (`origin/main` after PR #1979): `SuccessorBase` holds both `warm` and `duck`
+  with both neutral values, and the duck substitution runs after the warm-lead check, which must
+  precede the preparation's first allocation (the ducked copy allocates).
+
 ### Stated limits (1325b)
 
 - A restore declared with another source declaration or ring configuration starts its source

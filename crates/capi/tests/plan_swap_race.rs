@@ -379,7 +379,7 @@ impl Control<'_> {
 
     /// One control iteration: feed the source, race the two synchronizing dequeue entries and a
     /// resource query against the render thread, and, once two blocks have rendered since the
-    /// last admission, offer the next structural transaction.
+    /// last admission and (paced) the watermark reports it, offer the next structural transaction.
     fn step(&mut self) {
         // #1310 gate 5: back to back, every other step feeds only after its submit, so no block
         // can start while the command runs and the candidate before it stays unadopted
@@ -557,8 +557,9 @@ fn race_unpaced(control: &mut Control<'_>, render: impl FnOnce()) {
 ///
 /// This thread renders blocks through the exported entry while `render_while_producing`'s
 /// producer thread runs the control side ([`Control::step`]): it commits `swaps` structural
-/// transactions, offering each once two blocks have rendered since the last admission, and between
-/// them spins on the two dequeue entries, which synchronize plan epochs first, and on
+/// transactions, offering each once two blocks have rendered since the last admission and, when
+/// paced, once the watermark reports it (a removal adopts at its scheduled sample, #1325), and
+/// between them spins on the two dequeue entries, which synchronize plan epochs first, and on
 /// `miso_engine_v1_plan_resources`. The swap therefore lands inside a render call that the
 /// control thread is racing. Each reader thread polls `miso_engine_v1_plan_resources` until the
 /// race ends.
