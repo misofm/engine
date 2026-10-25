@@ -11,12 +11,17 @@
 //!
 //! Gates 5, 6 and the second case of gate 7 (the sidechain closure and the submix `input`-tap
 //! rule) are #1354b's.
+//!
+//! The second half (#1355) streams the warm successor through the plan exchange: render's
+//! readiness check, the adoption and its prime, on both bank widths, and the growth chain at
+//! every launch rate.
 
 #![cfg(feature = "test-support")]
 
 #[path = "support/successor.rs"]
 mod successor;
 
+use engine::realtime::{PlanAdoption, SwapOutcome};
 use graph::{GraphNodeId, StableGraphId, TrackStage};
 use graph_compiler::Backend;
 use host_core::{
@@ -27,7 +32,6 @@ use session::{
     Console, Effect, EffectIdentity, EffectQuality, LinkMode, Route, RouteDestination, RouteSource,
     SendTap, SessionModel, Sidechain, SidechainDeclaration, StableId, Submix, parse_session_json,
 };
-use engine::realtime::{PlanAdoption, SwapOutcome};
 use successor::{Block, Feed, Session, caps, exchange, render};
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -1008,7 +1012,7 @@ impl Stream {
             revision: 1,
             feeder: Feeder::new(rate, ahead_blocks),
             blocks: Vec::new(),
-            caps: caps.clone(),
+            caps: *caps,
             backend,
         }
     }
@@ -1039,7 +1043,12 @@ impl Stream {
 
     /// Publish `host`, prepared from [`Self::base`], with `adoption`; for a `Primed` candidate,
     /// first set the carried ring's `prime_required` flag (D3).
-    fn publish(&mut self, mut host: PreparedHost, committed: &SessionModel, adoption: PlanAdoption) {
+    fn publish(
+        &mut self,
+        mut host: PreparedHost,
+        committed: &SessionModel,
+        adoption: PlanAdoption,
+    ) {
         assert!(self.pending.is_none(), "one candidate at a time");
         host.sources.adopt_persisting(&mut self.sources);
         if let PlanAdoption::Primed { .. } = adoption {
@@ -1134,7 +1143,13 @@ impl Stream {
 
 /// A stream of `session` alone, fed `ahead_blocks` ahead.
 fn alone(session: &Session, caps: &HostPrepareCaps, backend: Backend, ahead: u64) -> Stream {
-    Stream::start(fresh(session, caps, backend), &session.model, caps, backend, ahead)
+    Stream::start(
+        fresh(session, caps, backend),
+        &session.model,
+        caps,
+        backend,
+        ahead,
+    )
 }
 
 /// Blocks rendered before an edit.
@@ -1148,7 +1163,9 @@ const AHEAD: u64 = LEAD / QUANTUM + 2;
 fn first_divergence(left: &Stream, right: &Stream) -> Option<usize> {
     let (left, right) = (left.bits(), right.bits());
     assert_eq!(left.len(), right.len());
-    left.iter().zip(&right).position(|(left, right)| left != right)
+    left.iter()
+        .zip(&right)
+        .position(|(left, right)| left != right)
 }
 
 /// Gate 1: a warm successor that adds a muted limiter track (and, second shape, feeds it into a
@@ -1195,10 +1212,22 @@ fn a_primed_warm_successor_continues_its_predecessor_bit_for_bit() {
             assert_eq!(lead, LEAD, "shape {shape}");
             let k = (lead / QUANTUM) as usize;
             swapped.render(AFTER);
-            assert_eq!(swapped.swap_blocks(), [BEFORE], "shape {shape}: adopted at once");
-            let watermark = swapped.publisher.watermark_reader().read().expect("watermark");
             assert_eq!(
-                (watermark.revision, watermark.first_sample, watermark.outcome_flags),
+                swapped.swap_blocks(),
+                [BEFORE],
+                "shape {shape}: adopted at once"
+            );
+            let watermark = swapped
+                .publisher
+                .watermark_reader()
+                .read()
+                .expect("watermark");
+            assert_eq!(
+                (
+                    watermark.revision,
+                    watermark.first_sample,
+                    watermark.outcome_flags
+                ),
                 (
                     swapped.revision,
                     BEFORE as u64 * QUANTUM,
@@ -1215,13 +1244,9 @@ fn a_primed_warm_successor_continues_its_predecessor_bit_for_bit() {
             );
             // The fresh W: the warm successor's floors, offset 0, fed from frame 0.
             let floors = swapped.inventory.test_only_floors_only();
-            let reference = successor_of(
-                &b,
-                &caps,
-                SuccessorBase::new(&floors, &b.model, 2),
-                backend,
-            )
-            .expect("the fresh W");
+            let reference =
+                successor_of(&b, &caps, SuccessorBase::new(&floors, &b.model, 2), backend)
+                    .expect("the fresh W");
             assert_eq!(reference.inventory.source_read_offset(), 0);
             let mut reference = Stream::start(reference, &b.model, &caps, backend, AHEAD);
             reference.render(BEFORE + AFTER + k);
@@ -1242,11 +1267,15 @@ fn a_primed_warm_successor_continues_its_predecessor_bit_for_bit() {
 fn growth_rebuild_growth_continues_its_predecessor() {
     let steps = |count: usize| {
         let mut model = two_tracks();
-        for (index, effects) in [vec![limiter()], Vec::new(), vec![limiter(), {
-            let mut second = limiter();
-            second.id = sid("limiter-2");
-            second
-        }]]
+        for (index, effects) in [
+            vec![limiter()],
+            Vec::new(),
+            vec![limiter(), {
+                let mut second = limiter();
+                second.id = sid("limiter-2");
+                second
+            }],
+        ]
         .into_iter()
         .take(count)
         .enumerate()
@@ -1317,7 +1346,10 @@ fn an_input_tap_sidechain_from_a_restarted_track_continues() {
             let mut swapped = alone(&start, &caps, backend, AHEAD);
             swapped.render(BEFORE);
             if grown {
-                assert_eq!(swapped.grow(&Session::compile(finish(a(true))), &CONFIG), LEAD);
+                assert_eq!(
+                    swapped.grow(&Session::compile(finish(a(true))), &CONFIG),
+                    LEAD
+                );
                 swapped.render(AFTER);
             }
             assert_eq!(swapped.grow(&edit(grown), &CONFIG), LEAD);
@@ -1363,7 +1395,10 @@ fn a_warm_successor_waits_for_every_carried_ring_and_a_held_seek() {
     swapped.render(BEFORE);
     swapped.grow(&b, &CONFIG);
     swapped.render(4);
-    assert!(swapped.swap_blocks().is_empty(), "not adopted while withheld");
+    assert!(
+        swapped.swap_blocks().is_empty(),
+        "not adopted while withheld"
+    );
     swapped.feeder.ahead = (k + 1) * QUANTUM;
     swapped.render(AFTER);
     assert_eq!(swapped.swap_blocks(), [BEFORE + 4], "adopted once ready");
@@ -1426,10 +1461,7 @@ fn the_growth_chain_primes_without_allocating() {
         };
         let p_max = u64::from(host_core::p_max_samples(rate, 128));
         let caps = ring_caps(stall_ring_frames(rate, 128) + p_max as u32 + 128);
-        let config = WarmConfig {
-            p_max,
-            ..CONFIG
-        };
+        let config = WarmConfig { p_max, ..CONFIG };
         let mut stream = alone(&model(0), &caps, backend(), 0);
         stream.feeder.rate = rate;
         let mut leads = Vec::new();
@@ -1442,7 +1474,11 @@ fn the_growth_chain_primes_without_allocating() {
             stream.feeder.ahead = lead + QUANTUM;
             stream.render(AFTER);
         }
-        assert_eq!(leads.iter().sum::<u64>(), p_max, "{rate} Hz: ΣP is p_max_samples");
+        assert_eq!(
+            leads.iter().sum::<u64>(),
+            p_max,
+            "{rate} Hz: ΣP is p_max_samples"
+        );
         assert_eq!(stream.offset, p_max);
         let swaps = stream.swap_blocks();
         assert_eq!(swaps.len(), 4, "{rate} Hz: four adoptions");
@@ -1455,4 +1491,3 @@ fn the_growth_chain_primes_without_allocating() {
         }
     }
 }
-

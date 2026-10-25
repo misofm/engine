@@ -5907,8 +5907,16 @@ fn lanes_of(pending: [[&[f32]; 2]; 2], lanes: u8) -> [[&[f32]; 2]; 2] {
     let none: [&[f32]; 2] = [&[], &[]];
     let [left, right] = pending;
     [
-        if lanes & STRIP_DELAY_LEFT != 0 { left } else { none },
-        if lanes & STRIP_DELAY_RIGHT != 0 { right } else { none },
+        if lanes & STRIP_DELAY_LEFT != 0 {
+            left
+        } else {
+            none
+        },
+        if lanes & STRIP_DELAY_RIGHT != 0 {
+            right
+        } else {
+            none
+        },
     ]
 }
 
@@ -6594,9 +6602,9 @@ impl PreparedPlanExecutor for GraphExecutor {
         let Some(source_read_sample) = block_start.checked_add(self.source_read_offset) else {
             return false;
         };
-        self.source_set.as_ref().is_none_or(|set| {
-            set.driver.prime_ready(source_read_sample, lead_blocks)
-        })
+        self.source_set
+            .as_ref()
+            .is_none_or(|set| set.driver.prime_ready(source_read_sample, lead_blocks))
     }
     // REALTIME_POLICY_END
 

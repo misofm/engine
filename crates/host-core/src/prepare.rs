@@ -2119,7 +2119,9 @@ fn prime_bytes_of(
             words = words.checked_add(written)?;
         }
     }
-    lead.checked_mul(channels)?.checked_add(words)?.checked_mul(4)
+    lead.checked_mul(channels)?
+        .checked_add(words)?
+        .checked_mul(4)
 }
 
 /// Whether `compiled`, a structural edit of the plan `base` describes, gets a warm successor
@@ -4441,11 +4443,9 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
         _ => Vec::new(),
     };
-    let prime_carry_bytes = graph::prime_carry_retained_bytes(
-        strip_delay_carry.fills.len(),
-        sidechain_fills.len(),
-    )
-    .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let prime_carry_bytes =
+        graph::prime_carry_retained_bytes(strip_delay_carry.fills.len(), sidechain_fills.len())
+            .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let route_carry = match successor {
         Some(base) => resolve_route_carry(&base.inventory.live_routes, &live_routes, &route_joins),
         None => RouteCarry::default(),
