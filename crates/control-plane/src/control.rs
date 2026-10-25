@@ -1166,6 +1166,10 @@ pub struct SessionState<A: ControlAdapter> {
     /// The most observation slots any committed plan has had; the ended-event cells and the
     /// binding table are charged for it (#1676 D2).
     pub(crate) observation_slots_high_water: usize,
+    /// The most owners one strip of any model this session committed has had (#1577): the
+    /// response capture is charged at it, since a job or result sized under a displaced model can
+    /// outlive the rebuild that displaced it.
+    pub(crate) capture_owners_high_water: usize,
     /// The next arm tag this session issues (#1585 D4): `1` at compile, one more per queued
     /// observation record, so tags are monotone per session and `0` is never one. A record is
     /// tagged when it is queued, after its batch was admitted, so a refused submission issues none.
@@ -1181,6 +1185,9 @@ pub struct SessionState<A: ControlAdapter> {
     /// render half does. `None` from boot when the session serves the meter batches itself
     /// ([`Self::meters`]).
     pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
+    /// The response capture's delivered result (#1577 D5), kept by `service` until a host takes
+    /// it; #1578 turns it into an event.
+    pub(crate) response_ready: Option<host_core::ResponseReady>,
     /// The session's meter delivery when its control plane serves the meter batches (#1583 D5,
     /// R2: the C ABI's), built at boot over the output meter's reader and a requested gate.
     pub(crate) meters: Option<SessionMeters>,
@@ -2862,10 +2869,61 @@ where
     pub fn service(&mut self) -> Result<(), CommandError> {
         self.fold_observation_pending();
         self.synchronize_plan_epochs()?;
+        self.poll_response_capture();
         self.refresh_provider_counters();
         self.collect_render_activity();
         self.refresh_provider_counters();
         Ok(())
+    }
+
+    /// Takes the response capture's reply, if one is there and no result is waiting (#1577 D5).
+    fn poll_response_capture(&mut self) {
+        if self.response_ready.is_some() {
+            return;
+        }
+        let (provider, store) = self.controller.provider_and_session_mut();
+        self.response_ready = provider.poll_response_capture(store.compiled().normalized_model());
+    }
+
+    /// Test seam (#1577 D5): arm one capture of `strip_id`'s response owners from the newest plan.
+    ///
+    /// # Errors
+    ///
+    /// The capture's refusal; a refusal changes nothing.
+    #[cfg(feature = "test-support")]
+    pub fn test_arm_track_response(
+        &mut self,
+        strip_id: &str,
+        grid: host_core::ResponsePreviewGrid,
+        channels: host_core::ResponseChannels,
+    ) -> Result<u64, host_core::ResponseCaptureRefusal> {
+        let (provider, store) = self.controller.provider_and_session_mut();
+        provider.arm_response_capture(
+            store.compiled().normalized_model(),
+            strip_id,
+            grid,
+            channels,
+        )
+    }
+
+    /// Test seam (#1577): the response capture row the newest epoch's plan was charged
+    /// (`CapiResources::response_capture`), the pending candidate's when one is pending.
+    #[cfg(feature = "test-support")]
+    pub fn test_response_capture_charge(&self) -> u64 {
+        self.pending_providers
+            .last()
+            .unwrap_or(&self.providers)
+            .capi
+            .response_capture
+    }
+
+    /// Test seam (#1577 D5): take the delivered capture result and release the capture, as #1578
+    /// does when the host dequeues its event.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_track_response(&mut self) -> Option<host_core::ResponseReady> {
+        let ready = self.response_ready.take()?;
+        self.controller.provider_mut().release_response_capture();
+        Some(ready)
     }
 
     /// Sets every counter the provider serves from a source outside it (#1348 D8): the
@@ -3917,12 +3975,9 @@ where
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
         kept_ramps.keep_within(prospective.normalized_model());
-        // #1325 D6 (the 1325b boundary): a transaction in phase 1 that restores a strip or a
-        // source the running plan is ramping out is retryable backpressure until #1325b gives the
-        // successor's base the overlay. Prepared against the kept model alone, the restored strip
-        // would carry its ducked fader and stay muted. Nothing has changed yet, so the caller
-        // republishes the withdrawn candidate; once render adopts it the overlay is gone and the
-        // same edit is an added strip (#1288).
+        // #1325 D6: the duck overlay of the running plan's cells while phase 1 runs, empty
+        // outside it. The successor's base composes it, so a strip or source this transaction
+        // restores carries from its ducked state and ramps back in from `S`.
         let duck = if superseding {
             &self
                 .kept_holder()
@@ -3932,17 +3987,6 @@ where
         } else {
             &NO_DUCK
         };
-        {
-            let next = prospective.normalized_model();
-            if next.strips().any(|strip| duck.has_strip(strip.id.as_str()))
-                || next
-                    .sources
-                    .iter()
-                    .any(|source| duck.has_source(source.id.as_str().as_bytes()))
-            {
-                return Err(CommandError::Backpressure);
-            }
-        }
         // #1698 (amending #1310 D2 and #1344 D1): across a withdrawn candidate A, P0's own
         // inventory, with only the source rows A carries from P0, and P0's kept base. An owner B
         // keeps unchanged from P0 carries from P0 as a direct P0 -> B swap carries it; a source A
@@ -3954,11 +3998,11 @@ where
                     .pending_providers
                     .last()
                     .ok_or(CommandError::Internal)?;
-                Some(
-                    holder
-                        .inventory
-                        .across_withdrawn(&donor.inventory, candidate.plan()),
-                )
+                Some(holder.inventory.across_withdrawn_in_phase_one(
+                    &donor.inventory,
+                    candidate.plan(),
+                    duck,
+                ))
             }
             None => None,
         };
@@ -3981,6 +4025,7 @@ where
                 observation: &observation_change.bindings,
                 discontinuity,
                 unchanged_revision,
+                duck,
                 ..SuccessorBase::new(inventory, kept.model.normalized_model(), revision)
             }
         } else {
@@ -4024,6 +4069,7 @@ where
             Some(base),
             &self.live_values_superseded,
             self.observation_slots_high_water,
+            self.capture_owners_high_water,
         )
         .map_err(spectrum_invariant)?;
         // #1325 D7: after preparation, the pure transition step against the plan the successor
@@ -4506,6 +4552,19 @@ where
                     .pending_providers
                     .last_mut()
                     .unwrap_or(&mut self.providers);
+                // #1325 D6: a source B restores in phase 1 carries P0's ring, so its producer
+                // moves from P0's set, where phase 1 kept it, into B's. Every other entry B holds
+                // vacant took its producer from A's set above, so only restored ones move here.
+                let restored = candidate_provider
+                    .sources
+                    .adopt_persisting(&mut holder.sources);
+                debug_assert!(
+                    restored
+                        <= transition
+                            .as_ref()
+                            .map_or(0, |transition| transition.restored_sources().len()),
+                    "only a restored source's producer moves from the running plan's set"
+                );
                 if let Some(kept) = holder.kept.as_mut() {
                     kept.edit_ramps = kept_ramps;
                     if monitor_ramp.is_some() {
@@ -4648,7 +4707,12 @@ where
         {
             *epoch = configured_epoch;
         }
+        let candidate_epoch = candidate_provider.epoch;
         self.pending_providers.push(candidate_provider);
+        // #1577 D4: a capture armed from here on waits for the candidate.
+        self.controller
+            .provider_mut()
+            .set_newest_plan_epoch(candidate_epoch);
         // #1584 D6a: the newest plan's slots, built above. The fold ran when this command was
         // serviced and nothing has been pushed since (one thread), so none is lost.
         (
@@ -4661,6 +4725,17 @@ where
         self.observation_slots_high_water = self
             .observation_slots_high_water
             .max(self.observation_pending.len());
+        // #1577: the committed model's owners join the capture's high-water; the successor's
+        // charge already counted them (`response_capture_bytes`), so this can only hold or rise.
+        self.capture_owners_high_water = self.capture_owners_high_water.max(
+            host_core::response_capture_owners(
+                self.controller.session().compiled().normalized_model(),
+            )
+            // Unreachable: the successor's preparation counted this model's owners before the
+            // commit (`prepared_capi_resources` -> `response_capture_bytes`) and refused the
+            // transaction on an overflow, so the count is `Some` here.
+            .unwrap_or(usize::MAX),
+        );
         if let Some((_, donor)) = superseded.as_ref() {
             // #1310 D5 step 6: A's report row leaves; `retain` shrinks in place.
             let donor_epoch = donor.epoch;

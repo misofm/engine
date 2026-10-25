@@ -3469,6 +3469,12 @@ impl<P: ControlProvider> ProtocolController<P> {
         &mut self.provider
     }
 
+    /// Lend the provider mutably and the committed session immutably at once, on the endpoint's
+    /// control thread: a provider step that reads the committed model (#1577's capture poll).
+    pub fn provider_and_session_mut(&mut self) -> (&mut P, &SessionStore) {
+        (&mut self.provider, &self.session)
+    }
+
     /// Borrow the bounded replay cache for occupancy fixture checks.
     #[must_use]
     pub const fn replay(&self) -> &ReplayCache {

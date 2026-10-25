@@ -567,11 +567,14 @@ named_disassembly=$(wasm-objdump -d "$named")
 # pushes a closed window, unreachable by the cursor invariant, the site `enter_block` is admitted
 # for. It is pinned to that one site (`=1`), so another checked index inlined into the fold is
 # red. No other rule of the gate is loosened.
+# #1577: the SPSC slots[...] index of after_block's one pop and one push (panic_bounds_check), the
+# same class as enter_block. Pinned to those two sites (`=2`).
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render \
     --trap-owner 17RealtimePlanOwner11enter_block \
-    --trap-owner 18OutputPeakObserver7observe=1 --render-thread || exit 1
+    --trap-owner 18OutputPeakObserver7observe=1 \
+    --trap-owner 21ResponseCaptureServer11after_block=2 --render-thread || exit 1
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||

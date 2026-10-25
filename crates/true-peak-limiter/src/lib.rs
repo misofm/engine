@@ -39,6 +39,27 @@
 //! recovery is attributed to the lanes that failed, so a bank-mate's bits never depend on another
 //! lane's failure (#1091, decision 12). No second copy of the ramp, the payload codec or the
 //! parameter validator (#90 F9): they come from `effect-runtime`.
+//!
+//! # The link glide (issue #1370 D2-D5)
+//!
+//! [`PreparedNativeEffect::retarget_link`] moves one lane's peak link between `DualMono` and
+//! `Maximum` over a ramp. The lane's mode, and with it the link mask, takes the target at once;
+//! one weight per channel, `w_link`, glides from the word in force to the target's rest weight
+//! (`0` own, `1` maximum). The limiter has no `Average`, so it blends `w_link` alone: while it
+//! moves, a channel's peak is `P = own + w_link * (max(P_l, P_r) - own)`, a separate multiply and
+//! add, and from the frame it arrives the peak is the target's law, bit for bit.
+//!
+//! **The ceiling (D4).** `max(P_l, P_r) - own >= 0`, its product with `w_link` in `[0, 1]` is at
+//! least `+0.0`, and a rounded sum with a non-negative addend is at least `own`: so the blended
+//! peak is at least the channel's own peak, its required gain `r` at most the own peak's, and
+//! `g[n] <= r[n-N] <= r_own[n-N]` holds on each channel through every window that mixes modes.
+//!
+//! **The linked pair (D5).** A glide's frames render the per-lane body and clear the #990
+//! record: the two channels' peaks differ while a weight moves. A switch into `Maximum` clears it
+//! too, and starts a per-bank countdown of the glide plus the `N + R` frames that rewrite both
+//! gain rings, raised and never lowered by every later switch. When the countdown ends, both gain rings have been rewritten under
+//! the target modes, and the record is re-derived once from the words (`gain_state_agrees`);
+//! the fast path never runs on disagreeing words.
 #![allow(missing_docs)]
 
 #[cfg(test)]
@@ -94,8 +115,8 @@ const MAXIMUM_WIDTH: usize = 8;
 const DETECTOR_CHUNK: usize = 32;
 /// Updates in the frozen `SmoothingRule::Linear` de-zipper window.
 const RAMP_UPDATES: u32 = 64;
-/// Lane words before the three rings.
-const LANE_HEADER_WORDS: usize = 27;
+/// Lane words before the three rings: the scalars, the history and the link weight (#1370 D6).
+const LANE_HEADER_WORDS: usize = 31;
 
 /// Quantisation grid of the box-ramp terms, `2^14`.
 ///
@@ -250,14 +271,15 @@ const PORTS: [PortDescriptor; 2] = [
 
 /// The state resource row of one launch rate.
 ///
-/// `lane_words = 27 + B + 2R = 3N + 35`: twenty-seven scalar words, the `B = N + 6` main-delay
+/// `lane_words = 31 + B + 2R = 3N + 39`: thirty-one scalar words (twenty-seven, and the four of
+/// the #1370 D6 link weight), the `B = N + 6` main-delay
 /// ring, and the two `R = N + 1` gain rings the minimum filter and the box ramp need. The common
 /// section is the two-word
 /// version/length header `effect-runtime` stamps into every payload, which is why
 /// `common_bytes` is eight.
 const fn quality(rate: u32) -> effect_contract::QualityDescriptor {
     let lookahead_maximum = rate / 100;
-    let lane_words = 3 * lookahead_maximum + 35;
+    let lane_words = 3 * lookahead_maximum + 39;
     let lane_bytes = lane_words * 4;
     effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
@@ -645,6 +667,11 @@ struct ChannelState {
     lookahead_ms: Box<[f32]>,
     /// The window offsets each lane's lookahead produced.
     lane: Box<[LaneShape]>,
+    /// Each lane's detector link weight `w_link` (issue #1370 D2; the limiter has no `w_avg`):
+    /// at rest exactly `effect_contract::link_glide_weights` of the lane's mode, `0` for
+    /// `DualMono` and `1` for `Maximum`. Only a glide in flight is read, by the glide bodies
+    /// ([`limiter_block_glide`]). Inline, so it adds no heap. Only `[..width]` is used.
+    link: [LinearRamp; MAXIMUM_WIDTH],
 }
 
 impl ChannelState {
@@ -675,6 +702,7 @@ impl ChannelState {
             release: vec![LinearRamp::fixed(0.0); width].into_boxed_slice(),
             lookahead_ms: vec![0.0; width].into_boxed_slice(),
             lane: vec![LaneShape::new(0, shape); width].into_boxed_slice(),
+            link: [LinearRamp::fixed(0.0); MAXIMUM_WIDTH],
         };
         state.reset_to_defaults::<L>(shape, defaults, rate);
         state
@@ -700,6 +728,7 @@ impl ChannelState {
     /// | `prefix`, `box_sum`, `phase` | the uniform body's three van Herk registers, written back once per block. |
     /// | `limit`, `release` | all four fields of each ramp: only the collapsed channel's were advanced. |
     /// | `lookahead_ms`, `lane` | the window shape `segment` and `LaneShape` read. Not moved by a rendered block, and copied anyway, because "whole per-channel state" is the rule that survives a later field being added. |
+    /// | `link` | the link weight (#1370): a collapsed glide block advanced the left channel's. |
     ///
     /// `width` is a preparation shape both channels share and is asserted rather than copied.
     /// # Which entries are individually gated, and which are here by the rule
@@ -740,6 +769,8 @@ impl ChannelState {
         self.release.copy_from_slice(&source.release);
         self.lookahead_ms.copy_from_slice(&source.lookahead_ms);
         self.lane.copy_from_slice(&source.lane);
+        // Issue #1370: the link weight is per-channel render state too.
+        self.link = source.link;
     }
 
     /// `FullToDefaults`: every runtime word cleared and every ramp snapped to the prepared value.
@@ -784,13 +815,26 @@ impl ChannelState {
         self.clear_lane_runtime(lane, shape);
     }
 
-    /// `DiscontinuityKeepParameters`: the same runtime words, ramps snapped to their targets.
+    /// `DiscontinuityKeepParameters`: the same runtime words, ramps snapped to their targets, a
+    /// link glide included: it lands on the lane's mode (issue #1370).
     fn reset_keeping_parameters<L: Lane>(&mut self, shape: &Shape) {
         for (limit, release) in self.limit.iter_mut().zip(self.release.iter_mut()) {
             limit.snap();
             release.snap();
         }
+        for link in &mut self.link {
+            link.snap();
+        }
         self.clear_runtime::<L>(shape);
+    }
+
+    /// Whether any lane's link weight is in flight (issue #1370), and for how many more frames.
+    fn glide_frames(&self) -> u32 {
+        self.link[..self.width]
+            .iter()
+            .map(|link| link.remaining)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Clears history, rings and the recursive word to the state a silent lane rests in.
@@ -910,6 +954,7 @@ impl ChannelState {
     /// | `prefix` | exactly `1.0` |
     /// | `box_sum` | exactly the lane's window `Wb` |
     /// | `limit`, `release` | no window open and `current` bit-equal to `target` |
+    /// | `link` | no glide in flight (#1370) |
     ///
     /// `lookahead_ms` and `lane` are preparation words a rendered block never writes. With these
     /// words at rest a `+0.0` frame writes `r = 1.0` over a `1.0`, takes a window minimum of
@@ -952,9 +997,11 @@ impl ChannelState {
             .zip(self.limit.iter().zip(self.release.iter()))
             .enumerate()
         {
+            // Issue #1370: a link glide in flight moves its weight every frame.
             if sum.to_bits() != (shape.window as f32).to_bits()
                 || !ramp_is_stationary(limit)
                 || !ramp_is_stationary(release)
+                || self.link[lane].is_ramping()
             {
                 mask &= !(1 << lane);
             }
@@ -1139,17 +1186,31 @@ fn lane_shapes_agree(left: &ChannelState, right: &ChannelState) -> bool {
 /// sections are arbitrary, and after a per-lane §4.4 recovery (#1091), which runs only on a block
 /// that failed the boundary check. Bounded by the rings and allocation-free either way.
 fn gain_state_agrees(left: &ChannelState, right: &ChannelState) -> bool {
-    let words_agree = |a: &[f32], b: &[f32]| {
-        a.iter()
-            .zip(b.iter())
-            .all(|(a, b)| a.to_bits() == b.to_bits())
-    };
+    gain_rings_agree(left, right) && reduction_agrees(left, right)
+}
+
+/// `true` when two runs of words are bit-equal.
+fn words_agree(a: &[f32], b: &[f32]) -> bool {
+    a.iter()
+        .zip(b.iter())
+        .all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
+/// [`gain_state_agrees`] without the reduction word: the gain words steps 1-5 of
+/// [`channel_frame_uniform`] read and write. None of those steps reads `d`, so while every lane is
+/// at `Maximum` and the designed words agree, two channels whose rings agree keep them agreeing
+/// block after block, whatever their reduction words do (issue #1370 D5).
+fn gain_rings_agree(left: &ChannelState, right: &ChannelState) -> bool {
     words_agree(&left.required_ring, &right.required_ring)
         && words_agree(&left.box_ring, &right.box_ring)
         && words_agree(&left.prefix, &right.prefix)
         && words_agree(&left.box_sum, &right.box_sum)
-        && words_agree(&left.reduction, &right.reduction)
         && left.phase == right.phase
+}
+
+/// The `W` recursive reduction words `d`, bit-equal across the channels (issue #1370 D5).
+fn reduction_agrees(left: &ChannelState, right: &ChannelState) -> bool {
+    words_agree(&left.reduction, &right.reduction)
 }
 
 #[cfg(test)]
@@ -1429,6 +1490,38 @@ struct RampLanes<L: Lane> {
 }
 
 impl<L: Lane> RampLanes<L> {
+    /// A ramp at rest at `+0.0` on every lane: the unused glide weight of a body with no glide.
+    #[inline(always)]
+    fn rest() -> Self {
+        let zero = L::zero();
+        Self {
+            current: zero,
+            target: zero,
+            step: zero,
+            remaining: zero,
+        }
+    }
+
+    /// [`gather`](Self::gather) for a link weight (issue #1370): its countdown runs to
+    /// `LINK_GLIDE_MAX_SAMPLES`, `2^24`, which `f32` holds exactly, and the 16-bit narrowing
+    /// `gather` makes for a 64-update coefficient ramp would cut it.
+    #[inline]
+    fn gather_link(ramps: &[LinearRamp]) -> Self {
+        let mut words = [[0.0_f32; MAXIMUM_WIDTH]; 4];
+        for (lane, ramp) in ramps.iter().enumerate() {
+            words[0][lane] = ramp.current;
+            words[1][lane] = ramp.target;
+            words[2][lane] = ramp.step;
+            words[3][lane] = ramp.remaining as f32;
+        }
+        Self {
+            current: L::load(&words[0]),
+            target: L::load(&words[1]),
+            step: L::load(&words[2]),
+            remaining: L::load(&words[3]),
+        }
+    }
+
     /// Gathers `width` scalar ramps into one lane-wide ramp.
     #[inline]
     fn gather(ramps: &[LinearRamp]) -> Self {
@@ -2959,11 +3052,11 @@ fn limiter_block_linkable<L: Lane>(
         }
     } else {
         if stationary {
-            limiter_block_per_lane::<DISPATCH_STATIONARY, L>(
+            limiter_block_per_lane::<DISPATCH_STATIONARY, L, false>(
                 left_io, right_io, frames, coef, shape, left, right, cursors, true,
             );
         } else {
-            limiter_block_per_lane::<DISPATCH_RAMPING, L>(
+            limiter_block_per_lane::<DISPATCH_RAMPING, L, false>(
                 left_io, right_io, frames, coef, shape, left, right, cursors, false,
             );
         }
@@ -2989,7 +3082,7 @@ fn limiter_block_runtime_oracle<L: Lane>(
             left_io, right_io, frames, coef, shape, left, right, cursors, stationary, false,
         );
     } else {
-        limiter_block_per_lane::<DISPATCH_RUNTIME, L>(
+        limiter_block_per_lane::<DISPATCH_RUNTIME, L, false>(
             left_io, right_io, frames, coef, shape, left, right, cursors, stationary,
         );
     }
@@ -3028,7 +3121,7 @@ fn detector_chunk<L: Lane>(
 /// [`detector_chunk`] and the peak scratch is two named arrays instead of one indexed pair.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
+fn limiter_block_per_lane<const DISPATCH: u8, L: Lane, const GLIDE: bool>(
     left_io: &mut [f32],
     right_io: &mut [f32],
     frames: usize,
@@ -3048,6 +3141,15 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
 
     let mut hot_left = HotChannel::<L>::load(left);
     let mut hot_right = HotChannel::<L>::load(right);
+    // Issue #1370: the link weights, lane-wide, only under a glide.
+    let mut glide = if GLIDE {
+        [
+            RampLanes::<L>::gather_link(&left.link[..width]),
+            RampLanes::<L>::gather_link(&right.link[..width]),
+        ]
+    } else {
+        [RampLanes::<L>::rest(); 2]
+    };
     #[cfg(test)]
     observe_dispatch::<DISPATCH>(DispatchRoute::DualPerLane);
     let all = L::zero().eq(L::zero());
@@ -3093,11 +3195,15 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
                 &mut hot_right.release,
             );
 
-            let peak_left = L::load(&peaks_left[frame * width..]);
-            let peak_right = L::load(&peaks_right[frame * width..]);
-            let linked = peak_right.max(peak_left);
-            let peak_left = L::select(link, linked, peak_left);
-            let peak_right = L::select(link, linked, peak_right);
+            let own_left = L::load(&peaks_left[frame * width..]);
+            let own_right = L::load(&peaks_right[frame * width..]);
+            let linked = own_right.max(own_left);
+            let mut peak_left = L::select(link, linked, own_left);
+            let mut peak_right = L::select(link, linked, own_right);
+            if GLIDE {
+                peak_left = glide_peak(own_left, linked, peak_left, &mut glide[0]);
+                peak_right = glide_peak(own_right, linked, peak_right, &mut glide[1]);
+            }
 
             channel_frame::<L>(
                 left_io,
@@ -3143,8 +3249,50 @@ fn limiter_block_per_lane<const DISPATCH: u8, L: Lane>(
 
     hot_left.store(left);
     hot_right.store(right);
+    if GLIDE {
+        let [glide_left, glide_right] = glide;
+        glide_left.scatter(&mut left.link[..width]);
+        glide_right.scatter(&mut right.link[..width]);
+    }
     cursors.main = main_cursor as u32;
     cursors.ring = ring_cursor as u32;
+}
+
+/// One channel's peak under a link glide (issue #1370 D3-D4): the weight advances one frame, and
+/// a lane still in flight after it takes `own + w_link * (linked - own)`, a separate multiply and
+/// add. `linked - own` is at least `+0.0` and `w_link` lies in `[0, 1]`, so the blend is at least
+/// `own`, and the ceiling proof holds per channel (D4). A lane at rest, or arriving on this
+/// frame, takes `prepared`, the word its link mask selects, so its bits are its mode's law: the
+/// blend at rest weights would equal it on finite words but not on non-finite ones.
+#[inline(always)]
+fn glide_peak<L: Lane>(own: L, linked: L, prepared: L, weight: &mut RampLanes<L>) -> L {
+    let current = weight.advance();
+    let gliding = weight.remaining.gt(L::zero());
+    let blend = own.add(current.mul(linked.sub(own)));
+    L::select(gliding, blend, prepared)
+}
+
+/// The ramp prefix of a dual block with a link glide in flight (issue #1370 D3): the per-lane
+/// body with every lane's peak through [`glide_peak`], under the ramping dispatch, which at rest
+/// is the identity on every ramp word ([`RampLanes::resting_value`]), so a stationary lane's bits
+/// are the bits either dispatch renders. The per-lane body renders each lane exactly as the
+/// uniform one does, and the glide never takes the #990 linked pair, whose one gain path needs
+/// both channels' peaks equal.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn limiter_block_glide<L: Lane>(
+    left_io: &mut [f32],
+    right_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    right: &mut ChannelState,
+    cursors: &mut Cursors,
+) {
+    limiter_block_per_lane::<DISPATCH_RAMPING, L, true>(
+        left_io, right_io, frames, coef, shape, left, right, cursors, false,
+    );
 }
 
 /// The body of [`limiter_block`] for a cohort [`lanes_uniform`] has accepted.
@@ -3774,10 +3922,32 @@ struct LimiterCore<L: Lane> {
     ///   window, so equal box sums mean equal windows.
     /// * **Cleared** by a dual block with any lane at `DualMono` (issue #1368: the mode is per
     ///   lane, and the record is one per bank) or with a designed word apart on any lane, by
-    ///   every collapsed block (only the left channel advances), and by a restore whose comparison
-    ///   fails. Once cleared it stays cleared until one of the three establishing events: a pair
+    ///   every collapsed block (only the left channel advances), by a restore whose comparison
+    ///   fails, and by a link switch and every block with a glide in flight (issue #1370 D5: a
+    ///   glide's per-channel peaks differ). After a switch, the end of
+    ///   [`relink_frames`](Self::relink_frames) re-derives it from the words, once. Once cleared it stays cleared until one of the three establishing events: a pair
     ///   whose designed words come back together has no proof its gain words did.
     gain_linked: bool,
+    /// Issue #1370 D5: frames until the #990 record is re-derived after a link switch.
+    ///
+    /// A switch (a [`retarget_link`](Self::retarget_link) that changes a lane's mode or leaves
+    /// its weight in flight, or a restore that brings a glide) clears the record and raises this
+    /// to at least the glide's length plus the `N + R` frames that rewrite both gain rings
+    /// ([`arm_relink`](Self::arm_relink)), never lowering it, so it
+    /// never falls below any lane's glide remaining. Every frame the bank renders or skips counts
+    /// it down; when it reaches zero on a dual path, the glide has ended and both gain rings have
+    /// been rewritten under the lanes' modes, and the record is re-derived from the words
+    /// ([`gain_state_agrees`]), once. A collapsed bank lets it lapse: `desymmetrize`
+    /// re-establishes the record.
+    relink_frames: u32,
+    /// Issue #1370 D5 (root ruling of 2026-10-25): the countdown ended with the gain rings
+    /// agreeing ([`gain_rings_agree`]) and the reduction words `d` apart. `d` is recursive and
+    /// re-agrees only on a frame where both channels take the attack arm, which stationary
+    /// material can put off for thousands of frames, so each dual block that keeps the rings
+    /// agreeing (every lane `Maximum`, designed words agreeing, no glide) compares the `W`
+    /// reduction words, and the record returns on the first block they agree. Any other block,
+    /// a collapsed one, a reset or a restore ends the watch.
+    relink_watch: bool,
     /// Blocks the fast path actually took, for the engagement-rate gate. Test-only, like
     /// [`nonfinite_report`](Self::nonfinite_report): instrumentation is not render state.
     #[cfg(test)]
@@ -3800,27 +3970,162 @@ impl<L: Lane> LimiterCore<L> {
         let left = ChannelState::new::<L>(width, &shape, &left_defaults, rate);
         let right = ChannelState::new::<L>(width, &shape, &right_defaults, rate);
         let gain_linked = lane_shapes_agree(&left, &right);
-        Some(Self {
-            coefficients: LimiterCoef::new(metadata.link_mode, metadata.bypass),
-            left,
-            right,
-            cursors: Cursors::default(),
-            report: NonFiniteReport::new(),
-            active: every_lane(width),
-            silent_fixed_point: false,
-            silent_bypass: metadata.bypass,
-            collapsed: false,
-            gain_linked,
-            #[cfg(test)]
-            silent_engagements: 0,
-            sample_rate: metadata.sample_rate,
-            automation_capacity: metadata.automation_capacity,
-            quantum: metadata.quantum,
-            shape,
-            left_defaults,
-            right_defaults,
-        })
+        Some(
+            Self {
+                coefficients: LimiterCoef::new(metadata.link_mode, metadata.bypass),
+                left,
+                right,
+                cursors: Cursors::default(),
+                report: NonFiniteReport::new(),
+                active: every_lane(width),
+                silent_fixed_point: false,
+                silent_bypass: metadata.bypass,
+                collapsed: false,
+                gain_linked,
+                relink_frames: 0,
+                relink_watch: false,
+                #[cfg(test)]
+                silent_engagements: 0,
+                sample_rate: metadata.sample_rate,
+                automation_capacity: metadata.automation_capacity,
+                quantum: metadata.quantum,
+                shape,
+                left_defaults,
+                right_defaults,
+            }
+            .with_links_at_rest(),
+        )
     }
+
+    /// Seats every lane's link weight at rest at its mode (issue #1370 D2).
+    fn with_links_at_rest(mut self) -> Self {
+        for lane in 0..L::WIDTH {
+            self.rest_link(lane);
+        }
+        self
+    }
+
+    /// Seats lane `lane`'s link weight at rest at its mode on both channels (issue #1370 D2):
+    /// preparation, a full reset, a lane whose mode a lane swap replaced and a padded lane that
+    /// follows a new first member. The D7 recovery leaves a glide in flight alone.
+    fn rest_link(&mut self, lane: usize) {
+        let weight = effect_contract::link_glide_weights(self.coefficients.links[lane])[0];
+        self.left.link[lane] = LinearRamp::fixed(weight);
+        self.right.link[lane] = LinearRamp::fixed(weight);
+    }
+
+    /// [`LimiterCoef::set_lane_link`], with every padded lane whose mode it moved seated at rest
+    /// at its new mode: a padded lane follows at once, its output discarded (issue #1370).
+    fn set_lane_link(&mut self, lane: usize, link: LinkMode) {
+        let before = self.coefficients.links;
+        self.coefficients.set_lane_link(lane, link, self.active);
+        for (padded, was) in before.iter().enumerate().take(L::WIDTH) {
+            if self.active & (1 << padded) == 0 && self.coefficients.links[padded] != *was {
+                self.rest_link(padded);
+            }
+        }
+    }
+
+    // REALTIME_POLICY_BEGIN: #1370, a link glide is retargeted at a block boundary.
+    /// Glides lane `lane`'s peak link to `mode` over `samples` samples (issue #1370 D1-D5).
+    ///
+    /// The lane's mode, and with it the link mask and the all-`Maximum` leg, becomes `mode` at
+    /// once, so a glide that arrives lands on `mode`'s own law; the weight of both channels,
+    /// retargeted from the word in force, carries the transition. A switch clears the #990
+    /// record and raises [`relink_frames`](Self::relink_frames) (D5). `false`, changing nothing,
+    /// for a lane past the width or padded, a mode the descriptor does not support or a glide
+    /// longer than `LINK_GLIDE_MAX_SAMPLES`. Allocation-free and bounded by the lane count.
+    fn retarget_link(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
+        if lane >= L::WIDTH
+            || self.active & (1 << lane) == 0
+            || !TRUE_PEAK_LIMITER_DESCRIPTOR
+                .supported_link_modes
+                .contains(mode)
+            || samples > effect_contract::LINK_GLIDE_MAX_SAMPLES
+        {
+            return false;
+        }
+        let previous = self.coefficients.links[lane];
+        self.set_lane_link(lane, mode);
+        let weight = effect_contract::link_glide_weights(mode)[0];
+        self.left.link[lane].set_target(weight, samples);
+        self.right.link[lane].set_target(weight, samples);
+        let remaining = self.left.link[lane]
+            .remaining
+            .max(self.right.link[lane].remaining);
+        if previous != mode || remaining != 0 {
+            self.arm_relink(remaining);
+        }
+        true
+    }
+
+    /// D5: clears the #990 record and raises the countdown to cover a glide of `remaining`
+    /// frames and the `N + R` frames after it that rewrite both gain rings. Never lowers it.
+    ///
+    /// Why `N + R`: from the first frame after the glide, each channel's peak is its mode's law,
+    /// so the required-gain ring's `R` slots are rewritten under it after `R` frames. A box term
+    /// written at frame `n` is the minimum of `r[n-N ..= n-N+Wb-1]`, so it depends on a required
+    /// gain `N` frames old, and the box ring's `R` slots all come from the new law only `N + R - 1`
+    /// frames after the glide. The van Herk `prefix` and the box sum follow the rings.
+    fn arm_relink(&mut self, remaining: u32) {
+        self.gain_linked = false;
+        self.relink_watch = false;
+        let rewrite = (self.shape.n + self.shape.ring) as u32;
+        self.relink_frames = self.relink_frames.max(remaining.saturating_add(rewrite));
+    }
+
+    /// D5: counts the countdown down by `frames` rendered or skipped frames, and when it ends on
+    /// a dual path re-derives the #990 record from the words, once.
+    fn tick_relink(&mut self, frames: usize) {
+        if self.relink_frames == 0 {
+            return;
+        }
+        self.relink_frames = self
+            .relink_frames
+            .saturating_sub(u32::try_from(frames).unwrap_or(u32::MAX));
+        if self.relink_frames == 0
+            && !self.collapsed
+            && !self.gain_linked
+            && gain_rings_agree(&self.left, &self.right)
+        {
+            self.gain_linked = reduction_agrees(&self.left, &self.right);
+            self.relink_watch = !self.gain_linked;
+        }
+    }
+
+    /// D5's watch, at a dual block's end: while every lane is `Maximum`, the designed words agree
+    /// and no glide ran, the rings still agree, so `W` compares of the reduction words decide
+    /// the record. Any other block ends the watch. Bounded by the lane count, allocation-free.
+    fn watch_relink(&mut self, glided: bool) {
+        if !self.relink_watch {
+            return;
+        }
+        if glided
+            || self.gain_linked
+            || !self.coefficients.link_all
+            || !designed_gain_agree(&self.left, &self.right)
+        {
+            self.relink_watch = false;
+            return;
+        }
+        if reduction_agrees(&self.left, &self.right) {
+            self.relink_watch = false;
+            self.gain_linked = gain_state_agrees(&self.left, &self.right);
+        }
+    }
+
+    /// Frames of this block a link glide is in flight for on the rendered channels: the
+    /// longest remaining glide, at most `frames`.
+    fn glide_frames(&self, frames: usize, mono: bool) -> usize {
+        let left = self.left.glide_frames();
+        let longest = if mono {
+            left
+        } else {
+            left.max(self.right.glide_frames())
+        };
+        frames.min(longest as usize)
+    }
+    // REALTIME_POLICY_END
 
     /// Binds a padded bank's active mask (issue #1091). `active` names at least one lane and no
     /// lane past `L::WIDTH`; the caller has validated the mask with the request.
@@ -3838,7 +4143,7 @@ impl<L: Lane> LimiterCore<L> {
         for (lane, &link) in links.iter().enumerate().take(L::WIDTH) {
             self.coefficients.set_lane_link(lane, link, self.active);
         }
-        self
+        self.with_links_at_rest()
     }
 
     /// The two resets, one implementation (#90 F9).
@@ -3861,6 +4166,16 @@ impl<L: Lane> LimiterCore<L> {
                 self.right.reset_keeping_parameters::<L>(&self.shape);
             }
         }
+        // Issue #1370: a full reset keeps each lane's mode and seats its weight at rest; a
+        // discontinuity snapped a glide to the mode above. No glide is left, and both channels
+        // hold `clear_runtime`'s words, so the D5 countdown has nothing to wait for.
+        if kind == ResetKind::FullToDefaults {
+            for lane in 0..L::WIDTH {
+                self.rest_link(lane);
+            }
+        }
+        self.relink_frames = 0;
+        self.relink_watch = false;
         self.cursors = Cursors::default();
         // #990: both channels now hold `clear_runtime`'s words.
         self.gain_linked = lane_shapes_agree(&self.left, &self.right);
@@ -3884,6 +4199,9 @@ impl<L: Lane> LimiterCore<L> {
         frames: usize,
     ) -> [u32; 2] {
         let words = frames * L::WIDTH;
+        // Issue #1370: the frames of this block a link glide is in flight for. Such a block is
+        // never quiet: the glide moves its weights every frame.
+        let glide = self.glide_frames(frames, false);
         // Issue #182 S2, the phase-4 admission test. Whole-bank, never per lane, and every leg is
         // cheap next to the block it can replace:
         //
@@ -3901,7 +4219,8 @@ impl<L: Lane> LimiterCore<L> {
         // never write it into the line, and the sample that should have come out of the line four
         // blocks later would be `+0.0` instead. That is the compressor's input-side argument
         // (#163 phase 4, adversarial pass) at a kernel that also has a delay line to carry it.
-        let quiet = self.silent_bypass == self.coefficients.bypass
+        let quiet = glide == 0
+            && self.silent_bypass == self.coefficients.bypass
             && ramps_are_stationary(&self.left.limit)
             && ramps_are_stationary(&self.left.release)
             && ramps_are_stationary(&self.right.limit)
@@ -3926,30 +4245,52 @@ impl<L: Lane> LimiterCore<L> {
             self.left.advance_rest_phase(every_lane(L::WIDTH), frames);
             self.right.advance_rest_phase(every_lane(L::WIDTH), frames);
             self.cursors.advance(frames, &self.shape);
+            self.tick_relink(frames);
             #[cfg(test)]
             {
                 self.silent_engagements = self.silent_engagements.saturating_add(1);
             }
             return [0, 0];
         }
-        // Issue #990: the whole-block linked-pair decision, and the record it leaves. A block that
-        // renders with every lane at `Maximum` (issue #1368) and every designed word agreeing leaves agreeing gain words
-        // behind whichever body runs it, so the record after the block is exactly the decision.
-        let linked = self.coefficients.link_all
-            && self.gain_linked
-            && designed_gain_agree(&self.left, &self.right);
-        self.gain_linked = linked;
-        limiter_block_linkable::<L>(
-            left_io,
-            right_io,
-            frames,
-            &self.coefficients,
-            &self.shape,
-            &mut self.left,
-            &mut self.right,
-            &mut self.cursors,
-            linked,
-        );
+        // Issue #1370 D3: the glide's frames render through the glide body, which never links
+        // and leaves the two channels' gain words apart, so the record is cleared.
+        let split = glide * L::WIDTH;
+        if glide > 0 {
+            self.gain_linked = false;
+            limiter_block_glide::<L>(
+                &mut left_io[..split],
+                &mut right_io[..split],
+                glide,
+                &self.coefficients,
+                &self.shape,
+                &mut self.left,
+                &mut self.right,
+                &mut self.cursors,
+            );
+        }
+        if glide < frames {
+            // Issue #990: the whole-block linked-pair decision, and the record it leaves. A block
+            // that renders with every lane at `Maximum` (issue #1368) and every designed word
+            // agreeing leaves agreeing gain words behind whichever body runs it, so the record
+            // after the block is exactly the decision.
+            let linked = self.coefficients.link_all
+                && self.gain_linked
+                && designed_gain_agree(&self.left, &self.right);
+            self.gain_linked = linked;
+            limiter_block_linkable::<L>(
+                &mut left_io[split..words],
+                &mut right_io[split..words],
+                frames - glide,
+                &self.coefficients,
+                &self.shape,
+                &mut self.left,
+                &mut self.right,
+                &mut self.cursors,
+                linked,
+            );
+        }
+        self.watch_relink(glide > 0);
+        self.tick_relink(frames);
         // Earn or lose the claim (issue #1745 D2): this block was quiet and every lane of both
         // channels, padded lanes included, is at rest by the per-lane predicate. The predicate is
         // `clear_runtime`'s own word list read back, which is the state the crate documents a
@@ -3985,6 +4326,7 @@ impl<L: Lane> LimiterCore<L> {
             right_io.fill(0.0);
             // #990: the whole §4.4 reset re-establishes the record exactly as `reset` does.
             self.gain_linked = lane_shapes_agree(&self.left, &self.right);
+            self.relink_watch = false;
         } else {
             zero_lanes::<L>(left_io, failed);
             zero_lanes::<L>(right_io, failed);
@@ -3993,6 +4335,7 @@ impl<L: Lane> LimiterCore<L> {
             // words, every lane, as `restore_track` reads it. No cheaper statement is exact after a
             // partial reset, and this runs only on a block that failed the check.
             self.gain_linked = gain_state_agrees(&self.left, &self.right);
+            self.relink_watch = false;
         }
         charged
     }
@@ -4093,30 +4436,50 @@ impl<L: Lane> LimiterCore<L> {
         // #990: only the left channel advances from here, the silent path included, so the right
         // channel's gain words go stale until `desymmetrize` copies the left over them.
         self.gain_linked = false;
+        // Issue #1370 D5: and the watch ends; `desymmetrize` re-establishes the record.
+        self.relink_watch = false;
         // #1894: and so does every right word the rest predicate reads.
         self.collapsed = true;
         let words = frames * L::WIDTH;
-        let quiet = self.silent_bypass == self.coefficients.bypass
+        let glide = self.glide_frames(frames, true);
+        let quiet = glide == 0
+            && self.silent_bypass == self.coefficients.bypass
             && ramps_are_stationary(&self.left.limit)
             && ramps_are_stationary(&self.left.release)
             && block_is_positive_zero(&left_io[..words]);
         if quiet && self.silent_fixed_point {
             self.left.advance_rest_phase(every_lane(L::WIDTH), frames);
             self.cursors.advance(frames, &self.shape);
+            self.tick_relink(frames);
             #[cfg(test)]
             {
                 self.silent_engagements = self.silent_engagements.saturating_add(1);
             }
             return [0, 0];
         }
-        limiter_block_mono::<L>(
-            left_io,
-            frames,
-            &self.coefficients,
-            &self.shape,
-            &mut self.left,
-            &mut self.cursors,
-        );
+        // Issue #1370: the left channel's glide frames through the collapsed glide body.
+        let split = glide * L::WIDTH;
+        if glide > 0 {
+            limiter_block_glide_mono::<L>(
+                &mut left_io[..split],
+                glide,
+                &self.coefficients,
+                &self.shape,
+                &mut self.left,
+                &mut self.cursors,
+            );
+        }
+        if glide < frames {
+            limiter_block_mono::<L>(
+                &mut left_io[split..words],
+                frames - glide,
+                &self.coefficients,
+                &self.shape,
+                &mut self.left,
+                &mut self.cursors,
+            );
+        }
+        self.tick_relink(frames);
         // Issue #1745 D2: the left channel's mask alone, since only the left channel advances. As
         // on the dual body (see `process_block`), this block's own output is not a leg.
         self.silent_fixed_point =
@@ -4207,9 +4570,11 @@ impl<L: Lane> LimiterCore<L> {
             && self.silent_bypass == self.coefficients.bypass
             && ramps_are_stationary(&self.left.limit)
             && ramps_are_stationary(&self.left.release)
+            && self.left.glide_frames() == 0
             && (self.collapsed
                 || (ramps_are_stationary(&self.right.limit)
-                    && ramps_are_stationary(&self.right.release)))
+                    && ramps_are_stationary(&self.right.release)
+                    && self.right.glide_frames() == 0))
     }
 
     /// The per-lane scan [`lanes_at_rest`](Self::lanes_at_rest) answers from when the claim does
@@ -4269,6 +4634,9 @@ impl<L: Lane> LimiterCore<L> {
         if !whole {
             self.silent_fixed_point = false;
         }
+        // Issue #1370 D5: a skipped block's frames count, after its linked decision, as a
+        // rendered block's do.
+        self.tick_relink(frames);
     }
 }
 
@@ -4394,6 +4762,8 @@ mod words {
     pub(super) const RELEASE_RAMP: usize = 11;
     /// Detector history, newest first.
     pub(super) const HISTORY: usize = 15;
+    /// The link weight `w_link` (issue #1370 D6): current, target, step, remaining.
+    pub(super) const LINK_RAMP: usize = HISTORY + super::HISTORY_WORDS;
 }
 
 /// The scalar words of a validated, not yet committed channel section.
@@ -4412,6 +4782,9 @@ struct LaneRestore {
     box_sum: f32,
     limit: LinearRamp,
     release: LinearRamp,
+    /// The link weight (issue #1370 D6), and the mode it glides to, decoded from its target.
+    link: LinearRamp,
+    mode: LinkMode,
 }
 
 const fn state_error(code: &'static str) -> StatePayloadError {
@@ -4456,6 +4829,11 @@ fn snapshot_lane(
             state.history[tap * width + lane],
         );
     }
+    let link = state.link[lane];
+    write_f32(bytes, words::LINK_RAMP, link.current);
+    write_f32(bytes, words::LINK_RAMP + 1, link.target);
+    write_f32(bytes, words::LINK_RAMP + 2, link.step);
+    write_u32(bytes, words::LINK_RAMP + 3, link.remaining);
     let mut word = LANE_HEADER_WORDS;
     for slot in 0..shape.main {
         write_f32(bytes, word, state.main_ring[slot * width + lane]);
@@ -4550,6 +4928,31 @@ fn read_lane(
         }
     }
 
+    // Issue #1370 D6: the weight lies in `[0, 1]` on its whole path, the engine never holds
+    // `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`, `c` a
+    // word of an earlier glide and `n <= 2^24`, never `0`), a settled weight holds its target, and
+    // the target is exactly a supported mode's rest weight (`w_avg` is `0` on both of them).
+    let link = LinearRamp {
+        current: read_f32(bytes, words::LINK_RAMP),
+        target: read_f32(bytes, words::LINK_RAMP + 1),
+        step: read_f32(bytes, words::LINK_RAMP + 2),
+        remaining: read_u32(bytes, words::LINK_RAMP + 3),
+    };
+    if is_negative_zero(link.current)
+        || (link.remaining != 0 && link.step == 0.0)
+        || (link.remaining == 0 && link.current.to_bits() != link.target.to_bits())
+        || !ramp_path_inside(link, (0.0, 1.0), effect_contract::LINK_GLIDE_MAX_SAMPLES)
+    {
+        return Err(state_error("effect.state.link"));
+    }
+    let mode = effect_contract::link_glide_mode([link.target, 0.0])
+        .filter(|mode| {
+            TRUE_PEAK_LIMITER_DESCRIPTOR
+                .supported_link_modes
+                .contains(*mode)
+        })
+        .ok_or(state_error("effect.state.link"))?;
+
     let main_base = LANE_HEADER_WORDS;
     let required_base = main_base + shape.main;
     let box_base = required_base + shape.ring;
@@ -4594,6 +4997,8 @@ fn read_lane(
         box_sum,
         limit: ramps[0],
         release: ramps[1],
+        link,
+        mode,
     })
 }
 
@@ -4681,6 +5086,9 @@ impl<L: Lane> LimiterCore<L> {
         let rate = self.sample_rate;
         let left = read_lane(input.left, &self.shape, rate)?;
         let right = read_lane(input.right, &self.shape, rate)?;
+        if left.mode != right.mode {
+            return Err(state_error("effect.state.link"));
+        }
         commit_lane(
             &mut self.left,
             track,
@@ -4707,6 +5115,21 @@ impl<L: Lane> LimiterCore<L> {
         // state, and allocation-free: the plan-swap carry makes it in the swap block, #1278). A rejected restore returns
         // above without writing anything and leaves the record as true as it was.
         self.gain_linked = gain_state_agrees(&self.left, &self.right);
+        self.relink_watch = false;
+        // Issue #1370 D6: the weights land only under the mode they glide to. A payload taken
+        // under another mode (the plan-swap carry into a successor prepared with a new mode)
+        // leaves the lane's own mode at rest, as before the glide existed. A glide brought in
+        // flight is a switch (D5).
+        if left.mode == self.coefficients.links[track] {
+            self.left.link[track] = left.link;
+            self.right.link[track] = right.link;
+            let remaining = left.link.remaining.max(right.link.remaining);
+            if remaining != 0 {
+                self.arm_relink(remaining);
+            }
+        } else {
+            self.rest_link(track);
+        }
         Ok(())
     }
 
@@ -4729,7 +5152,10 @@ impl<L: Lane> LimiterCore<L> {
         let (values_bytes, link_bytes) = bytes.split_at_mut(2 * PARAMETER_COUNT * 4);
         let link =
             effect_contract::exchange_lane_link_word(self.coefficients.links[lane], link_bytes);
-        self.coefficients.set_lane_link(lane, link, self.active);
+        self.set_lane_link(lane, link);
+        // The weight rests at the incoming mode; the swap's payload restore then brings a glide in
+        // flight with it (issue #1370 D6).
+        self.rest_link(lane);
         let (left_bytes, right_bytes) = values_bytes.split_at_mut(PARAMETER_COUNT * 4);
         for (values, side) in [
             (&mut self.left_defaults[lane], left_bytes),
@@ -4955,6 +5381,7 @@ impl<L: Lane> LimiterCore<L> {
             && self.left.lookahead_ms[lane].to_bits() == self.right.lookahead_ms[lane].to_bits()
             && ramp_words_agree(&self.left.limit[lane], &self.right.limit[lane])
             && ramp_words_agree(&self.left.release[lane], &self.right.release[lane])
+            && ramp_words_agree(&self.left.link[lane], &self.right.link[lane])
     }
 }
 
@@ -4965,6 +5392,11 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 
     fn channel_symmetry(&self) -> bool {
         self.core.designed_channel_symmetry(0)
+    }
+
+    /// Issue #1370: `LimiterCore::retarget_link` on the one lane.
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        track == 0 && self.core.retarget_link(0, mode, samples)
     }
 
     /// Issue #143 D2 / R4: the recursive reduction word `d`, linear, read for lane 0.
@@ -5033,6 +5465,11 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
 
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.core.designed_channel_symmetry(lane)
+    }
+
+    /// Issue #1370: [`LimiterCore::retarget_link`]; a padded lane takes no glide.
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        self.core.retarget_link(track, mode, samples)
     }
 
     /// Issue #1745: see [`LimiterCore::lanes_at_rest`]. The clocks a caller that skips a resting
@@ -5242,11 +5679,11 @@ fn limiter_block_mono<L: Lane>(
         }
     } else {
         if stationary {
-            limiter_block_per_lane_mono::<DISPATCH_STATIONARY, L>(
+            limiter_block_per_lane_mono::<DISPATCH_STATIONARY, L, false>(
                 left_io, frames, coef, shape, left, cursors, true,
             );
         } else {
-            limiter_block_per_lane_mono::<DISPATCH_RAMPING, L>(
+            limiter_block_per_lane_mono::<DISPATCH_RAMPING, L, false>(
                 left_io, frames, coef, shape, left, cursors, false,
             );
         }
@@ -5269,7 +5706,7 @@ fn limiter_block_mono_runtime_oracle<L: Lane>(
             left_io, frames, coef, shape, left, cursors, stationary,
         );
     } else {
-        limiter_block_per_lane_mono::<DISPATCH_RUNTIME, L>(
+        limiter_block_per_lane_mono::<DISPATCH_RUNTIME, L, false>(
             left_io, frames, coef, shape, left, cursors, stationary,
         );
     }
@@ -5277,7 +5714,7 @@ fn limiter_block_mono_runtime_oracle<L: Lane>(
 
 /// [`limiter_block_per_lane`] over one plane.
 #[inline(always)]
-fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane>(
+fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane, const GLIDE: bool>(
     left_io: &mut [f32],
     frames: usize,
     coef: &LimiterCoef<L>,
@@ -5292,6 +5729,12 @@ fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane>(
     debug_assert_eq!(left_io.len(), frames * width);
 
     let mut hot_left = HotChannel::<L>::load(left);
+    // Issue #1370: the left link weight, lane-wide, only under a glide.
+    let mut glide = if GLIDE {
+        RampLanes::<L>::gather_link(&left.link[..width])
+    } else {
+        RampLanes::<L>::rest()
+    };
     #[cfg(test)]
     observe_dispatch::<DISPATCH>(DispatchRoute::MonoPerLane);
     let all = L::zero().eq(L::zero());
@@ -5319,9 +5762,12 @@ fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane>(
             let (limit_left, release_left) =
                 ramp_values::<DISPATCH, L>(stationary, &mut hot_left.limit, &mut hot_left.release);
 
-            let peak_left = L::load(&peaks_left[frame * width..]);
-            let linked = peak_left.max(peak_left);
-            let peak_left = L::select(link, linked, peak_left);
+            let own_left = L::load(&peaks_left[frame * width..]);
+            let linked = own_left.max(own_left);
+            let mut peak_left = L::select(link, linked, own_left);
+            if GLIDE {
+                peak_left = glide_peak(own_left, linked, peak_left, &mut glide);
+            }
 
             channel_frame::<L>(
                 left_io,
@@ -5351,8 +5797,27 @@ fn limiter_block_per_lane_mono<const DISPATCH: u8, L: Lane>(
     }
 
     hot_left.store(left);
+    if GLIDE {
+        glide.scatter(&mut left.link[..width]);
+    }
     cursors.main = main_cursor as u32;
     cursors.ring = ring_cursor as u32;
+}
+
+/// [`limiter_block_glide`] over one plane: the dual glide body's left half, the link partner the
+/// plane itself, so a collapsed lane renders the dual body's bits on `L == R`.
+#[inline(always)]
+fn limiter_block_glide_mono<L: Lane>(
+    left_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    cursors: &mut Cursors,
+) {
+    limiter_block_per_lane_mono::<DISPATCH_RAMPING, L, true>(
+        left_io, frames, coef, shape, left, cursors, false,
+    );
 }
 
 /// [`limiter_block_uniform`] over one plane.
@@ -5469,6 +5934,8 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod glide;
     use dsp_reference::reference_annex2_phases;
     use effect_contract::BankWidth;
     use effect_contract::{
@@ -5699,19 +6166,20 @@ mod tests {
         assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.supported_link_modes.bits(), 3);
         assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.state_layout_version, 1);
         // Latency is a contract fixture and does not move; the state rows are the #90 re-pin
-        // (3N + 35 lane words, plus the runtime's two-word common header).
+        // (3N + 35 lane words, plus the runtime's two-word common header), and the #1370 D6
+        // link weight's four words.
         for (quality, expected) in QUALITIES.iter().zip([
-            (44_100_u32, 447_u64, 5_432_u32, 10_872_u64),
-            (48_000, 486, 5_900, 11_808),
-            (88_200, 888, 10_724, 21_456),
-            (96_000, 966, 11_660, 23_328),
+            (44_100_u32, 447_u64, 5_448_u32, 10_904_u64),
+            (48_000, 486, 5_916, 11_840),
+            (88_200, 888, 10_740, 21_488),
+            (96_000, 966, 11_676, 23_360),
         ]) {
             let n = expected.0 / 100;
             assert_eq!(quality.sample_rate, expected.0);
             assert_eq!(quality.latency, LatencySamples(u64::from(n) + 6));
             assert_eq!(quality.latency, LatencySamples(expected.1));
             assert_eq!(quality.maximum_state.common_bytes, 8);
-            assert_eq!(quality.maximum_state.left_bytes, (3 * n + 35) * 4);
+            assert_eq!(quality.maximum_state.left_bytes, (3 * n + 39) * 4);
             assert_eq!(quality.maximum_state.left_bytes, expected.2);
             assert_eq!(quality.maximum_state.right_bytes, expected.2);
             assert_eq!(quality.maximum_state.total(), Some(expected.3));
@@ -7285,7 +7753,12 @@ mod tests {
         // The two coefficient ramps, which the fast path must not freeze. A skipped block
         // advances no ramp, so a claim admitted while a de-zipper window was still open would
         // strand `current` short of its target for as long as the silence lasted.
-        for ramps in [&channel.limit, &channel.release] {
+        // Issue #1370: and the link weight, which a glide moves every frame.
+        for ramps in [
+            &channel.limit[..],
+            &channel.release[..],
+            &channel.link[..channel.width],
+        ] {
             for ramp in ramps.iter() {
                 words.push(ramp.current.to_bits());
                 words.push(ramp.target.to_bits());
@@ -8519,9 +8992,9 @@ mod tests {
         let bank = bank_for(&members, LinkMode::DualMono, width, backend);
         let key = bank.metadata.program_key;
         assert_eq!(key.state_layout_version, 1);
-        assert_eq!(key.state_sizes.left_bytes, 5_900);
+        assert_eq!(key.state_sizes.left_bytes, 5_916);
         assert_eq!(key.state_sizes.common_bytes, 8);
-        assert_eq!(key.state_sizes.total(), Some(11_808));
+        assert_eq!(key.state_sizes.total(), Some(11_840));
         assert_eq!(bank.metadata.width, width);
 
         // Mismatched backend and width are rejected before anything is prepared: the native width
