@@ -244,6 +244,15 @@ describe("session transactions encode as the engine's codec does", () => {
       return answers.map((answer) => answer.sdk).join("");
     });
     assert.equal(new Set(frames).size, 3, "omitted, 0 and 960 are three different frames");
+    // The same with `setConsole`'s ramp fixed: only `setTrackConsole`'s ramp varies.
+    const trackFrames = [undefined, 0, 960].map((rampSamples) => {
+      const ramp = rampSamples === undefined ? {} : { rampSamples };
+      const clear = transaction(oneSlot(0)).setConsole({}).setTrackConsole("t", [], ramp).setTrackConsole("bus", [], ramp);
+      const answers = oracle(oneSlot(0), [clear.build()]);
+      assertCodecBytes(answers);
+      return answers[0].sdk;
+    });
+    assert.equal(new Set(trackFrames).size, 3, "setTrackConsole's omitted, 0 and 960 are three different frames");
   });
 
   test("automation and VCA edits are the codec's bytes, members and spans at 0, 1 and 3", () => {

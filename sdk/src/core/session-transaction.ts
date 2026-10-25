@@ -94,11 +94,12 @@ import type {
  * sources, the console slots -- and the builder keeps a working copy, so an `upsertTrack` sees an
  * earlier `upsertSource` of the same transaction.
  *
- * The builder checks the shape of each edit, not the references between entities: the engine's
- * store refuses those at the transaction's final validation with a typed missing-entity error, so
- * nothing is lost silently. A sidechain source, a sidechain whose source track a later edit
- * removes, and automation that targets a removed insert are the store's to refuse, as they are for
- * `SessionBuilder`.
+ * The builder checks each edit's shape and the references it can resolve against the working
+ * session -- a track's source, a route's endpoints, a VCA's members, an automation's target -- as
+ * `SessionBuilder` checks them against its declarations. What it does not check, the engine's store
+ * refuses at the transaction's final validation with a typed missing-entity error, so nothing is
+ * lost silently: a sidechain source, and a reference that a later edit of the same transaction
+ * removes (a sidechain's source track, a route's endpoint, an automated insert).
  *
  * # What the frame carries, and when
  *
@@ -141,7 +142,7 @@ import type {
  * An automation target resolves through `resolveAutomationTarget` against the working strips,
  * inserts, console slots, routes and VCAs, exactly as `SessionBuilder.automation` resolves it, and
  * its spans are written in the unit of the row it names. Whether that row is automatable is the
- * engine's rule (#1566): the store refuses the transaction, as `validate()` refuses the built
+ * engine's rule (#1566): the engine's preparation refuses it, as `validate()` refuses the built
  * session. A VCA's members must be in the working graph, written in declared order (the store keeps
  * them sorted); a membership cycle, which only a replaced VCA can make, is the store's to refuse.
  *

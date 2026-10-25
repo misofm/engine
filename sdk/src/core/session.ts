@@ -963,11 +963,7 @@ export class SessionBuilder {
       fail(`${path}.id`, "tracks, submixes, VCAs and outputs share one ID namespace");
     }
     if (spec !== undefined) {
-      if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
-        fail(path, "expected a submix strip specification");
-      }
-      knownKeys(spec, SUBMIX_KEYS, path, "a submix strip");
-      this.#validateStrip(spec, path);
+      normalizeSubmix({ id, spec }, this.#state.console ?? [], this.#state.options.sampleRateHz);
     }
     return this.#next({
       submixes: [...this.#state.submixes, freeze({ id, spec: spec === undefined ? undefined : { ...spec } })],
@@ -1091,7 +1087,7 @@ export class SessionBuilder {
     this.#validateStrip(spec, path);
   }
 
-  /** A strip's fields after its source: shared by tracks and submixes. */
+  /** A track's strip fields after its source (a submix runs `normalizeSubmix`). */
   #validateStrip(spec: SubmixSpec, path: string): void {
     normalizeBuiltins(spec.builtins, this.#state.options.sampleRateHz, `${path}.builtins`);
     normalizeConsoleEntries(spec.console, this.#state.console ?? [], `${path}.console`);
