@@ -1611,6 +1611,42 @@ fn a_strip_whose_input_section_changed_starts_at_rest() {
     });
 }
 
+/// A live input section whose new values the live path refuses -- a high-pass above the strip's
+/// low-pass, which the session compiles -- is not an internal fault of the input join: the
+/// successor's preparation returns its own typed refusal (`builtin.filter.order`).
+///
+/// Test value: red if the join asserts on the refusal: a debug build then panicked in the middle
+/// of a rebuild, and a host that caught the panic lost the candidate the rebuild had withdrawn
+/// (#1324a: capi's in-place parity stream then fed a ring nothing read, `source.backpressure`).
+#[test]
+fn an_input_section_the_live_path_refuses_is_a_typed_refusal() {
+    let a = Session::compile(filtered_session(false));
+    let mut b_model = filtered_session(false);
+    let left = &mut b_model.tracks[0].builtins.left;
+    left.hpf_hz = left.lpf_hz + 1_000.0;
+    let b = Session::compile(b_model);
+    for backend in backends() {
+        let predecessor = LivePlan::fresh(&a, backend).prepared;
+        let refused = host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+            &b.compiled,
+            &caps(),
+            &LivePlan::request(),
+            host_core::SuccessorBase::new(
+                &predecessor.inventory,
+                &a.model,
+                successor::SUCCESSOR_REVISION,
+            ),
+            backend,
+        )
+        .err()
+        .expect("the filter order is refused");
+        assert!(
+            String::from_utf8_lossy(refused.as_bytes()).starts_with("builtin.filter.order\t"),
+            "{backend:?}: {refused:?}"
+        );
+    }
+}
+
 /// D1's control-kind clause: a successor that attaches a live queue to its strips when the
 /// predecessor did not, or the reverse, carries no input section; only the source moves. Red if
 /// the clause is dropped (nine lane moves).
