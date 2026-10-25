@@ -3001,6 +3001,50 @@ pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
     })
 }
 
+/// Stage an exact-length replacement document for the live host's next control command (issue
+/// #1697, #1386 D7): the live twin of [`miso_engine_web_v1_document_ptr`], on the same staging
+/// buffer. The page writes the document there, then stages the `SESSION_REPLACE` frame that names
+/// it and calls [`miso_engine_web_v1_control_command`], which passes the document beside the frame
+/// to the control plane and frees it after the command, whatever the command was.
+///
+/// Returns the buffer's address, or zero, with nothing staged, for a wrong handle, a host that is
+/// not ready, a `len` that is zero or over [`MAXIMUM_DOCUMENT_BYTES`], or a failed reservation.
+/// Every call on the live host first frees what an earlier one staged (the boot's copy too), so a
+/// refused call leaves no document for the next command. It never touches the boot result word.
+/// Control side only: the control Worker, or in `single` mode the worklet's message handler, never
+/// `process()`; the bytes are a counted control allocation.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_replace_document_ptr(handle: u32, len: u32) -> u32 {
+    pointer_u32(stage_replace_document(handle, len))
+}
+
+/// [`miso_engine_web_v1_replace_document_ptr`]'s staging, with the address as a pointer (null for
+/// a refusal), so a native test can tell a staged document from a refusal.
+fn stage_replace_document(handle: u32, len: u32) -> *mut u8 {
+    with_host(handle, ptr::null_mut(), |host| {
+        BOOT_STAGING.with(|staging| {
+            let Ok(mut staging) = staging.try_borrow_mut() else {
+                return ptr::null_mut();
+            };
+            // Assignment frees the earlier bytes; the `ManuallyDrop` registers no destructor.
+            *staging.document = Vec::new();
+            staging.document_valid = false;
+            if host.status().state != STATE_READY || len == 0 || len > MAXIMUM_DOCUMENT_BYTES {
+                return ptr::null_mut();
+            }
+            let count = len as usize;
+            let mut document = Vec::new();
+            if document.try_reserve_exact(count).is_err() {
+                return ptr::null_mut();
+            }
+            document.resize(count, 0);
+            *staging.document = document;
+            staging.document_valid = true;
+            staging.document.as_mut_ptr()
+        })
+    })
+}
+
 /// Return one prepared stable staging-buffer address or zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_buffer_ptr(handle: u32, kind: u32) -> u32 {
@@ -3530,9 +3574,14 @@ pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) 
 }
 
 /// Run the staged control command frame of `len` bytes through the control plane's
-/// `SessionState::command`, the entry the C ABI's `miso_engine_v1_submit_command` runs (issue
-/// #1562a D1). In `single` mode it runs in the worklet's message handler, never in `process()`; it
-/// is not render-locked, so its allocations are counted as the instance's control allocations.
+/// `SessionState::command_with_document`, the entry the C ABI's `miso_engine_v1_submit_command`
+/// and `miso_engine_v1_submit_document_command` run (issue #1562a D1, #1697). The document
+/// [`miso_engine_web_v1_replace_document_ptr`] staged, if any, goes beside the frame (a
+/// `SESSION_REPLACE` reads it, every other command ignores it); after the command, whatever its
+/// frame or result (a wrong handle's refusal too, while a host is live), the staging is freed, so
+/// a document serves exactly one command and the first command after boot frees the boot's copy. In `single` mode it runs in the worklet's message
+/// handler, never in `process()`; it is not render-locked, so its allocations are counted as the
+/// instance's control allocations.
 ///
 /// Results: [`RESULT_OK`] (the response frame is at [`miso_engine_web_v1_control_response_ptr`],
 /// and a refused transaction is still an ok call with a non-ok frame); [`RESULT_INVALID_ARGUMENT`]
@@ -3542,9 +3591,41 @@ pub extern "C" fn miso_engine_web_v1_control_request_ptr(handle: u32, len: u32) 
 /// [`RESULT_INTERNAL`]. After any failure the response is the refusal's diagnostic.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_control_command(handle: u32, len: u32) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        with_promotion_analysis(host, |host, analysis| host.control_command(len, analysis))
-    })
+    let mut ran = false;
+    let result = with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
+        ran = true;
+        BOOT_STAGING.with(|staging| {
+            let Ok(mut staging) = staging.try_borrow_mut() else {
+                return RESULT_INTERNAL;
+            };
+            let staging = &mut *staging;
+            let document: &[u8] = if staging.document_valid {
+                &staging.document
+            } else {
+                &[]
+            };
+            let result = with_promotion_analysis(host, |host, analysis| {
+                host.control_command_with_document(len, document, analysis)
+            });
+            // #1386 D7: no host keeps the document after the call.
+            *staging.document = Vec::new();
+            staging.document_valid = false;
+            result
+        })
+    });
+    // A wrong handle runs no command, yet a document `replace_document_ptr` staged must not
+    // survive it either. Only while a host is live: before boot the staging is the boot's document
+    // or a refused boot's diagnostic, which no control call may free.
+    let live = LIVE_HOST.with(|slot| slot.try_borrow().is_ok_and(|slot| slot.is_some()));
+    if !ran && live {
+        BOOT_STAGING.with(|staging| {
+            if let Ok(mut staging) = staging.try_borrow_mut() {
+                *staging.document = Vec::new();
+                staging.document_valid = false;
+            }
+        });
+    }
+    result
 }
 
 /// Dequeue the next event of `lane` through the control plane's `SessionState::dequeue_event`, the
@@ -4387,6 +4468,33 @@ pub(crate) fn test_boot(bytes: &[u8], options: WebBootOptions) -> u32 {
     BOOT_STAGING.with(|staging| staging.borrow_mut().options = options);
     test_stage_document(bytes);
     miso_engine_web_v1_boot(bytes.len() as u32)
+}
+
+/// Stage `bytes` through [`miso_engine_web_v1_replace_document_ptr`]'s staging and write them
+/// there, as the worklet does (#1697); `false` when the staging refused the length.
+#[cfg(test)]
+pub(crate) fn test_replace_document(handle: u32, bytes: &[u8]) -> bool {
+    let Ok(length) = u32::try_from(bytes.len()) else {
+        return false;
+    };
+    if stage_replace_document(handle, length).is_null() {
+        return false;
+    }
+    BOOT_STAGING.with(|staging| staging.borrow_mut().document.copy_from_slice(bytes));
+    true
+}
+
+/// The document staging as `(document_valid, length, capacity)` (#1697 gate 2).
+#[cfg(test)]
+pub(crate) fn test_document_staging() -> (bool, usize, usize) {
+    BOOT_STAGING.with(|staging| {
+        let staging = staging.borrow();
+        (
+            staging.document_valid,
+            staging.document.len(),
+            staging.document.capacity(),
+        )
+    })
 }
 
 #[cfg(test)]
