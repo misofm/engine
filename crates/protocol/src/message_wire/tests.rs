@@ -89,46 +89,59 @@ fn common_error_payload_is_canonical_and_caller_owned() {
 }
 
 /// #1629 gate 1. Queue kind 2 (the automation queue) is retired: a backpressure payload that
-/// names it fails typed decode, while the allocated kinds decode. Never reallocated.
+/// names it fails typed decode, while the allocated kinds decode. Never reallocated. Kind 7 (the
+/// spectrum arm slot, #1944) is allocated without a queue generation, as the replay cache is.
 ///
-/// Test value: red if the retired queue code decodes again or is given to another queue.
+/// Test value: red if the retired queue code decodes again or is given to another queue, or if
+/// the spectrum arm slot's code stops decoding or is decoded with a generation.
 #[test]
 fn a_backpressure_payload_naming_the_retired_automation_queue_is_refused() {
     let codec = codec();
-    let encode = |queue_kind: BackpressureQueueKind| {
+    let encode = |queue_kind: BackpressureQueueKind, generation: Option<u64>| {
         let mut value = response();
-        value
-            .backpressure
-            .as_mut()
-            .expect("backpressure")
-            .queue_kind = queue_kind;
+        let backpressure = value.backpressure.as_mut().expect("backpressure");
+        backpressure.queue_kind = queue_kind;
+        backpressure.generation = generation;
         let mut output = vec![0_u8; codec.encoded_non_ok_payload_len(&value).expect("size")];
         codec
             .encode_non_ok_payload(&value, &mut output)
             .expect("encode");
         output
     };
-    let reliable_response = encode(BackpressureQueueKind::ReliableResponse);
-    let control = encode(BackpressureQueueKind::ControlCommand);
+    let reliable_response = encode(BackpressureQueueKind::ReliableResponse, Some(4));
+    let control = encode(BackpressureQueueKind::ControlCommand, Some(4));
     let at = reliable_response
         .iter()
         .zip(&control)
         .position(|(left, right)| left != right)
         .expect("the queue kind is the one byte that differs");
     assert_eq!((control[at], reliable_response[at]), (1, 3));
+    let replay_cache = encode(BackpressureQueueKind::ReplayCache, None);
+    let decodes = |base: &[u8], kind: u8| {
+        let mut bytes = base.to_vec();
+        bytes[at] = kind;
+        codec.decode_non_ok_payload(&bytes, 3)
+    };
     for allocated in [1_u8, 3, 4, 5] {
-        let mut bytes = reliable_response.clone();
-        bytes[at] = allocated;
         assert!(
-            codec.decode_non_ok_payload(&bytes, 3).is_ok(),
+            decodes(&reliable_response, allocated).is_ok(),
             "{allocated}"
         );
     }
-    for refused in [0_u8, 2, 7] {
-        let mut bytes = reliable_response.clone();
-        bytes[at] = refused;
+    for generationless in [6_u8, 7] {
+        assert!(
+            decodes(&replay_cache, generationless).is_ok(),
+            "{generationless}"
+        );
         assert_eq!(
-            codec.decode_non_ok_payload(&bytes, 3),
+            decodes(&reliable_response, generationless),
+            Err(DecodeError::InvalidTlv),
+            "queue kind {generationless} with a generation"
+        );
+    }
+    for refused in [0_u8, 2, 8] {
+        assert_eq!(
+            decodes(&reliable_response, refused),
             Err(DecodeError::InvalidTlv),
             "queue kind {refused}"
         );

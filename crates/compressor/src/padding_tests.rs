@@ -45,7 +45,7 @@ pub(super) fn request(values: &Values, rate: u32, link: LinkMode) -> PrepareEffe
         },
         initial_values: values,
         limits: PrepareEffectLimits {
-            maximum_total_state_bytes: 296,
+            maximum_total_state_bytes: 360,
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },

@@ -1259,6 +1259,26 @@ fn render_c(plan: *mut crate::Plan, block: u64) -> Vec<f32> {
     pcm
 }
 
+/// [`feed_and_render_c`] from `first` until the watermark reports `revision` (#1325 D3: a strip
+/// removal is adopted at `S`); the next block.
+fn feed_and_render_until_c(
+    session: *mut crate::Session,
+    plan: *mut crate::Plan,
+    sample_rate_hz: u32,
+    first: u64,
+    revision: u64,
+) -> u64 {
+    let mut block = first;
+    while crate::ffi::test_plan_watermark(plan).1.revision < revision {
+        assert!(block < first + 64, "revision {revision} is adopted");
+        feed_and_render_c(session, plan, sample_rate_hz, block, 1);
+        block += 1;
+    }
+    // The service step promotes the adopted successor's epoch, as the next control call would.
+    assert_eq!(crate::ffi::test_service(session), crate::RESULT_OK);
+    block
+}
+
 /// Feeds `fixture-source` one block ahead and renders `blocks` blocks from `first`.
 fn feed_and_render_c(
     session: *mut crate::Session,
@@ -1686,6 +1706,35 @@ pub(super) fn feed_and_render_direct(
             render_direct(children, block)
         })
         .collect()
+}
+
+/// Feeds `ids` one block ahead and renders from `first` until the watermark reports `revision`:
+/// a transaction that removes a strip is adopted at its scheduled sample `S`, after the strip's
+/// ramp (#1325 D3). The blocks rendered and the next block.
+pub(super) fn feed_and_render_until_direct(
+    children: &mut CompiledChildren,
+    ids: &[&[u8]],
+    first: u64,
+    revision: u64,
+) -> (Vec<Vec<f32>>, u64) {
+    let mut blocks = Vec::new();
+    let mut block = first;
+    while children
+        .plan
+        .queries()
+        .watermark()
+        .expect("watermark")
+        .revision
+        < revision
+    {
+        assert!(block < first + 64, "revision {revision} is adopted");
+        submit_direct(children, ids, block + 1);
+        blocks.push(render_direct(children, block));
+        block += 1;
+    }
+    // The service step promotes the adopted successor's epoch, as the next control call would.
+    children.session.service().expect("service");
+    (blocks, block)
 }
 
 fn assert_bit_identical(label: &str, first: u64, actual: &[Vec<f32>], expected: &[Vec<f32>]) {
@@ -2135,11 +2184,12 @@ fn a_held_seek_carries_from_a_taken_candidate() {
 
 /// Issue #1273 gate 2: a transaction that removes a track and its source leaves the remaining
 /// source playing from its carried ring, bit-identical to the fresh post-edit session, and a
-/// submit for the removed source is refused as unknown.
+/// submit for the removed source is refused as unknown. Since #1325 D4 the removed source keeps
+/// feeding the running plan until the successor is adopted at `S`, and is refused from then on.
 ///
 /// Test value: red if the carry joins sources by graph index instead of ID (the remaining
-/// source's index moves when the first is removed), or if a removed source's producer stays
-/// reachable after the commit.
+/// source's index moves when the first is removed), if a removed source's producer stays
+/// reachable after the adoption, or if it is retired at the commit (a phase-1 submit refused).
 #[test]
 fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
     const AUX: &[u8] = b"aux-source";
@@ -2178,12 +2228,14 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
             4_096,
         )
         .expect("removal transaction");
-    let (left, right) = continuity_block(7, 1);
+    // #1325 D4: until the adoption both sources are fed, and neither submit is refused.
+    let (_, next) = feed_and_render_until_direct(&mut children, &both, 6, 43);
+    let (left, right) = continuity_block(next + 1, 1);
     let refused = children.session.submit(
         AUX,
         SourceSubmission {
             generation: 1,
-            start_frame: 7 * 128,
+            start_frame: (next + 1) * 128,
             sample_rate_hz: 48_000,
             planes: &[&left, &right],
             frames: 128,
@@ -2191,13 +2243,14 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
         },
     );
     let Err(refusal) = refused else {
-        panic!("a submit for the removed source is refused")
+        panic!("a submit for the removed source is refused after the adoption")
     };
     assert_eq!(
         refusal.report(),
         (crate::RESULT_INVALID_ARGUMENT, &b"source.id.unknown"[..])
     );
-    // #1273 D3: a seek, like a submit, addresses the newest committed session from the commit on.
+    // #1273 D3: a seek, like a submit, addresses the newest committed session from the adoption
+    // on (#1325 D4).
     let Err(refusal) = children.session.seek(AUX, 2, 0) else {
         panic!("a seek for the removed source is refused")
     };
@@ -2205,7 +2258,7 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
         refusal.report(),
         (crate::RESULT_INVALID_ARGUMENT, &b"source.id.unknown"[..])
     );
-    let swapped = feed_and_render_direct(&mut children, &both[..1], 6, 6);
+    let swapped = feed_and_render_direct(&mut children, &both[..1], next, 6);
     assert_eq!(children.plan.owner().carried_count(), 1);
 
     let committed = session::canonical_session_json(
@@ -2219,8 +2272,8 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
     .expect("committed");
     let mut reference = compile_children(&committed, limits()).expect("reference");
     submit_direct(&mut reference, &both[..1], 0);
-    let expected = feed_and_render_direct(&mut reference, &both[..1], 0, 12);
-    assert_bit_identical("removal", 6, &swapped, &expected[6..]);
+    let expected = feed_and_render_direct(&mut reference, &both[..1], 0, next + 6);
+    assert_bit_identical("removal", next, &swapped, &expected[next as usize..]);
 }
 
 // Issue #1323: a host-declared discontinuity resets the latency floors of #1285.
@@ -2355,7 +2408,7 @@ fn a_declared_discontinuity_reports_the_natural_latency_on_the_c_abi() {
         command_c(c_session, &transaction_at(1, 42, &edits)).0,
         crate::RESULT_OK
     );
-    feed_and_render_c(c_session, c_plan, 48_000, 6, 4);
+    let next = feed_and_render_until_c(c_session, c_plan, 48_000, 6, 43);
     assert_eq!(
         crate::ffi::test_plan_latency(c_plan),
         latency,
@@ -2374,8 +2427,8 @@ fn a_declared_discontinuity_reports_the_natural_latency_on_the_c_abi() {
         latency,
         "the running plan reports until render adopts the successor"
     );
-    let reset = feed_and_render_c(c_session, c_plan, 48_000, 10, 6);
-    let (natural, expected) = natural_reference(&snapshot_c(c_session), 10, 6);
+    let reset = feed_and_render_c(c_session, c_plan, 48_000, next, 6);
+    let (natural, expected) = natural_reference(&snapshot_c(c_session), next, 6);
     assert!(natural < latency, "B's natural latency is lower");
     assert_eq!(crate::ffi::test_plan_latency(c_plan), natural);
     assert!(
@@ -2493,12 +2546,9 @@ fn a_refused_declaration_changes_nothing() {
         submit_direct(&mut children, &[b"fixture-source"], 0);
         let mut blocks = feed_and_render_direct(&mut children, &[b"fixture-source"], 0, 6);
         command_direct(&mut children, &transaction_at(1, 42, &edits));
-        blocks.extend(feed_and_render_direct(
-            &mut children,
-            &[b"fixture-source"],
-            6,
-            4,
-        ));
+        let (adopted, next) =
+            feed_and_render_until_direct(&mut children, &[b"fixture-source"], 6, 43);
+        blocks.extend(adopted);
         if declare {
             let floors = children.session.test_providers().test_inventory().clone();
             assert!(floors.runs_behind_natural_timing());
@@ -2528,22 +2578,22 @@ fn a_refused_declaration_changes_nothing() {
         blocks.extend(feed_and_render_direct(
             &mut children,
             &[b"fixture-source"],
-            10,
+            next,
             2,
         ));
         assert_eq!(children.plan.resources().latency_samples, latency);
-        (children, blocks, latency)
+        (children, blocks, latency, next + 2)
     };
-    let (mut refused, blocks, latency) = run(true);
-    let (_, twin, _) = run(false);
+    let (mut refused, blocks, latency, next) = run(true);
+    let (_, twin, _, _) = run(false);
     assert_eq!(sample_bits(&blocks), sample_bits(&twin));
 
     refused
         .session
         .declare_discontinuity()
         .expect("the retry under the lifted cap");
-    feed_and_render_direct(&mut refused, &[b"fixture-source"], 12, 1);
-    let (natural, _) = natural_reference(&committed_document(&refused), 12, 1);
+    feed_and_render_direct(&mut refused, &[b"fixture-source"], next, 1);
+    let (natural, _) = natural_reference(&committed_document(&refused), next, 1);
     assert!(natural < latency);
     assert_eq!(refused.plan.resources().latency_samples, natural);
 }
@@ -2701,7 +2751,6 @@ fn a_declared_stop_supersedes_a_pending_warm_successor_alone_and_folded() {
 /// declared stop is lost.
 #[test]
 fn an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it() {
-    const ADOPTED_AT: u64 = 10;
     let (model, edits) = limited_session();
     let document = session::canonical_session_json(&model).expect("canonical");
     let mut children = compile_children(&document, limits()).expect("children");
@@ -2709,7 +2758,7 @@ fn an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it() {
     submit_direct(&mut children, &[b"fixture-source"], 0);
     feed_and_render_direct(&mut children, &[b"fixture-source"], 0, 6);
     command_direct(&mut children, &transaction_at(1, 42, &edits));
-    feed_and_render_direct(&mut children, &[b"fixture-source"], 6, 4);
+    let (_, adopted_at) = feed_and_render_until_direct(&mut children, &[b"fixture-source"], 6, 43);
     assert_eq!(children.plan.resources().latency_samples, latency);
     let before = children.plan.queries().watermark().expect("watermark");
 
@@ -2751,15 +2800,15 @@ fn an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it() {
         "E has no raised floor"
     );
 
-    let rendered = feed_and_render_direct(&mut children, &[b"fixture-source"], ADOPTED_AT, 6);
+    let rendered = feed_and_render_direct(&mut children, &[b"fixture-source"], adopted_at, 6);
     let watermark = children.plan.queries().watermark().expect("watermark");
     assert_eq!(
         (watermark.revision, watermark.first_sample),
-        (44, ADOPTED_AT * 128)
+        (44, adopted_at * 128)
     );
     assert_eq!(watermark.outcome_flags, engine::realtime::OUTCOME_EXACT);
     assert_eq!(watermark.superseded, before.superseded);
-    let (natural, expected) = natural_reference(&committed_document(&children), ADOPTED_AT, 6);
+    let (natural, expected) = natural_reference(&committed_document(&children), adopted_at, 6);
     assert!(natural < latency);
     assert_eq!(children.plan.resources().latency_samples, natural);
     assert!(expected.iter().flatten().any(|sample| *sample != 0.0));
@@ -2916,8 +2965,9 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
         .expect("first structural command");
     revision += 1;
 
+    let mut sample = 0;
     for round in 1..=4_u64 {
-        let sample = round * 128;
+        sample += 128;
         // The candidate is pending: the source's producer has moved to it.
         feed(&mut children, "pending candidate");
         // Drain the round's `SESSION_COMMITTED`, so the reliable lane never backpressures.
@@ -2932,17 +2982,31 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
         let new_epoch = children.session.test_pending_providers()[0].test_epoch();
         assert_eq!(new_epoch, old_epoch + 1);
 
-        // First half of `PlanState::render`: the owner swaps and retires the old plan.
-        let report = children
-            .plan
-            .test_owner_mut()
-            .render_contiguous(
-                RenderIo {
-                    output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
-                },
-                sample,
-            )
-            .expect("swapping block");
+        // First half of `PlanState::render`: the owner swaps and retires the old plan. A removal
+        // is adopted at its scheduled sample `S`, after the strip's ramp (#1325 D3): the blocks
+        // before it render whole, fed, and the round's window is the swapping block's.
+        let report = loop {
+            let report = children
+                .plan
+                .test_owner_mut()
+                .render_contiguous(
+                    RenderIo {
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+                    },
+                    sample,
+                )
+                .expect("swapping block");
+            if report.swap == engine::realtime::SwapOutcome::Applied || round % 2 == 1 {
+                break report;
+            }
+            children
+                .plan
+                .test_active_epoch()
+                .store(report.active_epoch.0, Ordering::Release);
+            sample += 128;
+            assert!(sample < 128 * 128, "round {round}: the removal is adopted");
+            feed(&mut children, "phase 1");
+        };
         assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
         assert_eq!(report.active_epoch.0, new_epoch);
         assert_eq!(children.plan.owner().carried_count(), round);
@@ -3037,7 +3101,7 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
     children
         .plan
         .render(
-            5 * 128,
+            sample + 128,
             PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
         )
         .expect("adopting block");
@@ -5519,7 +5583,12 @@ fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
         configure_meters_c(
             c_session,
             1,
-            vec![strip("eq0"), strip("eq1"), strip("bus"), output_peak_entry()],
+            vec![
+                strip("eq0"),
+                strip("eq1"),
+                strip("bus"),
+                output_peak_entry()
+            ],
             2 * window
         ),
         (StatusCode::Ok, None)
@@ -5530,6 +5599,9 @@ fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
         [0.75, 0.125],
         [1.5, 0.5],
         [0.25, 0.375],
+        // `eq1` ramps out over this batch before its removal swaps in (#1325).
+        [0.5, 0.5],
+        [0.25, 0.25],
         [0.5, 0.5],
         [0.25, 0.25],
         // A returned strip fades in over its first window, so the batch after `eq1` returns
@@ -5554,19 +5626,22 @@ fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
         [first[0].max(second[0]), first[1].max(second[1])]
     };
     let records = |handle: u32, peak: Option<[f32; 2]>| {
-        [protocol::MeterComponent::Left, protocol::MeterComponent::Right]
-            .into_iter()
-            .zip(peak.unwrap_or([0.0; 2]))
-            .map(move |(component, value)| protocol::MeterRecord {
-                handle,
-                component,
-                flags: match peak {
-                    None => 0,
-                    Some(_) if value > 1.0 => 1 | 2,
-                    Some(_) => 1,
-                },
-                value,
-            })
+        [
+            protocol::MeterComponent::Left,
+            protocol::MeterComponent::Right,
+        ]
+        .into_iter()
+        .zip(peak.unwrap_or([0.0; 2]))
+        .map(move |(component, value)| protocol::MeterRecord {
+            handle,
+            component,
+            flags: match peak {
+                None => 0,
+                Some(_) if value > 1.0 => 1 | 2,
+                Some(_) => 1,
+            },
+            value,
+        })
     };
     let scaled = |peak: [f32; 2], gain: f32| [peak[0] * gain, peak[1] * gain];
     let expected = |batch: usize, eq1_present: bool| {
@@ -5600,13 +5675,16 @@ fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
         // The commit's `SESSION_COMMITTED`, so the reliable lane has room for the next one.
         while !event_c(c_session, crate::EVENT_LANE_RELIABLE).1.is_empty() {}
     };
-    let batch = |index: usize, eq1_present: bool| {
+    let render_batch = |index: usize| {
         for block in 2 * index as u64 * window..2 * (index as u64 + 1) * window {
             feed(block);
         }
         assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+        meter_batches_c(c_session)
+    };
+    let batch = |index: usize, eq1_present: bool| {
         assert_eq!(
-            meter_batches_c(c_session),
+            render_batch(index),
             [expected(index, eq1_present)],
             "batch {index}"
         );
@@ -5617,7 +5695,19 @@ fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
     batch(1, true);
     // Gate 4: `eq1` and its send removed, then returned.
     commit(3, &remove_track("eq1"));
-    batch(2, false);
+    // While `eq1` ramps out, `bus` and the output carry its tail; `eq0` and the absent `eq1` are
+    // exact already.
+    let ramping = render_batch(2);
+    let (first, end, sequence, want) = expected(2, false);
+    assert_eq!(
+        ramping
+            .iter()
+            .map(|(first, end, sequence, records)| (*first, *end, *sequence, records[..4].to_vec()))
+            .collect::<Vec<_>>(),
+        [(first, end, sequence, want[..4].to_vec())],
+        "batch 2"
+    );
+    batch(3, false);
     commit(
         4,
         &[
@@ -5629,7 +5719,7 @@ fn strip_and_output_meter_batches_are_each_entrys_own_peak_across_rebuilds() {
             },
         ],
     );
-    batch(3, true);
+    batch(4, true);
     assert_eq!(meter_windows_lost_c(c_session, 100), 0, "no window lost");
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
@@ -5695,28 +5785,44 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
         (result, response_status(&response)),
         (crate::RESULT_OK, StatusCode::Ok)
     );
-    for block in swap_block..swap_block + 3 * window {
+    // The removed track ramps out first (#1325), so the swap lands a few blocks later, at a block
+    // the batches name.
+    let end_block = swap_block + 5 * window;
+    for block in swap_block..end_block {
         feed(block);
     }
     assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
     let span = window * 128;
-    let adoption = swap_block * 128;
-    assert_eq!(
-        meter_batches_c(c_session)
-            .into_iter()
-            .map(|(first, end, sequence, records)| (
+    let batches: Vec<_> = meter_batches_c(c_session)
+        .into_iter()
+        .map(|(first, end, sequence, records)| {
+            (
                 first,
                 end,
                 sequence,
-                records.iter().map(|record| record.flags).collect::<Vec<_>>()
-            ))
-            .collect::<Vec<_>>(),
-        [
-            (0, span, 1, vec![1, 1]),
-            (adoption, adoption + span, 2, vec![1, 1]),
-            (adoption + span, adoption + 2 * span, 3, vec![1, 1]),
-            (adoption + 2 * span, adoption + 3 * span, 4, vec![1, 1]),
-        ]
+                records
+                    .iter()
+                    .map(|record| record.flags)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let adoption = batches.get(1).expect("a batch after the swap").0;
+    assert!(
+        adoption >= swap_block * 128 && adoption % span != 0,
+        "the grid restarted mid-window, at {adoption}"
+    );
+    let after = (end_block * 128 - adoption) / span;
+    assert_eq!(
+        batches,
+        core::iter::once((0, span, 1, vec![1, 1]))
+            .chain((0..after).map(|k| (
+                adoption + k * span,
+                adoption + (k + 1) * span,
+                k + 2,
+                vec![1, 1]
+            )))
+            .collect::<Vec<_>>()
     );
     assert_eq!(meter_windows_lost_c(c_session, 100), 0);
     crate::ffi::test_plan_destroy(c_plan);
@@ -6383,38 +6489,81 @@ mod session_seek {
                 },
             ],
         );
-        submit_block_c(rig.session, LONG, 1, rig.block + 1, 0, 48_000);
-        rig.render();
         // #1699 parity row: the C ABI serves the discarded quantum as `SOURCE_FRAMES_DISCARDED`.
-        assert_eq!(crate::ffi::test_service(rig.session), crate::RESULT_OK);
-        let (result, response) = command_c(
-            rig.session,
-            &command_bytes(
-                2,
-                protocol::CommandPayload::CountersGet(&protocol::CountersRequest {
-                    all: false,
-                    ids: vec![protocol::CounterId::SourceFramesDiscarded as u32],
-                }),
-            ),
-        );
-        assert_eq!(result, crate::RESULT_OK);
-        let mut fields = [0_u16; 64];
-        let protocol::DecodedTypedResponseFrame::Success {
-            payload: protocol::DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
-            ..
-        } = ProtocolCodec::default()
-            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
-            .expect("counters response")
-        else {
-            panic!("expected a counter snapshot")
+        let session = rig.session;
+        let discarded = |request_id: u64| {
+            assert_eq!(crate::ffi::test_service(session), crate::RESULT_OK);
+            let (result, response) = command_c(
+                session,
+                &command_bytes(
+                    request_id,
+                    protocol::CommandPayload::CountersGet(&protocol::CountersRequest {
+                        all: false,
+                        ids: vec![protocol::CounterId::SourceFramesDiscarded as u32],
+                    }),
+                ),
+            );
+            assert_eq!(result, crate::RESULT_OK);
+            let mut fields = [0_u16; 64];
+            let protocol::DecodedTypedResponseFrame::Success {
+                payload: protocol::DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                .expect("counters response")
+            else {
+                panic!("expected a counter snapshot")
+            };
+            let [value] = snapshot.values[..] else {
+                panic!("one counter")
+            };
+            assert_eq!(value.id, protocol::CounterId::SourceFramesDiscarded);
+            value.value
+        };
+        // #1325 D4: until the adoption at `S` the removed short source feeds the running plan's
+        // ramp, one quantum a block, and nothing is discarded; the adoption retires the plan with
+        // the quantum it never read.
+        let mut request_id = 2;
+        let mut short_block = 1;
+        loop {
+            submit_block_c(rig.session, LONG, 1, rig.block + 1, 0, 48_000);
+            rig.render();
+            if crate::ffi::test_plan_watermark(rig.plan).1.revision > model.revision {
+                break;
+            }
+            assert!(rig.block < 64, "the removal is adopted");
+            assert_eq!(discarded(request_id), 0, "nothing is discarded before S");
+            request_id += 1;
+            submit_block_c(rig.session, SHORT, 10, short_block, 0, 48_000);
+            short_block += 1;
+        }
+        assert_eq!(discarded(request_id), Q);
+        let (left, right) = continuity_block(short_block, 0);
+        let planes = [left.as_ptr(), right.as_ptr()];
+        let chunk = crate::SourceChunk {
+            struct_size: crate::SOURCE_CHUNK_SIZE,
+            sample_rate_hz: 48_000,
+            generation: 10,
+            start_frame: short_block * Q,
+            planes: planes.as_ptr(),
+            plane_count: 2,
+            frames: 128,
+            end_of_region: 0,
+            reserved0: 0,
+        };
+        let mut report = crate::SubmitReport {
+            struct_size: crate::SUBMIT_REPORT_SIZE,
+            reserved0: 0,
+            accepted_frames: 0,
+            cumulative_written_frames: 0,
+            active_generation: 0,
         };
         assert_eq!(
-            snapshot.values,
-            vec![protocol::CounterValue {
-                id: protocol::CounterId::SourceFramesDiscarded,
-                value: Q,
-            }]
+            crate::ffi::test_source_submit(rig.session, SHORT, &chunk, &mut report),
+            crate::RESULT_INVALID_ARGUMENT,
+            "the removed source is refused after the adoption"
         );
+        assert_eq!(rig.last_error(), b"source.id.unknown");
         assert_eq!(
             rig.landed(LONG).0,
             1,
