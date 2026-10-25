@@ -7454,8 +7454,7 @@ mod tests {
         ///
         /// Test value: a classifier that publishes the warm candidate `Next` (or with no flags
         /// written) adopts it before render is ready -- its prime underruns or it repeats `P`
-        /// frames -- and a `not_before` read from the source-read clock is `P` late; a session
-        /// with no bounds that classifies changes today's path.
+        /// frames; a session with no bounds that classifies changes today's path.
         #[test]
         fn a_growth_is_published_primed_and_recorded() {
             let mut rig = Rig::new(Some(CONFIG));
@@ -7679,7 +7678,8 @@ mod tests {
         ///
         /// Test value: a record kept after W's adoption or supersession names W's epoch (#1358's
         /// deadline step would then act on B); a record dropped on a refused supersession leaves
-        /// W pending with no record.
+        /// W pending with no record; a `not_before` read from the source-read clock is `P` late
+        /// once a warm plan runs.
         #[test]
         fn the_record_names_the_one_pending_warm_candidate() {
             /// W published and pending, frames withheld; its record.
@@ -7704,9 +7704,16 @@ mod tests {
                 assert_eq!(rig.primed(), None, "adopted");
                 let adoption = rig.rebuild(b);
                 assert_eq!(matches!(adoption, PlanAdoption::Primed { .. }), primed);
+                // W runs `P` ahead on the source-read clock: B's `not_before` is the render
+                // clock's.
+                let render_clock = rig.children.session.test_render_clock();
                 assert_eq!(
-                    rig.primed().map(|record| record.epoch),
-                    primed.then(|| rig.children.session.newest_plan_epoch()),
+                    rig.children.session.test_source_read_clock(),
+                    render_clock + LEAD
+                );
+                assert_eq!(
+                    rig.primed().map(|record| (record.epoch, record.not_before)),
+                    primed.then(|| (rig.children.session.newest_plan_epoch(), render_clock)),
                     "after an adopted W, B warm: {primed}"
                 );
             }
