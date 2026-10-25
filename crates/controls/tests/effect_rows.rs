@@ -158,7 +158,7 @@ fn an_unknown_or_third_party_effect_has_no_rows() {
 }
 
 /// The classes the rulings give, written out per row: decision 14's limiter lookahead and decision
-/// 15 E2's crossover rows, E4's two bypass shunts and #1367's link mode.
+/// 15 E2's crossover rows and E4's two bypass shunts.
 fn expected_prepared(effect: &str, parameter: u32) -> Option<RebuildReason> {
     match (effect, parameter) {
         ("miso.true-peak-limiter", 3) => Some(RebuildReason::Glitch),
@@ -225,20 +225,6 @@ fn effect_rows_carry_the_ruled_class() {
                 && row.address.control == LINK_MODE_CONTROL
         });
         match (effect, link) {
-            ("miso.multiband-compressor", Some(row)) => {
-                assert_eq!(
-                    rebuild_reason(row.descriptor.class),
-                    Some(RebuildReason::RuledLiveNotBuilt { issue: 1367 })
-                );
-                // `lane_link`, but no glide yet (#1367b): its lane holds no link cell, so the
-                // writer refuses a switch (`EffectWriteRefusal::Link`) its processor would refuse
-                // after an ack.
-                assert!(descriptor.lane_link);
-                assert!(
-                    !EffectLaneShape::from_descriptor(descriptor, 0).has_link(),
-                    "{effect}"
-                );
-            }
             (_, Some(row)) => {
                 assert!(LIVE_LINK_EFFECTS.contains(&effect), "{effect}");
                 assert_eq!(row.descriptor.class, ControlClass::Live, "{effect}");
