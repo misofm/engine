@@ -913,7 +913,7 @@ fn parse_source(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) 
 /// Why a retired track rack key refuses (decision 12).
 const RETIRED_TRACK_RACK: &str = "retired rack key: declare shared slots once in the session console and a track's own effects in inserts";
 /// Why an effect field refuses inside a per-track console entry (decision 12).
-const CONSOLE_ENTRY_EFFECT_FIELD: &str = "a console entry carries only slot, bypass and params: identity, quality and link_mode are declared once on the session slot, and a console slot has no sidechain";
+const CONSOLE_ENTRY_EFFECT_FIELD: &str = "a console entry carries only slot, bypass, link_mode and params: identity and quality are declared once on the session slot, and a console slot has no sidechain";
 
 fn parse_console(
     parser: &mut Parser,
@@ -972,22 +972,23 @@ fn parse_console_entry(
 ) -> Option<crate::ConsoleEntry> {
     parser.keys_explained(
         table,
-        &["slot", "bypass", "params"],
+        &["slot", "bypass", "link_mode", "params"],
         &[
             ("id", CONSOLE_ENTRY_EFFECT_FIELD),
             ("identity", CONSOLE_ENTRY_EFFECT_FIELD),
             ("quality", CONSOLE_ENTRY_EFFECT_FIELD),
-            ("link_mode", CONSOLE_ENTRY_EFFECT_FIELD),
             ("sidechain", CONSOLE_ENTRY_EFFECT_FIELD),
         ],
         &path,
     );
     let slot = parser.id(table, "slot", &path);
     let bypass = parser.bool(table, "bypass", &path);
+    let link_mode = parser.closed_token(table, "link_mode", &path, DiagnosticCode::InvalidEnum);
     let params = parse_list(parser, table, "params", &path, parse_param);
     Some(crate::ConsoleEntry {
         slot: slot?,
         bypass: bypass?,
+        link_mode: link_mode?,
         params: params?,
     })
 }

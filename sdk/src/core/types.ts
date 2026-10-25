@@ -203,6 +203,12 @@ export interface ConsoleSpec {
 export interface ConsoleEntrySpec<E extends EffectId = EffectId> {
   readonly slot: string;
   readonly bypass?: boolean;
+  /**
+   * This strip's detector link mode (#1369): `"slot"` (the default, written explicitly) runs the
+   * slot's declared mode, and any other token overrides it on this strip only. The resolved mode
+   * must be one the slot's effect supports.
+   */
+  readonly linkMode?: "slot" | "dual_mono" | "maximum" | "average";
   readonly parameters?: EffectParamValues<E>;
   /** The channel a scalar parameter value addresses. Per-lane pairs override it. */
   readonly channel?: Channel;

@@ -28,7 +28,7 @@ LIMITER_SLOT = {
 
 def limiter(index: int) -> dict:
     return {
-        "slot": "limiter", "bypass": False,
+        "slot": "limiter", "bypass": False, "link_mode": "slot",
         "params": [
             {"parameter_id": 1, "channel": "both", "unit": "db", "value": -0.5 - index / 32},
             {"parameter_id": 2, "channel": "both", "unit": "milliseconds", "value": 60.0 + index * 1.25},
@@ -81,7 +81,8 @@ def main() -> int:
         assert compressor in (None, slot), "every track's compressor is one console slot"
         compressor = slot
         track["console"].append(
-            {"slot": insert["id"], "bypass": insert["bypass"], "params": insert["params"]}
+            {"slot": insert["id"], "bypass": insert["bypass"], "link_mode": "slot",
+             "params": insert["params"]}
         )
         track["console"].append(limiter(index))
     console["pre_insert"].append(compressor)

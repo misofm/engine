@@ -62,6 +62,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -148,6 +149,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -234,6 +236,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -320,6 +323,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -406,6 +410,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -492,6 +497,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -578,6 +584,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,
@@ -664,6 +671,7 @@
         {
           "slot": "comp",
           "bypass": false,
+          "link_mode": "slot",
           "params": [
             {
               "parameter_id": 1,

@@ -178,6 +178,7 @@ pub(crate) fn model_at(rate: u32) -> SessionModel {
             .map(|slot| ConsoleEntry {
                 slot: StableId::parse(slot).expect("slot ID"),
                 bypass: false,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: Vec::new(),
             })
             .collect();

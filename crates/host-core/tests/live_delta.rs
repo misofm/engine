@@ -2921,6 +2921,7 @@ fn with_effects() -> SessionModel {
         track.console.push(ConsoleEntry {
             slot: id("clip"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: Vec::new(),
         });
     }
@@ -3238,6 +3239,7 @@ fn with_bypassable() -> SessionModel {
             ConsoleEntry {
                 slot: fixture.console.pre_insert[0].slot.clone(),
                 bypass: true,
+                link_mode: session::ConsoleLinkMode::Slot,
                 params: Vec::new(),
             },
         );

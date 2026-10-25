@@ -269,11 +269,13 @@ fn console_fields_are_appended_and_walked_in_schema_order() {
         session::ConsoleEntry {
             slot: StableId::parse("desk-a").expect("id"),
             bypass: false,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: params.clone(),
         },
         session::ConsoleEntry {
             slot: StableId::parse("desk-b").expect("id"),
             bypass: true,
+            link_mode: session::ConsoleLinkMode::Slot,
             params: Vec::new(),
         },
     ];
