@@ -265,10 +265,34 @@ Review fold-in after attempt 2 (root, 2026-10-25):
   and the `resume-clicks` gate in `run.mjs` goes from 3 to 4 declared clicks: a new click for a
   new row, not a weaker gate. `sdk-live-eq-cuts` keeps its PCM parity on its offline engine
   (`live-eq-cuts`), with the edits made before the render. Its capture clause moved to the live
-  row's changed publication, as `capturedSample >= appliedAtSample` (the edit's watermark sample):
-  a capture in the very block that applied the edit is legal. Gate 4 now asserts that no response
+  row's changed publication as `capturedSample > appliedAtSample` (root ruling on attempt 1). The
+  core stamps a capture with its block's exclusive end, so the block that applied the edit reports
+  `appliedAt + 128`, and equality would mean a read of the committed model. `appliedAtSample` is
+  the edit's watermark sample, and the row requires it to be present and positive. The mutation
+  `sdk-track-response-early` sets it to the captured sample (the boundary case). Gate 4 now asserts that no response
   Worker is created, that renders with no edit publish nothing, and that an edit gives exactly one
   publication. The one-shot row asserts that two concurrent queries settle in turn, and that the
   section codes are 4, 5, 2. The continuous-spectrum row arms its response query before its
   offline render and reads it afterwards. New `--self-test-mutations` rows:
   `sdk-track-response-{worker,unchanged,once,early}` and `sdk-live-response-{serialized,sections}`.
+- **Paths.** Root added `hosts/host-web/qualification/qualification.js` (`resumeClickPlan` only)
+  to this slice's paths. Gate 1's browser leg is the Node stand-in in `live-response-evals.mjs`
+  plus the real-browser rows on `observation-session.json`; root accepted this.
+- **Requester.** A late tag reply whose event was read first is not held: the requester records the
+  tags it reads while a late reply is outstanding (`live-response-evals.mjs`, fake transport).
+- **Barrel.** The `@ts-expect-error` rows for the deleted names left `sdk/test/barrel-surface.ts`.
+  Those names no longer exist, so a row there defends no re-export.
+
+SDK public behaviour changes of #1579b (browser engine; add them to the changelog with the PR):
+
+12. `queryTrackResponse` settles after the next rendered block. A suspended or never-started
+    context rejects it at `responseLimits.requestDeadlineMs` (default 5 s), with `MisoUsageError`
+    "exceeded its deadline".
+13. Concurrent queries run one at a time, in call order. Before, the second was refused "already in
+    flight".
+14. A failed or disposed host rejects every pending and queued query at once with a lifecycle
+    `MisoEngineError` (`the browser host no longer owns a ready live response boundary`), found
+    by a host status read every 20 ms while a query is pending. `close()` rejects them at once
+    with `MisoUsageError`.
+15. `rackValue`, `snapshotToken`, `resultBytes` and the masks are the headless engine's (change 4).
+
