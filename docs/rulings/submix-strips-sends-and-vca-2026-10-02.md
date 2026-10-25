@@ -190,7 +190,12 @@ Ruling:
     is already a per-lane mask (DESIGN 8.2 Q1), so a per-strip override would not need to split a
     bank once the link mode leaves `EffectProgramKey`, where it is today (#1236's L1). It is filed
     as its own issue, *Let a strip override a console slot's link mode* (#1236), outside #1196.
-    Until it lands, the bus-compression hazard guidance (DESIGN 2.2b) stands.
+    Until it lands, the bus-compression hazard guidance (DESIGN 2.2b) stands. **Delivered
+    (2026-10-25, #1369):** every console entry carries a required `link_mode`, `slot` or an
+    override token; the override lowers per lane and the slot still binds one bank (#1368); the
+    entry's link mode is a `SET_CONTROL` row, rebuild-only until #1371 makes it live. The hazard
+    guidance is withdrawn: a bus overrides the console compressor's entry to `maximum` or
+    `average`.
   - **Q2, owner decision (the agreed bounds)** (bound route values to the fader's `[-144, 24]` dB
     and the matrix's `[-1, 1]`?): **answered, agreed.** The owner: "This makes sense to add
     bounded min/max for these values right?" -- agreed on 2026-10-03: route `gain_db` in

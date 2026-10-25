@@ -51,7 +51,11 @@ answered the amendments on 2026-09-29. Ruling:
   array of `{ "slot", "bypass", "params" }` in exactly the session's slot order (`pre_insert`,
   then `post_insert`). Per-track `inserts` replace `dynamic` with the same semantics; the per-track
   `simd1` and `simd2` are retired. Either section and `inserts` may be empty (amendments 2 and 4,
-  H4's canonical-order objection).
+  H4's canonical-order objection). *Amended 2026-10-25 (#1369, under decision 13 Q1):* an entry is
+  `{ "slot", "bypass", "link_mode", "params" }`. Its `link_mode` is `slot` (run the slot's declared
+  mode, which is the default) or a link token (`dual_mono`, `maximum`, `average`) that overrides
+  the slot's mode for that strip only; the slot still binds one bank, and the entry's link mode is
+  a control row like an insert's.
 - **Chain.** input section (polarity, trim, HPF/LPF) -> `console.pre_insert` -> `inserts` ->
   `console.post_insert` -> fader/mute -> pan/matrix -> routes. AGENTS.md's chain line, tap list
   and #163 sentence are amended in the same commit as this ruling (M7).

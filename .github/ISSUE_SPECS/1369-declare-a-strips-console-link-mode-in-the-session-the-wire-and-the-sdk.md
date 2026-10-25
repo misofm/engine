@@ -230,3 +230,42 @@ missing field -> gate 4 red; comp slot forced to `maximum` on every strip -> gat
 For #1369b (from the #1369a verify): add `console.link_mode.override_unbanked` to the Stable
 diagnostics list in `docs/EFFECT_CONTRACT_V1.md`. The SDK builder does not mirror the R3 guard: no
 launch table reaches it.
+
+## Evidence and decision record: slice #1369b (2026-10-25)
+
+Scope: the chain note's "#1369b" section (R1, R4). `AGENTS.md:31` is root's edit, not this slice's.
+
+- **R4 as built.** A console entry lists `LINK_MODE_CONTROL` in `Section::Console(slot)` when the
+  effect supports more than one mode (the insert row's rule): choices `slot` (code 0) then the
+  effect's modes at their contract codes; minimum and default `slot`. Class
+  `RebuildOnly{Optimisation, "#1371"}`, not automatable; the multiband's console row keeps the
+  insert row's `RuledLiveNotBuilt{1367}` (R1). `set` writes the entry's `ConsoleLinkMode`; an
+  effect with one mode has no console row, as it has no insert row.
+- **Consequences of the row.** The value mask copies an entry's `link_mode` like an insert's (a
+  change is now a rebuild-only row change, not a structural difference); a response override `0`
+  on a console section resolves the slot's declared mode; `protocol::row_address` names
+  `link_mode` in a console section. `controls::EffectTableRows` gains `console_link_mode`, the
+  metadata document a `consoleLinkMode` row per effect, and the SDK generator an
+  `EFFECT_CONSOLE_LINK_MODE_ROWS` table, `EffectConsoleLinkModeLabel` and console address types;
+  `EffectEdits.linkMode` picks the row by rack. Regenerated: `controls.ts`,
+  `control-builders.ts`, the metadata asset; `catalog.ts` does not change (it carries the effect
+  descriptors, not the rows). Blessed: `hosts/host-web/tests/fixtures/control-list.json` (four
+  console rows added). `COMPLETE_SCHEMA_HASH` does not move.
+- **The SDK builder does not mirror the R3 guard** (`console.link_mode.override_unbanked`): no
+  launch table reaches it (every console-eligible effect with a choice of modes is `lane_link`), so
+  the engine's refusal is the only check.
+- **Binding texts.** Engine-footprint Shape bullet amended; decision 13 Q1 recorded delivered;
+  DESIGN 2.2b and the `author-session` skill drop the bus-compression hazard guidance (the skill
+  also drops `link_mode` from its unknown-entry-field row); `console.link_mode.override_unbanked`
+  joins `docs/EFFECT_CONTRACT_V1.md`'s Stable diagnostics.
+- Outside the chain note's paths, needed by the row: `crates/controls/src/{mask,tables}.rs`,
+  `crates/controls/tests/tables.rs`, `crates/protocol/src/control_rows.rs`,
+  `tools/parameter-metadata/src/lib.rs` and `tests/round_trip.rs`, `sdk/codegen/generate.mjs`,
+  `sdk/src/core/live-controls.ts`, `sdk/test/{control-builders-evals.mjs,controls-types.ts}`,
+  `sdk/assets/` (generated), the control-list fixture, `docs/EFFECT_CONTRACT_V1.md`.
+
+Test value: `effect_rows.rs::bypass_link_mode_and_prepared_rows_are_written_by_set` (the console
+`set` refusal flipped to acceptance) and the shape test's console expectation: a console override
+unreachable by `SET_CONTROL`, or a console entry with a choice of modes that lists no row, breaks
+decision 17 (every value one row). Red first: both tests failed on the pre-change code (the
+`set` returned `AddressUnknown`; the listing had no console link row).
