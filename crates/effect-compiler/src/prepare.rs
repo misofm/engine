@@ -137,8 +137,7 @@ pub enum LiveEffectRack {
 ///   does not name the section (L6).
 /// - An insert is `(inserts, index)`, its position in the track's `inserts`.
 ///
-/// This is the `(rack, effect_index)` the browser's numeric observation selection carries, and what
-/// a host looks a channel up by ([`EffectControlProducer::address`]); a `SET_CONTROL` edit or an
+/// This is the `(rack, effect_index)` a host looks a channel up by ([`EffectControlProducer::address`]); a `SET_CONTROL` edit or an
 /// `Observe` edit names the instance by its stable ID, which the core resolves to it. Internally
 /// it maps through the lowering ([`Self::lower`]).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -638,8 +637,8 @@ pub struct EffectControlProducer {
     /// The instance's live address within its strip (a track or a submix): a console slot by its
     /// slot index, an insert by its index (decision 12, issue #1096).
     ///
-    /// This is the `(rack, effect_index)` a numeric observation selection addresses; the core's
-    /// `SET_CONTROL` and `Observe` edits name the instance by stable ID instead. It is derived from
+    /// This is the `(rack, effect_index)` a host looks a channel up by; the core's `SET_CONTROL`
+    /// and `Observe` edits name the instance by stable ID instead. It is derived from
     /// the normalized session model here rather than from `EffectPreparedSession::entries`, which
     /// is sorted by effect id.
     pub address: LiveEffectAddress,
@@ -1749,8 +1748,8 @@ pub fn attach_effect_live_controls(
 /// The control-side reader half of one prepared effect instance's observation taps (issue #143).
 ///
 /// Addressed exactly as an [`EffectControlProducer`] is -- by `(track_id, address)` -- because a
-/// subscription and the parameter commands it correlates with address the same instance through
-/// the same numbers. `readers[i]` belongs to `descriptor.observations[i]`.
+/// subscription and the live values it correlates with address the same instance through the same
+/// numbers. `readers[i]` belongs to `descriptor.observations[i]`.
 pub struct EffectObservationHandle {
     /// Normalized identity of the strip (a track or a submix) this instance belongs to.
     pub track_id: Box<str>,

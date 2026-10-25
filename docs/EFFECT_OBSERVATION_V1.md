@@ -54,7 +54,9 @@ zero with no way for the caller to learn why.
 (`observation_taps == 0`) has no observation state in the compiled plan *at all*: no lane, no
 accumulator, no conflating cell. Not a disabled one — none. `attach_effect_observation` is the
 only thing that creates one and it is never called. `observation_retained_bytes` is `0`, and that
-zero is **walked over the built runtime** rather than computed from the request.
+zero is **walked over the built runtime** rather than computed from the request. Both shipped
+hosts always ask for the launch maximum (#1590 D5), so only a preparer that asks for none, such
+as a benchmark arm, reaches level 1.
 
 **Level 2 — arm/disarm.** Inside a capable plan, subscribe and unsubscribe are
 `EffectControlRecord::Observe` records on the effect's observation queue, applied at the block
@@ -159,12 +161,29 @@ one. The browser's boot options carry no master word: issue #1689 retired it, an
 `reserved2`, refused unless zero (`web.options.reserved2`). A bus effect's tap is armed by its
 submix's ID, and its reading folds into `submixGrDb[j]`, the bus at strip position `T + j`.
 
-## Plan replacement drops subscriptions
+## Plan replacement keeps subscriptions
 
-Subscriptions are **per plan**. A structural session edit produces a replacement plan whose lanes
-exist and are unarmed; the readers the old plan handed out simply stop advancing. An app
-re-subscribes against the new plan and receives a fresh map whose sequences restart at `1`. Nothing
-carries over, and nothing has to be torn down.
+Subscriptions survive a plan replacement (#1584, #1585; this section predated them and was
+corrected by #1590). The host keeps a table of the armed taps, by stable key (strip, console slot
+or insert, tap), beside its monitor overlay: host-local, never saved, never in a snapshot, written
+when the `Observe` edit's record is queued on the newest plan. Every replacement plan is prepared
+from that table:
+
+- A tap whose effect carries across the replacement keeps its own window and sequence; the
+  prepared arm never restarts it.
+- A tap whose effect restarts (a prepared change, such as a new sidechain edge) is armed in the
+  successor and opens its first window at the successor's first rendered block, as a record
+  applied at that block would.
+- A replacement that removes the effect (the insert, the strip or the console slot is gone, or
+  the ID now names an effect without that tap) ends the binding: the commit queues one reliable
+  `OBSERVATION_ENDED` after its `SESSION_COMMITTED`, carrying the key of every binding it ended, in
+  key order. The room for that event is reserved before the commit; a lane without the room
+  refuses the transaction as backpressure with nothing changed. The SDK tells the subscription's
+  `onEnd` and closes a subscription left with no selection.
+
+No acknowledged subscription is dropped at a swap, and an app does not re-subscribe after a
+rebuild. A read (`OBSERVATION_READ`) names its tap by the same stable key and reports the tap's
+arm tag, so a row of a window from another arm of the tap is never taken for this one.
 
 ## Lease and arming are different switches
 
@@ -185,9 +204,9 @@ contract or transport change to arrive.
 `miso.dynamic-eq` declares four taps, one per band: ids `1` to `4`, "Band N Gain Change" (N = 1
 to 4), `GainChangeDb`, `Resident`, `PerBlock`, `PeakSigned`, `PerLane`, `-24 .. 24` dB. It is the
 first declarer of the signed kind (#1918), so an upward band reads as a boost, not as a reduction
-(#17). It is also the first effect with more than one tap: the boot's per-effect cap
-(`live_control_observation_taps`, the SDK's `liveControls.observationTaps`) must be at least `4`
-for a session that holds it, because a cap below an effect's tap count refuses the boot with
-`effect.observation.taps`.
+(#17). It is also the first effect with more than one tap. Both hosts ask preparation for
+`host_core::launch_maximum_observation_taps()` taps per effect, so every declared tap is bound on
+every plan; a preparer that asked for fewer taps than an effect declares would refuse the plan with
+`effect.observation.taps` (the browser's boot word that once set the cap is reserved since #1590).
 
 No computed tap ships. The other launch effects declare no tap.

@@ -620,7 +620,7 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
     };
     const observationMap = {
       bindings: [{
-        trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
+        trackId: "t", rack: "inserts", effectSlotId: "comp",
         nativeEffectId: "miso.compressor", tapIds: [1],
       }],
     };

@@ -27,7 +27,7 @@
 //! worklet harnesses (`scripts/test-web-audioworklet.mjs` and `sdk/test/browser-pcm-evals.mjs`)
 //! fail when a worklet calls an export that the table does not list. This header does not repeat
 //! the names: the table is the list, and a name set here would drift from it. The wrapped entries
-//! cover the render, meter, source, live-control and observation exports, with the pointer,
+//! cover the render, meter, source and live-control exports, with the pointer,
 //! capacity and byte-count accessors of their stagings that the worklets call after boot (issues
 //! #1488 and #1492). The two entries with `wrapped: false`
 //! are the named exceptions below, each with its reason in the table. Boot is outside the rule,
@@ -52,22 +52,17 @@
 
 use crate::render_lock::{control_allocation_count, render_allocation_count, render_locked};
 // Named by the exports' result docs only.
-#[cfg(doc)]
-use crate::RESULT_BACKPRESSURE;
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM,
-    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
-    MAXIMUM_OBSERVATION_READS, OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT,
-    OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES,
-    OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED,
-    ObservationAddress, ObservationReadChannels, ObservationReadError, ObservationReadValues,
-    RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
-    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_UNSUPPORTED,
-    RESULT_WRONG_STATE, STATE_READY, WebBootOptions, WebObservationResult, WebObservationSelection,
+    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES, RESULT_INTERNAL,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
+    RESULT_REFUSED_LIFECYCLE, STATE_READY, WebBootOptions,
 };
+#[cfg(doc)]
+use crate::{RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_WRONG_STATE};
 use core::{
     cell::{Cell, RefCell},
-    mem::{ManuallyDrop, MaybeUninit, needs_drop, size_of},
+    mem::{ManuallyDrop, MaybeUninit, needs_drop},
     ptr, slice,
 };
 
@@ -95,110 +90,6 @@ struct ResponseFrameStaging {
     reply: Vec<u8>,
 }
 
-/// The longest stable observation ID the observation staging holds.
-const OBSERVATION_MAXIMUM_ID_BYTES: u32 = 127;
-
-struct ObservationStaging {
-    selections: Box<[WebObservationSelection]>,
-    addresses: Vec<ObservationAddress>,
-    rows: Box<[ObservationReadValues]>,
-    results: Vec<WebObservationResult>,
-    id: Box<[u8]>,
-}
-
-impl ObservationStaging {
-    fn new() -> Self {
-        Self {
-            selections: vec![WebObservationSelection::default(); MAXIMUM_OBSERVATION_READS]
-                .into_boxed_slice(),
-            addresses: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
-            rows: vec![ObservationReadValues::default(); MAXIMUM_OBSERVATION_READS]
-                .into_boxed_slice(),
-            results: Vec::with_capacity(MAXIMUM_OBSERVATION_READS),
-            id: vec![0; OBSERVATION_MAXIMUM_ID_BYTES as usize].into_boxed_slice(),
-        }
-    }
-
-    fn reset_results(&mut self) {
-        self.addresses.clear();
-        self.results.clear();
-    }
-}
-
-/// Heap payload retained by the fixed selected-observation staging area.
-const fn checked_mul_or_zero(left: u64, right: u64) -> u64 {
-    match left.checked_mul(right) {
-        Some(value) => value,
-        None => 0,
-    }
-}
-
-pub(crate) const fn observation_staging_retained_bytes() -> u64 {
-    let count = MAXIMUM_OBSERVATION_READS as u64;
-    let containing = size_of::<RefCell<ObservationStaging>>() as u64;
-    let mut bytes = containing;
-    bytes = match bytes.checked_add(checked_mul_or_zero(
-        count,
-        size_of::<WebObservationSelection>() as u64,
-    )) {
-        Some(bytes) => bytes,
-        None => 0,
-    };
-    bytes = match bytes.checked_add(checked_mul_or_zero(
-        count,
-        size_of::<ObservationAddress>() as u64,
-    )) {
-        Some(bytes) => bytes,
-        None => 0,
-    };
-    bytes = match bytes.checked_add(checked_mul_or_zero(
-        count,
-        size_of::<ObservationReadValues>() as u64,
-    )) {
-        Some(bytes) => bytes,
-        None => 0,
-    };
-    bytes = match bytes.checked_add(checked_mul_or_zero(
-        count,
-        size_of::<WebObservationResult>() as u64,
-    )) {
-        Some(bytes) => bytes,
-        None => 0,
-    };
-    match bytes.checked_add(OBSERVATION_MAXIMUM_ID_BYTES as u64) {
-        Some(bytes) => bytes,
-        None => 0,
-    }
-}
-
-/// Largest one allocation in the fixed selected-observation staging area.
-pub(crate) const fn observation_staging_largest_allocation_bytes() -> u64 {
-    let count = MAXIMUM_OBSERVATION_READS as u64;
-    let containing = size_of::<RefCell<ObservationStaging>>() as u64;
-    let selections = checked_mul_or_zero(count, size_of::<WebObservationSelection>() as u64);
-    let addresses = checked_mul_or_zero(count, size_of::<ObservationAddress>() as u64);
-    let rows = checked_mul_or_zero(count, size_of::<ObservationReadValues>() as u64);
-    let results = checked_mul_or_zero(count, size_of::<WebObservationResult>() as u64);
-    let ids = OBSERVATION_MAXIMUM_ID_BYTES as u64;
-    let mut largest = containing;
-    if selections > largest {
-        largest = selections;
-    }
-    if addresses > largest {
-        largest = addresses;
-    }
-    if rows > largest {
-        largest = rows;
-    }
-    if results > largest {
-        largest = results;
-    }
-    if ids > largest {
-        largest = ids;
-    }
-    largest
-}
-
 /// The all-zero boot options, which select engine defaults; `WebBootOptions::default()` in a
 /// `const` context.
 const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
@@ -211,7 +102,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     maximum_memory_bytes: 0,
     reserved1: 0,
     live_control_meter_blocks: 0,
-    live_control_observation_taps: 0,
+    reserved3: 0,
     reserved2: 0,
 };
 
@@ -256,17 +147,14 @@ type StagingSlot<T> = Cell<Option<&'static RefCell<T>>>;
 thread_local! {
     static LIVE_HOST: LiveHostSlot = const { RefCell::new(ManuallyDrop::new(None)) };
     // Zero is the never-issued sentinel. `next_handle` preserves the established nonzero
-    // handle contract when the first owner is published, while cold invalid lookups can avoid
-    // constructing the allocating observation staging entirely.
+    // handle contract when the first owner is published.
     static NEXT_HANDLE: Cell<u32> = const { Cell::new(0) };
     static BOOT_STAGING: RefCell<BootStaging> = const { RefCell::new(BootStaging::new()) };
-    static OBSERVATION_STAGING: StagingSlot<ObservationStaging> = const { Cell::new(None) };
     static RESPONSE_FRAME_STAGING: StagingSlot<ResponseFrameStaging> = const { Cell::new(None) };
 }
 
 const _: () = assert!(!needs_drop::<LiveHostSlot>());
 const _: () = assert!(!needs_drop::<RefCell<BootStaging>>());
-const _: () = assert!(!needs_drop::<StagingSlot<ObservationStaging>>());
 const _: () = assert!(!needs_drop::<StagingSlot<ResponseFrameStaging>>());
 
 /// The staging in `slot`, allocated once on first touch and never freed.
@@ -284,10 +172,6 @@ fn leaked_staging<T: 'static>(
     })
 }
 
-fn observation_staging() -> &'static RefCell<ObservationStaging> {
-    leaked_staging(&OBSERVATION_STAGING, ObservationStaging::new)
-}
-
 fn with_response_frame_staging<R>(
     operation: impl FnOnce(&RefCell<ResponseFrameStaging>) -> R,
 ) -> R {
@@ -295,19 +179,6 @@ fn with_response_frame_staging<R>(
         &RESPONSE_FRAME_STAGING,
         ResponseFrameStaging::default,
     ))
-}
-
-fn with_observation_staging<R>(operation: impl FnOnce(&RefCell<ObservationStaging>) -> R) -> R {
-    operation(observation_staging())
-}
-
-/// Allocate the observation staging once a boot has published its handle. `boot_staged` calls this
-/// on its one success path, which both boot exports share, so a booted instance never allocates
-/// a staging later, inside or outside a render-locked window (issue #1333 D5). A refused boot
-/// allocates none, so a typed refusal stays within its memory bound, and an instance that never
-/// boots allocates it on first touch, outside any window.
-fn reserve_stagings() {
-    let _ = observation_staging();
 }
 
 fn next_handle() -> u32 {
@@ -359,8 +230,8 @@ fn with_host_mut<R>(
 /// Verify that `handle` names the live host before an alias touches caller-owned staging.
 ///
 /// A failed live-host borrow and every nonmatching handle are terminal at the ABI boundary: the
-/// resident-observation and meter-lease bodies write shared staging records, and would record a
-/// refusal there, so they run only after the matching host has been inspected. The check takes
+/// meter-lease body records its refusal on the host, so it runs only after the matching host has
+/// been inspected. The check takes
 /// the same exclusive borrow those bodies later need, so an immutable conflict cannot pass it.
 fn verify_live_host(handle: u32) -> Result<(), u32> {
     if handle == 0 {
@@ -416,44 +287,6 @@ fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
         _ => return 0,
     };
     u32::try_from(bytes).unwrap_or(0)
-}
-
-/// An observation record's `rack`: `inserts` (1) or `console` (3). The retired `simd1` (0) and
-/// `simd2` (2) codes are refused and never reinterpreted (decision 12, issue #1096).
-fn observation_rack(raw: u32) -> Result<crate::LiveEffectRack, u32> {
-    crate::live_effect_address(raw, 0)
-        .map(|address| address.rack)
-        .ok_or(RESULT_INVALID_ARGUMENT)
-}
-
-fn observation_channels(raw: u32) -> Result<ObservationReadChannels, u32> {
-    match raw {
-        OBSERVATION_CHANNEL_LEFT => Ok(ObservationReadChannels::Left),
-        OBSERVATION_CHANNEL_RIGHT => Ok(ObservationReadChannels::Right),
-        OBSERVATION_CHANNEL_BOTH => Ok(ObservationReadChannels::Both),
-        _ => Err(RESULT_INVALID_ARGUMENT),
-    }
-}
-
-fn observation_rack_raw(rack: crate::LiveEffectRack) -> u32 {
-    u32::from(crate::live_effect_rack_raw(rack))
-}
-
-fn observation_status_raw(status: crate::ObservationReadStatus) -> u32 {
-    match status {
-        crate::ObservationReadStatus::Pending => OBSERVATION_STATUS_PENDING,
-        crate::ObservationReadStatus::Unarmed => OBSERVATION_STATUS_UNARMED,
-        crate::ObservationReadStatus::Ready => OBSERVATION_STATUS_READY,
-    }
-}
-
-fn observation_error_code(error: ObservationReadError) -> u32 {
-    match error {
-        ObservationReadError::WrongState => RESULT_WRONG_STATE,
-        ObservationReadError::InvalidSelection => RESULT_INVALID_ARGUMENT,
-        ObservationReadError::Unsupported => RESULT_UNSUPPORTED,
-        ObservationReadError::BufferTooSmall => RESULT_BUFFER_TOO_SMALL,
-    }
 }
 
 /// The most request frame bytes the session-less response entry accepts.
@@ -740,7 +573,6 @@ fn boot_staged(len: u32) -> u32 {
         });
         return 0;
     };
-    reserve_stagings();
     handle
 }
 
@@ -1282,299 +1114,6 @@ pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
     })
 }
 
-/// Return the number of prepared resident observation effects in the current owner map.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_count(handle: u32) -> u32 {
-    render_locked(|| {
-        with_host(handle, 0, |host| {
-            u32::try_from(host.observation_binding_count()).unwrap_or(0)
-        })
-    })
-}
-
-/// Return the stable observation-ID staging address used by binding introspection.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_id_ptr() -> u32 {
-    render_locked(|| {
-        with_observation_staging(|slot| {
-            let Ok(mut staging) = slot.try_borrow_mut() else {
-                return 0;
-            };
-            pointer_u32(staging.id.as_mut_ptr())
-        })
-    })
-}
-
-/// Return the maximum stable observation-ID staging length.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_id_capacity() -> u32 {
-    render_locked(|| OBSERVATION_MAXIMUM_ID_BYTES)
-}
-
-fn copy_observation_id(handle: u32, index: u32, native: bool) -> u32 {
-    with_observation_staging(|slot| {
-        let Ok(mut staging) = slot.try_borrow_mut() else {
-            return 0;
-        };
-        with_host(handle, 0, |host| {
-            let Some(binding) = host.observation_binding(index) else {
-                return 0;
-            };
-            let bytes = if native {
-                binding.native_effect_id.as_bytes()
-            } else {
-                binding.effect_slot_id.as_bytes()
-            };
-            if bytes.len() > staging.id.len() {
-                return 0;
-            }
-            staging.id[..bytes.len()].copy_from_slice(bytes);
-            u32::try_from(bytes.len()).unwrap_or(0)
-        })
-    })
-}
-
-/// Copy one bound observation effect's stable local slot ID into the observation-ID staging area.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_effect_slot_id(handle: u32, index: u32) -> u32 {
-    render_locked(|| copy_observation_id(handle, index, false))
-}
-
-/// Copy one bound observation effect's native contract ID into the observation-ID staging area.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_native_effect_id(handle: u32, index: u32) -> u32 {
-    render_locked(|| copy_observation_id(handle, index, true))
-}
-
-/// One bound observation effect's strip index (tracks, then submixes), or zero when out of range.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index: u32) -> u32 {
-    render_locked(|| {
-        with_host(handle, 0, |host| {
-            host.observation_binding(index)
-                .map_or(0, |binding| binding.address.track_index)
-        })
-    })
-}
-
-/// Return one bound observation effect's rack (`1` inserts or `3` console), or zero when out of
-/// range. Zero is the retired `simd1` code, so it names no rack (issue #1096).
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_rack(handle: u32, index: u32) -> u32 {
-    render_locked(|| {
-        with_host(handle, 0, |host| {
-            host.observation_binding(index)
-                .map_or(0, |binding| observation_rack_raw(binding.address.rack))
-        })
-    })
-}
-
-/// Return one bound observation effect's index within its rack, or zero when out of range: a
-/// console slot's index in the session's slot order, or an insert's index.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_effect_index(handle: u32, index: u32) -> u32 {
-    render_locked(|| {
-        with_host(handle, 0, |host| {
-            host.observation_binding(index)
-                .map_or(0, |binding| binding.address.effect_index)
-        })
-    })
-}
-
-/// Return one bound observation effect's declared tap count, or zero when out of range.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_tap_count(handle: u32, index: u32) -> u32 {
-    render_locked(|| {
-        with_host(handle, 0, |host| {
-            host.observation_binding(index)
-                .and_then(|binding| u32::try_from(binding.descriptors.len()).ok())
-                .unwrap_or(0)
-        })
-    })
-}
-
-/// Return one bound observation effect's declared tap ID, or zero when out of range.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_tap_id(
-    handle: u32,
-    index: u32,
-    tap_index: u32,
-) -> u32 {
-    render_locked(|| {
-        with_host(handle, 0, |host| {
-            host.observation_binding(index)
-                .and_then(|binding| binding.descriptors.get(tap_index as usize))
-                .map_or(0, |tap| tap.id.0)
-        })
-    })
-}
-
-/// Return a writable bounded selected-observation input staging address.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_selection_ptr() -> u32 {
-    render_locked(|| {
-        with_observation_staging(|slot| {
-            let Ok(mut staging) = slot.try_borrow_mut() else {
-                return 0;
-            };
-            pointer_u32(staging.selections.as_mut_ptr())
-        })
-    })
-}
-
-/// Return the fixed selected-observation input record size.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_selection_bytes() -> u32 {
-    render_locked(|| OBSERVATION_SELECTION_BYTES)
-}
-
-/// Return the maximum selected-observation input record count.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_selection_capacity() -> u32 {
-    render_locked(|| MAXIMUM_OBSERVATION_READS as u32)
-}
-
-/// Read one complete bounded batch of selected resident observations.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_read(handle: u32, count: u32) -> u32 {
-    render_locked(|| {
-        if let Err(result) = verify_live_host(handle) {
-            return result;
-        }
-        with_observation_staging(|slot| {
-            let Ok(mut staging) = slot.try_borrow_mut() else {
-                return RESULT_INTERNAL;
-            };
-            staging.reset_results();
-            let count = match usize::try_from(count) {
-                Ok(count) if count <= MAXIMUM_OBSERVATION_READS => count,
-                _ => return RESULT_BUFFER_TOO_SMALL,
-            };
-            for index in 0..count {
-                let selection = staging.selections[index];
-                if selection.struct_size != OBSERVATION_SELECTION_BYTES
-                    || selection.abi_version != ABI_VERSION
-                    || selection.reserved != 0
-                {
-                    return RESULT_INVALID_ARGUMENT;
-                }
-                let rack = match observation_rack(selection.rack) {
-                    Ok(value) => value,
-                    Err(result) => return result,
-                };
-                let channels = match observation_channels(selection.channels) {
-                    Ok(value) => value,
-                    Err(result) => return result,
-                };
-                staging.addresses.push(ObservationAddress {
-                    track_index: selection.track_index,
-                    rack,
-                    effect_index: selection.effect_index,
-                    tap_id: selection.tap_id,
-                    channels,
-                });
-            }
-            let read = {
-                let ObservationStaging {
-                    addresses, rows, ..
-                } = &mut *staging;
-                with_host_mut(
-                    handle,
-                    Err(ObservationReadError::InvalidSelection),
-                    |host| host.read_observation_addresses_into(addresses, &mut rows[..count]),
-                )
-            };
-            if let Err(error) = read {
-                return observation_error_code(error);
-            }
-            let ObservationStaging {
-                addresses,
-                rows,
-                results,
-                ..
-            } = &mut *staging;
-            for (address, row) in addresses.iter().zip(rows.iter()).take(count) {
-                let Some(window) = row.window else {
-                    results.push(WebObservationResult {
-                        struct_size: OBSERVATION_RESULT_BYTES,
-                        abi_version: ABI_VERSION,
-                        status: observation_status_raw(row.status),
-                        track_index: address.track_index,
-                        rack: observation_rack_raw(address.rack),
-                        effect_index: address.effect_index,
-                        tap_id: address.tap_id,
-                        channels: selection_channels_raw(address.channels),
-                        sample_rate_hz: row.sample_rate_hz,
-                        ..WebObservationResult::default()
-                    });
-                    continue;
-                };
-                results.push(WebObservationResult {
-                    struct_size: OBSERVATION_RESULT_BYTES,
-                    abi_version: ABI_VERSION,
-                    status: observation_status_raw(row.status),
-                    track_index: address.track_index,
-                    rack: observation_rack_raw(address.rack),
-                    effect_index: address.effect_index,
-                    tap_id: address.tap_id,
-                    channels: selection_channels_raw(address.channels),
-                    sample_rate_hz: row.sample_rate_hz,
-                    first_sample: window.first_sample,
-                    end_sample: window.end_sample,
-                    sequence: window.sequence,
-                    blocks: window.blocks,
-                    left_present: u32::from(row.left.is_some()),
-                    right_present: u32::from(row.right.is_some()),
-                    left: row.left.unwrap_or(0.0),
-                    right: row.right.unwrap_or(0.0),
-                    ..WebObservationResult::default()
-                });
-            }
-            RESULT_OK
-        })
-    })
-}
-
-fn selection_channels_raw(channels: ObservationReadChannels) -> u32 {
-    match channels {
-        ObservationReadChannels::Left => OBSERVATION_CHANNEL_LEFT,
-        ObservationReadChannels::Right => OBSERVATION_CHANNEL_RIGHT,
-        ObservationReadChannels::Both => OBSERVATION_CHANNEL_BOTH,
-    }
-}
-
-/// Return the selected-observation result-record address, or zero before a successful read.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_result_ptr() -> u32 {
-    render_locked(|| {
-        with_observation_staging(|slot| {
-            let Ok(staging) = slot.try_borrow() else {
-                return 0;
-            };
-            pointer_u32(staging.results.as_ptr())
-        })
-    })
-}
-
-/// Return the selected-observation result byte length.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_observation_result_bytes() -> u32 {
-    render_locked(|| {
-        with_observation_staging(|slot| {
-            slot.try_borrow()
-                .ok()
-                .and_then(|staging| {
-                    staging
-                        .results
-                        .len()
-                        .checked_mul(OBSERVATION_RESULT_BYTES as usize)
-                        .and_then(|bytes| u32::try_from(bytes).ok())
-                })
-                .unwrap_or(0)
-        })
-    })
-}
-
 /// Return the number of sources the compiled session declares, or zero before compilation.
 ///
 /// # Issue #207: source introspection
@@ -1694,7 +1233,7 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
 #[cfg(not(target_family = "wasm"))]
 #[doc(hidden)]
 pub mod native_staging {
-    use super::{WebBootOptions, WebObservationSelection};
+    use super::WebBootOptions;
 
     /// Stage the boot options and the exact document, as `miso_engine_web_v1_boot_options_ptr`
     /// and `miso_engine_web_v1_document_ptr` let the worklet do. Returns the staged length for the
@@ -1711,13 +1250,6 @@ pub mod native_staging {
             staging.document.copy_from_slice(document);
             Some(length)
         })
-    }
-
-    /// Stage the selected-observation records an `observation_read` will read.
-    pub fn observation_selections(selections: &[WebObservationSelection]) {
-        super::with_observation_staging(|slot| {
-            slot.borrow_mut().selections[..selections.len()].copy_from_slice(selections);
-        });
     }
 
     /// Stage a source identity, as the worklet writes it through
@@ -2143,8 +1675,8 @@ pub(crate) mod allocation_counter {
 }
 
 #[cfg(test)]
-mod observation_alias_tests {
-    //! The ordinary observation aliases' live-host guard and the resident staging accounting.
+mod alias_tests {
+    //! The ordinary aliases' live-host guard.
     use super::*;
 
     pub(super) fn no_live_host() {
@@ -2164,251 +1696,13 @@ mod observation_alias_tests {
         no_live_host();
     }
 
-    fn stage_resident_markers() -> Vec<WebObservationResult> {
-        with_observation_staging(|slot| {
-            let mut staging = slot.borrow_mut();
-            staging.addresses.clear();
-            staging.results.clear();
-            staging.results.extend([
-                WebObservationResult {
-                    status: OBSERVATION_STATUS_READY,
-                    track_index: 96,
-                    sequence: 17,
-                    ..WebObservationResult::default()
-                },
-                WebObservationResult {
-                    status: OBSERVATION_STATUS_PENDING,
-                    track_index: 97,
-                    sequence: 19,
-                    ..WebObservationResult::default()
-                },
-            ]);
-            staging.results.clone()
-        })
-    }
-
-    fn assert_resident_markers(markers: &[WebObservationResult]) {
-        with_observation_staging(|slot| {
-            let staging = slot.borrow();
-            assert_eq!(staging.results.as_slice(), markers);
-        });
-    }
-
-    /// Decision 12 (issue #1096): the observation map and the selected-read records name a console
-    /// slot `3` and an insert `1`, and a selection carrying the retired `simd1` (`0`) or `simd2`
-    /// (`2`) code, an unallocated code, or the rack the session does not use there is refused.
-    /// The two fixtures are the same compressors as a console slot and as inserts.
-    ///
-    /// Red mutations: encode the console as the retired `0` in `observation_rack_raw`, or decode
-    /// `0`/`2` in `observation_rack` -> a retired selection is read.
     #[test]
-    fn observation_records_address_console_slots_and_inserts() {
-        let console: &[u8] =
-            include_bytes!("../../../fixtures/session/v1/compressor-bank-observation.json");
-        let inserts: &[u8] =
-            include_bytes!("../../../fixtures/session/v1/compressor-dynamic-bank-observation.json");
-        for (document, rack, unused) in [
-            (console, crate::RACK_CONSOLE, crate::RACK_INSERTS),
-            (inserts, crate::RACK_INSERTS, crate::RACK_CONSOLE),
-        ] {
-            no_live_host();
-            let options = WebBootOptions {
-                require_sample_rate_hz: 48_000,
-                require_quantum_frames: 128,
-                live_control_meter_blocks: 1,
-                live_control_observation_taps: 4,
-                ..WebBootOptions::explicit_defaults()
-            };
-            let handle = test_boot(document, options);
-            assert_ne!(handle, 0, "the observation fixture must boot");
-            let count = miso_engine_web_v1_observation_count(handle);
-            assert_eq!(count, 8, "one observed compressor per track");
-            for index in 0..count {
-                assert_eq!(
-                    miso_engine_web_v1_observation_rack(handle, index),
-                    u32::from(rack)
-                );
-                assert_eq!(
-                    miso_engine_web_v1_observation_effect_index(handle, index),
-                    0
-                );
-            }
-            let track_index = miso_engine_web_v1_observation_track_index(handle, 3);
-            let tap_id = miso_engine_web_v1_observation_tap_id(handle, 3, 0);
-            let read = |selection_rack: u32| {
-                with_observation_staging(|slot| {
-                    slot.borrow_mut().selections[0] = WebObservationSelection {
-                        struct_size: OBSERVATION_SELECTION_BYTES,
-                        abi_version: ABI_VERSION,
-                        track_index,
-                        rack: selection_rack,
-                        effect_index: 0,
-                        tap_id,
-                        channels: OBSERVATION_CHANNEL_BOTH,
-                        reserved: 0,
-                    };
-                });
-                miso_engine_web_v1_observation_read(handle, 1)
-            };
-            assert_eq!(read(u32::from(rack)), RESULT_OK);
-            let row = with_observation_staging(|slot| slot.borrow().results[0]);
-            assert_eq!(
-                (row.track_index, row.rack, row.effect_index),
-                (track_index, u32::from(rack), 0)
-            );
-            for refused in [0, 2, 4, u32::from(unused)] {
-                assert_eq!(
-                    read(refused),
-                    RESULT_INVALID_ARGUMENT,
-                    "a selection at rack {refused} is refused"
-                );
-            }
-            dispose(handle);
-        }
-    }
-
-    /// #1096 verdict M1: an observed `post_insert` slot is read at its console slot index, which
-    /// counts after `pre_insert`.
-    ///
-    /// The fixture puts an unobserved EQ in `pre_insert` and the observed compressor in
-    /// `post_insert`, so the compressor is console slot `1`. Red if a numeric read resolves a
-    /// console selection over `pre_insert` alone (the observation index then finds no `comp` and
-    /// refuses the read), or if `post_insert` is numbered from `0` (the map reports slot `0`, and
-    /// slot `0` is the EQ, which has no tap).
-    #[test]
-    fn a_post_insert_observation_is_read_at_its_console_slot_index() {
-        let mut document: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/session/v1/compressor-bank-observation.json"
-        ))
-        .expect("the observation fixture is JSON");
-        let compressor = document["console"]["pre_insert"][0].take();
-        assert_eq!(compressor["slot"], "comp");
-        document["console"]["pre_insert"] = serde_json::json!([{
-            "slot": "eq",
-            "identity": { "kind": "native", "effect_id": "miso.parametric-eq" },
-            "quality": "normal",
-            "link_mode": "dual_mono",
-        }]);
-        document["console"]["post_insert"] = serde_json::json!([compressor]);
-        let tracks = document["tracks"]
-            .as_array_mut()
-            .expect("the fixture's tracks");
-        for track in tracks.iter_mut() {
-            track["console"]
-                .as_array_mut()
-                .expect("a track's console entries")
-                .insert(
-                    0,
-                    serde_json::json!({ "slot": "eq", "bypass": false, "link_mode": "slot", "params": [] }),
-                );
-        }
-        let bytes = serde_json::to_vec(&document).expect("the moved fixture serializes");
-
-        no_live_host();
-        let options = WebBootOptions {
-            require_sample_rate_hz: 48_000,
-            require_quantum_frames: 128,
-            live_control_meter_blocks: 1,
-            live_control_observation_taps: 4,
-            ..WebBootOptions::explicit_defaults()
-        };
-        let handle = test_boot(&bytes, options);
-        assert_ne!(handle, 0, "the post_insert observation fixture must boot");
-        let count = miso_engine_web_v1_observation_count(handle);
-        assert_eq!(
-            count, 8,
-            "one observed compressor per track; the EQ has no tap"
-        );
-        for index in 0..count {
-            assert_eq!(
-                miso_engine_web_v1_observation_rack(handle, index),
-                u32::from(crate::RACK_CONSOLE)
-            );
-            assert_eq!(
-                miso_engine_web_v1_observation_effect_index(handle, index),
-                1,
-                "the post_insert compressor is console slot 1, after the pre_insert EQ"
-            );
-        }
-        let track_index = miso_engine_web_v1_observation_track_index(handle, 5);
-        let tap_id = miso_engine_web_v1_observation_tap_id(handle, 5, 0);
-        let read = |rack: u32, effect_index: u32| {
-            with_observation_staging(|slot| {
-                slot.borrow_mut().selections[0] = WebObservationSelection {
-                    struct_size: OBSERVATION_SELECTION_BYTES,
-                    abi_version: ABI_VERSION,
-                    track_index,
-                    rack,
-                    effect_index,
-                    tap_id,
-                    channels: OBSERVATION_CHANNEL_BOTH,
-                    reserved: 0,
-                };
-            });
-            miso_engine_web_v1_observation_read(handle, 1)
-        };
-        let console = u32::from(crate::RACK_CONSOLE);
-        assert_eq!(
-            read(console, 1),
-            RESULT_OK,
-            "the numeric read of the post_insert slot"
-        );
-        let row = with_observation_staging(|slot| slot.borrow().results[0]);
-        assert_eq!(
-            (row.track_index, row.rack, row.effect_index, row.tap_id),
-            (track_index, console, 1, tap_id)
-        );
-        assert_eq!(
-            read(console, 0),
-            RESULT_UNSUPPORTED,
-            "console slot 0 is the untapped EQ"
-        );
-        assert_eq!(
-            read(console, 2),
-            RESULT_INVALID_ARGUMENT,
-            "there is no console slot 2"
-        );
-        assert_eq!(
-            read(u32::from(crate::RACK_INSERTS), 0),
-            RESULT_INVALID_ARGUMENT,
-            "the track has no inserts"
-        );
-        dispose(handle);
-    }
-
-    #[test]
-    fn observation_staging_retention_adds_actual_refcell_once() {
-        let count = MAXIMUM_OBSERVATION_READS as u64;
-        let unchanged_heap_sum = count
-            * (size_of::<WebObservationSelection>() as u64
-                + size_of::<ObservationAddress>() as u64
-                + size_of::<ObservationReadValues>() as u64)
-            + count * size_of::<WebObservationResult>() as u64
-            + OBSERVATION_MAXIMUM_ID_BYTES as u64;
-        let containing = size_of::<RefCell<ObservationStaging>>() as u64;
-        assert_eq!(
-            observation_staging_retained_bytes(),
-            unchanged_heap_sum + containing,
-            "the actual staging container is charged exactly once"
-        );
-        assert!(observation_staging_largest_allocation_bytes() >= containing);
-    }
-
-    #[test]
-    fn alias_host_borrow_refusal_is_terminal_before_any_staging_work() {
+    fn alias_host_borrow_refusal_is_terminal() {
         let handle = boot_ordinary();
-        let resident_markers = stage_resident_markers();
-
         LIVE_HOST.with(|slot| {
             let _borrow = slot.borrow();
-            assert_eq!(
-                miso_engine_web_v1_observation_read(handle, u32::MAX),
-                RESULT_INTERNAL
-            );
             assert_eq!(miso_engine_web_v1_meter_lease(handle, 2), RESULT_INTERNAL);
         });
-
-        assert_resident_markers(&resident_markers);
         dispose(handle);
     }
 
@@ -2441,14 +1735,12 @@ mod observation_alias_tests {
     }
 
     #[test]
-    fn invalid_alias_handle_is_terminal_before_any_staging_work() {
+    fn invalid_alias_handle_is_terminal() {
         let handle = boot_ordinary();
-        let resident_markers = stage_resident_markers();
         assert_eq!(
-            miso_engine_web_v1_observation_read(0, u32::MAX),
+            miso_engine_web_v1_meter_lease(0, 1),
             RESULT_INVALID_ARGUMENT
         );
-        assert_resident_markers(&resident_markers);
         dispose(handle);
     }
 }

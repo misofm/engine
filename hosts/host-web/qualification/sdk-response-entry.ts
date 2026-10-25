@@ -4,10 +4,10 @@ import { ControlTransactionQueue } from "../../../sdk/src/core/control-queue.ts"
 import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrder } from "../../../sdk/src/browser/live-controls.ts";
 import {
   MESSAGE_SESSION_TRANSACTION_APPLY, WIRE_BYTES, WIRE_U32, WIRE_U8, commandFrame, concat, controlCallFailure,
-  decodeControlReply, decodeRefusalBody, encodeObserveTransaction,
-  decodeResponseEnvelope, field, scalar, u32,
+  decodeControlReply, decodeObservationReadReply, decodeRefusalBody, encodeObservationRead,
+  encodeObserveTransaction, decodeResponseEnvelope, field, scalar, u32,
 } from "../../../sdk/src/core/control-frame.ts";
-import type { ObserveEdit } from "../../../sdk/src/core/control-frame.ts";
+import type { ObservationFrameSelection, ObserveEdit } from "../../../sdk/src/core/control-frame.ts";
 import { ProtocolClient } from "../../../sdk/src/core/protocol-messages.ts";
 import { decodeResponseReady, decodeResponseTagReply, encodeStripResponseRequest } from "../../../sdk/src/core/response-frame.ts";
 import type { MisoAudioWorkletHost, MisoStatus } from "../../../sdk/src/browser/shipped-host.d.ts";
@@ -1583,7 +1583,7 @@ async function createTrackResponseLiveBrowser(stats: { workers: number; controlF
   );
   return createSdkEngine(TRACK_RESPONSE_LIVE, {
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: { observationTaps: 4 } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -1917,7 +1917,7 @@ async function runLiveEqCutsQualification(): Promise<Record<string, unknown>> {
   );
   const browser = await createSdkEngine("live-eq-cuts", {
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: { observationTaps: 4 } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -1945,7 +1945,6 @@ async function runLiveEqCutsQualification(): Promise<Record<string, unknown>> {
   )).arrayBuffer());
   const headless = await WasmBoundary.boot(asset, document, {
     sourceRingFrames: OBSERVATION_FRAMES,
-    liveControls: { observationTaps: 4 },
   });
   const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), {
     queue: new ControlTransactionQueue((frame) => headless.controlFrame(frame), {
@@ -2053,9 +2052,7 @@ async function createResidentObservationBrowser(
     document,
     ...(residentOptions.requestDeadlineMs === undefined
       ? {} : { requestDeadlineMs: residentOptions.requestDeadlineMs }),
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      observationTaps: 4,
-    } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -2414,9 +2411,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   );
   const browser = await createSdkEngine("sdk-observation", {
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
-      observationTaps: 4,
-    } },
+    policy: { sourceRingFrames: OBSERVATION_FRAMES },
     scratchBoot: async () => ({
       sampleRateHz: 48_000,
       quantumFrames: 128,
@@ -2946,6 +2941,23 @@ export async function observeThroughSdk(
     path: decoded.applied?.editPath ?? null,
     armTag: decoded.applied?.observeArmTags[0]?.toString() ?? null,
   };
+}
+
+/**
+ * One `OBSERVATION_READ` of one tap (#1590: the browser's own selected read is gone), built with
+ * the SDK's frame encoder and posted as the host's `control` message with the host's one
+ * request-ID allocator. Returns the call's result and the page's row count.
+ */
+export async function readObservationThroughSdk(
+  host: MisoAudioWorkletHost,
+  selection: ObservationFrameSelection,
+): Promise<{ result: number; rows: number }> {
+  const queue = await createBrowserControlQueue(host);
+  const reply = await host.control(encodeObservationRead(queue.requestIds.next(), [selection]));
+  queue.noteCommit(reply.revision);
+  if (reply.result !== 0) return { result: reply.result, rows: 0 };
+  const decoded = decodeObservationReadReply(reply.response);
+  return { result: decoded.ok ? 0 : 1, rows: decoded.ok ? decoded.value.rows.length : 0 };
 }
 
 /**

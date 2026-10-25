@@ -60,18 +60,14 @@ use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_DIAGNOSTIC,
     BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
     DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES, MAXIMUM_DOCUMENT_BYTES,
-    MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES, OBSERVATION_CHANNEL_BOTH,
-    OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT, OBSERVATION_RESULT_BYTES,
-    OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING, OBSERVATION_STATUS_READY,
-    OBSERVATION_STATUS_UNARMED, PLAN_LATENCY_BYTES, RACK_CONSOLE, RACK_INSERTS,
-    RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
-    RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
-    RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
+    METER_HEADER_BYTES, PLAN_LATENCY_BYTES, RACK_CONSOLE, RACK_INSERTS, RACK_NOT_APPLICABLE,
+    RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL,
+    RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
+    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
     RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
     RESULT_WRONG_STATE, SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED,
-    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebMeterHeader,
-    WebObservationResult, WebObservationSelection, WebPlanLatency, WebPlanWatermark,
-    WebResourceReport, WebSeekReport, WebStatus,
+    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebMeterHeader, WebPlanLatency,
+    WebPlanWatermark, WebResourceReport, WebSeekReport, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -122,7 +118,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 63] = [
+pub const EXPORTS: [&str; 47] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -143,22 +139,6 @@ pub const EXPORTS: [&str; 63] = [
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
-    "miso_engine_web_v1_observation_count",
-    "miso_engine_web_v1_observation_effect_index",
-    "miso_engine_web_v1_observation_effect_slot_id",
-    "miso_engine_web_v1_observation_id_capacity",
-    "miso_engine_web_v1_observation_id_ptr",
-    "miso_engine_web_v1_observation_native_effect_id",
-    "miso_engine_web_v1_observation_rack",
-    "miso_engine_web_v1_observation_read",
-    "miso_engine_web_v1_observation_result_bytes",
-    "miso_engine_web_v1_observation_result_ptr",
-    "miso_engine_web_v1_observation_selection_bytes",
-    "miso_engine_web_v1_observation_selection_capacity",
-    "miso_engine_web_v1_observation_selection_ptr",
-    "miso_engine_web_v1_observation_tap_count",
-    "miso_engine_web_v1_observation_tap_id",
-    "miso_engine_web_v1_observation_track_index",
     "miso_engine_web_v1_plan_latency_ptr",
     "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
@@ -229,11 +209,7 @@ fn boot_options_fields() -> [Field; 11] {
             offset_of!(WebBootOptions, live_control_meter_blocks),
             "u64",
         ),
-        (
-            "liveControlObservationTaps",
-            offset_of!(WebBootOptions, live_control_observation_taps),
-            "u64",
-        ),
+        ("reserved3", offset_of!(WebBootOptions, reserved3), "u64"),
         ("reserved2", offset_of!(WebBootOptions, reserved2), "u64"),
     ]
 }
@@ -567,119 +543,6 @@ fn seek_report_fields() -> [Field; 8] {
     ]
 }
 
-fn observation_selection_fields() -> [Field; 8] {
-    [
-        (
-            "structSize",
-            offset_of!(WebObservationSelection, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebObservationSelection, abi_version),
-            "u32",
-        ),
-        (
-            "trackIndex",
-            offset_of!(WebObservationSelection, track_index),
-            "u32",
-        ),
-        ("rack", offset_of!(WebObservationSelection, rack), "u32"),
-        (
-            "effectIndex",
-            offset_of!(WebObservationSelection, effect_index),
-            "u32",
-        ),
-        ("tapId", offset_of!(WebObservationSelection, tap_id), "u32"),
-        (
-            "channels",
-            offset_of!(WebObservationSelection, channels),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebObservationSelection, reserved),
-            "u32",
-        ),
-    ]
-}
-
-fn observation_result_fields() -> [Field; 19] {
-    [
-        (
-            "structSize",
-            offset_of!(WebObservationResult, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebObservationResult, abi_version),
-            "u32",
-        ),
-        ("status", offset_of!(WebObservationResult, status), "u32"),
-        (
-            "trackIndex",
-            offset_of!(WebObservationResult, track_index),
-            "u32",
-        ),
-        ("rack", offset_of!(WebObservationResult, rack), "u32"),
-        (
-            "effectIndex",
-            offset_of!(WebObservationResult, effect_index),
-            "u32",
-        ),
-        ("tapId", offset_of!(WebObservationResult, tap_id), "u32"),
-        (
-            "channels",
-            offset_of!(WebObservationResult, channels),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebObservationResult, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "reserved0",
-            offset_of!(WebObservationResult, reserved0),
-            "u32",
-        ),
-        (
-            "firstSample",
-            offset_of!(WebObservationResult, first_sample),
-            "u64",
-        ),
-        (
-            "endSample",
-            offset_of!(WebObservationResult, end_sample),
-            "u64",
-        ),
-        (
-            "sequence",
-            offset_of!(WebObservationResult, sequence),
-            "u64",
-        ),
-        ("blocks", offset_of!(WebObservationResult, blocks), "u32"),
-        (
-            "leftPresent",
-            offset_of!(WebObservationResult, left_present),
-            "u32",
-        ),
-        (
-            "rightPresent",
-            offset_of!(WebObservationResult, right_present),
-            "u32",
-        ),
-        ("left", offset_of!(WebObservationResult, left), "f32"),
-        ("right", offset_of!(WebObservationResult, right), "f32"),
-        (
-            "reserved",
-            offset_of!(WebObservationResult, reserved),
-            "u32[3]",
-        ),
-    ]
-}
-
 /// Render the whole document. Deterministic: every table below is a fixed array.
 #[must_use]
 pub fn render() -> String {
@@ -761,14 +624,6 @@ pub fn render() -> String {
                     "seekReport",
                     structure(SEEK_REPORT_BYTES, &seek_report_fields()),
                 ),
-                (
-                    "observationSelection",
-                    structure(OBSERVATION_SELECTION_BYTES, &observation_selection_fields()),
-                ),
-                (
-                    "observationResult",
-                    structure(OBSERVATION_RESULT_BYTES, &observation_result_fields()),
-                ),
             ]
             .into_iter()
             .map(|(name, structure)| (name.to_owned(), structure))
@@ -780,29 +635,17 @@ pub fn render() -> String {
             states: named(&states),
             backends: named(&backends),
             buffer_kinds: named(&buffers),
-            // Decision 12 (#1096): the `rack` of the observation, companion and configuration
-            // records. The retired `simd1` (0) and `simd2` (2) codes are absent,
+            // Decision 12 (#1096): the `rack` of the companion and configuration records. The retired `simd1` (0) and `simd2` (2) codes are absent,
             // never reallocated.
             racks: named(&[
                 (u32::from(RACK_INSERTS), "inserts"),
                 (u32::from(RACK_CONSOLE), "console"),
                 (u32::from(RACK_NOT_APPLICABLE), "notApplicable"),
             ]),
-            observation_channels: named(&[
-                (OBSERVATION_CHANNEL_LEFT, "left"),
-                (OBSERVATION_CHANNEL_RIGHT, "right"),
-                (OBSERVATION_CHANNEL_BOTH, "both"),
-            ]),
-            observation_statuses: named(&[
-                (OBSERVATION_STATUS_PENDING, "pending"),
-                (OBSERVATION_STATUS_UNARMED, "unarmed"),
-                (OBSERVATION_STATUS_READY, "ready"),
-            ]),
             maximum_document_bytes: MAXIMUM_DOCUMENT_BYTES,
             maximum_source_channels: session::SOURCE_CHANNELS_LAUNCH_MAXIMUM,
             diagnostic_bytes: DIAGNOSTIC_BYTES,
             default_meter_blocks: DEFAULT_METER_BLOCKS,
-            maximum_observation_taps: MAXIMUM_OBSERVATION_TAPS,
             maximum_response_points: RESPONSE_MAXIMUM_POINTS,
             default_maximum_memory_bytes: DEFAULT_MAXIMUM_MEMORY_BYTES,
             source_ring: SourceRing {
@@ -884,13 +727,10 @@ struct Constants<'a> {
     backends: Vec<NamedValue<'a>>,
     buffer_kinds: Vec<NamedValue<'a>>,
     racks: Vec<NamedValue<'a>>,
-    observation_channels: Vec<NamedValue<'a>>,
-    observation_statuses: Vec<NamedValue<'a>>,
     maximum_document_bytes: u32,
     maximum_source_channels: u32,
     diagnostic_bytes: u32,
     default_meter_blocks: u32,
-    maximum_observation_taps: u32,
     maximum_response_points: usize,
     default_maximum_memory_bytes: u64,
     source_ring: SourceRing,

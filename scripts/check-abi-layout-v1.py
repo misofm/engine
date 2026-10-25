@@ -79,8 +79,7 @@ BUFFER_KINDS = [
 ]
 # Buffer kind 6 was the observation-command staging; #1589c deleted it with the command record,
 # its kinds and its reasons. The value is retired and never reallocated.
-# Decision 12 (#1096): the effect racks of the observation, companion and configuration
-# records. `inserts` keeps the code `dynamic` had and `console` is appended. The retired `simd1`
+# Decision 12 (#1096): the effect racks of the companion and configuration records. `inserts` keeps the code `dynamic` had and `console` is appended. The retired `simd1`
 # (0) and `simd2` (2) codes are absent from the vocabulary and never reallocated.
 RACKS = [(1, "inserts"), (3, "console"), (255, "notApplicable")]
 RETIRED_RACKS = {0, 2}
@@ -115,22 +114,6 @@ EXPORTS = [
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
-    "miso_engine_web_v1_observation_count",
-    "miso_engine_web_v1_observation_effect_index",
-    "miso_engine_web_v1_observation_effect_slot_id",
-    "miso_engine_web_v1_observation_id_capacity",
-    "miso_engine_web_v1_observation_id_ptr",
-    "miso_engine_web_v1_observation_native_effect_id",
-    "miso_engine_web_v1_observation_rack",
-    "miso_engine_web_v1_observation_read",
-    "miso_engine_web_v1_observation_result_bytes",
-    "miso_engine_web_v1_observation_result_ptr",
-    "miso_engine_web_v1_observation_selection_bytes",
-    "miso_engine_web_v1_observation_selection_capacity",
-    "miso_engine_web_v1_observation_selection_ptr",
-    "miso_engine_web_v1_observation_tap_count",
-    "miso_engine_web_v1_observation_tap_id",
-    "miso_engine_web_v1_observation_track_index",
     "miso_engine_web_v1_plan_latency_ptr",
     "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
@@ -172,20 +155,18 @@ STRUCTURES = {
     "planWatermark": 96,
     "planLatency": 64,
     "seekReport": 64,
-    "observationSelection": 32,
-    "observationResult": 96,
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
     "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
-    "liveControlMeterBlocks", "liveControlObservationTaps", "reserved2",
+    "liveControlMeterBlocks", "reserved3", "reserved2",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
     "sourceRingFrames", "maximumMemoryBytes",
-    "liveControlMeterBlocks", "liveControlObservationTaps",
+    "liveControlMeterBlocks",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 
@@ -218,15 +199,10 @@ STATUS_WATERMARK_OFFSETS = {
     "watermarkFirstSample": 64,
     "watermarkOutcomeFlags": 72,
 }
-OBSERVATION_SELECTION_FIELDS = [
-    "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
-    "reserved",
-]
-OBSERVATION_RESULT_FIELDS = [
-    "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
-    "channels", "sampleRateHz", "reserved0", "firstSample", "endSample", "sequence", "blocks",
-    "leftPresent", "rightPresent", "left", "right", "reserved",
-]
+# Issue #1590: the browser's own observation records (`observationSelection`,
+# `observationResult`), their channel and status vocabularies and their sixteen exports are
+# deleted; the observation edit and read are the core's frames. The exact structure, constant
+# and export sets above refuse them should they return.
 
 WIDTHS = {"u8": 1, "u32": 4, "u64": 8, "f64": 8}
 
@@ -338,8 +314,6 @@ def validate(document: object) -> None:
         ("planWatermark", PLAN_WATERMARK_FIELDS),
         ("planLatency", PLAN_LATENCY_FIELDS),
         ("seekReport", SEEK_REPORT_FIELDS),
-        ("observationSelection", OBSERVATION_SELECTION_FIELDS),
-        ("observationResult", OBSERVATION_RESULT_FIELDS),
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
@@ -348,8 +322,8 @@ def validate(document: object) -> None:
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
         "maximumDocumentBytes", "maximumSourceChannels", "diagnosticBytes", "defaultMeterBlocks",
-        "maximumObservationTaps", "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
-        "observationChannels", "observationStatuses", "racks",
+        "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
+        "racks",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -361,8 +335,6 @@ def validate(document: object) -> None:
     # Spelled out on purpose: a retired code must never be reallocated, whatever it is named.
     require(not RETIRED_RACKS & {row["value"] for row in constants["racks"]},
             "constants.racks reallocates a retired simd1/simd2 code")
-    check_named(document, "observationChannels", [(1, "left"), (2, "right"), (3, "both")])
-    check_named(document, "observationStatuses", [(1, "pending"), (2, "unarmed"), (3, "ready")])
 
     # The alias table is an alias table: every row re-uses a value `resultCodes` already names,
     # under a different name. A row naming a value `resultCodes` does not carry would be a
@@ -382,7 +354,6 @@ def validate(document: object) -> None:
         ("maximumSourceChannels", 2),
         ("diagnosticBytes", 1 << 14),
         ("defaultMeterBlocks", 12),
-        ("maximumObservationTaps", 16),
         ("maximumResponsePoints", 4096),
         ("defaultMaximumMemoryBytes", 512 << 20),
     ):
@@ -435,7 +406,7 @@ def self_test() -> int:
         document["structures"]["status"]["fields"][0]["type"] = "u64"
 
     def hole_in_layout(document: dict) -> None:
-        document["structures"]["observationSelection"]["fields"][3]["offset"] = 16
+        document["structures"]["seekReport"]["fields"][3]["offset"] = 20
 
     def drop_export(document: dict) -> None:
         document["exports"].pop()
@@ -538,12 +509,12 @@ def self_test() -> int:
         raise AssertionError("the console rack row exists in the valid fixture")
 
     def boolean_named_value(document: dict) -> None:
-        rows = document["constants"]["observationChannels"]
+        rows = document["constants"]["racks"]
         for row in rows:
-            if row["name"] == "left":
+            if row["name"] == "inserts":
                 row["value"] = True
                 return
-        raise AssertionError("the observation left-channel row exists in the valid fixture")
+        raise AssertionError("the inserts rack row exists in the valid fixture")
 
     mutations = [
         ("an alias row is dropped", drop_alias),
@@ -577,6 +548,15 @@ def self_test() -> int:
          lambda d: d["exports"].insert(7, "miso_engine_web_v1_command_submit")),
         ("the retired command-queue boot word returns", retired_queue_word_returns),
         ("a retired prepared-command export returns", retired_export_returns),
+        # Issue #1590 gate 4: the browser's own observation records, vocabularies and exports.
+        ("the deleted observation selection record returns",
+         lambda d: d["structures"].__setitem__("observationSelection", d["structures"]["seekReport"])),
+        ("the deleted observation status vocabulary returns",
+         lambda d: d["constants"].__setitem__("observationStatuses", [{"value": 1, "name": "pending"}])),
+        ("the deleted observation read export returns",
+         lambda d: d["exports"].insert(19, "miso_engine_web_v1_observation_read")),
+        ("the retired observation-taps boot word returns",
+         lambda d: d["structures"]["bootOptions"]["fields"][9].__setitem__("name", "liveControlObservationTaps")),
         ("a source-ring input is dropped", drop_ring_input),
         ("the source-ring reserve is wrong", wrong_ring_reserve),
         ("the prime growth count is dropped", drop_ring_key("primeGrowths")),

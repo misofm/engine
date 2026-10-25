@@ -34,7 +34,6 @@ const QUANTUM_FRAMES: u32 = 128;
 fn boot() -> u32 {
     let options = WebBootOptions {
         live_control_meter_blocks: 2,
-        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     };
     let length = native_staging::boot(options, DOCUMENT).expect("the fixture stages");

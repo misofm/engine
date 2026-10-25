@@ -27,7 +27,7 @@ const FIXTURE = JSON.parse(readFileSync(
   new URL("../../hosts/host-web/tests/fixtures/control-list.json", import.meta.url),
   "utf8",
 ));
-const OPTIONS = { liveControls: { meterBlocks: 1, observationTaps: 8 } };
+const OPTIONS = { liveControls: { meterBlocks: 1 } };
 const STRIP = (id) => ({ kind: "strip", id });
 
 let asset;
@@ -468,14 +468,12 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
         windowBlocks: 2,
       });
       run(engine, 0, 4);
-      assert.equal(engine.observationMap().bindings.find((b) => b.effectSlotId === "comp" && b.trackId === "t1").effectIndex, 1);
+      // `remove_eq` moves `comp` from insert 1 to insert 0 of t1. The removal restarts t1: a
+      // duck-swap, adopted at its `S` (#1324a), within `duckBlocks` blocks.
       rebuild(engine, "remove_eq");
-      // The removal restarts t1: a duck-swap, adopted at its `S` (#1324a).
-      const index = () => engine.observationMap().bindings
-        .find((b) => b.effectSlotId === "comp" && b.trackId === "t1").effectIndex;
-      const adopted = await runUntil(engine, 4, 0, () => index() === 0, "the plan that moved comp renders");
+      run(engine, 4, duckBlocks);
       // The restarted strip's effects start at rest (#1324 D2): the tap opens a fresh window.
-      const next = await runUntil(engine, adopted, 2, async () => {
+      const next = await runUntil(engine, 4 + duckBlocks, 2, async () => {
         await handle.pump();
         return handle.readLatest()[0].status === "ready";
       }, "the moved effect's tap is ready");

@@ -567,16 +567,9 @@ impl Legs {
         model.sources[0].frames = 16_384;
         let document = canonical_session_json(&model).expect("canonical session");
         let browser = Browser {
-            host: AudioWorkletEngineHost::boot(
-                document.as_bytes(),
-                WebBootOptions {
-                    live_control_observation_taps: u64::from(
-                        host_core::launch_maximum_observation_taps(),
-                    ),
-                    ..options()
-                },
-            )
-            .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic()))),
+            host: AudioWorkletEngineHost::boot(document.as_bytes(), options()).unwrap_or_else(
+                |failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic())),
+            ),
         };
         let limits = browser
             .host
@@ -1237,9 +1230,10 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
 const OBSERVATION_SESSION: &str = include_str!("browser-v1/observation-session.json");
 
 /// #1586 gate 5 (R4's parity row): both hosts boot the observation fixture, arm the compressor
-/// insert's tap with a window of four blocks by the same `Observe` transaction, render the same PCM bit-identically, and read the same row: the C ABI by
-/// `OBSERVATION_READ`, the browser by its selected read. Status, window and both lanes' bits agree
-/// pending and ready.
+/// insert's tap with a window of four blocks by the same `Observe` transaction, render the same PCM
+/// bit-identically, and read the same row by the same `OBSERVATION_READ` frame (#1590: the
+/// browser's own selected read is gone). Status, window and both lanes' bits agree pending and
+/// ready.
 ///
 /// Red if the two hosts read the same tap differently: another slot, another window, a lane
 /// swapped or another status.
@@ -1254,7 +1248,6 @@ fn both_hosts_read_one_observation_tap_alike() {
             document.as_bytes(),
             WebBootOptions {
                 live_control_meter_blocks: u64::from(WINDOW_BLOCKS),
-                live_control_observation_taps: 4,
                 ..options()
             },
         )
@@ -1308,60 +1301,38 @@ fn both_hosts_read_one_observation_tap_alike() {
         browser.service();
         c.service();
         request += 1;
-        let (result, reply) = c.send(&frame(
+        let read_frame = frame(
             request,
             ExpectedRevision::Any,
             CommandPayload::ObservationRead(&read),
-        ));
-        assert_eq!(result, C_RESULT_OK, "{}", String::from_utf8_lossy(&reply));
-        let mut fields = [0_u16; 64];
-        let protocol::DecodedTypedResponseFrame::Success {
-            payload: protocol::DecodedSuccessResponsePayload::ObservationRead(page),
-            ..
-        } = ProtocolCodec::default()
-            .decode_typed_response(&reply, &mut protocol::DecodeScratch::new(&mut fields))
-            .expect("a response frame")
-        else {
-            panic!("an observation read page");
+        );
+        let row = |(result, reply): (u32, Vec<u8>), expected: u32| {
+            assert_eq!(result, expected, "{}", String::from_utf8_lossy(&reply));
+            let mut fields = [0_u16; 64];
+            let protocol::DecodedTypedResponseFrame::Success {
+                payload: protocol::DecodedSuccessResponsePayload::ObservationRead(page),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_response(&reply, &mut protocol::DecodeScratch::new(&mut fields))
+                .expect("a response frame")
+            else {
+                panic!("an observation read page");
+            };
+            page.rows[0]
         };
-        let c_row = page.rows[0];
-        let browser_row = &browser
-            .host
-            .read_observations(&[host_web::ObservationSelection {
-                track_id: TRACK_ID,
-                rack: host_web::LiveEffectRack::Inserts,
-                effect_slot_id: "comp",
-                tap_id: 1,
-                channels: host_web::ObservationReadChannels::Both,
-            }])
-            .expect("the browser read")[0];
-        let status = match browser_row.status {
-            host_web::ObservationReadStatus::Pending => protocol::ObservationRowStatus::Pending,
-            host_web::ObservationReadStatus::Unarmed => protocol::ObservationRowStatus::Unarmed,
-            host_web::ObservationReadStatus::Ready => protocol::ObservationRowStatus::Ready,
+        let c_row = row(c.send(&read_frame), C_RESULT_OK);
+        let browser_row = row(browser.send(&read_frame), RESULT_OK);
+        let lanes = |row: protocol::ObservationReadRow| {
+            (
+                row.status,
+                row.window,
+                row.left.map(f32::to_bits),
+                row.right.map(f32::to_bits),
+            )
         };
-        let window =
-            |first: u64, end: u64, sequence: u64, blocks: u32| (first, end, sequence, blocks);
         assert_eq!(
-            (
-                c_row.status,
-                c_row
-                    .window
-                    .map(|w| window(w.first_sample, w.end_sample, w.sequence, w.blocks)),
-                c_row.left.map(f32::to_bits),
-                c_row.right.map(f32::to_bits),
-            ),
-            (
-                status,
-                browser_row.window.map(|w| window(
-                    w.first_sample,
-                    w.end_sample,
-                    w.sequence,
-                    w.blocks
-                )),
-                browser_row.left.map(f32::to_bits),
-                browser_row.right.map(f32::to_bits),
-            ),
+            lanes(c_row),
+            lanes(browser_row),
             "block {block}: the same row"
         );
         ready |= c_row.status == protocol::ObservationRowStatus::Ready;

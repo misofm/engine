@@ -2,10 +2,11 @@
 //!
 //! # Why this lives in the contract crate
 //!
-//! Issue #137 shipped the whole `miso.command.v1` ABI and discovered that no live parameter path
-//! reaches a running plan: `graph::runtime` handed every effect a hardcoded empty
-//! automation slice and `rack::EffectBankStage` handed every bank an empty one with
-//! zero offsets. #140 closes that gap by feeding the admitted commands in as
+//! Issue #137 shipped the browser's first live-command ABI (deleted since: the value commands by
+//! #1565, the observation records by #1589c; every live value is now a `SET_CONTROL` edit) and
+//! discovered that no live parameter path reaches a running plan: `graph::runtime` handed every
+//! effect a hardcoded empty automation slice and `rack::EffectBankStage` handed every bank an empty
+//! one with zero offsets. #140 closes that gap by feeding the admitted live values in as
 //! [`PreparedAutomationSpan`]s -- which every effect's `process` already honours -- rather than by
 //! inventing a second parameter path.
 //!

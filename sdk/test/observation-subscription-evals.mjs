@@ -12,7 +12,6 @@ import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { effect, session } from "../src/core/session.ts";
 import { encodeSessionTransaction, transaction } from "../src/core/session-transaction.ts";
-import { RACKS } from "../src/internal/rack.ts";
 import { createEngine } from "../src/browser/engine.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { onEndpointIds } from "./control-support.mjs";
@@ -62,8 +61,10 @@ function feed(engine, block) {
 }
 
 /**
- * An owner over a scripted frame transport: `apply` arms the tap its last edit names and gives each
- * edit a fresh arm tag; `read` reports a ready window with the tap's tag while it is armed.
+ * An owner over a scripted frame transport that shares arms as the core does (#1584 D3): an arm of
+ * an unarmed tap issues a fresh arm tag, an arm of an armed tap adds a subscriber and reports its
+ * tag, and a disarm removes one and drops the tap with the last; `read` reports a ready window with
+ * the tap's tag while it is armed.
  */
 function injectedOwner() {
   let sequence = 1n;
@@ -76,9 +77,10 @@ function injectedOwner() {
   let applyCount = 0;
   let nextTag = 0n;
   const tags = new Map();
+  const subscribers = new Map();
   const map = {
     bindings: [{
-      trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
+      trackId: "t", rack: "inserts", effectSlotId: "comp",
       nativeEffectId: "miso.compressor", tapIds: [1],
     }],
   };
@@ -88,8 +90,25 @@ function injectedOwner() {
       applyCount += 1;
       if (applyHook) await applyHook();
       const issued = edits.map((edit) => {
+        const held = tags.get(edit.effectId);
+        if (edit.armed) {
+          if (held !== undefined) {
+            subscribers.set(edit.effectId, subscribers.get(edit.effectId) + 1);
+            return held;
+          }
+          nextTag += 1n;
+          tags.set(edit.effectId, nextTag);
+          subscribers.set(edit.effectId, 1);
+          return nextTag;
+        }
+        const left = (subscribers.get(edit.effectId) ?? 1) - 1;
+        if (left > 0) {
+          subscribers.set(edit.effectId, left);
+          return held;
+        }
         nextTag += 1n;
-        if (edit.armed) tags.set(edit.effectId, nextTag); else tags.delete(edit.effectId);
+        tags.delete(edit.effectId);
+        subscribers.delete(edit.effectId);
         return nextTag;
       });
       return { revision: 1n, observeArmTags: issued, removedArmTags: [] };
@@ -146,11 +165,15 @@ function transactionsOf(engine) {
 }
 
 describe("issue 783 -- managed resident observation subscriptions", () => {
-  test("shares bindings, preserves owned rows, guards manual edits, and closes last owner", async () => {
+  // #1590 gate 1: the SDK sends one arm per selection of each handle and keeps no reference count;
+  // the core shares the arm. Red if the SDK still counts references (the second subscribe sends no
+  // edit, or the first close sends none) or if the core does not share the arm (the second arm
+  // gives the tap another tag, or the first close silences the tap the second handle holds).
+  test("two handles on one tap and window share the core's one arm; the last close disarms", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { observationTaps: 4 },
     });
+    const sent = transactionsOf(engine);
     const compLeft = selection("comp", "left");
     const gateRight = selection("gate", "right");
     try {
@@ -160,6 +183,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
         windowBlocks: 2,
         onUpdate: () => { notifications += 1; },
       });
+      assert.deepEqual(sent, [2], "one arm per selection");
       assert.equal(first.configuration.windowBlocks, 2);
       assert.deepEqual(first.readLatest().map((row) => row.status), ["pending", "pending"]);
 
@@ -171,16 +195,21 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
         ["ready", "left"], ["ready", "right"],
       ]);
       assert.ok(saved[0].window && saved[0].window.sequence > 0n);
+      const tag = coreRow(engine, "comp").armTag;
       const second = await engine.subscribeObservations({
         selections: [selection("comp", "right"), selection("gate", "left")],
         windowBlocks: 2,
       });
+      assert.deepEqual(sent, [2, 2], "the second handle sends its own arms");
+      assert.equal(coreRow(engine, "comp").armTag, tag, "the core holds one arm: one tag");
       assert.equal(second.readLatest().length, 2);
       assert.equal(second.readLatest()[0].channels, "right");
 
       await assert.rejects(
         () => engine.subscribeObservations({ selections: [compLeft], windowBlocks: 3 }),
-        /conflicts/,
+        (error) => error instanceof MisoUsageError
+          && /^observation window conflicts with a managed subscriber/.test(error.message)
+          && error.diagnosticCode === "observation.window_conflict",
       );
       await assert.rejects(
         () => first.update({ selections: [selection("missing")], windowBlocks: 2 }),
@@ -190,8 +219,16 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       assert.equal(first.readLatest()[0].window.sequence, saved[0].window.sequence);
 
       await first.close();
-      assert.notEqual(engine.readObservations([compLeft])[0].status, "unarmed");
+      assert.deepEqual(sent.slice(-1), [2], "the first close sends one disarm per selection");
+      feed(engine, 2); engine.render();
+      feed(engine, 3); engine.render();
+      await second.pump();
+      const kept = second.readLatest();
+      assert.equal(kept[0].status, "ready");
+      assert.ok(kept[0].window.sequence > saved[0].window.sequence, "the other handle's rows keep flowing");
+      assert.equal(coreRow(engine, "comp").armTag, tag);
       await second.close();
+      feed(engine, 4); engine.render();
       assert.equal(engine.readObservations([compLeft])[0].status, "unarmed");
       await second.close();
     } finally {
@@ -199,34 +236,39 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     }
   });
 
-  // #1345 gate 6, on the core's frames (#1589b): a window change on a tap one subscriber holds is
-  // the disarm of the old window and the arm of the new one in one transaction, which the core
-  // applies as one re-arm. Red if the update sends the arm alone (the core refuses
-  // `observation.window_conflict`), or sends two transactions.
+  // #1345 gate 6 and #1590 gate 2, on the core's frames: a window change on a tap one subscriber
+  // holds is the disarm of the old window and the arm of the new one in one transaction, which the
+  // core applies as one re-arm. Red if the update sends the arm alone (the core refuses
+  // `observation.window_conflict`), sends two transactions or two arms, or sends a disarm that
+  // silences the tap.
   test("a window change on a one-tap effect is one re-arm transaction and lands", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { observationTaps: 4 },
     });
     const sent = transactionsOf(engine);
     try {
       const handle = await engine.subscribeObservations({
-        selections: [selection("comp", "both")], windowBlocks: 2,
+        selections: [selection("comp", "both")], windowBlocks: 4,
       });
-      for (let block = 0; block < 2; block += 1) { feed(engine, block); engine.render(); }
+      for (let block = 0; block < 4; block += 1) { feed(engine, block); engine.render(); }
       await handle.pump();
       assert.equal(handle.readLatest()[0].status, "ready");
-      assert.equal(handle.readLatest()[0].window.blocks, 2);
+      assert.equal(handle.readLatest()[0].window.blocks, 4);
       const before = sent.length;
+      const oldTag = coreRow(engine, "comp").armTag;
 
-      const receipt = await handle.update({ selections: [selection("comp", "both")], windowBlocks: 4 });
+      const receipt = await handle.update({ selections: [selection("comp", "both")], windowBlocks: 8 });
       assert.deepEqual(sent.slice(before), [2], "the update is one transaction of a disarm and an arm");
-      assert.equal(receipt.configuration.windowBlocks, 4);
-      for (let block = 2; block < 6; block += 1) { feed(engine, block); engine.render(); }
+      assert.equal(receipt.configuration.windowBlocks, 8);
+      feed(engine, 4); engine.render();
+      const rearmed = coreRow(engine, "comp");
+      assert.equal(rearmed.armed, true, "the re-arm leaves the tap armed");
+      assert.equal(rearmed.armTag, oldTag + 1n, "one new tag: one re-arm record");
+      for (let block = 5; block < 13; block += 1) { feed(engine, block); engine.render(); }
       await handle.pump();
       const reading = handle.readLatest()[0];
       assert.equal(reading.status, "ready");
-      assert.equal(reading.window.blocks, 4);
+      assert.equal(reading.window.blocks, 8);
       assert.ok(reading.window.firstSample >= await receipt.armed());
       await handle.close();
     } finally {
@@ -251,7 +293,6 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("an awaited close before any render is refused with typed backpressure; a render and a retry succeed", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { observationTaps: 4 },
     });
     try {
       const handle = await engine.subscribeObservations({
@@ -276,7 +317,6 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("a subscribe or update before the slot is drained is refused with typed backpressure and changes nothing", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { observationTaps: 4 },
     });
     const comp = selection("comp", "both");
     try {
@@ -309,7 +349,6 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
   test("invalidates a handle at headless replacement", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      liveControls: { observationTaps: 2 },
     });
     const sub = await engine.subscribeObservations({ selections: [selection("comp")], windowBlocks: 1 });
     try {
@@ -347,21 +386,23 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
 
     const mutationHarness = injectedOwner();
     mutationHarness.map.bindings.push({
-      trackId: "t", rack: "inserts", effectSlotId: "gate", effectIndex: 1,
+      trackId: "t", rack: "inserts", effectSlotId: "gate",
       nativeEffectId: "miso.compressor", tapIds: [1],
     });
     const managed = (await mutationHarness.owner.subscribe({
       selections: [injectedSelection], windowBlocks: 1,
     })).handle;
-    let releaseRead;
-    mutationHarness.setRead(() => new Promise((resolve) => { releaseRead = resolve; }));
+    // A timer tick while the update's transaction is in flight reads nothing.
+    let releaseApply;
+    mutationHarness.setApply(() => new Promise((resolve) => { releaseApply = resolve; }));
     const updating = managed.update({ selections: [injectedSelection, selection("gate")], windowBlocks: 1 });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const readsDuringPreflight = mutationHarness.readCount();
+    const readsDuringApply = mutationHarness.readCount();
     mutationHarness.fire();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(mutationHarness.readCount(), readsDuringPreflight);
-    releaseRead();
+    assert.equal(mutationHarness.readCount(), readsDuringApply);
+    mutationHarness.setApply(undefined);
+    releaseApply();
     await updating;
     await managed.close();
 
@@ -429,7 +470,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     assert.equal(epochHarness.applyCount(), 0);
   });
 
-  test("retries a refused close and bounds the readable union before admission", async () => {
+  test("retries a refused close", async () => {
     const harness = injectedOwner();
     const sub = (await harness.owner.subscribe({ selections: [injectedSelection], windowBlocks: 1 })).handle;
     harness.setApply(() => { throw new Error("temporary refusal"); });
@@ -437,16 +478,6 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
     harness.setApply(undefined);
     await sub.close();
     assert.equal(harness.applyCount(), 3);
-
-    assert.throws(
-      () => new ObservationSubscriptionOwner({
-        observationMap: () => harness.map,
-        apply: async () => ({ revision: 0n, observeArmTags: [], removedArmTags: [] }),
-        read: async () => ({ observedSample: 0n, rows: [] }),
-        sampleRateHz: () => 48_000,
-      }, { maximumBindings: 257 }),
-      /maximumBindings.*256/,
-    );
   });
 });
 
@@ -499,10 +530,10 @@ function hexOf(bytes) {
  * the core, and `log` records each transaction the browser sent: the render count when it was sent,
  * its call result, and its payload (the edits, without the header's request ID and revision).
  */
-async function coreRig({ observationTaps = 4, document = compSession() } = {}) {
+async function coreRig({ document = compSession() } = {}) {
   const text = typeof document === "string" ? document : document.toJson();
   const core = await WasmBoundary.boot(asset, new TextEncoder().encode(text), {
-    liveControls: { meterBlocks: 0, observationTaps },
+    liveControls: { meterBlocks: 0 },
   });
   const log = [];
   const statusCalls = { count: 0 };
@@ -536,21 +567,6 @@ async function coreRig({ observationTaps = 4, document = compSession() } = {}) {
       const map = core.sessionMap();
       return { tag: "miso.sessionmap.v1", requestId: 1, result: 0, sources: map.sources, metersAttached: map.metersAttached };
     },
-    async observationMap() {
-      const order = core.stripOrder();
-      const strips = [...order.tracks, ...order.submixes];
-      return {
-        tag: "miso.observationmap.v1", requestId: 1, result: 0, structureEpoch: order.structureEpoch,
-        bindings: core.observationMap().bindings.map((binding) => ({
-          trackIndex: strips.indexOf(binding.trackId),
-          rack: RACKS[binding.rack],
-          effectIndex: binding.effectIndex,
-          effectSlotId: binding.effectSlotId,
-          nativeEffectId: binding.nativeEffectId,
-          tapIds: [...binding.tapIds],
-        })),
-      };
-    },
     async status() {
       statusCalls.count += 1;
       return { tag: "miso.status.v1", result: 0, state: 2, renderedQuanta: core.renderedQuanta() };
@@ -566,7 +582,7 @@ async function coreRig({ observationTaps = 4, document = compSession() } = {}) {
       audioWorklet: { async addModule() {} }, async close() {},
     }),
     createHost: async () => host,
-    policy: { liveControls: { meterBlocks: 0, observationTaps } },
+    policy: { liveControls: { meterBlocks: 0 } },
     ...extra,
   });
   return rig;
@@ -596,20 +612,6 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       // Subscribe, the refused close, and the same close sent again after the render.
       assert.deepEqual(rig.log.map((entry) => [entry.at, entry.result]), [[0n, 0], [0n, BACKPRESSURE], [1n, 0]]);
       assert.equal(rig.log[1].payload, rig.log[2].payload, "the resend carries the same edits");
-    } finally {
-      await engine.close();
-    }
-  });
-
-  // Red if a session that binds no observation tap answers with another code than 1589a's R1
-  // refusal, or sends an edit.
-  test("a session booted with no observation taps refuses a subscription observation.unavailable", async () => {
-    const rig = await coreRig({ observationTaps: 0 });
-    const engine = await rig.browser();
-    try {
-      await assert.rejects(engine.subscribeObservations(request), (error) =>
-        error instanceof MisoEngineError && error.diagnosticCode === "observation.unavailable");
-      assert.deepEqual(rig.log, []);
     } finally {
       await engine.close();
     }
@@ -704,6 +706,9 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
     await engine.close();
   });
 
+  // #1590 D1: the core's `observation.not_subscribed` reaches the caller as `MisoUsageError` with
+  // the core's code. Red if a refusal that is not backpressure waits for a render or is resent, or
+  // if the subscriber refusal reaches the caller as an engine failure.
   test("a refusal that is not backpressure rejects at once with the core's code and is never sent again", async () => {
     const rig = await coreRig();
     const engine = await rig.browser({ requestDeadlineMs: 2_000 });
@@ -718,8 +723,7 @@ describe("issue 1345 -- the browser engine waits for a render, within a bound", 
       };
       const started = Date.now();
       await assert.rejects(() => handle.close(), (error) => {
-        assert.ok(error instanceof MisoEngineError);
-        assert.equal(error.code, "invalidArgument");
+        assert.ok(error instanceof MisoUsageError);
         assert.equal(error.diagnosticCode, "observation.not_subscribed");
         return true;
       });
@@ -737,7 +741,7 @@ describe("#1589 gate 2 -- armed() settles on the arm render applied", () => {
   // Red if `armed()` resolves at the reply (before any render applied the arm), or with another
   // sample than the arm sample the core's own read reports.
   test("armed() stays pending until a render applies the arm and resolves with the read's arm sample", async () => {
-    const engine = await createOfflineEngine(compSession(), { asset, liveControls: { observationTaps: 4 } });
+    const engine = await createOfflineEngine(compSession(), { asset });
     try {
       const handle = await engine.subscribeObservations({ selections: [comp], windowBlocks: 2 });
       assert.equal(engine.renderedQuanta(), 0n, "subscribe returned before any render");
@@ -783,7 +787,7 @@ describe("#1589 gate 2 -- armed() settles on the arm render applied", () => {
 
   // Red if a close before the arm applied leaves `armed()` pending for ever (or resolves it).
   test("closing before the arm applied rejects armed() with sdk.observation.closed", async () => {
-    const engine = await createOfflineEngine(compSession(), { asset, liveControls: { observationTaps: 4 } });
+    const engine = await createOfflineEngine(compSession(), { asset });
     try {
       const handle = await engine.subscribeObservations({ selections: [comp], windowBlocks: 2 });
       const armed = handle.armed();
@@ -798,7 +802,7 @@ describe("#1589 gate 2 -- armed() settles on the arm render applied", () => {
 
   // Red if a disposal leaves a pending `armed()` pending, or names another cause.
   test("disposing the engine rejects a pending armed() with sdk.engine.disposed", async () => {
-    const engine = await createOfflineEngine(compSession(), { asset, liveControls: { observationTaps: 4 } });
+    const engine = await createOfflineEngine(compSession(), { asset });
     const handle = await engine.subscribeObservations({ selections: [comp], windowBlocks: 2 });
     const armed = handle.armed();
     engine.dispose();
@@ -809,7 +813,7 @@ describe("#1589 gate 2 -- armed() settles on the arm render applied", () => {
   // Red if a commit that removes the effect does not settle a pending `armed()`, or settles it with
   // another cause.
   test("removing the effect in a transaction rejects armed() with sdk.observation.owner_removed", async () => {
-    const engine = await createOfflineEngine(compSession(), { asset, liveControls: { observationTaps: 4 } });
+    const engine = await createOfflineEngine(compSession(), { asset });
     try {
       const handle = await engine.subscribeObservations({ selections: [comp], windowBlocks: 2 });
       const armed = handle.armed();
@@ -849,7 +853,7 @@ describe("#1589 gate 3 -- a subscription keeps reporting across a rebuild", () =
 
   // Red if the headless engine's subscription is dropped or restarted by a rebuild.
   test("headless", async () => {
-    const engine = await createOfflineEngine(compSession(), { asset, liveControls: { observationTaps: 4 } });
+    const engine = await createOfflineEngine(compSession(), { asset });
     try {
       await acrossRebuild(engine, () => engine.render());
     } finally {
@@ -913,7 +917,7 @@ describe("#1589b -- the frame transport's resend and frame rules", () => {
   // limit is sent instead of refused before it leaves the SDK.
   test("a read past one reply frame is split, and a transaction past the frame is refused before it is sent", async () => {
     const tracks = Array.from({ length: 100 }, (_unused, index) => `t${index}`);
-    const engine = await createOfflineEngine(compSession(tracks), { asset, liveControls: { observationTaps: 4 } });
+    const engine = await createOfflineEngine(compSession(tracks), { asset });
     const sent = transactionsOf(engine);
     try {
       const limit = engine.controlTransactions().maximumFrameBytes;
