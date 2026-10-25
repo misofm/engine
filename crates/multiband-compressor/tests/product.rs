@@ -61,10 +61,10 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     );
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
     for (rate, bytes) in [
-        (44_100u32, 304u32),
-        (48_000, 304),
-        (88_200, 304),
-        (96_000, 304),
+        (44_100u32, 336u32),
+        (48_000, 336),
+        (88_200, 336),
+        (96_000, 336),
     ] {
         let initial = values();
         let mut prepared = request(&initial);
@@ -74,7 +74,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
             prepared.sample_rate,
             prepared.quality,
         );
-        prepared.limits.maximum_total_state_bytes = 608;
+        prepared.limits.maximum_total_state_bytes = 672;
         // The contract requires a positive capacity limit even when the prepared effect needs no
         // scratch; one byte is the smallest admissible declaration for the exact zero-byte row.
         prepared.limits.maximum_scratch_bytes = 1;
@@ -1174,9 +1174,9 @@ fn bank_requests_are_validated_before_any_fallback() {
         .expect("state bytes")
         .checked_add(quality.scratch_fixed_bytes)
         .expect("prepared bytes");
-    assert_eq!(per_track, 608);
-    assert_eq!(per_track * 4, 2_432);
-    assert_eq!(per_track * 8, 4_864);
+    assert_eq!(per_track, 672);
+    assert_eq!(per_track * 4, 2_688);
+    assert_eq!(per_track * 8, 5_376);
 }
 
 /// Issue #1328, amendment A9: the payload's last word per channel is the input's silence counter,

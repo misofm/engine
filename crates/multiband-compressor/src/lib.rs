@@ -77,8 +77,8 @@ mod split;
 pub mod tail;
 
 use shim::{
-    LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, LINK_MIXED, LinkLanes, branching_smooth,
-    link_levels,
+    GlideWeights, LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, LINK_MIXED, LINK_WEIGHTS, LinkLanes,
+    branching_smooth, glide_levels, link_levels,
 };
 
 /// Parameters in the frozen V1 order.
@@ -92,9 +92,11 @@ const RAMP_COUNT: usize = 10;
 const RAMP_WORDS: usize = 4;
 
 /// Fixed scalar words of one channel's state payload: 48 before the coefficient ramps, four
-/// four-word coefficient ramps after them (issue #1069), and three four-word crossover word ramps
-/// after those (issue #1338): 76.
-const LANE_HEADER_WORDS: usize = CROSSOVER_WORD + CROSSOVER_WORDS * RAMP_WORDS;
+/// four-word coefficient ramps after them (issue #1069), three four-word crossover word ramps
+/// after those (issue #1338), and the two four-word detector link glide weights last (issue
+/// #1367 D4): 84. The lane's link mode is the weights' targets
+/// (`effect_contract::link_glide_mode`), so it takes no word of its own.
+const LANE_HEADER_WORDS: usize = LINK_WORD + LINK_WEIGHTS * RAMP_WORDS;
 
 /// State layout version. This is the sole prelaunch layout identity; the payload shape incorporates
 /// the audit's F1, F4 and D11 corrections.
@@ -773,8 +775,12 @@ fn crossover_coefficients<L: Lane>(segment: &Segment<L>) -> Lr4Coef<L> {
 struct SegmentPlan {
     /// Frames the segment covers. Always at least one.
     frames: usize,
-    /// `true` while any ramp in the bank still has samples to produce.
+    /// `true` while any ramp in the bank still has samples to produce, a link glide weight
+    /// included (issue #1367).
     ramping: bool,
+    /// `true` while a link glide weight of some lane is in flight over the segment (issue #1367
+    /// D3): the segment takes [`run_segment`]'s `GLIDE` body.
+    gliding: bool,
 }
 
 /// Everything one channel of one bank owns.
@@ -799,6 +805,12 @@ struct Side<L: Lane, const W: usize> {
     /// The crossover the word ramps walk to, per track: the target of the last accepted span.
     crossover_hz: [f32; W],
     defaults: [[f32; PARAMETER_COUNT]; W],
+    /// Per track, the detector link glide weights `w_link` then `w_avg` (issue #1367 D3, #1370
+    /// D2): at rest each is exactly `effect_contract::link_glide_weights` of the lane's mode
+    /// ([`Instance::links`]). Only a segment with a glide in flight reads them
+    /// ([`run_segment`]'s `GLIDE`), which advances them frame by frame; the segment split
+    /// ([`Instance::plan_segment`]) snaps and scans them with the other ramps.
+    links: [[LinearRamp; LINK_WEIGHTS]; W],
 }
 
 impl<L: Lane, const W: usize> Side<L, W> {
@@ -831,6 +843,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
             prepared_designed: designed,
             crossover_hz,
             defaults,
+            links: [[LinearRamp::fixed(0.0); LINK_WEIGHTS]; W],
         })
     }
 
@@ -867,7 +880,9 @@ impl<L: Lane, const W: usize> Side<L, W> {
     ///   target is `+0.0`; the branching smoother from `+0.0` to `+0.0` stays `+0.0`, and
     ///   `flush(+0.0) = +0.0`. The applied gain is finite, so each band writes `+0.0 * g = +0.0`.
     /// * **Ramps.** `remaining == 0` with a `+0.0` step is the flat path, which moves no ramp word
-    ///   ([`Instance::flat_sides_are_identity`]); a ramp in flight clears its track's bit.
+    ///   ([`Instance::flat_sides_are_identity`]); a ramp in flight clears its track's bit. The
+    ///   link glide weights count as ramps (issue #1367): a glide in flight moves its detector
+    ///   every frame, so its lane is never at rest and a silent bank never skips it.
     ///
     /// A plain `flush` brings each smoother word to `+0.0` (the compressor's rest snap is not
     /// adopted here: that would move rendered bits). The crossover and coefficient words are ramps
@@ -880,9 +895,10 @@ impl<L: Lane, const W: usize> Side<L, W> {
             & positive_zero_lanes(self.filter.b.ic2)
             & positive_zero_lanes(self.gain_db[LOW_BAND])
             & positive_zero_lanes(self.gain_db[HIGH_BAND]);
-        for (track, ramps) in self.ramps.iter().enumerate() {
+        for (track, (ramps, links)) in self.ramps.iter().zip(&self.links).enumerate() {
             if ramps
                 .iter()
+                .chain(links)
                 .any(|ramp| ramp.remaining != 0 || ramp.step.to_bits() != 0)
             {
                 mask &= !(1 << track);
@@ -891,15 +907,66 @@ impl<L: Lane, const W: usize> Side<L, W> {
         mask
     }
 
-    /// `true` when no ramp of any track of this channel has samples left to produce.
+    /// `true` when no ramp of any track of this channel has samples left to produce, the link
+    /// glide weights included (issue #1367).
     fn no_ramp_in_flight(&self) -> bool {
-        self.ramps.iter().flatten().all(|ramp| ramp.remaining == 0)
+        self.ramps
+            .iter()
+            .flatten()
+            .chain(self.links.iter().flatten())
+            .all(|ramp| ramp.remaining == 0)
+    }
+
+    /// `true` while a link glide weight of any track of this channel is in flight (issue #1367).
+    fn gliding(&self) -> bool {
+        self.links.iter().flatten().any(LinearRamp::is_ramping)
+    }
+
+    /// The link glide weights of every track, as lanes, for one segment (issue #1367 D3).
+    fn glide_weights(&self) -> GlideWeights<L> {
+        let mut weights = GlideWeights::idle();
+        let mut gliding = 0u32;
+        for weight in 0..LINK_WEIGHTS {
+            let mut values = [0.0f32; 8];
+            let mut steps = [0.0f32; 8];
+            let mut targets = [0.0f32; 8];
+            for track in 0..W {
+                let ramp = self.links[track][weight];
+                values[track] = ramp.current;
+                steps[track] = ramp.step;
+                targets[track] = ramp.target;
+                if ramp.remaining != 0 {
+                    gliding |= 1 << track;
+                }
+            }
+            weights.current[weight] = L::load(&values[..W]);
+            weights.step[weight] = L::load(&steps[..W]);
+            weights.target[weight] = L::load(&targets[..W]);
+        }
+        weights.gliding = lanes_mask::<L>(gliding);
+        weights
+    }
+
+    /// Writes a finished segment's link glide weights back, as
+    /// [`store_segment`](Self::store_segment) does the other ramps: no weight arrives inside a
+    /// segment, so `remaining` stays positive on a gliding lane and zero on a resting one.
+    fn store_glide(&mut self, weights: &GlideWeights<L>, advanced: u32) {
+        for weight in 0..LINK_WEIGHTS {
+            let mut values = [0.0f32; 8];
+            weights.current[weight].store(&mut values[..W]);
+            for (track, value) in values.iter().enumerate().take(W) {
+                let ramp = &mut self.links[track][weight];
+                ramp.current = *value;
+                ramp.remaining = ramp.remaining.saturating_sub(advanced);
+            }
+        }
     }
 
     /// [`discontinuity_reset`](Self::discontinuity_reset) on lane `track` alone (issue #1340, D1):
     /// that lane's four crossover words, both smoother words and its silence clock go to `+0.0`
     /// and its track's ramps snap, which leaves every ramp's step `+0.0`, so the lane can rest
-    /// ([`rest_lanes`](Self::rest_lanes)). Every other lane's words are unchanged.
+    /// ([`rest_lanes`](Self::rest_lanes)). Every other lane's words are unchanged. This is the D7
+    /// recovery, and it leaves a link glide in flight alone (issue #1367, #1370's rule).
     fn discontinuity_reset_lane(&mut self, track: usize) {
         for stage in [&mut self.filter.a, &mut self.filter.b] {
             stage.ic1 = set_lane_value(stage.ic1, track, 0.0);
@@ -914,19 +981,21 @@ impl<L: Lane, const W: usize> Side<L, W> {
         }
     }
 
-    /// Clears history. Coefficients and parameters are deliberately untouched.
+    /// Clears history. Coefficients and parameters are deliberately untouched. A link glide in
+    /// flight snaps to its target, the lane's mode (issue #1367, #1370's rule).
     fn discontinuity_reset(&mut self) {
         self.filter = Lr4State::default();
         self.silence = L::zero();
         self.gain_db = [L::zero(); 2];
         for track in 0..W {
-            for ramp in &mut self.ramps[track] {
+            for ramp in self.ramps[track].iter_mut().chain(&mut self.links[track]) {
                 ramp.snap();
             }
         }
     }
 
-    /// Returns to the prepared defaults without allocating or redesigning.
+    /// Returns to the prepared defaults without allocating or redesigning. The link weights are
+    /// the instance's to re-seat at each lane's mode ([`Instance::reset`]).
     fn full_reset(&mut self) {
         self.discontinuity_reset();
         for track in 0..W {
@@ -951,8 +1020,11 @@ impl<L: Lane, const W: usize> Side<L, W> {
 struct Instance<L: Lane, const W: usize> {
     sample_rate: u32,
     bypass: bool,
-    /// Each lane's prepared detector link mode as masks and the arm they pick (issue #1367 D1),
-    /// read once per block by [`render_body`].
+    /// Each lane's detector link mode (issue #1367): the prepared one, then the target of each
+    /// accepted [`retarget_link`](Self::retarget_link). A full reset keeps it.
+    links: [LinkMode; W],
+    /// [`links`](Self::links) as masks and the arm they pick (issue #1367 D1), read once per block
+    /// by [`render_body`].
     link_lanes: LinkLanes<L>,
     /// The active lanes (issue #1893): bit `l` is set when lane `l` carries a member. A padded
     /// lane (a clear bit) renders like any lane, a clone fed `+0.0`, but is never charged or
@@ -977,9 +1049,10 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         metadata: PreparedEffectMetadata,
     ) -> Option<Self> {
         debug_assert_eq!(L::WIDTH, W);
-        Some(Self {
+        let mut instance = Self {
             sample_rate: metadata.sample_rate,
             bypass: metadata.bypass,
+            links: [metadata.link_mode; W],
             link_lanes: LinkLanes::new(&[metadata.link_mode; W]),
             active: all_lanes::<W>(),
             nonfinite: NonFiniteReport::new(),
@@ -988,14 +1061,100 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                 Side::new(right, metadata.sample_rate)?,
             ],
             collapsed: false,
-        })
+        };
+        instance.seat_links(&[metadata.link_mode; W]);
+        Some(instance)
     }
+
+    /// Sets every lane's link mode, its masks and the arm, and seats each lane's weights at rest
+    /// at its mode (issue #1367): preparation and bind.
+    fn seat_links(&mut self, links: &[LinkMode; W]) {
+        self.links = *links;
+        self.link_lanes = LinkLanes::new(links);
+        for lane in 0..W {
+            self.rest_links(lane);
+        }
+    }
+
+    /// Seats lane `lane`'s link weights at rest at its mode on both channels (issue #1367, #1370
+    /// D2): preparation, a full reset, a padded lane that follows a new first member and a
+    /// restore whose glide is not toward the lane's mode. The D7 recovery leaves a glide alone.
+    fn rest_links(&mut self, lane: usize) {
+        let weights = effect_contract::link_glide_weights(self.links[lane]);
+        for side in &mut self.sides {
+            side.links[lane] = weights.map(LinearRamp::fixed);
+        }
+    }
+
+    // REALTIME_POLICY_BEGIN: #1367, a link glide is retargeted at a block boundary.
+    /// Glides lane `lane`'s detector link to `mode` over `samples` samples (issue #1367 D3,
+    /// #1370 D1-D3).
+    ///
+    /// The lane's mode, and with it its masks and the bank's arm, becomes `mode` at once, so a
+    /// glide that arrives lands on `mode`'s own law; the weights of both channels, retargeted
+    /// from the words in force (a glide in flight continues from where it is), carry the
+    /// transition, and `samples == 0` steps them. The mode is the one a full reset keeps.
+    /// `false`, changing nothing, for a lane past the width or padded, a mode the descriptor does
+    /// not support or a glide longer than `LINK_GLIDE_MAX_SAMPLES`. Allocation-free and bounded
+    /// by the lane count.
+    fn retarget_link(&mut self, lane: usize, mode: LinkMode, samples: u32) -> bool {
+        if lane >= W
+            || self.active & (1 << lane) == 0
+            || !MULTIBAND_COMPRESSOR_DESCRIPTOR.lane_link
+            || !MULTIBAND_COMPRESSOR_DESCRIPTOR
+                .supported_link_modes
+                .contains(mode)
+            || samples > effect_contract::LINK_GLIDE_MAX_SAMPLES
+        {
+            return false;
+        }
+        self.set_lane_link(lane, mode);
+        let weights = effect_contract::link_glide_weights(mode);
+        for side in &mut self.sides {
+            for (ramp, &weight) in side.links[lane].iter_mut().zip(&weights) {
+                ramp.set_target(weight, samples);
+            }
+        }
+        true
+    }
+
+    /// Sets lane `lane`'s link mode and re-derives the masks and the arm (issue #1367). Every
+    /// padded lane re-takes the first active lane's mode at rest, as bind gives it, so a bank
+    /// whose members became uniform leaves the mixed arm; a padded lane's output is discarded,
+    /// so this moves no member's bit.
+    fn set_lane_link(&mut self, lane: usize, mode: LinkMode) {
+        self.links[lane] = mode;
+        let first = self.active.trailing_zeros() as usize;
+        if first < W {
+            let mode = self.links[first];
+            for padded in 0..W {
+                if self.active & (1 << padded) == 0 && self.links[padded] != mode {
+                    self.links[padded] = mode;
+                    self.rest_links(padded);
+                }
+            }
+        }
+        self.link_lanes = LinkLanes::new(&self.links);
+    }
+
+    /// Whether a link glide is in flight on any lane of the sides a block renders: the left alone
+    /// on a collapsed block, whose right side is frozen.
+    fn gliding<const MONO: bool>(&self) -> bool {
+        self.sides[0].gliding() || (!MONO && self.sides[1].gliding())
+    }
+    // REALTIME_POLICY_END
 
     fn reset(&mut self, kind: ResetKind) {
         for side in &mut self.sides {
             match kind {
                 ResetKind::FullToDefaults => side.full_reset(),
                 ResetKind::DiscontinuityKeepParameters => side.discontinuity_reset(),
+            }
+        }
+        if kind == ResetKind::FullToDefaults {
+            // Issue #1367: the lane keeps its mode, its weights at rest.
+            for lane in 0..W {
+                self.rest_links(lane);
             }
         }
     }
@@ -1121,6 +1280,12 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// `L == R`, in every link mode; the mixed arm selects among those same words per lane, so a
 /// collapsed lane's link partner is its own `L == R` pair at its own mode. A const parameter and
 /// never a runtime flag, so the dual body keeps its own symbol (the roster's M2 lesson).
+///
+/// `GLIDE` (issue #1367 D3) runs a detector link glide in flight: each frame advances both
+/// channels' weights (`glide`, the near side's alone when `MONO`) beside the other ramps, and the
+/// band levels are [`glide_levels`]'. Only a `RAMPING` segment over which some weight is in flight
+/// takes it, and [`process_block`] gives it [`LINK_MIXED`] as `LINK`; every other segment is the
+/// body it was before.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn run_segment<
@@ -1131,15 +1296,18 @@ fn run_segment<
     const RAMPING: bool,
     const ARMABLE: bool,
     const MONO: bool,
+    const GLIDE: bool,
 >(
     sides: &mut [Side<L, W>; 2],
     left: &mut [f32],
     right: &mut [f32],
     frames: usize,
     segments: &mut [Segment<L>; 2],
+    glide: &mut [GlideWeights<L>; 2],
     armed_after: L,
     link_lanes: &LinkLanes<L>,
 ) {
+    const { assert!(!GLIDE || RAMPING, "a glide rides the ramped path") };
     let (head, tail) = sides.split_at_mut(1);
     let near = &mut head[0];
     let far = &mut tail[0];
@@ -1182,6 +1350,13 @@ fn run_segment<
                 split[1] = crossover_coefficients(&segments[1]);
             }
         }
+        if GLIDE {
+            // Issue #1367 D3: the weights take the value of this frame, after its step, like
+            // every other ramped word.
+            for weights in glide.iter_mut().take(sides_moving) {
+                weights.advance();
+            }
+        }
         let input_near = L::load(&left[frame * W..]);
         if BYPASS {
             input_near.store(&mut left[frame * W..]);
@@ -1208,10 +1383,19 @@ fn run_segment<
             };
             lr4_step_when(ARMABLE, input_far, rest_far, &split[1], &mut filter_far)
         };
-        let (linked_near_low, linked_far_low) =
-            link_levels::<L, LINK>(low_near, low_far, link_lanes);
-        let (linked_near_high, linked_far_high) =
-            link_levels::<L, LINK>(high_near, high_far, link_lanes);
+        let ((linked_near_low, linked_far_low), (linked_near_high, linked_far_high)) = if GLIDE {
+            // A collapsed lane's far weights are its near ones, as its far band words are.
+            let far = &glide[usize::from(!MONO)];
+            (
+                glide_levels(low_near, low_far, link_lanes, &glide[0], far),
+                glide_levels(high_near, high_far, link_lanes, &glide[0], far),
+            )
+        } else {
+            (
+                link_levels::<L, LINK>(low_near, low_far, link_lanes),
+                link_levels::<L, LINK>(high_near, high_far, link_lanes),
+            )
+        };
 
         let amplitude_near_low = band_amplitude(
             linked_near_low,
@@ -1276,6 +1460,11 @@ fn run_segment<
 /// side's plan is the dual plan, and the right side stays exactly as the collapse found it but for
 /// the automation drain, which still retargets its ramps from their stale `current`; the
 /// disengage copy overwrites them, so no bit moves.
+///
+/// `GLIDE` (issue #1367 D3) is set on a block that starts with a link glide in flight
+/// ([`render_body`] then passes [`LINK_MIXED`], or the bypass arm): each ramped segment over which
+/// a weight is in flight runs [`run_segment`]'s `GLIDE` body, and every other segment the body it
+/// runs without one. At `false` no segment glides, because no weight is in flight.
 #[inline(always)]
 fn process_block<
     L: Lane,
@@ -1284,6 +1473,7 @@ fn process_block<
     const BYPASS: bool,
     const FORCE_RAMPING: bool,
     const MONO: bool,
+    const GLIDE: bool,
 >(
     instance: &mut Instance<L, W>,
     left: &mut [f32],
@@ -1329,9 +1519,28 @@ fn process_block<
                 );
             }
         }
+        debug_assert!(GLIDE || !plan.gliding, "a glide outside a glide block");
+        // Issue #1367 D3: a glide block renders every segment through the one glide body, the
+        // segments after an arrival included: there the weights rest (no lane gliding, every
+        // step `+0.0`) and the other ramps take the ramped path, both the identity on words at
+        // rest (`flat_sides_are_identity`), so its bits are the flat body's on the mixed arm. One
+        // body per block shape keeps the glide from multiplying the segment bodies.
+        let mut glide = if GLIDE {
+            let near = instance.sides[0].glide_weights();
+            [
+                near,
+                if MONO {
+                    near
+                } else {
+                    instance.sides[1].glide_weights()
+                },
+            ]
+        } else {
+            [GlideWeights::idle(); 2]
+        };
         macro_rules! segment {
-            ($ramping:literal, $armable:literal) => {
-                run_segment::<L, W, LINK, BYPASS, $ramping, $armable, MONO>(
+            ($ramping:literal, $armable:literal, $glide:literal) => {
+                run_segment::<L, W, LINK, BYPASS, $ramping, $armable, MONO, $glide>(
                     &mut instance.sides,
                     &mut left[position * W..(position + length) * W],
                     if MONO {
@@ -1341,18 +1550,26 @@ fn process_block<
                     },
                     length,
                     &mut segments,
+                    &mut glide,
                     armed_after,
                     &link_lanes,
                 )
             };
         }
-        if plan.ramping || FORCE_RAMPING {
-            if armable {
-                segment!(true, true);
-            } else {
-                segment!(true, false);
+        if GLIDE || plan.ramping || FORCE_RAMPING {
+            match (armable, GLIDE) {
+                (true, true) => segment!(true, true, true),
+                (false, true) => segment!(true, false, true),
+                (true, false) => segment!(true, true, false),
+                (false, false) => segment!(true, false, false),
             }
             let advanced = length as u32;
+            if GLIDE {
+                instance.sides[0].store_glide(&glide[0], advanced);
+                if !MONO {
+                    instance.sides[1].store_glide(&glide[1], advanced);
+                }
+            }
             instance.sides[0].store_segment(&segments[0], advanced);
             if !MONO {
                 instance.sides[1].store_segment(&segments[1], advanced);
@@ -1361,9 +1578,9 @@ fn process_block<
             #[cfg(debug_assertions)]
             assert!(instance.flat_sides_are_identity(if MONO { 1 } else { 2 }));
             if armable {
-                segment!(false, true);
+                segment!(false, true, false);
             } else {
-                segment!(false, false);
+                segment!(false, false, false);
             }
             // The write-back is skipped rather than performed and discarded, and that is sound
             // for the same reason the additions are: `store_segment` would write `current` back
@@ -1401,29 +1618,46 @@ fn render_body<L: Lane, const W: usize, const FORCE_RAMPING: bool, const MONO: b
     frames: usize,
     reports: &mut [ProcessReport],
 ) {
-    match (instance.link_lanes.arm, instance.bypass) {
-        (LINK_DUAL_MONO, false) => {
-            process_block::<L, W, LINK_DUAL_MONO, false, FORCE_RAMPING, MONO>(
+    // Issue #1367 D3: a block that starts with a link glide in flight takes the glide-capable
+    // block, whose resting lanes take their own modes' laws from the mixed arm's masks; every
+    // other block takes the arm it took before.
+    match (
+        instance.gliding::<MONO>(),
+        instance.link_lanes.arm,
+        instance.bypass,
+    ) {
+        (true, _, false) => {
+            process_block::<L, W, LINK_MIXED, false, FORCE_RAMPING, MONO, true>(
                 instance, left, right, frames,
             );
         }
-        (LINK_MAXIMUM, false) => {
-            process_block::<L, W, LINK_MAXIMUM, false, FORCE_RAMPING, MONO>(
+        (true, _, true) => {
+            process_block::<L, W, LINK_DUAL_MONO, true, FORCE_RAMPING, MONO, true>(
                 instance, left, right, frames,
             );
         }
-        (LINK_AVERAGE, false) => {
-            process_block::<L, W, LINK_AVERAGE, false, FORCE_RAMPING, MONO>(
+        (false, LINK_DUAL_MONO, false) => {
+            process_block::<L, W, LINK_DUAL_MONO, false, FORCE_RAMPING, MONO, false>(
                 instance, left, right, frames,
             );
         }
-        (_, false) => {
-            process_block::<L, W, LINK_MIXED, false, FORCE_RAMPING, MONO>(
+        (false, LINK_MAXIMUM, false) => {
+            process_block::<L, W, LINK_MAXIMUM, false, FORCE_RAMPING, MONO, false>(
                 instance, left, right, frames,
             );
         }
-        (_, true) => {
-            process_block::<L, W, LINK_DUAL_MONO, true, FORCE_RAMPING, MONO>(
+        (false, LINK_AVERAGE, false) => {
+            process_block::<L, W, LINK_AVERAGE, false, FORCE_RAMPING, MONO, false>(
+                instance, left, right, frames,
+            );
+        }
+        (false, _, false) => {
+            process_block::<L, W, LINK_MIXED, false, FORCE_RAMPING, MONO, false>(
+                instance, left, right, frames,
+            );
+        }
+        (false, _, true) => {
+            process_block::<L, W, LINK_DUAL_MONO, true, FORCE_RAMPING, MONO, false>(
                 instance, left, right, frames,
             );
         }
@@ -1515,7 +1749,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         let sides = if MONO { 1 } else { 2 };
         for side in self.sides.iter_mut().take(sides) {
             for track in 0..W {
-                for ramp in &mut side.ramps[track] {
+                for ramp in side.ramps[track].iter_mut().chain(&mut side.links[track]) {
                     if ramp.remaining == 1 {
                         ramp.snap();
                     }
@@ -1524,6 +1758,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         }
         let mut length = budget;
         let mut ramping = false;
+        let mut gliding = false;
         for side in self.sides.iter().take(sides) {
             for track in 0..W {
                 for ramp in &side.ramps[track] {
@@ -1532,11 +1767,20 @@ impl<L: Lane, const W: usize> Instance<L, W> {
                         length = length.min(ramp.remaining as usize - 1);
                     }
                 }
+                // Issue #1367 D3: a link glide weight splits and keeps the segment ramped as the
+                // other ramps do, so its arrival is a boundary and never inside a segment.
+                for ramp in &side.links[track] {
+                    if ramp.remaining > 0 {
+                        gliding = true;
+                        length = length.min(ramp.remaining as usize - 1);
+                    }
+                }
             }
         }
         SegmentPlan {
             frames: length.max(1),
-            ramping,
+            ramping: ramping || gliding,
+            gliding,
         }
     }
 
@@ -1560,12 +1804,16 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     fn flat_sides_are_identity(&self, sides: usize) -> bool {
         const NEGATIVE_ZERO: u32 = 0x8000_0000;
         self.sides.iter().take(sides).all(|side| {
-            side.ramps[..W].iter().flatten().all(|ramp| {
-                ramp.remaining == 0
-                    && ramp.step.to_bits() == 0
-                    && ramp.current.is_finite()
-                    && ramp.current.to_bits() != NEGATIVE_ZERO
-            })
+            side.ramps[..W]
+                .iter()
+                .flatten()
+                .chain(side.links.iter().flatten())
+                .all(|ramp| {
+                    ramp.remaining == 0
+                        && ramp.step.to_bits() == 0
+                        && ramp.current.is_finite()
+                        && ramp.current.to_bits() != NEGATIVE_ZERO
+                })
         })
     }
 
@@ -1737,8 +1985,9 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 // ---------------------------------------------------------------------------------------------
 //
 // Per channel: crossover, the two smoother words, ten four-word parameter ramps, the four filter
-// words, the silence counter, the four four-word coefficient ramps (issue #1069), and the three
-// four-word crossover word ramps (issue #1338).
+// words, the silence counter, the four four-word coefficient ramps (issue #1069), the three
+// four-word crossover word ramps (issue #1338), and the two four-word link glide weights (issue
+// #1367 D4).
 
 /// Word offset of the first filter word.
 const FILTER_WORD: usize = 3 + RAMP_COUNT * RAMP_WORDS;
@@ -1748,6 +1997,9 @@ const SILENCE_WORD: usize = FILTER_WORD + 4;
 const RATE_WORD: usize = SILENCE_WORD + 1;
 /// Word offset of the first crossover word ramp, after the coefficient ramps (issue #1338).
 const CROSSOVER_WORD: usize = RATE_WORD + RATE_COUNT * RAMP_WORDS;
+/// Word offset of the first link glide weight (`w_link`, then `w_avg`), after the crossover word
+/// ramps (issue #1367 D4).
+const LINK_WORD: usize = CROSSOVER_WORD + CROSSOVER_WORDS * RAMP_WORDS;
 /// The silence counter's saturation, `2^24`.
 const SILENCE_SATURATION: f32 = 16_777_216.0;
 
@@ -1776,6 +2028,10 @@ struct StagedSide {
     ramps: [LinearRamp; RAMP_SLOTS],
     filter: [f32; 4],
     silence: f32,
+    /// The two link glide weights (issue #1367 D4).
+    links: [LinearRamp; LINK_WEIGHTS],
+    /// The mode the weights glide to, decoded from their targets.
+    mode: LinkMode,
 }
 
 fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, track: usize) {
@@ -1813,6 +2069,9 @@ fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, trac
             CROSSOVER_WORD + word * RAMP_WORDS,
             side.ramps[track][crossover_slot(word)],
         );
+    }
+    for (weight, ramp) in side.links[track].iter().enumerate() {
+        write_ramp(bytes, LINK_WORD + weight * RAMP_WORDS, *ramp);
     }
 }
 
@@ -1939,12 +2198,37 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
         }
         point = walk.each_mut().map(LinearRamp::next_value);
     }
+    // Issue #1367 D4 (#1370 D6): each weight lies in `[0, 1]` on its whole path, the engine never
+    // holds `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in `{0, 1}`,
+    // `c` a word of an earlier glide and `n <= 2^24`, never `0`), a settled weight holds its
+    // target, and the two targets are exactly one supported mode's rest weights.
+    let mut links = [LinearRamp::fixed(0.0); LINK_WEIGHTS];
+    for (weight, link) in links.iter_mut().enumerate() {
+        let read = read_ramp(bytes, LINK_WORD + weight * RAMP_WORDS);
+        let valid = read.current.to_bits() != (-0.0_f32).to_bits()
+            && (read.remaining == 0 || read.step != 0.0)
+            && (read.remaining != 0 || read.current.to_bits() == read.target.to_bits())
+            && ramp_path_inside(read, (0.0, 1.0), effect_contract::LINK_GLIDE_MAX_SAMPLES);
+        if !valid {
+            return Err(state_error("effect.state.link"));
+        }
+        *link = read;
+    }
+    let mode = effect_contract::link_glide_mode([links[0].target, links[1].target])
+        .filter(|mode| {
+            MULTIBAND_COMPRESSOR_DESCRIPTOR
+                .supported_link_modes
+                .contains(*mode)
+        })
+        .ok_or(state_error("effect.state.link"))?;
     Ok(StagedSide {
         crossover_hz,
         gains: [normalize_zero(gains[0]), normalize_zero(gains[1])],
         ramps,
         filter,
         silence,
+        links,
+        mode,
     })
 }
 
@@ -2014,8 +2298,19 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         self.validate_lengths((input.common.len(), input.left.len(), input.right.len()))?;
         let left = stage_side(input.left, self.sample_rate)?;
         let right = stage_side(input.right, self.sample_rate)?;
+        if left.mode != right.mode {
+            return Err(state_error("effect.state.link"));
+        }
         commit_side(&mut self.sides[0], &left, track);
         commit_side(&mut self.sides[1], &right, track);
+        // Issue #1367 D4 (#1370 D6): the weights land only under the mode they glide to. A
+        // payload taken under another mode leaves the lane's own mode at rest.
+        if left.mode == self.links[track] {
+            self.sides[0].links[track] = left.links;
+            self.sides[1].links[track] = right.links;
+        } else {
+            self.rest_links(track);
+        }
         Ok(())
     }
 }
@@ -2138,9 +2433,12 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// four fields each: `remaining` decides whether a ramp moves and when it snaps (and so where
     /// a segment ends), and `current`, `step` and `target` are what it moves and where it stops.
     ///
+    /// The lane's two link glide weights (issue #1367) are designed words too, all four fields:
+    /// a glide in flight blends the lane's detector with them.
+    ///
     /// Deliberately excluded: `prepared_rates`, `prepared_designed`, `crossover_hz` and
     /// `defaults`, which the kernel never loads (a reset or a span that made the channels disagree
-    /// shows in the ramps); `sample_rate` and `bypass`, which are whole-instance; and
+    /// shows in the ramps); `sample_rate` and `bypass`, which are whole-instance; and `links` and
     /// `link_lanes`, each lane's mode, which is one value for both channels of the lane.
     ///
     /// Raw bits, so `+0.0` against `-0.0` declines. A lane past the width declines.
@@ -2151,7 +2449,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         let [left, right] = &self.sides;
         left.ramps[lane]
             .iter()
-            .zip(&right.ramps[lane])
+            .chain(&left.links[lane])
+            .zip(right.ramps[lane].iter().chain(&right.links[lane]))
             .all(|(l, r)| ramp_bits(l) == ramp_bits(r))
     }
 
@@ -2170,14 +2469,16 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         right.silence = left.silence;
         right.gain_db = left.gain_db;
         right.ramps = left.ramps;
+        // Issue #1367: the link glide weights are per-channel render state too.
+        right.links = left.links;
         self.collapsed = false;
     }
 
     /// [`PreparedNativeEffectBank::channels_agree`] (issue #1871): every word
     /// [`desymmetrize`](Self::desymmetrize) copies compares bit-equal between the channels, on
     /// every lane: seven lane words (four crossover, the silence counter, two smoother words)
-    /// and the seventeen ramps' four words per track. Small enough to compare outright; no fixed
-    /// point is needed.
+    /// and the seventeen ramps' and two link glide weights' (issue #1367) four words per track.
+    /// Small enough to compare outright; no fixed point is needed.
     fn channels_bit_equal(&self) -> bool {
         let words = |side: &Side<L, W>| {
             [
@@ -2197,7 +2498,14 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             .ramps
             .iter()
             .flatten()
-            .zip(right.ramps.iter().flatten())
+            .chain(left.links.iter().flatten())
+            .zip(
+                right
+                    .ramps
+                    .iter()
+                    .flatten()
+                    .chain(right.links.iter().flatten()),
+            )
             .all(|(l, r)| ramp_bits(l) == ramp_bits(r))
     }
 }
@@ -2290,7 +2598,7 @@ fn bind_instance<L: Lane, const W: usize>(
     // move an active lane's bits, because a clone fed `+0.0` rests like any lane. `active` keeps
     // them out of every charge, report, automation and payload.
     let mut instance = Instance::<L, W>::new(left, right, metadata).ok_or(PREPARE_FAILED)?;
-    instance.link_lanes = LinkLanes::new(&links);
+    instance.seat_links(&links);
     instance.active = request
         .active_mask
         .iter()
@@ -2391,6 +2699,11 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
         self.instance.designed_channel_symmetry(0)
     }
 
+    /// Issue #1367 D3: `Instance::retarget_link` on track 0.
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        track == 0 && self.instance.retarget_link(0, mode, samples)
+    }
+
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
         self.instance.apply_automation(
@@ -2489,6 +2802,17 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
     /// Issue #1871: `Instance::designed_channel_symmetry`.
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
         self.instance.designed_channel_symmetry(lane)
+    }
+
+    /// Issue #1367 D3: `Instance::retarget_link`; a padded lane takes no glide. An accepted glide
+    /// withdraws the silent fixed-point claim (the next quiet block that ends at rest re-earns
+    /// it).
+    fn retarget_link(&mut self, track: usize, mode: LinkMode, samples: u32) -> bool {
+        let accepted = self.instance.retarget_link(track, mode, samples);
+        if accepted {
+            self.silent_fixed_point = false;
+        }
+        accepted
     }
 
     fn supports_mono_collapse(&self) -> bool {

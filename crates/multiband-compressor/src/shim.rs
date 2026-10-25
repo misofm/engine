@@ -10,6 +10,7 @@
 
 use effect_contract::LinkMode;
 use lane::Lane;
+use lane::kernels::ramp_toward;
 
 /// Dual mono: each channel keeps its own detector level.
 pub(crate) const LINK_DUAL_MONO: u8 = 0;
@@ -60,6 +61,83 @@ impl<L: Lane> LinkLanes<L> {
             arm,
         }
     }
+}
+
+/// The detector link glide weights per channel and lane (issue #1367 D3, #1370 D2): `w_link`,
+/// then `w_avg`.
+pub(crate) const LINK_WEIGHTS: usize = 2;
+
+/// One channel's link glide weights across the lanes for one segment (issue #1367 D3): gathered
+/// from the lanes' ramps at the segment's start, advanced once a frame by [`advance`](Self::advance)
+/// and written back at its end, like the seventeen parameter, rate and crossover ramps.
+///
+/// `gliding` is set on a lane whose either weight is in flight. It is constant over a segment: the
+/// segment split snaps every ramp one sample from its target at a boundary and ends each segment
+/// before the next arrival, so no weight arrives inside one.
+#[derive(Clone, Copy)]
+pub(crate) struct GlideWeights<L: Lane> {
+    pub(crate) current: [L; LINK_WEIGHTS],
+    pub(crate) step: [L; LINK_WEIGHTS],
+    pub(crate) target: [L; LINK_WEIGHTS],
+    pub(crate) gliding: L::Mask,
+}
+
+impl<L: Lane> GlideWeights<L> {
+    /// No lane gliding and every word `+0.0`: the value a segment with no glide carries and never
+    /// reads.
+    #[inline(always)]
+    pub(crate) fn idle() -> Self {
+        let zero = L::zero();
+        Self {
+            current: [zero; LINK_WEIGHTS],
+            step: [zero; LINK_WEIGHTS],
+            target: [zero; LINK_WEIGHTS],
+            gliding: zero.gt(zero),
+        }
+    }
+
+    /// One frame of each weight: `ramp_toward(current, step, target)`, the step the other ramps
+    /// take (issue #1409's clamped law). A resting weight's step is `+0.0` and its word `0.0` or
+    /// `1.0`, so the update is the identity there.
+    #[inline(always)]
+    pub(crate) fn advance(&mut self) {
+        for weight in 0..LINK_WEIGHTS {
+            self.current[weight] =
+                ramp_toward(self.current[weight], self.step[weight], self.target[weight]);
+        }
+    }
+}
+
+/// [`link_levels`] while a link glide is in flight (issue #1367 D3, #1370 D3).
+///
+/// Each lane's prepared law is the [`LINK_MIXED`] arm's word, its own mode's bits whatever its
+/// bank-mates' modes. On each channel, a lane whose weights still glide takes instead the blend
+/// `combined = max + w_avg * (avg - max)`, `d = own + w_link * (combined - own)` of the frame's
+/// advanced weights, each a separate `mul` and `add` (base Wasm SIMD has no fused multiply-add),
+/// with `own`, `max` and `avg` in [`link_levels`]' frozen order. A resting lane, the arriving one
+/// included, keeps the prepared word: a blend at rest weights equals it on finite words, but not
+/// on non-finite ones (`0 * inf`), so the `select` is load-bearing.
+#[inline(always)]
+pub(crate) fn glide_levels<L: Lane>(
+    left: L,
+    right: L,
+    lanes: &LinkLanes<L>,
+    near: &GlideWeights<L>,
+    far: &GlideWeights<L>,
+) -> (L, L) {
+    let (prepared_left, prepared_right) = link_levels::<L, LINK_MIXED>(left, right, lanes);
+    let (left, right) = (left.abs(), right.abs());
+    let maximum = left.max(right);
+    let half = L::splat(0.5);
+    let average = half.mul(left).add(half.mul(right));
+    let blend = |own: L, weights: &GlideWeights<L>| {
+        let combined = maximum.add(weights.current[1].mul(average.sub(maximum)));
+        own.add(weights.current[0].mul(combined.sub(own)))
+    };
+    (
+        L::select(near.gliding, blend(left, near), prepared_left),
+        L::select(far.gliding, blend(right, far), prepared_right),
+    )
 }
 
 /// One sample of a log-domain branching smoother.
