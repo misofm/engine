@@ -1997,13 +1997,7 @@ fn reply_status(response: &[u8]) -> (u16, Vec<String>) {
 /// Designate strip `strip` the master through the production control entry (#1689 D6): the
 /// header names it at once.
 fn designate_master(host: &mut AudioWorkletEngineHost, strip: &str) {
-    use core::sync::atomic::{AtomicU64, Ordering};
-    static REQUEST: AtomicU64 = AtomicU64::new(1 << 40);
-    let frame = master_designation_frame(
-        strip,
-        REQUEST.fetch_add(1, Ordering::Relaxed),
-        host.committed_revision(),
-    );
+    let frame = master_designation_frame(strip, next_request_id(), host.committed_revision());
     host.control_request_mut(frame.len() as u32)
         .expect("the control staging")[..frame.len()]
         .copy_from_slice(&frame);
@@ -4074,7 +4068,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     assert_eq!(
         observe(&mut host, 0, 1, 0, 1, 2, true),
         Ok(()),
-        "the existing observe command remains the only arming path"
+        "the core's Observe edit arms the tap"
     );
     let pending = host
         .read_observations(&[selection])
@@ -4121,9 +4115,14 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
 
     // A re-arm is admitted before the next render block, but the reader still retains the prior
     // resident cell. That old publication is before the admitted application sample and must not
-    // look ready while a replacement window is being built. (A subscription to an armed tap is
-    // the re-arm: it restarts the window, and the effect's one-slot queue holds just it.)
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), Ok(()));
+    // look ready while a replacement window is being built. (The disarm of the two-block window
+    // and the arm of a one-block window in one transaction is the core's re-arm: it restarts the
+    // window, and the effect's one-slot queue holds just it.)
+    let rearm = [
+        observe_edit_at(&host, 0, 1, 0, 1, 2, false),
+        observe_edit_at(&host, 0, 1, 0, 1, 1, true),
+    ];
+    assert_eq!(apply_observe(&mut host, &rearm), Ok(()));
     let rearmed_pending = host
         .read_observations(&[selection])
         .expect("re-arm pending selected read");
@@ -4157,7 +4156,9 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
         .expect("two-effect selected read");
     assert_eq!(pair.len(), 2);
     assert_eq!(pair[0].track_id.as_ref(), "t0");
-    assert_eq!(pair[0].window.map(|window| window.first_sample), Some(256));
+    // The re-arm applied at block 2 (sample 256); the latest of its one-block windows opened at
+    // block 3.
+    assert_eq!(pair[0].window.map(|window| window.first_sample), Some(384));
     assert_eq!(pair[1].track_id.as_ref(), "t2");
     assert_eq!(pair[1].window, Some(expected_gate));
     assert_eq!(pair[1].left, Some(expected_gate.left));
@@ -4183,7 +4184,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
 
     // #1585: a disarm is in effect when it is accepted, before a block drains it; no later window
     // belongs to the subscription it ends.
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), Ok(()));
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 1, false), Ok(()));
     let disarmed = host
         .read_observations(&[selection])
         .expect("disarmed selected read");
@@ -4450,6 +4451,16 @@ fn observe_key(
     )
 }
 
+/// A request ID above every one a test sent before it: the replay cache refuses an ID at or below
+/// the highest it has seen (`REPLAY_EXPIRED`), so the helpers that send frames on a test's behalf
+/// ([`apply_observe`], [`designate_master`]) and a test that mixes them with its own frames draw
+/// from this one monotone sequence.
+fn next_request_id() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static REQUEST: AtomicU64 = AtomicU64::new(1 << 40);
+    REQUEST.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Send `edits` in one `SESSION_TRANSACTION_APPLY` at the committed revision through the browser's
 /// control entry, as an app arms and disarms a tap since #1589c deleted the observation records.
 /// `Ok` when the core applied the transaction, else the codes of its diagnostics, or `result N`
@@ -4459,19 +4470,16 @@ fn apply_observe(
     host: &mut AudioWorkletEngineHost,
     edits: &[protocol::SessionEdit],
 ) -> Result<(), Vec<String>> {
-    use core::sync::atomic::{AtomicU64, Ordering};
     use protocol::{
         CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
         RequestId, SessionRevision, TypedCommandFrame,
     };
-    static REQUEST: AtomicU64 = AtomicU64::new(1 << 42);
     let codec = ProtocolCodec::default();
     let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
     let length = codec
         .encode_command_frame_into(
             &TypedCommandFrame {
-                request_id: RequestId::new(REQUEST.fetch_add(1, Ordering::Relaxed))
-                    .expect("nonzero request"),
+                request_id: RequestId::new(next_request_id()).expect("nonzero request"),
                 expected_revision: ExpectedRevision::Exact(SessionRevision(
                     host.committed_revision(),
                 )),
@@ -4924,7 +4932,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
     assert_eq!(
         unbound,
         (
-            protocol::StatusCode::Unavailable as u16,
+            protocol::StatusCode::ValidationFailed as u16,
             vec!["observation.unavailable".to_owned()]
         )
     );
@@ -7371,7 +7379,7 @@ mod structural_apply {
         let mut rig = Rig::boot(&model, options());
         rig.step();
         assert!(matches!(
-            rig.apply(&first, 1),
+            rig.apply(&first, next_request_id()),
             Outcome::Applied {
                 path: EditPath::Rebuild,
                 ..
@@ -7383,7 +7391,7 @@ mod structural_apply {
             "the subscription is acked against the pending candidate"
         );
         assert!(matches!(
-            rig.apply(&second, 2),
+            rig.apply(&second, next_request_id()),
             Outcome::Applied {
                 path: EditPath::Rebuild,
                 ..
@@ -7463,7 +7471,7 @@ mod structural_apply {
         let mut rig = Rig::boot(&model, options());
         rig.step();
         assert!(matches!(
-            rig.apply(&put(restarted), 1),
+            rig.apply(&put(restarted), next_request_id()),
             Outcome::Applied {
                 path: EditPath::Rebuild,
                 ..
@@ -7475,7 +7483,7 @@ mod structural_apply {
             "the subscription is acked against the pending candidate"
         );
         assert!(matches!(
-            rig.apply(&put(original), 2),
+            rig.apply(&put(original), next_request_id()),
             Outcome::Applied {
                 path: EditPath::Rebuild,
                 ..
@@ -8031,7 +8039,7 @@ mod structural_apply {
 
         let base = rig.host.committed_revision();
         assert!(matches!(
-            rig.apply(&add_muted_track(&model, ADDED), 1),
+            rig.apply(&add_muted_track(&model, ADDED), next_request_id()),
             Outcome::Applied {
                 path: EditPath::Rebuild,
                 revision
@@ -8354,7 +8362,7 @@ mod structural_apply {
                     final_position: 0,
                     effect: restarted,
                 }],
-                1
+                next_request_id()
             ),
             Outcome::Applied {
                 path: EditPath::Rebuild,
@@ -8434,7 +8442,7 @@ mod structural_apply {
                     rack_name: session::RackName::Inserts,
                     effect_id: model.tracks[0].inserts.effects[0].id.clone(),
                 }],
-                1
+                next_request_id()
             ),
             Outcome::Applied {
                 path: EditPath::Rebuild,
@@ -8535,7 +8543,7 @@ mod structural_apply {
         }];
         first.extend(track(0, "t0"));
         assert!(matches!(
-            rig.apply(&first, 1),
+            rig.apply(&first, next_request_id()),
             Outcome::Applied {
                 path: EditPath::Rebuild,
                 ..
@@ -8546,13 +8554,13 @@ mod structural_apply {
         // An unknown strip is refused before commit, and nothing is designated.
         let revision = rig.host.committed_revision();
         assert!(matches!(
-            rig.apply(&[master_edit("nobody", true)], 2),
+            rig.apply(&[master_edit("nobody", true)], next_request_id()),
             Outcome::Refused(..)
         ));
         assert_eq!(rig.host.meter_header().master_track_plus_one, 0);
 
         assert_eq!(
-            rig.apply(&[master_edit("t0", true)], 3),
+            rig.apply(&[master_edit("t0", true)], next_request_id()),
             Outcome::Applied {
                 path: EditPath::Monitor,
                 revision,
@@ -8595,7 +8603,7 @@ mod structural_apply {
         // A track whose ID sorts first arrives by a rebuild: t0 is strip 1 now, and stays the
         // master.
         assert!(matches!(
-            rig.apply(&track(1, "a0"), 4),
+            rig.apply(&track(1, "a0"), next_request_id()),
             Outcome::Applied {
                 path: EditPath::Rebuild,
                 ..
@@ -8611,7 +8619,7 @@ mod structural_apply {
         // Cleared: absent, not zero.
         let revision = rig.host.committed_revision();
         assert_eq!(
-            rig.apply(&[master_edit("t0", false)], 5),
+            rig.apply(&[master_edit("t0", false)], next_request_id()),
             Outcome::Applied {
                 path: EditPath::Monitor,
                 revision,
