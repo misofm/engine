@@ -870,6 +870,9 @@ pub enum TestStructuralFaultPhase {
     /// A panic inside a rebuild, after the pending candidate was withdrawn and the successor
     /// prepared, before admission (#2010).
     PanicAfterWithdrawal,
+    /// A panic where a rebuild publishes a warm candidate's `Primed` schedule, standing in for
+    /// that step's `expect` (#2044): the last step that can panic before the candidate is taken.
+    PanicAtPrimedPublication,
 }
 
 /// How many of each owner the structural and live paths constructed, published and disposed.
@@ -5197,11 +5200,12 @@ where
     /// #2010: a panic inside the rebuild before its commit republishes the candidate too, then
     /// resumes the panic, so a host that catches it (the C ABI answers `RESULT_INTERNAL`) keeps
     /// the candidate whose revisions it acked. Under `panic = "abort"` nothing unwinds and this
-    /// changes nothing. A panic after the commit, which has taken the candidate, is not covered.
-    /// Nor is a panic between the protocol commit (`prepared.commit`) and `withdrawn.take()`: it
-    /// still republishes the candidate, but over a half-committed controller, which then holds the
-    /// successor's model, revision, monitor overlay, observation and send moves while the
-    /// candidate renders (#2010 R2; a successor issue).
+    /// changes nothing. #2044: every step of the rebuild that can panic runs before the protocol
+    /// commit (`prepared.commit`), and the candidate is taken right after it, before any write to
+    /// the controller's own fields; only `take_displaced`, which cannot panic, runs between them.
+    /// So `withdrawn` is still `Some` exactly when the protocol commit did not happen, and a
+    /// republished candidate always meets the controller it was published under. A panic after
+    /// the take, which has taken the candidate, is not covered.
     fn rebuild_superseding(
         &mut self,
         kind: Rebuild,
@@ -5244,6 +5248,15 @@ where
             self.publisher.republish(candidate);
             #[cfg(feature = "test-support")]
             update_test_owners(|owners| owners.candidate_republished += 1);
+            // #2044: the rebuild holds the report lock from its capacity check to the publication,
+            // so a panic in that stretch before the commit poisons it, and every later service
+            // would refuse. The candidate is still here, so the panic came before the take, and
+            // the rebuild writes the table only after the take: it holds the rows it held before
+            // the call, and the poison is cleared. A no-op when nothing panicked or the lock was
+            // not held.
+            if result.is_err() {
+                self.shared.reports.clear_poison();
+            }
         }
         result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
     }
@@ -6148,28 +6161,19 @@ where
             }
             None => None,
         };
-        let (committed, displaced) = match kind {
-            Rebuild::Transaction(prepared) => {
-                // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
-                let mut committed = prepared
-                    .commit(&mut self.controller, protocol::EditPath::Rebuild)
-                    .map_err(|_| CommandError::Internal)?;
-                // #1310 D3: the model the commit displaced, never one committed in place (#1613).
-                let displaced = committed.take_displaced();
-                debug_assert!(displaced.is_some(), "a rebuild displaces a compiled model");
-                (Some(committed), displaced)
-            }
-            // #1323 D4: nothing is committed. The copy of the committed model is the base the
-            // epoch this successor displaces keeps (the model that epoch renders), or, across a
-            // withdrawn candidate, drops below as a commit's displaced model does.
-            Rebuild::Discontinuity(model)
-            | Rebuild::Monitor { model, .. }
-            | Rebuild::Transition { model, .. } => (None, Some(*model)),
-        };
-        // #1403 D3: a warm candidate's flags and `Primed` schedule, after the last fallible step
-        // and before its set takes any producer or donated ring: each entry it holds vacant is
-        // then a ring it carries from the plan it displaces, whose producer is still in that
-        // plan's set, or, across a withdrawn candidate, in the withdrawn candidate's.
+        // #1403 D3: a warm candidate's flags and `Primed` schedule, before its set takes any
+        // producer or donated ring: each entry it holds vacant is then a ring it carries from the
+        // plan it displaces, whose producer is still in that plan's set, or, across a withdrawn
+        // candidate, in the withdrawn candidate's. It sets the prime flags of rings render reads,
+        // so it runs after the last refusal: the commit below cannot refuse once its predicate
+        // passed above, with no controller write between. #2044: it runs before the protocol
+        // commit, as the last step that can panic, so a panic here (its `expect`, which fires
+        // before any flag is set) leaves the controller as it was and republishes the withdrawn
+        // candidate (#2010).
+        #[cfg(feature = "test-support")]
+        if take_test_fault_state(TestStructuralFaultPhase::PanicAtPrimedPublication) {
+            panic!("test fault: a rebuild panics where it publishes the primed schedule");
+        }
         let mut primed = warm_lead_blocks.map(|lead_blocks| {
             let (running, withdrawn_sources) = if superseding {
                 let len = self.pending_providers.len();
@@ -6195,6 +6199,30 @@ where
                 lead_blocks,
             )
         });
+        let (committed, displaced) = match kind {
+            Rebuild::Transaction(prepared) => {
+                // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
+                let mut committed = prepared
+                    .commit(&mut self.controller, protocol::EditPath::Rebuild)
+                    .map_err(|_| CommandError::Internal)?;
+                // #1310 D3: the model the commit displaced, never one committed in place (#1613).
+                // `take_displaced` is `Option::take`, the one step between the commit and the
+                // candidate's take (#2044), and it cannot panic. It is `Some`: the preparation
+                // refused a token without a compilation (`compiled().ok_or`), and a compiled
+                // token always displaces the committed model.
+                let displaced = committed.take_displaced();
+                (Some(committed), displaced)
+            }
+            // #1323 D4: nothing is committed. The copy of the committed model is the base the
+            // epoch this successor displaces keeps (the model that epoch renders), or, across a
+            // withdrawn candidate, drops below as a commit's displaced model does.
+            Rebuild::Discontinuity(model)
+            | Rebuild::Monitor { model, .. }
+            | Rebuild::Transition { model, .. } => (None, Some(*model)),
+        };
+        // #2044: the candidate is taken first, so no write below precedes the step after which a
+        // panic no longer republishes it.
+        let withdrawn = withdrawn.take();
         // B19-R7: the rebuild's own send moves ramp from its successor's first block.
         fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
@@ -6204,7 +6232,7 @@ where
         self.observation = observation_change.bindings;
         // From here on nothing fails.
         let mut superseded = None;
-        let superseded_revisions = match withdrawn.take() {
+        let superseded_revisions = match withdrawn {
             Some(candidate) => {
                 // #1310 D5 step 2: the checked donation, then the producers of the sources B
                 // carries from P0, which A's commit had moved into A's set. A's own model, which

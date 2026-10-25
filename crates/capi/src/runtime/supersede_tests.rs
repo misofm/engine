@@ -379,6 +379,11 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
 /// Test value: red if the panic drops the withdrawn candidate: T1's acked revision then never
 /// renders, T3 promotes the lost epoch as adopted, and the rings the producers feed after the seek
 /// are not the ones render reads, so they fill.
+///
+/// #2044: the same run with T2 panicking where the rebuild publishes the primed schedule, its
+/// last step that can panic before the candidate is taken. Red if that step (or any later one that
+/// can panic) runs after the protocol commit: the controller then holds T2's revision and model
+/// while T1's candidate renders.
 #[test]
 fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
     let model = stateless_session(48_000);
@@ -406,7 +411,7 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
             assert_eq!(report.accepted_frames, 128, "block {block}");
         }
     };
-    let run = |panics: bool| {
+    let run = |panics: Option<TestStructuralFaultPhase>| {
         control_plane::test_reset_lifecycle_observer();
         let mut children = compile(&model, limits());
         submit_direct(&mut children, &[FIXTURE], 0);
@@ -414,12 +419,16 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
         commit(&mut children, 1, 42, &first);
         submit_direct(&mut children, &[ADDED], 0);
         submit_direct(&mut children, &[FIXTURE, ADDED], 1);
-        if panics {
+        if let Some(phase) = panics {
             let epoch = children.session.test_pending_providers()[0].test_epoch();
-            children.session.test_set_structural_faults([
-                Some(TestStructuralFaultPhase::PanicAfterWithdrawal),
-                None,
-            ]);
+            let committed = children
+                .session
+                .committed_session()
+                .normalized_model()
+                .clone();
+            children
+                .session
+                .test_set_structural_faults([Some(phase), None]);
             let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 children
                     .session
@@ -432,11 +441,16 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
                 (1, 1),
                 "the withdrawn candidate is republished"
             );
-            assert_eq!(revision(&children), 43, "the revision is T1's");
+            assert_eq!(revision(&children), 43, "{phase:?}: the revision is T1's");
+            assert_eq!(
+                children.session.committed_session().normalized_model(),
+                &committed,
+                "{phase:?}: the committed model is T1's"
+            );
             assert_eq!(
                 children.session.test_pending_providers()[0].test_epoch(),
                 epoch,
-                "T1's candidate stays pending with its own epoch"
+                "{phase:?}: T1's candidate stays pending with its own epoch"
             );
         }
         let (mut blocks, next) =
@@ -458,13 +472,12 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
         assert!(children.session.test_pending_providers().is_empty());
         drop(children);
         assert_balanced(
-            if panics { "panicked" } else { "reference" },
+            &format!("{panics:?}"),
             control_plane::test_lifecycle_counters(),
         );
         blocks
     };
-    let reference = run(false);
-    let panicked = run(true);
+    let reference = run(None);
     assert!(
         reference
             .last()
@@ -473,9 +486,15 @@ fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
             .any(|sample| *sample != 0.0),
         "the compared blocks play"
     );
-    assert_eq!(reference.len(), panicked.len(), "the same block count");
-    for (block, (actual, expected)) in panicked.iter().zip(&reference).enumerate() {
-        assert_eq!(bits(actual), bits(expected), "block {block}");
+    for phase in [
+        TestStructuralFaultPhase::PanicAfterWithdrawal,
+        TestStructuralFaultPhase::PanicAtPrimedPublication,
+    ] {
+        let panicked = run(Some(phase));
+        assert_eq!(reference.len(), panicked.len(), "{phase:?}: the same block count");
+        for (block, (actual, expected)) in panicked.iter().zip(&reference).enumerate() {
+            assert_eq!(bits(actual), bits(expected), "{phase:?}: block {block}");
+        }
     }
 }
 
