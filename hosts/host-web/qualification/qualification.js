@@ -3,8 +3,8 @@ import { hexLower } from "../web/hex-lower.js";
 const SAMPLE_RATE = 48000;
 const QUANTUM_FRAMES = 128;
 const CORPUS_FRAMES = QUANTUM_FRAMES * 3;
-const DEFAULT_RING_FRAMES = 5120;
-const STALL_FRAMES = DEFAULT_RING_FRAMES;
+const STALL_RING_FRAMES = 5120;
+const STALL_FRAMES = STALL_RING_FRAMES;
 const STALL_RENDER_FRAMES = STALL_FRAMES;
 const REQUESTED_STALL_MS = 120;
 // Issue #137: the live-control rows. 130 blocks is one full 128-block telemetry window plus slack,
@@ -32,7 +32,7 @@ const UNSUBSCRIBE_ARMED_FRAMES = 4;
 // D4: more frames after the acknowledgement than the ring holds blocks, so a feed that stopped at
 // the acknowledgement cannot supply them from the ring alone.
 const UNSUBSCRIBE_SIGNAL_FRAMES = 48;
-const RING_BLOCKS = DEFAULT_RING_FRAMES / QUANTUM_FRAMES;
+const RING_BLOCKS = STALL_RING_FRAMES / QUANTUM_FRAMES;
 // The fed signal is a +-0.5 square wave. The lowest track peak measured after the acknowledgement
 // is 0.0815 in all three browsers (#1535 attempt 1), 1.6 times this floor; a block of zeros (an
 // underrun) peaks at 0.
@@ -256,7 +256,7 @@ async function typedUnsupportedAttestation(createHost, sessionDocument) {
     await createHost({
       context,
       document: sessionDocument,
-      options: bootOptions(DEFAULT_RING_FRAMES),
+      options: bootOptions(STALL_RING_FRAMES),
       simd128ModuleUrl: ARTIFACT_URL,
       workletModuleUrl: WORKLET_URL,
     });
@@ -1214,7 +1214,7 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     context,
     document: sessionDocument,
     options: bootOptions(
-      DEFAULT_RING_FRAMES,
+      STALL_RING_FRAMES,
       UNSUBSCRIBE_METER_BLOCKS,
       OBSERVATION_TAPS,
     ),
@@ -1439,7 +1439,7 @@ async function runStallQualification(createHost, sessionDocument) {
     // 100 ms fault is survived under exactly the command and metering load a mixing console
     // imposes -- and the frozen exact-output requirement is unchanged.
     options: bootOptions(
-      DEFAULT_RING_FRAMES,
+      STALL_RING_FRAMES,
       LIVE_CONTROL_METER_BLOCKS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
@@ -1505,7 +1505,7 @@ async function runStallQualification(createHost, sessionDocument) {
     requestedStallMs: REQUESTED_STALL_MS,
     minimumStallMs: MINIMUM_STALL_MS,
     measuredStallMs,
-    ringFrames: DEFAULT_RING_FRAMES,
+    ringFrames: STALL_RING_FRAMES,
     renderedFrames: STALL_FRAMES,
     nextAbsoluteSample: status.nextAbsoluteSample.toString(),
     renderedQuanta: status.renderedQuanta.toString(),
@@ -1855,7 +1855,7 @@ export async function runQualification() {
 }
 
 export const qualificationConstants = Object.freeze({
-  defaultRingFrames: DEFAULT_RING_FRAMES,
+  stallRingFrames: STALL_RING_FRAMES,
   minimumStallMs: MINIMUM_STALL_MS,
   processorName: PROCESSOR_NAME,
   quantumFrames: QUANTUM_FRAMES,

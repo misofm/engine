@@ -17,10 +17,7 @@ import {
 } from "./policy.ts";
 import type { BrowserBootPolicy } from "./policy.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
-import type {
-  MisoAudioWorkletHost,
-  MisoSpectrumStreamMetadata,
-} from "./shipped-host.d.ts";
+import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
 import { createMeasurementFeeds } from "./measurement.ts";
 import { linkFeedEngine } from "./pcm-feed.ts";
 import type {
@@ -34,11 +31,11 @@ import { createDefaultHost, BrowserBootError } from "./default-host.ts";
 import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
-import { ProtocolClient, decodeProtocolEvent } from "../core/protocol-messages.ts";
+import { ProtocolClient, decodeCapabilitiesReply, decodeProtocolEvent } from "../core/protocol-messages.ts";
 import { AppliedLedger, watermarkSnapshot } from "../core/session-edit.ts";
 import type { EditOutcome, WatermarkSnapshot } from "../core/session-edit.ts";
 import type { SessionTransaction } from "../core/session-transaction.ts";
-import { controlCallFailure } from "../core/control-frame.ts";
+import { controlCallFailure, encodeRevisionProbe, malformed } from "../core/control-frame.ts";
 import type { ControlTransactionQueue } from "../core/control-queue.ts";
 import type {
   CommittedDocument,
@@ -53,26 +50,39 @@ import type {
   TransportSnapshot,
 } from "../core/protocol-messages.ts";
 import { isResponseReady } from "../core/response-frame.ts";
-import { createSpectrum } from "./response.ts";
-import type { BrowserSpectrum } from "./response.ts";
 import { TrackResponseRequester } from "../core/live-response.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import type { ResponseWorkerFactory } from "./response-worker.ts";
 import {
   cloneSpectrumCollection,
   cloneSpectrumQuery,
-  cloneSpectrumStreamMetadata,
+  spectrumCallResult,
+  spectrumConfigureRequest,
+  spectrumConfiguredOf,
+  spectrumMetadataOf,
+  spectrumRefusalError,
+  spectrumResultOfStream,
+  spectrumResultOfWindow,
+  spectrumSelection,
 } from "../core/spectrum.ts";
 import type {
   SpectrumCollection,
+  SpectrumConfigureOptions,
+  SpectrumConfigured,
+  SpectrumHopFrames,
   SpectrumQuery,
   SpectrumResult,
   SpectrumStreamSelection,
-  SpectrumStreamMetadata,
   SpectrumStreamRead,
   SpectrumStreamStart,
-  SpectrumStreamStatus,
 } from "../core/spectrum.ts";
+import {
+  decodeSpectrumCaptureReply,
+  decodeSpectrumConfiguredReply,
+  decodeSpectrumStreamReply,
+  encodeSpectrumCommand,
+} from "../core/spectrum-frame.ts";
+import type { SpectrumFrameReply, SpectrumFrameRequest, SpectrumFrameStream } from "../core/spectrum-frame.ts";
 import {
   ObservationSubscriptionOwner,
 } from "../core/observation-subscriptions.ts";
@@ -255,10 +265,31 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * `MisoEngineError`; `close()` rejects them with `MisoUsageError`.
    */
   queryTrackResponse(request: TrackResponseQuery): Promise<TrackResponseResult>;
-  /** Subscribe to one prepared continuous spectrum boundary; browser delivery is off-render. */
+  /**
+   * Subscribe to one configured spectrum tap's continuous stream (`SPECTRUM_STREAM`); browser
+   * delivery is off-render.
+   */
   subscribeSpectrum(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscription>;
-  /** Arm, capture and analyze one complete 2048-frame spectrum window. */
+  /**
+   * Capture one complete 2048-frame window of a configured tap, analyzed by the core
+   * (`SPECTRUM_CAPTURE` arm and read; with a collection, a select first). A core refusal rejects with
+   * `MisoEngineError` whose `diagnosticCode` is the core's code (`spectrum.unprepared`,
+   * `spectrum.busy`, `spectrum.entry.unknown`, ...).
+   */
   querySpectrum(request: SpectrumQuery): Promise<SpectrumResult>;
+  /**
+   * Set, change or remove the spectrum taps of the running session with one `SPECTRUM_CONFIGURE`
+   * (#1596 D5): a query sets one tap, a collection several, and an empty collection with budget 0
+   * removes them. A change of taps prepares a replacement plan that the audio thread adopts at a
+   * later block; the taps are in effect once a spectrum reply reports
+   * `adoptedEpoch === configuredEpoch`. A stream on an entry that a collection keeps runs on; a
+   * change between the single form and a collection ends it (#1594 D6). A core refusal
+   * rejects with `MisoEngineError` whose `diagnosticCode` is the core's code.
+   */
+  configureSpectrum(
+    configuration: SpectrumQuery | SpectrumCollection,
+    options?: SpectrumConfigureOptions,
+  ): Promise<SpectrumConfigured>;
   /** Bind the semantic live controls once (every value edit is a `SET_CONTROL` transaction). */
   liveControls(): Promise<EngineLiveControls>;
   /**
@@ -382,8 +413,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * Dispose the worklet host, then close its context. Safe to call more than once.
    *
    * Each step that can hang waits at most 10 s. A step that does not settle rejects `close()` with
-   * a `lifecycle` `MisoEngineError` whose code names it (`spectrumCloseTimeout`,
-   * `hostDisposeTimeout`, `contextCloseTimeout`); the context close is still attempted. A settled
+   * a `lifecycle` `MisoEngineError` whose code names it (`hostDisposeTimeout`,
+   * `contextCloseTimeout`); the context close is still attempted. A settled
    * close is not run again: every later call returns the same promise.
    */
   close(): Promise<void>;
@@ -413,108 +444,98 @@ function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<Ar
   return new TextEncoder().encode(document.toJson());
 }
 
-function spectrumTargetId(target: SpectrumQuery["target"]): string {
-  if (target === null || typeof target !== "object") {
-    throw new MisoUsageError("spectrum target must be an object");
-  }
-  let id: unknown;
-  switch (target.kind) {
-    case "trackPostInput":
-    case "trackPostPan":
-      id = target.trackId;
-      break;
-    case "output":
-      id = target.outputId;
-      break;
-    default:
-      throw new MisoUsageError("target.kind must name a supported spectrum boundary");
-  }
-  if (typeof id !== "string" || id.length === 0) {
-    throw new MisoUsageError("spectrum target identity must be a nonempty string");
-  }
-  return id;
-}
+/** Capability flag bit 16 of `CAPABILITIES_GET` (#1594 D10): the core serves the spectrum frames. */
+const CAPABILITY_SPECTRUM = 1n << 16n;
 
-function sameSpectrumTarget(left: SpectrumQuery["target"], right: SpectrumQuery["target"]): boolean {
-  if (left === null || typeof left !== "object" || right === null || typeof right !== "object") {
-    throw new MisoUsageError("spectrum target must be an object");
-  }
-  const leftKind = left.kind;
-  const rightKind = right.kind;
-  if (leftKind !== "trackPostInput" && leftKind !== "trackPostPan" && leftKind !== "output") {
-    throw new MisoUsageError("target.kind must name a supported spectrum boundary");
-  }
-  if (rightKind !== "trackPostInput" && rightKind !== "trackPostPan" && rightKind !== "output") {
-    throw new MisoUsageError("target.kind must name a supported spectrum boundary");
-  }
-  if (leftKind !== rightKind) return false;
-  return spectrumTargetId(left) === spectrumTargetId(right);
-}
-
-function spectrumChannelMask(channels: SpectrumQuery["channels"]): number {
-  if (channels === undefined || channels === "both") return 3;
-  if (channels === "left") return 1;
-  if (channels === "right") return 2;
-  throw new MisoUsageError("spectrum channels must be left, right, or both");
-}
-
-function spectrumHostSelection(query: SpectrumQuery): {
-  readonly target: "trackPostInput" | "trackPostPan" | "output";
-  readonly targetId: string;
-  readonly channels: "left" | "right" | "both";
-} {
-  const targetId = query.target.kind === "output" ? query.target.outputId : query.target.trackId;
-  return Object.freeze({
-    target: query.target.kind,
-    targetId,
-    channels: query.channels ?? "both",
+function spectrumCapabilityRefusal(reason: string): MisoEngineError {
+  return new MisoEngineError(`the engine cannot serve the spectrum frames: ${reason}`, {
+    phase: "asset",
+    code: "unsupported",
+    result: constantValue("resultCodes", "unsupported"),
+    diagnostics: [{ code: "sdk.asset.capability", path: "CAPABILITIES_GET.flags.spectrum" }],
   });
 }
 
-function validateSpectrumQuery(request: SpectrumQuery, prepared: SpectrumQuery): SpectrumQuery {
-  const query = cloneSpectrumQuery(request);
-  if (!sameSpectrumTarget(query.target, prepared.target)) {
-    throw new MisoUsageError("spectrum query target does not match the prepared boundary");
+function spectrumTargetKey(target: SpectrumQuery["target"]): string {
+  return JSON.stringify([target.kind, target.kind === "output" ? target.outputId : target.trackId]);
+}
+
+/**
+ * Send one spectrum command (#1596 D1) through the host's `control` message, on the host's one
+ * request-ID allocator (the transaction queue's), and decode its reply. The port delivers frames in
+ * the order they are sent, so a frame sent after another is served after it.
+ */
+async function sendSpectrumFrame<T>(
+  host: MisoAudioWorkletHost,
+  queue: ControlTransactionQueue,
+  request: SpectrumFrameRequest,
+  decode: (bytes: Uint8Array) => SpectrumFrameReply<T>,
+): Promise<SpectrumFrameReply<T>> {
+  const requestId = queue.requestIds.next();
+  const reply = await host.control(encodeSpectrumCommand(requestId, request));
+  queue.noteCommit(reply.revision);
+  if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+  const decoded = decode(reply.response);
+  if (decoded.requestId !== requestId) {
+    throw malformed(`the reply answers request ${decoded.requestId}, not ${requestId}`);
   }
-  const requestedChannels = spectrumChannelMask(query.channels);
-  const preparedChannels = spectrumChannelMask(prepared.channels);
-  if ((requestedChannels & ~preparedChannels) !== 0) {
-    throw new MisoUsageError("spectrum query channels were not prepared");
+  return decoded;
+}
+
+/**
+ * D2 of #1596 for the browser engine, as for the headless one: refuse an engine whose
+ * `CAPABILITIES_GET` lacks flag bit 16, then send one `SPECTRUM_CONFIGURE` of the boot's taps with
+ * the policy's hop. The worklet boot staged the same taps (#1597 owns that route), so the first plan
+ * carries them and the reply reports `adoptedEpoch === configuredEpoch` at once: an equal
+ * configuration changes nothing, and a hop retunes the taps without a plan (#1594 D4).
+ */
+async function configureBootSpectrum(
+  host: MisoAudioWorkletHost,
+  configuration: SpectrumQuery | SpectrumCollection,
+  hopFrames: SpectrumHopFrames | undefined,
+  deadlineMs: number,
+  signal: AbortSignal | undefined,
+): Promise<ControlTransactionQueue> {
+  const started = Date.now();
+  // The boot's own deadline is the SDK's boot timeout, not a usage error of the caller's.
+  const expired = (): Error => new MisoEngineError(
+    `the boot spectrum configuration did not complete within ${deadlineMs} ms`,
+    { phase: "boot", code: "bootConfigureTimeout" },
+  );
+  const queue = await awaitSpectrum(createBrowserControlQueue(host), started, deadlineMs, signal, expired);
+  const requestId = queue.requestIds.next();
+  const probe = await awaitSpectrum(host.control(encodeRevisionProbe(requestId)), started, deadlineMs, signal, expired);
+  queue.noteCommit(probe.revision);
+  if (probe.result !== 0) throw controlCallFailure(probe.result, probe.response);
+  const capabilities = decodeCapabilitiesReply(probe.response);
+  if (capabilities.requestId !== requestId) {
+    throw malformed(`the reply answers request ${capabilities.requestId}, not ${requestId}`);
   }
-  const maximumCaptureBytes = query.spectrumLimits?.maximumCaptureBytes
-    ?? prepared.spectrumLimits?.maximumCaptureBytes
-    ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
-  if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes < 1
-      || maximumCaptureBytes > (prepared.spectrumLimits?.maximumCaptureBytes
-        ?? ABI_LAYOUT.constants.spectrumCaptureBytes)) {
-    throw new MisoUsageError("spectrum maximumCaptureBytes exceeds the prepared bound");
+  if (!capabilities.ok) throw spectrumCapabilityRefusal(`CAPABILITIES_GET was refused with ${capabilities.status}`);
+  if ((capabilities.value.flags & CAPABILITY_SPECTRUM) === 0n) {
+    throw spectrumCapabilityRefusal("capability flag bit 16 is clear");
   }
-  const deadline = query.spectrumLimits?.requestDeadlineMs;
-  if (deadline !== undefined
-      && (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647)) {
+  const { request } = spectrumConfigureRequest(configuration, hopFrames === undefined ? undefined : { hopFrames });
+  const reply = await awaitSpectrum(
+    sendSpectrumFrame(host, queue, request, decodeSpectrumConfiguredReply),
+    started,
+    deadlineMs,
+    signal,
+    expired,
+  );
+  if (!reply.ok) throw spectrumRefusalError("the engine refused the boot spectrum configuration", reply, "boot");
+  if (reply.value.adoptedEpoch !== reply.value.configuredEpoch) {
+    throw malformed("the boot spectrum configuration was not carried by the first plan");
+  }
+  return queue;
+}
+
+function spectrumDeadlineMs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 2_147_483_647) {
     throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
   }
-  return query;
+  return value;
 }
-
-function validateSpectrumCollectionQuery(
-  request: SpectrumQuery,
-  collection: SpectrumCollection,
-): SpectrumQuery {
-  const query = cloneSpectrumQuery(request);
-  const channels = query.channels ?? "both";
-  if (!collection.entries.some((entry) =>
-    sameSpectrumTarget(entry.target, query.target) && (entry.channels ?? "both") === channels)) {
-    throw new MisoUsageError("spectrum query target and channels were not prepared");
-  }
-  const maximumCaptureBytes = query.spectrumLimits?.maximumCaptureBytes;
-  if (maximumCaptureBytes !== undefined
-      && maximumCaptureBytes > ABI_LAYOUT.constants.spectrumCaptureBytes) {
-    throw new MisoUsageError("spectrum maximumCaptureBytes exceeds the browser capture bound");
-  }
-  return query;
-}
-
 /** The longest `close()` waits for one step that can hang (D1 of issue #1532). */
 const CLOSE_STEP_TIMEOUT_MS = 10_000;
 
@@ -556,19 +577,20 @@ async function awaitSpectrum<T>(
   started: number,
   deadline: number,
   signal: AbortSignal | undefined,
+  expired: () => Error = () => new MisoUsageError("spectrum query exceeded its deadline"),
 ): Promise<T> {
   // A request may still reject after the total deadline has elapsed before this wrapper is called.
   // Observe it even when there is no time left, so deadline refusal never creates an unhandled
   // host/Worker rejection.
   void promise.catch(() => undefined);
   const remaining = deadline - (Date.now() - started);
-  if (remaining <= 0) throw new MisoUsageError("spectrum query exceeded its deadline");
+  if (remaining <= 0) throw expired();
   signal?.throwIfAborted();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   try {
     return await new Promise<T>((resolve, reject) => {
-      timer = setTimeout(() => reject(new MisoUsageError("spectrum query exceeded its deadline")), remaining);
+      timer = setTimeout(() => reject(expired()), remaining);
       onAbort = () => reject(signal?.reason ?? new MisoUsageError("spectrum query was aborted"));
       signal?.addEventListener("abort", onAbort, { once: true });
       promise.then(resolve, reject);
@@ -577,61 +599,6 @@ async function awaitSpectrum<T>(
     if (timer !== undefined) clearTimeout(timer);
     if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
   }
-}
-
-function spectrumStreamMetadata(
-  raw: MisoSpectrumStreamMetadata,
-  prepared: SpectrumQuery,
-): SpectrumStreamMetadata {
-  const target = prepared.target;
-  const targetRaw = ABI_LAYOUT.constants.spectrumTargets.find((row) => row.name === target.kind)?.value;
-  if (targetRaw === undefined) {
-    throw new MisoEngineError("the prepared spectrum target is absent from the generated ABI", {
-      phase: "asset", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-    });
-  }
-  if (raw.target !== targetRaw) {
-    throw new MisoEngineError("the browser host returned a different spectrum target", {
-      phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-    });
-  }
-  const channels = prepared.channels ?? "both";
-  const channelsRaw = ABI_LAYOUT.constants.spectrumChannels.find((row) => row.name === channels)?.value;
-  if (channelsRaw === undefined) {
-    throw new MisoEngineError("the prepared spectrum channels are absent from the generated ABI", {
-      phase: "asset", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-    });
-  }
-  if (raw.channels !== channelsRaw) {
-    throw new MisoEngineError("the browser host returned different spectrum channels", {
-      phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-    });
-  }
-  const status = ABI_LAYOUT.constants.spectrumStreamStatuses.find((row) => row.value === raw.status);
-  if (status === undefined) {
-    throw new MisoEngineError("the browser host returned an unknown spectrum stream status", {
-      phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-    });
-  }
-  return cloneSpectrumStreamMetadata(Object.freeze({
-    result: raw.result,
-    status: status.name as SpectrumStreamStatus,
-    target,
-    channels,
-    sampleRateHz: raw.sampleRateHz,
-    quantumFrames: raw.quantumFrames,
-    hopFrames: raw.hopFrames,
-    sourceUnderrun: raw.sourceUnderrun !== 0,
-    captureEpoch: raw.captureEpoch,
-    sequence: raw.sequence,
-    droppedCaptures: raw.droppedCaptures,
-    windows: raw.windows,
-    capturedSample: raw.capturedSample,
-    endSample: raw.endSample,
-    analysisEpoch: raw.analysisEpoch,
-    historyStartSample: raw.historyStartSample,
-    smoothingMs: raw.smoothingMs,
-  }));
 }
 
 /**
@@ -755,6 +722,25 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       workletModuleUrl,
       ...(preparedModule === undefined ? {} : { preparedModule }),
     });
+    // D2 of #1596: the boot's taps through one `SPECTRUM_CONFIGURE`, before the engine is returned.
+    let spectrumQueue: ControlTransactionQueue | undefined;
+    const bootSpectrum = preparedSpectrumCollection ?? preparedSpectrum;
+    if (bootSpectrum !== undefined) {
+      try {
+        spectrumQueue = await configureBootSpectrum(
+          host,
+          bootSpectrum,
+          spectrumHopFrames,
+          spectrumDeadlineMs(options.requestDeadlineMs ?? 5_000),
+          options.signal,
+        );
+      } catch (error) {
+        try {
+          await boundedCloseStep("worklet host dispose", "hostDisposeTimeout", async () => { await host.dispose(); });
+        } catch { /* the spectrum boot refusal is the failure to report */ }
+        throw error;
+      }
+    }
     let semanticLiveControls: Promise<EngineLiveControls> | undefined;
     let closePromise: Promise<void> | undefined;
     // The track response queries of this engine (#1579 D4): the same requester as the headless
@@ -762,14 +748,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     // transaction queue, whose allocator its request IDs come from.
     let trackResponses: Promise<TrackResponseRequester> | undefined;
     let trackResponseRequester: TrackResponseRequester | undefined;
-    let spectrum: BrowserSpectrum | undefined;
-    let spectrumPromise: Promise<BrowserSpectrum> | undefined;
+    // The spectrum taps the core holds, as the boot or the last accepted `configureSpectrum` set
+    // them: the subscription owner checks a subscription against them.
+    let spectrumQuery: SpectrumQuery | undefined = preparedSpectrum;
+    let spectrumCollection: SpectrumCollection | undefined = preparedSpectrumCollection;
     let spectrumPending = false;
-    let spectrumCleanup: Promise<void> | undefined;
-    let spectrumStreamActive = false;
-    let spectrumStreamPending = false;
-    let spectrumStreamBuffer: ArrayBuffer | undefined;
-    let spectrumActiveQuery: SpectrumQuery | undefined = preparedSpectrum;
+    // Whether a managed stream start is in flight or its stream runs: the capture is the stream's,
+    // so a one-shot query is refused, and a start is refused while a query runs (the core would
+    // answer the overlap `spectrum.busy` only for some of its orders).
+    let spectrumStreamHeld = false;
     let closed = false;
     // Issue #1644 D3: the largest generation a session seek of this object has used; every source
     // and the timeline start at 1.
@@ -904,352 +891,127 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           "this engine booted with no observation taps attached; set policy.liveControls.observationTaps",
         ))
         : getLiveControls();
-    const ensureSpectrumWorker = (query: SpectrumQuery): Promise<BrowserSpectrum> => {
-      if (spectrum !== undefined) return Promise.resolve(spectrum);
-      if (spectrumPromise !== undefined) return spectrumPromise;
-      let pending: Promise<BrowserSpectrum>;
-      pending = createSpectrum({
-        ...(preparedModule === undefined ? { moduleUrl: simd128ModuleUrl } : { module: preparedModule }),
-        ...(options.responseWorkerModuleUrl === undefined ? {} : { responseWorkerModuleUrl: options.responseWorkerModuleUrl }),
-        ...(options.createResponseWorker === undefined ? {} : { createWorker: options.createResponseWorker }),
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        ...(query.spectrumLimits === undefined ? {} : { spectrumLimits: query.spectrumLimits }),
-      }).then((client) => {
-        if (closed || spectrumPromise !== pending) {
-          void client.close().catch(() => undefined);
-          throw new MisoUsageError("the spectrum Worker was superseded");
-        }
-        spectrum = client;
-        return client;
-      }, (error) => {
-        if (spectrumPromise === pending) spectrumPromise = undefined;
-        throw error;
-      });
-      spectrumPromise = pending;
-      return spectrumPromise;
-    };
-    const selectSpectrum = async (query: SpectrumQuery): Promise<EngineCallResult> => {
-      const collection = preparedSpectrumCollection;
-      if (collection === undefined) {
-        return Object.freeze({
-          ok: false,
-          result: constantValue("resultCodes", "unsupported"),
-          code: "unsupported",
-        });
-      }
+    // #1596 D1-D7: every spectrum call is one of the three frames, posted to the host's `control`
+    // message; the core analyzes where the session runs (D4), so no analysis Worker starts.
+    const spectrumFrame = async <T>(
+      request: SpectrumFrameRequest,
+      decode: (bytes: Uint8Array) => SpectrumFrameReply<T>,
+    ): Promise<SpectrumFrameReply<T>> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
-      if (spectrumStreamActive || spectrumStreamPending) {
-        throw new MisoUsageError("a spectrum stream is already active");
-      }
-      if (spectrumPending || spectrumCleanup !== undefined) {
-        throw new MisoUsageError("a one-shot spectrum query is already in flight");
-      }
-      if (typeof host.selectSpectrum !== "function") {
-        throw new MisoUsageError("the browser host does not support spectrum collections");
-      }
-      const effectiveQuery = validateSpectrumCollectionQuery(query, collection);
-      spectrumStreamPending = true;
+      // Held once known, so a frame is posted in the same turn as its call: a frame that undoes a
+      // timed-out one is then posted, and so served, after it.
+      const queue = spectrumQueue ?? await createBrowserControlQueue(host);
+      spectrumQueue = queue;
+      editQueue ??= queue;
+      return sendSpectrumFrame(host, queue, request, decode);
+    };
+    /** Send `request` and drop its answer: it undoes a frame whose caller stopped waiting. */
+    const sendQuietly = (request: SpectrumFrameRequest): void => {
+      if (closed) return;
+      const decode: (bytes: Uint8Array) => SpectrumFrameReply<unknown> = request.op === "stream"
+        ? decodeSpectrumStreamReply : decodeSpectrumCaptureReply;
+      void spectrumFrame(request, decode).catch(() => undefined);
+    };
+    const queryDeadline = (query?: SpectrumQuery): number =>
+      spectrumDeadlineMs(query?.spectrumLimits?.requestDeadlineMs ?? options.requestDeadlineMs ?? 5_000);
+    /**
+     * One `SPECTRUM_STREAM` frame for the managed subscriptions, bounded by the deadline. A frame the
+     * caller stopped waiting for may still start or restart the stream, so the stream is stopped
+     * behind it and the managed lifetime ends.
+     */
+    const streamFrame = async (
+      request: Extract<SpectrumFrameRequest, { op: "stream" }>,
+      query?: SpectrumQuery,
+    ): Promise<SpectrumFrameReply<SpectrumFrameStream>> => {
+      const started = Date.now();
+      const deadline = queryDeadline(query);
       try {
-        const started = Date.now();
-        const deadline = effectiveQuery.spectrumLimits?.requestDeadlineMs ?? options.requestDeadlineMs ?? 5_000;
-        // Preflight before the collection operation arms a capture, so Worker initialization
-        // refusal cannot leave an unowned selected capture behind.
-        await awaitSpectrum(ensureSpectrumWorker(effectiveQuery), started, deadline, options.signal);
-        spectrumStreamBuffer ??= new ArrayBuffer(ABI_LAYOUT.constants.spectrumCaptureBytes);
-        const selection = host.selectSpectrum(spectrumHostSelection(effectiveQuery));
-        let reply: Awaited<typeof selection>;
-        try {
-          reply = await awaitSpectrum(selection, started, deadline, options.signal);
-        } catch (error) {
-          // Initial selection arms a one-shot capture before stream activation. Hold its late
-          // cancellation so a replacement cannot inherit or race that unowned capture.
-          holdSpectrumCleanup(selection.then(
-            () => cancelSpectrumCapture(),
-            () => cancelSpectrumCapture(),
-          ));
-          throw error;
+        return await awaitSpectrum(spectrumFrame(request, decodeSpectrumStreamReply), started, deadline, options.signal);
+      } catch (error) {
+        if (request.stream !== "stop" && !closed) {
+          sendQuietly({ op: "stream", stream: "stop" });
+          observationSubscriptions?.invalidateSpectrum();
         }
-        if (closed) throw new MisoUsageError("the browser engine is closed");
-        if (reply.result === constantValue("resultCodes", "ok")) spectrumActiveQuery = effectiveQuery;
-        return Object.freeze({
-          ok: reply.result === constantValue("resultCodes", "ok"),
-          result: reply.result,
-          code: resultName(reply.result, "call"),
-        });
-      } finally {
-        spectrumStreamPending = false;
+        spectrumStreamHeld = false;
+        throw error;
       }
+    };
+    const configureSpectrum = async (
+      configuration: SpectrumQuery | SpectrumCollection,
+      configureOptions?: SpectrumConfigureOptions,
+    ): Promise<SpectrumConfigured> => {
+      if (closed) throw new MisoUsageError("the browser engine is closed");
+      const { request, query, collection } = spectrumConfigureRequest(configuration, configureOptions);
+      const reply = await awaitSpectrum(
+        spectrumFrame(request, decodeSpectrumConfiguredReply),
+        Date.now(),
+        queryDeadline(),
+        options.signal,
+      );
+      if (!reply.ok) throw spectrumRefusalError("the engine refused the spectrum configuration", reply);
+      spectrumQuery = query;
+      spectrumCollection = collection;
+      return spectrumConfiguredOf(reply.value);
+    };
+    // The owner's select before a collection's first stream start: the capture is the stream's from
+    // here, so the hold is taken now and given back if the select fails (the start keeps it, or
+    // gives it back when it fails).
+    const selectSpectrum = async (query: SpectrumQuery): Promise<EngineCallResult> => {
+      if (spectrumPending) throw new MisoUsageError("a one-shot spectrum query is in flight");
+      const selected = spectrumSelection(query);
+      spectrumStreamHeld = true;
+      let reply: SpectrumFrameReply<unknown>;
+      try {
+        reply = await awaitSpectrum(spectrumFrame({
+          op: "capture",
+          capture: "select",
+          target: selected.target,
+          channels: selected.channels ?? "both",
+        }, decodeSpectrumCaptureReply), Date.now(), queryDeadline(query), options.signal);
+      } catch (error) {
+        spectrumStreamHeld = false;
+        throw error;
+      }
+      if (!reply.ok) spectrumStreamHeld = false;
+      return spectrumCallResult(reply);
     };
     const selectSpectrumStream = async (
       query: SpectrumQuery,
       smoothingMs: number,
     ): Promise<SpectrumStreamSelection> => {
-      const collection = preparedSpectrumCollection;
-      if (collection === undefined) {
-        return Object.freeze({
-          ok: false,
-          result: constantValue("resultCodes", "unsupported"),
-          code: "unsupported",
-        });
-      }
-      if (closed) throw new MisoUsageError("the browser engine is closed");
-      if (!spectrumStreamActive) throw new MisoUsageError("the spectrum stream is not active");
-      if (spectrumStreamPending) throw new MisoUsageError("a spectrum stream request is already in flight");
-      if (spectrumPending || spectrumCleanup !== undefined) {
-        throw new MisoUsageError("a one-shot spectrum query is already in flight");
-      }
-      if (typeof host.selectSpectrumStream !== "function") {
-        throw new MisoUsageError("the browser host does not support spectrum collection updates");
-      }
-      const effectiveQuery = validateSpectrumCollectionQuery(query, collection);
-      if (!Number.isFinite(smoothingMs) || smoothingMs < 0 || smoothingMs > 10_000) {
-        throw new MisoUsageError("spectrum smoothing must be finite and between 0 and 10000 milliseconds");
-      }
-      spectrumStreamPending = true;
-      try {
-        const selection = host.selectSpectrumStream({
-          ...spectrumHostSelection(effectiveQuery),
-          smoothingMs,
-        });
-        let reply: Awaited<typeof selection>;
-        try {
-          reply = await awaitSpectrum(selection, Date.now(),
-            effectiveQuery.spectrumLimits?.requestDeadlineMs ?? options.requestDeadlineMs ?? 5_000,
-            options.signal);
-        } catch (error) {
-          // A late transaction may have committed after the caller's deadline. Retire this
-          // spectrum lifetime and hold its cleanup before permitting another selection.
-          spectrumStreamActive = false;
-          observationSubscriptions?.invalidateSpectrum();
-          holdSpectrumCleanup(selection.then(
-            () => host.stopSpectrumStream?.(),
-            () => host.stopSpectrumStream?.(),
-          ));
-          throw error;
-        }
-        if (closed) throw new MisoUsageError("the browser engine is closed");
-        if (reply.metadata === undefined) {
-          throw new MisoEngineError("the browser host returned no spectrum selection metadata", {
-            phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-          });
-        }
-        const metadata = spectrumStreamMetadata(reply.metadata, effectiveQuery);
-        if (reply.result === constantValue("resultCodes", "ok")) spectrumActiveQuery = effectiveQuery;
-        return Object.freeze({
-          ok: reply.result === constantValue("resultCodes", "ok"),
-          result: reply.result,
-          code: resultName(reply.result, "call"),
-          metadata,
-        });
-      } finally {
-        spectrumStreamPending = false;
-      }
+      const selected = spectrumSelection(query);
+      const reply = await streamFrame({
+        op: "stream",
+        stream: "select",
+        target: selected.target,
+        channels: selected.channels ?? "both",
+        smoothingMs,
+      }, query);
+      if (!reply.ok) return spectrumCallResult(reply);
+      return Object.freeze({ ...spectrumCallResult(reply), metadata: spectrumMetadataOf(reply.value) });
     };
     const startSpectrumStream = async (smoothingMs: number, query?: SpectrumQuery): Promise<SpectrumStreamStart> => {
-      const prepared = preparedSpectrum;
-      const collection = preparedSpectrumCollection;
-      if (prepared === undefined && collection === undefined) {
-        throw new MisoUsageError("this engine has no prepared spectrum boundary");
+      if (spectrumPending) throw new MisoUsageError("a one-shot spectrum query is in flight");
+      spectrumStreamHeld = true;
+      const reply = await streamFrame({ op: "stream", stream: "start", smoothingMs }, query);
+      if (!reply.ok) {
+        spectrumStreamHeld = false;
+        throw spectrumRefusalError("the engine refused the spectrum stream start", reply);
       }
-      if (closed) throw new MisoUsageError("the browser engine is closed");
-      if (spectrumStreamActive || spectrumStreamPending) {
-        throw new MisoUsageError("a spectrum stream is already active");
-      }
-      if (spectrumPending || spectrumCleanup !== undefined) {
-        throw new MisoUsageError("a one-shot spectrum query is already in flight");
-      }
-      if (typeof host.startSpectrumStream !== "function") {
-        throw new MisoUsageError("the browser host does not support managed spectrum streams");
-      }
-      const effectiveQuery = query === undefined
-        ? prepared
-        : collection === undefined
-          ? validateSpectrumQuery(query, prepared!)
-          : validateSpectrumCollectionQuery(query, collection);
-      if (effectiveQuery === undefined) {
-        throw new MisoUsageError("a spectrum collection stream needs a selected query");
-      }
-      spectrumStreamPending = true;
-      const deadline = effectiveQuery.spectrumLimits?.requestDeadlineMs
-        ?? options.requestDeadlineMs
-        ?? 5_000;
-      const started = Date.now();
-      let startRequest: Promise<Awaited<ReturnType<NonNullable<MisoAudioWorkletHost["startSpectrumStream"]>>>> | undefined;
-      try {
-        await awaitSpectrum(ensureSpectrumWorker(effectiveQuery), started, deadline, options.signal);
-        spectrumStreamBuffer ??= new ArrayBuffer(ABI_LAYOUT.constants.spectrumCaptureBytes);
-        startRequest = host.startSpectrumStream(smoothingMs);
-        const reply = await awaitSpectrum(startRequest, started, deadline, options.signal);
-        const metadata = spectrumStreamMetadata(reply.metadata, effectiveQuery);
-        if (closed) {
-          if (reply.result === constantValue("resultCodes", "ok")) {
-              void Promise.resolve(host.stopSpectrumStream?.()).catch(() => undefined);
-          }
-          throw new MisoUsageError("the browser engine is closed");
-        }
-        if (reply.result === constantValue("resultCodes", "ok")) {
-          spectrumStreamActive = true;
-          spectrumActiveQuery = effectiveQuery;
-        }
-        return Object.freeze({
-          ok: reply.result === constantValue("resultCodes", "ok"),
-          result: reply.result,
-          code: resultName(reply.result, "call"),
-          metadata,
-        });
-      } catch (error) {
-        // A timed-out MessagePort request can still complete after this call returns. If it arms
-        // the native stream late, stop it at completion rather than leaving an unowned stream.
-        if (startRequest !== undefined) {
-          void startRequest.then((reply) => {
-            if (reply.result === constantValue("resultCodes", "ok")) {
-          return host.stopSpectrumStream?.();
-            }
-            return undefined;
-          }, () => undefined).catch(() => undefined);
-        }
-        throw error;
-      } finally {
-        spectrumStreamPending = false;
-      }
+      return Object.freeze({ ...spectrumCallResult(reply), metadata: spectrumMetadataOf(reply.value) });
     };
     const readSpectrumStream = async (query?: SpectrumQuery): Promise<SpectrumStreamRead> => {
-      const prepared = preparedSpectrum;
-      const collection = preparedSpectrumCollection;
-      if (prepared === undefined && collection === undefined) {
-        throw new MisoUsageError("this engine has no prepared spectrum boundary");
-      }
-      if (closed) throw new MisoUsageError("the browser engine is closed");
-      if (!spectrumStreamActive) throw new MisoUsageError("the spectrum stream is not active");
-      if (spectrumStreamPending) throw new MisoUsageError("a spectrum stream read is already in flight");
-      if (typeof host.readSpectrumStream !== "function") {
-        throw new MisoUsageError("the browser host does not support managed spectrum streams");
-      }
-      const initialBuffer = spectrumStreamBuffer
-        ?? new ArrayBuffer(ABI_LAYOUT.constants.spectrumCaptureBytes);
-      const expectedBufferBytes = initialBuffer.byteLength;
-      const requestedQuery = query ?? spectrumActiveQuery ?? prepared;
-      if (requestedQuery === undefined) {
-        throw new MisoUsageError("a spectrum collection stream has no selected query");
-      }
-      const effectiveQuery = collection === undefined
-        ? validateSpectrumQuery(requestedQuery, prepared!)
-        : validateSpectrumCollectionQuery(requestedQuery, collection);
-      const deadline = effectiveQuery.spectrumLimits?.requestDeadlineMs
-        ?? options.requestDeadlineMs
-        ?? 5_000;
-      const started = Date.now();
-      spectrumStreamBuffer = undefined;
-      spectrumStreamPending = true;
-      let returned = false;
-      let readRequest: Promise<Awaited<ReturnType<NonNullable<MisoAudioWorkletHost["readSpectrumStream"]>>>> | undefined;
-      try {
-        readRequest = host.readSpectrumStream(initialBuffer);
-        const reply = await awaitSpectrum(readRequest, started, deadline, options.signal);
-        if (!(reply.buffer instanceof ArrayBuffer) || reply.buffer.byteLength !== expectedBufferBytes) {
-          throw new MisoEngineError("the browser host returned an invalid spectrum stream buffer", {
-            phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-          });
-        }
-        spectrumStreamBuffer = reply.buffer;
-        returned = true;
-        const metadata = spectrumStreamMetadata(reply.metadata, effectiveQuery);
-        const backpressure = constantValue("resultCodes", "backpressure");
-        const renderRejected = constantValue("resultCodes", "renderRejected");
-        const ok = constantValue("resultCodes", "ok");
-        if (reply.result === backpressure || reply.result === renderRejected) {
-          return Object.freeze({ metadata });
-        }
-        if (reply.result !== ok) {
-          throw new MisoEngineError("the browser host refused the spectrum stream read", {
-            phase: reply.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
-            code: resultName(reply.result, "call"),
-            result: reply.result,
-          });
-        }
-        if (metadata.status !== "ready" || reply.byteLength === 0) {
-          return Object.freeze({ metadata });
-        }
-        if (!Number.isSafeInteger(reply.byteLength) || reply.byteLength <= 0
-            || reply.byteLength > reply.buffer.byteLength) {
-          throw new MisoEngineError("the browser host returned an invalid spectrum stream length", {
-            phase: "output", code: "abiMismatch", result: constantValue("resultCodes", "abiMismatch"),
-          });
-        }
-        const buffer = spectrumStreamBuffer;
-        spectrumStreamBuffer = undefined;
-        returned = false;
-        let client: BrowserSpectrum | undefined;
-        let analyzed: Awaited<ReturnType<BrowserSpectrum["queryStream"]>>;
-        try {
-          client = await ensureSpectrumWorker(effectiveQuery);
-          analyzed = await awaitSpectrum(
-            client.queryStream(effectiveQuery, buffer!, reply.byteLength, metadata),
-            started,
-            deadline,
-            options.signal,
-          );
-        } catch (error) {
-          if (client !== undefined && spectrum === client) spectrum = undefined;
-          spectrumPromise = undefined;
-          if (client !== undefined) {
-            try { await client.close(); } catch { /* the failed Worker is already terminal */ }
-          }
-          if (buffer !== undefined && buffer.byteLength !== 0) {
-            spectrumStreamBuffer = buffer;
-            returned = true;
-          }
-          spectrumStreamActive = false;
-          // The read operation still owns the stream-pending flag, so the shared owner's stop
-          // callback cannot issue its normal serialized stop here. Close the native stream at the
-          // transport seam before invalidating the managed lifetime.
-          spectrumStreamPending = false;
-          await Promise.resolve(host.stopSpectrumStream?.()).catch(() => undefined);
-          if (!closed) observationSubscriptions?.invalidateSpectrum();
-          throw error;
-        }
-        spectrumStreamBuffer = analyzed.buffer;
-        returned = true;
-        return Object.freeze({ metadata: analyzed.metadata, result: analyzed.result });
-      } catch (error) {
-        const recovered = (error as Error & { spectrumBuffer?: unknown }).spectrumBuffer;
-        if (recovered instanceof ArrayBuffer) {
-          spectrumStreamBuffer = recovered;
-          returned = true;
-        } else if (!returned && initialBuffer.byteLength !== 0) {
-          spectrumStreamBuffer = initialBuffer;
-          returned = true;
-        }
-        if (!returned && readRequest !== undefined && !closed) {
-          spectrumStreamActive = false;
-          observationSubscriptions?.invalidateSpectrum();
-          void readRequest.then(() => Promise.resolve(host.stopSpectrumStream?.()), () => undefined).catch(() => undefined);
-        }
-        throw error;
-      } finally {
-        spectrumStreamPending = false;
-      }
+      const reply = await streamFrame({ op: "stream", stream: "read" }, query);
+      if (!reply.ok) throw spectrumRefusalError("the engine refused the spectrum stream read", reply);
+      const metadata = spectrumMetadataOf(reply.value);
+      const result = spectrumResultOfStream(reply.value);
+      return Object.freeze(result === undefined ? { metadata } : { metadata, result });
     };
     const stopSpectrumStream = async (): Promise<EngineCallResult> => {
-      if (typeof host.stopSpectrumStream !== "function") {
-        throw new MisoUsageError("the browser host does not support managed spectrum streams");
-      }
-      if (!spectrumStreamActive && !spectrumStreamPending) {
-        return Object.freeze({ ok: true, result: constantValue("resultCodes", "ok"), code: "ok" });
-      }
-      if (spectrumStreamPending) throw new MisoUsageError("a spectrum stream request is already in flight");
-      spectrumStreamPending = true;
-      try {
-        const reply = await host.stopSpectrumStream();
-        if (reply.result === constantValue("resultCodes", "ok")) spectrumStreamActive = false;
-        return Object.freeze({
-          ok: reply.result === constantValue("resultCodes", "ok"),
-          result: reply.result,
-          code: resultName(reply.result, "call"),
-        });
-      } finally {
-        spectrumStreamPending = false;
-      }
+      const reply = await streamFrame({ op: "stream", stream: "stop" });
+      // A stop gives the capture back, whatever the core answers (a stream it already ended).
+      spectrumStreamHeld = false;
+      return spectrumCallResult(reply);
     };
     const observationOwner = (): ObservationSubscriptionOwner => observationSubscriptions ??=
       new ObservationSubscriptionOwner({
@@ -1292,39 +1054,18 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           }),
         },
         responseRead: queryTrackResponse,
-        ...(preparedSpectrum === undefined ? {} : {
-          spectrumPrepared: () => preparedSpectrum,
-        }),
-        ...(preparedSpectrumCollection === undefined ? {} : {
-          spectrumPreparedCollection: () => preparedSpectrumCollection,
-          spectrumSelect: selectSpectrum,
-          spectrumStreamSelect: selectSpectrumStream,
-        }),
-        ...((preparedSpectrum === undefined && preparedSpectrumCollection === undefined) ? {} : {
-          spectrumStart: startSpectrumStream,
-          spectrumRead: readSpectrumStream,
-          spectrumStop: stopSpectrumStream,
-        }),
+        spectrumPrepared: () => spectrumQuery,
+        spectrumPreparedCollection: () => spectrumCollection,
+        spectrumSelect: selectSpectrum,
+        spectrumStreamSelect: selectSpectrumStream,
+        spectrumStart: startSpectrumStream,
+        spectrumRead: readSpectrumStream,
+        spectrumStop: stopSpectrumStream,
         scheduler: {
           setInterval: (callback, milliseconds) => globalThis.setInterval(callback, milliseconds),
           clearInterval: (handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
         },
       }, options.observationSubscriptionLimits, options.responseSubscriptionLimits, options.spectrumSubscriptionLimits);
-    const cancelSpectrumCapture = (): Promise<void> => {
-      try {
-        return Promise.resolve(host.cancelSpectrum?.()).then(() => undefined, () => undefined);
-      } catch {
-        return Promise.resolve();
-      }
-    };
-    const holdSpectrumCleanup = (cleanup: Promise<unknown>): void => {
-      const safe = Promise.resolve(cleanup).then(() => undefined, () => undefined);
-      let held: Promise<void>;
-      held = safe.finally(() => {
-        if (spectrumCleanup === held) spectrumCleanup = undefined;
-      });
-      spectrumCleanup = held;
-    };
     /**
      * One track response, as a C ABI host reads it: a strip `RESPONSE_GET` through the host's
      * `control` message, then the `RESPONSE_READY` with its tag from the event lane. The capture
@@ -1415,141 +1156,67 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     };
     const querySpectrum = async (request: SpectrumQuery): Promise<SpectrumResult> => {
       if (closed) throw new MisoUsageError("the browser engine is closed");
-      const prepared = preparedSpectrum;
-      if (prepared === undefined) throw new MisoUsageError("this engine has no prepared spectrum boundary");
-      if (spectrumPending || spectrumCleanup !== undefined || spectrumStreamActive || spectrumStreamPending) {
-        throw new MisoUsageError("a spectrum query is already in flight");
+      if (spectrumPending) throw new MisoUsageError("a spectrum query is already in flight");
+      if (spectrumStreamHeld) throw new MisoUsageError("a managed spectrum stream holds the capture");
+      const selected = spectrumSelection(request);
+      const channels = selected.channels ?? "both";
+      const deadline = queryDeadline(request);
+      // An arm and a read name no target: in the single form the SDK holds the one tap the core has.
+      const single = spectrumQuery;
+      if (single !== undefined && spectrumTargetKey(single.target) !== spectrumTargetKey(selected.target)) {
+        throw new MisoUsageError("the spectrum query target is not the configured tap");
       }
       spectrumPending = true;
+      const started = Date.now();
+      // Whether the core may hold this query's arm: a query that ends before its window is read
+      // cancels it, in a frame posted behind the arm.
       let armed = false;
-      let armSettled = true;
-      let armNeedsCancel = false;
-      let armCompletion: Promise<void> | undefined;
-      let readSettled = true;
-      let readCompletion: Promise<void> | undefined;
       try {
-        const query = validateSpectrumQuery(request, prepared);
-        const deadline = query.spectrumLimits?.requestDeadlineMs
-          ?? options.requestDeadlineMs
-          ?? 5_000;
-        if (!Number.isFinite(deadline) || deadline <= 0 || deadline > 2_147_483_647) {
-          throw new MisoUsageError("requestDeadlineMs must be positive and at most 2147483647");
+        if (spectrumCollection !== undefined) {
+          const selection = await awaitSpectrum(spectrumFrame({
+            op: "capture", capture: "select", target: selected.target, channels,
+          }, decodeSpectrumCaptureReply), started, deadline, options.signal);
+          if (!selection.ok) throw spectrumRefusalError("the engine refused the spectrum selection", selection);
         }
-        const started = Date.now();
-        if (typeof host.armSpectrum !== "function" || typeof host.readSpectrum !== "function") {
-          throw new MisoUsageError("the browser host does not support spectrum capture");
-        }
-        armSettled = false;
-        let armRequest: Promise<Awaited<ReturnType<MisoAudioWorkletHost["armSpectrum"]>>>;
-        try {
-          armRequest = host.armSpectrum();
-        } catch (error) {
-          armSettled = true;
-          throw error;
-        }
-        armCompletion = armRequest.then(
-          (reply) => {
-            armSettled = true;
-            armNeedsCancel = reply.result === constantValue("resultCodes", "ok");
-          },
-          () => {
-            armSettled = true;
-            // A rejected transport request may have reached the Worklet before the reply failed.
-            armNeedsCancel = true;
-          },
-        );
-        const arm = await awaitSpectrum(armRequest, started, deadline, options.signal);
-        armSettled = true;
-        armNeedsCancel = arm.result === constantValue("resultCodes", "ok");
-        if (closed) throw new MisoUsageError("the browser engine is closed");
-        if (arm.result !== constantValue("resultCodes", "ok")) {
-          throw new MisoEngineError("the browser host refused the spectrum capture arm", {
-            phase: arm.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
-            code: resultName(arm.result, "call"),
-            result: arm.result,
-          });
-        }
-        armed = true;
-        let capture: Awaited<ReturnType<MisoAudioWorkletHost["readSpectrum"]>>;
-        for (;;) {
-          if (closed) throw new MisoUsageError("the browser engine is closed");
-          readSettled = false;
-          let readRequest: Promise<Awaited<ReturnType<MisoAudioWorkletHost["readSpectrum"]>>>;
-          try {
-            readRequest = host.readSpectrum({ channels: query.channels ?? "both" });
-          } catch (error) {
-            readSettled = true;
-            throw error;
-          }
-          readCompletion = readRequest.then(
-            () => { readSettled = true; },
-            () => { readSettled = true; },
-          );
-          capture = await awaitSpectrum(
-            readRequest,
-            started,
-            deadline,
-            options.signal,
-          );
-          readSettled = true;
-          if (closed) throw new MisoUsageError("the browser engine is closed");
-          if (capture.result === constantValue("resultCodes", "ok")) break;
-          if (capture.result !== constantValue("resultCodes", "backpressure")) {
-            throw new MisoEngineError("the browser host refused the spectrum capture read", {
-              phase: capture.result === constantValue("resultCodes", "wrongState") ? "lifecycle" : "output",
-              code: resultName(capture.result, "call"),
-              result: capture.result,
-            });
-          }
-          if (Date.now() - started >= deadline) {
-            throw new MisoUsageError("spectrum query exceeded its deadline");
-          }
-          await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        }
-        armed = false;
-        if (capture.snapshot.byteLength === 0) {
-          throw new MisoEngineError("the browser host returned an empty spectrum capture", {
-            phase: "output",
-            code: "abiMismatch",
-            result: constantValue("resultCodes", "abiMismatch"),
-          });
-        }
-        if (closed) throw new MisoUsageError("the browser engine is closed");
-        const client = await awaitSpectrum(ensureSpectrumWorker(query), started, deadline, options.signal);
-        if (closed) throw new MisoUsageError("the browser engine is closed");
-        const result = await awaitSpectrum(
-          client.query(query, capture.snapshot),
+        // Give back any arm this query does not own before it arms: a collection select arms the
+        // entry for the core (#1592 D4), and an earlier query's undo may have been lost (a cancel
+        // refused under backpressure), which would leave every later arm `spectrum.busy`.
+        const released = await awaitSpectrum(
+          spectrumFrame({ op: "capture", capture: "cancel" }, decodeSpectrumCaptureReply),
           started,
           deadline,
           options.signal,
         );
-        if (closed) {
-          await client.close();
-          throw new MisoUsageError("the browser engine is closed");
+        if (!released.ok) throw spectrumRefusalError("the engine refused the spectrum capture cancel", released);
+        armed = true;
+        const arm = await awaitSpectrum(
+          spectrumFrame({ op: "capture", capture: "arm" }, decodeSpectrumCaptureReply),
+          started,
+          deadline,
+          options.signal,
+        );
+        if (!arm.ok) {
+          armed = false;
+          throw spectrumRefusalError("the engine refused the spectrum capture arm", arm);
         }
-        const status = await awaitSpectrum(host.status(), started, deadline, options.signal);
-        if (status.result !== constantValue("resultCodes", "ok")
-            || status.state !== constantValue("states", "ready")) {
-          const lifecycleResult = status.result !== constantValue("resultCodes", "ok")
-            ? status.result
-            : constantValue("resultCodes", "wrongState");
-          throw new MisoEngineError("the browser host no longer owns a ready spectrum boundary", {
-            phase: "lifecycle",
-            code: resultName(lifecycleResult, "call"),
-            result: lifecycleResult,
-          });
+        for (;;) {
+          const read = await awaitSpectrum(
+            spectrumFrame({ op: "capture", capture: "read", channels }, decodeSpectrumCaptureReply),
+            started,
+            deadline,
+            options.signal,
+          );
+          if (!read.ok) throw spectrumRefusalError("the engine refused the spectrum capture read", read, "lifecycle");
+          if (read.value.status !== "pending") {
+            armed = false;
+            if (read.value.window === undefined) throw malformed("a spectrum read answered done");
+            return spectrumResultOfWindow(read.value.window);
+          }
+          // The window is not complete: ask again after the audio thread rendered a little more.
+          await awaitSpectrum(new Promise<void>((resolve) => setTimeout(resolve, 4)), started, deadline, options.signal);
         }
-        return result;
       } finally {
-        if (armCompletion !== undefined && !armSettled) {
-          holdSpectrumCleanup(armCompletion.then(() => armNeedsCancel ? cancelSpectrumCapture() : undefined));
-        } else if (armNeedsCancel && !armed) {
-          holdSpectrumCleanup(cancelSpectrumCapture());
-        } else if (readCompletion !== undefined && !readSettled) {
-          holdSpectrumCleanup(readCompletion.then(() => cancelSpectrumCapture()));
-        } else if (armed) {
-          holdSpectrumCleanup(cancelSpectrumCapture());
-        }
+        if (armed) sendQuietly({ op: "capture", capture: "cancel" });
         spectrumPending = false;
       }
     };
@@ -1608,6 +1275,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         .then((receipt) => receipt.handle),
       queryTrackResponse,
       querySpectrum,
+      configureSpectrum,
       liveControls: getLiveControls,
       controls: async (filter?: ControlListFilter) =>
         readControlList(await createBrowserControlListTransport(host), filter),
@@ -1764,15 +1432,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           const fail = (error: unknown): void => {
             if (!failed) { failed = true; failure = error; }
           };
-          if (spectrumPromise !== undefined) {
-            try {
-              await boundedCloseStep("spectrum close", "spectrumCloseTimeout",
-                async () => { await (spectrum ?? await spectrumPromise)?.close(); });
-            } catch (error) {
-              // A spectrum rejection is dropped (host close stays authoritative); a timeout is kept.
-              if (error instanceof MisoEngineError && error.code === "spectrumCloseTimeout") fail(error);
-            }
-          }
           try {
             await boundedCloseStep("worklet host dispose", "hostDisposeTimeout", async () => { await host.dispose(); });
           } catch (error) {

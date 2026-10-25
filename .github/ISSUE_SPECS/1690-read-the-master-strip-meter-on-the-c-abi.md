@@ -119,8 +119,8 @@ browser, an invalid record on the C ABI), never `0`.
   formula (`reduction_db`).
 - No master peak. The master has no structural bus; its peak is the strip's own entry.
 - No change to #1683's row, the boot word (#1689) or the browser's lease frame bytes.
-- No SDK API beyond the generated table type; a later issue gives the SDK a `masterGainReduction`
-  call on the batch.
+- No SDK API beyond the generated table type. Root's R1 ruling (2026-10-25) dropped the
+  `masterGainReduction` call on the batch: the app reads the master entry's record by its handle.
 
 ## Objective gates
 
@@ -210,7 +210,7 @@ The issue splits in two slices.
   every poll and lease transition (four master choices, a silence/loud run, master moves, a
   disarm/re-arm and a lease toggle; 132 records, 70 with the master present) is the same on the
   base and on the branch (PR evidence, not a committed test).
-- **#1690b (open, blocked by #1587b, so by #1583 and #1585): D2's C ABI half, D3, D5, D6.**
+- **#1690b (done on `codex/batch-b13-1690b`; was blocked by #1587b, so by #1583 and #1585): D2's C ABI half, D3, D5, D6.**
   The C ABI keeps the resolved master index (`Option<u32>`) beside #1587's entry-resolution vector
   in `SessionState`, recomputed at each promotion, after every command and after a `SET_CONTROL` of
   the `master` row; the `Master` target is wire code 3 of #1583's `meter_entry.target`, with its
@@ -219,5 +219,67 @@ The issue splits in two slices.
   existing parity row `both_hosts_designate_the_master_strip_after_an_empty_boot_alike`
   (`hosts/host-web/tests/control_parity.rs`) rather than adding one. Gates 1, 3, 4, 5 and 7 are
   #1690b's; gate 2's C ABI record half also moves there.
-  #1690b also gives `master_gain_reduction` its single host-core test (gate 2, in the owning
-  crate) and removes that role from the host-web tests.
+  Root ruling (2026-10-25, 1690b attempt 2): gate 2 needs no host-core test; the browser tests
+  above and gate 3's quiet-track step cover it.
+
+### #1690b record (2026-10-25, on main `fffbf51ee`, after #1587b and #1588a)
+
+- **Wire (D3).** `MeterTarget::Master`, code 3, no strip ID; `meter_table_is_valid` takes the
+  master with gain reduction only (`{master, peak}` and `{output, gain reduction}` are
+  `INVALID_FIELD` on encode and decode; a master with a strip ID is `INVALID_FIELD` at decode).
+- **Resolution (D2), amended (attempt 2, verifier MAJOR).** Each provider epoch keeps its own
+  master strip (`ProviderEpoch::master_meter`), resolved by the `master_strip()` ID against that
+  epoch's plan through the strip entries' own rule (`strip_meter_index`), so the record is #1587b's
+  gain row (`push_with_strips`) with the predicate `master_gain_reduction` states. The browser's
+  `sync_master` rule keeps them (`sync_master_meters`): after every live or monitor commit, after a
+  successor is published and after each promotion, every pending epoch takes the master the row
+  names now, and the running epoch takes it only while nothing waits. `MeterBatches::resolve` reads
+  the frame epoch's own value, never the row, so a frame the plan still rendering publishes after a
+  waiting replacement moved the master (the browser's render thread publishes after the control
+  half's commits), or after a `TELEMETRY_CONFIGURE` before adoption, reads that plan's master. A
+  change clears `resolved_epoch`. Attempt 1's `master_moved` (which re-resolved every frame against
+  the row) is deleted.
+- **Gates.** Gate 1: the master parity row plays 132 blocks after each step (whole windows of both
+  hosts at 44.1 kHz), the browser's lease frame against the C ABI's last record; red on a C ABI
+  absent record reported `VALID` (step 2) and on no re-resolution after a move (step 2). Gate 3:
+  `a_master_entry_follows_the_master_row_across_moves_a_rebuild_and_a_removal` (capi runtime);
+  red on no re-resolution (first designation), on a master index kept across moves (the quiet
+  track) and on a master index kept across epochs (the rebuild). Gate 4: the protocol wire test;
+  red on a master validity rule that takes any metric and on a decode that takes a master with a
+  strip ID. The "accepted with no master" half is gate 3's first configure. Attempt 2:
+  `rendered_meters::a_master_moved_while_a_rebuild_waits_leaves_the_rendering_plans_master`
+  (control-plane), through the render-half ring: `eq1` master, a waiting rebuild, a live move to
+  `eq2`, a configure, then a frame of the rendering plan; red on attempt 1's code (`[0.0]`, absent,
+  for `[3.0]`), green without the move. Not added to the parity row: both hosts stage `METER_BATCH`
+  through the same `MeterBatches` and `sync_master_meters`, so a cross-host step cannot
+  discriminate; the claim is tested once, in control-plane, which owns it. The
+  configure-before-adoption case is in the same test.
+- **Not done.** Gate 2 is not needed (root ruling, 2026-10-25): the browser tests #1690a recorded
+  and gate 3's quiet-track step cover it. Gate 5 is not extended: the master read runs on the control
+  thread, and the race test counts render allocations only, so no master defect can turn it red
+  (an extension would be a test with no defect to catch). The SDK's hand decoder
+  (`sdk/src/core/protocol-messages.ts`) does not yet decode target 3, and the SDK table call is a
+  later issue (non-goal). With #1588b (#2026) the browser accepts a `{master, gain reduction}`
+  table and serves it through the same staging. Remaining work on #1690 after this slice: the
+  SDK's target-3 decode and its master call (a later issue).
+- **Re-pin (gate 7).** After #2024 (#1578) merged (main `9d7bbb887`), the corpus's telemetry table
+  gains `{master, gain reduction}`: `COMPLETE_SCHEMA_HASH` `cb8db815ed0103a0` -> `dea650f7e506833e`,
+  59 frames still; only `command.telemetry_configure` and `response.telemetry` move.
+
+### #1690c record (2026-10-25, on main `90090ba09`, after #1690b) -- #1690 is done
+
+- **Scope (root, from the #1690c scope note).** No new SDK call: the master reading is
+  `records[handle - 1]` of a `meterBatch` event, or `masterGrDb` from the lease frame, so a
+  `masterGainReduction` accessor adds surface and no capability (the non-goal stays closed).
+- **Codec.** `MeterEntry` (`sdk/src/core/protocol-messages.ts`) gains
+  `{target: "master"; metric: "gainReduction"}`. The encoder writes field 1 = `u8(3)` and the
+  metric, no field 2, and adds no metric check (the engine's `INVALID_FIELD` is the one rule). The
+  decoder takes code 3 with no strip ID; code 3 with a strip ID stays malformed, and code 3 with
+  peak is malformed too (the engine never echoes it and the type cannot hold it). Both SDK engines
+  reach it through `configureTelemetry`, with no engine-specific code.
+- **Gate.** One fixture row: `full_telemetry()` in `crates/protocol/tests/sdk_message_fixture.rs`
+  gains `{master, gain reduction}`, blessed once (`sdk/test/fixtures/protocol-messages.json`: the
+  `telemetry_configure_full` request and `telemetry_full` reply only). Red on an encoder that
+  writes field 2 for the master (`telemetry_configure_full` encode) and on a decoder that refuses
+  code 3 (`telemetry_full` decode). `COMPLETE_SCHEMA_HASH` does not move (`dea650f7e506833e`).
+- **Done.** #1690 has no remaining work; root closes it at the GitHub sync.

@@ -1,4 +1,5 @@
-//! Publish a warm successor `Primed` from the control plane (issue #1403 D3, D4; #1397 D1).
+//! Publish a warm successor `Primed` from the control plane (issue #1403 D3, D4; #1397 D1), and
+//! fall back to the transition when it is not ready by its deadline (#1358 D1, D3).
 //!
 //! A latency-growing structural edit is prepared warm (#1354) and published
 //! [`PlanAdoption::Primed`]: render adopts it at the first block at or past `not_before` at which
@@ -6,12 +7,14 @@
 //! `prime_required` flag of each ring the running plan renders (#1320 D4), so the publication
 //! writes those flags first. [`publish_primed`] is that step, and [`PrimedCandidate`] is the record
 //! the control plane keeps of the candidate until it is adopted, superseded or withdrawn.
+//! [`check_prime_deadline`] decides, per control call, whether that record's deadline
+//! ([`prime_deadline_samples`]) has passed.
 
-use engine::realtime::{PlanAdoption, PlanReplacementReservation};
+use engine::realtime::{PlanAdoption, PlanPublisher, PlanReplacementReservation};
 
 use session::SessionModel;
 
-use crate::prepare::{PlanStateInventory, SuccessorBase};
+use crate::prepare::{PlanStateInventory, SOURCE_STALL_TOLERANCE_MS, SuccessorBase, p_max_samples};
 use crate::source::SourceControlSet;
 
 /// The record of the one warm candidate published [`PlanAdoption::Primed`] and not yet adopted,
@@ -135,4 +138,71 @@ pub fn fall_back_to_transition<T, E>(
         forced_restart: &grown,
         ..base
     })
+}
+
+/// How long render may run past a warm candidate's `not_before` without adopting it before the
+/// control plane withdraws it and takes the transition, in render samples (#1358 D1):
+/// `T(fs, q) + p_max_samples(fs, q) + q`, with `T(fs, q) = ceil_q(fs · SOURCE_STALL_TOLERANCE_MS /
+/// 1000)`, one stall tolerance in whole quanta (not [`crate::stall_ring_frames`], which adds the
+/// consumer's and the recycle path's quanta). 7,040 at 48 kHz and quantum 128.
+///
+/// A host that keeps its rings full holds `P_MAX + q` frames past each consumer through any
+/// producer stall up to the tolerance (#1406 D2), so only a held seek or command inside the prime
+/// window delays readiness: it applies within `P + q <= P_MAX + q` samples, and the host then has
+/// one stall tolerance to queue the new generation. A zero quantum returns zero; callers validate
+/// the document first.
+#[must_use]
+pub const fn prime_deadline_samples(sample_rate_hz: u32, quantum_frames: u32) -> u64 {
+    if quantum_frames == 0 {
+        return 0;
+    }
+    let quantum = quantum_frames as u64;
+    let tolerance = (sample_rate_hz as u64 * SOURCE_STALL_TOLERANCE_MS as u64) / 1_000;
+    tolerance.div_ceil(quantum) * quantum
+        + p_max_samples(sample_rate_hz, quantum_frames) as u64
+        + quantum
+}
+
+/// What [`check_prime_deadline`] found for a warm candidate's record (#1358 D3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeadlineStep {
+    /// The render clock has not reached `not_before + prime_deadline_samples`: do nothing. A
+    /// render clock that does not move (a paused host) never passes it.
+    Pending,
+    /// The record does not name the newest epoch published: drop it and do nothing else, so a
+    /// stale record never withdraws another candidate.
+    Stale,
+    /// The deadline has passed: withdraw the candidate once and take the transition if render
+    /// has not adopted it.
+    Due,
+}
+
+/// The deadline step's decision for the record `pending` (#1358 D3): [`DeadlineStep::Stale`] when
+/// `newest_epoch` (the newest epoch the control plane published) is not the record's,
+/// [`DeadlineStep::Pending`] while `publisher.render_clock()` is below `pending.not_before +
+/// prime_deadline_samples(sample_rate_hz, quantum_frames)`, else [`DeadlineStep::Due`].
+///
+/// It reads one clock and acts on nothing: the caller runs the one withdrawal of a `Due` step
+/// through its own withdrawal path, which also promotes a candidate render took (`Taken`), and
+/// hands a withdrawn candidate of the record's epoch to the transition fallback as its donor
+/// ([`fall_back_to_transition`]). Control thread only; allocation-free; never waits on render.
+#[must_use]
+pub fn check_prime_deadline(
+    publisher: &PlanPublisher,
+    newest_epoch: u64,
+    pending: &PrimedCandidate,
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+) -> DeadlineStep {
+    if pending.epoch != newest_epoch {
+        return DeadlineStep::Stale;
+    }
+    let deadline = pending
+        .not_before
+        .saturating_add(prime_deadline_samples(sample_rate_hz, quantum_frames));
+    if publisher.render_clock() < deadline {
+        DeadlineStep::Pending
+    } else {
+        DeadlineStep::Due
+    }
 }

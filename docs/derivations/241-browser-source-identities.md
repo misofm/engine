@@ -176,7 +176,7 @@ what happens here.
 ## 6. `qualification/stall-session.toml` — 5,120 frames
 
 `runStallQualification` feeds `STALL_FRAMES / QUANTUM_FRAMES = 40` blocks (`40 * 128 = 5120` frames,
-the default ring) from the same `sourcePlanes(block)` generator as §4, so it is the §4 formula
+the stall ring) from the same `sourcePlanes(block)` generator as §4, so it is the §4 formula
 truncated to `n = 0 .. 5119`. Preimage `5120 * 2 * 4 = 40960` bytes:
 
 ```

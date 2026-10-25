@@ -461,9 +461,13 @@ pub fn plan_strip_transition(
 /// both plans that reaches the output in `next` is in the set. An added strip never is: it is
 /// #1288's to arm.
 ///
-/// **Limit (#1397a):** a sidechain line is not read, and #1324 D1's sidechain closure is not run
-/// over the set: a carried effect keyed from a tap before the fader of a strip in the set is not
-/// added, and a sidechain line that changes length does not add its strip. Both are #1397b's.
+/// The set is not closed over sidechains here. The host passes it as
+/// [`crate::SuccessorBase::forced_restart`], which the preparation adds to its restarted set
+/// before it runs #1324 D1's sidechain closure, the one closure rule (#1397b, root ruling). So a
+/// carried effect keyed from a `post_input`, `insert_send`, `insert_return` or `pre_fader` tap of
+/// a strip in the set joins the prepared `restarted_strips()`, the set the transition ducks. A
+/// sidechain line from a `post_fader` or `post_pan` tap adds no strip: the transition's `C` counts
+/// it ([`plan_strip_transition`], #1324 D4).
 ///
 /// Control thread only; it allocates the set.
 #[must_use]

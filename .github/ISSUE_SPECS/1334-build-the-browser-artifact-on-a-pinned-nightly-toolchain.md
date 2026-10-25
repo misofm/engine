@@ -8,7 +8,7 @@ Code anchors verified on `main` at `6fb211594`.
 The shipped AudioWorklet module is built by one pinned, dated nightly with `-Zbuild-std`, named in
 one place in the repo. Every build path (CI, the release workflow, a developer's machine) uses it,
 the release identity names it, and changing it is held to a re-recorded three-browser qualification
-and the parity gates. Every other build in the repo stays on stable 1.97.1. This is the toolchain
+and the parity gates. Every other build in the repo stays on stable 1.99.1. This is the toolchain
 that #1332's Wasm threads need; this slice ships the toolchain change alone, with today's module
 shape (no atomics, unshared memory), so its risk is reviewed apart from threading.
 
@@ -172,7 +172,99 @@ shape (no atomics, unshared memory), so its risk is reviewed apart from threadin
 
 ## Dependencies
 
-- *Prove two Wasm instances on one shared memory in three browser engines and on iOS* (#1331):
-  it chooses the dated nightly, records the build flags, and runs the parity gates on it. A second
-  toolchain is only justified if that spike passes, including iOS.
+- *Prove two Wasm instances on one shared memory in three browser engines and on iOS* (#1331a):
+  it chooses the dated nightly, records the build flags, and runs the parity gates on it. Root
+  ruling 2026-10-24: this slice starts on #1331a-1's desktop record alone and does not wait for the
+  iOS leg (#1331b); the module shape it ships (no atomics, unshared memory) is today's.
 - Not dependent on *Gate AudioWorklet render against allocation statically and at runtime* (#1333).
+
+## Decision record (attempt 1, 2026-10-25, base `b0bc367af`)
+
+Anchors moved since the brief: the stable pin is 1.99.1 (not 1.97.1) everywhere; D4's step name is
+"Install the browser artifact toolchain and Rust 1.99.1".
+
+- **Inputs from #1331a-1 (PR #1962).** Channel `nightly-2026-08-20` passed (rustc `1.100.0-nightly
+  (f7d782a3b 2026-08-19)`, LLVM 23.1.0). Its non-atomic flag set adds `+bulk-memory,+mutable-globals`
+  to `+simd128`; both are already default target features of `wasm32-unknown-unknown` on this
+  nightly (`rustc --print cfg`), so the builder keeps `-C target-feature=+simd128` alone. The record
+  answered the RUSTUP_HOME hazard: without a sysroot remap the digest depends on the toolchain path.
+- **D2 as built.** The builder remaps the whole sysroot (`$(rustc --print sysroot)=/rustc-sysroot`,
+  the brief's form; the record remapped its `lib/rustlib/src/rust` subdirectory, which the whole
+  sysroot covers). `-Zbuild-std=std,panic_abort` sits before `--target ... -p host-web`, so the cargo
+  line keeps the tail `scripts/test-artifact-evidence-leak.sh` edits. `--render-lock-probe` shares
+  the cargo line and so builds on the nightly too.
+- **D3 as built.** Install sites: `artifact`, `artifact-identity`, `wasm-guests` (in their toolchain
+  step) and `sdk`, `artifact-gates` (a step of its own after the download is verified:
+  `check-ci-path-routing.py` refuses a repository script before that verification in a reader job;
+  `artifact-gates` needs it for the render-lock probe, which the brief did not list). `npm-publish`'s
+  qualify step installs the channel after refusing a `BROWSER_ARTIFACT_TOOLCHAIN` other than the
+  builder's. Only `rust-src` is installed: gate 4 built the module from a toolchain copy with no
+  wasm32 `rust-std`.
+- **D4 as built.** The `artifact` job's output `rustc` is now `toolchain`; `artifact-record`
+  accepts only a dated nightly; `--toolchain` likewise (the builder accepts nothing else), and a
+  record from before (`<sha256> rustc 1.99.1`) parses and reads as a toolchain change.
+  `release_checks` compares `BROWSER_ARTIFACT_TOOLCHAIN` with the built channel in place of
+  `RUSTUP_TOOLCHAIN`, which no longer reaches the module's bytes.
+- **D5 as built.** A change of the channel between base and HEAD adds a `TOOLCHAIN:` line and runs
+  the `results.json` lineage checks (digest and canonical `candidateCommit`), as a release does.
+
+### Evidence
+
+- Digest before (stable 1.99.1, `b0bc367af`, matches main's `audioworklet-sha256` record):
+  `95ee32630f43ff1008c85d4f1dae37258c2785fe892c6676826060ab5f06d0e6`, 5,628,337 B. After (nightly,
+  build-std): `8643b810a7396683ff2d4f5788ac3b8e52c082d2475efd385cb131ac3498c255`, 5,625,493 B; named
+  twin `4f3b48cf...6ce6`. The pin and `EXPECTED_WORKLET_SHA256` stay (D6). Cargo time for the module:
+  31 s stable, 51 s nightly with build-std (one run each, a shared machine).
+- Gate 1: `rustup show active-toolchain` = 1.99.1; `--print-toolchain` = `nightly-2026-08-20`.
+- Gate 2: `check-web-audioworklet.sh <out> <twin>`, `check-browser-expected-resources.py
+  --artifacts` (expected.json digests and rows agree), `test-web-audioworklet.sh`,
+  `test-sdk-artifact-builder-output-contract.sh`: pass.
+- Gate 3: `run-wasm-gates.sh` (native + guest on the nightly + V8 spill): pass, 0 mismatches.
+- Gate 4: a build from a second `RUSTUP_HOME` (toolchain copy without the wasm32 std), another
+  `CARGO_HOME` and another checkout path gave `8643b810...` again.
+- Gate 5: each of chromium 151.0.7922.34, firefox 153.0, webkit 26.5 passed
+  `--self-test-mutations` once (native corpus digest included); one `--browser all
+  --record-matrix` run re-recorded `results.json` and `BROWSER_DEPLOYMENT_MATRIX.md`, and
+  `--check-matrix` accepts them.
+- Gate 6: identity `--self-test`, `test-npm-publish-modes.py`, `check-ci-path-routing.py`,
+  `test-ci-path-routing.py`, `check-release-shape.py --self-test`: pass. Gate 7 is CI's.
+- Gate 8: `cargo fmt --check`, `check-workspace-policy.sh`: pass; no Rust source changed.
+
+- **Sysroot remap form (deliberate).** The builder remaps the whole sysroot
+  (`$(rustc --print sysroot)=/rustc-sysroot`, D2's frozen form) rather than the #1331a-1 record's
+  `<sysroot>/lib/rustlib/src/rust=/rust-src`: `-Zbuild-std` compiles std from that `rust-src`,
+  which lies inside the sysroot, so the wider prefix covers it and any other sysroot path. Gate 4
+  evidence: a second `RUSTUP_HOME` (toolchain copy at another path, no wasm32 std), another
+  `CARGO_HOME` and another checkout gave the same digest `8643b810...` as the first build.
+- **Re-record after merging main (2026-10-25).** Main at the merge (#2038, #2048) moves the module
+  to `f8e2e594f8468f9da76d6a5714ca46b03e42c3b202ac90dff04e064e9e39b1c2` (5,697,370 B); one
+  `--browser all --record-matrix` run (candidate `f4a4f0da0`, chromium 151.0.7922.34, firefox
+  153.0, webkit 26.5, all gates passed) re-recorded `results.json` and
+  `BROWSER_DEPLOYMENT_MATRIX.md`, and `--check-matrix` accepts them.
+
+### Stated limits (each with a successor)
+
+- **The sysroot remap has no committed gate.** The `artifact-identity` twin shares the runner's
+  `RUSTUP_HOME`, so a dropped remap stays green on a PR; gate 4 above is PR evidence only. It fails
+  closed: the module would then embed the toolchain path, and the next bump or release, built from
+  another toolchain path (`npm-publish.yml`'s rebuild) or re-recorded against a moved digest, refuses
+  the bytes rather than shipping them. Successor: build the twin from a toolchain copy at another
+  path, so the remap is held on every PR.
+- **`check-browser-expected-resources.py` without `--artifacts` builds its own module on stable.**
+  CI always passes `--artifacts`, so CI reads the shipped bytes; a local run without it reads a
+  stable build. Successor: have that path call `build-web-audioworklet.sh --module-only`, the one
+  home of the shipped cargo line.
+
+### Verifier finding M1 (folded in)
+
+The builder contract test's mock cargo logs `RUSTUP_TOOLCHAIN`, and the test asserts that the
+delivery build's cargo line runs on the `[browser-artifact]` channel with
+`-Zbuild-std=std,panic_abort`. It is red on each mutant: dropping `RUSTUP_TOOLCHAIN="$channel"`,
+dropping `-Zbuild-std`, and dropping both.
+
+### Merge order (root, 2026-10-25)
+
+The recorded `results.json` describes `8643b810...` built on `b0bc367af`. #1334 merges alone after
+the current wave of module-moving PRs; just before it merges, the branch merges `origin/main` and
+re-records the matrix (one `--browser all --record-matrix`, then `--check-matrix`), with nothing
+in between.
