@@ -242,7 +242,9 @@ pub fn response_capture_owners(model: &SessionModel) -> Option<usize> {
 /// The job: its box, its strip ID and a collector of `owners` owners, each with three identities
 /// of [`session::STABLE_ID_MAXIMUM_BYTES`] and its two six-section arrays. The result: two strip
 /// IDs (the result's and its track response's), [`crate::RESPONSE_MAXIMUM_POINTS`] points of
-/// frequencies and of both curves, and `owners` members with two identities each.
+/// frequencies and of both curves, and `owners` members with two identities each, plus the
+/// `RESPONSE_READY` event's member table, which exists beside the result's while it is built
+/// (#1578 D4).
 ///
 /// `None` when a product overflows.
 #[must_use]
@@ -255,11 +257,18 @@ pub fn response_capture_ceiling(owners: usize) -> Option<ResponseCaptureCeiling>
             IDENTITY_BYTES,
         )?)?;
     let curve = crate::RESPONSE_MAXIMUM_POINTS.checked_mul(size_of::<f32>())?;
+    // #1578 D4: the result becomes its `RESPONSE_READY` event, whose member table is allocated
+    // while the result's is still held; every other buffer moves.
     let member_table = size_of::<crate::ResponseMember>().checked_mul(owners)?;
+    #[cfg(feature = "control-provider")]
+    let event_member_table = size_of::<protocol::ResponseMember>().checked_mul(owners)?;
+    #[cfg(not(feature = "control-provider"))]
+    let event_member_table = 0_usize;
     let members = IDENTITY_BYTES
         .checked_mul(2)?
         .checked_mul(owners)?
-        .checked_add(member_table)?;
+        .checked_add(member_table)?
+        .checked_add(event_member_table)?;
     let result = IDENTITY_BYTES
         .checked_mul(2)?
         .checked_add(curve.checked_mul(3)?)?
@@ -271,7 +280,11 @@ pub fn response_capture_ceiling(owners: usize) -> Option<ResponseCaptureCeiling>
         result_bytes,
         total_bytes: job_bytes.checked_add(result_bytes)?,
         largest_allocation_bytes: u64::try_from(
-            owner_table.max(curve).max(member_table).max(IDENTITY_BYTES),
+            owner_table
+                .max(curve)
+                .max(member_table)
+                .max(event_member_table)
+                .max(IDENTITY_BYTES),
         )
         .ok()?,
     })
@@ -292,7 +305,7 @@ pub struct ResponseCaptureCeiling {
 
 /// The number of owners `strip_id` has in `model` (its input filters, every console slot and its
 /// inserts), or `None` when the model has no such track or submix.
-fn strip_owners(model: &SessionModel, strip_id: &str) -> Option<usize> {
+pub(crate) fn strip_owners(model: &SessionModel, strip_id: &str) -> Option<usize> {
     let inserts = model
         .tracks
         .iter()

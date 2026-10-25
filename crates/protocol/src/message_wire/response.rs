@@ -14,9 +14,13 @@ use super::{
     write_control_address_fields,
 };
 use crate::{
-    DecodeError, EncodeError, ProtocolCodec,
+    DecodeError, EncodeError, ProtocolCodec, StatusCode,
+    btlv::read_u16,
     btlv::{CountSink, Sink, SliceSink},
-    schema::{self, response_configuration, response_override, response_request, response_result},
+    schema::{
+        self, response_configuration, response_member, response_override, response_ready,
+        response_request, response_result,
+    },
 };
 
 control_code_table! {
@@ -156,6 +160,126 @@ pub enum ResponseResult {
     Curves(ResponseCurves),
 }
 
+control_code_table! {
+    /// The response provider of one `RESPONSE_READY` member (#1578 D2).
+    #[allow(missing_docs)]
+    ResponseMemberKind {
+        ParametricEq = 1,
+        InputFilters = 2,
+        /// A declared owner without a linear response provider, excluded from the curves.
+        Unavailable = 3,
+    }
+}
+
+/// Where one `RESPONSE_READY` member sits in its strip (#1578 D2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResponseMemberSection {
+    /// The strip's builtin input section (wire code 4, no slot ID).
+    Builtins,
+    /// A console slot, by its session slot ID (wire code 5).
+    Console(String),
+    /// A strip insert, by its session insert ID (wire code 2).
+    Inserts(String),
+}
+
+impl ResponseMemberSection {
+    const fn code(&self) -> u8 {
+        match self {
+            Self::Builtins => 4,
+            Self::Console(_) => 5,
+            Self::Inserts(_) => 2,
+        }
+    }
+
+    fn slot_id(&self) -> Option<&str> {
+        match self {
+            Self::Builtins => None,
+            Self::Console(id) | Self::Inserts(id) => Some(id),
+        }
+    }
+}
+
+/// One owner a track response names, in declared signal order (#1578 D2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponseMember {
+    /// Where the owner sits.
+    pub section: ResponseMemberSection,
+    /// The owner's native effect ID, 1 to 127 bytes.
+    pub effect: String,
+    /// The owner's response provider.
+    pub kind: ResponseMemberKind,
+    /// Bypass state captured at the same boundary as the curves.
+    pub bypassed: bool,
+    /// Bit `i` is set when left section `i` is enabled; no bit at or above `section_count`.
+    pub enabled_left: u32,
+    /// Bit `i` is set when right section `i` is enabled; no bit at or above `section_count`.
+    pub enabled_right: u32,
+    /// The number of valid mask bits, at most 32.
+    pub section_count: u8,
+}
+
+/// The capture of a `RESPONSE_READY` whose outcome is `OK` (#1578 D2, D5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackResponseCapture {
+    /// The boundary sample of the captured values.
+    pub captured_sample: u64,
+    /// The plan's sample rate.
+    pub sample_rate_hz: u32,
+    /// The floor every curve value is clamped to, in dB.
+    pub floor_db: f32,
+    /// The generated frequency axis, at least two points.
+    pub frequencies_hz: Vec<f32>,
+    /// The left curve in dB, of the axis's length, when the request asked for the left side.
+    pub left_db: Option<Vec<f32>>,
+    /// The right curve in dB, of the axis's length, when the request asked for the right side.
+    pub right_db: Option<Vec<f32>>,
+    /// The number of members without a linear response provider.
+    pub excluded_count: u32,
+    /// Every captured owner, in declared signal order.
+    pub members: Vec<ResponseMember>,
+}
+
+/// What a `RESPONSE_READY` carries: the capture, or why there is none.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResponseReadyOutcome {
+    /// Outcome `OK` with the capture.
+    Ready(TrackResponseCapture),
+    /// A refused capture: `NOT_FOUND`, `UNAVAILABLE`, `LIMIT_EXCEEDED` or `INTERNAL`, and its
+    /// dotted diagnostic code (1 to 127 bytes).
+    Refused {
+        /// The outcome status.
+        status: StatusCode,
+        /// The dotted diagnostic code, such as `response.strip.removed`.
+        diagnostic: String,
+    },
+}
+
+/// The reliable `RESPONSE_READY` event (`0x8040`, #1578 D2): the result of one strip
+/// `RESPONSE_GET`, named by the tag its reply carried.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResponseReady {
+    /// Endpoint-monotonic reliable event sequence. The controller writes it when it queues the
+    /// event.
+    pub sequence: u64,
+    /// The tag the `RESPONSE_GET` reply carried.
+    pub request_tag: u64,
+    /// The strip the request named.
+    pub strip_id: String,
+    /// The capture, or why there is none.
+    pub outcome: ResponseReadyOutcome,
+}
+
+/// The statuses a refused `RESPONSE_READY` may carry (#1578 D2).
+const REFUSED_OUTCOMES: [StatusCode; 4] = [
+    StatusCode::NotFound,
+    StatusCode::Unavailable,
+    StatusCode::LimitExceeded,
+    StatusCode::Internal,
+];
+
+/// The longest identity or diagnostic a `RESPONSE_READY` carries, in bytes.
+const RESPONSE_READY_TEXT_BYTES: usize = 127;
+
 const FRAME_FIELD_PREFIX_BYTES: usize = 8;
 
 /// The bytes one field occupies: its prefix, its value and the padding to eight bytes.
@@ -195,6 +319,41 @@ pub fn response_result_encoded_len(
         }
     }
     Some(total)
+}
+
+/// The largest frame, in bytes, of a `RESPONSE_READY` event (#1578 D2, R3) for a request of
+/// `points` axis points and `channels` sides on a strip of `owners` members: the larger of the
+/// refused form and the ready form, with the strip ID, every slot and effect ID and the diagnostic
+/// at their 127-byte bound. `None` when the length does not fit a `usize`.
+#[must_use]
+pub fn response_ready_encoded_bound(
+    points: usize,
+    channels: ParameterChannel,
+    owners: usize,
+) -> Option<usize> {
+    // Every scalar of the event (`u8` to `u64`, `f32`, `bool`) occupies one 16-byte field.
+    let scalar = field_bytes(8)?;
+    let text = field_bytes(RESPONSE_READY_TEXT_BYTES)?;
+    let sides = match channels {
+        ParameterChannel::Left | ParameterChannel::Right => 1_usize,
+        ParameterChannel::Both => 2,
+    };
+    // Fields 1 to 4: sequence, tag, strip ID, outcome.
+    let head = crate::OUTER_HEADER_BYTES
+        .checked_add(scalar.checked_mul(3)?)?
+        .checked_add(text)?;
+    let refused = head.checked_add(text)?;
+    // One member: its field prefix and message header, six scalars, the slot and effect IDs.
+    let member = (2 * FRAME_FIELD_PREFIX_BYTES)
+        .checked_add(scalar.checked_mul(6)?)?
+        .checked_add(text.checked_mul(2)?)?;
+    let curve = field_bytes(points.checked_mul(4)?)?;
+    // Fields 6, 7, 8 and 12, the axis and the curves, then the members.
+    let ready = head
+        .checked_add(scalar.checked_mul(4)?)?
+        .checked_add(curve.checked_mul(sides.checked_add(1)?)?)?
+        .checked_add(member.checked_mul(owners)?)?;
+    Some(ready.max(refused))
 }
 
 fn curve_len(values: &[f32]) -> Result<usize, EncodeError> {
@@ -780,6 +939,304 @@ fn decode_response_result(message: Message<'_>) -> Result<ResponseResult, Decode
     Ok(result)
 }
 
+fn response_text_fits(limits: crate::ProtocolLimits, text: &str) -> bool {
+    !text.is_empty() && text.len() <= RESPONSE_READY_TEXT_BYTES && text_fits(limits, text)
+}
+
+/// Whether `mask` sets no bit at or above `count`.
+fn mask_fits(mask: u32, count: u8) -> bool {
+    mask.checked_shr(u32::from(count))
+        .is_none_or(|rest| rest == 0)
+}
+
+fn response_member_is_valid(limits: crate::ProtocolLimits, member: &ResponseMember) -> bool {
+    member.section_count <= 32
+        && mask_fits(member.enabled_left, member.section_count)
+        && mask_fits(member.enabled_right, member.section_count)
+        && response_text_fits(limits, &member.effect)
+        && member
+            .section
+            .slot_id()
+            .is_none_or(|id| stable_id_fits(limits, id))
+}
+
+/// A `RESPONSE_READY`'s own rules, shared by both directions (#1578 D2): a stable strip ID; a
+/// refusal carries one of the four refused statuses and a diagnostic of 1 to 127 bytes; a capture
+/// carries at least two finite axis points, a finite floor, at least one side, each side finite and
+/// of the axis's length, and members whose masks fit their section count.
+fn response_ready_is_valid(limits: crate::ProtocolLimits, value: &ResponseReady) -> bool {
+    if !stable_id_fits(limits, &value.strip_id) {
+        return false;
+    }
+    match &value.outcome {
+        ResponseReadyOutcome::Refused { status, diagnostic } => {
+            REFUSED_OUTCOMES.contains(status) && response_text_fits(limits, diagnostic)
+        }
+        ResponseReadyOutcome::Ready(capture) => {
+            let points = capture.frequencies_hz.len();
+            let side_fits = |side: &Option<Vec<f32>>| {
+                side.as_ref()
+                    .is_none_or(|values| values.len() == points && finite_all(values))
+            };
+            points >= 2
+                && capture.floor_db.is_finite()
+                && finite_all(&capture.frequencies_hz)
+                && (capture.left_db.is_some() || capture.right_db.is_some())
+                && side_fits(&capture.left_db)
+                && side_fits(&capture.right_db)
+                && capture
+                    .members
+                    .iter()
+                    .all(|member| response_member_is_valid(limits, member))
+        }
+    }
+}
+
+pub(crate) fn write_response_ready(
+    sink: &mut dyn Sink,
+    value: &ResponseReady,
+) -> Result<(), EncodeError> {
+    if !response_ready_is_valid(sink.limits(), value) {
+        return Err(EncodeError::InvalidField);
+    }
+    let spec = &response_ready::SPEC;
+    let count = match &value.outcome {
+        ResponseReadyOutcome::Refused { .. } => {
+            spec.field_count(&[(response_ready::DIAGNOSTIC, 1), (response_ready::MEMBER, 0)])?
+        }
+        ResponseReadyOutcome::Ready(capture) => spec.field_count(&[
+            (response_ready::CAPTURED_SAMPLE, 1),
+            (response_ready::SAMPLE_RATE_HZ, 1),
+            (response_ready::FLOOR_DB, 1),
+            (response_ready::FREQUENCIES_HZ, 1),
+            (
+                response_ready::LEFT_DB,
+                usize::from(capture.left_db.is_some()),
+            ),
+            (
+                response_ready::RIGHT_DB,
+                usize::from(capture.right_db.is_some()),
+            ),
+            (response_ready::EXCLUDED_COUNT, 1),
+            (response_ready::MEMBER, capture.members.len()),
+        ])?,
+    };
+    sink.check_field_count(count)?;
+    write_spec!(
+        sink,
+        response_ready::SEQUENCE,
+        &value.sequence.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        response_ready::REQUEST_TAG,
+        &value.request_tag.to_le_bytes()
+    )?;
+    write_spec!(sink, response_ready::STRIP_ID, value.strip_id.as_bytes())?;
+    let capture = match &value.outcome {
+        ResponseReadyOutcome::Refused { status, diagnostic } => {
+            write_spec!(
+                sink,
+                response_ready::OUTCOME,
+                &(*status as u16).to_le_bytes()
+            )?;
+            return write_spec!(sink, response_ready::DIAGNOSTIC, diagnostic.as_bytes());
+        }
+        ResponseReadyOutcome::Ready(capture) => capture,
+    };
+    write_spec!(
+        sink,
+        response_ready::OUTCOME,
+        &(StatusCode::Ok as u16).to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        response_ready::CAPTURED_SAMPLE,
+        &capture.captured_sample.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        response_ready::SAMPLE_RATE_HZ,
+        &capture.sample_rate_hz.to_le_bytes()
+    )?;
+    write_spec!(
+        sink,
+        response_ready::FLOOR_DB,
+        &capture.floor_db.to_le_bytes()
+    )?;
+    write_packed(
+        sink,
+        response_ready::FREQUENCIES_HZ,
+        &capture.frequencies_hz,
+    )?;
+    if let Some(values) = &capture.left_db {
+        write_packed(sink, response_ready::LEFT_DB, values)?;
+    }
+    if let Some(values) = &capture.right_db {
+        write_packed(sink, response_ready::RIGHT_DB, values)?;
+    }
+    write_spec!(
+        sink,
+        response_ready::EXCLUDED_COUNT,
+        &capture.excluded_count.to_le_bytes()
+    )?;
+    for member in &capture.members {
+        sink.nested_spec(response_ready::MEMBER, &mut |sink| {
+            let slot_id = member.section.slot_id();
+            sink.message_header(
+                response_member::SPEC
+                    .field_count(&[(response_member::SLOT_ID, usize::from(slot_id.is_some()))])?,
+            )?;
+            write_spec!(sink, response_member::SECTION, &[member.section.code()])?;
+            if let Some(id) = slot_id {
+                write_spec!(sink, response_member::SLOT_ID, id.as_bytes())?;
+            }
+            write_spec!(sink, response_member::EFFECT, member.effect.as_bytes())?;
+            write_spec!(sink, response_member::KIND, &[member.kind.code()])?;
+            write_spec!(
+                sink,
+                response_member::BYPASSED,
+                &[u8::from(member.bypassed)]
+            )?;
+            write_spec!(
+                sink,
+                response_member::ENABLED_LEFT,
+                &member.enabled_left.to_le_bytes()
+            )?;
+            write_spec!(
+                sink,
+                response_member::ENABLED_RIGHT,
+                &member.enabled_right.to_le_bytes()
+            )?;
+            write_spec!(
+                sink,
+                response_member::SECTION_COUNT,
+                &[member.section_count]
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn decode_response_member(
+    limits: crate::ProtocolLimits,
+    message: Message<'_>,
+) -> Result<ResponseMember, DecodeError> {
+    let message = message.schema_spec(&response_member::SPEC)?;
+    let slot_id = optional_spec!(message, response_member::SLOT_ID)?
+        .map(|id| read_string_within(limits, id).map(str::to_owned))
+        .transpose()?;
+    // The slot ID is present exactly for a console slot and an insert.
+    let section = match (
+        read_u8(one_spec!(message, response_member::SECTION)?)?,
+        slot_id,
+    ) {
+        (4, None) => ResponseMemberSection::Builtins,
+        (5, Some(id)) => ResponseMemberSection::Console(id),
+        (2, Some(id)) => ResponseMemberSection::Inserts(id),
+        _ => return Err(DecodeError::InvalidField),
+    };
+    Ok(ResponseMember {
+        section,
+        effect: read_string_within(limits, one_spec!(message, response_member::EFFECT)?)?
+            .to_owned(),
+        kind: ResponseMemberKind::from_code(read_u8(one_spec!(message, response_member::KIND)?)?)?,
+        bypassed: read_bool(one_spec!(message, response_member::BYPASSED)?)?,
+        enabled_left: read_u32(one_spec!(message, response_member::ENABLED_LEFT)?)?,
+        enabled_right: read_u32(one_spec!(message, response_member::ENABLED_RIGHT)?)?,
+        section_count: read_u8(one_spec!(message, response_member::SECTION_COUNT)?)?,
+    })
+}
+
+fn decode_response_ready(
+    codec: &ProtocolCodec,
+    message: Message<'_>,
+) -> Result<ResponseReady, DecodeError> {
+    let limits = codec.limits();
+    let message = message.schema_spec(&response_ready::SPEC)?;
+    let outcome = read_u16(one_spec!(message, response_ready::OUTCOME)?)?;
+    let diagnostic = optional_spec!(message, response_ready::DIAGNOSTIC)?;
+    let captured_sample = optional_spec!(message, response_ready::CAPTURED_SAMPLE)?;
+    let sample_rate_hz = optional_spec!(message, response_ready::SAMPLE_RATE_HZ)?;
+    let floor_db = optional_spec!(message, response_ready::FLOOR_DB)?;
+    let frequencies_hz = optional_spec!(message, response_ready::FREQUENCIES_HZ)?;
+    let left_db = optional_spec!(message, response_ready::LEFT_DB)?;
+    let right_db = optional_spec!(message, response_ready::RIGHT_DB)?;
+    let excluded_count = optional_spec!(message, response_ready::EXCLUDED_COUNT)?;
+    let members = values_spec!(message, response_ready::MEMBER)?.count();
+    let outcome = if outcome == StatusCode::Ok as u16 {
+        let (
+            None,
+            Some(captured_sample),
+            Some(sample_rate_hz),
+            Some(floor_db),
+            Some(frequencies_hz),
+            Some(excluded_count),
+        ) = (
+            diagnostic,
+            captured_sample,
+            sample_rate_hz,
+            floor_db,
+            frequencies_hz,
+            excluded_count,
+        )
+        else {
+            return Err(DecodeError::InvalidField);
+        };
+        let mut decoded = Vec::with_capacity(members);
+        for raw in values_spec!(message, response_ready::MEMBER)? {
+            decoded.push(decode_response_member(
+                limits,
+                Message::nested_at_depth(raw, limits, 1)?,
+            )?);
+        }
+        ResponseReadyOutcome::Ready(TrackResponseCapture {
+            captured_sample: read_u64(captured_sample)?,
+            sample_rate_hz: read_u32(sample_rate_hz)?,
+            floor_db: read_f32(floor_db)?,
+            frequencies_hz: read_packed(frequencies_hz)?,
+            left_db: left_db.map(read_packed).transpose()?,
+            right_db: right_db.map(read_packed).transpose()?,
+            excluded_count: read_u32(excluded_count)?,
+            members: decoded,
+        })
+    } else {
+        let status = REFUSED_OUTCOMES
+            .into_iter()
+            .find(|status| *status as u16 == outcome)
+            .ok_or(DecodeError::InvalidField)?;
+        // A refusal carries its diagnostic and nothing of a capture.
+        let (Some(diagnostic), None, None, None, None, None, None, None, 0) = (
+            diagnostic,
+            captured_sample,
+            sample_rate_hz,
+            floor_db,
+            frequencies_hz,
+            left_db,
+            right_db,
+            excluded_count,
+            members,
+        ) else {
+            return Err(DecodeError::InvalidField);
+        };
+        ResponseReadyOutcome::Refused {
+            status,
+            diagnostic: read_string_within(limits, diagnostic)?.to_owned(),
+        }
+    };
+    let value = ResponseReady {
+        sequence: read_u64(one_spec!(message, response_ready::SEQUENCE)?)?,
+        request_tag: read_u64(one_spec!(message, response_ready::REQUEST_TAG)?)?,
+        strip_id: read_string_within(limits, one_spec!(message, response_ready::STRIP_ID)?)?
+            .to_owned(),
+        outcome,
+    };
+    if !response_ready_is_valid(limits, &value) {
+        return Err(DecodeError::InvalidField);
+    }
+    Ok(value)
+}
+
 impl ProtocolCodec {
     /// Return the exact caller-buffer size of a `RESPONSE_GET` request.
     pub fn encoded_response_request_len(
@@ -847,5 +1304,37 @@ impl ProtocolCodec {
         count: u32,
     ) -> Result<ResponseResult, DecodeError> {
         decode_response_result(Message::top_level(payload, count, self.limits())?)
+    }
+
+    /// Return the exact caller-buffer size of a `RESPONSE_READY` event payload (#1578 D2).
+    pub fn encoded_response_ready_len(&self, value: &ResponseReady) -> Result<usize, EncodeError> {
+        let mut sink = CountSink::new(self.limits());
+        write_response_ready(&mut sink, value)?;
+        checked_sink_len(self, &mut sink)
+    }
+
+    /// Encode a `RESPONSE_READY` event payload without allocation.
+    pub fn encode_response_ready(
+        &self,
+        value: &ResponseReady,
+        output: &mut [u8],
+    ) -> Result<usize, EncodeError> {
+        let required = self.encoded_response_ready_len(value)?;
+        if output.len() < required {
+            return Err(EncodeError::OutputTooSmall { required });
+        }
+        let mut writer = SliceSink::new(output, self.limits());
+        write_response_ready(&mut writer, value)?;
+        checked_writer_len(&writer, required)
+    }
+
+    /// Strictly decode a `RESPONSE_READY` event payload: the presence rules of #1578 D2 hold, and
+    /// every other shape is `INVALID_FIELD`.
+    pub fn decode_response_ready(
+        &self,
+        payload: &[u8],
+        count: u32,
+    ) -> Result<ResponseReady, DecodeError> {
+        decode_response_ready(self, Message::top_level(payload, count, self.limits())?)
     }
 }
