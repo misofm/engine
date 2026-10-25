@@ -4330,7 +4330,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             })
         })
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    let session_resources = compiled.resource_estimate();
+    // #1953b: the session the graph was compiled from, fading copies included.
+    let session_resources = graph_session.resource_estimate();
     let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
         None => None,
         Some(SpectrumPreparation::Single(request)) => Some(
