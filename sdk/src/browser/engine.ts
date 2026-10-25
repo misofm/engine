@@ -496,8 +496,8 @@ function spectrumCapabilityRefusal(reason: string): MisoEngineError {
   });
 }
 
-function spectrumKey(target: SpectrumQuery["target"], channels: string): string {
-  return JSON.stringify([target.kind, target.kind === "output" ? target.outputId : target.trackId, channels]);
+function spectrumTargetKey(target: SpectrumQuery["target"]): string {
+  return JSON.stringify([target.kind, target.kind === "output" ? target.outputId : target.trackId]);
 }
 
 /**
@@ -780,10 +780,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let trackResponsePromise: Promise<BrowserTrackResponse> | undefined;
     let trackResponsePending = false;
     // The spectrum taps the core holds, as the boot or the last accepted `configureSpectrum` set
-    // them, and the entry the last accepted selection named.
+    // them: the subscription owner checks a subscription against them.
     let spectrumQuery: SpectrumQuery | undefined = preparedSpectrum;
     let spectrumCollection: SpectrumCollection | undefined = preparedSpectrumCollection;
-    let spectrumActiveQuery: SpectrumQuery | undefined = preparedSpectrum;
     let spectrumPending = false;
     let closed = false;
     // Issue #1644 D3: the largest generation a session seek of this object has used; every source
@@ -978,13 +977,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       if (!reply.ok) throw spectrumRefusalError("the engine refused the spectrum configuration", reply);
       spectrumQuery = query;
       spectrumCollection = collection;
-      const active = spectrumActiveQuery;
-      // A collection keeps the selection of an entry it still holds (#1594 D6); a single form selects
-      // its one entry.
-      spectrumActiveQuery = query ?? (active !== undefined && collection !== undefined
-        && collection.entries.some((entry) =>
-          spectrumKey(entry.target, entry.channels ?? "both") === spectrumKey(active.target, active.channels ?? "both"))
-        ? active : undefined);
       return spectrumConfiguredOf(reply.value);
     };
     const selectSpectrum = async (query: SpectrumQuery): Promise<EngineCallResult> => {
@@ -995,7 +987,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         target: selected.target,
         channels: selected.channels ?? "both",
       }, decodeSpectrumCaptureReply), Date.now(), queryDeadline(query), options.signal);
-      if (reply.ok) spectrumActiveQuery = selected;
       return spectrumCallResult(reply);
     };
     const selectSpectrumStream = async (
@@ -1011,7 +1002,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         smoothingMs,
       }, query);
       if (!reply.ok) return spectrumCallResult(reply);
-      spectrumActiveQuery = selected;
       return Object.freeze({ ...spectrumCallResult(reply), metadata: spectrumMetadataOf(reply.value) });
     };
     const startSpectrumStream = async (smoothingMs: number, query?: SpectrumQuery): Promise<SpectrumStreamStart> => {
@@ -1171,7 +1161,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       const deadline = queryDeadline(request);
       // An arm and a read name no target: in the single form the SDK holds the one tap the core has.
       const single = spectrumQuery;
-      if (single !== undefined && spectrumKey(single.target, "") !== spectrumKey(selected.target, "")) {
+      if (single !== undefined && spectrumTargetKey(single.target) !== spectrumTargetKey(selected.target)) {
         throw new MisoUsageError("the spectrum query target is not the configured tap");
       }
       spectrumPending = true;
@@ -1185,7 +1175,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
             op: "capture", capture: "select", target: selected.target, channels,
           }, decodeSpectrumCaptureReply), started, deadline, options.signal);
           if (!selection.ok) throw spectrumRefusalError("the engine refused the spectrum selection", selection);
-          spectrumActiveQuery = selected;
           // A select that changes the entry arms it for the core, not for this caller (#1592 D4):
           // give that arm back, so the arm below is this query's own.
           const released = await awaitSpectrum(

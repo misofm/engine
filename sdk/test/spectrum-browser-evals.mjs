@@ -184,9 +184,11 @@ test("a one-shot query on a collection selects its entry first", SKIP, async () 
 
 test("a one-shot query past its deadline cancels its arm behind it, so the next query arms", SKIP, async () => {
   // Red if a query that stopped waiting leaves its arm standing: the next arm is then refused
-  // `spectrum.busy`.
+  // `spectrum.busy`. Red too if a single-form query of another target is armed: an arm names no
+  // target, so its window would be the configured tap's under the other target's name.
   const { engine, render, harness } = await served({ spectrum: OUTPUT });
   try {
+    await assert.rejects(engine.querySpectrum(TRACK), /not the configured tap/);
     let release;
     harness.hold = new Promise((resolve) => { release = resolve; });
     await assert.rejects(engine.querySpectrum({ ...OUTPUT, spectrumLimits: { requestDeadlineMs: 10 } }), /deadline/);
