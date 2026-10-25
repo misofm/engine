@@ -211,3 +211,34 @@ Commands: `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-headless.sh
   `backpressure` or `renderRejected`; `startSpectrumStream` throws where it returned `ok: false`. Gate 3 is in
   `spectrum-evals.mjs`; the #852 hop-probe boot evals in `boot-evals.mjs` became the bit-16 and
   copied-hop evals.
+- #1596c facts (attempt 1): the browser engine sends the three frames through `host.control()` on
+  the host's one request-ID allocator; the core analyzes, so no analysis Worker starts, and the
+  SDK's spectrum Worker client and its Worker messages are deleted (`SpectrumModule`,
+  `decodeSpectrumResult` and `SdkTimeoutCode` `spectrumCloseTimeout` in `sdk/src/core/` are now
+  unused and outside this slice's paths: #1597). The browser boot follows the headless boot (root
+  ruling): the worklet still stages the taps, then one `SPECTRUM_CONFIGURE` (after a
+  `CAPABILITIES_GET` bit-16 check) carries the policy hop and must report `adopted_epoch ==
+  configured_epoch` at once, bounded by `requestDeadlineMs`. The boot words no longer carry the hop,
+  so the worklet never calls the hop boot export; the worklet scripts are unchanged. A frame the
+  caller stopped waiting for is undone by a frame posted behind it on the same ordered port: a
+  query's `cancel`, or a stream's `stop` with the end of the managed lifetime. The core keeps a
+  stream across a configure only within the collection form (`adopt_successor`): gate 4 boots a
+  one-entry collection. A collection `select` arms the entry for the core, so a one-shot query on a
+  collection sends select, cancel, arm, read. The qualification page has no cross-origin isolation
+  (single mode); the isolated leg needs #1332, so gate 5 runs on the one leg, with a new
+  `sdk-spectrum-control-allocations` row (the handler's allocations grow across each query).
+  Browser public changes: `BrowserEngine.configureSpectrum` is new; `querySpectrum` and the
+  managed stream raise `MisoEngineError` (`code` the result class, `diagnosticCode` the core's) where
+  the SDK raised `MisoUsageError` for an unprepared engine, unprepared channels, a capture limit
+  above the prepared bound or an active stream (`spectrum.unprepared`, `spectrum.channels`,
+  `spectrum.busy`); the capture limit of a query is no longer checked (the configured budget is
+  the core's); a single-form query of another target is still `MisoUsageError`; a timed-out query
+  no longer refuses the next one as in flight; `querySpectrum` works on a collection and both calls
+  work after a run-time `configureSpectrum` on an engine booted without taps; a stream read refused
+  `backpressure` or `renderRejected` throws where it returned `{ metadata }`; a stream frame past
+  its deadline ends the subscription; the query no longer checks the host status after its read;
+  `close()` no longer waits for a spectrum Worker (`spectrumCloseTimeout` is never raised);
+  `scratchBootOptions`, `workletBootOptions` (and so `toWebBootOptions`) no longer carry
+  `spectrumHopFrames`; a boot with taps refuses an engine without capability bit 16
+  (`sdk.asset.capability`) and rejects a refused boot configure with the core's code; the policy hop
+  applies only to the boot's taps (as headless).
