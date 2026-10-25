@@ -3977,7 +3977,8 @@ fn a_fired_fade_does_not_repeat_on_every_width() {
 /// so both fades are scheduled for block 10, and the second swap lands at block 8. (c) Fired: (b)'s
 /// send has fired at block 10 when the second swap lands at block 11, its successor prepared then
 /// or at block 8, before the fire. Every run equals the one-swap run straight to the second
-/// session, and neither swap block allocates or frees.
+/// session, and neither swap block allocates or frees. In (b) and (c) a live mute of the send at
+/// block 11 is heard: the second plan holds no arm left over that would swallow it.
 fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
     let send = |model| {
         with_route(
@@ -3989,14 +3990,14 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
             false,
         )
     };
-    let one_swap = |a: &Session, b: &Session, anchored, feeds: &[&Feed]| {
+    let one_swap = |a: &Session, b: &Session, anchored, feeds: &[&Feed], writes: &[CellWrite]| {
         let swap = [FadeSwap {
             block: SWAP_BLOCK,
             to: b,
             committed: &a.model,
             prepared_at: None,
         }];
-        fade_run(a, &swap, feeds, anchored, &[], backend)
+        fade_run(a, &swap, feeds, anchored, writes, backend)
     };
     // (a) Waiting.
     let kept = Feed::new(SOURCE, 1);
@@ -4018,7 +4019,7 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
         })
     };
     let run = two_swap_run(&a, &b1, &b2, SWAP_BLOCK + 1, anchored(), &[&kept], backend);
-    let reference = one_swap(&a, &b2, anchored(), &[&kept]);
+    let reference = one_swap(&a, &b2, anchored(), &[&kept], &[]);
     assert_eq!(
         first_fade_difference(&run, &reference),
         None,
@@ -4037,14 +4038,53 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
     let b2 = Session::compile(with_muted_track(b1.model.clone()));
     let fire_block = (SWAP_BLOCK * QUANTUM + 486).div_ceil(QUANTUM);
     assert_eq!(fire_block, 10, "the fades are scheduled for block 10");
-    let reference = one_swap(&a, &b2, None, &feeds);
+    let ramp = LiveRamps::for_session(&b2.model).mute_samples;
+    let mut mute = unmute_route(&b2.model, "fade-bus", BLOCKS - 1, ramp);
+    let CellRecord::Route(_, record) = &mut mute.record else {
+        unreachable!("a send record")
+    };
+    let values = b2
+        .model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "fade-bus")
+        .expect("the send");
+    let matrix = &values.channel_matrix;
+    *record = host_core::route_record(
+        values.gain_db,
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
+        true,
+        [false; 2],
+        ramp,
+    )
+    .expect("a send record");
+    let writes = [mute];
+    let reference = one_swap(&a, &b2, None, &feeds, &writes);
+    assert_ne!(
+        reference.blocks[BLOCKS - 1],
+        one_swap(&a, &b2, None, &feeds, &[]).blocks[BLOCKS - 1],
+        "{backend:?}: the live mute is heard"
+    );
     for (case, second, prepared_at) in [
         ("(b) scheduled", SWAP_BLOCK + 2, None),
         ("(c) fired", fire_block + 1, None),
         ("(c) fired after its successor's preparation", fire_block + 1, Some(SWAP_BLOCK + 2)),
     ] {
-        let run =
-            two_swap_run_prepared(&a, &b1, &b2, (second, prepared_at), None, &feeds, backend);
+        let swaps = [
+            FadeSwap {
+                block: SWAP_BLOCK,
+                to: &b1,
+                committed: &a.model,
+                prepared_at: None,
+            },
+            FadeSwap {
+                block: second,
+                to: &b2,
+                committed: &b1.model,
+                prepared_at,
+            },
+        ];
+        let run = fade_run(&a, &swaps, &feeds, None, &writes, backend);
         assert_eq!(
             first_fade_difference(&run, &reference),
             None,
