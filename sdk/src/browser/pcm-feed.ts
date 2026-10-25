@@ -657,8 +657,8 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
 
 /**
  * Issue 1297c: the indexes of the sources that have a `start`, in a stable dependency order: a
- * source whose `alignTo` names another started source of the same feed comes after it. A
- * self-alignment or an `alignTo` cycle is refused. Each start names at most one reference, so the
+ * source whose `alignTo` names another started source of the same feed comes after it. An
+ * `alignTo` cycle, a self-alignment included, is refused. Each start names at most one reference, so the
  * walk follows one chain at a time, without recursion.
  */
 function startOrder(sources: readonly FeedSource[]): number[] {
@@ -672,10 +672,9 @@ function startOrder(sources: readonly FeedSource[]): number[] {
     while (index !== undefined && !placed.has(index)) {
       const source: FeedSource = sources[index]!;
       if (source.start === undefined) break;
-      if (onChain.has(index)) throw new MisoUsageError(`feed source ${source.sourceId} is on an alignTo cycle`);
+      if (onChain.has(index)) throw new MisoUsageError(`feed source ${source.sourceId} is on an alignTo cycle (a self-alignment is one)`);
       chain.push(index); onChain.add(index);
       const alignTo: string | undefined = source.start.alignTo;
-      if (alignTo === source.sourceId) throw new MisoUsageError(`feed source ${source.sourceId} cannot align to itself`);
       index = alignTo === undefined ? undefined : indexOf.get(alignTo);
     }
     for (const entry of chain.reverse()) { placed.add(entry); order.push(entry); }

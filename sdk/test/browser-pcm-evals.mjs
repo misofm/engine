@@ -839,7 +839,7 @@ test("alignTo refuses an unrendered, busy, reseeked, held or pending-seek refere
     [{ sourceId: "self", channels: 1, start: { alignTo: "self", prime() {} } }],
     [{ sourceId: "a", channels: 1, start: { alignTo: "c", prime() {} } }, { sourceId: "b", channels: 1, start: { alignTo: "a", prime() {} } }, { sourceId: "c", channels: 1, start: { alignTo: "b", prime() {} } }],
   ]) {
-    assert.throws(() => attachEngineFeed({ context, sources, quantumFrames: 4, engine: { host }, createNode: () => run.node }), (error) => error instanceof MisoUsageError && /itself|cycle/.test(error.message), sources[0].sourceId);
+    assert.throws(() => attachEngineFeed({ context, sources, quantumFrames: 4, engine: { host }, createNode: () => run.node }), (error) => error instanceof MisoUsageError && /alignTo cycle/.test(error.message), sources[0].sourceId);
   }
 });
 
