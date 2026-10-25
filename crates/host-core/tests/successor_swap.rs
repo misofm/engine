@@ -4129,6 +4129,17 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
             "{backend:?} {case}: allocator calls"
         );
     }
+    // #2069: a waiting send the second transaction mutes is re-armed too, carrying its entry, as
+    // any value change: the second plan holds the same arms as with the send unmuted.
+    let mut muted_send = b2.model.clone();
+    route_mut(&mut muted_send, "fade-bus").mute = true;
+    let muted_send = Session::compile(muted_send);
+    let second = SWAP_BLOCK + 2;
+    assert_eq!(
+        two_swap_run(&a, &b1, &muted_send, second, None, &feeds, backend).arms[1],
+        two_swap_run(&a, &b1, &b2, second, None, &feeds, backend).arms[1],
+        "{backend:?}: a waiting send the second transaction mutes is re-armed"
+    );
     // (e) The second transaction restarts the track (#1324): a transparent insert. Its pending
     // entries are replaced by fresh arms, the send's with the fader's (#1392 D2), so both wait out
     // the restarted chain's line. The fresh-arm run: the same swaps, the send added by the second
@@ -4200,7 +4211,9 @@ fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
 /// `FireAt` send as `Waiting` (it fires `D` late), fades a fired send again, carries a restarted
 /// strip's send entry over its fresh arm (it fires before the restarted line refills), folds a
 /// fired transition route whose ramp is still in flight (it steps to its constant, #1953b), or
-/// allocates at either swap block.
+/// allocates at either swap block; or (#2069) if a waiting send the second transaction mutes is
+/// not re-armed (its displaced arm fires at the swap, and an unmute before its fire opens it at
+/// once).
 #[test]
 fn a_pending_route_fade_survives_a_second_swap_on_every_width() {
     for backend in backends() {
@@ -4712,6 +4725,24 @@ fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
         [(486, ramp), (486, ramp)],
         "{backend:?}: aux's fader and its send wait for the limiter"
     );
+    // #2069: a send the session mutes is armed with its restarted strip too.
+    let muted_send = |restarted| {
+        let mut model = follow_send_model(None, restart(restarted));
+        route_mut(&mut model, "aux-bus").mute = true;
+        Session::compile(model)
+    };
+    let (a, b) = (muted_send(false), muted_send(true));
+    let swap = [FadeSwap {
+        block: SWAP_BLOCK,
+        to: &b,
+        committed: &a.model,
+        prepared_at: None,
+    }];
+    assert_eq!(
+        fade_run(&a, &swap, &feeds, None, &[], backend).arms[0],
+        six_word.arms[0],
+        "{backend:?}: a muted send of a restarted strip is armed"
+    );
     // A curve that mutes `aux` at preparation leaves its fader unarmed (#1288: a muted lane
     // arms nothing), and still arms its send (R2: the arm refuses on the route's own gate only).
     for (case, curve, arms) in [
@@ -4785,7 +4816,9 @@ fn a_following_send_of_a_restarted_strip_fades_in(backend: Backend) {
 /// event during the wait lifts its ramps off zero (it opens before the fire), or if the arm or
 /// the fire allocates on render; or (d) if an added following send's first-block fire composes
 /// with its seed instead of the curve its block hears (the curve's first-block `Set` then steps it
-/// open). Render-scope allocations are counted, not aborted, so (c) reads them.
+/// open); or (#2069) if a send the session mutes is left unarmed by its strip's restart (an
+/// unmute before the fire opens it at once). Render-scope allocations are counted, not aborted, so
+/// (c) reads them.
 #[test]
 fn a_following_send_of_a_restarted_strip_fades_in_on_every_width() {
     use bench_support::alloc::{Mode, assert_installed, mode, set_mode};

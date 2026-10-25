@@ -20175,8 +20175,8 @@ mod follow_route_op_tests {
                 bits((&want_left, &want_right)),
                 "the fire ramps from rest to the record's target over the armed length"
             );
-            // A muting record before the fire: the fire keeps the route muted, so once its ramp
-            // has run the route is inactive (it is never unmuted).
+            // A muting record before the fire: the fire keeps the route muted and (#2069) ramps
+            // nowhere, so the route is inactive from the fire block on (it is never unmuted).
             let mut muted = Six::new(gated(OPEN, [false; 2]), false);
             assert!(muted.route.arm_fade_in(ARMED));
             muted.revision += 1;
@@ -20188,10 +20188,16 @@ mod follow_route_op_tests {
             let (mut left, mut right) = input(AFTER);
             assert!(!muted.block(&mut left, &mut right), "it waits silent");
             muted.route.fire_fade_in();
-            for _ in 0..2 {
-                let (mut left, mut right) = input(AFTER);
-                muted.block(&mut left, &mut right);
-            }
+            assert_eq!(
+                (muted.route.ramp, muted.route.mute),
+                (IndexedRamp::settled([0.0; 4]), true),
+                "the fire to a mute leaves the route settled at rest, muted"
+            );
+            let (mut left, mut right) = input(AFTER);
+            assert!(
+                !muted.block(&mut left, &mut right),
+                "a route muted before its fire is inactive in the fire block"
+            );
             let (mut left, mut right) = input(AFTER);
             assert!(
                 !muted.block(&mut left, &mut right),
