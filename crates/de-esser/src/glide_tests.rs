@@ -786,8 +786,8 @@ fn a_silent_bank_never_skips_a_glide() {
 
 /// A collapsed bank (issue #973) glides as the dual bank does on `L == R`: lane 0 glides
 /// while the bank renders collapsed, the disengage copy carries its weights to the right channel
-/// mid-glide, and the dual blocks after it render both channels bit for bit as a bank that never
-/// collapsed. At `Simd4` and `Simd8`.
+/// mid-glide, and the dual blocks after it, on channels 20 dB apart, render both channels bit for
+/// bit as a bank that never collapsed. At `Simd4` and `Simd8`.
 #[test]
 fn a_collapsed_glide_matches_the_dual_glide_and_survives_the_disengage() {
     let values = oracle_values();
@@ -820,9 +820,16 @@ fn a_collapsed_glide_matches_the_dual_glide_and_survives_the_disengage() {
             let plane: Vec<f32> = (0..BLOCK * lanes)
                 .map(|index| source[first + index / lanes] * (1.0 + index as f32 % 3.0))
                 .collect();
-            let (mut left, mut right) = (plane.clone(), plane.clone());
+            // `L == R` while collapsed; after the disengage the right is 20 dB down, so the dual
+            // blocks show how far each bank's glide has come.
+            let other: Vec<f32> = if mono {
+                plane.clone()
+            } else {
+                plane.iter().map(|word| 0.1 * word).collect()
+            };
+            let (mut left, mut right) = (plane.clone(), other.clone());
             collapsed.process(&mut left, &mut right, first as u64, (&[], &offsets), mono);
-            let (mut dual_left, mut dual_right) = (plane.clone(), plane);
+            let (mut dual_left, mut dual_right) = (plane, other);
             dual.process(
                 &mut dual_left,
                 &mut dual_right,
