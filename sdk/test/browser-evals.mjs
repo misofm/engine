@@ -18,6 +18,7 @@ import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import {
   POLICY_WORDS,
   ROLE_DEFINED_WORDS,
+  SessionSeekProducerError,
   assertQuantumMatch,
   assertWebDeliverableSources,
   bootOptionsAgree,
@@ -443,6 +444,67 @@ describe("the browser open sequence", () => {
     assert.deepEqual(events, ["host", "context"]);
     await engine.close();
     assert.deepEqual(events, ["host", "context"], "a settled close stays one operation");
+  });
+
+  test("seek repositions the producers only after the engine accepted the session seek", async () => {
+    // Issue #1644 gate 3: the order is the claim. A producer seeking first, or without an OK,
+    // makes the session seek stale and the ring stall; a stale default generation does the same.
+    const log = [];
+    let result = 0;
+    let localRefusal = null;
+    const engine = await createEngine({
+      document: sessionDocument(),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "running",
+        close: async () => {},
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => ({
+        seekSession: async (request) => {
+          if (localRefusal !== null) throw localRefusal;
+          log.push(["host", request]);
+          await Promise.resolve();
+          log.push(["reply", result]);
+          return { tag: "miso.session-seek.v1", requestId: 1, result, generation: request.generation };
+        },
+        dispose: async () => {},
+      }),
+    });
+    const producer = (name) => ({ seek: async (frame, generation) => { log.push([name, frame, generation]); } });
+    const producers = [producer("a"), producer("b")];
+    assert.deepEqual(await engine.seek(480n, { producers }), { generation: 2n });
+    assert.deepEqual(await engine.seek(96n, { producers }), { generation: 3n }, "the next default is one above");
+    assert.deepEqual(log.splice(0), [
+      ["host", { generation: 2n, frame: 480n }], ["reply", 0], ["a", 480, 2n], ["b", 480, 2n],
+      ["host", { generation: 3n, frame: 96n }], ["reply", 0], ["a", 96, 3n], ["b", 96, 3n],
+    ]);
+    result = 1;
+    await assert.rejects(engine.seek(0n, { generation: 3n, producers }), (error) =>
+      error instanceof MisoEngineError && error.result === 1 && error.code === "invalidArgument");
+    assert.deepEqual(log.splice(0), [["host", { generation: 3n, frame: 0n }], ["reply", 1]],
+      "a refused seek repositions nothing");
+    await assert.rejects(engine.seek(2n ** 53n, { producers }), MisoUsageError);
+    assert.deepEqual(log, [], "an unsafe frame posts nothing");
+    result = 0;
+    // The host's local refusal of a second unsettled seek is its numeric record.
+    localRefusal = Object.freeze({ tag: "miso.error.v1", requestId: 0, result: 6 });
+    await assert.rejects(engine.seek(0n, { producers }), (error) =>
+      error instanceof MisoEngineError && error.code === "backpressure" && error.result === 6);
+    localRefusal = null;
+    const failure = new RangeError("seek generation must be a bigint above the pump's own");
+    const failing = { seek: async () => { throw failure; } };
+    await assert.rejects(engine.seek(0n, { generation: 9n, producers: [producers[0], failing, producers[1]] }), (error) =>
+      error instanceof SessionSeekProducerError && error.generation === 9n && error.producerIndex === 1 && error.cause === failure);
+    assert.deepEqual(log.splice(0), [["host", { generation: 9n, frame: 0n }], ["reply", 0], ["a", 0, 9n]],
+      "a producer failure after the OK names the applied generation and stops");
+    await engine.close();
+    await assert.rejects(engine.seek(0n), MisoUsageError);
+    assert.deepEqual(log, [], "a closed engine posts nothing");
   });
 
   test("close still releases the AudioContext when host disposal rejects", async () => {

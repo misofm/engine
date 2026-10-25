@@ -299,10 +299,13 @@ SCALAR_SLACK = 8
 #   parametric-eq        f32x4    748 /  1   ratio 0.0013   (collapsed; [84 / 0])
 #   soft-clip            f32x4     55 /  0   ratio 0        ([25 / 0])
 #   route-mix-ramp       f32x4     22 /  0   ratio 0        (#1220; row added by its verdict NIT-1)
-#   dynamic-eq           f32x4    626 /  0   ratio 0        (dual, #17 S2)
-#   dynamic-eq           f32x4    316 /  0   ratio 0        (collapsed, #17 S2)
-#   de-esser             f32x4    561 /  0   ratio 0        (dual, #1920)
-#   de-esser             f32x4    283 /  0   ratio 0        (collapsed, #1920)
+#   dynamic-eq           f32x4   1014 /  0   ratio 0        (dual, #17 S2; 626 / 0 before #1969)
+#   dynamic-eq           f32x4    511 /  0   ratio 0        (collapsed, #17 S2; 316 / 0 before #1969)
+#   de-esser             f32x4    893 /  0   ratio 0        (dual, #1920; 561 / 0 before #1969)
+#   de-esser             f32x4    450 /  0   ratio 0        (collapsed, #1920; 283 / 0 before #1969)
+#
+# The dynamic-eq and de-esser rows were re-measured after #1969 (its detector link glide), on the
+# named twin built from `e3e7cdab3`; the other rows are the #1970 build's.
 #
 # The parametric EQ's one scalar operation in each body is an `f32.sub` once per block, not per
 # sample: `lane::silence_armable_holding` (issue #1328) computes `armed_after - frames`, and both
