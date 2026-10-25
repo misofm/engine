@@ -1715,6 +1715,31 @@ pub trait RuntimePreparer: Send {
     fn meter_window_blocks(&self) -> u32 {
         0
     }
+
+    /// The observation readers this preparer moved out of the handles into `host`'s plan, its own
+    /// host attachment (#1589 R2): the browser's render half keeps them, pairs them at the swap
+    /// block and folds their gain reduction. The plan's `OBSERVATION_READ` index is then built
+    /// over this list, so the session's one index addresses the readers where they are. Empty, the
+    /// default, for a preparer that leaves them in the handles, whose epoch keeps them.
+    fn kept_observations<'p>(
+        &self,
+        host: &'p mut host_core::PreparedHost,
+    ) -> &'p [host_core::EffectObservationHandle] {
+        let _ = host;
+        &[]
+    }
+
+    /// Whether every plan this preparer prepares binds an observation queue slot for every declared
+    /// tap of every effect (#1584 D7), which an `Observe` edit needs: `true`, the default, for a
+    /// preparer that asks for [`host_core::launch_maximum_observation_taps`]. The browser's asks
+    /// for its boot word's taps (#1589 R1), and preparation refuses an effect that declares more
+    /// taps than the word, so a nonzero word binds every declared tap of every plan it prepares.
+    /// A session whose preparer binds none serves neither the edit nor the
+    /// read: it refuses `Observe` with `observation.unavailable` and does not advertise
+    /// `OBSERVATION_READ` or capability bit 15, never an edit acknowledged and never applied.
+    fn observation_queues(&self) -> bool {
+        true
+    }
 }
 
 /// The epoch's meter rows (#1587a R2, #1588 D2): its meter tables, and the frame ring of
@@ -1879,9 +1904,17 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         0
     };
     // #1586 D6, R1: the index of an adapter that serves `OBSERVATION_READ`, from the producers
-    // (every instance, so an instance with no tap reads as unbound) and the readers' positions.
+    // (every instance, so an instance with no tap reads as unbound) and the readers' positions:
+    // in the epoch's list, or (#1589 R2) in the list the preparer keeps in the plan (the
+    // browser's), the session's one index either way.
+    let mut prepared = prepared;
     let observation_index = if A::OBSERVE_EDIT {
-        observation_index(&effects, &observations)?
+        let readers = if observations.is_empty() {
+            preparer.kept_observations(&mut prepared)
+        } else {
+            &observations
+        };
+        observation_index(&effects, readers)?
     } else {
         host_core::observation::ObservationIndex::default()
     };
@@ -2266,8 +2299,8 @@ where
             provider_features: ProviderFeatures {
                 spectrum: A::SPECTRUM,
                 // #1586 R2: `OBSERVATION_READ` and bit 15 follow the `Observe` edit, so the
-                // adapter that serves one serves both.
-                observation: A::OBSERVE_EDIT,
+                // adapter that serves one serves both; #1589 R1: only with the queues it needs.
+                observation: A::OBSERVE_EDIT && preparer.observation_queues(),
                 ..ProviderFeatures::ALL
             },
             // #1386 D3: an adapter with a document transport serves `SESSION_REPLACE` through this
