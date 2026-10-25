@@ -616,6 +616,7 @@ fn graph_tap_artifact() -> graph_compiler::PreparedGraphBuiltinsArtifact {
     let entry = |name: &str| session::ConsoleEntry {
         slot: StableId::parse(name).expect("stable effect ID"),
         bypass: fixture_effect.bypass,
+        link_mode: session::ConsoleLinkMode::Slot,
         params: Vec::new(),
     };
     model.console.pre_insert = vec![slot("fixture-simd1")];

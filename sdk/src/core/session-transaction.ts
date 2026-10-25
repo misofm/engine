@@ -126,6 +126,8 @@ const BIT_DEPTH_CODES: ReadonlyMap<ModelValue, number> = new Map<ModelValue, num
 ]);
 const QUALITY_CODES = codes(["draft", "normal", "high"]);
 const LINK_MODE_CODES = codes(["dual_mono", "maximum", "average"]);
+/** A console entry's link mode (#1369): `slot` is code 1, then the three link tokens. */
+const CONSOLE_LINK_MODE_CODES = codes(["slot", "dual_mono", "maximum", "average"]);
 const TAP_CODES = codes([
   "input",
   "post_input",
@@ -823,5 +825,6 @@ function consoleEntryFields(entry: ModelRecord): Uint8Array[] {
     utf8(1, entry.slot),
     boolean(2, entry.bypass),
     ...records(entry.params).map((param) => message(3, paramFields(param))),
+    code(4, CONSOLE_LINK_MODE_CODES, entry.link_mode),
   ];
 }

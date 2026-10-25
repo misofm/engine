@@ -85,8 +85,8 @@ fn every_nested_object_family_rejects_an_exact_unknown_leaf() {
             }]
         });
         value["tracks"][0]["console"] = serde_json::json!([
-            { "slot": "desk-eq", "bypass": false, "params": [] },
-            { "slot": "desk-limit", "bypass": false, "params": [
+            { "slot": "desk-eq", "bypass": false, "link_mode": "slot", "params": [] },
+            { "slot": "desk-limit", "bypass": false, "link_mode": "slot", "params": [
                 { "parameter_id": 1, "channel": "both", "unit": "db", "value": -1.0 }
             ] }
         ]);
