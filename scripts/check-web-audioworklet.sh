@@ -317,6 +317,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_plan_latency_read \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
+  miso_engine_web_v1_replace_document_ptr \
   miso_engine_web_v1_response_frame_close \
   miso_engine_web_v1_response_frame_ptr \
   miso_engine_web_v1_response_frame_reply_bytes \

@@ -98,3 +98,37 @@ diffs and commits them, so both hosts give the same reply, revision and rendered
 ## Size
 
 Half a day.
+
+## Decision record (implementation, 2026-10-25)
+
+- **Root decisions (scope note R1-R3, accepted).** Gate 3 (the real-browser 1 MiB replace and its
+  growth against `document_bytes * PARSE_TRANSIENT_MULTIPLIER`) moves to #1295's non-isolated
+  browser case; `hosts/host-web/qualification/` is not touched here. No new budget row: the staged
+  bytes are a counted control allocation. `ControlLimits.maximum_document_bytes` stays
+  `MAXIMUM_DOCUMENT_BYTES`: the staging refuses the length first, the core's
+  `session.replace.document_too_large` second.
+- **The export.** `miso_engine_web_v1_replace_document_ptr(handle, len)` frees what an earlier
+  call staged (the boot's copy too) before it checks anything, so a refused call leaves nothing
+  for the next command; a wrong handle touches nothing (a refused boot's diagnostic stays readable).
+  `miso_engine_web_v1_control_command` passes the staged document to
+  `SessionState::command_with_document` and frees it after every command on the live host.
+- **Host entry.** `AudioWorkletEngineHost::control_command(len, analysis)` keeps its signature and
+  forwards to the new `control_command_with_document(len, document, analysis)`, as the core's
+  `command` forwards to `command_with_document`; no caller outside the authorized paths changes.
+- **Where the worklet stages the document (for #1332's `worker` mode).** In the message handler,
+  in `readControlCommand`: it first takes the frame's staging address (`control_request_ptr`, no
+  allocation), then stages and writes the document through `replace_document_ptr`, then writes the
+  frame and runs the command. Taking the frame address first means a frame the staging refuses
+  never leaves a document staged. A refused document is `RESULT_INVALID_ARGUMENT` with an empty
+  response and runs no command. `process()` never stages, hashes or parses. A Worker control plane
+  does the same three steps on its own instance.
+- **Gate 1 leg.** The parity row drives the browser through `control_command_with_document` (the
+  call the export makes), as every other row of `control_parity.rs` drives the host directly; the
+  export's staging and free are gate 2's, in `hosts/host-web/src/tests.rs`.
+- **Artifact pin.** Not re-pinned: no gate on an ordinary PR compares the built module with the
+  pin (`build-web-audioworklet.sh` header, #1061; only `--check-pin` and `npm-publish.yml`, a
+  release change, read it).
+- **Companion row (outside the authorized paths).** The worklet calls `replace_document_ptr` after
+  construction, so the hermetic suite requires a `wrapped: false` row in
+  `tools/realtime-policy/render-thread-exports.json` (handler `readControlCommand`), and the policy
+  tool's `UNWRAPPED_EXPORTS` list must name it (as #1294a's `watermark_read`). Awaiting root.

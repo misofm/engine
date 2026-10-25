@@ -142,6 +142,7 @@ async function testMainRealm() {
   let statusMutation = null;
   let renderAllocationsMutation = null;
   let controlMutation = null;
+  let lastControlDocument;
   let sessionMapMutation = null;
   let planeMutation = null;
   let commandResult = 0;
@@ -205,6 +206,7 @@ async function testMainRealm() {
           // Issue #1562a D1: the frame comes back reversed as the response, so the test can see
           // that the host sent the caller's bytes and returns the engine's unchanged.
           const frame = received.frame;
+          lastControlDocument = received.document;
           response = {
             tag: "miso.control.v1", requestId: received.requestId, result: 0,
             response: new Uint8Array([...frame].reverse()), revision: 2n,
@@ -1363,6 +1365,22 @@ async function testMainRealm() {
       );
       const largest = await host.control(new Uint8Array(16384));
       assert.equal(largest.response.byteLength, 16384, "the largest frame is sent");
+      // Issue #1697: a document is copied and posted beside the frame, both buffers transferred;
+      // an empty or non-array document is refused before the port.
+      const document = new Uint8Array([1, 2, 3, 4]);
+      await host.control(new Uint8Array([7]), document);
+      const withDocument = events.filter((event) => event[1] === "miso.control.v1");
+      assert.equal(withDocument.length, 3);
+      assert.equal(withDocument[2][3], 2, "the frame's and the document's buffers are transferred");
+      assert.deepEqual([...lastControlDocument], [1, 2, 3, 4], "the document is posted");
+      assert.equal(document.byteLength, 4, "the caller keeps its document: the host sends a copy");
+      await localErrorResult(host.control(new Uint8Array([7]), new Uint8Array(0)), 1);
+      await localErrorResult(host.control(new Uint8Array([7]), [1]), 1);
+      assert.equal(
+        events.filter((event) => event[1] === "miso.control.v1").length,
+        3,
+        "a refused document never reaches the port",
+      );
     }
 
     // Issue #1570b D5, gate 4's host half: an engine event reaches every listener as
@@ -2629,6 +2647,9 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     // response it leaves, the committed revision, and whether it grows its memory under a command.
     control: [], controlResult: 0, controlResponse: new Uint8Array([9, 8, 7]), controlRevision: 4n,
     controlGrowsMemory: false, controlRequestRefusals: 0, growths: 0,
+    // Issue #1697: every `replace_document_ptr` length, how many the staging refuses next, and
+    // the length staged for the next command (which frees it, as the export does).
+    replaceDocument: [], replaceDocumentRefusals: 0, stagedDocumentBytes: 0,
     // Issue #1570b D1: the lanes' queued event frames (lane 0 reliable, lane 1 lossy), every
     // `control_event` call the fake received, and the result it answers with.
     events: [[], []], eventCalls: [], eventResult: 0,
@@ -2647,6 +2668,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   let currentEvent = null;
   const controlRequestPointer = 50000;
   const controlResponsePointer = 56000;
+  const documentPointer = 150000;
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
   const commandPointer = 70000;
   const meterFramePointer = 40000;
@@ -2901,10 +2923,25 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       }
       return controlRequestPointer;
     },
+    miso_engine_web_v1_replace_document_ptr: (_handle, length) => {
+      calls.replaceDocument.push(length);
+      calls.stagedDocumentBytes = 0;
+      if (calls.replaceDocumentRefusals > 0 || length === 0 || length > 40000) {
+        calls.replaceDocumentRefusals = Math.max(0, calls.replaceDocumentRefusals - 1);
+        return 0;
+      }
+      calls.stagedDocumentBytes = length;
+      return documentPointer;
+    },
     miso_engine_web_v1_control_command: (handle, length) => {
+      const documentBytes = calls.stagedDocumentBytes;
+      calls.stagedDocumentBytes = 0;
       calls.control.push({
         handle,
         frame: new Uint8Array(memory.buffer, controlRequestPointer, length).slice(),
+        document: documentBytes === 0
+          ? null
+          : new Uint8Array(memory.buffer, documentPointer, documentBytes).slice(),
       });
       new Uint8Array(memory.buffer, controlResponsePointer, calls.controlResponse.length)
         .set(calls.controlResponse);
@@ -3922,6 +3959,59 @@ async function testProcessor() {
         processor.port.onmessage({ data: bad });
         assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
         assert.equal(fake.calls.control.length, 0, "a malformed message reaches no export");
+        assert.equal(processor.ready, false);
+      }
+    }
+    {
+      // Issue #1697: a `document` beside the frame is staged through `replace_document_ptr` and
+      // reaches the command with the frame; a document the staging refuses answers a typed
+      // refusal with no response (never the previous command's) and runs no command; a frame the
+      // staging refuses stages no document, so none is left for a later command.
+      const { processor, fake } = makeProcessor();
+      const document = new Uint8Array([123, 34, 97, 34, 125]);
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1, 2]), document },
+      });
+      assert.deepEqual(fake.calls.replaceDocument, [5]);
+      assert.equal(fake.calls.control.length, 1);
+      assert.deepEqual([...fake.calls.control[0].frame], [1, 2]);
+      assert.deepEqual([...fake.calls.control[0].document], [...document], "the document is staged");
+      assert.deepEqual([...processor.port.posts.at(-1).message.response], [9, 8, 7]);
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([3]) },
+      });
+      assert.equal(fake.calls.control[1].document, null, "a frame alone carries no document");
+      fake.calls.replaceDocumentRefusals = 1;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 3, frame: new Uint8Array([4]), document },
+      });
+      const refused = processor.port.posts.at(-1).message;
+      assert.equal(refused.tag, "miso.control.v1");
+      assert.equal(refused.requestId, 3);
+      assert.equal(refused.result, 1);
+      assert.equal(refused.response.byteLength, 0, "a refused document has no response");
+      assert.equal(fake.calls.control.length, 2, "a refused document runs no command");
+      fake.calls.controlRequestRefusals = 1;
+      processor.port.onmessage({
+        data: { tag: "miso.control.v1", requestId: 4, frame: new Uint8Array([5]), document },
+      });
+      assert.equal(processor.port.posts.at(-1).message.result, 1);
+      assert.deepEqual(fake.calls.replaceDocument, [5, 5], "a refused frame stages no document");
+      assert.equal(fake.calls.control.length, 2);
+      assert.equal(processor.ready, true, "a refused staging is not sticky");
+      for (const bad of [
+        new Uint8Array(0),
+        [1, 2],
+        new Uint8Array(new ArrayBuffer(8), 2, 4),
+        undefined,
+      ]) {
+        const { processor, fake } = makeProcessor();
+        processor.port.onmessage({
+          data: { tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([1]), document: bad },
+        });
+        assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
+        assert.equal(fake.calls.replaceDocument.length, 0, "a malformed document reaches no export");
+        assert.equal(fake.calls.control.length, 0, "a malformed document runs no command");
         assert.equal(processor.ready, false);
       }
     }
