@@ -13,10 +13,11 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use protocol::{
-    Backpressure, BackpressureQueueKind, DecodeScratch, Diagnostic, DiagnosticSeverity, EditPath,
-    ExpectedRevision, MessageId, NonOkResponse, PathSegment, ProtocolCodec, RequestId, SessionEdit,
-    SessionRevision, SessionTransactionFrame, StatusCode, SuccessResponsePayload,
-    TransactionApplied, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    Backpressure, BackpressureQueueKind, CommandPayload, DecodeScratch, Diagnostic,
+    DiagnosticSeverity, EditPath, ExpectedRevision, MessageId, NonOkResponse, PathSegment,
+    ProtocolCodec, RequestId, SessionEdit, SessionReplaceRequest, SessionRevision,
+    SessionTransactionFrame, StatusCode, SuccessResponsePayload, TransactionApplied,
+    TypedCommandFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
     control_core::{ControlAddress, Owner, Section},
 };
 use session::{ParameterChannel, StableId};
@@ -547,6 +548,31 @@ fn replies() -> Vec<Reply> {
     ]
 }
 
+/// #1389: one `SESSION_REPLACE` command frame, which the SDK's replace encoder is held to. The
+/// length and the digest bytes are arbitrary: the frame names a document, it never carries it.
+fn replace_row() -> String {
+    let (request_id, expected_revision, document_bytes) = ((1_u64 << 40) + 3, 17_u64, 70_001_u32);
+    let digest: [u8; 32] = std::array::from_fn(|index| (index as u8).wrapping_mul(37) ^ 0xa5);
+    let frame = TypedCommandFrame {
+        request_id: RequestId::new(request_id).expect("nonzero request ID"),
+        expected_revision: ExpectedRevision::Exact(SessionRevision(expected_revision)),
+        payload: CommandPayload::SessionReplace(SessionReplaceRequest {
+            document_bytes,
+            document_sha256: digest,
+        }),
+    };
+    let mut bytes = vec![0_u8; 256];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(&frame, &mut bytes)
+        .expect("the replace frame encodes");
+    bytes.truncate(length);
+    format!(
+        "{{\n    \"name\": \"session_replace\",\n    \"requestId\": \"{request_id}\",\n    \"expectedRevision\": \"{expected_revision}\",\n    \"documentBytes\": {document_bytes},\n    \"documentSha256\": \"{}\",\n    \"hex\": \"{}\"\n  }}",
+        hex(&digest),
+        hex(&bytes),
+    )
+}
+
 fn render() -> String {
     let mut text = String::new();
     text.push_str("{\n  \"schema\": \"miso.protocol.set-control-frames\",\n  \"commands\": [\n");
@@ -578,7 +604,7 @@ fn render() -> String {
         )
         .expect("write to a string");
     }
-    text.push_str("  ]\n}\n");
+    write!(text, "  ],\n  \"replace\": {}\n}}\n", replace_row()).expect("write to a string");
     text
 }
 

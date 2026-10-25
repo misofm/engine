@@ -10,8 +10,8 @@
 mod lane_rig;
 
 use effect_contract::{
-    BypassShunt, EffectControlRecord, EffectLaneShape, EffectWriteRefusal, ParameterChannel,
-    ParameterChannelPolicy,
+    BypassShunt, EffectControlRecord, EffectLaneShape, EffectWriteRefusal, LINK_GLIDE_MAX_SAMPLES,
+    LinkMode, LinkModeSet, LinkSwitch, ParameterChannel, ParameterChannelPolicy,
 };
 use lane_rig::{Rig, UNBYPASSED, both, left, right, target};
 
@@ -128,7 +128,8 @@ fn a_target_owners_lane_refuses_a_bare_parameter_and_resets_its_target_prefix() 
 /// not take, and in either case writes nothing.
 ///
 /// Test value: a `Left` write to a `Shared` parameter reaching a cell (every launch effect counts
-/// such a span as invalid, so the value would be lost after an ack).
+/// such a span as invalid, so the value would be lost after an ack), or a link switch reaching a
+/// cell that the effect's `retarget_link` refuses (an unsupported mode, a glide too long).
 #[test]
 fn a_record_without_a_cell_is_refused_and_writes_nothing() {
     let mut rig = Rig::new(shape(&[1], &[2], 0), 1);
@@ -162,6 +163,28 @@ fn a_record_without_a_cell_is_refused_and_writes_nothing() {
         Err(EffectWriteRefusal::Observe),
         "a subscription is a queue record, not a cell"
     );
+    // A link switch (#1371): a lane without a link cell, a mode its effect does not support and a
+    // glide past the kernels' countdown are refused, so render never meets a switch
+    // `retarget_link` would refuse after an ack.
+    let switch = |mode, ramp_samples| EffectControlRecord::Link(LinkSwitch { mode, ramp_samples });
+    assert_eq!(
+        rig.commit(&[switch(LinkMode::Maximum, 0)]),
+        Err(EffectWriteRefusal::Link)
+    );
+    let mut linked = Rig::new(
+        shape(&[1], &[2], 0).with_link(LinkModeSet::new(0b011).expect("dual mono and maximum")),
+        0,
+    );
+    assert_eq!(
+        linked.commit(&[switch(LinkMode::Average, 0)]),
+        Err(EffectWriteRefusal::Link)
+    );
+    assert_eq!(
+        linked.commit(&[switch(LinkMode::Maximum, LINK_GLIDE_MAX_SAMPLES + 1)]),
+        Err(EffectWriteRefusal::Ramp)
+    );
+    assert_eq!(linked.pin.last_published(), 0);
+    assert_eq!(linked.stage().link, None);
     assert_eq!(rig.pin.last_published(), 0);
     assert_eq!(rig.stage().staged, 0);
 }

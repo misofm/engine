@@ -1218,6 +1218,7 @@ mod owner_tests {
                     shape: EffectLaneShape::from_descriptor(&PARAMETRIC_EQ_DESCRIPTOR, EQ_SLOTS),
                     bypass: false,
                     observation_depth: 0,
+                    link: None,
                 },
                 &superseded,
             )
@@ -1273,6 +1274,7 @@ mod owner_tests {
                 ),
                 bypass: false,
                 observation_depth: 0,
+                link: None,
             },
             &LiveValuesSuperseded::new(),
         )
@@ -1695,11 +1697,14 @@ pub fn attach_effect_live_controls(
         // Seeded from the session's bypass, not the prepared one: an effect whose bypass is
         // lowered is prepared enabled (issue #1087), and this lane replaces the channel-less
         // lane that carried the same bit.
+        // #1371 D6: the prepared link mode, which a plan-swap carry seats before a restore.
+        let link = shape.has_link().then_some(entry.metadata.link_mode);
         let Some((writer, lane)) = effect_control_lane(
             EffectLaneSpec {
                 shape,
                 bypass: entry.initial_bypass,
                 observation_depth,
+                link,
             },
             superseded,
         ) else {

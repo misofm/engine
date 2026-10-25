@@ -8279,8 +8279,20 @@ mod structural_apply {
         );
     }
 
+    /// A sidechain routed from strip `track`'s own input: a prepared change of an instance (a new
+    /// graph edge), which restarts it. (A link change is live since #1371, so it carries.)
+    fn own_input_sidechain(track: &session::StableId) -> session::SidechainDeclaration {
+        session::SidechainDeclaration::Routed(session::Sidechain {
+            source: session::RouteSource::Track {
+                track_id: track.clone(),
+                tap: session::SendTap::Input,
+            },
+            port_id: session::StableId::parse("sidechain-in").expect("a port ID"),
+        })
+    }
+
     /// #1698 on the browser: a subscription acked against a candidate that restarted "track"'s
-    /// compressor (its link mode changed), which a later structural edit supersedes by putting the
+    /// compressor (its sidechain changed), which a later structural edit supersedes by putting the
     /// compressor back as the plan that renders has it. The replacement now carries the
     /// compressor from the plan that renders, whose tap never saw the record, so the core queues
     /// the record again on the replacement, as for a compressor the candidate itself carried.
@@ -8298,7 +8310,7 @@ mod structural_apply {
         model.tracks[0].inserts.effects[0] = observed_compressor_insert();
         let original = model.tracks[0].inserts.effects[0].clone();
         let mut restarted = original.clone();
-        restarted.link_mode = session::LinkMode::Maximum;
+        restarted.sidechain = own_input_sidechain(&model.tracks[0].id);
         let put = |effect: session::Effect| {
             [SessionEdit::PutTrackEffect {
                 track_id: model.tracks[0].id.clone(),
@@ -9065,7 +9077,7 @@ mod structural_apply {
         }
     }
 
-    /// #1584 D6b, restart: a subscribed compressor whose link mode changes is prepared again (a
+    /// #1584 D6b, restart: a subscribed compressor whose sidechain changes is prepared again (a
     /// rebuild with no carry), and its first block publishes the prepared arm in the tap's slot
     /// (#1585 R2). The tap reads armed, the first window opens at the adoption block's first
     /// sample, and the windows continue block after block.
@@ -9096,7 +9108,7 @@ mod structural_apply {
         assert!(before > 1);
 
         let mut restarted = model.tracks[0].inserts.effects[0].clone();
-        restarted.link_mode = session::LinkMode::Maximum;
+        restarted.sidechain = own_input_sidechain(&model.tracks[0].id);
         let base = rig.host.committed_revision();
         assert!(matches!(
             rig.apply(

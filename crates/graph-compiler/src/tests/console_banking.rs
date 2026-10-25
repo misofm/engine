@@ -1699,6 +1699,7 @@ fn compile_with_live_delays(
                 ),
                 bypass: entry.initial_bypass,
                 observation_depth: 0,
+                link: None,
             },
             &engine::realtime::LiveValuesSuperseded::new(),
         )
