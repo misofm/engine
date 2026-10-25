@@ -806,6 +806,7 @@ fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
             );
             if block == 3 {
                 bank.desymmetrize_channels();
+                assert!(bank.channels_agree(), "{width:?}: the disengage copy");
                 for lane in 0..lanes {
                     assert_eq!(
                         collapsed.link_words(lane),
@@ -815,6 +816,80 @@ fn a_collapsed_block_advances_a_glide_as_the_dual_block_on_equal_channels() {
                 }
             }
         }
+    }
+}
+
+/// **A glide in flight is never quiet.** On a bank whose every lane is at rest on `+0.0` input
+/// (the silent fast path skips its blocks), lane 0 glides: `lanes_at_rest` drops the lane while
+/// it glides and reports it again from the block it arrives in, and its weights move on every
+/// block as a twin's that renders every block (the fast path forbidden), arriving on their frame.
+/// At `Simd4` and `Simd8`.
+#[test]
+fn a_silent_bank_never_skips_a_glide() {
+    const GLIDE: u32 = 300;
+    for &width in BankWidth::ALL {
+        let lanes = width.lanes() as usize;
+        let all = (1_u32 << lanes) - 1;
+        let values = oracle_values();
+        let requests: Vec<_> = (0..lanes)
+            .map(|lane| request(&values, RATE, LINKS[lane % LINKS.len()]))
+            .collect();
+        let (mut fast, mut slow) = (
+            Under::new(Some(width), &requests),
+            Under::new(Some(width), &requests),
+        );
+        let offsets = vec![0_u32; lanes + 1];
+        let render = |fast: &mut Under, slow: &mut Under, first: u64| {
+            let silence = vec![0.0_f32; BLOCK * lanes];
+            let (mut left, mut right) = (silence.clone(), silence.clone());
+            fast.process(&mut left, &mut right, first, &[], &offsets);
+            SILENT_FORBIDDEN.with(|cell| cell.set(true));
+            let (mut left, mut right) = (silence.clone(), silence);
+            slow.process(&mut left, &mut right, first, &[], &offsets);
+            SILENT_FORBIDDEN.with(|cell| cell.set(false));
+        };
+        let at_rest = |under: &Under| match under {
+            Under::Bank(bank, _) => bank.lanes_at_rest(),
+            Under::Scalar(_) => unreachable!("a bank"),
+        };
+        assert_eq!(at_rest(&fast), all, "{width:?}: every lane at rest");
+        let before = SILENT_ADMISSIONS.with(core::cell::Cell::get);
+        render(&mut fast, &mut slow, 0);
+        assert!(
+            SILENT_ADMISSIONS.with(core::cell::Cell::get) > before,
+            "{width:?}: the silent fast path runs before the glide"
+        );
+        for under in [&mut fast, &mut slow] {
+            assert!(
+                under.retarget(0, LinkMode::Average, GLIDE),
+                "a supported glide"
+            );
+        }
+        for block in 1..=8_u32 {
+            render(&mut fast, &mut slow, u64::from(block) * BLOCK as u64);
+            let context = format!("{width:?} block {block}");
+            for lane in 0..lanes {
+                assert_eq!(
+                    fast.link_words(lane),
+                    slow.link_words(lane),
+                    "{context} lane {lane}: a skipped glide"
+                );
+            }
+            let remaining = GLIDE.saturating_sub(block * BLOCK as u32);
+            assert_eq!(fast.link_words(0)[3], remaining, "{context}: the countdown");
+            let expected = if remaining == 0 { all } else { all & !1 };
+            assert_eq!(
+                at_rest(&fast),
+                expected,
+                "{context}: the gliding lane's rest"
+            );
+        }
+        let rest = link_glide_weights(LinkMode::Average).map(f32::to_bits);
+        assert_eq!(
+            fast.link_words(0),
+            [rest[0], rest[0], 0, 0, rest[1], rest[1], 0, 0],
+            "{width:?}: the glide arrived"
+        );
     }
 }
 
