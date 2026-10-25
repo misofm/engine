@@ -3969,6 +3969,221 @@ fn a_fired_fade_does_not_repeat_on_every_width() {
     }
 }
 
+/// Issue #1877 gate 4 at one width: #1363 gate 6's added track [`FADE_TRACK`] with a `pre_fader`
+/// send `fade-bus` into [`ROUTE_BUS`], and a second transaction (a muted track) adopted before the
+/// send's fade fires. (a) Waiting: the track is on [`ADDED_SOURCE`], anchored at
+/// [`FADE_ANCHOR_BLOCK`], and the second swap lands one block after the first. (b) FireAt: the
+/// track holds a 486-sample true-peak limiter on [`AUX_SOURCE`], fed exact zeros before the swap,
+/// so both fades are scheduled for block 10, and the second swap lands at block 8. (c) Fired: (b)'s
+/// send has fired at block 10 when the second swap lands at block 11, its successor prepared then
+/// or at block 8, before the fire. Every run equals the one-swap run straight to the second
+/// session, and neither swap block allocates or frees. In (b) and (c) a live mute of the send at
+/// block 11 is heard: the second plan holds no arm left over that would swallow it. (d) The lane-less
+/// transition route: an added `post_fader` route from the playing `aux` into the output fires at
+/// the first swap; the second successor, prepared before that fire and adopted mid-ramp at block
+/// 7, re-arms it and continues its ramp. (e) The second transaction restarts the track (#1324)
+/// before the fire: the send takes the restarted strip's fresh arm, as a send the second
+/// transaction adds does.
+fn a_pending_route_fade_survives_a_second_swap(backend: Backend) {
+    let send = |model| {
+        with_route(
+            model,
+            "fade-bus",
+            FADE_TRACK,
+            session::SendTap::PreFader,
+            into_bus(),
+            false,
+        )
+    };
+    let one_swap = |a: &Session, b: &Session, anchored, feeds: &[&Feed], writes: &[CellWrite]| {
+        let swap = [FadeSwap {
+            block: SWAP_BLOCK,
+            to: b,
+            committed: &a.model,
+            prepared_at: None,
+        }];
+        fade_run(a, &swap, feeds, anchored, writes, backend)
+    };
+    // (a) Waiting.
+    let kept = Feed::new(SOURCE, 1);
+    let mut unlimited = route_fade_base_limited(false);
+    add_source(&mut unlimited, ADDED_SOURCE);
+    let a = Session::compile(unlimited.clone());
+    let b1 = Session::compile(send(with_fade_track(
+        unlimited.clone(),
+        ADDED_SOURCE,
+        false,
+        false,
+    )));
+    let b2 = Session::compile(with_muted_track(b1.model.clone()));
+    let (added, _) = anchored_feeds();
+    let anchored = || {
+        Some(Anchored {
+            feed: &added,
+            anchor_block: FADE_ANCHOR_BLOCK,
+        })
+    };
+    let run = two_swap_run(&a, &b1, &b2, SWAP_BLOCK + 1, anchored(), &[&kept], backend);
+    let reference = one_swap(&a, &b2, anchored(), &[&kept], &[]);
+    assert_eq!(
+        first_fade_difference(&run, &reference),
+        None,
+        "{backend:?} (a): a waiting send fades in at the anchor after a second swap"
+    );
+    assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (a): allocator calls");
+    // (b) FireAt.
+    let aux = Feed::new(AUX_SOURCE, 2);
+    let aux = spliced(AUX_SOURCE, &aux, |block| {
+        (block >= SWAP_BLOCK).then_some(block)
+    });
+    let feeds = [&kept, &aux];
+    let base = route_fade_base_limited(false);
+    let a = Session::compile(base.clone());
+    let b1 = Session::compile(send(with_fade_track(base, AUX_SOURCE, true, false)));
+    let b2 = Session::compile(with_muted_track(b1.model.clone()));
+    let fire_block = (SWAP_BLOCK * QUANTUM + 486).div_ceil(QUANTUM);
+    assert_eq!(fire_block, 10, "the fades are scheduled for block 10");
+    let ramp = LiveRamps::for_session(&b2.model).mute_samples;
+    let mut mute = unmute_route(&b2.model, "fade-bus", BLOCKS - 1, ramp);
+    let CellRecord::Route(_, record) = &mut mute.record else {
+        unreachable!("a send record")
+    };
+    let values = b2
+        .model
+        .routes
+        .iter()
+        .find(|route| route.id.as_str() == "fade-bus")
+        .expect("the send");
+    let matrix = &values.channel_matrix;
+    *record = host_core::route_record(
+        values.gain_db,
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
+        true,
+        [false; 2],
+        ramp,
+    )
+    .expect("a send record");
+    let writes = [mute];
+    let reference = one_swap(&a, &b2, None, &feeds, &writes);
+    assert_ne!(
+        reference.blocks[BLOCKS - 1],
+        one_swap(&a, &b2, None, &feeds, &[]).blocks[BLOCKS - 1],
+        "{backend:?}: the live mute is heard"
+    );
+    for (case, second, prepared_at) in [
+        ("(b) scheduled", SWAP_BLOCK + 2, None),
+        ("(c) fired", fire_block + 1, None),
+        (
+            "(c) fired after its successor's preparation",
+            fire_block + 1,
+            Some(SWAP_BLOCK + 2),
+        ),
+    ] {
+        let swaps = [
+            FadeSwap {
+                block: SWAP_BLOCK,
+                to: &b1,
+                committed: &a.model,
+                prepared_at: None,
+            },
+            FadeSwap {
+                block: second,
+                to: &b2,
+                committed: &b1.model,
+                prepared_at,
+            },
+        ];
+        let run = fade_run(&a, &swaps, &feeds, None, &writes, backend);
+        assert_eq!(
+            first_fade_difference(&run, &reference),
+            None,
+            "{backend:?} {case}: a second swap at block {second} moves no bit"
+        );
+        assert_eq!(
+            run.allocator,
+            (0, 0, 0),
+            "{backend:?} {case}: allocator calls"
+        );
+    }
+    // (e) The second transaction restarts the track (#1324): a transparent insert. Its pending
+    // entries are replaced by fresh arms, the send's with the fader's (#1392 D2), so both wait out
+    // the restarted chain's line. The fresh-arm run: the same swaps, the send added by the second
+    // transaction, so it is armed only afresh. The restart lands at block 8, before the fire at
+    // block 10, its successor prepared then or one block earlier. (A restart after the fire is not
+    // observable in this run: the restarted limiter's line holds the strip silent past its end.)
+    let restarted = |model| {
+        let mut model = send(model);
+        track_mut(&mut model, FADE_TRACK)
+            .inserts
+            .effects
+            .push(transparent_insert());
+        model
+    };
+    let track = with_fade_track(route_fade_base_limited(false), AUX_SOURCE, true, false);
+    let without_send = Session::compile(track.clone());
+    let b2 = Session::compile(restarted(track));
+    let restart = |b1: &Session, second, prepared_at| {
+        let run = two_swap_run_prepared(&a, b1, &b2, (second, prepared_at), None, &feeds, backend);
+        assert!(
+            run.restarted[1].iter().any(|id| &**id == FADE_TRACK),
+            "the insert restarts the strip"
+        );
+        run
+    };
+    for prepared_at in [None, Some(SWAP_BLOCK + 1)] {
+        assert_eq!(
+            first_fade_difference(
+                &restart(&b1, SWAP_BLOCK + 2, prepared_at),
+                &restart(&without_send, SWAP_BLOCK + 2, prepared_at),
+            ),
+            None,
+            "{backend:?} (e) restart before the fire, prepared at {prepared_at:?}: the send \
+             takes the restarted strip's fresh arm"
+        );
+    }
+    // (d) A transition route.
+    let aux = Feed::new(AUX_SOURCE, 2);
+    let feeds = [&kept, &aux];
+    let base = route_fade_base_limited(false);
+    let a = Session::compile(base.clone());
+    let b1 = Session::compile(with_route(
+        base,
+        "aux-out",
+        "aux",
+        session::SendTap::PostFader,
+        into_output(),
+        false,
+    ));
+    let b2 = Session::compile(with_muted_track(b1.model.clone()));
+    let run = two_swap_run_prepared(
+        &a,
+        &b1,
+        &b2,
+        (SWAP_BLOCK + 1, Some(SWAP_BLOCK)),
+        None,
+        &feeds,
+        backend,
+    );
+    assert_eq!(
+        first_fade_difference(&run, &one_swap(&a, &b2, None, &feeds, &[])),
+        None,
+        "{backend:?} (d): a transition route's ramp continues across a second swap"
+    );
+    assert_eq!(run.allocator, (0, 0, 0), "{backend:?} (d): allocator calls");
+}
+
+/// Issue #1877 gate 4 on every width. Red if the successor does not re-arm the send from the
+/// inventory (it fires at the second swap and the bus hears the source enter at a step), re-arms a
+/// `FireAt` send as `Waiting` (it fires `D` late), fades a fired send again, carries a restarted
+/// strip's send entry over its fresh arm (it fires before the restarted line refills), or
+/// allocates at either swap block.
+#[test]
+fn a_pending_route_fade_survives_a_second_swap_on_every_width() {
+    for backend in backends() {
+        a_pending_route_fade_survives_a_second_swap(backend);
+    }
+}
+
 /// Issue #1392 gate 3, as #1324a reads it (D2, D3): the second transaction adds a transparent
 /// insert to the added track while its fade waits for the anchor. The strip restarts for its chain
 /// (`restarted_strips()` lists it), so its fader lane does not carry and its pending entry is

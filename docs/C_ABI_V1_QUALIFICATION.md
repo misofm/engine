@@ -193,7 +193,10 @@ given a live unmute at that block (`an_added_route_fades_in_after_its_line_fills
 route into the output, which has no lane, binds live for that plan only so it can ramp, and loses
 the fold there. A muted route, a route whose destination strip is added, a following route with
 an automated source mute and a declared discontinuity arm nothing; a removed or re-pointed route
-still steps (#1953). The frozen exported set is now 15
+still steps (#1953). A later structural transaction adopted before an added route's fade has run
+keeps it as #1392 keeps a strip's (#1877): the successor re-arms the route with its own target and
+ramp, a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never
+runs again (`a_pending_route_fade_survives_a_second_swap_on_every_width`). The frozen exported set is now 15
 `miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
 where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
 defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops
