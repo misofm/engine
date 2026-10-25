@@ -49,8 +49,9 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
     settle.
   - The browser host's per-source in-flight bound mirrors the rule when the ring override is 0
     (`hosts/host-web/web/miso-engine-v1-audio-worklet-host.js:1728-1732`): 40 quanta at 48 kHz
-    and quantum 128, 77 at quantum 64. Under the old bound the host would never fill the new
-    57-quantum (110 at quantum 64) ring.
+    and quantum 128, 77 at quantum 64. The old bound limits the host's in-flight (unsettled)
+    bursts, not the ring's occupancy; 1406b still aligns it with the new 57-quantum (110 at
+    quantum 64) ring.
   - The host's declaration `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and its
     mirror `sdk/src/browser/shipped-host.d.ts` (kept equal by `scripts/check-sdk-generated.sh`)
     describe the old rule at `:145-147` and `:785`. `hosts/host-web/MUTATIONS.md:7` and
@@ -70,7 +71,9 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
 
 - **D1. `p_max_samples`.** `pub const fn p_max_samples(sample_rate_hz: u32, quantum_frames: u32)
   -> u32` in `crates/host-core/src/prepare.rs`, beside `stall_ring_frames`, re-exported from
-  `crates/host-core/src/lib.rs`, with #1286 D3 item 1's value; its comment names the record row.
+  `crates/host-core/src/lib.rs`, with #1286 D3 item 1's value (`4 · ceil_q(fs / 100 + 6)`); its
+  comment names the record row. **Written by #1354a** (amended 2026-10-25, root): #1406 uses it
+  and does not add it.
   The name is snake_case, as every Rust function's is: clippy's `non_snake_case` refuses an
   upper-case `fn` under `-D warnings`, and no workspace lint relaxes it.
   #1358 D1, D2 below and the production `WarmConfig` (*Check the warm-successor deadline in
@@ -228,3 +231,29 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
 - *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355): gate 1's
   readiness.
 - *Record the swap block's cost on the 64-track console* (#1286): `p_max_samples`.
+
+## Decision record
+
+- **2026-10-25, slice 1406a** (scope note `1406.md`): the engine and the published rule. 1406a owns
+  D2, D3, D4's Rust prose and the published-rule pins, gates 1-3; the browser host's in-flight
+  bound, the browser-host test case, `MUTATIONS.md`, the `.d.ts`/DEPLOYMENT/derivation prose, D5
+  and gates 4-5 are 1406b. `tools/console-workload/src/lib.rs`'s live-row pin used
+  `default_source_ring_frames` by name for the stall body: it now reads `stall_ring_frames`, so
+  the console benchmark's ring bytes do not move (scope R3).
+- **The SDK pins move in 1406a.** `defaultSourceRingFrames` applies D3's whole rule, so the SDK
+  evals' 9,906 / 78-quanta pins fail with it; the minimum mechanical change (14,097 and 111
+  quanta, D4's values) lands with it. The browser host's own bound stays the old rule until 1406b,
+  and its test (77 held, the 78th refused) still holds because the host bound, not the ring, refuses.
+- **Gate 1's stall.** The test stalls for `stall_ring_frames / q` silent blocks (40 at 48 kHz /
+  128): that is C3's own accounting (`prepare.rs`, step 7: the ring's frames above
+  `stall_ring_frames` must be at least `P + q`), because in the host-core harness the whole stall
+  ring drains at a block boundary (#917: the played block sits outside both queues). A ring
+  without D2's `+ q` is refused by that C3 lead bound (`LeadBound`) at any stall length, before
+  readiness is asked. The 40-block stall sharpens the readiness half: after it, exactly
+  `P / q + 1` blocks remain (17 at 48 kHz), and one more silent block leaves the successor
+  unadopted. The growth is one growth of all four of gate 6's stages (`ΣP = 0`,
+  `P = p_max_samples`), the largest window readiness asks for; the chain's fourth growth asks for
+  only `P_4 / q + 1` blocks.
+- **Values.** At quantum 128: 6,912 / 7,296 / 12,800 / 14,080 frames (54 / 57 / 100 / 110 quanta)
+  at 44.1 / 48 / 88.2 / 96 kHz; 14,097 (111 · 127) at 96 kHz / 127. Per source the ring grows by
+  `p_max_samples + q` frames (2,176 at 48 kHz / 128, 8.5 KiB per channel).

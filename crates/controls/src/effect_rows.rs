@@ -25,7 +25,7 @@ use session::{
 
 use crate::descriptor::{
     AutomationExclusion, AutomationRule, BASE, Choice, ControlDescriptor, ControlScope, DomainRule,
-    Lanes, Motion, ruled_live_not_built,
+    Lanes, Motion,
 };
 use crate::error::ControlError;
 use crate::lane::{Side, is_on, toggle};
@@ -40,9 +40,6 @@ pub const BYPASS_CONTROL: u32 = 0;
 /// (the registry test refuses a descriptor that does).
 pub const LINK_MODE_CONTROL: u32 = 0x8000_0000;
 
-/// The multiband compressor's link mode is live once #1367 lands (decision 15 E2).
-const MULTIBAND_LINK_ISSUE: u32 = 1367;
-
 /// The native effects whose link mode is a live update (decision 15 E2, #1371): the effect
 /// contract's list, the one that also decides which lanes hold a link cell.
 pub use effect_contract::LIVE_LINK_EFFECTS;
@@ -53,8 +50,6 @@ const LINK_AUTOMATION: AutomationExclusion = AutomationExclusion {
     reason: "a mode, not a performance value",
     reopen: "an owner request",
 };
-
-const MULTIBAND_ID: &str = "miso.multiband-compressor";
 
 /// Every link mode with the label a frontend shows, in code order. The choice lists below are
 /// selected from it by the set bits of an effect's `supported_link_modes`, so a code or label is
@@ -302,15 +297,6 @@ pub(crate) fn link_mode_descriptor(
             ControlClass::Live,
             Motion::Ramp(LiveRampRow::LinkGlide),
             AutomationRule::Excluded(&LINK_AUTOMATION),
-        )
-    } else if effect_id == MULTIBAND_ID {
-        (
-            ruled_live_not_built(
-                MULTIBAND_LINK_ISSUE,
-                "decision 15 E2, #1367 makes the link mode live",
-            ),
-            Motion::Fixed,
-            AutomationRule::Computed,
         )
     } else {
         // No launch effect other than these offers a choice of modes; one that does is rebuilt.

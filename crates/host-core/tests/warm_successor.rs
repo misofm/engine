@@ -525,13 +525,22 @@ fn a_send_into_a_bus_from_a_latent_track_restarts_the_track() {
         assert_eq!(restarted(&w), ["x"], "bus limiter {bus_limiter}");
         // Scope R6: the warm program moves none of X's pre-fader owners (its input section and
         // its limiter) and not its fader; everything else the ordinary successor carries, it
-        // carries.
+        // carries. Of the compensation lines, X's are all new, and the one line A and the warm
+        // successor share, `s-main`'s (without the bus limiter), carries: the whole-strip restart
+        // filter (#1324a) drops no line of a strip it does not restart.
         let mut ordinary = edit.prepare(edit.base()).expect("ordinary");
         assert!(ordinary.restarted_strips().is_empty());
-        let [sources, inputs, strips, effects] = graph::test_only_carry_counts(&mut ordinary.plan);
+        let [sources, inputs, strips, effects, _] =
+            graph::test_only_carry_counts(&mut ordinary.plan);
         assert_eq!(
             graph::test_only_carry_counts(&mut w.plan),
-            [sources, inputs - 1, strips - 1, effects - 1],
+            [
+                sources,
+                inputs - 1,
+                strips - 1,
+                effects - 1,
+                usize::from(!bus_limiter)
+            ],
             "bus limiter {bus_limiter}"
         );
         let mut carried = stages("s", TrackStage::Input);
@@ -942,6 +951,30 @@ impl Feeder {
                 )
                 .unwrap_or_else(|error| panic!("submit at {}: {error:?}", self.next));
             self.next += QUANTUM;
+        }
+    }
+
+    /// Submit whole blocks until the ring refuses one as full (#1406 gate 1).
+    fn fill(&mut self, sources: &mut host_core::SourceControlSet) {
+        loop {
+            let range = self.next as usize..(self.next + QUANTUM) as usize;
+            match sources.submit(
+                SOURCE.as_bytes(),
+                host_core::SourceSubmission {
+                    generation: self.generation,
+                    start_frame: self.next,
+                    sample_rate_hz: self.rate,
+                    planes: &[&self.planes[0][range.clone()], &self.planes[1][range]],
+                    frames: QUANTUM as u32,
+                    end_of_region: false,
+                },
+            ) {
+                Ok(_) => self.next += QUANTUM,
+                Err(host_core::SourceControlError::Chunk(source::HostChunkError::Full {
+                    ..
+                })) => return,
+                Err(error) => panic!("submit at {}: {error:?}", self.next),
+            }
         }
     }
 
@@ -1639,5 +1672,71 @@ fn the_growth_chain_primes_without_allocating() {
                 "{rate} Hz: block {index} (adoptions at {swaps:?})"
             );
         }
+    }
+}
+
+/// Gate 1 (#1406): the default ring holds a warm successor's largest prime through one stall.
+/// On [`host_core::default_source_ring_frames`]`(fs, 128)`, at every launch rate, the producer
+/// fills the ring and then submits nothing for `stall_ring_frames(fs, 128) / q` blocks, the
+/// silent blocks a full stall ring renders with no underrun (the stall tolerance's
+/// `ceil(fs · 100 ms / q)` and its two reserve quanta: since #917 the played block sits outside
+/// both queues, so a full ring queues every one of its blocks at a block boundary). Then gate 6's
+/// four growths are published as one, `P = p_max_samples(fs, 128)` with `ΣP = 0`, so readiness
+/// asks for its largest window, `P / q + 1` blocks; it is adopted at the next block, the producer
+/// still silent. The queue only shrinks while the producer is silent, so readiness held at every
+/// earlier block of the stall too, and the ring never underran.
+#[test]
+fn the_default_ring_holds_the_largest_prime_through_a_stall() {
+    for (rate, clippers) in [(44_100, 2), (48_000, 0), (88_200, 0), (96_000, 1)] {
+        let model = |growths: usize| {
+            let mut model = two_tracks();
+            model.sample_rate_hz = rate;
+            let chain = inserts(&mut model, "t1");
+            for growth in 0..growths {
+                let mut stage = limiter();
+                stage.id = sid(&format!("limiter-{growth}"));
+                chain.push(stage);
+                for clipper in 0..clippers {
+                    let mut clip = effect(
+                        &format!("clip-{growth}-{clipper}"),
+                        "miso.soft-clip",
+                        SidechainDeclaration::None,
+                    );
+                    clip.link_mode = LinkMode::DualMono;
+                    chain.push(clip);
+                }
+            }
+            Session::compile(finish(model))
+        };
+        let p_max = u64::from(host_core::p_max_samples(rate, 128));
+        let caps = ring_caps(host_core::default_source_ring_frames(rate, 128));
+        let config = WarmConfig { p_max, ..CONFIG };
+        let mut stream = alone(&model(0), &caps, backend(), 1);
+        stream.feeder.rate = rate;
+        stream.render(BEFORE);
+        stream.feeder.fill(&mut stream.sources);
+        stream.feeder.ahead = 0;
+        let stall = u64::from(stall_ring_frames(rate, 128)) / QUANTUM;
+        stream.render(usize::try_from(stall).expect("blocks"));
+        let at = stream.blocks.len();
+        assert_eq!(
+            stream.grow(&model(4), &config),
+            p_max,
+            "{rate} Hz: P is p_max_samples"
+        );
+        stream.render(1);
+        assert_eq!(
+            stream.swap_blocks(),
+            [at],
+            "{rate} Hz: ready at the block after the stall"
+        );
+        let report = stream
+            .sources
+            .seek_report(SOURCE.as_bytes())
+            .expect("the source's report");
+        assert_eq!(
+            report.cumulative_underrun_frames, 0,
+            "{rate} Hz: no underrun"
+        );
     }
 }

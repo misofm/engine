@@ -15,11 +15,11 @@ use protocol::{
     ControlScope, ControlSection, ControlSectionHeader, ControlStatePage, ControlStateRecord,
     ControlTaper, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
     CountersRequest, Diagnostic, DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest,
-    EnumChoice, MeterMetric, ParameterChannel, ParameterProviderError,
-    ParameterUnit as ProtocolUnit, ResponseConfiguration, ResponseCurves, ResponseGetRequest,
-    ResponseGrid, ResponseProviderError, ResponseResult, ResponseTarget, SampleTime, StatusCode,
-    TelemetryConfiguration, TelemetryCounters, TelemetryRefusal, TelemetryRefusalPath,
-    TransportSetRequest, TransportSnapshot, TransportState,
+    EnumChoice, ParameterChannel, ParameterProviderError, ParameterUnit as ProtocolUnit,
+    ResponseConfiguration, ResponseCurves, ResponseGetRequest, ResponseGrid, ResponseProviderError,
+    ResponseResult, ResponseTarget, SampleTime, StatusCode, TelemetryConfiguration,
+    TelemetryCounters, TelemetryRefusal, TelemetryRefusalPath, TransportSetRequest,
+    TransportSnapshot, TransportState,
 };
 use session::{EffectIdentity, SessionModel, StripKind};
 
@@ -1526,10 +1526,11 @@ pub const MAXIMUM_METER_BATCH_RECORDS: usize = 256;
 
 /// The meter table rules this provider owns (#1583 D3, #1587a), in order: with no meter delivery
 /// any entry is `meter.unavailable`; the period must be a positive multiple of the window
-/// (`meter.period`); then, until #1587b, the first gain-reduction entry is
-/// `meter.gain_reduction.unavailable`; and the first entry whose records (two per peak entry, left
-/// and right) take the table past [`MAXIMUM_METER_BATCH_RECORDS`] is `meter.records`. An empty
-/// table is always served.
+/// (`meter.period`); and the entry past half of [`MAXIMUM_METER_BATCH_RECORDS`] is
+/// `meter.records`: an entry has at most two records (a peak entry's left and right; a gain
+/// reduction entry has one), so a batch of an accepted table never needs more, and the session's
+/// stored tables are charged for that many entries (#1587a, #1587b). An empty table is always
+/// served.
 fn refuse_meter_table(
     configuration: &TelemetryConfiguration,
     window: Option<core::num::NonZeroU32>,
@@ -1562,18 +1563,7 @@ fn refuse_meter_table(
             TelemetryRefusalPath::MeterPeriod,
         );
     }
-    if let Some(index) = configuration
-        .meters
-        .iter()
-        .position(|entry| entry.metric == MeterMetric::GainReduction)
-    {
-        return refuse(
-            ParameterProviderError::Unavailable,
-            "meter.gain_reduction.unavailable",
-            TelemetryRefusalPath::Meter(index),
-        );
-    }
-    // Every entry left is a peak entry, the output's or a strip's: two records each.
+    // At most two records per entry, the output's or a strip's.
     if configuration.meters.len() > MAXIMUM_METER_BATCH_RECORDS / 2 {
         return refuse(
             ParameterProviderError::InvalidField,
@@ -2725,7 +2715,7 @@ mod tests {
     use effect_contract::{ParameterChannelPolicy, ParameterDomain};
 
     use crate::RESPONSE_MAXIMUM_OVERRIDES;
-    use protocol::{ControlOwnerKind, ParameterChannel, ResponseOverride};
+    use protocol::{ControlOwnerKind, MeterMetric, ParameterChannel, ResponseOverride};
 
     use super::*;
 

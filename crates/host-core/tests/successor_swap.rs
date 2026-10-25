@@ -46,9 +46,11 @@ const AUX_SOURCE: &str = "aux-source";
 const MUTED_TRACK: &str = "a-muted";
 
 /// The carry program's table entries, `[source moves, input-section lane moves, strip-stage
-/// moves, effect-lane moves]` (#1276, #1277 D8, #1280): `graph::test_only_carry_counts`.
+/// moves, effect-lane moves]` (#1276, #1277 D8, #1280): the first four of
+/// `graph::test_only_carry_counts`.
 fn carry_counts(prepared: &mut host_core::PreparedHost) -> [usize; 4] {
-    graph::test_only_carry_counts(&mut prepared.plan)
+    let [sources, inputs, strips, effects, _] = graph::test_only_carry_counts(&mut prepared.plan);
+    [sources, inputs, strips, effects]
 }
 
 /// The command queue and seek-report record a successor's carried timeline brings (#1641 D7,
@@ -1609,6 +1611,42 @@ fn a_strip_whose_input_section_changed_starts_at_rest() {
     });
 }
 
+/// A live input section whose new values the live path refuses -- a high-pass above the strip's
+/// low-pass, which the session compiles -- is not an internal fault of the input join: the
+/// successor's preparation returns its own typed refusal (`builtin.filter.order`).
+///
+/// Test value: red if the join asserts on the refusal: a debug build then panicked in the middle
+/// of a rebuild, and a host that caught the panic lost the candidate the rebuild had withdrawn
+/// (#1324a: capi's in-place parity stream then fed a ring nothing read, `source.backpressure`).
+#[test]
+fn an_input_section_the_live_path_refuses_is_a_typed_refusal() {
+    let a = Session::compile(filtered_session(false));
+    let mut b_model = filtered_session(false);
+    let left = &mut b_model.tracks[0].builtins.left;
+    left.hpf_hz = left.lpf_hz + 1_000.0;
+    let b = Session::compile(b_model);
+    for backend in backends() {
+        let predecessor = LivePlan::fresh(&a, backend).prepared;
+        let refused = host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+            &b.compiled,
+            &caps(),
+            &LivePlan::request(),
+            host_core::SuccessorBase::new(
+                &predecessor.inventory,
+                &a.model,
+                successor::SUCCESSOR_REVISION,
+            ),
+            backend,
+        )
+        .err()
+        .expect("the filter order is refused");
+        assert!(
+            String::from_utf8_lossy(refused.as_bytes()).starts_with("builtin.filter.order\t"),
+            "{backend:?}: {refused:?}"
+        );
+    }
+}
+
 /// D1's control-kind clause: a successor that attaches a live queue to its strips when the
 /// predecessor did not, or the reverse, carries no input section; only the source moves. Red if
 /// the clause is dropped (nine lane moves).
@@ -3118,6 +3156,8 @@ struct FadeRun {
     blocks: Vec<Vec<u32>>,
     arms: Vec<Vec<(u32, u32)>>,
     restarted: Vec<Vec<Box<str>>>,
+    /// Each successor's `graph::test_only_carry_counts`.
+    carries: Vec<[usize; 5]>,
     allocator: (u64, u64, u64),
 }
 
@@ -3156,6 +3196,7 @@ fn fade_run(
     let mut plan = CellPlan::fresh(a, backend);
     let mut arms = Vec::new();
     let mut restarted = Vec::new();
+    let mut carries = Vec::new();
     let mut allocator = (0, 0, 0);
     let mut add = |delta: bench_alloc::Counters| {
         allocator.0 += delta.allocations;
@@ -3186,6 +3227,9 @@ fn fade_run(
                     .expect("a graph plan"),
             );
             restarted.push(successor.live.prepared.restarted_strips().to_vec());
+            carries.push(graph::test_only_carry_counts(
+                &mut successor.live.prepared.plan,
+            ));
             successor
                 .live
                 .prepared
@@ -3246,6 +3290,7 @@ fn fade_run(
         blocks,
         arms,
         restarted,
+        carries,
         allocator,
     }
 }
@@ -3924,12 +3969,13 @@ fn a_fired_fade_does_not_repeat_on_every_width() {
     }
 }
 
-/// Issue #1392 gate 3 (root's reading of D5): the second transaction adds a transparent insert to
-/// the added track while its fade waits for the anchor. The strip restarts for its chain
-/// (`restarted_strips()` lists it) but its fader lane carries, armed, so its entry carries too and
-/// the fade still fires at the anchor: the run equals the post-edit session with the track muted
-/// and unmuted live there. Red if a restarted strip drops its entry while its lane imports
-/// `armed` (a mute that never lifts).
+/// Issue #1392 gate 3, as #1324a reads it (D2, D3): the second transaction adds a transparent
+/// insert to the added track while its fade waits for the anchor. The strip restarts for its chain
+/// (`restarted_strips()` lists it), so its fader lane does not carry and its pending entry is
+/// replaced by a fresh arm, still `Waiting` for the anchored source: the fade still fires at the
+/// anchor, and the run equals the post-edit session with the track muted and unmuted live there.
+/// Red if a swap that restarts the strip's fader drops its Waiting arm (the track enters at full
+/// gain at the swap), or carries the fader beside a fresh arm.
 #[test]
 fn a_chain_restarted_strip_still_fades() {
     let backend = Backend::current();
@@ -3965,6 +4011,12 @@ fn a_chain_restarted_strip_still_fades() {
         run.restarted[1].iter().any(|id| &**id == FADE_TRACK),
         "the insert restarts the strip"
     );
+    // Every strip's fader and matrix stage move, but the restarted strip's fader (#1324 D2).
+    assert_eq!(
+        run.carries[1][2],
+        2 * b2.model.strips().count() - 1,
+        "the restarted strip's fader lane does not carry"
+    );
     let reference = fade_run(
         &muted,
         &[],
@@ -3986,6 +4038,319 @@ fn a_chain_restarted_strip_still_fades() {
     );
 }
 
+/// #1324a gate 4's session: the #1363 base, with `aux` holding a true-peak limiter and then a
+/// transparent compressor `second`, and a route `aux-in` from `aux`'s input tap into the bus, whose
+/// input arrives 486 samples late, so the route's line is 486 samples long; the untouched `eq0`
+/// holds a transparent compressor insert.
+fn whole_restart_model(second: &str) -> SessionModel {
+    let mut model = route_fade_base_limited(true);
+    add_limiter(&mut model, "aux", "lim");
+    let mut insert = transparent_insert();
+    insert.id = id(second);
+    track_mut(&mut model, "aux").inserts.effects.push(insert);
+    track_mut(&mut model, "eq0")
+        .inserts
+        .effects
+        .push(transparent_insert());
+    with_route(
+        model,
+        "aux-in",
+        "aux",
+        session::SendTap::Input,
+        into_bus(),
+        false,
+    )
+}
+
+/// #1324a gate 4 (D2, D3) at one width, the successor prepared between two render calls: B
+/// replaces `aux`'s second insert. `aux` is restarted, and none of its owners before its fader
+/// carries: its input section, its fader, both inserts (the surviving limiter too) and the line of
+/// its route from the input tap; its matrix carries. It is armed with `D` its limiter's 486
+/// samples, and its `input`-tap route with it at `D = 0`. Every other strip carries every owner:
+/// against a successor that changes nothing, the tables hold exactly `aux`'s entries fewer.
+fn a_restarted_strip_carries_nothing_before_its_fader(backend: Backend) {
+    let a = Session::compile(whole_restart_model("tc"));
+    let b = Session::compile(whole_restart_model("tc2"));
+    let ramp = LiveRamps::for_session(&a.model).mute_samples;
+    let mut plan = CellPlan::fresh(&a, backend);
+    let mut output = vec![f32::NAN; QUANTUM * 2];
+    for _ in 0..SWAP_BLOCK {
+        plan.live.render_into(&mut output, QUANTUM);
+    }
+    let mut unchanged = CellPlan::successor(
+        &a,
+        &plan.live.prepared.inventory,
+        &a.model,
+        &EditRamps::new(),
+        backend,
+    );
+    let mut replaced = CellPlan::successor(
+        &b,
+        &plan.live.prepared.inventory,
+        &a.model,
+        &EditRamps::new(),
+        backend,
+    );
+    let what = format!("{backend:?}");
+    assert!(
+        unchanged.live.prepared.restarted_strips().is_empty(),
+        "{what}"
+    );
+    assert_eq!(
+        replaced.live.prepared.restarted_strips(),
+        [Box::<str>::from("aux")],
+        "{what}"
+    );
+    let full = graph::test_only_carry_counts(&mut unchanged.live.prepared.plan);
+    let counts = graph::test_only_carry_counts(&mut replaced.live.prepared.plan);
+    assert_eq!(
+        [0, 1, 2, 3, 4].map(|table| full[table] - counts[table]),
+        [0, 1, 1, 2, 1],
+        "{what}: aux's input section, fader, two inserts and input-tap line do not move ({full:?})"
+    );
+    assert_eq!(
+        graph::test_only_fade_arms(&mut unchanged.live.prepared.plan).expect("a graph plan"),
+        []
+    );
+    assert_eq!(
+        graph::test_only_fade_arms(&mut replaced.live.prepared.plan).expect("a graph plan"),
+        [(486, ramp), (0, ramp)],
+        "{what}: aux's fader waits for its limiter, its input-tap route for nothing"
+    );
+    assert_eq!(
+        replaced
+            .live
+            .prepared
+            .plan
+            .adopt_predecessor_plan(&mut plan.live.prepared.plan),
+        CarryOutcome::Carried,
+        "{what}"
+    );
+}
+
+/// #1324a gate 4 on every width. Red if a restarted strip carries an owner before its fader (a
+/// surviving latent insert, its input section, a pre-fader line: the hole in front of the
+/// restarted owner, D2) or its fader, if it is not armed, or if an untouched strip loses a carry.
+#[test]
+fn a_restarted_strip_carries_nothing_before_its_fader_on_every_width() {
+    for backend in backends() {
+        a_restarted_strip_carries_nothing_before_its_fader(backend);
+    }
+}
+
+/// A compressor `name` whose `sidechain-in` port reads `tap` of strip `source`.
+fn keyed_insert(name: &str, source: RouteSource) -> Effect {
+    Effect {
+        id: id(name),
+        sidechain: SidechainDeclaration::Routed(session::Sidechain {
+            source,
+            port_id: id("sidechain-in"),
+        }),
+        ..transparent_insert()
+    }
+}
+
+fn track_key(track: &str, tap: session::SendTap) -> RouteSource {
+    RouteSource::Track {
+        track_id: id(track),
+        tap,
+    }
+}
+
+/// How a row of [`a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width`] edits A.
+#[derive(Clone, Copy, PartialEq)]
+enum Restart {
+    /// An insert added to `eq0`.
+    Insert,
+    /// `eq0`'s `delay_samples` changed (its delay line restarts).
+    Delay,
+    /// An insert added to the bus.
+    Bus,
+    /// An insert added to the bus, and a latent insert to the muted `late` that feeds it, so the
+    /// bus input, which carried `aux` also feeds, arrives at `eq1`'s limited key: the key's line
+    /// shrinks from the limiter's latency to 0.
+    BusLater,
+    /// [`Self::BusLater`] with no `aux` route: the bus's only input is `late`'s `pre_fader` route,
+    /// which follows `late`'s stored mute automation, so it cannot be armed (#2011) and the bus
+    /// input is not quiet.
+    Following,
+    /// The bus's `delay_samples` changed (its delay line restarts).
+    BusDelay,
+}
+
+/// #1324b gate 7 and D1's sidechain closure on every width, on the control thread. B restarts
+/// `eq0` (an insert, or its `delay_samples`) or the bus; `keys` are the keyed inserts A and B share.
+/// The restart set is closed over the sidechain edges: a strip keyed from a restarted strip's
+/// `post_input`, `insert_send`, `insert_return` or `pre_fader` tap joins it, and so, on a second
+/// round, does a strip keyed from that one; a `post_fader` tap adds nothing, and an `input` tap
+/// (a track's or the bus's) adds nothing unless its delay line restarts. A submix's `input` tap
+/// adds nothing while its line keeps its length, and adds its consumer when the line changes and
+/// a carried strip or an unarmable following route feeds the submix. Each strip in the set is armed. Red if the closure ignores sidechains or a tap kind,
+/// stops after one round, adds a `post_fader` or a plain `input`-tap consumer, misses a restarted
+/// delay line, or gets either submix rule wrong.
+#[test]
+fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
+    let bus = || RouteSource::Submix {
+        submix_id: id(ROUTE_BUS),
+        tap: session::SendTap::Input,
+    };
+    // A row: its name, its edit, the keyed inserts (strip, key source) and the restart set.
+    type Row<'a> = (&'a str, Restart, Vec<(&'a str, RouteSource)>, &'a [&'a str]);
+    let keyed = |tap| vec![("eq1", track_key("eq0", tap))];
+    let rows: [Row<'_>; 11] = [
+        (
+            "insert_return",
+            Restart::Insert,
+            keyed(session::SendTap::InsertReturn),
+            &["eq0", "eq1"],
+        ),
+        (
+            "post_input",
+            Restart::Insert,
+            keyed(session::SendTap::PostInput),
+            &["eq0", "eq1"],
+        ),
+        (
+            "insert_send",
+            Restart::Insert,
+            keyed(session::SendTap::InsertSend),
+            &["eq0", "eq1"],
+        ),
+        (
+            "input",
+            Restart::Insert,
+            keyed(session::SendTap::Input),
+            &["eq0"],
+        ),
+        (
+            "input behind a restarted delay line",
+            Restart::Delay,
+            keyed(session::SendTap::Input),
+            &["eq0", "eq1"],
+        ),
+        (
+            "post_fader",
+            Restart::Insert,
+            keyed(session::SendTap::PostFader),
+            &["eq0"],
+        ),
+        (
+            "a chain",
+            Restart::Insert,
+            vec![
+                ("eq1", track_key("eq0", session::SendTap::PreFader)),
+                ("aux", track_key("eq1", session::SendTap::InsertReturn)),
+            ],
+            &["aux", "eq0", "eq1"],
+        ),
+        (
+            "a kept bus line",
+            Restart::Bus,
+            vec![("eq1", bus())],
+            &[ROUTE_BUS],
+        ),
+        (
+            "a moved bus line",
+            Restart::BusLater,
+            vec![("eq1", bus())],
+            &[ROUTE_BUS, "eq1", "late"],
+        ),
+        (
+            "a following pre-fader route into the bus",
+            Restart::Following,
+            vec![("eq1", bus())],
+            &[ROUTE_BUS, "eq1", "late"],
+        ),
+        (
+            "the bus input behind a restarted delay line",
+            Restart::BusDelay,
+            vec![("eq1", bus())],
+            &[ROUTE_BUS, "eq1"],
+        ),
+    ];
+    for backend in backends() {
+        for (what, edit, keys, restarted) in &rows {
+            let mut a_model = if *edit == Restart::Following {
+                let mut model = with_mute_automation(route_fade_base_limited(false), "late", None);
+                for route in &mut model.routes {
+                    if route.id.as_str() == "late-bus" {
+                        route.source = track_key("late", session::SendTap::PreFader);
+                    }
+                }
+                model
+            } else {
+                with_route(
+                    route_fade_base_limited(false),
+                    "aux-bus",
+                    "aux",
+                    session::SendTap::PostFader,
+                    into_bus(),
+                    false,
+                )
+            };
+            if matches!(edit, Restart::BusLater | Restart::Following) {
+                add_limiter(&mut a_model, "eq1", "eq1-lim");
+            }
+            for (strip, source) in keys {
+                track_mut(&mut a_model, strip)
+                    .inserts
+                    .effects
+                    .push(keyed_insert("key", source.clone()));
+            }
+            let mut b_model = a_model.clone();
+            match edit {
+                Restart::Insert => track_mut(&mut b_model, "eq0")
+                    .inserts
+                    .effects
+                    .push(transparent_insert()),
+                Restart::Delay => {
+                    let builtins = &mut track_mut(&mut b_model, "eq0").builtins;
+                    builtins.left.delay_samples = 32;
+                    builtins.right.delay_samples = 32;
+                }
+                Restart::Bus | Restart::BusLater | Restart::Following => b_model.submixes[0]
+                    .inserts
+                    .effects
+                    .push(transparent_insert()),
+                Restart::BusDelay => {
+                    let builtins = &mut b_model.submixes[0].builtins;
+                    builtins.left.delay_samples = 32;
+                    builtins.right.delay_samples = 32;
+                }
+            }
+            if matches!(edit, Restart::BusLater | Restart::Following) {
+                add_limiter(&mut b_model, "late", "lim");
+            }
+            let a = Session::compile(a_model);
+            let b = Session::compile(b_model);
+            let plan = CellPlan::fresh(&a, backend);
+            let mut successor = CellPlan::successor(
+                &b,
+                &plan.live.prepared.inventory,
+                &a.model,
+                &EditRamps::new(),
+                backend,
+            );
+            let what = format!("{what} at {backend:?}");
+            let set: Vec<&str> = successor
+                .live
+                .prepared
+                .restarted_strips()
+                .iter()
+                .map(|strip| &**strip)
+                .collect();
+            assert_eq!(set, *restarted, "{what}");
+            let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
+                .expect("a graph plan");
+            assert_eq!(
+                arms.len(),
+                restarted.len() - usize::from(restarted.contains(&"late")),
+                "{what}: each audible restarted strip is armed, the muted `late` is not"
+            );
+        }
+    }
+}
+
 /// The oracle sees the fade: `reference` differs from `muted` rendered with no unmute.
 fn assert_audible(muted: &Session, feeds: &[&Feed], reference: &FadeRun, backend: Backend) {
     let silent = fade_run(muted, &[], feeds, None, &[], backend);
@@ -3995,15 +4360,19 @@ fn assert_audible(muted: &Session, feeds: &[&Feed], reference: &FadeRun, backend
     );
 }
 
-/// `model` with a stored mute automation curve on [`FADE_TRACK`] that holds it unmuted, or, with
+/// `model` with a stored mute automation curve on track `track` that holds it unmuted, or, with
 /// `mute_at`, steps it to muted at that sample: the lane becomes an automated lane, whose live
 /// mute goes through the cell's mute terms.
-fn with_fade_mute_automation(mut model: SessionModel, mute_at: Option<u64>) -> SessionModel {
+fn with_mute_automation(
+    mut model: SessionModel,
+    track: &str,
+    mute_at: Option<u64>,
+) -> SessionModel {
     let owner = model
         .tracks
         .iter()
-        .find(|track| track.id.as_str() == FADE_TRACK)
-        .expect("the fade track")
+        .find(|candidate| candidate.id.as_str() == track)
+        .expect("the track")
         .id
         .clone();
     model.automation.push(session::Automation {
@@ -4052,12 +4421,14 @@ fn a_user_mute_on_an_automated_armed_lane_outlasts_the_fire() {
         ("a user mute", None, vec![mute]),
         ("a curve mute", Some(curve_mute), Vec::new()),
     ] {
-        let b = Session::compile(with_fade_mute_automation(
+        let b = Session::compile(with_mute_automation(
             anchored_fade_model(false),
+            FADE_TRACK,
             mute_at,
         ));
-        let muted = Session::compile(with_fade_mute_automation(
+        let muted = Session::compile(with_mute_automation(
             anchored_fade_model(true),
+            FADE_TRACK,
             mute_at,
         ));
         let swap = [FadeSwap {
@@ -4080,7 +4451,11 @@ fn a_user_mute_on_an_automated_armed_lane_outlasts_the_fire() {
         );
     }
     // The oracle can fail: the muted reference given an unmute at the anchor is heard.
-    let muted = Session::compile(with_fade_mute_automation(anchored_fade_model(true), None));
+    let muted = Session::compile(with_mute_automation(
+        anchored_fade_model(true),
+        FADE_TRACK,
+        None,
+    ));
     let reference = fade_run(&muted, &[], &reference_feeds, None, &[], backend);
     let unmuted = fade_run(
         &muted,
@@ -5852,13 +6227,13 @@ fn plane_of(run: &PlainRun, plane: usize) -> Vec<&[u32]> {
 }
 
 /// Gate 3, first case. B changes the compressor threshold of strip `eq3` -- a prepared value, since
-/// an effect bank stage has no live lane -- and adds a muted track. That slot does not carry, every
-/// other lane does, and `restarted_strips()` is exactly `eq3`:
+/// an effect bank stage has no live lane -- and adds a muted track. `restarted_strips()` is exactly
+/// `eq3`, so every slot of `eq3` restarts with it (#1324 D2) and every other strip's lane carries:
 ///
 /// * the right plane, which the other strips alone feed, equals a fresh B on every block: their
 ///   lanes carried;
-/// * the carry program holds exactly one move fewer than the same swap without the threshold
-///   change: `eq3`'s other slots carried (with a single slot that is none left to count);
+/// * the carry program holds exactly `eq3`'s slots fewer moves than the same swap without the
+///   threshold change;
 /// * the left plane, which `eq3` alone feeds, differs from the swap that carries the old
 ///   threshold: the slot restarted at the new one.
 fn a_prepared_change_to_one_slot_restarts_only_its_strip(backend: Backend, slots: &[&str]) {
@@ -5876,8 +6251,8 @@ fn a_prepared_change_to_one_slot_restarts_only_its_strip(backend: Backend, slots
     assert_eq!(carried_all.restarted, Vec::<Box<str>>::new(), "{backend:?}");
     assert_eq!(
         carried_all.carry_counts[3] - run.carry_counts[3],
-        1,
-        "{backend:?}: one move fewer"
+        slots.len(),
+        "{backend:?}: none of eq3's slots moves"
     );
     assert_eq!(
         plane_of(&run, 1),
@@ -5963,59 +6338,13 @@ fn transparent_insert() -> Effect {
     }
 }
 
-/// Gate 3, second case. B adds a compressor insert to strip `eq3` and a muted track. The insert
-/// changes `eq3`'s chain, so `eq3` -- and only `eq3` -- is in the restart set, but every console
-/// slot of every strip, `eq3`'s included, carries: the insert changes no sample, so the swapped run
-/// equals a fresh B on every block only if `eq3`'s console state continued.
-fn an_added_insert_restarts_its_strip_and_its_console_slots_carry(backend: Backend) {
-    let mut with_insert = with_muted_track(console_session(false, &ALL_SLOTS));
-    track_mut(&mut with_insert, "eq3")
-        .inserts
-        .effects
-        .push(transparent_insert());
-    let a = Session::compile(console_session(false, &ALL_SLOTS));
-    let b = Session::compile(with_insert);
-    let feed = bursty_feed(SOURCE, 5);
-    let reference = plain_run(&b, None, &feed, backend, false);
-    let bare = plain_run(
-        &Session::compile(with_muted_track(console_session(false, &ALL_SLOTS))),
-        None,
-        &feed,
-        backend,
-        false,
-    );
-    assert_eq!(
-        first_plain_difference(&reference, &bare),
-        None,
-        "{backend:?}: the insert is transparent, so the oracle is exact"
-    );
-    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
-    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
-    assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
-    assert_eq!(
-        first_plain_difference(&run, &reference),
-        None,
-        "{backend:?}: every console slot carried"
-    );
-    assert_eq!(run.refusals, 0, "{backend:?}");
-}
-
-/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
-/// its build executes (#1017).
-#[test]
-fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_the_build_width() {
-    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::current());
-}
-
 /// An insert carries when it is a lane of a bank in both plans (#1280a), and the compressor insert
 /// here is not: it sits on one of nine strips, below the padding threshold at every width (#888:
-/// 2 members at 4 lanes, 3 at 8), so it runs per node, and a per-node insert has no carry yet
-/// (#1281, #1282). A strip whose insert survives the swap but is not banked restarts that insert
-/// at rest and is in `restarted_strips()`, while a strip without an insert is not. A structural
-/// swap adds a muted track to a session whose `eq3` holds an unchanged insert: the list is exactly
-/// `eq3`, and every console slot of every strip still carries (the insert is transparent, so the
-/// swapped run equals a fresh B on every block only if the console state continued and the
-/// restarted insert changes no sample).
+/// 2 members at 4 lanes, 3 at 8), so it runs per node, and a per-node instance carries only with
+/// live controls (#1282), which a plain plan has not. A strip whose insert survives the swap but
+/// is not banked restarts (with every owner before its fader, #1324 D2) and is in
+/// `restarted_strips()`, while a strip without an insert is not. A structural swap adds a muted
+/// track to a session whose `eq3` holds an unchanged insert: the list is exactly `eq3`.
 fn a_surviving_insert_restarts_its_strip(backend: Backend) {
     let mut with_inserts = console_session(false, &ALL_SLOTS);
     track_mut(&mut with_inserts, "eq3")
@@ -6026,18 +6355,12 @@ fn a_surviving_insert_restarts_its_strip(backend: Backend) {
     let a = Session::compile(with_inserts);
     let b = Session::compile(b_model);
     let feed = bursty_feed(SOURCE, 5);
-    let reference = plain_run(&b, None, &feed, backend, false);
     let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
     assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
     assert_eq!(
         run.restarted,
         vec![Box::<str>::from("eq3")],
         "{backend:?}: the strip with a surviving insert, and no other"
-    );
-    assert_eq!(
-        first_plain_difference(&run, &reference),
-        None,
-        "{backend:?}: every console slot carried, and the restarted insert is transparent"
     );
     assert_eq!(run.refusals, 0, "{backend:?}");
 }
@@ -6065,8 +6388,8 @@ fn without_console_slot(mut model: SessionModel, slot: &str) -> SessionModel {
     model
 }
 
-/// A session console slot removed changes every strip's chain: every strip restarts (D15-9), and
-/// the five slots that remain still carry, on every strip.
+/// A session console slot removed changes every strip's chain: every strip restarts (D15-9), with
+/// every slot (#1324 D2).
 fn a_removed_console_slot_restarts_every_strip(backend: Backend) {
     let a = Session::compile(console_session(false, &ALL_SLOTS));
     let removed = Session::compile(without_console_slot(
@@ -6081,11 +6404,6 @@ fn a_removed_console_slot_restarts_every_strip(backend: Backend) {
     let every_strip: Vec<Box<str>> = (0..9).map(|index| format!("eq{index}").into()).collect();
     assert_eq!(run.restarted, every_strip, "{backend:?}");
     assert_eq!(unchanged.restarted, Vec::<Box<str>>::new(), "{backend:?}");
-    assert_eq!(
-        unchanged.carry_counts[3] - run.carry_counts[3],
-        9,
-        "{backend:?}: the removed slot's nine lanes do not move, the other forty-five do"
-    );
     assert_eq!(run.refusals, 0, "{backend:?}");
 }
 
@@ -10514,9 +10832,11 @@ fn a_changed_lane_delay_restarts_only_its_lane(backend: Backend) {
     let b_model = with_strip_delay(a_model.clone(), "eq0", [37, 60]);
     let (a, b) = (Session::compile(a_model), Session::compile(b_model));
     let feed = Feed::new(SOURCE, 1);
-    let reference = effect_run(&b, None, &feed, &[], &[], backend);
-    let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
-    assert_clean_swap(&run, &format!("{backend:?}"));
+    // Plain plans: a live plan arms the restarted strip's fader (#1324 D3), which would hide the
+    // lanes' lines behind its fade.
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
     assert_eq!(run.restarted, vec![Box::<str>::from("eq0")], "{backend:?}");
     for block in SWAP_BLOCK..BLOCKS {
         let (swapped_left, swapped_right) = lane_planes(&run.blocks[block]);

@@ -75,8 +75,11 @@ never leaves it muted.
     swap, even in a plain duck-swap. So the strip that holds the consuming effect joins the set. The
     rule is applied after the carry join and repeated until no strip is added, since a joined strip
     may itself feed a sidechain; `restarted_strips()` reports the closed set. A track's `input` tap
-    is its raw source, which no owner of the restarted strip touches, so it adds nothing. A
-    submix's `input` tap is the sum of its incoming routes. It adds nothing only while the
+    is its raw source as its delay line (`delay_samples`, ring length, source) leaves it, which no
+    other owner of the restarted strip touches, so it adds nothing unless that delay line restarts:
+    the tap is the line's output, which then starts at rest at `S`, so the consumer of a track's or
+    a submix's `input` tap whose delay line restarts joins the set, before the submix rules below
+    (root amendment, 1324b attempt 2). A submix's `input` tap is the sum of its incoming routes. It adds nothing only while the
     submix's `Input` stage keeps its place against the consumer: the consumer's sidechain line
     from it keeps its length (moved by #1283 D2). Under a warm lead `P` that means the stage
     arrives at exactly its predecessor arrival plus `P` (*Prepare a warm successor whose carried
@@ -382,3 +385,195 @@ until then.
 
 **Realtime-path edits.** None planned under `crates/engine/src/realtime`. The fire and the ramped
 mutes are #1288's and #1325's render-side work.
+
+## Slice 1324a record (implementer, 2026-10-25)
+
+Scope (root, scope note R1-R5): D1 on the carry joins only, D2, D3, D4 with `C` over route lines,
+D5 through #1325b's overlay, D6, D7; gates 1 (a-d), 2, 3, 4, 6, 8. 1324a never ducks for a
+sidechain: D1's sidechain closure, D4's sidechain-line `C` and gates 7 and 9 are 1324b's. Gate 5's
+send is in gate 1's session (`b-send`, `pre_fader` into `r`, with `C` from `a`'s limiter).
+
+- **D1-D2, one filter** (`prepare.rs`, `StripRestart`). After every join, the restart set is the
+  strip, effect and strip-delay joins' `restarted` plus a warm lead's `restart_whole`. One filter
+  drops, for each strip in it, the fader's move and retarget, every effect move and retarget (a
+  dropped retarget that opened an owner transaction discards it), its input-section move, every
+  compensation line on its chain before the matrix, into its effects' sidechains and on its routes
+  from a tap before the fader, and the live-lane carry of those routes. The matrix, post-fader and
+  post-pan routes and their lines carry. The join functions are untouched; #1354a's scattered
+  `restarts_whole` filters stay (they are a subset). The input section is filtered too: D2's "every
+  owner before the fader" (R2 lists the families; the input section is one of them by its rule).
+  The strip delay (source alignment and claim lines) is not: it holds raw source frames (D2's
+  claim-line bullet). The input-carry install moved after the filter; its admission keeps the
+  ceiling it charged.
+- **D3** Every restarted strip is armed afresh with this plan's `D` (#1288's entry point,
+  `fade_arms_for`), on #1288's terms (live lanes, no declared discontinuity); a pending #1392 arm of
+  a restarted strip is not carried (its fader does not move), so the fresh arm replaces it. Each of
+  its routes from a tap before the fader that binds a six-word op is armed too and waits for the
+  strip (#1363 D1 (c)). Effective mute decides by construction: a lane prepared muted arms nothing.
+- **D4** `plan_strip_transition(base, overlay, next, restarted)`: the duck set is the removed
+  strips plus `restarted`, minus the overlay; `C` already spans every route out of a ducked strip.
+  `control.rs` passes `prepared_runtime.inventory.restarted_strips()` (the call only).
+- **Test inventory** `test_only_floors_only` now keeps the join rows (strip stages, input
+  sections, effect lanes, strip delays): a successor of it restarts and arms nothing, and, rendered
+  without adopting, still carries no state (#1285's floored reference).
+- `graph::test_only_carry_counts` gains the compensation-line move count (root, from 1354a); 1354a
+  gate 2's R6 assertion checks it (X's lines are all new; `s-main`'s carries without the bus
+  limiter).
+
+**Bits that move (class A outside the intended change).** Only on strips in `restarted_strips()`:
+their owners before the fader and their fader no longer carry, and on a live plan they and their
+pre-fader routes are armed. On the bank widths no other path changes. On the scalar oracle every
+strip's fader is no bank lane, so every kept strip restarts at every swap (as before) and now
+restarts and arms whole. Existing tests whose claim was a carry inside a restarted strip were
+folded: `a_prepared_change_to_one_slot_restarts_only_its_strip` (all of `eq3`'s slots now stay),
+`a_surviving_insert_restarts_its_strip` (its console-carry claim dropped),
+`a_removed_console_slot_restarts_every_strip` (the 45-lane count dropped),
+`an_added_insert_restarts_its_strip_and_its_console_slots_carry` (deleted: superseded by gate 4),
+`a_changed_lane_delay_restarts_only_its_lane` (plain plans, so no arm hides the lanes), and
+route_mute's `a_rebuild_that_adds_a_mute_entry_keeps_the_sends_ramp` and
+`a_rebuild_that_hand_mutes_the_source_ramps_the_send_over_the_edits_length` (bank widths only: on
+the scalar oracle the strip restarts, so its `pre_fader` send restarts with it).
+
+**Known limits.** (1) A carried effect whose sidechain reads a ducked strip's pre-fader tap steps
+at `S` (1324b; closed by the 1324b record below). (2) A pre-fader route that follows its
+source's automated mute has no six-word op, so it cannot be armed: it restarts at its prepared
+value at `S` (a step in). Arming a following route needs graph work outside this slice: #2011.
+(3) A restarted submix's
+`D` adds the longest line of any route into it, not only of a line that starts at rest (D3 says
+the latter): its fade may start later than needed. (4) An insert's quality is no trigger any
+session can reach: every launch effect declares only `normal` (gate 3 lists five triggers). (5)
+The route live-lane filter is unobservable for an armed route (the arm settles the state the
+carried, ducked lane holds); it decides only limit (2)'s case, and no test pins it.
+
+**Tests (red first on a mutant, each).** Gate 4
+`a_restarted_strip_carries_nothing_before_its_fader_on_every_width` (host-core); the Waiting-arm
+assertion in `a_chain_restarted_strip_still_fades`; gates 1 (with 8),
+2, 3 and 6 in `strip_transitions.rs`: `a_restarted_strip_ducks_then_fades_in_after_s`,
+`an_untouched_strip_plays_through_a_duck_swap`,
+`every_restarting_edit_ducks_and_a_send_or_value_edit_does_not`,
+`a_revert_during_the_duck_fades_back_in_at_s`.
+
+**A declared discontinuity ducks nothing** (found by the fallout below): a successor prepared at
+a declared discontinuity restarts every owner, so its `restarted_strips()` lists every strip;
+`plan_strip_transition` ignores `restarted` when `base.discontinuity` (#1323 D2), and such an edit
+is adopted at the next block as before. Pinned by capi's
+`an_edit_that_supersedes_a_discontinuity_successor_is_prepared_at_it`, red without the guard.
+
+**Test fallout (root authorization, 2026-10-25).** A restarting rebuild now waits for `S`. Each
+edit moves only the adoption point (render through `S`, or wait on the applied-revision watermark);
+no equality, count or bit comparison was loosened. Shared helpers: control-plane
+`tests/support/adoption.rs`, capi `feed_and_render_until_direct` (existing) and
+`render_owner_until_swap`, host-web `Rig::step_through_adoption` and control_parity's
+`step_both_until_applied`. Claims changed to the duck-swap expectation (the old claim was
+next-block adoption of a strip-restarting rebuild):
+- control-plane `capture_follows_newest_plan`: a capture armed before an insert-adding rebuild is
+  now answered by the running plan without the insert (as for a removal, #1325); the stale branch
+  keeps its claim with a rebuild that restarts no strip (a muted track added).
+- capi `assert_rebuilds` (`a_set_control_on_a_rebuild_value_is_a_rebuild`): a `delay_samples`
+  rebuild leaves exactly the duck's two mute writes on the restarted strip, no other cell write.
+- capi `in_place_commands_equal_full_commands_through_the_c_abi`: compares every watermark word of
+  the two sessions (supersessions now occur, alike on both paths) instead of requiring none.
+- capi `edits_after_render_took_two_candidates_unretired_each_commit` and
+  `two_taken_candidates_and_a_published_adoption_never_wedge_the_session`: their edits are now
+  structural edits that restart no strip (tracks added), so render still takes each candidate at
+  the next block, which those claims are about.
+
+**Root cause of the in-place parity failure (fixed here).** The input join's `debug_assert`
+("a compiled strip's input values have live records", `prepare.rs` input join) fired on unmodified
+main too, inside a caught panic, whenever a transaction moved a high-pass above its strip's
+low-pass: such a model compiles, the live path refuses its records, and the preparation's own
+`builtin.filter.order` refusal comes later. On main no candidate was pending at that moment. With
+1324a's longer phase 1 one was: the rebuild had withdrawn candidate A when it panicked, the capi
+host caught the panic, and A (acked revisions) was dropped with the publisher's mark consumed. The
+next edit's withdrawal found `Nothing`, promoted A as if render ran it, parked the running epoch
+for good, and routed the source producer to a plan render never adopted: its ring filled
+(`source.backpressure`). Acked-batch answer: yes, an acked candidate was lost, through the panic.
+The fix removes the `debug_assert` (a refusal is the designed path: the section restarts, or the
+preparation refuses), pinned by host-core's
+`an_input_section_the_live_path_refuses_is_a_typed_refusal` (red with the assert back, and the
+in-place test red with it). Left for root: any other panic inside a rebuild after the withdrawal
+still drops the withdrawn candidate in a host that catches panics (a panic-safety question for
+#1310's withdraw-then-rebuild order): #2010.
+
+**SDK evals.** `sdk/test/structure-evals.mjs` waits a duck-swap out with one bounded helper,
+`runUntil`: it renders until the state the test then asserts holds, within `duckBlocks` blocks
+(`ceil((q + N + L)/q) + ceil(L/q) + 1`, `N` the session's mute ramp, `L` the plan latency measured
+by an impulse, which bounds `C` and `D`), plus the tap's window where a fresh arm must publish.
+
+**An input section the live path refuses is no click.** Every value the live input path refuses
+(trim outside -144..24 dB, a cutoff outside its range, a high-pass at or above its low-pass) is
+refused by the successor's own preparation with the same rules (`builtins::prepare_input_track`,
+the same SVF design), so the rebuild is refused and the running plan plays on. The other branches
+that restart an input section (a rate or control-kind change) are refused by both hosts or occur
+only on a plain plan, which has no duck and no arm. Listing such strips in `restarted_strips()`
+was tried: it changes only plain plans (three host-core tests restart their strips whole, with no
+duck to cover it) and nothing a live host renders, so it was not kept.
+
+## Slice 1324b record (implementer, 2026-10-25)
+
+Scope (scope note): D1's sidechain closure, D4's sidechain terms of `C` (with the submix
+`input`-tap exemption), gates 7 and 9. Closes 1324a's limit (1).
+
+- **D1** (`prepare.rs`, `close_over_sidechains`): after the joins and the warm lead's whole
+  restarts, a strip of both plans with an insert keyed (successor model) from a restarted strip's
+  `post_input`, `insert_send`, `insert_return` or `pre_fader` tap joins the restart set, repeated
+  until no strip joins. A `post_fader`/`post_pan` tap adds nothing. An `input` tap (track or
+  submix) adds its consumer when its strip's delay line restarts (`strip_delay_carry.restarted`,
+  kept before the merge; root amendment of D1, attempt 2); otherwise a track's adds nothing, and a
+  submix's `input` tap adds its consumer only when the sidechain's compensation line changes length
+  (predecessor's line against the successor's; the line-length form of "the stage arrives at its
+  predecessor arrival plus `P`") and some line into the stage, in either plan, comes from a strip
+  neither ducked (removed or restarted) nor added (`submix_input_is_quiet`). A successor route
+  into the stage from a tap before the fader that follows an automated source mute (unarmable,
+  limit 2, #2011) makes the stage not quiet, so its consumer ducks rather than read the route's
+  step at `S`. The whole-strip filter,
+  the arm and `restarted_strips()` then treat a joined strip as any restarted strip. The closure
+  is not order-free when the exemption flips on a later round (a strip that joined earlier stays);
+  that only ducks more, never less.
+- **D4** (`transition.rs`): `C` also takes, into each carried strip (in `next`, not restarted, not
+  in the overlay), every sidechain line from a now-ducked strip's `post_fader`/`post_pan` tap, and
+  for a now-ducked submix whose `input` tap keys it under the exemption, that line plus the longest
+  route line into the submix (running plan's lines).
+- **Warm lead.** `warm_lead`'s `R` is the ordinary successor's `restarted_strips()`, so it is now
+  closed over sidechains for its join part. A consumer of a strip restarted whole is closed only
+  in the warm successor itself, after the floors (`warm_lead` doc limit; #1354b).
+
+**Bits that move (intended change only).** A carried strip keyed from a restarted strip's tap
+behind a restarted owner (or, outside the exemption, from a restarted submix's `input` tap) now
+ducks, restarts before its fader and fades in; a duck-swap with a sidechain line of the D4 kinds
+waits longer for `S`; a warm lead's `R` holds such closure strips, which take floor `a` instead of
+`a + P`. No existing test changed: host-core, capi, control-plane and host-web suites pass
+unmodified.
+
+**Limit 3 (a restarted submix's `D` counts every input route's line)** is D3's arm delay, not the
+`input`-tap part (D1's exemption and D4's `C` term); it stays open, unchanged by this slice.
+
+**Widths (attempt 2, root's MINOR 4).** Gate 7's set membership is checked at `Simd8` and
+`Simd4` in host-core; its rendered bits are checked through the C entries at the build's width
+only. The bits at the other width rest on the banking claim (banking regroups lanes and never
+changes per-lane arithmetic, so a placement or width change moves no bit); no per-width bit check
+was added.
+
+**Tests (each red first on a mutant).**
+- capi `a_sidechain_consumer_ducks_with_its_restarted_source` (gate 7 (a)(b) through the C
+  entries): red with the closure off (block 7 differs from the reference that mutes `a`) and with
+  a track's `input` tap joining (block 7 differs from the run with no transaction).
+- capi `a_shortened_sidechain_line_from_a_restarted_submix_drops_no_fade_sample` (gate 9; attempt
+  2 gives `t2` a limiter and adds a removed plain `t4` into `bu`, so the line into `bu` is `L` and
+  `C = 2L`): red with `C`'s sidechain terms off, with the exemption off, and with the
+  line-into-the-submix term zeroed (`into * 0`), each with `S` 3584, not 4096.
+- host-core `a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width` (gate 7's
+  membership at `Simd8` and `Simd4`; rows `insert_return`, `post_input`, `insert_send`, `input`,
+  `input` behind a restarted delay line, `post_fader`, a two-round chain, a submix `input` key
+  whose line keeps its length, and one whose line shrinks while carried `aux` feeds the bus): red
+  with the closure off, after one round, with `post_fader` joining, without the line-length
+  check, with a track's `input` tap joining, with the delay-line arm off (`["eq0"]`), with
+  `post_input` and `insert_send` mapped to false, and with the submix arm `false &&`
+  (`["bus", "late"]`). Folds after attempt 2's PASS: a row whose bus input is only `late`'s
+  `pre_fader` route following its stored mute automation, red with the following-route clause
+  `false && ...` (`["bus", "late"]`); a row with the bus's `delay_samples` changed, red with the
+  delay-line arm limited to tracks (`["bus"]`); and the exact arm count (each audible restarted
+  strip armed, the muted `late` not).
+- host-core `transition::tests::c_counts_a_post_fader_sidechain_line_into_a_carried_node` (D4's
+  `post_fader` term; feature `control-provider`): red with that term off (`C` 0, not 486).
+

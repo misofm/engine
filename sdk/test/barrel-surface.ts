@@ -150,6 +150,12 @@ type NoHeadlessCanonicalSessionJson = typeof headlessBarrel.canonicalSessionJson
 // @ts-expect-error canonicalSessionJson is intentionally not a public browser declaration
 type NoBrowserCanonicalSessionJson = typeof browserBarrel.canonicalSessionJson;
 
+// The PCM feed's engine link is `createEngine`'s seam (#1297b), never a browser declaration.
+// @ts-expect-error linkFeedEngine is not a public browser declaration
+type NoBrowserLinkFeedEngine = typeof browserBarrel.linkFeedEngine;
+// @ts-expect-error FeedRetirement is not a public browser type
+type NoBrowserFeedRetirement = browserBarrel.FeedRetirement;
+
 // --- core/session-transaction.ts: the transaction builder on every entry (#1383 D5) ----------
 //
 // The builder's types are the module's on all three barrels, and the session normalizers it shares
