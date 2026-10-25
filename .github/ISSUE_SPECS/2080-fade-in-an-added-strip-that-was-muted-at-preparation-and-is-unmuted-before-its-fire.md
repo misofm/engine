@@ -59,8 +59,8 @@ tests; this spec.
   retargets the fire.
 - Graph: no logic change. The fader arm now returns `true`, so a muted strip gets a fade entry
   and its carry pair. The `None` skip in host-core stays for an arm that armed nothing.
-- Bits move only for a mute-then-unmute record sequence before the fire, on an added strip or on
-  a strip muted at preparation. No fixture exercises this sequence. Evidence (PR evidence, not a
+- Bits move for an unmute before the fire that follows a mute record or a mute at preparation.
+  No fixture exercises this sequence. Evidence (PR evidence, not a
   committed test): base 609ccf399 and branch 5adcce571 each ran the same `successor_swap.rs`
   with the #2069 digest dump in `fade_run`, and the five arm-count assertions below changed into
   a non-failing print. 125 passed in both; the 185 digests are identical (sha256 `11881beb...744d`).

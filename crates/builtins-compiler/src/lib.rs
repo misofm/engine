@@ -1588,9 +1588,10 @@ trait FaderJumpStage {
     /// then only remembers the gain (#1638 D2).
     fn gain_held(&self, channel: usize) -> bool;
     /// Whether `channel` is muted (settled, or in a ramp toward `0.0`) by the model, a live
-    /// record or a curve. An armed channel (issue #1288) is not: its mute is the arm's, and the
-    /// model holds it unmuted, so a mute that arrives while it is armed is a change that reaches
-    /// the stage and ends the arm, and an unmute is no change.
+    /// record or a curve. An armed channel whose fire opens it (issue #1288, #2080 R1) is not:
+    /// its mute is the arm's, and the model holds it unmuted. An armed channel whose fire stays
+    /// muted is muted in the model. A record that reaches the stage while the channel is armed
+    /// only retargets the fire (#2080 R1).
     fn muted(&self, channel: usize) -> bool;
     /// Frames left in `channel`'s ramp; `0` when settled.
     fn ramp_remaining(&self, channel: usize) -> u32;
@@ -5438,8 +5439,9 @@ fn bank_hold(bank: &BuiltinFaderBank) -> impl Fn(usize, usize) -> Option<Channel
         let held = bank.gain_held(lane, channel)?;
         Some(ChannelHold {
             held,
-            // Issue #1288: an armed channel's mute is the arm's, not the model's (see
-            // `FaderJumpStage::muted`), so a curve's mute reaches the stage and ends the arm.
+            // Issue #1288, #2080 R1: an armed channel whose fire opens it is unmuted in the model
+            // (see `FaderJumpStage::muted`); one whose fire stays muted is muted. A curve's
+            // record that reaches the stage only retargets the fire.
             muted: bank.is_muted(lane, channel)? && bank.is_armed(lane, channel) != Some(true),
             remaining: bank.ramp_remaining(lane, channel)?,
             stage_gain: if held {
