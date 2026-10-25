@@ -64,11 +64,7 @@ pub(super) fn request(
             maximum_scratch_bytes: quality.scratch_fixed_bytes,
             maximum_automation_spans_per_block: 16,
         },
-        tail_bound: conformance::tail_bound_of(
-            Box::new(crate::SoftClipFactory),
-            rate,
-            EffectQuality::Normal,
-        ),
+        tail_bound: tail_bound(rate),
     }
 }
 
@@ -1038,3 +1034,21 @@ fn a_tripping_lane_leaves_every_bank_mates_bits() {
 // Issue #1747: the clock and lane-swap tests reuse this module's helpers.
 #[path = "swap_tests.rs"]
 mod swap_tests;
+
+/// The registry's tail-bound entry at `rate`, computed once per launch rate: a registry admission
+/// derives every row's bound, and per request it dominated this module's debug test time (#1972).
+fn tail_bound(rate: u32) -> effect_contract::RegisteredTailBound {
+    static BOUNDS: [std::sync::OnceLock<effect_contract::RegisteredTailBound>; 4] =
+        [const { std::sync::OnceLock::new() }; 4];
+    let index = [44_100, 48_000, 88_200, 96_000]
+        .iter()
+        .position(|launch| *launch == rate)
+        .expect("a launch rate");
+    *BOUNDS[index].get_or_init(|| {
+        conformance::tail_bound_of(
+            Box::new(crate::SoftClipFactory),
+            rate,
+            EffectQuality::Normal,
+        )
+    })
+}

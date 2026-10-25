@@ -623,43 +623,6 @@ fn a_long_polarity_flip_stays_inside_its_trim() {
     }
 }
 
-/// The same flip on one member of a four-lane bank: the banked trim body is clamped too, and the
-/// uncommanded members hold their trim.
-///
-/// Red mutation: as above, on the banked bodies.
-#[test]
-fn a_long_polarity_flip_on_a_bank_member_stays_inside_its_trim() {
-    let width = BankWidth::for_backend(Backend::Simd4).expect("four-lane bank");
-    let lanes = width.lanes() as usize;
-    let prepared = || {
-        input(parameters(
-            channel(24.0, false, 0.0, 0.0),
-            channel(24.0, false, 0.0, 0.0),
-        ))
-    };
-    let g = f32::from_bits(input_trim_words(&prepared())[0]);
-    let mut bank = BuiltinInputBank::new(
-        Backend::Simd4,
-        width,
-        (0..lanes).map(|_| prepared()).collect(),
-    )
-    .expect("bank");
-    for (inverted, settled) in [(true, -g), (false, g)] {
-        bank.set_polarity_invert(0, BuiltinLaneSelector::Both, inverted, LONG_FLIP)
-            .expect("member");
-        let tails = long_flip_render(lanes, g, |left, right| {
-            let frames = (left.len() / lanes) as u32;
-            bank.process(left, right, frames);
-        });
-        for tail in tails {
-            for (index, word) in tail.iter().enumerate() {
-                let expected = if index % lanes == 0 { settled } else { g };
-                assert_eq!(*word, expected.to_bits(), "tail word {index} settles");
-            }
-        }
-    }
-}
-
 /// The two parameters share one coefficient and do not overwrite each other.
 ///
 /// Red mutation: drop the sign-preserving branch from `set_trim_db` -> a trim ride silently clears
@@ -864,13 +827,17 @@ fn a_banked_lane_ramps_exactly_as_the_same_track_alone() {
 
 /// Issue #1408: every trim body holds its word inside the endpoints, not only the identity one.
 ///
-/// The long flip above has its filters disabled, so it reaches only the elided-identity body. A
-/// shorter move the unclamped law also takes past its target -- a polarity flip at -1 dB over
-/// 2^20 samples, whose unclamped word leaves `[-g, g]` for its last ~7,200 frames, by up to
-/// `0.0125` -- is driven here through each other body on a four-lane bank: the filtered dual and
-/// collapsed bodies, the identity collapsed body, and both filter-retarget bodies (a filter
-/// retarget issued while the clamped word already holds its target, so its 64 frames run the
-/// filter body's trim update). The word read back at every block end must stay inside `[-g, g]`.
+/// The long flip above has its filters disabled, so it reaches only the elided-identity body of a
+/// single input. A shorter move the unclamped law also takes past its target -- a polarity flip at
+/// -1 dB over 2^20 samples, whose unclamped word leaves `[-g, g]` for its last ~7,200 frames, by
+/// up to `0.0125` -- is driven here through every body on member 0 of a four-lane bank: the
+/// identity dual and collapsed bodies, the filtered dual and collapsed bodies, and both
+/// filter-retarget bodies (a filter retarget issued while the clamped word already holds its
+/// target, so its 64 frames run the filter body's trim update). The word read back at every block
+/// end must stay inside `[-g, g]`, and the uncommanded members must hold `g`. (The identity dual
+/// leg replaced a 22,137,669-frame copy of the long flip on a bank member, #1972. The upward flip
+/// and the +24 dB scale stay with the single-input reproducer above, which runs the same generic
+/// `identity_chain_ramp_block` and `ramp_toward`.)
 ///
 /// The word is read only at block ends, so each leg also walks the unclamped law (`current + step`
 /// per frame, the target assigned on the window's last frame) in scalar `f32` beside the bank and
@@ -878,9 +845,9 @@ fn a_banked_lane_ramps_exactly_as_the_same_track_alone() {
 /// retarget: a change of window, block size or retarget frame that moved every checked frame out of
 /// the overshoot stretch would otherwise leave the leg green with nothing checked.
 ///
-/// Red mutation: revert the trim update of `input_chain_ramp_block`,
-/// `input_chain_ramp_block_mono`, `input_chain_ramp_block_filter`,
-/// `input_chain_ramp_block_filter_mono` or `identity_chain_ramp_block_mono` to `current + step`
+/// Red mutation: revert the trim update of `identity_chain_ramp_block`,
+/// `identity_chain_ramp_block_mono`, `input_chain_ramp_block`, `input_chain_ramp_block_mono`,
+/// `input_chain_ramp_block_filter` or `input_chain_ramp_block_filter_mono` to `current + step`
 /// -> the matching leg reads a word past `g`.
 #[test]
 fn every_trim_body_keeps_a_flip_inside_its_trim() {
@@ -894,7 +861,8 @@ fn every_trim_body_keeps_a_flip_inside_its_trim() {
         .targets[0];
     // (name, prepared HPF, collapsed, filter retarget)
     for (name, hpf_hz, collapsed, retarget) in [
-        ("filtered dual", 40.0_f32, false, false),
+        ("identity dual", 0.0_f32, false, false),
+        ("filtered dual", 40.0, false, false),
         ("filtered collapsed", 40.0, true, false),
         ("identity collapsed", 0.0, true, false),
         ("filter-retarget dual", 0.0, false, true),
@@ -980,5 +948,14 @@ fn every_trim_body_keeps_a_flip_inside_its_trim() {
             (-g).to_bits(),
             "{name} settles"
         );
+        for member in 1..lanes {
+            for channel in 0..if collapsed { 1 } else { 2 } {
+                assert_eq!(
+                    bank.trim_signed(member, channel).to_bits(),
+                    g.to_bits(),
+                    "{name}: uncommanded member {member} channel {channel} holds its trim"
+                );
+            }
+        }
     }
 }
