@@ -513,6 +513,48 @@ test("control preparation never discards or applies a superseding producer gener
   assert.deepEqual(raced.seeks, [[2n, 12n], [3n, 16n]]);
 });
 
+test("a ring seek at the generation of an accepted session seek is consumed without a source seek", async () => {
+  // Issue #1644 gate 1: after a session seek at 2 every source is at 2, so a per-source seek at 2
+  // is refused as stale and the ring never drains again; a ring at any other generation still
+  // seeks its source.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const run = runPrelude(source, { initial: false });
+  run.engine.lastSessionSeekGeneration = 2n; // what the engine handler records after an OK
+  const [sessionRing, otherRing] = run.writers;
+  sessionRing.seek(2n, 12n);
+  sessionRing.reserve(4)[0].fill(0.5);
+  sessionRing.commit({ generation: 2n, startFrame: 12n, frames: 4, endOfRegion: false });
+  otherRing.seek(3n, 8n);
+  run.process();
+  assert.deepEqual(run.seeks, [[3n, 8n]], "only the ring at another generation seeks its source");
+  assert.equal(run.ringControls[0][MSB1_CONTROL.SEEKS_APPLIED], 1);
+  assert.equal(run.ringControls[0][MSB1_CONTROL.REFUSED], 0);
+  assert.deepEqual(run.submissions.map(({ generation, start }) => ({ generation, start })), [{ generation: 2n, start: 12n }],
+    "the consumed ring's later PCM is submitted");
+});
+
+test("the pump seeks every ring under the session's generation and refuses one not above its own", async () => {
+  // Issue #1644 gate 4: a pump that writes its own next generation after a session seek feeds a
+  // generation the engine never applied.
+  const { CanonicalPcmPump } = await import("../../hosts/host-web/web/stem-store/pcm-pump.js");
+  const ringSeeks = [];
+  const ring = (channels) => ({ channels, frameCapacity: 4, engage() {}, seek(generation, frame) { ringSeeks.push([generation, frame]); }, release() {} });
+  const pump = new CanonicalPcmPump({
+    lease: { read: async () => new Blob([]) },
+    windowFrames: 4,
+    sources: [
+      { sourceId: "short", identity: "a", channels: 1, bitDepth: 16, frames: 10, ring: ring(1) },
+      { sourceId: "long", identity: "b", channels: 2, bitDepth: 16, frames: 100, ring: ring(2) },
+    ],
+  });
+  await pump.seek(50, 5n);
+  assert.deepEqual(ringSeeks.splice(0), [[5n, 10n], [5n, 50n]], "each stem at its clamped frame under the given generation");
+  await assert.rejects(pump.seek(0, 5n), RangeError);
+  assert.deepEqual(ringSeeks, [], "a generation not above the pump's own writes nothing");
+  await pump.seek(0);
+  assert.deepEqual(ringSeeks, [[6n, 0n], [6n, 0n]], "without one the pump continues from the session's");
+});
+
 function runPrelude(source, { tracking = false, mutate = false, capacity = 2, initial = true } = {}) {
   const mutated = mutate ? source.replace(
     "const staging = this.sourcePcm",

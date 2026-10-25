@@ -445,6 +445,51 @@ describe("the browser open sequence", () => {
     assert.deepEqual(events, ["host", "context"], "a settled close stays one operation");
   });
 
+  test("seek repositions the producers only after the engine accepted the session seek", async () => {
+    // Issue #1644 gate 3: the order is the claim. A producer seeking first, or without an OK,
+    // makes the session seek stale and the ring stall; a stale default generation does the same.
+    const log = [];
+    let result = 0;
+    const engine = await createEngine({
+      document: sessionDocument(),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "running",
+        close: async () => {},
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => ({
+        seekSession: async (request) => {
+          log.push(["host", request]);
+          await Promise.resolve();
+          log.push(["reply", result]);
+          return { tag: "miso.session-seek.v1", requestId: 1, result, generation: request.generation };
+        },
+        dispose: async () => {},
+      }),
+    });
+    const producer = (name) => ({ seek: async (frame, generation) => { log.push([name, frame, generation]); } });
+    const producers = [producer("a"), producer("b")];
+    assert.deepEqual(await engine.seek(480n, { producers }), { generation: 2n });
+    assert.deepEqual(await engine.seek(96n, { producers }), { generation: 3n }, "the next default is one above");
+    assert.deepEqual(log.splice(0), [
+      ["host", { generation: 2n, frame: 480n }], ["reply", 0], ["a", 480, 2n], ["b", 480, 2n],
+      ["host", { generation: 3n, frame: 96n }], ["reply", 0], ["a", 96, 3n], ["b", 96, 3n],
+    ]);
+    result = 1;
+    await assert.rejects(engine.seek(0n, { generation: 3n, producers }), (error) =>
+      error instanceof MisoEngineError && error.result === 1 && error.code === "invalidArgument");
+    assert.deepEqual(log.splice(0), [["host", { generation: 3n, frame: 0n }], ["reply", 1]],
+      "a refused seek repositions nothing");
+    await assert.rejects(engine.seek(2n ** 53n, { producers }), MisoUsageError);
+    assert.deepEqual(log, [], "an unsafe frame posts nothing");
+    await engine.close();
+  });
+
   test("close still releases the AudioContext when host disposal rejects", async () => {
     const failure = new Error("port disappeared");
     let contextCloses = 0;
