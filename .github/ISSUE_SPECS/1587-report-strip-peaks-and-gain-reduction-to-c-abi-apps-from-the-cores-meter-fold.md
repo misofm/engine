@@ -275,3 +275,22 @@ Commands: `cargo test --locked -p host-core --all-features`,
     `GAIN_REDUCTION` is set by an armed tap's fresh window even when its strip is outside the frame.
   - Note for #1674 (verifier nit): the fold reads each tap's slot twice per poll, `read_state`
     for the arm state and `read` for the window; the pair is not one publication.
+- **Attempt 4 (verifier blocker; root ruling).** Render claims a candidate before it carries into
+  it (`plan_exchange` claim, then `carry_from`), and `withdraw_pending_candidate` promotes a
+  claimed candidate, so a promotion could read the record before render wrote it and pair
+  nothing for good. `CarriedTaps::count` now starts at `UNWRITTEN` (`u32::MAX`): a promotion that
+  reads it unwritten sets `ProviderEpoch::observations_pending` to the displaced epoch, and
+  `settle_observation_pairings` settles it at each service step once the record reads written
+  (`Acquire` on `count`, paired with render's `Release`), or at the reclaim of the displaced plan
+  (the retirement queue orders the hook before the reclaim), where an unwritten record means
+  nothing carried. A promotion settles the running epoch's own pending pairing first, so the chain
+  pairs in order. Until settled the strip shows no reading, never a wrong one.
+  - `a_promotion_before_the_carry_pairs_the_carried_tap_once_render_carries` (capi, direct
+    children, `test_promote_pending_before_carry` + reclamation held): red on attempt 3's code
+    (the running epoch's reader `None`, want `Some((4, 4608))`); red if the service-step settle is
+    removed (same).
+  - Minor 2: the carried-rebuild row of gate 2 now adds a muted copy of the compressor's track
+    (`add_muted_copy`), so the carried handle moves from 0 to 1; the mutant that pairs a successor
+    position with itself is red in both tests ("a published window" / `None`).
+  - Nit 4: the per-pair `slice::from_ref` loop is commented (the pairs are atomics; collecting
+    would allocate).
