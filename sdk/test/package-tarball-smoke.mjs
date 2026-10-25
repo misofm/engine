@@ -208,8 +208,7 @@ void [collectedEngine, observations, responses, spectra];
 const host = browser.host;
 void browser.subscribeMeters((update: MeterUpdate) => update.master.gainReductionDb);
 void browser.subscribeTelemetry((update: TelemetryUpdate) => update.cpuPercent);
-void host.command({ commands: [] });
-void host.observe({ subscriptions: [] });
+void host.control(new Uint8Array(1));
 void host.submitSource({
   sourceId: "s", generation: 1n, startFrame: 0n, sampleRateHz: 48_000,
   planes: [new Float32Array()], frames: 0, endOfRegion: true,

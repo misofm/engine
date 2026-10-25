@@ -854,8 +854,10 @@ async function runStructuralReplaceQualification(createHost, documentA, document
 /// the tap is armed when rendering starts. That is E1's leg (c) against leg (d) in a browser: the
 /// two renders must produce **identical PCM**, because arming a declared tap may not move a sample.
 ///
-/// `armed` is `true` for the first run and `false` for the second, which never subscribes. The
-/// engine admits one observation record per tap per render (#1345 D8, D2 Amendments 1 and 2), and an
+/// `armed` is `true` for the first run and `false` for the second, which never subscribes. The arm
+/// is the core's `Observe` edit through the host's `control` message (#1589c), built with the SDK's
+/// codec. The engine admits one observation record per tap per render (#1345 D8, D2 Amendments 1
+/// and 2), and an
 /// offline context renders only inside one `startRendering` call (Firefox has no
 /// `OfflineAudioContext.suspend`), so a subscribe followed at once by an unsubscribe is refused with
 /// typed backpressure here. That an unsubscribe stops a tap's reading is proved on a real
@@ -903,13 +905,14 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   });
   const subscription = {
     stripId: "track",
-    rack: 1,
+    rack: "inserts",
     effectId: "comp",
     tapId: OBSERVATION_TAP_ID,
     windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
     armed: true,
   };
-  const subscribed = armed ? await host.observe({ subscriptions: [subscription] }) : null;
+  const { observeThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const subscribed = armed ? await observeThroughSdk(host, subscription) : null;
 
   const rendered = await context.startRendering();
   for (let spin = 0; spin < 8 && frames.length === 0; spin += 1) {
@@ -931,10 +934,9 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   return {
     meterLeaseResult: meterLease.result,
     subscribeResult: subscribed === null ? null : subscribed.result,
-    subscribeReason: subscribed === null ? null : subscribed.reason,
-    bindings: subscribed === null ? 0 : subscribed.bindings.length,
-    stripId: subscribed?.bindings[0]?.stripId ?? null,
-    windowBlocks: subscribed?.bindings[0]?.windowBlocks ?? -1,
+    subscribeStatus: subscribed?.status ?? null,
+    subscribePath: subscribed?.path ?? null,
+    subscribeArmTag: subscribed?.armTag ?? null,
     frames: frames.length,
     trackGrDbWidth: frames.length === 0 ? -1 : frames[0].trackGrDb.length,
     peakWidth: frames.length === 0 ? -1 : frames[0].peaks,
@@ -1552,20 +1554,19 @@ async function runStagingReadRun(createHost, sessionDocument) {
     });
     if (acknowledgement.result !== RESULT_OK) throw new Error("staging-read prefill rejected");
   }
-  const subscribed = await host.observe({
-    subscriptions: [{
-      stripId: "track",
-      rack: 1,
-      effectId: "comp",
-      tapId: OBSERVATION_TAP_ID,
-      windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
-      armed: true,
-    }],
+  // Issue #1589c: the arm is the core's `Observe` edit through the host's `control` message.
+  const { observeThroughSdk, requestTrackResponseThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const subscribed = await observeThroughSdk(host, {
+    stripId: "track",
+    rack: "inserts",
+    effectId: "comp",
+    tapId: OBSERVATION_TAP_ID,
+    windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
+    armed: true,
   });
-  const run = { subscribeResult: subscribed.result };
+  const run = { subscribeResult: subscribed.result, subscribeStatus: subscribed.status };
   // Issue #1580 D2: the track response through the core's frames, as every host reads it. The
   // capture runs in a render step, so the request goes out before the context renders.
-  const { requestTrackResponseThroughSdk } = await import("/sdk/sdk-response-client.js");
   const response = await requestTrackResponseThroughSdk(host, "track");
   try {
     await context.startRendering();

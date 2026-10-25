@@ -99,8 +99,6 @@ delay.parameter("cross feedback", 0.5, { channel: "both" });
 delay.parameter("cross feedback", 0.5, { channel: "left" });
 // @ts-expect-error cross feedback is shared and cannot address one lane in object form
 delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" });
-// @ts-expect-error delay declares no observation tap
-delay.observe("Gain Reduction", true);
 
 const eq = track.effect("console", 1, "miso.parametric-eq");
 // @ts-expect-error the retired rack tokens are not live-control racks

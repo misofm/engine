@@ -8,7 +8,7 @@ import { MisoEngineError } from "../src/core/errors.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { decodeObservationRows, enrichObservationMap } from "../src/core/observation.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
-import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+import { effectEntry, insertTap, moduleBytes, observeTaps, ramp, sessionDocument } from "./support.mjs";
 
 let asset;
 
@@ -141,14 +141,8 @@ describe("issue 777 -- selected resident observations", () => {
       const gate = selection("gate", "left");
       assert.equal(engine.readObservations([comp])[0].status, "unarmed");
 
-      const liveControls = engine.liveControls();
-      const armed = await liveControls.submit(
-        liveControls.edit.track("t").insert("comp", "miso.compressor")
-          .observe("Gain Reduction", true, 2),
-        liveControls.edit.track("t").insert("gate", "miso.gate-expander")
-          .observe("Gain Reduction", true, 2),
-      );
-      assert.equal(armed.ok, true);
+      const armed = observeTaps(engine, [insertTap("t", "comp", true, 2), insertTap("t", "gate", true, 2)]);
+      assert.equal(armed.status, "ok");
       assert.equal(engine.readObservations([comp, gate])[0].status, "pending");
 
       feed(engine, 0); engine.render();
@@ -168,13 +162,11 @@ describe("issue 777 -- selected resident observations", () => {
       const repeated = engine.readObservations([comp, gate]);
       assert.deepEqual(repeated, first);
 
-      // The prior resident cell survives a re-arm, but is historical for that new arm. A re-arm of
-      // an armed tap is one record: it restarts the window, and no withdrawal comes first.
-      const rearmed = await liveControls.submit(
-        liveControls.edit.track("t").insert("comp", "miso.compressor")
-          .observe("Gain Reduction", true, 2),
-      );
-      assert.equal(rearmed.ok, true);
+      // The prior resident cell survives a re-arm, but is historical for that new arm. The disarm of
+      // the old window and the arm of a new one in one transaction is the core's one re-arm: it
+      // restarts the window.
+      const rearmed = observeTaps(engine, [insertTap("t", "comp", false, 2), insertTap("t", "comp", true, 1)]);
+      assert.equal(rearmed.status, "ok");
       assert.equal(engine.readObservations([comp])[0].status, "pending");
       feed(engine, 2); engine.render();
       feed(engine, 3); engine.render();
