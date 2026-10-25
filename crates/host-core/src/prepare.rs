@@ -2253,6 +2253,10 @@ fn prime_bytes_of(
 ///
 /// At a declared discontinuity nothing leads, so the answer is [`WarmDecision::Ordinary`].
 ///
+/// It reads `base.committed`, not the model with [`SuccessorBase::duck`] applied: the overlay
+/// changes only mutes, which nothing here reads. A later reader of mutes must use the overlaid
+/// model, as preparation does.
+///
 /// # Errors
 ///
 /// A compile refusal of the successor, or an invariant error when the step-6 walk reaches no

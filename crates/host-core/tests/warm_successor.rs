@@ -734,10 +734,16 @@ fn sidechain_into(strip: &'static str) -> impl Fn(&GraphEdgeId) -> bool {
 /// from a tap of X. From X's `pre_fader` tap Y joins `R` before the floors are derived, so its
 /// nodes before the fader and its fader keep `a(n)`. From X's `input` tap and from its
 /// `post_fader` tap Y stays carried and leads by `P`. From the `input` tap the prime fills Y's
-/// sidechain line (L3, `P` words a channel), and D3 counts it.
+/// sidechain line (L3), and D3 counts it: `P` words a channel, and, with a limiter before Y's
+/// compressor in A (so A already holds the edge's line, `e = L`), the line's whole length `L + P`.
 #[test]
 fn a_strip_keyed_from_a_strip_restarted_whole() {
-    for tap in [SendTap::PreFader, SendTap::Input, SendTap::PostFader] {
+    for (tap, y_limiter) in [
+        (SendTap::PreFader, false),
+        (SendTap::Input, false),
+        (SendTap::Input, true),
+        (SendTap::PostFader, false),
+    ] {
         let a = || {
             let mut model = empty();
             track(&mut model, "x", vec![limiter()]);
@@ -746,11 +752,9 @@ fn a_strip_keyed_from_a_strip_restarted_whole() {
             to_output(&mut model, "s");
             track(&mut model, "t", Vec::new());
             to_submix(&mut model, "t", "s");
-            track(
-                &mut model,
-                "y",
-                vec![keyed_compressor(from_track("x", tap))],
-            );
+            let mut chain: Vec<Effect> = y_limiter.then(limiter).into_iter().collect();
+            chain.push(keyed_compressor(from_track("x", tap)));
+            track(&mut model, "y", chain);
             to_output(&mut model, "y");
             model
         };
@@ -777,7 +781,8 @@ fn a_strip_keyed_from_a_strip_restarted_whole() {
         }
         edit.assert_leads(&w, &leading, LEAD);
         // D3 (gate 4's count): every track's claim line grew from none and is written whole on
-        // both lanes, and one stereo source replays; the `input` tap adds Y's L3 line, `P` long.
+        // both lanes, and one stereo source replays; the `input` tap adds Y's L3 line, written
+        // whole on both channels.
         let lines: u64 = edit
             .b
             .model
@@ -786,8 +791,18 @@ fn a_strip_keyed_from_a_strip_restarted_whole() {
             .map(|track| arrival(&w, &stages(track.id.as_str(), TrackStage::Input)[0]))
             .sum();
         let l3 = if tap == SendTap::Input {
-            assert_eq!(line_samples(&w, sidechain_into("y")), LEAD);
-            2 * LEAD
+            let line = line_samples(&w, sidechain_into("y"));
+            assert_eq!(
+                line_samples(&edit.host_a, sidechain_into("y")) != 0,
+                y_limiter,
+                "A holds the edge's line only behind Y's limiter"
+            );
+            assert_eq!(
+                line - line_samples(&edit.host_a, sidechain_into("y")),
+                LEAD,
+                "the edge grows by P"
+            );
+            2 * line
         } else {
             0
         };
@@ -795,7 +810,7 @@ fn a_strip_keyed_from_a_strip_restarted_whole() {
         assert_eq!(
             (lead.prime_bytes(), w.prime_bytes()),
             (expected, expected),
-            "key tap {tap:?}"
+            "key tap {tap:?}, Y limiter {y_limiter}"
         );
     }
 }
