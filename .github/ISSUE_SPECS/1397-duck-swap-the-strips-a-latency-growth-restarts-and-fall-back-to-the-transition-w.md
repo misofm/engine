@@ -331,3 +331,38 @@ warm edit would be `LeadBound`.
   through `PlanStateInventory::across_withdrawn`, with its source rows filtered to those the
   donor carried vacant. `committed` (the running epoch's kept model with #1325 D6's duck overlay)
   and the rest of that bullet are unchanged.
+
+## Decision record (slice 1397a, attempt 1, 2026-10-25)
+
+Scope note R1-R4 apply (root accepted them). This change is D1 (both arms) and deliverable 5.
+
+- **D1 routing.** `rebuild` plans the transition over the ordinary successor's
+  `restarted_strips()`, classifies, and for any `Warm` answer prepares the warm successor with its
+  lead and plans the transition again over the warm successor's `restarted_strips()` (removed
+  strips plus every strip the warm successor restarts, the lead's whole restarts included). The
+  preparation already restarts each of them whole and arms it (#1324a). `lead_samples > 0`: the
+  reprepare peak, `publish_primed`, then `PrimedCandidate::hold_until(S)` (new, `warm.rs`) after
+  phase 1 reads `p`, so the adoption is `Primed { not_before: S, lead_blocks }`. `lead_samples ==
+  0`: the single peak and the ordinary duck-swap publication (`NoEarlierThan(S)`), `EXACT`.
+- **Inherited overlay (#1403 NIT-1).** The warm arm now skips only an inherited overlay that ducks
+  a strip (`duck.strips().is_empty()`): a superseding growth over a W whose overlay holds only a
+  removed source no strip read is warm. A growth while a phase 1 that ducks a strip is pending
+  keeps today's path (`NoEarlierThan(S' >= S)`, no record): output-correct, but not warm.
+- **Sidechain limit (R1).** `S` counts route lines only (#1324a's `C`). A `post_fader` or
+  `post_pan` sidechain line out of a ducked strip into a carried node is not in `C` until 1397b
+  (with 1324b), so such a line that W shortens can drop its last nonzero samples at the adoption.
+  Stated in `plan_strip_transition`'s doc. Gate 2's sidechain case and gate 6 are 1397b's.
+- **Gates (R4).** Gate 1 and gate 2's first case are one control-plane test at 48 kHz on both
+  bank widths, through host-core's width seam (#1272 D2, which attaches every live lane). `D` is
+  the limiter's 486 samples, so the fire block is `ceil_q(S + 486)`. Gate 5 is an extension of
+  #1403 gate 3's supersession row (the same edit: remove track 2 and its source over a pending
+  W): `not_before = S`, the removed source fed only up to `S`, adoption at `S`, A continued with
+  track 2 live-muted for 64 blocks. Deliverable 5 rewrites #1403 gate 2's test; its old
+  assertions are deleted. A `lead_samples == 0` row is not tested: no shape that `warm_lead`
+  answers with a zero lead was found in the control plane's session family (no submixes).
+- **Not in this change:** D2 (`fall_back_to_transition`, `grown_strips`,
+  `SuccessorBase::forced_restart`), D3, D5, the injected-refusal hook and gates 3 and 4. The
+  `Unavailable` arm still takes today's path.
+
+Paths moving rendered bits: only a session that holds a `WarmConfig` (none in production). Class A
+for every other session.
