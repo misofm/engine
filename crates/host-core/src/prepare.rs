@@ -4166,7 +4166,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             // #1953b: and a lane-less route whose entry fired but has not settled, kept unchanged:
             // its op still ramps, and a fold would step from its ramp to its constant. Re-armed
             // and carried, it takes the displaced op's state (#1877 D6) and settles where the
-            // displaced entry would have.
+            // displaced entry would have. One kept at other values is not re-armed: its fading
+            // copy takes the op mid-ramp and the kept route fades in afresh (#2077).
             let in_flight = |row: &&FadeArmInventoryRow| {
                 row.owner == FadeArmOwner::Route
                     && watch.fired(row.entry)
