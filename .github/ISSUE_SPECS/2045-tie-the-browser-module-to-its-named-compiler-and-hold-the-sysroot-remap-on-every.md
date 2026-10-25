@@ -49,3 +49,7 @@ the shipped one only if the remap holds. Both are CI steps plus a hermetic self-
   sysroot remap dropped, only RUSTUP_HOME differing: `bc5d3eeb...` vs `87ed775a...` (red).
 - Real module: `rustc 1.100.0-nightly (f7d782a3b 2026-08-19)` passes against `nightly-2026-08-20`
   and fails against `nightly` (1.101.0-nightly).
+- Review minors folded: the identity job's runner-home install step is gone (the twin installs
+  its own toolchain; the report runs only git and gh), and the checker now pins exactly three
+  steps; the identity report names `RUSTUP_HOME` and the sysroot remap; a routing mutation moves
+  the producers step after the upload (red).

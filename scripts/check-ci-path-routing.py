@@ -564,7 +564,6 @@ WRITE_PERMISSION = re.compile(r"^\s+[a-z-]+: write\s*$|^\s*permissions: write-al
 IDENTITY_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: read\n"
 IDENTITY_CHECKOUT = re.compile(
     r"      - uses: actions/checkout@[0-9a-f]{40} # v\S+\n        with:\n          fetch-depth: 0\n\Z")
-IDENTITY_INSTALL = "      - name: Install pinned Rust toolchain and Wasm standard library\n"
 # Issue #2045: the twin also builds under a freshly installed second RUSTUP_HOME, so its digest
 # equals the shipped one only if the sysroot remap holds (a shared RUSTUP_HOME let a dropped remap
 # stay green).
@@ -699,15 +698,13 @@ def check_qualification_artifact_identity(text: str) -> None:
             "qualification.yml: artifact-identity must carry no job-level continue-on-error, "
             "defaults or env")
     steps = job_steps(identity)
-    require(len(steps) == 4,
-            "qualification.yml: artifact-identity must be exactly checkout, toolchain, twin and "
-            "report steps")
+    require(len(steps) == 3,
+            "qualification.yml: artifact-identity must be exactly checkout, twin and report steps "
+            "(#2045: the twin installs its own toolchain into its own RUSTUP_HOME)")
     require(IDENTITY_CHECKOUT.fullmatch(steps[0]) is not None,
             "qualification.yml: artifact-identity must check out full history (fetch-depth: 0), "
             "or no run finds its base")
-    require(steps[1].startswith(IDENTITY_INSTALL),
-            "qualification.yml: artifact-identity's second step must install the toolchain")
-    for step, pinned in zip(steps[2:], IDENTITY_STEPS):
+    for step, pinned in zip(steps[1:], IDENTITY_STEPS):
         require(step == pinned,
                 "qualification.yml: artifact-identity step differs from its pin: "
                 f"{pinned.splitlines()[0].strip()!r} (scripts/check-ci-path-routing.py "
