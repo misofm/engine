@@ -5852,13 +5852,13 @@ fn plane_of(run: &PlainRun, plane: usize) -> Vec<&[u32]> {
 }
 
 /// Gate 3, first case. B changes the compressor threshold of strip `eq3` -- a prepared value, since
-/// an effect bank stage has no live lane -- and adds a muted track. That slot does not carry, every
-/// other lane does, and `restarted_strips()` is exactly `eq3`:
+/// an effect bank stage has no live lane -- and adds a muted track. `restarted_strips()` is exactly
+/// `eq3`, so every slot of `eq3` restarts with it (#1324 D2) and every other strip's lane carries:
 ///
 /// * the right plane, which the other strips alone feed, equals a fresh B on every block: their
 ///   lanes carried;
-/// * the carry program holds exactly one move fewer than the same swap without the threshold
-///   change: `eq3`'s other slots carried (with a single slot that is none left to count);
+/// * the carry program holds exactly `eq3`'s slots fewer moves than the same swap without the
+///   threshold change;
 /// * the left plane, which `eq3` alone feeds, differs from the swap that carries the old
 ///   threshold: the slot restarted at the new one.
 fn a_prepared_change_to_one_slot_restarts_only_its_strip(backend: Backend, slots: &[&str]) {
@@ -5876,8 +5876,8 @@ fn a_prepared_change_to_one_slot_restarts_only_its_strip(backend: Backend, slots
     assert_eq!(carried_all.restarted, Vec::<Box<str>>::new(), "{backend:?}");
     assert_eq!(
         carried_all.carry_counts[3] - run.carry_counts[3],
-        1,
-        "{backend:?}: one move fewer"
+        slots.len(),
+        "{backend:?}: none of eq3's slots moves"
     );
     assert_eq!(
         plane_of(&run, 1),
@@ -5963,59 +5963,13 @@ fn transparent_insert() -> Effect {
     }
 }
 
-/// Gate 3, second case. B adds a compressor insert to strip `eq3` and a muted track. The insert
-/// changes `eq3`'s chain, so `eq3` -- and only `eq3` -- is in the restart set, but every console
-/// slot of every strip, `eq3`'s included, carries: the insert changes no sample, so the swapped run
-/// equals a fresh B on every block only if `eq3`'s console state continued.
-fn an_added_insert_restarts_its_strip_and_its_console_slots_carry(backend: Backend) {
-    let mut with_insert = with_muted_track(console_session(false, &ALL_SLOTS));
-    track_mut(&mut with_insert, "eq3")
-        .inserts
-        .effects
-        .push(transparent_insert());
-    let a = Session::compile(console_session(false, &ALL_SLOTS));
-    let b = Session::compile(with_insert);
-    let feed = bursty_feed(SOURCE, 5);
-    let reference = plain_run(&b, None, &feed, backend, false);
-    let bare = plain_run(
-        &Session::compile(with_muted_track(console_session(false, &ALL_SLOTS))),
-        None,
-        &feed,
-        backend,
-        false,
-    );
-    assert_eq!(
-        first_plain_difference(&reference, &bare),
-        None,
-        "{backend:?}: the insert is transparent, so the oracle is exact"
-    );
-    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
-    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
-    assert_eq!(run.restarted, vec![Box::<str>::from("eq3")], "{backend:?}");
-    assert_eq!(
-        first_plain_difference(&run, &reference),
-        None,
-        "{backend:?}: every console slot carried"
-    );
-    assert_eq!(run.refusals, 0, "{backend:?}");
-}
-
-/// At the build's own width, `Backend::current()`: a console effect bank binds only at the width
-/// its build executes (#1017).
-#[test]
-fn an_added_insert_restarts_its_strip_and_its_console_slots_carry_at_the_build_width() {
-    an_added_insert_restarts_its_strip_and_its_console_slots_carry(Backend::current());
-}
-
 /// An insert carries when it is a lane of a bank in both plans (#1280a), and the compressor insert
 /// here is not: it sits on one of nine strips, below the padding threshold at every width (#888:
-/// 2 members at 4 lanes, 3 at 8), so it runs per node, and a per-node insert has no carry yet
-/// (#1281, #1282). A strip whose insert survives the swap but is not banked restarts that insert
-/// at rest and is in `restarted_strips()`, while a strip without an insert is not. A structural
-/// swap adds a muted track to a session whose `eq3` holds an unchanged insert: the list is exactly
-/// `eq3`, and every console slot of every strip still carries (the insert is transparent, so the
-/// swapped run equals a fresh B on every block only if the console state continued and the
-/// restarted insert changes no sample).
+/// 2 members at 4 lanes, 3 at 8), so it runs per node, and a per-node instance carries only with
+/// live controls (#1282), which a plain plan has not. A strip whose insert survives the swap but
+/// is not banked restarts (with every owner before its fader, #1324 D2) and is in
+/// `restarted_strips()`, while a strip without an insert is not. A structural swap adds a muted
+/// track to a session whose `eq3` holds an unchanged insert: the list is exactly `eq3`.
 fn a_surviving_insert_restarts_its_strip(backend: Backend) {
     let mut with_inserts = console_session(false, &ALL_SLOTS);
     track_mut(&mut with_inserts, "eq3")
@@ -6026,18 +5980,12 @@ fn a_surviving_insert_restarts_its_strip(backend: Backend) {
     let a = Session::compile(with_inserts);
     let b = Session::compile(b_model);
     let feed = bursty_feed(SOURCE, 5);
-    let reference = plain_run(&b, None, &feed, backend, false);
     let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
     assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
     assert_eq!(
         run.restarted,
         vec![Box::<str>::from("eq3")],
         "{backend:?}: the strip with a surviving insert, and no other"
-    );
-    assert_eq!(
-        first_plain_difference(&run, &reference),
-        None,
-        "{backend:?}: every console slot carried, and the restarted insert is transparent"
     );
     assert_eq!(run.refusals, 0, "{backend:?}");
 }
@@ -6065,8 +6013,8 @@ fn without_console_slot(mut model: SessionModel, slot: &str) -> SessionModel {
     model
 }
 
-/// A session console slot removed changes every strip's chain: every strip restarts (D15-9), and
-/// the five slots that remain still carry, on every strip.
+/// A session console slot removed changes every strip's chain: every strip restarts (D15-9), with
+/// every slot (#1324 D2).
 fn a_removed_console_slot_restarts_every_strip(backend: Backend) {
     let a = Session::compile(console_session(false, &ALL_SLOTS));
     let removed = Session::compile(without_console_slot(
@@ -6081,11 +6029,6 @@ fn a_removed_console_slot_restarts_every_strip(backend: Backend) {
     let every_strip: Vec<Box<str>> = (0..9).map(|index| format!("eq{index}").into()).collect();
     assert_eq!(run.restarted, every_strip, "{backend:?}");
     assert_eq!(unchanged.restarted, Vec::<Box<str>>::new(), "{backend:?}");
-    assert_eq!(
-        unchanged.carry_counts[3] - run.carry_counts[3],
-        9,
-        "{backend:?}: the removed slot's nine lanes do not move, the other forty-five do"
-    );
     assert_eq!(run.refusals, 0, "{backend:?}");
 }
 
@@ -10500,9 +10443,11 @@ fn a_changed_lane_delay_restarts_only_its_lane(backend: Backend) {
     let b_model = with_strip_delay(a_model.clone(), "eq0", [37, 60]);
     let (a, b) = (Session::compile(a_model), Session::compile(b_model));
     let feed = Feed::new(SOURCE, 1);
-    let reference = effect_run(&b, None, &feed, &[], &[], backend);
-    let run = effect_run(&a, Some((&b, &a.model)), &feed, &[], &[], backend);
-    assert_clean_swap(&run, &format!("{backend:?}"));
+    // Plain plans: a live plan arms the restarted strip's fader (#1324 D3), which would hide the
+    // lanes' lines behind its fade.
+    let reference = plain_run(&b, None, &feed, backend, false);
+    let run = plain_run(&a, Some((&b, &a.model)), &feed, backend, false);
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
     assert_eq!(run.restarted, vec![Box::<str>::from("eq0")], "{backend:?}");
     for block in SWAP_BLOCK..BLOCKS {
         let (swapped_left, swapped_right) = lane_planes(&run.blocks[block]);

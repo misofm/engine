@@ -1347,8 +1347,9 @@ impl PlanStateInventory {
         }
     }
 
-    /// An inventory that holds only this inventory's input floors (#1285, deliverable 2): a
-    /// successor prepared against it carries no state, so a test renders it from frame 0 as the
+    /// An inventory that holds this inventory's input floors (#1285, deliverable 2) and its join
+    /// rows, but no source, line or route row: a successor prepared against it and rendered
+    /// without adopting a predecessor carries no state, so a test renders it from frame 0 as the
     /// fresh reference of a plan compiled with the same floors.
     #[cfg(feature = "test-support")]
     #[must_use]
@@ -1356,9 +1357,12 @@ impl PlanStateInventory {
         Self {
             plan_identity: self.plan_identity,
             sources: Box::default(),
-            input_sections: Box::default(),
-            strip_stages: Box::default(),
-            effect_lanes: Box::default(),
+            // The strip, input-section, effect and strip-delay rows stay, so a successor's joins
+            // restart no strip it keeps and arm none (#1324 D3): rendered without adopting a
+            // predecessor, it runs no move and plays as a fresh plan.
+            input_sections: self.input_sections.clone(),
+            strip_stages: self.strip_stages.clone(),
+            effect_lanes: self.effect_lanes.clone(),
             meters: Box::default(),
             observations: Box::default(),
             sample_rate_hz: self.sample_rate_hz,
@@ -1368,7 +1372,7 @@ impl PlanStateInventory {
             spectrum_pairing: Box::default(),
             meter_pairing: Box::default(),
             delay_lines: Box::default(),
-            strip_delays: Box::default(),
+            strip_delays: self.strip_delays.clone(),
             live_routes: Box::default(),
             follow_into_six_word: false,
             follow_into_following: false,
@@ -4465,8 +4469,16 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // Issue #1324 D3, #1363 D1 (c): a duck-swapped strip's routes from a tap before its fader
     // are armed with it and wait for its fade, as an added strip's are. Only a route with a
     // six-word live op can arm (the route lanes of #1391), and phase 1 can duck only such a route.
+    // The duck-swapped strips the successor arms, on the terms of an added strip's arm (#1288
+    // D1, D2): a plan that attaches live lanes, never at a declared discontinuity.
+    let armed_restarts: BTreeSet<&str> = match successor {
+        Some(base) if attach_live && !base.discontinuity => {
+            restarted.iter().map(|id| &**id).collect()
+        }
+        _ => BTreeSet::new(),
+    };
     let route_fades: Vec<RouteFade<'_>> = match successor {
-        Some(base) if attach_live && !base.discontinuity && !restarted.is_empty() => {
+        Some(base) if !armed_restarts.is_empty() => {
             let mut fades = route_fades;
             let added = added_strips(base.committed, model);
             for route in &model.routes {
@@ -4474,7 +4486,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                     session::RouteSource::Track { track_id, tap } => (track_id.as_str(), *tap),
                     session::RouteSource::Submix { submix_id, tap } => (submix_id.as_str(), *tap),
                 };
-                if !restart.contains(source) || !tap.precedes_fader() {
+                if !armed_restarts.contains(source) || !tap.precedes_fader() {
                     continue;
                 }
                 if let Some(fade) = fades
@@ -4519,7 +4531,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .into_iter()
                 .map(|id| (id, None))
                 .collect();
-            strips.extend(restarted.iter().map(|id| (&**id, None)));
+            strips.extend(armed_restarts.iter().map(|id| (*id, None)));
             // A row whose entry render has fired is dropped: the strip's lane imports `armed =
             // false`, so the successor needs no entry and never fades it again.
             let watch = &base.inventory.fade_watch;
