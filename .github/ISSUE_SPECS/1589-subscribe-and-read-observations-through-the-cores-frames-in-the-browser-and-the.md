@@ -398,6 +398,13 @@ and its fixture, the two deleted vocabulary scripts, `scripts/test-web-audiowork
 
 ### Open after this slice
 
+- **Root ruling (attempt 1 review, MINOR-2), #1590's scope.** Three of the deleted tests' holders,
+  control-plane `observation_bindings::{a_batch_that_names_one_tap_twice_is_refused_at_the_second_naming,
+  every_insert_of_a_sixty_four_track_session_subscribes_at_the_browser_frame,
+  a_subscription_past_the_frame_is_refused_and_the_removal_of_all_still_commits}`, run through
+  `admit_and_push_observation_batch`. Whoever deletes that wrapper rewrites them through
+  `rig.apply(&[SessionEdit::Observe ..])` so their claims stay held.
+
 - control-plane keeps `SessionState::{effect_producers, admit_and_push_observation_batch,
   resolve_observation_key, observation_ended_bytes, observation_frame_bytes}` public with no host
   caller (the core's own `Observe` edit uses the crate-private halves; `effect_producers`'s doc says
