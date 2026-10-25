@@ -75,6 +75,13 @@ pub enum ReliablePayload {
         /// Index into the endpoint's bounded observation-ended store.
         cell: u32,
     },
+    /// A reference to the endpoint's one retained `RESPONSE_READY` event (#1578 D4). The event
+    /// carries curves and text, so it stays in the controller's response-ready cell until its
+    /// complete event frame has reached caller output.
+    ResponseReady {
+        /// Endpoint-monotonic reliable event sequence: the one the retained event carries.
+        event_sequence: u64,
+    },
     /// A bounded controller-owned typed diagnostic reference. The diagnostic itself remains in
     /// prepared endpoint storage until its complete event frame has reached caller output.
     Diagnostic {
@@ -128,6 +135,18 @@ impl ReliableSlot {
             revision,
             message_id: MessageId::ObservationEnded,
             payload: ReliablePayload::ObservationEnded { cell },
+        }
+    }
+
+    /// Construct a reliable `RESPONSE_READY` event referencing the controller's response-ready
+    /// cell, with zero outer-header request ID (#1578 D4).
+    #[must_use]
+    pub const fn response_ready(revision: SessionRevision, event_sequence: u64) -> Self {
+        Self {
+            header: ReliableHeader::Event,
+            revision,
+            message_id: MessageId::ResponseReady,
+            payload: ReliablePayload::ResponseReady { event_sequence },
         }
     }
 

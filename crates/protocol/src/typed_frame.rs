@@ -11,11 +11,12 @@ use crate::{
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage,
     DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse,
     OUTER_HEADER_BYTES, ObservationEnded, ObservationReadPage, ObservationReadRequest,
-    ProtocolCodec, RequestId, ResponseGetRequest, ResponseHeader, ResponseResult, SessionCommitted,
-    SessionEdit, SessionReplaceRequest, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
-    SpectrumCaptureReply, SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured,
-    SpectrumStreamReply, SpectrumStreamRequest, StatusCode, TelemetryConfiguration,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
+    ProtocolCodec, RequestId, ResponseGetRequest, ResponseHeader, ResponseReady, ResponseResult,
+    SessionCommitted, SessionEdit, SessionReplaceRequest, SessionRevision, SessionSnapshot,
+    SessionSnapshotRequest, SpectrumCaptureReply, SpectrumCaptureRequest, SpectrumConfigureRequest,
+    SpectrumConfigured, SpectrumStreamReply, SpectrumStreamRequest, StatusCode,
+    TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
+    TransportStateEvent,
 };
 
 #[cfg(test)]
@@ -116,6 +117,7 @@ pub enum EventPayload<'a> {
     MeterBatch(MeterBatch<'a>),
     CounterSnapshot(CounterSnapshotRef<'a>),
     Diagnostic(&'a Diagnostic),
+    ResponseReady(&'a ResponseReady),
 }
 
 /// One typed unsolicited event frame. The payload selects and fixes the event message ID.
@@ -196,6 +198,7 @@ pub enum DecodedEventPayload<'a> {
     MeterBatch(DecodedMeterBatch<'a>),
     CounterSnapshot(CounterSnapshot),
     Diagnostic(DiagnosticEvent),
+    ResponseReady(ResponseReady),
 }
 
 /// A strictly decoded event header and its exact registered event payload.
@@ -260,6 +263,7 @@ impl<'a> EventPayload<'a> {
             Self::MeterBatch(_) => MessageId::MeterBatch,
             Self::CounterSnapshot(_) => MessageId::CounterSnapshot,
             Self::Diagnostic(_) => MessageId::Diagnostic,
+            Self::ResponseReady(_) => MessageId::ResponseReady,
         }
     }
 }
@@ -607,6 +611,9 @@ impl ProtocolCodec {
             MessageId::Diagnostic => DecodedEventPayload::Diagnostic(
                 self.decode_diagnostic_event(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::ResponseReady => DecodedEventPayload::ResponseReady(
+                self.decode_response_ready(decoded.payload, header.tlv_count)?,
+            ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
         Ok(DecodedTypedEventFrame { header, payload })
@@ -836,6 +843,9 @@ fn write_event_payload(
         EventPayload::Diagnostic(value) => {
             crate::message_wire::write_diagnostic_event(codec, sink, value)
         }
+        EventPayload::ResponseReady(value) => {
+            crate::message_wire::write_response_ready(sink, value)
+        }
     }
 }
 
@@ -868,7 +878,7 @@ mod tests {
             maximum_telemetry_handles: 256,
             maximum_transaction_edits: 1,
             supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
-            supported_events: &[0x8001, 0x8010, 0x8020, 0x8021, 0x8030],
+            supported_events: &[0x8001, 0x8010, 0x8020, 0x8021, 0x8030, 0x8040],
             flags: crate::CapabilityFlags::B4_BASE,
         }
     }
