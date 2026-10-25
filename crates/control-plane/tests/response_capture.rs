@@ -4,6 +4,7 @@
 //! both hosts run) and its render half (`PlanState::render`) on one thread. The session is the
 //! nine-track EQ fixture cut to two tracks, at 48 kHz: input filters on every strip, the EQ
 //! console slot `eq`, and an EQ insert on `eq0`.
+#![cfg(feature = "test-support")]
 
 use control_plane::{
     CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources, PlanState,
