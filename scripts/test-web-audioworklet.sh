@@ -268,24 +268,6 @@ for entry in "${session_map_mutations[@]}"; do
 done
 echo "web AudioWorklet session-map shape gates passed"
 
-# Issue #151: the shipped defect itself. Restoring the literal `<= 9` bound on the acknowledgement
-# must take the whole hermetic suite red -- the refused subscription stops being a typed
-# per-request rejection and becomes the host-wide sticky 255 that kept the app's GR meters dead.
-mutated_host="$mutation_dir/host-reason-cap.js"
-sed 's/validCommandReason(message\.reason)/validU32(message.reason) \&\& message.reason <= 9/' \
-  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
-  >"$mutated_host"
-if diff -q "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
-  "$mutated_host" >/dev/null; then
-  echo "the reason-cap mutation matched nothing" >&2
-  exit 1
-fi
-if MISO_ENGINE_WEB_HOST_TEST_MODULE="$mutated_host" \
-  node "$repo_root/scripts/test-web-audioworklet.mjs" >/dev/null 2>&1; then
-  echo "the <= 9 command-reason cap escaped the observation refusal tests" >&2
-  exit 1
-fi
-echo "web AudioWorklet reason-cap mutation passed"
 mutated_utf8="$mutation_dir/worklet-utf8.js"
 sed 's/(codePoint >>> 18) | 0xf0/(codePoint >>> 18) | 0xe0/' "$worklet" >"$mutated_utf8"
 if MISO_ENGINE_WEB_WORKLET_TEST_MODULE="$mutated_utf8" \

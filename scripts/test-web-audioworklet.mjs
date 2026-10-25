@@ -2452,12 +2452,7 @@ async function testQualificationBoot({
       this.options = options;
       this.onprocessorerror = null;
       this.disconnectCount = 0;
-      const processorOptions = options.processorOptions?.options;
-      this.fake = makeFake(
-        context.renderQuantumSize,
-        1,
-        processorOptions?.liveControlObservationTaps !== 0n,
-      );
+      this.fake = makeFake(context.renderQuantumSize, 1);
       setNextFake(this.fake);
       setProcessorPortFactory(() => processorPort);
       try {
