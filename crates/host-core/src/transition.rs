@@ -733,4 +733,45 @@ mod tests {
             "C is the sum of b-main's two lines"
         );
     }
+
+    /// #1324 D4: `C` counts a sidechain line from a ducked strip's `post_fader` tap into a carried
+    /// node. `b` has no route and keys `c`'s compressor, which sits behind a limiter, so the key's
+    /// line is the limiter's latency `L`; a successor that restarts `b` (here: given an insert)
+    /// may shorten it, so `C` is `L`. Red if `C` counts route lines only (0 here: `b` has none).
+    #[test]
+    fn c_counts_a_post_fader_sidechain_line_into_a_carried_node() {
+        let mut committed = model();
+        committed
+            .routes
+            .retain(|route| !route.id.as_str().starts_with("b-"));
+        let mut key = limiter("key");
+        key.identity = session::EffectIdentity::Native {
+            effect_id: id("miso.compressor"),
+        };
+        key.link_mode = session::LinkMode::DualMono;
+        key.sidechain = session::SidechainDeclaration::Routed(session::Sidechain {
+            source: RouteSource::Track {
+                track_id: id("b"),
+                tap: SendTap::PostFader,
+            },
+            port_id: id("sidechain-in"),
+        });
+        committed.tracks[2].inserts.effects = vec![limiter("c-lim"), key];
+        let compiled = compile(&committed);
+        let prepared = crate::prepare::prepare_host_runtime(&compiled, &caps()).expect("prepares");
+        let latency = prepared.report.latency_samples;
+        assert!(latency > 0);
+        let committed = compiled.normalized_model();
+        let mut next = committed.clone();
+        next.tracks[1].inserts.effects.push(limiter("b-lim"));
+        let transition = plan_strip_transition(
+            &SuccessorBase::new(&prepared.inventory, committed, 2),
+            &DuckOverlay::new(),
+            &next,
+            &[Box::from("b")],
+        )
+        .expect("b's duck-swap");
+        assert_eq!(transition.strips(), [Box::<str>::from("b")]);
+        assert_eq!(transition.compensation(), latency, "C is the key's line");
+    }
 }
