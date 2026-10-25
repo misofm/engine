@@ -4170,16 +4170,22 @@ enum Restart {
     /// bus input, which carried `aux` also feeds, arrives at `eq1`'s limited key: the key's line
     /// shrinks from the limiter's latency to 0.
     BusLater,
+    /// [`Self::BusLater`] with no `aux` route: the bus's only input is `late`'s `pre_fader` route,
+    /// which follows `late`'s stored mute automation, so it cannot be armed (#2011) and the bus
+    /// input is not quiet.
+    Following,
+    /// The bus's `delay_samples` changed (its delay line restarts).
+    BusDelay,
 }
 
 /// #1324b gate 7 and D1's sidechain closure on every width, on the control thread. B restarts
 /// `eq0` (an insert, or its `delay_samples`) or the bus; `keys` are the keyed inserts A and B share.
 /// The restart set is closed over the sidechain edges: a strip keyed from a restarted strip's
 /// `post_input`, `insert_send`, `insert_return` or `pre_fader` tap joins it, and so, on a second
-/// round, does a strip keyed from that one; a `post_fader` tap adds nothing, and a track's `input`
-/// tap adds nothing unless its delay line restarts. A submix's `input` tap adds nothing while its
-/// line keeps its length, and adds its consumer when the line changes and a carried strip feeds
-/// the submix. Each strip in the set is armed. Red if the closure ignores sidechains or a tap kind,
+/// round, does a strip keyed from that one; a `post_fader` tap adds nothing, and an `input` tap
+/// (a track's or the bus's) adds nothing unless its delay line restarts. A submix's `input` tap
+/// adds nothing while its line keeps its length, and adds its consumer when the line changes and
+/// a carried strip or an unarmable following route feeds the submix. Each strip in the set is armed. Red if the closure ignores sidechains or a tap kind,
 /// stops after one round, adds a `post_fader` or a plain `input`-tap consumer, misses a restarted
 /// delay line, or gets either submix rule wrong.
 #[test]
@@ -4191,7 +4197,7 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
     // A row: its name, its edit, the keyed inserts (strip, key source) and the restart set.
     type Row<'a> = (&'a str, Restart, Vec<(&'a str, RouteSource)>, &'a [&'a str]);
     let keyed = |tap| vec![("eq1", track_key("eq0", tap))];
-    let rows: [Row<'_>; 9] = [
+    let rows: [Row<'_>; 11] = [
         (
             "insert_return",
             Restart::Insert,
@@ -4249,18 +4255,40 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
             vec![("eq1", bus())],
             &[ROUTE_BUS, "eq1", "late"],
         ),
+        (
+            "a following pre-fader route into the bus",
+            Restart::Following,
+            vec![("eq1", bus())],
+            &[ROUTE_BUS, "eq1", "late"],
+        ),
+        (
+            "the bus input behind a restarted delay line",
+            Restart::BusDelay,
+            vec![("eq1", bus())],
+            &[ROUTE_BUS, "eq1"],
+        ),
     ];
     for backend in backends() {
         for (what, edit, keys, restarted) in &rows {
-            let mut a_model = with_route(
-                route_fade_base_limited(false),
-                "aux-bus",
-                "aux",
-                session::SendTap::PostFader,
-                into_bus(),
-                false,
-            );
-            if *edit == Restart::BusLater {
+            let mut a_model = if *edit == Restart::Following {
+                let mut model = with_mute_automation(route_fade_base_limited(false), "late", None);
+                for route in &mut model.routes {
+                    if route.id.as_str() == "late-bus" {
+                        route.source = track_key("late", session::SendTap::PreFader);
+                    }
+                }
+                model
+            } else {
+                with_route(
+                    route_fade_base_limited(false),
+                    "aux-bus",
+                    "aux",
+                    session::SendTap::PostFader,
+                    into_bus(),
+                    false,
+                )
+            };
+            if matches!(edit, Restart::BusLater | Restart::Following) {
                 add_limiter(&mut a_model, "eq1", "eq1-lim");
             }
             for (strip, source) in keys {
@@ -4280,12 +4308,17 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
                     builtins.left.delay_samples = 32;
                     builtins.right.delay_samples = 32;
                 }
-                Restart::Bus | Restart::BusLater => b_model.submixes[0]
+                Restart::Bus | Restart::BusLater | Restart::Following => b_model.submixes[0]
                     .inserts
                     .effects
                     .push(transparent_insert()),
+                Restart::BusDelay => {
+                    let builtins = &mut b_model.submixes[0].builtins;
+                    builtins.left.delay_samples = 32;
+                    builtins.right.delay_samples = 32;
+                }
             }
-            if *edit == Restart::BusLater {
+            if matches!(edit, Restart::BusLater | Restart::Following) {
                 add_limiter(&mut b_model, "late", "lim");
             }
             let a = Session::compile(a_model);
@@ -4309,9 +4342,10 @@ fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
             assert_eq!(set, *restarted, "{what}");
             let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
                 .expect("a graph plan");
-            assert!(
-                arms.len() >= restarted.len() - usize::from(restarted.contains(&"late")),
-                "{what}: each audible restarted strip is armed"
+            assert_eq!(
+                arms.len(),
+                restarted.len() - usize::from(restarted.contains(&"late")),
+                "{what}: each audible restarted strip is armed, the muted `late` is not"
             );
         }
     }
@@ -4326,15 +4360,19 @@ fn assert_audible(muted: &Session, feeds: &[&Feed], reference: &FadeRun, backend
     );
 }
 
-/// `model` with a stored mute automation curve on [`FADE_TRACK`] that holds it unmuted, or, with
+/// `model` with a stored mute automation curve on track `track` that holds it unmuted, or, with
 /// `mute_at`, steps it to muted at that sample: the lane becomes an automated lane, whose live
 /// mute goes through the cell's mute terms.
-fn with_fade_mute_automation(mut model: SessionModel, mute_at: Option<u64>) -> SessionModel {
+fn with_mute_automation(
+    mut model: SessionModel,
+    track: &str,
+    mute_at: Option<u64>,
+) -> SessionModel {
     let owner = model
         .tracks
         .iter()
-        .find(|track| track.id.as_str() == FADE_TRACK)
-        .expect("the fade track")
+        .find(|candidate| candidate.id.as_str() == track)
+        .expect("the track")
         .id
         .clone();
     model.automation.push(session::Automation {
@@ -4383,12 +4421,14 @@ fn a_user_mute_on_an_automated_armed_lane_outlasts_the_fire() {
         ("a user mute", None, vec![mute]),
         ("a curve mute", Some(curve_mute), Vec::new()),
     ] {
-        let b = Session::compile(with_fade_mute_automation(
+        let b = Session::compile(with_mute_automation(
             anchored_fade_model(false),
+            FADE_TRACK,
             mute_at,
         ));
-        let muted = Session::compile(with_fade_mute_automation(
+        let muted = Session::compile(with_mute_automation(
             anchored_fade_model(true),
+            FADE_TRACK,
             mute_at,
         ));
         let swap = [FadeSwap {
@@ -4411,7 +4451,11 @@ fn a_user_mute_on_an_automated_armed_lane_outlasts_the_fire() {
         );
     }
     // The oracle can fail: the muted reference given an unmute at the anchor is heard.
-    let muted = Session::compile(with_fade_mute_automation(anchored_fade_model(true), None));
+    let muted = Session::compile(with_mute_automation(
+        anchored_fade_model(true),
+        FADE_TRACK,
+        None,
+    ));
     let reference = fade_run(&muted, &[], &reference_feeds, None, &[], backend);
     let unmuted = fade_run(
         &muted,
