@@ -202,7 +202,7 @@ parts of D1-D6:
   `SetTrackConsole` as the per-edit path are gone: every link write is a `SET_CONTROL` of the
   instance's `link_mode` row, and its ramp is that edit's `ramp_samples`. The protocol records it
   under the strip's one `(Strip, Link)` key, so two link writes of one transaction on one strip
-  with different lengths refuse `control.ramp_conflict`, as the pan and matrix rows do.
+  with different lengths refuse `control.ramp.conflict`, as the pan and matrix rows do.
 - **D4 narrowed (R6, decision 17 C5).** A console slot's declared mode (`SetConsole`) stays
   structural and has no row; only the insert row and the console-entry row are live. "One cell
   per strip on a slot-default change" is dropped. A move of an entry to the slot's own mode
