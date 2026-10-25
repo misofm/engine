@@ -920,14 +920,14 @@ pub struct TestTransactionSnapshot<Row> {
     pub effect_owners: Vec<TestOwnerState>,
     /// The newest window each observation reader the epochs keep holds (#1584 D7), current epoch
     /// first, then each pending candidate: `(epoch, strip ID, effect instance ID, one window per
-    /// declared tap as (sequence, first sample, blocks))`. `None` for a tap that has published
-    /// nothing.
+    /// declared tap as (sequence, first sample, blocks, the bits of its strip gain-reduction word))`. `None`
+    /// for a tap that has published nothing.
     pub observation_windows: Vec<TestObservationWindows>,
 }
 
 /// One observed effect instance's newest windows in a [`TestTransactionSnapshot`].
 #[cfg(feature = "test-support")]
-pub type TestObservationWindows = (u64, Box<str>, Box<str>, Vec<Option<(u64, u64, u32)>>);
+pub type TestObservationWindows = (u64, Box<str>, Box<str>, Vec<Option<(u64, u64, u32, u32)>>);
 
 /// One EQ owner's observable state in a [`TestTransactionSnapshot`].
 #[cfg(feature = "test-support")]
@@ -2599,9 +2599,20 @@ where
                             handle
                                 .readers
                                 .iter()
-                                .map(|reader| {
+                                .zip(handle.descriptor.observations)
+                                .map(|(reader, tap)| {
                                     reader.read().map(|window| {
-                                        (window.sequence, window.first_sample, window.blocks)
+                                        (
+                                            window.sequence,
+                                            window.first_sample,
+                                            window.blocks,
+                                            host_core::meters::strip_reduction_db(
+                                                *tap,
+                                                window.left,
+                                                window.right,
+                                            )
+                                            .to_bits(),
+                                        )
                                     })
                                 })
                                 .collect(),

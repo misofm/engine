@@ -1681,7 +1681,56 @@ pub fn default_meter_window_blocks(rate_hz: u32, quantum_frames: u32) -> NonZero
 
 #[cfg(test)]
 mod tests {
-    use super::{default_meter_window_blocks, output_peak_gate_relay, output_peak_meter};
+    use super::{
+        MeterBatchFold, MeterFrame, MeterValidity, StripPeakFold, default_meter_window_blocks,
+        output_peak_gate_relay, output_peak_meter,
+    };
+
+    /// #1587b D3: in a batch of three frames, an entry's gain reduction is the last frame's
+    /// reading for its strip that is present, `VALID` when any is. Strip 0 reads 3 dB, then 2 dB,
+    /// then nothing: the batch reports 2 dB. Strip 1 reads nothing: absent. In the next batch strip
+    /// 0 reads nothing and strip 1 only in its first frame: strip 0 is absent again, strip 1 reads
+    /// that frame's 1 dB. An entry with no strip reads nothing.
+    ///
+    /// Test value: red if the fold takes the batch's maximum (3 dB), its first or last frame's
+    /// reading (3 dB, or absent), or keeps a previous batch's reading past the batch's first frame.
+    #[test]
+    fn a_batch_reports_each_strips_last_present_gain_reduction() {
+        let mut fold = MeterBatchFold::new(core::num::NonZeroU32::new(3).expect("three"));
+        let strips = [Some(0), Some(1), None];
+        let mut folds = [StripPeakFold::START; 3];
+        let mut frame = MeterFrame::new(2).expect("frame");
+        let readings: [[Option<f32>; 2]; 6] = [
+            [Some(3.0), None],
+            [Some(2.0), None],
+            [None, None],
+            [None, Some(1.0)],
+            [None, None],
+            [None, None],
+        ];
+        let mut batches = Vec::new();
+        for (index, reading) in (0_u64..).zip(readings) {
+            frame.first_sample = index * 256;
+            frame.end_sample = (index + 1) * 256;
+            frame.windows = 1;
+            frame.validity = MeterValidity::COMPLETE.union(MeterValidity::OUTPUT);
+            for (strip, value) in reading.into_iter().enumerate() {
+                frame.strip_gain_reduction_db[strip] = value.unwrap_or(0.0);
+                frame.strip_gain_reduction_present[strip] = value.is_some();
+            }
+            if fold.push_with_strips(&frame, &strips, &mut folds).is_some() {
+                batches
+                    .push(folds.map(|fold| (fold.gain_reduction_present, fold.gain_reduction_db)));
+            }
+        }
+        assert_eq!(
+            batches,
+            [
+                [(true, 2.0), (false, 0.0), (false, 0.0)],
+                [(false, 0.0), (true, 1.0), (false, 0.0)],
+            ]
+        );
+    }
 
     /// #1587a, root ruling 3: a request whose boundary is behind the block render applies it in
     /// (the control thread read the render clock blocks earlier) opens the gate at the grid's

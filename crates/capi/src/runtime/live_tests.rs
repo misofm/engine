@@ -9470,7 +9470,10 @@ fn an_observe_edit_arms_a_tap_through_the_c_abi() {
         .3[0]
         .expect("a published window");
     let quantum = rig.quantum as u64;
-    assert_eq!(window, (3, (armed_at + 8) * quantum, 4));
+    assert_eq!(
+        (window.0, window.1, window.2),
+        (3, (armed_at + 8) * quantum, 4)
+    );
 }
 
 /// #1585 gate 2: each `Observe` reply names the arm tag of the record behind the subscription,

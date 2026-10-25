@@ -5834,6 +5834,139 @@ fn an_uncarried_rebuild_restarts_the_meter_grid_at_its_adoption_block() {
     crate::ffi::test_session_destroy(c_session);
 }
 
+/// #1587b gate 2: `{eq0, gain reduction}` beside the output's peak, one batch per window, on a
+/// compressor insert driven past its threshold. Unarmed, the record is `{1, Aggregate, 0, 0.0}`.
+/// Armed at a window's first block, the batch of that window is `VALID` and reads the tap's
+/// window, which opened at the arm: `strip_reduction_db` of the window the session's reader
+/// holds. Disarmed, it is `{1, Aggregate, 0, 0.0}` again, though the reader still holds that
+/// window. Re-armed in the middle of a window, the batch at that window's end is still flags `0`:
+/// the reader's newest window opened before the re-arm. The next batch reads the re-armed tap's
+/// first window.
+///
+/// Test value: red if a window from before the tap's arm sample reaches a record (the fold
+/// ignores `arm_sample`), if a disarmed tap still reports (it ignores `armed`), if a record carries
+/// another value than its tap's window's reduction, or if gain reduction is still refused.
+#[test]
+fn gain_reduction_records_read_only_windows_since_the_taps_arm() {
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let track = model.tracks[0].id.clone();
+    let protocol::SessionEdit::PutTrackEffect { effect, .. } = put_compressor(&model, 0) else {
+        panic!("an insert edit")
+    };
+    model.tracks[0].inserts.effects.insert(0, effect);
+    let document = session::canonical_session_json(&model).expect("compressor session");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let window = fixture_window_blocks();
+    let gain_reduction = protocol::MeterEntry {
+        target: protocol::MeterTarget::Strip(track.as_str().into()),
+        metric: protocol::MeterMetric::GainReduction,
+    };
+    assert_eq!(
+        configure_meters_c(
+            c_session,
+            1,
+            vec![gain_reduction, output_peak_entry()],
+            window
+        ),
+        (StatusCode::Ok, None)
+    );
+    let mut request = 2;
+    let mut observe = |armed: bool| {
+        let edit = protocol::SessionEdit::Observe {
+            strip_id: track.clone(),
+            section: protocol::control_core::TapSection::Inserts(
+                session::StableId::parse("comp").expect("compressor"),
+            ),
+            tap_id: 1,
+            armed,
+            window_blocks: u32::try_from(window).expect("window"),
+        };
+        let (result, response) = command_c(c_session, &transaction_at(request, 42, &[edit]));
+        assert_eq!(
+            (result, response_status(&response)),
+            (crate::RESULT_OK, StatusCode::Ok),
+            "observe {armed}"
+        );
+        request += 1;
+    };
+    // A full-scale square wave, far above the compressor's default threshold.
+    let render_until = |end: u64, block: &mut u64| {
+        while *block < end {
+            let left: Vec<f32> = (0..128)
+                .map(|i| if i % 2 == 0 { 0.9 } else { -0.9 })
+                .collect();
+            submit_c(c_session, 1, *block * 128, 48_000, &left, &left, false);
+            render_c(c_plan, *block);
+            *block += 1;
+        }
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+        meter_batches_c(c_session)
+            .into_iter()
+            .map(|(_, _, _, records)| records[0])
+            .collect::<Vec<_>>()
+    };
+    let absent = protocol::MeterRecord {
+        handle: 1,
+        component: protocol::MeterComponent::Aggregate,
+        flags: 0,
+        value: 0.0,
+    };
+    // The first sample and reduction of the newest window the session's reader holds.
+    let held = || {
+        let snapshot = crate::ffi::test_transaction_snapshot(c_session);
+        let [(_, _, _, taps)] = snapshot.observation_windows.as_slice() else {
+            panic!("one observed instance")
+        };
+        let (_, first, _, reduction) = taps[0].expect("a published window");
+        (first, f32::from_bits(reduction))
+    };
+    let valid = |value| protocol::MeterRecord {
+        flags: 1,
+        value,
+        ..absent
+    };
+    let mut block = 0;
+    assert_eq!(render_until(window, &mut block), [absent], "unarmed");
+    observe(true);
+    assert_eq!(
+        render_until(2 * window, &mut block),
+        [valid(held().1)],
+        "armed"
+    );
+    let (first, reduction) = held();
+    assert_eq!(first, window * 128, "the window opened at the arm");
+    assert!(reduction > 1.0, "the compressor reduces: {reduction} dB");
+    observe(false);
+    assert_eq!(render_until(3 * window, &mut block), [absent], "disarmed");
+    assert_eq!(held().0, window * 128, "the reader keeps the window");
+    render_until(3 * window + window / 2, &mut block);
+    observe(true);
+    assert_eq!(
+        render_until(4 * window, &mut block),
+        [absent],
+        "re-armed, before the first window since the arm closes"
+    );
+    assert_eq!(
+        held().0,
+        window * 128,
+        "the reader holds the window from before the re-arm"
+    );
+    assert_eq!(
+        render_until(5 * window, &mut block),
+        [valid(held().1)],
+        "re-armed"
+    );
+    assert_eq!(
+        held().0,
+        (3 * window + window / 2) * 128,
+        "the re-armed tap's window"
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
 /// #1583 gate 5: nine windows rendered with no service call overflow the output meter's queue of
 /// eight. With three windows per batch, the first service stages batches 1 and 2 (windows 1-6),
 /// render dropped window 9, and the next window's gap discards the partial batch of windows 7
