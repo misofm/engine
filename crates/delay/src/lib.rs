@@ -280,15 +280,255 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
     }
 }
 
-/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
-/// (decision 15 D15-4(b), #1377 D1). Today's declared tail, with no exact-rest bound yet and so no
-/// finite tail over every peak (#1377 D4); #1374 derives the bounds from the designer.
-fn tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
-    effect_contract::NodeTailBound {
-        tail: TailSamples::Infinite,
-        tail_every_peak: TailSamples::Infinite,
-        rest: effect_contract::RestBound::Unstated,
-        composition: effect_contract::CompositionBound::Unstated,
+/// The `f32` unit roundoff `u = 2^-24`.
+const U: f64 = effect_runtime::tail::ROUNDOFF;
+
+/// The relative allowance by which every `f64` evaluation in [`tail_bound_at`] is rounded up or
+/// down (`2^-24`): far above the few `2^-53` units one evaluation of a short expression of
+/// `math::log`, `math::exp`, products and quotients can lose. No expression it rounds cancels:
+/// every difference it takes is at least `0.04` of its larger operand.
+const EVAL: f64 = 1.0 / 16_777_216.0;
+
+/// Samples after the last control event by which every ramp and crossfade has settled: a ramp
+/// takes [`RAMP_SAMPLES`], and a crossfade in flight plus the one queued behind it take
+/// `2 * TRANSITION_SAMPLES` (`begin_transition` starts the queued one at the next chunk).
+const SETTLE_SAMPLES: u64 = if RAMP_SAMPLES > 2 * TRANSITION_SAMPLES {
+    RAMP_SAMPLES as u64
+} else {
+    2 * TRANSITION_SAMPLES as u64
+};
+
+/// `x (1 + EVAL)`: an upper bound of the exact value that `x` approximates.
+fn up(x: f64) -> f64 {
+    x * (1.0 + EVAL)
+}
+
+/// `x (1 - EVAL)`: a lower bound of the exact value that `x` approximates.
+fn down(x: f64) -> f64 {
+    x * (1.0 - EVAL)
+}
+
+/// `1 + k u`: the factor of a step whose rounding the derivation counts as `k u`.
+fn grow(k: f64) -> f64 {
+    1.0 + k * U
+}
+
+/// `ceil(x)` of a non-negative finite `x`; `None` past `u64`.
+fn ceil_u64(x: f64) -> Option<u64> {
+    let ceiling = -math::floor(-x);
+    (ceiling.is_finite() && (0.0..1.8e19).contains(&ceiling)).then_some(ceiling as u64)
+}
+
+/// The smallest `n >= 0` with `r^n x < y`, given `0 < nu <= -ln r` and `x, y > 0`: `0` when
+/// `x < y`, otherwise `ceil(ln(x / y) / nu)` with the logarithm rounded up.
+fn decay_samples(x: f64, y: f64, nu: f64) -> Option<u64> {
+    if x < y {
+        return Some(0);
+    }
+    ceil_u64(up(up(math::log(up(x / y))) / nu))
+}
+
+/// The positive linear majorant of the settled loop (`docs/derivations/1374-delay-tail-and-rest.md`,
+/// "The settled loop"). With every damping coefficient `0` or at least `g_lo`, every feedback at
+/// most `f_max` in magnitude and every tap at most `D` samples old, a ring word written `n`
+/// samples after the controls settle is at most `c r^n + W_U`, and a damping state at most
+/// `c sigma r^n + S_U`, where `c` bounds every word at the start.
+#[derive(Clone, Copy, Debug)]
+struct Majorant {
+    /// `nu <= -ln r`, `r` the per-sample contraction: a certified upper bound of the majorant's
+    /// Perron root.
+    nu: f64,
+    /// `sigma r^D = b' / (r - a')`, the damping state's weight relative to the oldest tap.
+    state_weight: f64,
+    /// `1 / (1 - A H(1))`: the loop's gain to a constant injection into every ring word.
+    loop_gain: f64,
+    /// `W_U`: the steady underflow allowance of a ring word.
+    word_underflow: f64,
+    /// `S_U`: the steady underflow allowance of a damping state.
+    state_underflow: f64,
+}
+
+impl Majorant {
+    /// `None` when the loop has no contraction at this `g_lo` (`A H(1) >= 1`).
+    fn new(g_lo: f64, f_max: f64, delay_max: u32) -> Option<Self> {
+        // The damping state's step, `|s'| <= a |s| + b |x| + 4 U`, and its output,
+        // `|y| <= alpha |s| + beta |x| + 2 U` (derivation, "Rounding, step by step").
+        let a = 1.0 - 2.0 * g_lo + 7.0 * U;
+        let b = 2.0 * g_lo + 7.0 * U;
+        let alpha = 1.0 - g_lo + 3.0 * U;
+        let beta = g_lo + 3.0 * U;
+        // The feedback product (1 + u), the matrix (1 + u)^3 and the ring write's sum (1 + u).
+        let one = grow(1.0);
+        let gain = up(f_max * one * one * one * one * one);
+        let d = f64::from(delay_max);
+        // F(r) = A r^-D (beta + alpha b / (r - a)), rounded up; it decreases in r on (a, 1].
+        let certificate =
+            |r: f64| up(gain * math::exp(-d * math::log(r)) * (beta + alpha * b / down(r - a)));
+        if certificate(1.0) >= 1.0 {
+            return None;
+        }
+        // Bisection to adjacent `f64`s: `hi` always satisfies `F(hi) <= 1`.
+        let (mut lo, mut hi) = (a, 1.0_f64);
+        loop {
+            let mid = lo + (hi - lo) / 2.0;
+            if mid <= lo || mid >= hi {
+                break;
+            }
+            if certificate(mid) <= 1.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let at_one = up(beta + alpha * b / down(1.0 - a));
+        let loop_gain = up(1.0 / down(1.0 - up(gain * at_one)));
+        let underflow = math::tail::UNDERFLOW;
+        let word_underflow =
+            up(up(8.0 + 4.0 * gain * alpha / down(1.0 - a)) * loop_gain) * underflow;
+        let state_underflow = up((b * word_underflow + 4.0 * underflow) / down(1.0 - a));
+        Some(Self {
+            nu: down(-math::log(hi)),
+            state_weight: up(b / down(hi - a)),
+            loop_gain,
+            word_underflow,
+            state_underflow,
+        })
+    }
+}
+
+/// The largest `f32` at or below `x` (a positive finite `x`).
+fn f32_at_or_below(x: f64) -> f32 {
+    let value = x as f32;
+    if f64::from(value) > x {
+        value.next_down()
+    } else {
+        value
+    }
+}
+
+/// The smallest `f32` at or above `x` (a positive finite `x`).
+fn f32_at_or_above(x: f64) -> f32 {
+    let value = x as f32;
+    if f64::from(value) < x {
+        value.next_up()
+    } else {
+        value
+    }
+}
+
+/// The delay's tail, tail over every peak, exact-rest bound and composition values for taps at
+/// most `delay_max` samples old, at `sample_rate` (decision 15 D15-4(b), #1374).
+/// [`DELAY_DESCRIPTOR`]'s `tail_and_rest` is this at `delay_max = 2 * sample_rate`; the tail
+/// contract gates evaluate it at a short `delay_max` too. The derivation is
+/// `docs/derivations/1374-delay-tail-and-rest.md`; its names are used here.
+///
+/// * **(N1) Peak**, under any admitted control history: every ring word is at most
+///   `W = ((1 + u) X + 16 U) / (1 - f_max kappa)` and every damping state at most
+///   `S_b = ((1 + 6u) W + 7 U) / (1 - 7u)`, because each loop element is non-expansive in the
+///   sample maximum up to its counted rounding (the damping coefficient is at most `1/2`).
+/// * **Tail.** From `SETTLE_SAMPLES` after the input stops, the settled loop's majorant
+///   ([`Majorant`]) contracts by `r` per sample from `c = S_b(P)`; the output is at most the tap,
+///   so `T = SETTLE_SAMPLES + D + n` with `r^n c_rel < eps / 2`, and `P*` is where the underflow
+///   part reaches `eps / 2`.
+/// * **Rest.** Every ring write is `+0.0` once its majorant is below `FLUSH_EPS`; `D` samples
+///   later every tap is `+0.0`, the damping state then rests in the follower walk
+///   [`effect_runtime::tail::rate_follower_rest_samples`] at `c_eff <= 2 g_lo - 3u`, and the
+///   ring is all `+0.0` one ring length after the first zero write. The rest state is the reset
+///   state.
+///
+/// `UNBOUNDED` where the derivation does not cover the rate: a damping coefficient above `1/2`
+/// (the cutoff cap `min(19_845 Hz, fs / 4)` keeps every launch rate at or below it), or no
+/// contraction.
+#[must_use]
+pub fn tail_bound_at(sample_rate: u32, delay_max: u32) -> effect_contract::NodeTailBound {
+    stated_bound(sample_rate, delay_max).unwrap_or(effect_contract::NodeTailBound::UNBOUNDED)
+}
+
+fn stated_bound(sample_rate: u32, delay_max: u32) -> Option<effect_contract::NodeTailBound> {
+    use effect_contract::{
+        CompositionBound, FlushStall, NodeTailBound, PeakGain, RestBound, RestSamples, TailDecay,
+    };
+    use math::tail::{Rounding, TAIL_FLOOR, UNDERFLOW, ceil_millibels};
+
+    let ring_words = u64::try_from(resources(sample_rate)?.ring_words).ok()?;
+    let damping = &DELAY_PARAMETERS[2];
+    let feedback = &DELAY_PARAMETERS[1];
+    let g_min = damping_coefficient(damping.maximum?, sample_rate);
+    if delay_max == 0 || damping_coefficient_max(sample_rate) > 0.5 || g_min <= 0.0 {
+        return None;
+    }
+    // Below every non-zero coefficient the domain designs, whatever ulp the f64 design or its
+    // f32 rounding moves (derivation, "The settled loop").
+    let g_lo = f64::from(g_min) * (1.0 - 1.0 / 1_048_576.0);
+    let f_max = f64::from(feedback.minimum?.abs().max(feedback.maximum?.abs()));
+
+    // (N1): the hull invariant.
+    let one = grow(1.0);
+    let tap = grow(6.0);
+    let kappa = up(one * one * one * one * one * grow(3.0) * grow(8.0) * tap);
+    let hull = down(1.0 - up(f_max * kappa));
+    let state = down(1.0 - 7.0 * U);
+    let peak_gain = up(tap * tap * one / hull);
+    let peak_stall = up((tap * tap * 16.0 / hull + tap * 3.0 + 3.0) * UNDERFLOW);
+    let start_rel = up(tap * one / (hull * state));
+    let start_abs = up((tap * 16.0 / hull + 7.0) / state) * UNDERFLOW;
+
+    // The settled loop.
+    let loop_ = Majorant::new(g_lo, f_max, delay_max)?;
+    let tail_gain = up(tap * one * loop_.loop_gain);
+    let tail_stall = up(tap * (start_abs + loop_.word_underflow) + 3.0 * UNDERFLOW);
+    let settle = SETTLE_SAMPLES + u64::from(delay_max);
+    let tail = settle.checked_add(decay_samples(start_rel, TAIL_FLOOR / 2.0, loop_.nu)?)?;
+    let decay = decay_samples(10.0, 1.0, loop_.nu)?;
+    let floor_peak = up(2.0 * (start_abs + loop_.word_underflow) / TAIL_FLOOR);
+
+    let flush = f64::from(lane::FLUSH_EPS);
+    let headroom = down(flush - loop_.word_underflow);
+    let state_start = f32_at_or_above(up(flush * loop_.state_weight + loop_.state_underflow));
+    let walk_rate = f32_at_or_below(down(2.0 * g_lo - 3.0 * U));
+    let walk = effect_runtime::tail::rate_follower_rest_samples(
+        walk_rate,
+        state_start,
+        effect_runtime::tail::RestSnap::Below(lane::FLUSH_EPS),
+    )?;
+    let zeros = ring_words.max(u64::from(delay_max).checked_add(walk)?);
+    let rest = |peak: f64| -> Option<u64> {
+        let start = up(start_rel * peak + start_abs);
+        SETTLE_SAMPLES
+            .checked_add(decay_samples(start, headroom, loop_.nu)?)?
+            .checked_add(zeros)
+    };
+    let peak_plus_24_dbfs = rest(up(math::db_to_gain(24.0)))?;
+    let any_sanitized_input = rest(f64::from(1.0e30_f32))?;
+    let gain = PeakGain::Millibels(ceil_millibels(peak_gain.max(tail_gain), Rounding::Computed));
+    let stall = FlushStall::Level(ceil_millibels(
+        peak_stall.max(tail_stall),
+        Rounding::Computed,
+    ));
+    Some(NodeTailBound {
+        tail: TailSamples::Finite(tail),
+        tail_every_peak: TailSamples::Finite(tail.max(rest(floor_peak)?)),
+        rest: RestBound::Bounded(RestSamples {
+            peak_plus_24_dbfs,
+            any_sanitized_input,
+        }),
+        composition: CompositionBound::Stated {
+            decay: TailDecay(decay),
+            peak_gain: gain,
+            tail_gain: gain,
+            peak_stall: stall,
+            tail_stall: stall,
+        },
+    })
+}
+
+/// This effect's tail, tail over every peak, exact-rest bound and composition values, the one
+/// place they are stated (decision 15 D15-4(b), #1377 D1, #1374): [`tail_bound_at`] at the
+/// longest tap, `2 * sample_rate` samples.
+fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> effect_contract::NodeTailBound {
+    match resources(sample_rate) {
+        Some(resources) => tail_bound_at(sample_rate, resources.max_delay),
+        None => effect_contract::NodeTailBound::UNBOUNDED,
     }
 }
 
@@ -370,9 +610,20 @@ const DAMPING_REFERENCE_RATE_HZ: f64 = 48_000.0;
 /// finite and positive at 44.1 kHz, the lowest rate the contract admits.
 const DAMPING_MAX_CUTOFF_HZ: f64 = 19_845.0;
 
+/// The damping cutoff cap at `sample_rate`: `min(19_845 Hz, fs / 4)` (#1374, owner ruling of
+/// 2026-10-25, option 1). At `fs / 4`, `G = tan(pi / 4) = 1` and `g = 1/2`, so every designed
+/// coefficient is at most `1/2`, where the one-pole's state is a convex combination of its state
+/// and its input and the tail bound holds (`docs/derivations/1374-delay-tail-and-rest.md`). The
+/// cap binds only at 44.1 and 48 kHz (11,025 and 12,000 Hz); at 88.2 and 96 kHz `fs / 4` is above
+/// 19,845 Hz.
+fn damping_cutoff_max_hz(sample_rate: u32) -> f64 {
+    DAMPING_MAX_CUTOFF_HZ.min(f64::from(sample_rate) / 4.0)
+}
+
 /// Maps the frozen linear damping control `c` to the one-pole TPT coefficient at `sample_rate`.
 ///
-/// `fc(c) = min(19_845, -ln(c) * 48_000 / (2 pi))` Hz, `G = tan(pi * fc / fs)`, `g = G / (1 + G)`.
+/// `fc(c) = min(19_845, fs / 4, -ln(c) * 48_000 / (2 pi))` Hz, `G = tan(pi * fc / fs)`,
+/// `g = G / (1 + G)`.
 ///
 /// The control keeps the meaning it had at 48 kHz: the first-order pole of the frozen
 /// `y = (1 - c) * x + c * y` recurrence sits at `fc = -ln(c) * fs / (2 pi)`, so evaluating that
@@ -380,7 +631,9 @@ const DAMPING_MAX_CUTOFF_HZ: f64 = 19_845.0;
 /// holds the damping cutoff in hertz at every sample rate (issue #93 finding F5: the raw
 /// coefficient made the tone of the feedback tail a function of the sample rate). Reference
 /// values: `c = 0.25` (the default) is 10_590.6 Hz, `c = 0.995` is 38.3 Hz, and every
-/// `c <= 0.0745` clamps at 19_845 Hz. `c == 0` maps to exactly `0.0` and selects the identity
+/// `c <= 0.0745` clamps at 19_845 Hz at 88.2 and 96 kHz. At 44.1 and 48 kHz the cap is `fs / 4`
+/// ([`damping_cutoff_max_hz`]): every `c` below about 0.236 (44.1 kHz) or 0.208 (48 kHz) clamps at
+/// 11,025 or 12,000 Hz. `c == 0` maps to exactly `0.0` and selects the identity
 /// path, which is the frozen "damping off is the exact tap" behaviour.
 ///
 /// One `log` and one `tan` during preparation or per accepted damping event at block start,
@@ -391,7 +644,7 @@ fn damping_coefficient(c: f32, sample_rate: u32) -> f32 {
     }
     let cutoff = (-math::log(f64::from(c)) * DAMPING_REFERENCE_RATE_HZ
         / (2.0 * core::f64::consts::PI))
-        .min(DAMPING_MAX_CUTOFF_HZ);
+        .min(damping_cutoff_max_hz(sample_rate));
     let big_g = math::tan(core::f64::consts::PI * cutoff / f64::from(sample_rate));
     (big_g / (1.0 + big_g)) as f32
 }
@@ -401,7 +654,9 @@ fn damping_coefficient(c: f32, sample_rate: u32) -> f32 {
 /// The restore domain of the damping ramp: the state words hold `g`, not `c`, so the
 /// descriptor's `[0, 0.995]` is not the interval a restored word has to lie in.
 fn damping_coefficient_max(sample_rate: u32) -> f32 {
-    let big_g = math::tan(core::f64::consts::PI * DAMPING_MAX_CUTOFF_HZ / f64::from(sample_rate));
+    let big_g = math::tan(
+        core::f64::consts::PI * damping_cutoff_max_hz(sample_rate) / f64::from(sample_rate),
+    );
     (big_g / (1.0 + big_g)) as f32
 }
 
@@ -1887,7 +2142,10 @@ mod tests {
             let (_, metadata) = prepare_delay(request(&values, sample_rate)).expect("prepare");
             assert_eq!(metadata.state_sizes.total(), Some(total_state));
             assert_eq!(metadata.latency, LatencySamples(0));
-            assert_eq!(metadata.tail, TailSamples::Infinite);
+            // The prepared metadata carries the descriptor's stated tail (#1374), a finite one.
+            let stated = (DELAY_DESCRIPTOR.tail_and_rest)(sample_rate, EffectQuality::Normal);
+            assert!(matches!(stated.tail, TailSamples::Finite(_)));
+            assert_eq!(metadata.tail, stated.tail);
             assert_eq!(
                 delay_samples(2000.0, sample_rate, resource.max_delay),
                 Some(resource.max_delay)
@@ -2031,7 +2289,8 @@ mod tests {
         }
     }
 
-    /// E4 — the damping control keeps its cutoff at every rate, and the mapping is monotone.
+    /// E4 — the damping control keeps its cutoff at every rate up to the cap `min(19_845 Hz, fs / 4)`,
+    /// the cap keeps every coefficient at or below `1/2`, and the mapping is monotone.
     #[test]
     fn damping_mapping_is_rate_invariant_and_monotone() {
         // `g = G / (1 + G)` inverts to `G = g / (1 - g)`, and `fc = atan(G) * fs / pi`.
@@ -2055,19 +2314,36 @@ mod tests {
                 (low - 38.29).abs() < 0.1,
                 "{sample_rate} Hz low cutoff {low}"
             );
-            // Everything below the clamp point shares one cutoff.
+            // Everything below the clamp point shares one cutoff: `min(19_845 Hz, fs / 4)`, so
+            // `g <= 1/2` and the tail bound of #1374 holds (owner ruling of 2026-10-25).
+            let cap = if sample_rate <= 48_000 {
+                f64::from(sample_rate) / 4.0
+            } else {
+                DAMPING_MAX_CUTOFF_HZ
+            };
             let clamped = cutoff_of(damping_coefficient(0.01, sample_rate), sample_rate);
             assert!(
-                (clamped - DAMPING_MAX_CUTOFF_HZ).abs() < 0.1,
+                (clamped - cap).abs() < 0.1,
                 "{sample_rate} Hz clamped cutoff {clamped}"
             );
             let maximum = damping_coefficient_max(sample_rate);
+            assert!(
+                maximum <= 0.5,
+                "{sample_rate} Hz: g_max {maximum} above 1/2"
+            );
             let mut previous = f32::INFINITY;
             for step in 0..1_000 {
                 let control = 0.08 + (0.995 - 0.08) * step as f32 / 999.0;
                 let g = damping_coefficient(control, sample_rate);
                 assert!(g > 0.0 && g <= maximum, "{control} -> {g} > {maximum}");
-                assert!(g < previous, "{control} is not below {previous}");
+                let free = -math::log(f64::from(control)) * DAMPING_REFERENCE_RATE_HZ
+                    / (2.0 * core::f64::consts::PI)
+                    < cap;
+                if free {
+                    assert!(g < previous, "{control} is not below {previous}");
+                } else {
+                    assert_eq!(g, maximum, "{control} is clamped");
+                }
                 previous = g;
             }
         }
