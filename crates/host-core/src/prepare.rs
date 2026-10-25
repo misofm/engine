@@ -1372,6 +1372,7 @@ impl PlanStateInventory {
 
     /// The fading copies whose fade entry render has not settled (#1953b): the ones a successor
     /// keeps, so a phase 1 that ducks a copy's source strip waits for their lines.
+    #[cfg(feature = "control-provider")]
     pub(crate) fn unsettled_route_copies(&self) -> impl Iterator<Item = &session::Route> {
         self.route_copies
             .iter()
