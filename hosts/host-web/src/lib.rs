@@ -4920,6 +4920,9 @@ pub struct WebAdapter;
 impl ControlAdapter for WebAdapter {
     type Row = PlanResources;
     const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+    // #1588 R1: the browser serves the meter batches from its render half's fold.
+    const METER_DELIVERY: bool = true;
+    const RENDER_METER_FOLD: bool = true;
 }
 
 /// The control-protocol session the browser host owns (#1381a): the committed model at its boot

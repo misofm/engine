@@ -35,8 +35,16 @@ pub trait ControlAdapter {
     /// service step stages one `METER_BATCH` per completed batch of the output meter's windows,
     /// whose gate a relay applies on the render thread. An adapter that keeps the default refuses
     /// every meter entry with `meter.unavailable` and takes the output meter's reader and gate
-    /// itself (`take_output_meter`): the browser until #1588.
+    /// itself (`take_output_meter`).
     const METER_DELIVERY: bool = false;
+    /// Whether a meter-serving session's fold runs in the adapter's render half (#1588 R1): the
+    /// render half keeps the output meter's reader and gate (`take_output_meter`) and the strip
+    /// meters, folds them in its own [`host_core::MeterDelivery`] under a shared
+    /// [`host_core::MeterLevel`], and pushes each frame the protocol's table needs into the
+    /// plan's [`host_core::MeterFrameRing`]; the control plane stages the batches from the rings
+    /// with the same fold and records as its own delivery. The browser's. Read only with
+    /// [`Self::METER_DELIVERY`].
+    const RENDER_METER_FOLD: bool = false;
     /// Whether the session advertises the spectrum commands (#1595 R2): `SPECTRUM_CONFIGURE`,
     /// `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` with capability bit 16
     /// (`ProviderFeatures::spectrum`).

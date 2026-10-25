@@ -21,6 +21,10 @@ pub(crate) struct PreparedRuntime {
     /// batches ([`ControlAdapter::METER_DELIVERY`]): one entry per meter and per strip. Empty, and
     /// allocating nothing, for any other adapter.
     pub(crate) meter_tables: host_core::MeterTables,
+    /// The plan's meter frame ring (#1588 D2) for an adapter whose render half folds the meters
+    /// ([`ControlAdapter::RENDER_METER_FOLD`]): frames of the plan's strip count. `None` for any
+    /// other adapter.
+    pub(crate) meter_frames: Option<host_core::MeterFrameRing>,
     /// The plan's effect observation readers (#1584 D7), one per observed effect instance in
     /// `HostLiveControlHandles::effect_observations` order: kept, not dropped. Empty for a host
     /// whose preparer takes them for itself (the browser's).
@@ -436,8 +440,15 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         output_meter[2],
         // #1583: the requested gate word of an adapter whose control plane serves the meter
         // batches (`output_peak_gate_relay`), one `Arc<AtomicU64>`; none otherwise. The delivery's
-        // output-only tables allocate nothing.
-        checked_layout::<SharedArcAllocation<AtomicU64>>(usize::from(A::METER_DELIVERY))?,
+        // output-only tables allocate nothing. #1588 R1: a render-half fold's adapter keeps the
+        // live gate and shares the meter level word instead, one `Arc<AtomicU32>`.
+        if A::RENDER_METER_FOLD {
+            checked_layout::<SharedArcAllocation<core::sync::atomic::AtomicU32>>(usize::from(
+                A::METER_DELIVERY,
+            ))?
+        } else {
+            checked_layout::<SharedArcAllocation<AtomicU64>>(usize::from(A::METER_DELIVERY))?
+        },
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
         // #1584 D6a: the observation-ended cells, one more than the reliable queue's slots (an
         // event popped for egress keeps its cell until its frame is delivered), and the heap the
@@ -578,6 +589,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
     strip_heap_bytes: u64,
     capture_owners_high_water: usize,
     meter_tables: &host_core::MeterTables,
+    meter_frame_strips: Option<usize>,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
@@ -618,12 +630,7 @@ pub(crate) fn prepared_capi_resources<A: ControlAdapter>(
         route_controls,
         observation,
         monitor,
-        MeterTableRows {
-            retained: u64::try_from(meter_tables.heap_bytes())
-                .map_err(|_| failure(ResourceFault::Platform))?,
-            largest: u64::try_from(meter_tables.largest_allocation_bytes())
-                .map_err(|_| failure(ResourceFault::Platform))?,
-        },
+        meter_table_rows(meter_tables, meter_frame_strips)?,
         response_capture_bytes(compiled.normalized_model(), capture_owners_high_water)?,
     )
 }
@@ -1577,6 +1584,33 @@ pub trait RuntimePreparer: Send {
     }
 }
 
+/// The epoch's meter rows (#1587a R2, #1588 D2): its meter tables, and the frame ring of
+/// `meter_frame_strips` strips a render-half fold's plan has.
+fn meter_table_rows(
+    meter_tables: &host_core::MeterTables,
+    meter_frame_strips: Option<usize>,
+) -> Result<MeterTableRows, CompileFailure> {
+    let (ring, ring_largest) = match meter_frame_strips {
+        Some(strips) => (
+            host_core::MeterFrameRing::heap_bytes(strips),
+            host_core::MeterFrameRing::largest_allocation_bytes(strips),
+        ),
+        None => (Some(0), Some(0)),
+    };
+    let arithmetic = || failure(ResourceFault::Arithmetic);
+    let retained = meter_tables
+        .heap_bytes()
+        .checked_add(ring.ok_or_else(arithmetic)?)
+        .ok_or_else(arithmetic)?;
+    let largest = meter_tables
+        .largest_allocation_bytes()
+        .max(ring_largest.ok_or_else(arithmetic)?);
+    Ok(MeterTableRows {
+        retained: u64::try_from(retained).map_err(|_| failure(ResourceFault::Platform))?,
+        largest: u64::try_from(largest).map_err(|_| failure(ResourceFault::Platform))?,
+    })
+}
+
 /// Prepare one plan plus its source producers, and project its resource accounting.
 ///
 /// The shared pipeline is `host-core`; the control plane adds only what is its own: its retained
@@ -1676,11 +1710,22 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
     let observations = effect_observations.into_boxed_slice();
     // #1587a R2: the plan's meter tables, built here, on the control thread, so its adoption
     // exchanges them by pointer. Only a control-plane meter delivery reads them.
-    let meter_tables = if A::METER_DELIVERY {
-        host_core::MeterTables::new(meters.len(), compiled.normalized_model().strips().count())
+    let strip_count = compiled.normalized_model().strips().count();
+    let meter_tables = if A::METER_DELIVERY && !A::RENDER_METER_FOLD {
+        host_core::MeterTables::new(meters.len(), strip_count)
             .map_err(|_| failure(ResourceFault::Allocation))?
     } else {
         host_core::MeterTables::empty()
+    };
+    // #1588 D2: a render-half fold's frames reach the control plane through the plan's own ring,
+    // built here at the plan's strip count, so no swap reallocates one on the render thread.
+    let meter_frames = if A::METER_DELIVERY && A::RENDER_METER_FOLD {
+        Some(
+            host_core::MeterFrameRing::new(strip_count)
+                .map_err(|_| failure(ResourceFault::Allocation))?,
+        )
+    } else {
+        None
     };
     let mut capi = prepared_capi_resources::<A>(
         compiled,
@@ -1697,6 +1742,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         strip_heap_bytes,
         capture_owners_high_water,
         &meter_tables,
+        meter_frames.as_ref().map(|_| strip_count),
     )?;
     // #1594 R6, #1595 R7: a plan with spectrum captures has a session spectrum service, analysis
     // and one-shot result beside it (made at boot or at the promotion that installs the first
@@ -1742,6 +1788,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         effects,
         meters,
         meter_tables,
+        meter_frames,
         observations,
         plan,
         revision_gate,
@@ -1880,6 +1927,7 @@ where
         effects,
         meters,
         meter_tables,
+        meter_frames,
         observations,
         plan,
         mut revision_gate,
@@ -1950,7 +1998,29 @@ where
     // over a requested gate the plan's relay applies on the render thread; its provider learns the
     // window. Any other adapter takes the reader and the live gate (`take_output_meter`).
     let mut provider = provider;
-    let (output_meter, session_meters, output_gate) = if A::METER_DELIVERY {
+    let (output_meter, session_meters, output_gate) = if A::METER_DELIVERY && A::RENDER_METER_FOLD {
+        // #1588 R1: the render half folds. It keeps the output meter's reader and live gate, and
+        // the session stages the batches from the plans' frame rings under a shared level word,
+        // still reporting the windows the output queue dropped. A host whose strip meters bind
+        // no window of their own (`meter_window_blocks() == 0`: the browser's lease is refused
+        // then) has no delivery to serve, and its provider keeps refusing meter tables.
+        let drops = output_reader.drop_count();
+        if preparer.meter_window_blocks() != 0 {
+            provider.set_meter_window_blocks(Some(window_blocks));
+        }
+        let session_meters = crate::control::SessionMeters::rendered(
+            host_core::MeterLevel::new(),
+            drops,
+            window_blocks,
+            maximum_meter_entries(limits.maximum_control_frame_bytes)?,
+        )
+        .map_err(|_| failure(ResourceFault::Allocation))?;
+        (
+            Some((output_reader, output_gate)),
+            Some(session_meters),
+            None,
+        )
+    } else if A::METER_DELIVERY {
         let (requested, relay) =
             host_core::meters::output_peak_gate_relay(output_gate, u64::from(window_frames.get()));
         // #1587a R2: the delivery folds the boot plan's strip meters over its tables.
@@ -2022,7 +2092,8 @@ where
             capi,
             revision_gate,
         )
-        .with_observations(observations),
+        .with_observations(observations)
+        .with_meter_frames(meter_frames),
         pending_providers,
         retired_providers,
         publisher,

@@ -147,6 +147,25 @@ impl OutputPeakReader {
     pub fn dropped_windows(&self) -> u64 {
         self.dropped.load(Ordering::Acquire)
     }
+
+    /// A second reader of [`Self::dropped_windows`] (#1588 R4), for a control half that hands the
+    /// reader to a render-half delivery and still reports the windows a full queue dropped.
+    #[must_use]
+    pub fn drop_count(&self) -> OutputPeakDrops {
+        OutputPeakDrops(Arc::clone(&self.dropped))
+    }
+}
+
+/// A reader of the output meter's dropped-window count ([`OutputPeakReader::drop_count`]).
+#[derive(Clone, Debug)]
+pub struct OutputPeakDrops(Arc<AtomicU64>);
+
+impl OutputPeakDrops {
+    /// How many closed windows render dropped because the queue was full: monotone, never reset.
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 /// The render half of the output meter (#1581 D3). Its owner calls [`Self::observe`] once after
@@ -1101,10 +1120,32 @@ impl MeterFrameRing {
             .checked_add(queue_bytes.checked_mul(2)?)?
             .checked_add(3 * size_of::<u64>())
     }
+
+    /// The largest single allocation of [`Self::heap_bytes`]: a frame's strip peak table, or a
+    /// queue's slots or header. `None` on overflow.
+    #[must_use]
+    pub fn largest_allocation_bytes(strip_count: usize) -> Option<usize> {
+        let depth = NonZeroUsize::new(METER_FRAME_RING_DEPTH)?;
+        let queue = bounded_spsc_retained_payload::<Box<MeterFrame>>(depth).ok()?;
+        Some(
+            strip_count
+                .checked_mul(size_of::<[f32; 2]>())?
+                .max(size_of::<MeterFrame>())
+                .max(queue.slot_payload_bytes)
+                .max(queue.ring_header_bytes),
+        )
+    }
 }
 
 // REALTIME_POLICY_BEGIN: #1588 D2, the meter frame ring's two halves.
 impl MeterFrameConsumer {
+    /// The published frames the control half has not released, as one acquire load sees them:
+    /// a later push only adds to it.
+    #[must_use]
+    pub fn available(&self) -> usize {
+        self.published.available_at_entry()
+    }
+
     /// The oldest published frame the control half has not released, if any.
     #[must_use]
     pub fn peek(&self) -> Option<&MeterFrame> {
