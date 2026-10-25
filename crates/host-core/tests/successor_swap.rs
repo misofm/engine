@@ -4138,6 +4138,116 @@ fn a_restarted_strip_carries_nothing_before_its_fader_on_every_width() {
     }
 }
 
+/// A compressor `name` whose `sidechain-in` port reads `tap` of strip `source`.
+fn keyed_insert(name: &str, source: RouteSource) -> Effect {
+    Effect {
+        id: id(name),
+        sidechain: SidechainDeclaration::Routed(session::Sidechain {
+            source,
+            port_id: id("sidechain-in"),
+        }),
+        ..transparent_insert()
+    }
+}
+
+fn track_key(track: &str, tap: session::SendTap) -> RouteSource {
+    RouteSource::Track {
+        track_id: id(track),
+        tap,
+    }
+}
+
+/// #1324b gate 7 and D1's sidechain closure on every width, on the control thread. B adds an
+/// insert to `eq0` (or, in the last row, to the bus), which restarts it; `keys` are the keyed
+/// inserts A and B share. The restart set is closed over the sidechain edges: a strip keyed from a
+/// restarted strip's `insert_return` or `pre_fader` tap joins it, and so, on a second round, does a
+/// strip keyed from that one; a track's `input` tap and a `post_fader` tap add nothing, and nor
+/// does a submix's `input` tap whose line keeps its length. Each strip in the set is armed. Red if
+/// the closure ignores sidechains, stops after one round, adds an `input`- or `post_fader`-tap
+/// consumer, or adds a consumer of a submix's `input` tap whose line keeps its length.
+#[test]
+fn a_strip_keyed_from_a_restarted_strip_restarts_with_it_on_every_width() {
+    let bus = || RouteSource::Submix {
+        submix_id: id(ROUTE_BUS),
+        tap: session::SendTap::Input,
+    };
+    let rows: [(&str, Vec<(&str, RouteSource)>, &[&str]); 5] = [
+        (
+            "insert_return",
+            vec![("eq1", track_key("eq0", session::SendTap::InsertReturn))],
+            &["eq0", "eq1"],
+        ),
+        (
+            "input",
+            vec![("eq1", track_key("eq0", session::SendTap::Input))],
+            &["eq0"],
+        ),
+        (
+            "post_fader",
+            vec![("eq1", track_key("eq0", session::SendTap::PostFader))],
+            &["eq0"],
+        ),
+        (
+            "a chain",
+            vec![
+                ("eq1", track_key("eq0", session::SendTap::PreFader)),
+                ("aux", track_key("eq1", session::SendTap::InsertReturn)),
+            ],
+            &["aux", "eq0", "eq1"],
+        ),
+        ("a kept bus line", vec![("eq1", bus())], &[ROUTE_BUS]),
+    ];
+    for backend in backends() {
+        for (what, keys, restarted) in &rows {
+            let mut a_model = route_fade_base_limited(false);
+            for (strip, source) in keys {
+                track_mut(&mut a_model, strip)
+                    .inserts
+                    .effects
+                    .push(keyed_insert("key", source.clone()));
+            }
+            let mut b_model = a_model.clone();
+            if *what == "a kept bus line" {
+                b_model.submixes[0]
+                    .inserts
+                    .effects
+                    .push(transparent_insert());
+            } else {
+                track_mut(&mut b_model, "eq0")
+                    .inserts
+                    .effects
+                    .push(transparent_insert());
+            }
+            let a = Session::compile(a_model);
+            let b = Session::compile(b_model);
+            let plan = CellPlan::fresh(&a, backend);
+            let mut successor = CellPlan::successor(
+                &b,
+                &plan.live.prepared.inventory,
+                &a.model,
+                &EditRamps::new(),
+                backend,
+            );
+            let what = format!("{what} at {backend:?}");
+            let set: Vec<&str> = successor
+                .live
+                .prepared
+                .restarted_strips()
+                .iter()
+                .map(|strip| &**strip)
+                .collect();
+            assert_eq!(set, *restarted, "{what}");
+            let arms = graph::test_only_fade_arms(&mut successor.live.prepared.plan)
+                .expect("a graph plan");
+            assert_eq!(
+                arms.len(),
+                restarted.len(),
+                "{what}: each restarted strip is armed"
+            );
+        }
+    }
+}
+
 /// The oracle sees the fade: `reference` differs from `muted` rendered with no unmute.
 fn assert_audible(muted: &Session, feeds: &[&Feed], reference: &FadeRun, backend: Backend) {
     let silent = fade_run(muted, &[], feeds, None, &[], backend);
