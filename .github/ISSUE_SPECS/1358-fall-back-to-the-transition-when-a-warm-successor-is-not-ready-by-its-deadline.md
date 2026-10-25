@@ -201,3 +201,32 @@ A latency-growing edit always completes, and the host always learns how.
 - *Grow the default source ring by the warm-prime headroom* (#1406): `p_max_samples` and the
   ring headroom D1 relies on.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
+
+## Evidence and decision record
+
+Attempt 1 (2026-10-25, on `main` 19697b5ff, after #1403 and 1397a).
+
+- D1 verified: `T(48 kHz, 128) = ceil_128(4,800) = 4,864` (one tolerance in whole quanta, not
+  `stall_ring_frames`' 5,120), so `prime_deadline_samples(48_000, 128) = 4,864 + 2,048 + 128 =
+  7,040`, as gate 4 quotes. The gates pin the literal 7,040.
+- D3 shape (scope note R1, amended): `check_prime_deadline(publisher, newest_epoch, pending, fs,
+  q) -> DeadlineStep { Pending, Stale, Due }` decides and acts on nothing. The control plane's
+  step (`SessionState::check_prime_deadline`) drops a `Stale` record and runs a `Due` one through
+  1397a's `fall_back_pending_warm`, whose one withdrawal (`withdraw_pending_candidate`) answers
+  `Taken`/`Nothing` (record dropped, the taken candidate promoted, nothing published),
+  `Withdrawn` of the record's epoch (the transition, or on refusal the republish with the record
+  kept), or another epoch (republish, record dropped, debug assertion). R1's host-core
+  `withdraw()` would have needed a second withdrawal path beside `withdraw_pending_candidate`,
+  which also promotes a taken candidate (batch 15a M1).
+- The step is not yet called from `service` (#1360 D2, #1361); `test_check_prime_deadline`
+  reaches it, and replaces 1397a's `test_fall_back_to_transition`.
+- Gates (scope note R2): four control-plane tests in `control::tests::warm_successor`. Gate 3
+  folds into gate 1 (1,000 steps with render paused publish nothing; no wall-clock sleep). Gate 1
+  runs two arms: `not_before` at the publication clock, and at a duck's `S` past it. Its "output
+  equals A continued" holds up to the step that publishes the transition, which ducks from its
+  publication (#1397). Gate 4's refused supersession sets the effect-state cap one below the held
+  sum (B's own effect state is 0). #1397 gate 4's donor test is gate 5 run 1, now through the
+  deadline step. The rig treats a full ring (a pending candidate's added source) as backpressure
+  and offers the chunk again at the next block.
+- Acked-batch question: no new queue; the step drops only a record, and every withdrawn candidate
+  is the donor of a transition prepared from the committed model or republished whole.
