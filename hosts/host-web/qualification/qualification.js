@@ -446,16 +446,28 @@ async function runLiveControlQualification(createHost, sessionDocument) {
 
 /// The delay the structural row applies, in samples (#1562b).
 const STRUCTURAL_DELAY_SAMPLES = 64;
+/// `N`, the live-control session's mute ramp: its default `mute_ms` of 10 ms (#1324a).
+const STRUCTURAL_MUTE_RAMP = Math.round((10 * SAMPLE_RATE) / 1000);
+/// The ceiling to a whole quantum.
+const ceilQuantum = (samples) => Math.ceil(samples / QUANTUM_FRAMES) * QUANTUM_FRAMES;
+/// `S = ceil_q(p + q + N + C)`: the delay edit restarts the track, a duck-swap (#1324a), committed
+/// before the first block (`p = 0`) in a session with no compensation line (`C = 0`).
+const STRUCTURAL_SWAP_SAMPLE = ceilQuantum(QUANTUM_FRAMES + STRUCTURAL_MUTE_RAMP);
+/// The first frame after the successor's fade-in: it fires at the first block at or after `S + D`,
+/// with `D` at most the edit's delay, and ramps over `N`.
+const STRUCTURAL_FADED_IN = ceilQuantum(STRUCTURAL_SWAP_SAMPLE + STRUCTURAL_DELAY_SAMPLES)
+  + STRUCTURAL_MUTE_RAMP;
 
 /// #1562b: a structural apply in a real browser. The live-control session's track gets a
 /// `delay_samples` edit, which the core classifies as a rebuild: it prepares a replacement plan and
-/// publishes it while the first plan has rendered nothing, so the very first quantum is the swap
-/// block (the offline context cannot be suspended in every engine). The row holds what the swap
-/// must keep: the reply is the rebuild path, the applied revision is not early, the output is the
-/// submitted PCM delayed by exactly the edit (computed here, not read back), the meter stream is the
-/// successor's from its first frame (the retired header's views were switched in the swap block,
-/// and the frame carries the structure epoch of the list), and no allocator call ran on the
-/// render thread.
+/// publishes it while the first plan has rendered nothing (the offline context cannot be suspended
+/// in every engine). The edit restarts the track, so the rebuild is a duck-swap (#1324a): the first
+/// plan ramps the track out over `N` from the first block, and the successor is adopted at
+/// `S = ceil_q(q + N)` and fades the track in. The row holds what the swap must keep: the reply is
+/// the rebuild path, the applied revision is not early (it moves at `S`, exactly), the duck holds
+/// exact `+0.0` from its end until `S`, the output after the fade-in is the submitted PCM delayed
+/// by exactly the edit (computed here, not read back), the meter stream is the successor's (the
+/// frame carries the structure epoch of the list), and no allocator call ran on the render thread.
 async function runStructuralApplyQualification(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, LIVE_CONTROL_FRAMES, SAMPLE_RATE);
   const host = await createHost({
@@ -520,8 +532,12 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
   const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
 
   let exact = true;
+  let duckedSilent = true;
   for (let channel = 0; channel < 2; channel += 1) {
-    for (let frame = 0; frame < LIVE_CONTROL_FRAMES; frame += 1) {
+    for (let frame = STRUCTURAL_MUTE_RAMP; frame < STRUCTURAL_SWAP_SAMPLE; frame += 1) {
+      if (!Object.is(actual[channel][frame], 0)) duckedSilent = false;
+    }
+    for (let frame = STRUCTURAL_FADED_IN; frame < LIVE_CONTROL_FRAMES; frame += 1) {
       if (!Object.is(actual[channel][frame], expected[channel][frame])) exact = false;
     }
   }
@@ -529,6 +545,7 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
   for (let index = 1; index < meterFrames.length; index += 1) {
     if (meterFrames[index].sequence <= meterFrames[index - 1].sequence) increasing = false;
   }
+  const fadedIn = (pcm) => pcm.map((channel) => channel.subarray(STRUCTURAL_FADED_IN));
   return {
     commandOk: command.ok,
     commandPath: command.path,
@@ -539,14 +556,16 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
     pendingRevision: pending.appliedRevision.toString(),
     finalRevision: after.appliedRevision.toString(),
     finalSample: after.appliedSample.toString(),
+    scheduledSample: String(STRUCTURAL_SWAP_SAMPLE),
     meterFrames: meterFrames.length,
     meterFrameWidth: meterFrames.length === 0 ? 0 : meterFrames[0].peaks,
     meterTrackCount: meterFrames.length === 0 ? 0 : meterFrames[0].trackCount,
     structureEpochs: [...new Set(meterFrames.map((frame) => frame.structureEpoch))],
     sequenceIncreasing: increasing,
+    duckedSilent,
     exactDelayedOutput: exact,
-    expectedDigest: await pcmDigest(expected, LIVE_CONTROL_FRAMES),
-    renderedDigest: await pcmDigest(actual, LIVE_CONTROL_FRAMES),
+    expectedDigest: await pcmDigest(fadedIn(expected), LIVE_CONTROL_FRAMES - STRUCTURAL_FADED_IN),
+    renderedDigest: await pcmDigest(fadedIn(actual), LIVE_CONTROL_FRAMES - STRUCTURAL_FADED_IN),
     renderAllocations,
   };
 }

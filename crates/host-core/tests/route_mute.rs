@@ -1419,6 +1419,14 @@ mod follow {
     pub(super) const L: u64 = 486;
 
     /// Every bank width of the target and the scalar oracle (R17-4).
+    /// The bank widths of [`backends`]: every backend whose strips carry their fader lanes.
+    pub(super) fn bank_backends() -> Vec<Backend> {
+        backends()
+            .into_iter()
+            .filter(|backend| *backend != Backend::Scalar)
+            .collect()
+    }
+
     pub(super) fn backends() -> Vec<Backend> {
         vec![
             #[cfg(target_feature = "avx2")]
@@ -2012,13 +2020,16 @@ fn send_gain(gain_db: f32, length: u32) -> host_core::RouteControlRecord {
         .expect("an in-domain send record")
 }
 
-/// #1652 gate 4(a) (every bank width and the scalar oracle). A predecessor with live controls
+/// #1652 gate 4(a) (every bank width). A predecessor with live controls
 /// and no stored automation ramps its send `t-b` toward `-12` dB over 2,000 samples from block 4.
 /// A rebuild at block 6 adds a mute entry on `t` (held unmuted, then a step to muted at 1,000):
 /// the successor gives `t-b` the seven-word cell, so the route changes kind. It keeps the send's
 /// ramp by route ID: until the step, the swapped run is bit for bit the never-swapped
 /// predecessor. The join writes no seven-word record (no word the models hold changed), the swap
 /// block and every later block allocate and free nothing, and from the step the send follows.
+///
+/// Not on the scalar oracle: its fader is no bank lane, so it never carries, the strip restarts at
+/// every swap, and a restarted strip restarts its `pre_fader` send with it (#1324 D2).
 ///
 /// Test value: red if gaining automation on the source re-points the send and drops its ramp
 /// (the successor starts at its prepared `-12` dB), if the join writes a record only because the
@@ -2047,7 +2058,7 @@ fn a_rebuild_that_adds_a_mute_entry_keeps_the_sends_ramp() {
             });
         }
     };
-    for backend in follow::backends() {
+    for backend in bank_backends() {
         let what = format!("{backend:?}");
         let (twin, _) = live_swap(&a, None, backend, &pcm, ramp);
         let (swapped, handles) = live_swap(&a, Some((&b, &committed)), backend, &pcm, ramp);
@@ -2358,14 +2369,14 @@ fn a_send_edit_and_a_mute_entry_in_one_rebuild_adopt_over_one_length() {
     }
 }
 
-/// #1653 U2b MINOR-2 (every bank width and the scalar oracle). A predecessor whose mute entry
+/// #1653 U2b MINOR-2 (every bank width). A predecessor whose mute entry
 /// holds `t` open is rebuilt at block 6 with `t` hand-muted (both lanes) and a transaction that
 /// gave the strip's mute row an explicit 200-sample ramp, not the session's `M`. The send follows,
 /// so the join's record is built from the source's effective mute in both models: its `before`
 /// term is the open strip, its `after` term the muted one, so the record exists and ramps over the
 /// gate length, the strip's 200. The send reaches exact `+0.0` 200 samples after the swap block
-/// starts (the strip does too, on the bank widths: the scalar oracle restarts its strip at the
-/// swap).
+/// starts, and so does the strip. Not on the scalar oracle, which restarts its strip at every swap
+/// and its `pre_fader` send with it (#1324 D2).
 ///
 /// Test value: red if the join reads the source's mute of the successor for both terms (the
 /// records of the two models then agree, no record is written, and the carried send reopens its
@@ -2390,7 +2401,7 @@ fn a_rebuild_that_hand_mutes_the_source_ramps_the_send_over_the_edits_length() {
     let quiet = |_: usize,
                  _: &mut host_core::HostLiveControlHandles,
                  _: &mut engine::realtime::PlanRevisionGate| {};
-    for backend in follow::backends() {
+    for backend in bank_backends() {
         let what = format!("{backend:?}");
         let (swapped, handles) = live_swap_ramped(&a, Some((&b, &a)), backend, &pcm, &ramps, quiet);
         assert_eq!(
@@ -2414,10 +2425,8 @@ fn a_rebuild_that_hand_mutes_the_source_ramps_the_send_over_the_edits_length() {
             "{what}: the send reaches +0.0 over the edit's {RAMP} samples, at {}",
             end - at
         );
-        if backend != Backend::Scalar {
-            let strip = first_zero_from(&plane(&swapped, 0), at).expect("the strip mutes");
-            assert_eq!(strip, end, "{what}: the strip and the send ramp together");
-        }
+        let strip = first_zero_from(&plane(&swapped, 0), at).expect("the strip mutes");
+        assert_eq!(strip, end, "{what}: the strip and the send ramp together");
     }
 }
 

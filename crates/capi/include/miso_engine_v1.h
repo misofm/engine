@@ -386,6 +386,23 @@ extern "C" {
  * added one: in a new ring at generation 1, frame 0, with the PCM accepted for it before the
  * command discarded with its plan; the host restarts its feed.
  *
+ * Duck-swapping a strip whose state cannot continue (issue 1324). A transaction whose
+ * replacement restarts a strip it keeps -- an insert added, removed or reordered, delay_samples, a
+ * value the plan keeps prepared (such as the true-peak limiter's lookahead), any edit after which
+ * one of the strip's owners cannot carry its state -- ducks that strip as a removal does: its fader
+ * and each of its routes whose tap precedes the fader are muted on the running plan over N, and the
+ * replacement is adopted no earlier than S, with C the longest compensation delay of a route out of
+ * a ducked strip. The replacement starts every owner of the strip before its fader, and its fader,
+ * at rest, then fades the strip and those routes back in over N from the first block at or after
+ * S + D, where D is the strip's own latency before its fader. The dip is N, the wait to S (from
+ * q + C up to 2q + C), D, then N. Strips the edit does not restart play on, bit for bit, and a
+ * re-pointed route never ducks its source strip. The watermark reports the revision first at S as
+ * EXACT. A transaction before S that reverts the edit commits and is adopted at the same S; the
+ * strip fades back in from S. Two limits remain: a carried effect whose sidechain reads a ducked
+ * strip's tap before the fader does not duck with it and still steps at S (issue 1324b), and a
+ * route before the fader that follows its source's automated mute is not faded back in: it
+ * restarts at its prepared value at S.
+ *
  * A transaction behind an unadopted replacement (issue 1310). A SESSION_TRANSACTION_APPLY that
  * needs a new plan while an earlier transaction's replacement plan has not been adopted by render
  * (a paused host never adopts one) commits as any other: it is not refused as backpressure because
