@@ -89,13 +89,6 @@ const SEEK_AT_FIELDS = ["sourceId", "generation", "sourceFrame", "anchorSample"]
 const SEEK_REPORT_FIELDS = [
   "generation", "firstSample", "sourceFrame", "cumulativeUnderrunFrames", "cumulativeHeldFrames",
 ];
-// Issue #137 D1, #1677: the frozen 272-byte little-endian command record. It names its tap by
-// stable key: a one-byte length and a 128-byte zero-padded field for each of the strip's and the
-// effect's ID. The IDs are at most 127 UTF-8 bytes (`session::STABLE_ID_MAXIMUM_BYTES`).
-const COMMAND_RECORD_BYTES = 272;
-const RECORD_ID_FIELD_BYTES = 128;
-const RECORD_ID_MAXIMUM_BYTES = RECORD_ID_FIELD_BYTES - 1;
-const MAXIMUM_COMMAND_RECORDS = 256;
 // Issue #1562a D1: the control frames in flight on the port at once. The worklet answers them in
 // arrival order; a flood is refused here with `RESULT_BACKPRESSURE` before any transfer.
 const MAXIMUM_CONTROL_IN_FLIGHT = 64;
@@ -103,16 +96,8 @@ const MAXIMUM_CONTROL_IN_FLIGHT = 64;
 const MAXIMUM_CONTROL_FRAME_BYTES = 16384;
 // Issue #143: the largest `liveControlObservationTaps` the frozen configuration accepts.
 const MAXIMUM_OBSERVATION_TAPS = 16;
-// Issue #143: the two observation command kinds, named here so `observe()` never writes a literal.
-// Not `MISO_`-prefixed: `scripts/check-env-vocabulary.sh` reserves that prefix for the engine's
-// environment vocabulary, and a `MISO_`-prefixed identifier in any tracked file is a failure.
-const OBSERVE_SUBSCRIBE_KIND = 7;
-const OBSERVE_UNSUBSCRIBE_KIND = 8;
-const SUBSCRIPTION_FIELDS = [
-  "stripId", "rack", "effectId", "tapId", "windowBlocks", "armed",
-];
 const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
-const MAXIMUM_OBSERVATION_READS = MAXIMUM_COMMAND_RECORDS;
+const MAXIMUM_OBSERVATION_READS = 256;
 const OBSERVATION_CHANNELS = new Set([1, 2, 3]);
 const OBSERVATION_STATUSES = new Set([1, 2, 3]);
 const OBSERVATION_SELECTION_BYTES = 32;
@@ -136,32 +121,6 @@ const SESSION_SOURCE_FIELDS = ["id", "channels", "frames"];
 const RACK_INSERTS = 1;
 const RACK_CONSOLE = 3;
 const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
-
-/// Order two IDs by their code units, which is their byte order for the ASCII IDs a session holds.
-function compareIds(left, right) {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-/// The UTF-8 bytes of a record's ID field. It runs on the caller's thread, never in `process()`.
-function idBytes(id) {
-  return new TextEncoder().encode(id);
-}
-
-/// A record's ID: a string whose UTF-8 form fits the 127 bytes of its field. Whether it names
-/// anything is the engine's to say, with a typed reason.
-function validRecordId(id) {
-  return typeof id === "string" && idBytes(id).length <= RECORD_ID_MAXIMUM_BYTES;
-}
-
-function validSubscription(subscription) {
-  return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
-    && validRecordId(subscription.stripId)
-    && effectRack(subscription.rack)
-    && validRecordId(subscription.effectId)
-    && validU32(subscription.tapId) && subscription.tapId > 0
-    && validU32(subscription.windowBlocks)
-    && typeof subscription.armed === "boolean";
-}
 
 function validObservationAddress(address) {
   return hasExactFields(address, OBSERVATION_ADDRESS_FIELDS)
@@ -198,85 +157,7 @@ function validObservationRow(row) {
     && typeof row.left === "number" && Number.isFinite(row.left)
     && typeof row.right === "number" && Number.isFinite(row.right);
 }
-// Issue #143 froze reasons 10 and 11; issue #151 found that this file still wrote the bound as
-// the literal `<= 9`, so the only two reasons the observation path ever returns read as malformed
-// acknowledgements and killed the whole host with a sticky 255.
-//
-// The vocabulary is therefore a table, spelled once, in the frozen value order. The bound is
-// derived from it and never written as a literal again, and
-// `scripts/check-command-reason-vocabulary.py` holds this table equal to
-// `hosts/host-web/src/lib.rs`'s `COMMAND_REASON_*` constants, the `.d.ts`
-// `MisoCommandReason` enum, the metadata generator's `commandReasons` rows and the schema
-// gate's own list. Bump a Rust reason without the rest and that gate is red.
-//
-// Reasons 12-14 belonged to the value kinds #1565A deleted. They are retired and never
-// reallocated, so their entries are `null`: an acknowledgement that names one is malformed.
-// Issue #1676 added 15, `observationLimit`.
-const COMMAND_REASONS = Object.freeze([
-  "none",
-  "malformed",
-  "unknownTrack",
-  "unknownRack",
-  "unknownEffect",
-  "unknownParameter",
-  "domain",
-  "unsupportedKind",
-  "backpressure",
-  "wrongState",
-  "unknownTap",
-  "observationUnbound",
-  null,
-  null,
-  null,
-  "observationLimit",
-]);
 
-/// `true` for exactly the reasons this ABI version declares.
-///
-/// A reason outside the table is a genuinely malformed acknowledgement and still fails the host:
-/// the fix for #151 widened the vocabulary, it did not stop validating it.
-function validCommandReason(reason) {
-  return validU32(reason) && reason < COMMAND_REASONS.length && COMMAND_REASONS[reason] !== null;
-}
-
-const COMMAND_FIELDS = ["kind", "rack", "stripId", "effectId", "tapId", "windowBlocks"];
-// Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records. Issue #1565a
-// deleted every value kind (1-6 and 9-17): a value goes through the `control` message, and a record
-// of a deleted kind is refused here as an unknown kind is. Kind numbers are never reallocated.
-//
-// This set is the bound: `validCommand` asks it, never a hand-written range. It is one of
-// the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
-// constants, so a kind that exists on the wire and not here is red before it ships.
-const COMMAND_KINDS = new Set([7, 8]);
-
-function validCommand(command) {
-  return hasExactFields(command, COMMAND_FIELDS)
-    && COMMAND_KINDS.has(command.kind)
-    && effectRack(command.rack)
-    && validRecordId(command.stripId) && validRecordId(command.effectId)
-    && validU32(command.tapId) && validU32(command.windowBlocks);
-}
-
-/// Encode one live-control submission into the 272-byte semantic wire record (#1677).
-function encodeCommands(commands) {
-  const records = new Uint8Array(commands.length * COMMAND_RECORD_BYTES);
-  const view = new DataView(records.buffer);
-  for (let index = 0; index < commands.length; index += 1) {
-    const command = commands[index];
-    const offset = index * COMMAND_RECORD_BYTES;
-    const stripId = idBytes(command.stripId);
-    const effectId = idBytes(command.effectId);
-    records[offset] = command.kind;
-    records[offset + 1] = command.rack;
-    records[offset + 2] = stripId.length;
-    records[offset + 3] = effectId.length;
-    view.setUint32(offset + 4, command.tapId, true);
-    view.setUint32(offset + 8, command.windowBlocks, true);
-    records.set(stripId, offset + 16);
-    records.set(effectId, offset + 16 + RECORD_ID_FIELD_BYTES);
-  }
-  return records;
-}
 const RESOURCE_FIELDS = [
   "sampleRateHz", "quantumFrames", "backend", "optionsBytes", "statusBytes", "sessionDocumentBytes",
   "diagnosticBytes", "idStagingBytes", "sourcePcmStagingBytes", "outputPcmBytes",
@@ -529,14 +410,9 @@ class MisoAudioWorkletHost {
   #statusRead = null;
   #statusFollow = null;
   #inFlightRenderAllocations = 0;
-  #inFlightCommands = 0;
   #inFlightControl = 0;
   #inFlightObservationReads = 0;
   #inFlightLease = new Set();
-  #liveControlMeterBlocks;
-  /// Issue #143: the host's own record of the taps it armed, keyed by the four addressing numbers.
-  /// It is what `trackGrDb`'s positional array structurally cannot express.
-  #observations = new Map();
   #ringBlocks;
   #onMeterFrame = null;
   #onTelemetryFrame = null;
@@ -562,7 +438,6 @@ class MisoAudioWorkletHost {
     resources,
     memoryBytes,
     ringBlocks,
-    liveControlMeterBlocks,
   ) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
@@ -574,7 +449,6 @@ class MisoAudioWorkletHost {
     this.#sampleRateHz = sampleRateHz;
     this.#quantumFrames = quantumFrames;
     this.#ringBlocks = ringBlocks;
-    this.#liveControlMeterBlocks = liveControlMeterBlocks;
     this.#port = node.port;
     this.#port.onmessage = (event) => this.#receive(event.data);
     this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
@@ -613,14 +487,6 @@ class MisoAudioWorkletHost {
     this.#serviceTick = null;
   }
 
-  #submitOrdinaryRecords(records, count) {
-    return this.#request(
-      { tag: "miso.command.v1", count, records },
-      [records.buffer],
-      "command",
-    );
-  }
-
   // Request IDs are strictly monotonic and the worklet handles messages in arrival order, so the
   // first key of the insertion-ordered map is the oldest unsettled request.
   #oldestRequestId() {
@@ -653,8 +519,6 @@ class MisoAudioWorkletHost {
       }
     } else if (pending.response === "renderAllocations") {
       this.#inFlightRenderAllocations -= 1;
-    } else if (pending.response === "command") {
-      this.#inFlightCommands -= 1;
     } else if (pending.response === "control") {
       this.#inFlightControl -= 1;
     } else if (pending.response === "observationRead") {
@@ -803,12 +667,7 @@ class MisoAudioWorkletHost {
     }
     const expectedFields = pending.response === "source"
       ? ["tag", "requestId", "result", "planes"]
-      : pending.response === "command"
-        ? [
-          "tag", "requestId", "result", "reason", "rejectedIndex", "admitted", "appliedAtSample",
-          "records",
-        ]
-        : pending.response === "control"
+      : pending.response === "control"
           ? ["tag", "requestId", "result", "response", "revision"]
         : pending.response === "sessionMap"
           ? ["tag", "requestId", "result", "sources", "metersAttached"]
@@ -848,15 +707,6 @@ class MisoAudioWorkletHost {
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
-    const validCommandAck = pending.response !== "command" || (
-      validCommandReason(message.reason)
-      && validU32(message.rejectedIndex) && message.rejectedIndex < MAXIMUM_COMMAND_RECORDS
-      && validU32(message.admitted) && message.admitted <= pending.commandCount
-      && (message.result === RESULT_OK) === (message.admitted === pending.commandCount)
-      && validU64(message.appliedAtSample)
-      && message.records instanceof Uint8Array
-      && message.records.byteLength === pending.commandCount * COMMAND_RECORD_BYTES
-    );
     const validControl = pending.response !== "control" || (
       message.response instanceof Uint8Array
       && message.response.buffer instanceof ArrayBuffer
@@ -918,7 +768,7 @@ class MisoAudioWorkletHost {
         : message.report === null);
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
-        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validControl || !validSessionMap
+        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validControl || !validSessionMap
         || !validObservationMap || !validObservationRead
         || !validSessionSeek || !validSeekReport) {
       this.#fail(webError(255, message.requestId));
@@ -963,12 +813,6 @@ class MisoAudioWorkletHost {
     if (response === "sessionSeek") return this.#inFlightSessionSeeks >= 1;
     if (response === "seekReport") return this.#inFlightSeekReports.has(sourceId);
     if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
-    // Issue #137 D1: the local bound is the worklet-side queue depth, so a flood is refused here,
-    // before any transfer, and the caller keeps its record block. The engine-side bound is the
-    // authority; this one only avoids paying a message round trip to be told so.
-    if (response === "command") {
-      return this.#inFlightCommands >= MAXIMUM_COMMAND_RECORDS;
-    }
     if (response === "control") return this.#inFlightControl >= MAXIMUM_CONTROL_IN_FLIGHT;
     if (response === "observationRead") return this.#inFlightObservationReads >= 1;
     if (response === "lease" || response === "sessionMap" || response === "observationMap") {
@@ -988,8 +832,6 @@ class MisoAudioWorkletHost {
       this.#inFlightSeekReports.add(sourceId);
     } else if (response === "renderAllocations") {
       this.#inFlightRenderAllocations += 1;
-    } else if (response === "command") {
-      this.#inFlightCommands += 1;
     } else if (response === "control") {
       this.#inFlightControl += 1;
     } else if (response === "observationRead") {
@@ -1022,7 +864,6 @@ class MisoAudioWorkletHost {
         requestId,
         sourceId,
         leaseKind: sourceId,
-        commandCount: stamped.count ?? 0,
         observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
         generation: stamped.generation,
         resolve,
@@ -1194,28 +1035,12 @@ class MisoAudioWorkletHost {
   /// Read this instance's render-locked allocator count (issue #1333 D3).
   ///
   /// The count is every allocator call the instance made inside the exports its processor calls
-  /// on the render thread after boot: render, command submission, meter polling and the
-  /// observation and response staging reads. Decision 15 requires it to stay zero. It
+  /// on the render thread after boot: render, source submission, meter polling and the
+  /// observation staging reads. Decision 15 requires it to stay zero. It
   /// is per instance, so a caller reads it on each host before that host's `dispose()`. The
   /// worklet answers in its message handler, never in `process()`.
   renderAllocationCount() {
     return this.#request({ tag: "miso.renderallocations.v1" }, [], "renderAllocations");
-  }
-
-  /// Submit one live-control command batch (issue #137 D1).
-  ///
-  /// The whole batch is one transaction: the acknowledgement's `result` is `RESULT_OK` only when
-  /// every record was admitted, and `appliedAtSample` is the exact absolute sample the batch takes
-  /// effect at. A refusal names `reason` and `rejectedIndex` and admits nothing.
-  command(request) {
-    if (!hasExactFields(request, ["commands"])
-        || !Array.isArray(request.commands)
-        || request.commands.length === 0
-        || request.commands.length > MAXIMUM_COMMAND_RECORDS
-        || !request.commands.every(validCommand)) {
-      return Promise.reject(webError(1));
-    }
-    return this.#submitOrdinaryRecords(encodeCommands(request.commands), request.commands.length);
   }
 
   /// Send one command frame to the engine's control plane and resolve with its reply (issue
@@ -1267,78 +1092,11 @@ class MisoAudioWorkletHost {
     );
   }
 
-  /// Subscribe to, or unsubscribe from, declared observation taps (issue #143).
-  ///
-  /// # Why this is not just `command()` with two more kinds
-  ///
-  /// It *is* those two kinds on the wire -- one batch, one transaction, the same
-  /// `appliedAtSample`. What it adds is the answer to the question `trackGrDb` structurally cannot
-  /// answer: **which** tracks have an observed effect at all. The frame's array is positional, so
-  /// a track with no tap and a track that is not reducing both read `0`; the map this returns is
-  /// where that distinction lives, and it is why the array can be read without null checks.
-  ///
-  /// The map is the host's own record of what it successfully armed. A batch is all-or-nothing, so
-  /// it is updated only on `result === 0`, and it is cleared whenever the plan is replaced --
-  /// subscriptions belong to the plan they were applied to (D7).
-  async observe(request) {
-    if (!hasExactFields(request, ["subscriptions"])
-        || !Array.isArray(request.subscriptions)
-        || request.subscriptions.length === 0
-        || request.subscriptions.length > MAXIMUM_COMMAND_RECORDS
-        || !request.subscriptions.every(validSubscription)) {
-      return Promise.reject(webError(1));
-    }
-    const commands = request.subscriptions.map((subscription) => ({
-      kind: subscription.armed
-        ? OBSERVE_SUBSCRIBE_KIND
-        : OBSERVE_UNSUBSCRIBE_KIND,
-      rack: subscription.rack,
-      stripId: subscription.stripId,
-      effectId: subscription.effectId,
-      tapId: subscription.tapId,
-      windowBlocks: subscription.windowBlocks,
-    }));
-    const ack = await this.command({ commands });
-    if (ack.result === 0) {
-      for (const subscription of request.subscriptions) {
-        // The tap's stable key, the one the core's `OBSERVATION_ENDED` names.
-        const key = JSON.stringify([
-          subscription.stripId, subscription.rack, subscription.effectId, subscription.tapId,
-        ]);
-        if (subscription.armed) {
-          this.#observations.set(key, {
-            stripId: subscription.stripId,
-            rack: subscription.rack,
-            effectId: subscription.effectId,
-            tapId: subscription.tapId,
-            windowBlocks: subscription.windowBlocks === 0
-              ? Number(this.#liveControlMeterBlocks)
-              : subscription.windowBlocks,
-          });
-        } else {
-          this.#observations.delete(key);
-        }
-      }
-    }
-    return Object.freeze({
-      tag: "miso.observe.v1",
-      requestId: ack.requestId,
-      result: ack.result,
-      reason: ack.reason,
-      bindings: Object.freeze([...this.#observations.values()]
-        .sort((left, right) => compareIds(left.stripId, right.stripId)
-          || left.rack - right.rack
-          || compareIds(left.effectId, right.effectId)
-          || left.tapId - right.tapId)
-        .map(Object.freeze)),
-    });
-  }
-
   /// Read the compiled session's canonical track order (issue #137 D1), its sources (issue #207)
   /// and its canonical submix order (issue #1210 D3).
   ///
   /// This is the addressing authority for the strip positions the meter frame and the observation
-  /// map use: the app never guesses an index. A command record does not use one: it names its tap
+  /// map use: the app never guesses an index. An `Observe` edit does not use one: it names its tap
   /// by stable key (#1677).
   sessionMap() {
     return this.#request({ tag: "miso.sessionmap.v1" }, [], "sessionMap", false, undefined, "sessionMap");
@@ -1444,7 +1202,6 @@ class MisoAudioWorkletHost {
     this.#stopServiceTick();
     await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
     this.#disposed = true;
-    this.#observations.clear();
     this.#onMeterFrame = null;
     this.#onTelemetryFrame = null;
     this.#controlEventListeners.clear();
@@ -1571,9 +1328,6 @@ export async function createMisoAudioWorkletHost(options) {
       // The per-source in-flight bound is the ring depth in quanta: the ring the engine reports it
       // resolved at boot (issue #1406b), so a zero override gives the engine's own default ring.
       ready.sourceRingFrames / quantumFrames,
-      // Issue #143: the plan's default observation window is the meter window; a subscription that
-      // names `windowBlocks: 0` gets it, and the returned map says which one it got.
-      Number(bootOptions.liveControlMeterBlocks),
     );
   } catch (error) {
     cleanupNode(node);

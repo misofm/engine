@@ -60,7 +60,7 @@ fn boot_options(quantum: u32) -> WebBootOptions {
 /// past its buffer. A boot of a short, mono session never meets either; only a rebuild does.
 #[test]
 fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlong_id() {
-    let projection = project_buffers(1, 48_000, 128, boot_options(128)).expect("bridge projection");
+    let projection = project_buffers(1, 48_000, 128).expect("bridge projection");
     let mut buffers = allocate_buffers(projection).expect("staging");
     assert_eq!(buffers.source_id.len(), session::STABLE_ID_MAXIMUM_BYTES);
     assert_eq!(
@@ -115,7 +115,6 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
         u32::try_from(document.len()).expect("bounded fixture document"),
         shape.sample_rate_hz,
         shape.quantum_frames,
-        options,
     )
     .expect("bridge projection");
     projected_retained_bytes(
@@ -254,42 +253,11 @@ fn frozen_layouts_and_values_are_exact() {
             BUFFER_SOURCE_PCM,
             BUFFER_DIAGNOSTIC,
             BUFFER_OUTPUT_PCM,
-            BUFFER_COMMAND,
             BUFFER_METER_FRAME
         ],
-        [2, 3, 4, 5, 6, 7]
+        [2, 3, 4, 5, 7]
     );
-    // Issue #137 D1: the two live-control words were the first two of the frozen configuration's
-    // four reserved words; since #1565 the first is `reserved1` and must be zero. Every V1 writer
-    // already sets it to zero, so the layout and every existing caller stand.
-    assert_eq!(size_of::<WebCommandReport>(), 48);
-    assert_eq!(COMMAND_REPORT_BYTES, 48);
-    assert_eq!(COMMAND_RECORD_BYTES, 272);
-    assert_eq!(RECORD_ID_FIELD_BYTES, 128);
-    assert_eq!(MAXIMUM_COMMAND_RECORDS, 256);
     assert_eq!(DEFAULT_METER_BLOCKS, 12);
-    // Kinds 1-6 and 9-17 are deleted (#1565A) and their numbers are never reallocated.
-    assert_eq!(
-        [COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE],
-        [7, 8]
-    );
-    assert_eq!(
-        [
-            COMMAND_REASON_NONE,
-            COMMAND_REASON_MALFORMED,
-            COMMAND_REASON_UNKNOWN_TRACK,
-            COMMAND_REASON_UNKNOWN_RACK,
-            COMMAND_REASON_UNKNOWN_EFFECT,
-            COMMAND_REASON_UNKNOWN_PARAMETER,
-            COMMAND_REASON_DOMAIN,
-            COMMAND_REASON_UNSUPPORTED_KIND,
-            COMMAND_REASON_BACKPRESSURE,
-            COMMAND_REASON_WRONG_STATE,
-            COMMAND_REASON_UNKNOWN_TAP,
-            COMMAND_REASON_OBSERVATION_UNBOUND
-        ],
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    );
     assert_eq!(offset_of!(WebBootOptions, struct_size), 0);
     assert_eq!(offset_of!(WebBootOptions, require_quantum_frames), 12);
     assert_eq!(offset_of!(WebBootOptions, source_ring_frames), 16);
@@ -324,10 +292,6 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebMeterHeader, frame_pointer), 72);
     assert_eq!(offset_of!(WebMeterHeader, successor_pointer), 76);
     assert_eq!(offset_of!(WebMeterHeader, structure_epoch), 80);
-    assert_eq!(offset_of!(WebCommandReport, result), 8);
-    assert_eq!(offset_of!(WebCommandReport, rejected_index), 16);
-    assert_eq!(offset_of!(WebCommandReport, applied_at_sample), 24);
-    assert_eq!(offset_of!(WebCommandReport, reserved), 32);
     assert_eq!(offset_of!(WebStatus, state), 8);
     assert_eq!(offset_of!(WebStatus, blocking_rebuilds), 28);
     assert_eq!(offset_of!(WebStatus, next_absolute_sample), 32);
@@ -907,16 +871,15 @@ fn extended_rates_refuse_typed_at_browser_boot() {
     }
 }
 
-/// The observation command staging and its decode array are charged exactly, and exist exactly
-/// when the boot asked for observation taps (#1565A): with taps off there is no wire staging and no
-/// decode array; with taps on, `MAXIMUM_COMMAND_RECORDS` records of wire staging and as many
-/// decoded entries, each in the bridge rows.
+/// The bridge rows are charged exactly with the boot's observation taps off and on, and the taps
+/// word adds no bridge staging (#1589c deleted the observation-command staging and its decode
+/// array: an `Observe` edit rides the control frame staging every boot has).
 ///
 /// Test value: red if the browser keeps the retired mirrors' bytes (input-filter shadows, ramp
-/// table, VCA and strip-value mirrors) in the bridge rows, if the decode array outlives the
-/// staging it decodes, or if the plan's observation index (#1586 D3) is not charged.
+/// table, VCA and strip-value mirrors, the command staging) in the bridge rows, or if the plan's
+/// observation index (#1586 D3) is not charged.
 #[test]
-fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
+fn bridge_resource_rows_are_exact_for_the_taps_off_and_on_modes() {
     // One console EQ, which declares no tap: its instance and its observation index entry are
     // charged to the bridge rows (#1586a) while the engine's observation row stays zero.
     let document = one_track_session(128);
@@ -946,8 +909,14 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         .expect("source control table projection")
         + source_id_arena_bytes(source_id_bytes as usize).expect("source ID projection");
     let session_model_bytes = compiled.resource_estimate().compiled_model_bytes;
-    for (name, options, expected_records) in [
-        ("off", boot_options(128), 0_u32),
+    let projection = project_buffers(
+        document.len() as u32,
+        shape.sample_rate_hz,
+        shape.quantum_frames,
+    )
+    .expect("bridge projection");
+    for (name, options) in [
+        ("off", boot_options(128)),
         (
             "on",
             WebBootOptions {
@@ -955,20 +924,8 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
                 live_control_observation_taps: 1,
                 ..boot_options(128)
             },
-            MAXIMUM_COMMAND_RECORDS,
         ),
     ] {
-        let expected_wire_bytes = u64::from(expected_records * COMMAND_RECORD_BYTES);
-        let decoded_bytes = u64::from(expected_records) * size_of::<StagedObserve>() as u64;
-        let projection = project_buffers(
-            document.len() as u32,
-            shape.sample_rate_hz,
-            shape.quantum_frames,
-            options,
-        )
-        .expect("bridge projection");
-        assert_eq!(projection.command_records, expected_records, "{name}");
-
         let source_ring_frames = if options.source_ring_frames == 0 {
             default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
         } else {
@@ -1017,13 +974,6 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
                 panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
             });
         let ready = host.ready.as_ref().expect("ready ownership");
-        assert_eq!(ready.command_decoded.len(), expected_records as usize);
-        assert_eq!(
-            size_of_val(ready.command_decoded.as_ref()) as u64,
-            decoded_bytes,
-            "{name}: typed decoded backing has exact element size"
-        );
-        assert_eq!(host.command_staging_bytes(), expected_wire_bytes);
         assert_eq!(
             ready.shape.effect_instances.len(),
             1,
@@ -1070,12 +1020,12 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
         let meter_delivery_bytes = meter_delivery_bytes
             + strips * (size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>()) as u64;
         let frame_bytes = frame_bytes + meter_delivery_bytes;
-        // The one EQ's dense instance table, its producer-slot word and the IDs it copies. Its
+        // The one EQ's dense instance table, its observation-strip word and the IDs it copies. Its
         // observation index entry is the epoch's (#1589 R2), in the control plane's row.
         let effect_ids = (model.tracks[0].id.as_str().len()
             + model.console.pre_insert[0].slot.as_str().len()) as u64;
         let instance_bytes =
-            (size_of::<Option<EffectInstance>>() + 2 * size_of::<u32>()) as u64 + effect_ids;
+            (size_of::<Option<EffectInstance>>() + size_of::<u32>()) as u64 + effect_ids;
         let frame_bytes = frame_bytes + instance_bytes;
         let expected_bridge_metadata = projection
             .report
@@ -1083,7 +1033,6 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             .checked_add(frame_bytes)
             .and_then(|bytes| bytes.checked_add(control_retained))
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
-            .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .expect("bridge metadata arithmetic");
         let expected_bridge_retained = projection
             .report
@@ -1091,7 +1040,6 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             .checked_add(frame_bytes)
             .and_then(|bytes| bytes.checked_add(control_retained))
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
-            .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .expect("bridge retained arithmetic");
         assert_eq!(
             host.resources().bridge_metadata_bytes,
@@ -1102,16 +1050,14 @@ fn observation_staging_resource_is_exact_for_the_taps_off_and_on_modes() {
             expected_bridge_retained
         );
 
-        // The 1 MiB live-response capture is deliberately larger than this fixture's decoded
-        // array. Keep the largest assertion honest: it includes that independent projection and
-        // then folds the engine's own largest allocation into the named maximum.
+        // The largest assertion includes the independent projection and then folds the engine's
+        // own largest allocation into the named maximum.
         let bridge_largest = projection
             .report
             .largest_named_allocation_bytes
             .max(control_table_bytes(shape.source_count as usize).expect("table largest"))
             .max(source_id_arena_bytes(source_id_bytes as usize).expect("ID largest"))
-            .max(compiled.resource_estimate().single_allocation_bytes)
-            .max(decoded_bytes);
+            .max(compiled.resource_estimate().single_allocation_bytes);
         assert_eq!(
             host.resources().largest_bridge_allocation_bytes,
             bridge_largest
@@ -1988,6 +1934,66 @@ fn master_designation_frame(strip: &str, request: u64, revision: u64) -> Vec<u8>
     bytes
 }
 
+/// The three `Observe` frames of the observation timeline (#1589c), in order: an arm of a tap the
+/// compressor does not declare (tap 9), the arm of its gain-reduction tap (tap 1) and that tap's
+/// disarm, each with a two-block window, requests 2 to 4 at revision 1 (a monitor edit spends no
+/// revision). Committed as `tests/browser-v1/set-control-frames/observe-{unknown-tap,arm,disarm}.bin`,
+/// the frames the raw-Wasm oracle's observation timeline sends.
+fn observation_timeline_frames() -> [(&'static str, Vec<u8>); 3] {
+    use protocol::{
+        CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionRevision,
+        TypedCommandFrame,
+    };
+    let frame = |request: u64, tap_id: u32, armed: bool| {
+        let edits = [observe_edit(
+            "track",
+            RACK_INSERTS,
+            "comp",
+            tap_id,
+            2,
+            armed,
+        )];
+        let mut bytes = vec![0_u8; 4_096];
+        let length = ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(request).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(1)),
+                    payload: CommandPayload::SessionTransactionApply(&edits),
+                },
+                &mut bytes,
+            )
+            .expect("an observe frame");
+        bytes.truncate(length);
+        bytes
+    };
+    [
+        ("observe-unknown-tap", frame(2, 9, true)),
+        ("observe-arm", frame(3, 1, true)),
+        ("observe-disarm", frame(4, 1, false)),
+    ]
+}
+
+/// The status word and the diagnostic codes of one response frame.
+fn reply_status(response: &[u8]) -> (u16, Vec<String>) {
+    use protocol::{DecodeScratch, DecodedTypedResponseFrame, ProtocolCodec};
+    let mut fields = [0_u16; 64];
+    match ProtocolCodec::default()
+        .decode_typed_response(response, &mut DecodeScratch::new(&mut fields))
+        .expect("a response frame")
+    {
+        DecodedTypedResponseFrame::Success { header, .. } => (header.status as u16, Vec::new()),
+        DecodedTypedResponseFrame::NonOk { header, payload } => (
+            header.status as u16,
+            payload
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.to_string())
+                .collect(),
+        ),
+    }
+}
+
 /// Designate strip `strip` the master through the production control entry (#1689 D6): the
 /// header names it at once.
 fn designate_master(host: &mut AudioWorkletEngineHost, strip: &str) {
@@ -2012,8 +2018,8 @@ fn designate_master(host: &mut AudioWorkletEngineHost, strip: &str) {
     );
 }
 
-/// The committed frame fixtures are exactly what [`set_control_timeline_frames`] and
-/// [`master_designation_frame`] encode.
+/// The committed frame fixtures are exactly what [`set_control_timeline_frames`],
+/// [`master_designation_frame`] and [`observation_timeline_frames`] encode.
 ///
 /// Test value: red if the encoder or the protocol changes a byte of a frame without the fixtures
 /// the raw-Wasm oracle sends moving with it, so the native leg and the shipped artifact would
@@ -2036,6 +2042,9 @@ fn set_control_frames_are_the_committed_fixtures() {
             master_designation_frame("track", 1, 1),
         )
         .expect("fixture file");
+        for (name, frame) in observation_timeline_frames() {
+            std::fs::write(format!("{directory}/{name}.bin"), frame).expect("fixture file");
+        }
     }
     for (index, frame) in frames.iter().enumerate() {
         let committed = std::fs::read(format!("{directory}/frame-{}.bin", index + 1))
@@ -2049,6 +2058,11 @@ fn set_control_frames_are_the_committed_fixtures() {
         master_designation_frame("track", 1, 1),
         "master.bin"
     );
+    for (name, frame) in observation_timeline_frames() {
+        let committed =
+            std::fs::read(format!("{directory}/{name}.bin")).expect("the committed observe frame");
+        assert_eq!(committed, frame, "{name}.bin");
+    }
 }
 
 /// The `SET_CONTROL` timeline's native digest: the same session, source feed and control frames
@@ -2384,41 +2398,6 @@ mod serde_pin {
     }
 }
 
-/// Stage one `miso.command.v1` record into the fixed command buffer at `index`, naming its tap by
-/// the raw key bytes (#1677). The bytes are written as given, so a test can stage an ID the plan
-/// does not have, or one that does not fit the field.
-#[allow(clippy::too_many_arguments)]
-fn stage_record(
-    host: &mut AudioWorkletEngineHost,
-    index: usize,
-    kind: u32,
-    rack: u8,
-    strip_id: &[u8],
-    effect_id: &[u8],
-    tap_id: u32,
-    window_blocks: u32,
-) {
-    let record_bytes = COMMAND_RECORD_BYTES as usize;
-    let field = RECORD_ID_FIELD_BYTES as usize;
-    let staging = host
-        .command_staging_mut()
-        .expect("prepared command staging");
-    let record = &mut staging[index * record_bytes..(index + 1) * record_bytes];
-    record.fill(0);
-    record[0] = u8::try_from(kind).expect("frozen kind");
-    record[1] = rack;
-    record[2] = u8::try_from(strip_id.len()).expect("strip ID length");
-    record[3] = u8::try_from(effect_id.len()).expect("effect ID length");
-    record[4..8].copy_from_slice(&tap_id.to_le_bytes());
-    record[8..12].copy_from_slice(&window_blocks.to_le_bytes());
-    let strip_field = &mut record[16..16 + field];
-    strip_field[..strip_id.len().min(field)]
-        .copy_from_slice(&strip_id[..strip_id.len().min(field)]);
-    let effect_field = &mut record[16 + field..16 + 2 * field];
-    effect_field[..effect_id.len().min(field)]
-        .copy_from_slice(&effect_id[..effect_id.len().min(field)]);
-}
-
 /// The stable key of the strip at `track` (tracks, then submixes) and of the console slot or insert
 /// at `effect` of `rack` on the host's rendering plan; an index the plan does not have names an ID
 /// it does not have either.
@@ -2437,33 +2416,6 @@ fn key_at(host: &AudioWorkletEngineHost, track: u32, rack: u8, effect: u32) -> (
             |instance| instance.effect_id.as_bytes().to_vec(),
         );
     (strip, effect_id)
-}
-
-/// Stage one record that names its tap by the position the fixture's plan gives it, translated to
-/// the stable key the record carries: the strip at `track_index` and the console slot or insert at
-/// `effect_index`.
-#[allow(clippy::too_many_arguments)]
-fn stage_command(
-    host: &mut AudioWorkletEngineHost,
-    index: usize,
-    kind: u32,
-    rack: u8,
-    track_index: u32,
-    effect_index: u32,
-    tap_id: u32,
-    window_blocks: u32,
-) {
-    let (strip, effect) = key_at(host, track_index, rack, effect_index);
-    stage_record(
-        host,
-        index,
-        kind,
-        rack,
-        &strip,
-        &effect,
-        tap_id,
-        window_blocks,
-    );
 }
 
 /// A live-control host over the browser identity fixture: one track, unity everything, one-quantum
@@ -2552,6 +2504,7 @@ fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u6
 /// reduction, tap 1) that a session in this file can bind, so an insert queue can be filled with
 /// observation subscriptions, which stay a FIFO (D15-2 condition 1; #1345 D2), where a fader,
 /// matrix or input value is a latest-target cell with no room to fill (#1312, #1346).
+#[cfg(feature = "test-support")]
 fn observed_compressor_insert() -> session::Effect {
     parse_session_json(include_str!(
         "../../../fixtures/session/v1/observation-frame-shape.json"
@@ -2563,438 +2516,15 @@ fn observed_compressor_insert() -> session::Effect {
         .clone()
 }
 
-/// Stage one observation subscription (tap 1, a two-block window) for insert `effect` of `track`.
-fn stage_observe_subscribe_at(
-    host: &mut AudioWorkletEngineHost,
-    index: usize,
-    track: u32,
-    effect: u32,
-) {
-    stage_command(
-        host,
-        index,
-        COMMAND_OBSERVE_SUBSCRIBE,
-        RACK_INSERTS,
-        track,
-        effect,
-        1,
-        2,
-    );
-}
-
-/// Stage one subscription for the first insert of track 0, the record the queue-credit tests fill
-/// that insert's queue with. A repeated subscription is idempotent in effect and costs one record.
-fn stage_observe_subscribe(host: &mut AudioWorkletEngineHost, index: usize) {
-    stage_observe_subscribe_at(host, index, 0, 0);
-}
-
-/// The command fixture with its parametric EQ insert swapped for the observed compressor and
-/// observation lanes bound: track 0 keeps one insert queue that observation records can fill.
-fn observed_effect_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
-    let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
-        .expect("accepted command fixture");
-    model.tracks[0].inserts.effects[0] = observed_compressor_insert();
-    let document = canonical_session_json(&model).expect("canonical observed command fixture");
-    let options = WebBootOptions {
-        source_ring_frames: quantum,
-        live_control_observation_taps: 4,
-        ..boot_options(quantum)
-    };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options)
-        .expect("observed effect live-control boot")
-}
-
-/// #514 IO7: command-free blocks skip the dense admission-counter reset while command ownership
-/// and the existing transactional capacity contract remain exact.
-#[test]
-fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
-    const QUANTUM: u32 = 128;
-
-    let mut host = observed_effect_live_control_host(QUANTUM);
-    // The observed compressor declares one tap, so its observation queue holds one subscription
-    // between two renders (#1345 D2: one slot per declared tap).
-    let ready = host.ready.as_ref().expect("ready");
-    let queue_depth = ReadyOwnership::effect_producer_position(&ready.shape, 0)
-        .and_then(|position| ready.control.effect_producers().get(position))
-        .map(|producer| producer.observe_capacity())
-        .expect("the compressor's producer");
-    assert_eq!(queue_depth, 1);
-    let depth = queue_depth as u32;
-    reset_admission_counter_clear();
-    for block in 0..3_u64 {
-        feed_and_render(&mut host, 1, block, 0.25);
-    }
-    assert_eq!(admission_counter_clear_stats(), (0, 0));
-    assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
-    assert!(
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .shape
-            .in_flight
-            .iter()
-            .all(|count| *count == 0)
-    );
-
-    // Repeated observation subscriptions on the insert queue (the one queue kind that stays a FIFO,
-    // #1345 D2) preserve the exact per-queue count until the successful render drains it.
-    stage_observe_subscribe(&mut host, 0);
-    assert_eq!(host.submit_commands(1), RESULT_OK);
-    let application_sample = 3 * u64::from(QUANTUM);
-    assert_eq!(
-        *host.command_report(),
-        WebCommandReport {
-            struct_size: COMMAND_REPORT_BYTES,
-            abi_version: ABI_VERSION,
-            result: RESULT_OK,
-            reason: COMMAND_REASON_NONE,
-            rejected_index: 0,
-            admitted: 1,
-            applied_at_sample: application_sample,
-            reserved: [0; 2],
-        }
-    );
-    assert_eq!(
-        host.ready.as_ref().expect("ready").shape.in_flight[..],
-        [depth]
-    );
-    assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
-
-    reset_admission_counter_clear();
-    feed_and_render(&mut host, 1, 3, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (1, 1));
-    assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
-    assert!(
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .shape
-            .in_flight
-            .iter()
-            .all(|count| *count == 0)
-    );
-    feed_and_render(&mut host, 1, 4, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (1, 1));
-
-    // A healthy drained host can refill a queue to its exact old capacity; one more record is the
-    // existing typed refusal and leaves the accepted prefix's ownership untouched.
-    for index in 0..depth as usize {
-        stage_observe_subscribe(&mut host, index);
-    }
-    assert_eq!(host.submit_commands(depth), RESULT_OK);
-    assert_eq!(
-        host.ready.as_ref().expect("ready").shape.in_flight[0],
-        depth
-    );
-    assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
-    stage_observe_subscribe(&mut host, 0);
-    assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE);
-    assert_eq!(
-        *host.command_report(),
-        WebCommandReport {
-            struct_size: COMMAND_REPORT_BYTES,
-            abi_version: ABI_VERSION,
-            result: RESULT_BACKPRESSURE,
-            reason: COMMAND_REASON_BACKPRESSURE,
-            rejected_index: 0,
-            admitted: 0,
-            applied_at_sample: 5 * u64::from(QUANTUM),
-            reserved: [0; 2],
-        }
-    );
-    assert_eq!(
-        host.ready.as_ref().expect("ready").shape.in_flight[..],
-        [depth]
-    );
-    assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
-
-    reset_admission_counter_clear();
-    feed_and_render(&mut host, 1, 5, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (1, 1));
-    assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
-    assert!(
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .shape
-            .in_flight
-            .iter()
-            .all(|count| *count == 0)
-    );
-
-    // The successful drain renews the full old capacity. Drain that refill, then prove the next
-    // command-free block performs no physical clear.
-    for index in 0..depth as usize {
-        stage_observe_subscribe(&mut host, index);
-    }
-    assert_eq!(host.submit_commands(depth), RESULT_OK);
-    assert_eq!(host.command_report().admitted, depth);
-    assert_eq!(
-        host.command_report().applied_at_sample,
-        6 * u64::from(QUANTUM)
-    );
-    assert_eq!(
-        host.ready.as_ref().expect("ready").shape.in_flight[..],
-        [depth]
-    );
-    assert!(host.ready.as_ref().expect("ready").has_in_flight_commands);
-    reset_admission_counter_clear();
-    feed_and_render(&mut host, 1, 6, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (1, 1));
-    assert!(!host.ready.as_ref().expect("ready").has_in_flight_commands);
-    assert!(
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .shape
-            .in_flight
-            .iter()
-            .all(|count| *count == 0)
-    );
-    reset_admission_counter_clear();
-    feed_and_render(&mut host, 1, 7, 0.25);
-    assert_eq!(admission_counter_clear_stats(), (0, 0));
-
-    // Malformed submissions on an idle host cannot create pending ownership, a submission that
-    // names one observation tap twice included (a single submission cannot overfill the queue, so
-    // that is the only way for one to be refused here).
-    let mut refused = observed_effect_live_control_host(QUANTUM);
-    stage_command(&mut refused, 0, 3, 255, 0, 0, 0, 0);
-    assert_eq!(refused.submit_commands(1), RESULT_INVALID_ARGUMENT);
-    assert!(
-        !refused
-            .ready
-            .as_ref()
-            .expect("ready")
-            .has_in_flight_commands
-    );
-    assert!(
-        refused
-            .ready
-            .as_ref()
-            .expect("ready")
-            .shape
-            .in_flight
-            .iter()
-            .all(|count| *count == 0)
-    );
-    for index in 0..=depth as usize {
-        stage_observe_subscribe(&mut refused, index);
-    }
-    assert_eq!(refused.submit_commands(depth + 1), RESULT_INVALID_ARGUMENT);
-    assert_eq!(refused.command_report().reason, COMMAND_REASON_MALFORMED);
-    assert_eq!(refused.command_report().rejected_index, depth);
-    assert!(
-        !refused
-            .ready
-            .as_ref()
-            .expect("ready")
-            .has_in_flight_commands
-    );
-    assert!(
-        refused
-            .ready
-            .as_ref()
-            .expect("ready")
-            .shape
-            .in_flight
-            .iter()
-            .all(|count| *count == 0)
-    );
-
-    // A refusal after accepted records preserves those records and the dirty flag.
-    stage_observe_subscribe(&mut refused, 0);
-    assert_eq!(refused.submit_commands(1), RESULT_OK);
-    stage_command(&mut refused, 0, 3, 255, 0, 0, 0, 0);
-    assert_eq!(refused.submit_commands(1), RESULT_INVALID_ARGUMENT);
-    assert!(
-        refused
-            .ready
-            .as_ref()
-            .expect("ready")
-            .has_in_flight_commands
-    );
-    assert_eq!(refused.ready.as_ref().expect("ready").shape.in_flight[0], 1);
-
-    // A render failure is sticky: pending ownership and the untouched clear counters survive the
-    // failed block and the subsequent WRONG_STATE re-entry.
-    let mut failed = observed_effect_live_control_host(QUANTUM);
-    stage_observe_subscribe(&mut failed, 0);
-    assert_eq!(failed.submit_commands(1), RESULT_OK);
-    let before = failed
-        .ready
-        .as_ref()
-        .expect("ready")
-        .shape
-        .in_flight
-        .to_vec();
-    assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
-    failed
-        .buffers
-        .as_mut()
-        .expect("prepared buffers")
-        .output_pcm
-        .fill(-1.0);
-    reset_admission_counter_clear();
-    failed.status.next_absolute_sample = u64::MAX;
-    assert_eq!(failed.render_next(), RESULT_RENDER_REJECTED);
-    assert_eq!(failed.status().state, STATE_FAILED);
-    assert!(
-        failed
-            .output_pcm()
-            .expect("prepared output")
-            .iter()
-            .all(|sample| sample.to_bits() == 0),
-        "a failed render with pending commands emits positive-zero silence"
-    );
-    assert_eq!(failed.diagnostic(), b"web.render.rejected\t$\n");
-    assert_eq!(admission_counter_clear_stats(), (0, 0));
-    assert_eq!(
-        &failed.ready.as_ref().expect("ready").shape.in_flight[..],
-        &before[..]
-    );
-    assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
-    assert_eq!(failed.render_next(), RESULT_WRONG_STATE);
-    assert_eq!(failed.status().state, STATE_FAILED);
-    assert_eq!(failed.diagnostic(), b"web.render.rejected\t$\n");
-    assert_eq!(admission_counter_clear_stats(), (0, 0));
-    assert_eq!(
-        &failed.ready.as_ref().expect("ready").shape.in_flight[..],
-        &before[..]
-    );
-    assert!(failed.ready.as_ref().expect("ready").has_in_flight_commands);
-}
-
-/// A record whose strip ID or effect ID has length zero is refused `MALFORMED` at its index in pass
-/// one, before anything is admitted: a stable ID is 1..=127 bytes, so an empty one names nothing.
-///
-/// Test value: red if an empty ID decodes (the record then reaches key resolution and is refused
-/// as an unknown strip or effect, a reason that says the record named something the plan lacks).
-#[test]
-fn a_record_with_an_empty_id_is_refused_malformed_at_its_index() {
-    const QUANTUM: u32 = 128;
-    let mut host = observed_effect_live_control_host(QUANTUM);
-    feed_and_render(&mut host, 1, 0, 0.75);
-    let (strip, effect) = key_at(&host, 0, RACK_INSERTS, 0);
-    for (strip_id, effect_id) in [(&[][..], &effect[..]), (&strip[..], &[][..])] {
-        stage_observe_subscribe(&mut host, 0);
-        stage_record(
-            &mut host,
-            1,
-            COMMAND_OBSERVE_SUBSCRIBE,
-            RACK_INSERTS,
-            strip_id,
-            effect_id,
-            1,
-            QUANTUM,
-        );
-        assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
-        let report = *host.command_report();
-        assert_eq!(report.reason, COMMAND_REASON_MALFORMED);
-        assert_eq!(report.rejected_index, 1);
-        assert_eq!(report.admitted, 0);
-        assert_eq!(host.observation_armed_taps(), 0);
-        assert!(
-            !host.ready.as_ref().expect("ready").has_in_flight_commands,
-            "nothing was queued"
-        );
-    }
-}
-
-/// #1565A gate 1: a record of a deleted value kind (1-6 and 9-17) is refused `MALFORMED` at its
-/// index, before anything is admitted, and changes no cell. The browser keeps no value admission of
-/// its own: every value goes through `control_command`, so these numbers are only retired.
-///
-/// The records are otherwise shaped as the kind they had (the shapes a live kind accepted before
-/// the deletion), alone and behind a valid observation record that must not be armed.
-///
-/// Test value: red if a value kind still reaches the cells without the core, or if a refused
-/// submission arms the observation record in front of it.
-#[test]
-fn every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell() {
-    const QUANTUM: u32 = 128;
-    let mut host = observed_effect_live_control_host(QUANTUM);
-    // A twin that sees no traffic at all: the compressor's envelope moves between blocks, so the
-    // second block is compared with the twin's second block, not with the first.
-    let mut twin = observed_effect_live_control_host(QUANTUM);
-    feed_and_render(&mut host, 1, 0, 0.75);
-    feed_and_render(&mut twin, 1, 0, 0.75);
-    let baseline_status = *host.status();
-    let watermark_before = host.read_watermark();
-    let revision_before = host.committed_revision();
-
-    for kind in (1..=6_u32).chain(9..=17) {
-        // Alone: refused at index 0.
-        stage_command(&mut host, 0, kind, 255, 0, 0, 0, QUANTUM);
-        assert_eq!(
-            host.submit_commands(1),
-            RESULT_INVALID_ARGUMENT,
-            "kind {kind}"
-        );
-        let report = *host.command_report();
-        assert_eq!(report.reason, COMMAND_REASON_MALFORMED, "kind {kind}");
-        assert_eq!(report.rejected_index, 0, "kind {kind}");
-        assert_eq!(report.admitted, 0, "kind {kind}");
-        // Behind a valid subscription: refused at index 1, and the subscription is not armed.
-        stage_observe_subscribe(&mut host, 0);
-        stage_command(&mut host, 1, kind, 255, 0, 0, 0, QUANTUM);
-        assert_eq!(
-            host.submit_commands(2),
-            RESULT_INVALID_ARGUMENT,
-            "kind {kind}"
-        );
-        let report = *host.command_report();
-        assert_eq!(report.reason, COMMAND_REASON_MALFORMED, "kind {kind}");
-        assert_eq!(report.rejected_index, 1, "kind {kind}");
-        assert_eq!(report.admitted, 0, "kind {kind}");
-        assert_eq!(host.observation_armed_taps(), 0, "kind {kind}");
-        assert!(
-            !host.ready.as_ref().expect("ready").has_in_flight_commands,
-            "kind {kind}: nothing was queued"
-        );
-    }
-    // An unknown kind byte is malformed, not an unknown target.
-    stage_command(&mut host, 0, 0, 255, 0, 0, 0, 0);
-    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
-    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
-
-    let status = *host.status();
-    assert_eq!(
-        (
-            status.state,
-            status.next_absolute_sample,
-            status.rendered_quanta
-        ),
-        (
-            baseline_status.state,
-            baseline_status.next_absolute_sample,
-            baseline_status.rendered_quanta
-        ),
-        "no refusal moved the state or the clock",
-    );
-    assert_eq!(host.committed_revision(), revision_before);
-    assert_eq!(host.read_watermark(), watermark_before);
-    feed_and_render(&mut host, 1, 1, 0.75);
-    feed_and_render(&mut twin, 1, 1, 0.75);
-    assert_eq!(
-        host.output_pcm().expect("output"),
-        twin.output_pcm().expect("twin output"),
-        "a refused command changed no coefficient",
-    );
-}
-
 /// #1565A gate 2, #1689 gate 2: the boot words at offsets 32 and 56 are reserved. A nonzero
 /// value is refused `web.options.reserved1` (the word was the command-queue size until the
 /// browser's own value commands were deleted) or `web.options.reserved2` (the word was the master
-/// boot word until the `master` row replaced it); a boot with observation taps accepts the
-/// observation kinds; a boot without taps has no command staging and refuses them `UNSUPPORTED`
-/// with `COMMAND_REASON_UNSUPPORTED_KIND`.
+/// boot word until the `master` row replaced it).
 ///
 /// Test value: red if a deleted word still changes behaviour (a writer that still sets it is
-/// accepted and ignored), if observation loses its staging, or if a host with no taps accepts a
-/// record.
+/// accepted and ignored).
 #[test]
-fn the_boot_words_are_reserved_and_observation_staging_follows_the_taps() {
+fn the_boot_words_at_offsets_32_and_56_are_reserved() {
     const QUANTUM: u32 = 128;
     let document = include_str!("../tests/browser-v1/command-session.json");
     let refusal = |options: WebBootOptions| {
@@ -3029,29 +2559,6 @@ fn the_boot_words_are_reserved_and_observation_staging_follows_the_taps() {
         let refused = refusal(options);
         assert_eq!(refused.result(), RESULT_REFUSED_OPTIONS);
         assert_eq!(refused.diagnostic(), code);
-    }
-
-    let mut observed = observed_effect_live_control_host(QUANTUM);
-    assert!(observed.live_controls_attached());
-    assert_eq!(
-        observed.command_staging_bytes(),
-        u64::from(MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES)
-    );
-    stage_observe_subscribe(&mut observed, 0);
-    assert_eq!(observed.submit_commands(1), RESULT_OK);
-    assert_eq!(observed.command_report().admitted, 1);
-
-    let mut bare = AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(QUANTUM))
-        .expect("a boot without taps");
-    assert!(!bare.live_controls_attached());
-    assert_eq!(bare.command_staging_bytes(), 0);
-    for count in [1_u32, 8, MAXIMUM_COMMAND_RECORDS] {
-        assert_eq!(bare.submit_commands(count), RESULT_UNSUPPORTED);
-        assert_eq!(
-            bare.command_report().reason,
-            COMMAND_REASON_UNSUPPORTED_KIND
-        );
-        assert_eq!(bare.command_report().admitted, 0);
     }
 }
 
@@ -3743,6 +3250,9 @@ fn meter_reacquisition_rejects_a_full_stale_queue_then_recovers() {
     let empty_frame = host.meter_frame().to_vec();
     let empty_header = *host.meter_header();
     assert!(empty_header.reserved[0] > old_generation);
+    // The retake restarts the frame sequence and the reported window, and clears the frame.
+    assert_eq!((empty_header.sequence, empty_header.first_sample), (0, 0));
+    assert!(empty_frame.iter().all(|value| *value == 0.0));
 
     // The first fresh track window is dropped while stale producer slots remain full. One bounded
     // poll rejects those old windows and publishes nothing.
@@ -4469,7 +3979,7 @@ fn bus_meters_render_and_poll_without_allocating() {
     assert_eq!(host.meter_header().submix_count, 2);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     // `t0`'s compressor insert, tap 1, so the poll's gain-reduction fold reads a window.
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), Ok(()));
     for block in 0..5 {
         feed_and_render_tracks(&mut host, block, 0.5);
     }
@@ -4563,7 +4073,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
 
     assert_eq!(
         observe(&mut host, 0, 1, 0, 1, 2, true),
-        RESULT_OK,
+        Ok(()),
         "the existing observe command remains the only arming path"
     );
     let pending = host
@@ -4613,7 +4123,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     // resident cell. That old publication is before the admitted application sample and must not
     // look ready while a replacement window is being built. (A subscription to an armed tap is
     // the re-arm: it restarts the window, and the effect's one-slot queue holds just it.)
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), Ok(()));
     let rearmed_pending = host
         .read_observations(&[selection])
         .expect("re-arm pending selected read");
@@ -4629,7 +4139,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
         tap_id: 1,
         channels: ObservationReadChannels::Left,
     };
-    assert_eq!(observe(&mut host, 2, 1, 0, 1, 2, true), RESULT_OK);
+    assert_eq!(observe(&mut host, 2, 1, 0, 1, 2, true), Ok(()));
     for block in 2..4 {
         feed_and_render_tracks(&mut host, block, 0.0);
     }
@@ -4673,7 +4183,7 @@ fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
 
     // #1585: a disarm is in effect when it is accepted, before a block drains it; no later window
     // belongs to the subscription it ends.
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), Ok(()));
     let disarmed = host
         .read_observations(&[selection])
         .expect("disarmed selected read");
@@ -4716,8 +4226,8 @@ fn selected_observation_reads_keep_same_track_owner_windows_and_sequences() {
         tap_id: 1,
         channels: ObservationReadChannels::Both,
     };
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
-    assert_eq!(observe(&mut host, 0, 1, 1, 1, 3, true), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), Ok(()));
+    assert_eq!(observe(&mut host, 0, 1, 1, 1, 3, true), Ok(()));
     for block in 0..3 {
         feed_and_render_channels(&mut host, block, 0.75, 0.125);
     }
@@ -4854,7 +4364,8 @@ fn feed_and_render_channels(
     assert_eq!(host.render_next(), RESULT_OK);
 }
 
-/// Stage and submit one observation subscribe/unsubscribe for one addressed effect.
+/// Arm (`armed`) or disarm the tap `tap_id` of the effect at `effect` in rack `rack` of the strip
+/// at `track`, by the stable key the fixture's plan gives those positions (see [`key_at`]).
 fn observe(
     host: &mut AudioWorkletEngineHost,
     track: u32,
@@ -4863,19 +4374,59 @@ fn observe(
     tap_id: u32,
     window_blocks: u32,
     armed: bool,
-) -> u32 {
-    let kind = if armed {
-        COMMAND_OBSERVE_SUBSCRIBE
-    } else {
-        COMMAND_OBSERVE_UNSUBSCRIBE
-    };
-    stage_command(host, 0, kind, rack, track, effect, tap_id, window_blocks);
-    host.submit_commands(1)
+) -> Result<(), Vec<String>> {
+    let edit = observe_edit_at(host, track, rack, effect, tap_id, window_blocks, armed);
+    apply_observe(host, &[edit])
 }
 
-/// [`observe`] naming the tap by its stable key: the strip's ID, the console slot's or insert's ID
-/// and the tap's ID (#1677), whatever the plan that renders calls its position. Test support only:
-/// every caller is in a `test-support` module.
+/// The `Observe` edit [`observe`] sends.
+fn observe_edit_at(
+    host: &AudioWorkletEngineHost,
+    track: u32,
+    rack: u8,
+    effect: u32,
+    tap_id: u32,
+    window_blocks: u32,
+    armed: bool,
+) -> protocol::SessionEdit {
+    let (strip, effect) = key_at(host, track, rack, effect);
+    observe_edit(
+        core::str::from_utf8(&strip).expect("an ASCII strip ID"),
+        rack,
+        core::str::from_utf8(&effect).expect("an ASCII effect ID"),
+        tap_id,
+        window_blocks,
+        armed,
+    )
+}
+
+/// One `Observe` edit of the tap named by its stable key: the strip's ID, the console slot's or
+/// insert's ID per `rack`, and the tap's ID.
+fn observe_edit(
+    strip_id: &str,
+    rack: u8,
+    effect_id: &str,
+    tap_id: u32,
+    window_blocks: u32,
+    armed: bool,
+) -> protocol::SessionEdit {
+    let id = |id: &str| session::StableId::parse(id).expect("a stable ID");
+    let section = match rack {
+        RACK_INSERTS => controls::TapSection::Inserts(id(effect_id)),
+        RACK_CONSOLE => controls::TapSection::Console(id(effect_id)),
+        other => panic!("rack {other} names no effect section"),
+    };
+    protocol::SessionEdit::Observe {
+        strip_id: id(strip_id),
+        section,
+        tap_id,
+        armed,
+        window_blocks,
+    }
+}
+
+/// [`observe`] naming the tap by its stable key, whatever the plan that renders calls its
+/// position. Test support only: every caller is in a `test-support` module.
 #[cfg(feature = "test-support")]
 fn observe_key(
     host: &mut AudioWorkletEngineHost,
@@ -4885,23 +4436,73 @@ fn observe_key(
     tap_id: u32,
     window_blocks: u32,
     armed: bool,
-) -> u32 {
-    let kind = if armed {
-        COMMAND_OBSERVE_SUBSCRIBE
-    } else {
-        COMMAND_OBSERVE_UNSUBSCRIBE
-    };
-    stage_record(
+) -> Result<(), Vec<String>> {
+    apply_observe(
         host,
-        0,
-        kind,
-        rack,
-        strip_id.as_bytes(),
-        effect_id.as_bytes(),
-        tap_id,
-        window_blocks,
-    );
-    host.submit_commands(1)
+        &[observe_edit(
+            strip_id,
+            rack,
+            effect_id,
+            tap_id,
+            window_blocks,
+            armed,
+        )],
+    )
+}
+
+/// Send `edits` in one `SESSION_TRANSACTION_APPLY` at the committed revision through the browser's
+/// control entry, as an app arms and disarms a tap since #1589c deleted the observation records.
+/// `Ok` when the core applied the transaction, else the codes of its diagnostics, or `result N`
+/// for a control call that failed with result `N` (a full observation queue is `result 6`,
+/// backpressure).
+fn apply_observe(
+    host: &mut AudioWorkletEngineHost,
+    edits: &[protocol::SessionEdit],
+) -> Result<(), Vec<String>> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use protocol::{
+        CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
+        RequestId, SessionRevision, TypedCommandFrame,
+    };
+    static REQUEST: AtomicU64 = AtomicU64::new(1 << 42);
+    let codec = ProtocolCodec::default();
+    let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+    let length = codec
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(REQUEST.fetch_add(1, Ordering::Relaxed))
+                    .expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(
+                    host.committed_revision(),
+                )),
+                payload: CommandPayload::SessionTransactionApply(edits),
+            },
+            &mut bytes,
+        )
+        .expect("an observe frame");
+    let staged = u32::try_from(length).expect("frame length");
+    host.control_request_mut(staged)
+        .expect("the control staging")[..length]
+        .copy_from_slice(&bytes[..length]);
+    let result = host.control_command(staged);
+    if result != RESULT_OK {
+        return Err(vec![format!("result {result}")]);
+    }
+    let mut fields = [0_u16; 64];
+    match codec
+        .decode_typed_response(
+            host.control_response(),
+            &mut DecodeScratch::new(&mut fields),
+        )
+        .expect("a transaction response")
+    {
+        DecodedTypedResponseFrame::Success { .. } => Ok(()),
+        DecodedTypedResponseFrame::NonOk { payload, .. } => Err(payload
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code.to_string())
+            .collect()),
+    }
 }
 
 /// The armed-tap mask of the insert `insert_id` of strip `strip_id` on the plan that renders, as
@@ -4961,16 +4562,14 @@ fn the_meter_frame_carries_the_app_shaped_gain_reduction() {
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
 
     // Track 1's parametric EQ declares no tap: subscribing to it is an addressing error, not a
-    // capacity error, and it is `UNKNOWN_TAP` rather than `UNKNOWN_PARAMETER`.
+    // capacity error.
     assert_eq!(
         observe(&mut host, 1, 1, 0, 1, 2, true),
-        RESULT_INVALID_ARGUMENT
+        Err(vec!["observation.tap.unknown".to_owned()])
     );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
 
     for track in [0_u32, 2] {
-        assert_eq!(observe(&mut host, track, 1, 0, 1, 2, true), RESULT_OK);
-        assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
+        assert_eq!(observe(&mut host, track, 1, 0, 1, 2, true), Ok(()));
     }
 
     // Silence first: an armed tap over a signal that never crosses a threshold reads exactly zero.
@@ -5023,7 +4622,7 @@ fn the_meter_frame_carries_the_app_shaped_gain_reduction() {
     // With no designation at all the master reading is absent, not zero.
     let mut undesignated = observation_host(QUANTUM, BLOCKS, None);
     assert_eq!(undesignated.set_meter_lease(true), RESULT_OK);
-    assert_eq!(observe(&mut undesignated, 0, 1, 0, 1, 2, true), RESULT_OK);
+    assert_eq!(observe(&mut undesignated, 0, 1, 0, 1, 2, true), Ok(()));
     for block in 0..16 {
         feed_and_render_tracks(&mut undesignated, block, 0.5);
     }
@@ -5045,7 +4644,7 @@ fn a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window() {
     const QUANTUM: u32 = 128;
     let mut host = observation_host(QUANTUM, 2, Some(0));
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), Ok(()));
 
     let selection = ObservationSelection {
         track_id: "t0",
@@ -5076,7 +4675,7 @@ fn a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window() {
     assert_eq!(armed_master, Some(armed[0]));
 
     // Unsubscribe: the frame leaves the tap out at once, though its cell keeps the last window.
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, false), Ok(()));
     for _ in 0..2 {
         feed_and_render_tracks(&mut host, block, 0.5);
         block += 1;
@@ -5130,245 +4729,28 @@ fn a_resubscribed_tap_leaves_the_meter_frame_until_its_first_new_window() {
         );
     };
 
-    // Leg 1: re-subscribe after the unsubscribe.
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 8, true), RESULT_OK);
-    let resubscribed = host.command_report().applied_at_sample;
+    // Leg 1: re-subscribe after the unsubscribe. Render applies the arm at the next block.
+    let resubscribed = host.status().next_absolute_sample;
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 8, true), Ok(()));
     assert!(
         cell_first_sample(&mut host).is_some_and(|first| first < resubscribed),
         "a stale window exists to leak"
     );
     drive(&mut host, &mut block, resubscribed, 12);
 
-    // Leg 2: re-arm an armed tap, the SDK `update()` path.
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 4, true), RESULT_OK);
-    let rearmed = host.command_report().applied_at_sample;
+    // Leg 2: re-arm an armed tap with another window, the SDK `update()` path: the disarm of the
+    // old window and the arm of the new one in one transaction, the core's one re-arm.
+    let rearmed = host.status().next_absolute_sample;
+    let rearm = [
+        observe_edit_at(&host, 0, 1, 0, 1, 8, false),
+        observe_edit_at(&host, 0, 1, 0, 1, 4, true),
+    ];
+    assert_eq!(apply_observe(&mut host, &rearm), Ok(()));
     assert!(
         cell_first_sample(&mut host).is_some_and(|first| first < rearmed),
         "the armed tap's old window predates the re-arm"
     );
     drive(&mut host, &mut block, rearmed, 8);
-}
-
-/// Issue #143 E8: misuse and the typed refusals of an observation subscription.
-///
-/// Test value: red if a refused submission arms or moves anything (the "nothing was armed or
-/// moved" assertion), or if an operation on a tap whose one slot an earlier submission holds is
-/// admitted again before a block has drained it (the `RESULT_BACKPRESSURE` assertions).
-#[test]
-fn observation_misuse_is_typed_and_all_or_nothing() {
-    const QUANTUM: u32 = 128;
-    let mut host = observation_host(QUANTUM, 2, Some(0));
-    assert_eq!(host.set_meter_lease(true), RESULT_OK);
-
-    // A tap id the effect does not declare.
-    assert_eq!(
-        observe(&mut host, 0, 1, 0, 9, 2, true),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
-    // Tap zero is reserved for "no tap" and is an unknown tap, not a malformed record.
-    assert_eq!(
-        observe(&mut host, 0, 1, 0, 0, 2, true),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
-
-    // A record that does not say what it names is malformed, not an unknown target: a nonzero
-    // reserved word, a byte after the end of an ID, a length that fills the whole field.
-    let (strip, effect) = key_at(&host, 0, RACK_INSERTS, 0);
-    let field = RECORD_ID_FIELD_BYTES as usize;
-    for (name, offset, value) in [
-        ("reserved word", 12, 1_u8),
-        ("byte after the strip ID", 16 + strip.len(), 1),
-        ("byte after the effect ID", 16 + field + effect.len(), 1),
-        (
-            "strip ID length fills the field",
-            2,
-            RECORD_ID_FIELD_BYTES as u8,
-        ),
-        (
-            "effect ID length fills the field",
-            3,
-            RECORD_ID_FIELD_BYTES as u8,
-        ),
-    ] {
-        stage_command(&mut host, 0, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, 0, 1, 2);
-        host.command_staging_mut().expect("staging")[offset] = value;
-        assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT, "{name}");
-        assert_eq!(
-            host.command_report().reason,
-            COMMAND_REASON_MALFORMED,
-            "{name}"
-        );
-    }
-
-    // Unknown rack and unknown effect keep their own reasons on the observe kinds. The retired
-    // `simd1`/`simd2` codes are unknown racks (issue #1096); this session has no console slot, so
-    // `console` is a known rack naming an unknown effect.
-    for retired in [0, 2, 4] {
-        assert_eq!(
-            observe(&mut host, 0, retired, 0, 1, 2, true),
-            RESULT_INVALID_ARGUMENT
-        );
-        assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_RACK);
-    }
-    assert_eq!(
-        observe(&mut host, 0, RACK_CONSOLE, 0, 1, 2, true),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_EFFECT);
-    assert_eq!(
-        observe(&mut host, 0, 1, 7, 1, 2, true),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_EFFECT);
-    assert_eq!(
-        observe(&mut host, 9, 1, 0, 1, 2, true),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TRACK);
-
-    // Double subscribe is idempotent and the newer window length wins; double unsubscribe is fine.
-    // A subscription is an ordered queue record (#1345 D2) and the effect's queue holds one per
-    // declared tap, so a second one in the same interval is typed backpressure that changes
-    // nothing, and is accepted once a block has drained the first.
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 8, true), RESULT_OK);
-    assert_eq!(
-        observe(&mut host, 0, 1, 0, 1, 2, true),
-        RESULT_BACKPRESSURE,
-        "the queue's one slot is taken until a block drains it"
-    );
-    assert_eq!(host.command_report().admitted, 0);
-    feed_and_render_tracks(&mut host, 0, 0.5);
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
-    for block in 1..9 {
-        feed_and_render_tracks(&mut host, block, 0.5);
-    }
-    assert!(host.poll_meters() > 0);
-    assert_eq!(
-        host.meter_header().end_sample - host.meter_header().first_sample,
-        2 * u64::from(QUANTUM),
-        "the second subscription's window length is the one in force"
-    );
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 0, false), RESULT_OK);
-    feed_and_render_tracks(&mut host, 9, 0.5);
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 0, false), RESULT_OK);
-    feed_and_render_tracks(&mut host, 10, 0.5);
-
-    // A lease release and retake restarts the frame sequence and the reported window.
-    assert_eq!(host.set_meter_lease(false), RESULT_OK);
-    assert_eq!(host.set_meter_lease(true), RESULT_OK);
-    assert_eq!(host.meter_header().sequence, 0);
-    assert_eq!(host.meter_header().first_sample, 0);
-    assert!(host.meter_frame().iter().all(|value| *value == 0.0));
-
-    // A submission names each tap once: a record overwrites its tap's whole state and a
-    // submission drains in one block, so a second record for the tap is malformed at its own wire
-    // index, and nothing of the batch is armed or moved (#1345 D2). The queue's one slot is taken
-    // by an earlier submission, so the duplicate is refused before the room pass: had the room
-    // pass come first, the answer would be backpressure, which invites a retry that can never
-    // succeed.
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
-    feed_and_render_tracks(&mut host, 11, 0.5);
-    let before = host.meter_frame().to_vec();
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
-    for index in 0..2 {
-        stage_command(&mut host, index, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, 0, 1, 4);
-    }
-    assert_eq!(
-        host.submit_commands(2),
-        RESULT_INVALID_ARGUMENT,
-        "a submission naming one tap twice is malformed, whatever room the queue has"
-    );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
-    assert_eq!(host.command_report().rejected_index, 1);
-    assert_eq!(host.command_report().admitted, 0);
-    assert_eq!(
-        host.meter_frame(),
-        &before[..],
-        "nothing was armed or moved"
-    );
-
-    // The same tap in a later submission, with the queue still full from the earlier one, is
-    // backpressure: records of earlier submissions are not yet drained, and a block clears it.
-    assert_eq!(
-        observe(&mut host, 0, 1, 0, 1, 2, true),
-        RESULT_BACKPRESSURE,
-        "the queue's one slot is taken until a block drains it"
-    );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_BACKPRESSURE);
-    assert_eq!(host.command_report().admitted, 0);
-    feed_and_render_tracks(&mut host, 12, 0.5);
-    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
-
-    // And a batch beyond the staging capacity is malformed before any queue is consulted.
-    assert_eq!(
-        host.submit_commands(MAXIMUM_COMMAND_RECORDS + 1),
-        RESULT_INVALID_ARGUMENT
-    );
-    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
-}
-
-/// #1345 D2: a submission names each observation tap once. An `Observe` record overwrites its tap's
-/// whole state and one submission drains in one block, so the second record for a tap is malformed
-/// at its own wire index, before the room pass, any cell write or the stamp, whatever the queue's
-/// room. Two taps of different effects in one submission are fine.
-///
-/// Test value: red if the duplicate check goes, or runs after the room pass (the second record then
-/// finds no room in the tap's one-slot queue and the answer is backpressure, which invites a retry
-/// that can never succeed; the reason code is what catches it, and the armed-tap assertion states
-/// the all-or-nothing outcome beside it), or if it refuses taps of different
-/// effects.
-#[test]
-fn a_submission_names_each_observation_tap_once() {
-    const QUANTUM: u32 = 128;
-    let mut host = same_track_observation_host(QUANTUM);
-    let mut clean = same_track_observation_host(QUANTUM);
-    feed_and_render_tracks(&mut host, 0, 0.5);
-    feed_and_render_tracks(&mut clean, 0, 0.5);
-
-    // Two effects' taps, one record each, are admitted whole.
-    stage_observe_subscribe_at(&mut host, 0, 0, 0);
-    stage_observe_subscribe_at(&mut host, 1, 0, 1);
-    assert_eq!(host.submit_commands(2), RESULT_OK);
-    assert_eq!(host.command_report().admitted, 2);
-    feed_and_render_tracks(&mut host, 1, 0.5);
-    feed_and_render_tracks(&mut clean, 1, 0.5);
-    let armed = host.observation_armed_taps();
-    assert_eq!(armed, 2);
-
-    // The first effect's tap armed, then withdrawn: refused at the withdrawal, the second record,
-    // with the queue empty and nothing armed or moved.
-    stage_observe_subscribe_at(&mut host, 0, 0, 0);
-    stage_command(
-        &mut host,
-        1,
-        COMMAND_OBSERVE_UNSUBSCRIBE,
-        RACK_INSERTS,
-        0,
-        0,
-        1,
-        2,
-    );
-    assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
-    let report = *host.command_report();
-    assert_eq!(report.reason, COMMAND_REASON_MALFORMED);
-    assert_eq!(report.rejected_index, 1, "the second record of the tap");
-    assert_eq!(report.admitted, 0);
-    let ready = host.ready.as_ref().expect("ready");
-    assert!(ready.shape.in_flight.iter().all(|count| *count == 0));
-    assert_eq!(host.observation_armed_taps(), armed);
-    feed_and_render_tracks(&mut host, 2, 0.5);
-    feed_and_render_tracks(&mut clean, 2, 0.5);
-    assert_eq!(
-        host.output_pcm().expect("host output"),
-        clean.output_pcm().expect("clean output"),
-        "the refused batch moved no rendered sample"
-    );
-
-    // The refusal left the tap usable: the same tap alone is admitted.
-    stage_observe_subscribe_at(&mut host, 0, 0, 0);
-    assert_eq!(host.submit_commands(1), RESULT_OK);
 }
 
 /// The observation words are validated at configuration time: more taps than the cap and the
@@ -5417,7 +4799,8 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
     const BLOCKS: u64 = 12;
 
     let document = include_str!("../tests/browser-v1/observation-session.json");
-    let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, u32, u32) {
+    type Reply = (u16, Vec<String>);
+    let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, Reply, Reply) {
         let options = WebBootOptions {
             source_ring_frames: QUANTUM,
             live_control_meter_blocks: u64::from(WINDOW_BLOCKS),
@@ -5442,16 +4825,18 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
         );
         assert_eq!(host.set_meter_lease(true), RESULT_OK);
 
-        let subscribe = |host: &mut AudioWorkletEngineHost, kind: u32, tap: u32, window: u32| {
-            // A boot with no taps has no command staging; its submission is refused as such.
-            if host.command_staging_mut().is_some() {
-                stage_command(host, 0, kind, 1, 0, 0, tap, window);
-            }
-            host.submit_commands(1);
-            *host.command_report()
+        // The oracle sends the same committed `Observe` frames (#1589c) through the same entry,
+        // and reads each reply's status word.
+        let [unknown_tap, arm, disarm] = observation_timeline_frames();
+        let send = |host: &mut AudioWorkletEngineHost, frame: &[u8]| {
+            host.control_request_mut(frame.len() as u32)
+                .expect("the control staging")[..frame.len()]
+                .copy_from_slice(frame);
+            assert_eq!(host.control_command(frame.len() as u32), RESULT_OK);
+            reply_status(host.control_response())
         };
-        let unknown_tap = subscribe(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 9, WINDOW_BLOCKS);
-        let subscribed = subscribe(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 1, WINDOW_BLOCKS);
+        let unknown_tap = send(&mut host, &unknown_tap.1);
+        let subscribed = send(&mut host, &arm.1);
 
         let plane = vec![0.5_f32; QUANTUM as usize];
         let mut blocks: Vec<Vec<f32>> = Vec::new();
@@ -5482,7 +4867,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
         let master =
             (host.meter_header().master_gr_present == 1).then(|| host.meter_frame()[base + tracks]);
         let window_samples = host.meter_header().end_sample - host.meter_header().first_sample;
-        let _ = subscribe(&mut host, COMMAND_OBSERVE_UNSUBSCRIBE, 1, 0);
+        let _ = send(&mut host, &disarm.1);
         for block in 8..BLOCKS {
             step(&mut host, block);
         }
@@ -5505,8 +4890,8 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
             master,
             disarmed,
             window_samples,
-            unknown_tap.reason,
-            subscribed.reason,
+            unknown_tap,
+            subscribed,
         )
     };
 
@@ -5525,11 +4910,24 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
     );
     assert_eq!(disarmed, 0.0, "an unsubscribed tap publishes nothing");
     assert_eq!(window, u64::from(WINDOW_BLOCKS) * u64::from(QUANTUM));
-    assert_eq!(unknown_tap, COMMAND_REASON_UNKNOWN_TAP);
-    assert_eq!(subscribed, COMMAND_REASON_NONE);
+    // The statuses the oracle pins (`expected.json`'s `observationTimeline`), with the codes.
+    assert_eq!(
+        unknown_tap,
+        (
+            protocol::StatusCode::ValidationFailed as u16,
+            vec!["observation.tap.unknown".to_owned()]
+        )
+    );
+    assert_eq!(subscribed, (protocol::StatusCode::Ok as u16, Vec::new()));
     assert_eq!(quiet, 0.0, "no capacity means no reading");
     assert_eq!(quiet_master, None, "and no master reading either");
-    assert_eq!(unbound, COMMAND_REASON_UNSUPPORTED_KIND);
+    assert_eq!(
+        unbound,
+        (
+            protocol::StatusCode::Unavailable as u16,
+            vec!["observation.unavailable".to_owned()]
+        )
+    );
 
     let expected: serde_pin::Pin =
         serde_pin::read(include_str!("../tests/browser-v1/expected.json"));
@@ -5554,7 +4952,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
 /// the assertion fails. A bound computed tap would be a lane that never publishes: a meter frozen
 /// at zero with no way for the caller to learn why.
 #[test]
-fn a_computed_tap_is_refused_with_unsupported_kind() {
+fn a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown() {
     use effect_contract::{
         EffectDescriptor, EffectId, LinkModeSet, ObservationCadence, ObservationChannels,
         ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationTapId,
@@ -5607,19 +5005,26 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
         observations: &MENU,
     };
 
-    // The control plane resolves the tap (#1677); the host maps its refusal to the wire's reason.
-    let reason = |tap_id: u32| {
-        control_plane::resolve_observation_tap(&DESCRIPTOR, tap_id).map_err(crate::key_refusal)
-    };
+    // The control plane resolves the tap (#1677).
+    let reason = |tap_id: u32| control_plane::resolve_observation_tap(&DESCRIPTOR, tap_id);
     // The resident tap resolves and binds.
     assert_eq!(reason(1), Ok(0));
     // The computed tap resolves and is refused for what it is -- never `UnknownTap`, which would
     // say the address was wrong, and never silently bound.
-    assert_eq!(reason(2), Err(COMMAND_REASON_UNSUPPORTED_KIND));
+    assert_eq!(
+        reason(2),
+        Err(control_plane::ObservationKeyError::ComputedTap)
+    );
     // A tap id the menu does not declare stays `UnknownTap` on the same descriptor, and so does
     // the reserved zero.
-    assert_eq!(reason(3), Err(COMMAND_REASON_UNKNOWN_TAP));
-    assert_eq!(reason(0), Err(COMMAND_REASON_UNKNOWN_TAP));
+    assert_eq!(
+        reason(3),
+        Err(control_plane::ObservationKeyError::UnknownTap)
+    );
+    assert_eq!(
+        reason(0),
+        Err(control_plane::ObservationKeyError::UnknownTap)
+    );
 }
 
 /// Issue #143 R4: the one unit conversion the design permits, and where it happens.
@@ -6230,7 +5635,7 @@ fn a_bus_compressor_reports_its_gain_reduction_in_the_bus_word() {
     for (host, index) in [(&mut a, STRIP_BUS), (&mut b, 0)] {
         assert_eq!(
             observe(host, index, RACK_INSERTS, 0, 1, WINDOW as u32, true),
-            RESULT_OK
+            Ok(())
         );
     }
     let mut block = 0;
@@ -6290,7 +5695,7 @@ fn a_bus_compressor_reports_its_gain_reduction_in_the_bus_word() {
 
     assert_eq!(
         observe(&mut a, STRIP_BUS, RACK_INSERTS, 0, 1, WINDOW as u32, false),
-        RESULT_OK
+        Ok(())
     );
     for _ in 0..2 * WINDOW {
         for feeder in 0..3_u64 {
@@ -6353,11 +5758,9 @@ fn a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading() {
     const WINDOW: u64 = 2;
     let mut host = same_track_observation_host_metered(QUANTUM, WINDOW);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
-    // One submission arms both taps; a tap's queue holds one record until a block drains it.
-    for effect in 0..2 {
-        stage_observe_subscribe_at(&mut host, effect, 0, effect as u32);
-    }
-    assert_eq!(host.submit_commands(2), RESULT_OK);
+    // One transaction arms both taps; a tap's queue holds one record until a block drains it.
+    let arms = [0, 1].map(|effect| observe_edit_at(&host, 0, RACK_INSERTS, effect, 1, 2, true));
+    assert_eq!(apply_observe(&mut host, &arms), Ok(()));
     let mut block = 0;
     let mut render_window = |host: &mut AudioWorkletEngineHost| {
         for _ in 0..WINDOW {
@@ -6400,7 +5803,7 @@ fn a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading() {
             WINDOW as u32,
             false
         ),
-        RESULT_OK
+        Ok(())
     );
     render_window(&mut host);
     assert!(host.poll_meters() >= 1, "a frame follows the withdrawal");
@@ -6426,7 +5829,7 @@ fn a_withdrawn_tap_leaves_the_first_polled_frame_and_only_its_own_reading() {
             WINDOW as u32,
             false
         ),
-        RESULT_OK
+        Ok(())
     );
     render_window(&mut host);
     assert!(host.poll_meters() >= 1, "a frame follows the withdrawal");
@@ -6473,7 +5876,7 @@ fn a_bus_limiter_can_be_the_designated_master() {
             WINDOW as u32,
             true
         ),
-        RESULT_OK
+        Ok(())
     );
     for block in 0..4 * WINDOW {
         for feeder in 0..3_u64 {
@@ -6499,15 +5902,15 @@ fn a_bus_limiter_can_be_the_designated_master() {
     );
 }
 
-/// Issue #1213 gate 7, as #1565A leaves it: admitting a bus observation subscription, then
-/// rendering, allocates and frees nothing. The bus value edits of the gate's earlier form go
-/// through the core now (`control_command` is control work and allocates by design).
+/// Issue #1213 gate 7, as #1589c leaves it: the block that applies a bus observation arm renders
+/// without allocating or freeing. The arm is an `Observe` edit through the core
+/// (`control_command` is control work and allocates by design), so only the render is measured.
 ///
-/// Test value: red if strip-sized observation admission allocates on the admission or render path.
-/// The bus gain-reduction fold runs in `poll_meters`, outside the measured closure; #1209's
+/// Test value: red if the render that drains a strip-sized observation arm allocates. The bus
+/// gain-reduction fold runs in `poll_meters`, outside the measured closure; #1209's
 /// `bus_meters_render_and_poll_without_allocating` covers it.
 #[test]
-fn a_bus_observation_admits_and_renders_without_allocating() {
+fn a_bus_observation_arm_renders_without_allocating() {
     let (mut a, _) = strip_pair(None, 2);
     assert_eq!(a.set_meter_lease(true), RESULT_OK);
     for block in 0..2 {
@@ -6521,26 +5924,21 @@ fn a_bus_observation_admits_and_renders_without_allocating() {
         }
         assert_eq!(a.render_next(), RESULT_OK);
     }
-    stage_command(
-        &mut a,
-        0,
-        COMMAND_OBSERVE_SUBSCRIBE,
-        RACK_INSERTS,
-        STRIP_BUS,
-        0,
-        1,
-        2,
+    assert_eq!(
+        observe(&mut a, STRIP_BUS, RACK_INSERTS, 0, 1, 2, true),
+        Ok(()),
+        "the bus observation is armed"
     );
     let planes: Vec<[Vec<f32>; 2]> = (0..3).map(|feeder| strip_planes(feeder, 2)).collect();
     for (feeder, planes) in planes.iter().enumerate() {
         submit_strip_source(&mut a, &format!("t{feeder}"), 2, planes);
     }
-    let ((admission, render), allocations, deallocations) =
-        crate::ffi::allocation_counter::measured(|| (a.submit_commands(1), a.render_next()));
-    assert_eq!(admission, RESULT_OK, "the bus observation is admitted");
+    let (render, allocations, deallocations) =
+        crate::ffi::allocation_counter::measured(|| a.render_next());
     assert_eq!(render, RESULT_OK);
-    assert_eq!(allocations, 0, "admission/render allocated");
-    assert_eq!(deallocations, 0, "admission/render freed");
+    assert_eq!(a.observation_armed_taps(), 1, "the block applied the arm");
+    assert_eq!(allocations, 0, "the render allocated");
+    assert_eq!(deallocations, 0, "the render freed");
 }
 
 // Issue #1222: browser live send commands. A send is addressed by its live-route index: its
@@ -7499,47 +6897,28 @@ mod structural_apply {
         };
         // A key the successor does not have is refused with its typed code and queues nothing,
         // whichever plan has it: "gone" has no strip anywhere, "a-track" is the successor's.
-        assert_eq!(key(&mut rig.host, "gone"), RESULT_INVALID_ARGUMENT);
+        let unknown = |code: &str| Err(vec![code.to_owned()]);
         assert_eq!(
-            rig.host.command_report().reason,
-            COMMAND_REASON_UNKNOWN_TRACK
+            key(&mut rig.host, "gone"),
+            unknown("observation.address.unknown")
         );
         assert_eq!(
             observe_key(&mut rig.host, "track", RACK_INSERTS, "gone", 1, 2, true),
-            RESULT_INVALID_ARGUMENT
-        );
-        assert_eq!(
-            rig.host.command_report().reason,
-            COMMAND_REASON_UNKNOWN_EFFECT
+            unknown("observation.address.unknown")
         );
         assert_eq!(
             observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 9, 2, true),
-            RESULT_INVALID_ARGUMENT
-        );
-        assert_eq!(rig.host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
-        assert!(
-            !rig.host
-                .ready
-                .as_ref()
-                .expect("ready")
-                .has_in_flight_commands,
-            "a refused key queued nothing"
+            unknown("observation.tap.unknown")
         );
         assert_eq!(
             key(&mut rig.host, "track"),
-            RESULT_OK,
+            Ok(()),
             "an observation record between the commit and the adoption block is admitted"
         );
-        assert_eq!(rig.host.command_report().admitted, 1);
         assert_eq!(
             rig.host.observation_armed_taps(),
             0,
             "the plan that renders is not armed by a record addressed to its successor"
-        );
-        assert_eq!(
-            key(&mut rig.host, "track"),
-            RESULT_BACKPRESSURE,
-            "the record is queued on the successor: its one-slot queue is full until its block"
         );
 
         rig.step();
@@ -7823,11 +7202,6 @@ mod structural_apply {
                     "swap {swap}: the rendering plan names the successor's header"
                 );
             }
-            assert_eq!(
-                rig.host.submit_commands(0),
-                RESULT_OK,
-                "swap {swap}: a submission before the swap is admitted on the successor"
-            );
             assert_eq!(rig.host.status().state, STATE_READY, "swap {swap}");
 
             let quantum = u64::from(QUANTUM);
@@ -8005,7 +7379,7 @@ mod structural_apply {
         ));
         assert_eq!(
             observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 1, 2, true),
-            RESULT_OK,
+            Ok(()),
             "the subscription is acked against the pending candidate"
         );
         assert!(matches!(
@@ -8097,7 +7471,7 @@ mod structural_apply {
         ));
         assert_eq!(
             observe_key(&mut rig.host, "track", RACK_INSERTS, "comp", 1, 2, true),
-            RESULT_OK,
+            Ok(()),
             "the subscription is acked against the pending candidate"
         );
         assert!(matches!(
@@ -8634,7 +8008,7 @@ mod structural_apply {
         rig.step();
         assert_eq!(
             observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
-            RESULT_OK
+            Ok(())
         );
         for _ in 0..8 {
             rig.step();
@@ -8955,7 +8329,7 @@ mod structural_apply {
         rig.step();
         assert_eq!(
             observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
-            RESULT_OK
+            Ok(())
         );
         for _ in 0..8 {
             rig.step();
@@ -9041,7 +8415,7 @@ mod structural_apply {
         rig.step();
         assert_eq!(
             observe(&mut rig.host, 0, RACK_INSERTS, 0, 1, 2, true),
-            RESULT_OK
+            Ok(())
         );
         for _ in 0..4 {
             rig.step();
@@ -9198,7 +8572,7 @@ mod structural_apply {
                 WINDOW as u32,
                 true
             ),
-            RESULT_OK
+            Ok(())
         );
         assert_eq!(rig.host.seek_source(SOURCE, 2, 0), RESULT_OK);
         let mut fed = 0;
@@ -9703,264 +9077,6 @@ mod structural_apply {
             "the adopted plan's row equals a fresh boot of the committed model"
         );
     }
-}
-
-/// The encoded bytes of the one `OBSERVATION_ENDED` frame that ends the insert taps keyed by
-/// `(strip, insert)` (tap 1), by the real codec: the oracle the control plane's exact-byte
-/// admission is held to (#1685).
-fn ended_frame_bytes(keys: &[(String, String)]) -> usize {
-    let mut keys: Vec<protocol::ObservationTapKey> = keys
-        .iter()
-        .map(|(strip, effect)| protocol::ObservationTapKey {
-            strip_id: strip.clone(),
-            section: protocol::ObservationSection::Inserts,
-            effect_id: effect.clone(),
-            tap_id: 1,
-        })
-        .collect();
-    keys.sort_by(|a, b| (&a.strip_id, &a.effect_id).cmp(&(&b.strip_id, &b.effect_id)));
-    let event = protocol::ObservationEnded {
-        event_sequence: u64::MAX,
-        keys,
-    };
-    match protocol::ProtocolCodec::default().encode_event_frame_into(
-        &protocol::TypedEventFrame {
-            revision: protocol::SessionRevision(u64::MAX),
-            payload: protocol::EventPayload::ObservationEnded(&event),
-        },
-        &mut [],
-    ) {
-        Err(protocol::EncodeError::OutputTooSmall { required }) => required,
-        other => panic!("an ended event is measured: {other:?}"),
-    }
-}
-
-/// The large session (#1685 gate 1) on the browser: a 64-track session with one compressor insert
-/// per track subscribes the compressor's meter tap on every insert, in one submission, at the
-/// browser's 16 KiB control frame: all 64 are admitted, and the ended event they would need is the
-/// real codec's size for their keys.
-///
-/// Red if admission still assumes the longest IDs (the cap of #1676 held 51 taps at this frame and
-/// refused record 51).
-#[test]
-fn every_insert_of_a_sixty_four_track_session_subscribes() {
-    const QUANTUM: u32 = 128;
-    const TRACKS: usize = 64;
-    let mut document: serde_json::Value =
-        serde_json::from_str(include_str!("../tests/browser-v1/observation-session.json"))
-            .expect("fixture");
-    let track = document["tracks"][0].clone();
-    let route = document["routes"][0].clone();
-    let name = |index: usize| format!("t{index:02}");
-    document["tracks"] = (0..TRACKS)
-        .map(|index| {
-            let mut track = track.clone();
-            track["id"] = serde_json::Value::String(name(index));
-            track
-        })
-        .collect();
-    document["routes"] = (0..TRACKS)
-        .map(|index| {
-            let mut route = route.clone();
-            route["id"] = serde_json::Value::String(format!("{}-main", name(index)));
-            route["source"]["track_id"] = serde_json::Value::String(name(index));
-            route
-        })
-        .collect();
-    let document = serde_json::to_string_pretty(&document).expect("document");
-    let options = WebBootOptions {
-        live_control_observation_taps: 1,
-        ..boot_options(QUANTUM)
-    };
-    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
-    let first = host.live_control_tracks()[0].to_string();
-    designate_master(&mut host, &first);
-    for track in 0..TRACKS {
-        stage_command(
-            &mut host,
-            track,
-            COMMAND_OBSERVE_SUBSCRIBE,
-            1,
-            track as u32,
-            0,
-            1,
-            2,
-        );
-    }
-    host.submit_commands(TRACKS as u32);
-    let report = *host.command_report();
-    assert_eq!(report.result, RESULT_OK, "{report:?}");
-    let control = &host.ready.as_ref().expect("ready").control;
-    assert_eq!(control.observation_armed(), TRACKS);
-    let keys: Vec<(String, String)> = (0..TRACKS)
-        .map(|index| (name(index), "comp".to_owned()))
-        .collect();
-    assert_eq!(control.observation_ended_bytes(), ended_frame_bytes(&keys));
-    assert!(control.observation_ended_bytes() <= CONTROL_FRAME_BYTES as usize);
-}
-
-/// A subscription whose `OBSERVATION_ENDED` event would outgrow the browser's 16 KiB control frame
-/// (#1676, #1685) is refused as a whole before any record is queued, so the acknowledgement never
-/// promises a tap the engine could not end honestly; unsubscribing one tap makes room for the
-/// next. The admission is the control plane's, by the event's exact encoded bytes, shared with the
-/// C ABI: the browser only reports the refusal, as its own non-retryable reason `observationLimit`
-/// with `RESULT_UNSUPPORTED`, never as backpressure, at the record that crossed it. The insert IDs
-/// are of the grammar's longest length, so the frame holds `k` of them by the real codec.
-///
-/// Red if the browser admits a subscription past the frame (the later removal of every subscribed
-/// tap could not be told to its subscribers), if it reports the refusal as backpressure (the SDK
-/// would resend it after every render), if the refusal still queues or arms the tap, if a refused
-/// batch moves the armed count or keeps part of itself, if the refusal names a record other than
-/// the arm that crossed (index 2 of a batch that first unsubscribes), or if an unsubscribe does not
-/// give its place back.
-#[test]
-fn a_subscription_past_the_frame_is_refused_and_an_unsubscribe_makes_room() {
-    const QUANTUM: u32 = 128;
-    let document: serde_json::Value =
-        serde_json::from_str(include_str!("../tests/browser-v1/observation-session.json"))
-            .expect("fixture");
-    let insert_id = |index: usize| {
-        let id = format!(
-            "i{index:03}{}",
-            "x".repeat(session::STABLE_ID_MAXIMUM_BYTES - 4)
-        );
-        assert_eq!(id.len(), session::STABLE_ID_MAXIMUM_BYTES);
-        id
-    };
-    let keys = |count: usize| -> Vec<(String, String)> {
-        (0..count)
-            .map(|index| ("track".to_owned(), insert_id(index)))
-            .collect()
-    };
-    let frame = CONTROL_FRAME_BYTES as usize;
-    let probe_cap = (1..)
-        .take_while(|count| ended_frame_bytes(&keys(*count)) <= frame)
-        .last()
-        .expect("one key fits");
-    let inserts = probe_cap + 2;
-    let mut document = document;
-    let template = document["tracks"][0]["inserts"]["effects"][0].clone();
-    document["tracks"][0]["inserts"]["effects"] = serde_json::Value::Array(
-        (0..inserts)
-            .map(|index| {
-                let mut effect = template.clone();
-                effect["id"] = serde_json::Value::String(insert_id(index));
-                effect
-            })
-            .collect(),
-    );
-    let document = serde_json::to_string_pretty(&document).expect("document");
-    let options = WebBootOptions {
-        live_control_observation_taps: 1,
-        ..boot_options(QUANTUM)
-    };
-    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
-    let first = host.live_control_tracks()[0].to_string();
-    designate_master(&mut host, &first);
-    let submit = |host: &mut AudioWorkletEngineHost, kind: u32, effect: u32| {
-        stage_command(host, 0, kind, 1, 0, effect, 1, 2);
-        host.submit_commands(1);
-        *host.command_report()
-    };
-    // A render drains the effects' observation queues, one slot per tap.
-    let mut block = 0_u64;
-    let mut render = |host: &mut AudioWorkletEngineHost| {
-        let plane = vec![0.5_f32; QUANTUM as usize];
-        let planes: [&[f32]; 2] = [&plane, &plane];
-        assert_eq!(
-            host.submit_source(
-                b"fixture-source",
-                1,
-                block * u64::from(QUANTUM),
-                48_000,
-                &planes,
-                QUANTUM,
-                false,
-            ),
-            RESULT_OK,
-        );
-        assert_eq!(host.render_next(), RESULT_OK);
-        block += 1;
-    };
-    let armed = |host: &AudioWorkletEngineHost| {
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .control
-            .observation_armed()
-    };
-    for effect in 0..probe_cap {
-        let report = submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, effect as u32);
-        assert_eq!(report.result, RESULT_OK, "{effect}: {report:?}");
-    }
-    assert_eq!(armed(&host), probe_cap);
-    assert_eq!(
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .control
-            .observation_ended_bytes(),
-        ended_frame_bytes(&keys(probe_cap))
-    );
-    let refused = submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, probe_cap as u32);
-    assert_eq!(
-        (
-            refused.result,
-            refused.reason,
-            refused.rejected_index,
-            refused.admitted
-        ),
-        (RESULT_UNSUPPORTED, COMMAND_REASON_OBSERVATION_LIMIT, 0, 0),
-        "{refused:?}"
-    );
-    assert_eq!(
-        armed(&host),
-        probe_cap,
-        "a refused subscription arms nothing"
-    );
-    render(&mut host);
-    // A batch that unsubscribes one tap, takes its place and then crosses the frame is refused whole,
-    // at the record that crossed: wire index 2, not the first record or the first arm.
-    let cap = probe_cap as u32;
-    stage_command(&mut host, 0, COMMAND_OBSERVE_UNSUBSCRIBE, 1, 0, 0, 1, 2);
-    stage_command(&mut host, 1, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, cap, 1, 2);
-    stage_command(&mut host, 2, COMMAND_OBSERVE_SUBSCRIBE, 1, 0, cap + 1, 1, 2);
-    host.submit_commands(3);
-    let refused = *host.command_report();
-    assert_eq!(
-        (
-            refused.result,
-            refused.reason,
-            refused.rejected_index,
-            refused.admitted
-        ),
-        (RESULT_UNSUPPORTED, COMMAND_REASON_OBSERVATION_LIMIT, 2, 0),
-        "{refused:?}"
-    );
-    assert_eq!(
-        armed(&host),
-        probe_cap,
-        "the refused batch's unsubscribe and first arm are not kept"
-    );
-    render(&mut host);
-    // A window change on an armed tap adds no tap.
-    assert_eq!(
-        submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 0).result,
-        RESULT_OK
-    );
-    render(&mut host);
-    // An unsubscribe gives its place back.
-    assert_eq!(
-        submit(&mut host, COMMAND_OBSERVE_UNSUBSCRIBE, 0).result,
-        RESULT_OK
-    );
-    assert_eq!(armed(&host), probe_cap - 1);
-    render(&mut host);
-    assert_eq!(
-        submit(&mut host, COMMAND_OBSERVE_SUBSCRIBE, probe_cap as u32).result,
-        RESULT_OK
-    );
-    assert_eq!(armed(&host), probe_cap);
 }
 
 /// Issue #1643: the session seek exports, driven as the page's message handler drives them.

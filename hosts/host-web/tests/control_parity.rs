@@ -3934,34 +3934,20 @@ const MASTER_PLAY_BLOCKS: u64 = 132;
 /// four-block window, and the C ABI configures `[{master, gain reduction}]` with one batch per
 /// meter window; the browser takes its meter lease.
 fn arm_master_reading(browser: &mut Rig, c_abi: &mut CAbi) {
-    // The browser arms by a kind 7 record (its `Observe` edit waits for #1589), the C ABI by one
-    // `Observe` transaction.
-    let mut record = [0_u8; host_web::COMMAND_RECORD_BYTES as usize];
-    record[0] = host_web::COMMAND_OBSERVE_SUBSCRIBE as u8;
-    record[1] = host_web::RACK_INSERTS;
-    record[2] = 2;
-    record[3] = u8::try_from(COMPRESSOR.id.len()).expect("insert ID length");
-    record[4..8].copy_from_slice(&1_u32.to_le_bytes());
-    record[8..12].copy_from_slice(&4_u32.to_le_bytes());
-    record[16..18].copy_from_slice(b"t1");
-    record[144..144 + COMPRESSOR.id.len()].copy_from_slice(COMPRESSOR.id.as_bytes());
-    browser
-        .host
-        .command_staging_mut()
-        .expect("the command staging")[..record.len()]
-        .copy_from_slice(&record);
-    assert_eq!(
-        browser.host.submit_commands(1),
-        host_web::RESULT_OK,
-        "the browser arm"
-    );
-    let (c, _) = c_abi.transaction(&[SessionEdit::Observe {
+    // Both hosts arm by the same `Observe` transaction.
+    let arm = [SessionEdit::Observe {
         strip_id: id("t1"),
         section: controls::TapSection::Inserts(id(COMPRESSOR.id)),
         tap_id: 1,
         armed: true,
         window_blocks: 4,
-    }]);
+    }];
+    let (b, _) = browser.transaction_reply(&arm);
+    assert!(
+        matches!(b, Verdict::Applied { .. }),
+        "the browser arm: {b:?}"
+    );
+    let (c, _) = c_abi.transaction(&arm);
     assert!(matches!(c, Verdict::Applied { .. }), "the C ABI arm: {c:?}");
     let window = host_core::default_meter_window_blocks(c_abi.rate, QUANTUM).get();
     assert_eq!(

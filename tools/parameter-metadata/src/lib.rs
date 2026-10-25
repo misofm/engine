@@ -2,9 +2,9 @@
 //!
 //! # Why this exists
 //!
-//! The app drives the engine through numeric IDs: a track index, a rack, an effect index and a
-//! parameter ID. Numbers are what the command path takes, and deliberately so -- there is no
-//! string on the hot path. But numbers are useless to a user interface without names, units,
+//! The app drives the engine through numeric IDs: a control row, a lane, an effect's parameter or
+//! tap ID. Numbers are what a control frame carries, and deliberately so -- there is no string on
+//! the hot path. But numbers are useless to a user interface without names, units,
 //! ranges, defaults and enumerations, and the one place that knowledge lives is the effect
 //! contract's descriptors. This tool emits it, once, at build time, next to the Wasm artifact, so
 //! the app never introspects the module for metadata and never has to keep a hand-written copy in
@@ -25,21 +25,6 @@
 //! row is live exactly when its declared update rate is `blockTarget`, and an effect row is live
 //! exactly when its descriptor declares it automatable. A caller that reads this file never has to
 //! discover either at runtime. See the browser ABI's `.d.ts` header for the full statement.
-//!
-//! # `commandKinds` is the whole vocabulary, and `plane` says what each kind moves
-//!
-//! Every kind the wire decodes is a row here. Since slice #1565A the browser's command record
-//! carries only the two observation kinds (`observeSubscribe` 7, `observeUnsubscribe` 8); every
-//! value goes through the control transaction (`SET_CONTROL`), and the retired value kinds 1-6 and
-//! 9-17 are refused `malformed` and never reallocated. Before the kind-vocabulary gate this table
-//! stopped short while the Rust constants, the host JS `COMMAND_KINDS` set and the `.d.ts` enum
-//! disagreed, and nothing noticed.
-//!
-//! Each row carries `plane`. `applied` keeps its issue #140 meaning -- the ABI applies this kind
-//! rather than declaring and refusing it -- and `plane` says what is applied: `"observation"`
-//! binds or unbinds an entry in the `miso.observe.v1` subscription map and changes nothing
-//! rendered. `"render"` stays a declared plane (DSP state the render thread reads) that no kind
-//! uses today.
 //!
 //! # Decision 17, slice S2b (`controls`)
 //!
@@ -151,14 +136,7 @@ use effect_contract::{
     ResponseChannelLayout, ResponseQueryCadence, ResponseSectionOutput, ResponseTotalScope,
     SmoothingRule, StepSize, StepUnit,
 };
-use host_web::{
-    ABI_VERSION, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE,
-    COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED,
-    COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_LIMIT, COMMAND_REASON_OBSERVATION_UNBOUND,
-    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
-    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
-};
+use host_web::ABI_VERSION;
 use json::{Entries, Num};
 use serde::Serialize;
 
@@ -168,15 +146,6 @@ pub const OUTPUT_NAME: &str = "miso-engine-v1-parameter-metadata.json";
 pub const SCHEMA: &str = "miso.web.parameter-metadata.v1";
 /// The launch sample rates a rate-keyed builtin domain is reported for.
 pub const LAUNCH_RATES_HZ: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-/// The plane a `commandKinds` row applies on: DSP state the render thread reads.
-pub const PLANE_RENDER: &str = "render";
-/// The plane a `commandKinds` row applies on: the `miso.observe.v1` subscription map.
-///
-/// Kinds 7 and 8 are applied -- `admit_commands` binds or unbinds the tap and acknowledges
-/// `COMMAND_REASON_NONE` -- but they move nothing the render thread reads. `applied` therefore
-/// stays `true` for every kind (issue #140: nothing in this ABI is declared-and-refused), and
-/// `plane` is what tells a consumer which of the two things "applied" means for that kind.
-pub const PLANE_OBSERVATION: &str = "observation";
 
 fn usage() -> ! {
     eprintln!(
@@ -191,22 +160,10 @@ fn usage() -> ! {
 struct Document<'a> {
     schema: &'a str,
     abi_version: u32,
-    command_record_bytes: u32,
-    maximum_command_records: u32,
-    command_kinds: Vec<CommandKindRow<'a>>,
-    command_reasons: Vec<NamedValue<'a>>,
     observation_vocabularies: ObservationVocabularies<'a>,
     builtins: Builtins<'a>,
     effects: Vec<Effect<'a>>,
     controls: Controls<'a>,
-}
-
-#[derive(Serialize)]
-struct CommandKindRow<'a> {
-    value: u32,
-    name: &'a str,
-    applied: bool,
-    plane: &'a str,
 }
 
 #[derive(Serialize)]
@@ -240,59 +197,9 @@ fn named<'a>(rows: &[(u32, &'a str)]) -> Vec<NamedValue<'a>> {
 #[must_use]
 pub fn render() -> String {
     let registry = launch_native_effect_registry().expect("launch effect registry");
-    let kinds = [
-        (
-            COMMAND_OBSERVE_SUBSCRIBE,
-            "observeSubscribe",
-            true,
-            PLANE_OBSERVATION,
-        ),
-        (
-            COMMAND_OBSERVE_UNSUBSCRIBE,
-            "observeUnsubscribe",
-            true,
-            PLANE_OBSERVATION,
-        ),
-    ];
-    let reasons = [
-        (COMMAND_REASON_NONE, "none"),
-        (COMMAND_REASON_MALFORMED, "malformed"),
-        (COMMAND_REASON_UNKNOWN_TRACK, "unknownTrack"),
-        (COMMAND_REASON_UNKNOWN_RACK, "unknownRack"),
-        (COMMAND_REASON_UNKNOWN_EFFECT, "unknownEffect"),
-        (COMMAND_REASON_UNKNOWN_PARAMETER, "unknownParameter"),
-        (COMMAND_REASON_DOMAIN, "domain"),
-        (COMMAND_REASON_UNSUPPORTED_KIND, "unsupportedKind"),
-        (COMMAND_REASON_BACKPRESSURE, "backpressure"),
-        (COMMAND_REASON_WRONG_STATE, "wrongState"),
-        // Issue #143 added these two and #151 found the drift they caused: a vocabulary that stops
-        // at `wrongState` tells every consumer that reasons 10 and 11 do not exist, and the only
-        // reasons the observation path ever returns are exactly those two.
-        // `scripts/check-command-reason-vocabulary.py` now holds this table, the Rust constants,
-        // the host JS bound, the `.d.ts` enum and the schema gate's list to one another.
-        (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
-        (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
-        // 12-14 are retired with the value kinds (#1565A) and never reallocated; #1676 added 15.
-        (COMMAND_REASON_OBSERVATION_LIMIT, "observationLimit"),
-    ];
     let document = Document {
         schema: SCHEMA,
         abi_version: ABI_VERSION,
-        command_record_bytes: COMMAND_RECORD_BYTES,
-        maximum_command_records: MAXIMUM_COMMAND_RECORDS,
-        command_kinds: kinds
-            .iter()
-            .map(|&(value, name, applied, plane)| CommandKindRow {
-                value,
-                name,
-                applied,
-                plane,
-            })
-            .collect(),
-        command_reasons: reasons
-            .iter()
-            .map(|&(value, name)| NamedValue { value, name })
-            .collect(),
         // Issue #143 D1: the observation vocabularies, so a consumer resolves a tap's raw `u32`s
         // the same way it resolves a parameter's -- from this document, never from a hand-written
         // table.

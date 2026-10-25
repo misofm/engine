@@ -16,13 +16,11 @@ const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_BACKPRESSURE = 6;
 const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
-const COMMAND_REASON_UNSUPPORTED_KIND = 7;
 const RESULT_INTERNAL = 255;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
 const BUFFER_DIAGNOSTIC = 4;
 const BUFFER_OUTPUT_PCM = 5;
-const BUFFER_COMMAND = 6;
 const BUFFER_METER_FRAME = 7;
 const STATE_READY = 2;
 // Issue #1294a: the 96-byte watermark record `miso_engine_web_v1_watermark_ptr` names.
@@ -39,13 +37,10 @@ const SEEK_REPORT_WORDS = [
 ];
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
-// Issue #137 D1/D2/D3.
-const COMMAND_RECORD_BYTES = 272;
-const MAXIMUM_COMMAND_RECORDS = 256;
-const COMMAND_REPORT_BYTES = 48;
+// Issue #137 D2/D3.
 const OBSERVATION_SELECTION_BYTES = 32;
 const OBSERVATION_RESULT_BYTES = 96;
-const MAXIMUM_OBSERVATION_READS = MAXIMUM_COMMAND_RECORDS;
+const MAXIMUM_OBSERVATION_READS = 256;
 const OBSERVATION_MAP_FIELDS = [
   "trackIndex", "rack", "effectIndex", "effectSlotId", "nativeEffectId", "tapIds",
 ];
@@ -76,7 +71,6 @@ const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "a
 // Issue #1297a: the anchored source seek and the seek report, both control work of the handler.
 const SEEK_AT_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame", "anchorSample"];
 const SEEK_REPORT_FIELDS = ["tag", "requestId", "sourceId"];
-const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
 /// Issue #1697: a `SESSION_REPLACE` frame carries its document beside it.
 const CONTROL_DOCUMENT_FIELDS = [...CONTROL_FIELDS, "document"];
@@ -664,26 +658,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// clone `postMessage` performs is the only allocation left, and it is the one the ABI cannot
   /// avoid.
   bindLiveControls(init) {
-    // Issue #1565a D4: the command staging exists exactly when observation taps are configured.
-    this.liveControlsAttached = init.options.liveControlObservationTaps !== 0n;
-    const commandPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_COMMAND);
-    const commandCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
-      this.handle,
-      BUFFER_COMMAND,
-    );
-    const reportPointer = this.exports.miso_engine_web_v1_command_report_ptr(this.handle);
-    if (!u32(reportPointer) || reportPointer === 0) return false;
-    this.bindView("commandReport", DataView, reportPointer, COMMAND_REPORT_BYTES);
-    if (this.liveControlsAttached) {
-      if (!u32(commandPointer) || commandPointer === 0
-          || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) return false;
-      this.bindView("commandStaging", Uint8Array, commandPointer, commandCapacity);
-    } else if (commandPointer !== 0 || commandCapacity !== 0) {
-      // Released live controls must own no staging at all; a nonzero row here would mean the engine
-      // charged for a buffer the ABI says does not exist.
-      return false;
-    }
-
     // Issue #207: source introspection and the observation bindings are control-path state, read
     // here once at boot and again by the request handlers (a rebuild can change both, #1562b). The
     // construction path and the handlers are the ones that may allocate; `process()` never touches
@@ -994,8 +968,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else if (message?.tag === "miso.seek-report.v1"
         && exactFields(message, SEEK_REPORT_FIELDS)) {
       this.receiveSeekReport(message);
-    } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
-      this.receiveCommand(message);
     } else if (message?.tag === "miso.control.v1"
         && (exactFields(message, CONTROL_FIELDS)
           || exactFields(message, CONTROL_DOCUMENT_FIELDS))) {
@@ -1203,59 +1175,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       message.frames, message.endOfRegion ? 1 : 0,
     );
     this.acknowledge(message.requestId, result, message.planes);
-  }
-
-  /// Copy one staged `miso.command.v1` submission into Wasm and admit it (issue #137 D1).
-  ///
-  /// The records arrive as one flat transferable byte block, so a whole fader gesture costs one
-  /// message and one copy rather than one message per parameter. The block is handed straight back
-  /// on the acknowledgement, exactly as source planes are, so the caller keeps its storage.
-  receiveCommand(message) {
-    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !u32(message.count) || message.count > MAXIMUM_COMMAND_RECORDS
-        || !(message.records instanceof Uint8Array)
-        || !(message.records.buffer instanceof ArrayBuffer)
-        || (typeof SharedArrayBuffer !== "undefined"
-          && message.records.buffer instanceof SharedArrayBuffer)
-        || message.records.byteLength !== message.count * COMMAND_RECORD_BYTES) {
-      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-      return;
-    }
-    if (!this.liveControlsAttached) {
-      // A session prepared with `liveControlObservationTaps === 0n` has no control channel and
-      // no staging buffer. That is a typed refusal of a well-formed request, not a protocol error,
-      // so the batch is acknowledged and its record block goes back to the caller untouched.
-      this.port.postMessage({
-        tag: "miso.ack.v1",
-        requestId: message.requestId,
-        result: RESULT_UNSUPPORTED,
-        reason: COMMAND_REASON_UNSUPPORTED_KIND,
-        rejectedIndex: 0,
-        admitted: 0,
-        appliedAtSample: 0n,
-        records: message.records,
-      }, [message.records.buffer]);
-      return;
-    }
-    this.commandStaging.set(message.records, 0);
-    const result = this.exports.miso_engine_web_v1_command_submit(this.handle, message.count);
-    const report = this.commandReport;
-    if (report.getUint32(0, true) !== COMMAND_REPORT_BYTES
-        || report.getUint32(4, true) !== ABI_VERSION
-        || report.getBigUint64(32, true) !== 0n || report.getBigUint64(40, true) !== 0n) {
-      this.sticky(RESULT_INTERNAL, message.requestId);
-      return;
-    }
-    this.port.postMessage({
-      tag: "miso.ack.v1",
-      requestId: message.requestId,
-      result,
-      reason: report.getUint32(12, true),
-      rejectedIndex: report.getUint32(16, true),
-      admitted: report.getUint32(20, true),
-      appliedAtSample: report.getBigUint64(24, true),
-      records: message.records,
-    }, [message.records.buffer]);
   }
 
   /// Issue #1562a D1: one command frame through the control plane's `SessionState::command`, the

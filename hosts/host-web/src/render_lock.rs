@@ -18,10 +18,9 @@
 //!
 //! - Before the `boot` export, it calls `abi_version`, `boot_options_ptr` and `document_ptr`.
 //!   None of them is wrapped, and neither is the `boot` export, which allocates by design.
-//! - After the `boot` export returns a handle, the unwrapped exports it can call are these 18:
-//!   `buffer_ptr`, `buffer_capacity`, `status_ptr`, `resource_ptr`, `command_report_ptr`,
-//!   `source_count`, `source_id`, `source_channels`, `source_frames`,
-//!   `observation_count`, `observation_track_index`, `observation_rack`,
+//! - After the `boot` export returns a handle, the unwrapped exports it can call are these 17:
+//!   `buffer_ptr`, `buffer_capacity`, `status_ptr`, `resource_ptr`, `source_count`, `source_id`,
+//!   `source_channels`, `source_frames`, `observation_count`, `observation_track_index`, `observation_rack`,
 //!   `observation_effect_index`, `observation_effect_slot_id`, `observation_native_effect_id`,
 //!   `observation_tap_count`, `observation_tap_id` and `meter_header_ptr`.
 //! - When `document_ptr` or the `boot` export returns 0, it calls `boot_result`, which is not
