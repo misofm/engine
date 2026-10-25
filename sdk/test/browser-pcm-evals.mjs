@@ -841,6 +841,13 @@ test("detachSource withdraws one ring: the drain never reads it after it resolve
   });
   await starting.ready();
   assert.deepEqual(asked, ["one"]);
+  // A prime that detaches its own source sends no seek-at for it.
+  const self = attachEngineFeed({
+    context, quantumFrames: 4, createNode: () => anchoredPrelude(source).node, engine: { host: linkedHost },
+    sources: [{ sourceId: "self", channels: 1, start: { frameAt: () => 0n, prime: () => self.detachSource("self") } }],
+  });
+  await self.ready();
+  assert.deepEqual(asked, ["one"]);
   // One ring per source ID: a second ring of one ID would be detached by its first's index.
   assert.throws(() => attachEngineFeed({ context, sources: [{ sourceId: "twice", channels: 1 }, { sourceId: "twice", channels: 2 }], quantumFrames: 4, createNode: () => attachNode() }), /unique: twice/);
 });

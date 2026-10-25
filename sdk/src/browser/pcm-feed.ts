@@ -483,6 +483,8 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     const seek = Object.freeze({ sourceId: entry.source.sourceId, generation, frame, anchorSample });
     await entry.start.prime(seek);
     if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
+    // Detached during its own prime: the ring is withdrawn, so the engine is not asked to seek it.
+    if (!live.has(entry.source.sourceId)) return;
     let result: number;
     try {
       result = (await host.seekSourceAt({ sourceId: seek.sourceId, generation, sourceFrame: frame, anchorSample })).result;
@@ -514,7 +516,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
         try {
           for (const entry of unstarted) {
             // A source detached while an earlier start was in flight is not started.
-            if (live.get(entry.source.sourceId)?.ring !== entry.ring) continue;
+            if (!live.has(entry.source.sourceId)) continue;
             await startSource(link!.host, link!.reserveSeekGeneration, entry);
           }
           unstarted = [];
