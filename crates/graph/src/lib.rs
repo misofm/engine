@@ -6356,15 +6356,35 @@ pub fn test_only_bank_slot_runs(plan: &mut PreparedRenderPlan) -> Vec<TestOnlyBa
         })
 }
 
-/// Test-only (issue #1782a): `(first unit, last unit, width)` of each pack group of a graph plan,
-/// in unit order; empty for any other plan.
+/// Test-only (issue #1782a; lane chains, issue #2142): one pack group of a graph plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestOnlyPackGroup {
+    /// Lanes per unit.
+    pub width: u32,
+    /// The group's lane chains in order: `chains[c][j]` is unit `j` of chain `c`, so every chain
+    /// has the group's units per chain and position `p` is lane `p % width` of chain `p / width`
+    /// in every row.
+    pub chains: Vec<Vec<u32>>,
+}
+
+/// Test-only (issue #1782a): each pack group of a graph plan, in unit order; empty for any other
+/// plan.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[must_use]
-pub fn test_only_pack_groups(plan: &PreparedRenderPlan) -> Vec<(u32, u32, u32)> {
+pub fn test_only_pack_groups(plan: &PreparedRenderPlan) -> Vec<TestOnlyPackGroup> {
     plan.executor_any()
         .and_then(|any| any.downcast_ref::<GraphExecutor>())
-        .map_or_else(Vec::new, |executor| executor.runtime.pack_groups())
+        .map_or_else(Vec::new, |executor| {
+            executor
+                .runtime
+                .pack_groups()
+                .into_iter()
+                .map(|(width, chains)| TestOnlyPackGroup { width, chains })
+                .collect()
+        })
 }
 
 /// Test-only (issue #1782a): trade the strips at `(unit, lane)` `a` and `b` of one pack group, as

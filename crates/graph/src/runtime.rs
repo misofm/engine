@@ -5362,17 +5362,20 @@ impl Runtime {
         // `run`. Set on every block, armed or not, because the term is sticky. A producer that is
         // an admitted per-node op (issue #1899) answers with its `channels_agree` fact, which its
         // own `execute` of this block left.
+        // Issue #2142: a per-node op whose producer is a grouped bank asks the unit that renders
+        // its strip this block; a bank's row names its lane chain's predecessor, which every move
+        // keeps at the same lanes, so it asks the unit it names.
         let input_symmetric = input_producers.get(index).and_then(|producers| {
             (!producers.is_empty()).then(|| {
-                producers
-                    .iter()
-                    .all(|&producer| match before.get(producer as usize) {
+                producers.iter().all(|&producer| {
+                    match before.get(lane_map.producer_unit(index, producer as usize)) {
                         Some(RuntimeUnit::Bank { chain, .. }) => chain.planes_identical(),
                         Some(RuntimeUnit::Op(_)) => {
                             channels_agree.get(producer as usize).copied() == Some(true)
                         }
                         None => false,
-                    })
+                    }
+                })
             })
         });
         let delays: &mut [CompensationDelay] = delays;
@@ -5575,11 +5578,10 @@ impl Runtime {
                     lane_map.record_facts(group, index, lanes, quiet);
                 }
                 if defer
-                    && let Some((_, pack)) = lane_map.group(index)
+                    && let Some((group, pack)) = lane_map.group(index)
                     && pack.last as usize == index
                 {
-                    let LaneMap { at, staging, .. } = lane_map;
-                    fold_displaced_group(units, pack, at, staging, arena, host);
+                    fold_displaced_group(units, group, pack, lane_map, arena, host);
                 }
                 Ok(())
             }
@@ -9938,54 +9940,61 @@ pub(crate) fn build_sequential(
 /// A unit in no pack group: [`LaneMap`]'s `group_of` filler.
 const NO_PACK_GROUP: u32 = u32::MAX;
 
-/// One pack group (issue #1782a): a maximal run of two or more consecutive peer bank units whose
-/// strips may trade lanes ([`Runtime::swap_bank_lanes`]) without any reader keyed by a unit and a
-/// lane being left behind.
+/// A consumer with no translated producer lane: [`LaneMap`]'s `producer_lane` filler.
+const NO_PRODUCER_LANE: u8 = u8::MAX;
+
+/// One pack group (issue #1782a; lane chains, issue #2142): a run of two or more peer **lane
+/// chains** whose strips may trade lanes ([`Runtime::swap_bank_lanes`]) without any reader keyed by
+/// a unit and a lane being left behind.
 ///
-/// Group position `p` names unit `first + p / width`, lane `p % width`. A padded unit's padded
-/// positions never move: a padded lane never swaps.
+/// A lane chain is the ordered bank units that render the same strips at the same lanes, each unit
+/// after the first gathering its predecessor's final lanes (a strip split by a send, a stage meter
+/// or a sidechain tap): `rows` units per chain. An unsplit strip's chain is one unit. Group
+/// position `p` names chain `p / width`, lane `p % width`, in every row; unit `j` of chain `c` is
+/// [`LaneMap`]'s `chain_units[units_base + c * rows + j]`. A padded unit's padded positions never
+/// move: a padded lane never swaps.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PackGroup {
-    /// The group's first unit.
+    /// The group's first unit, the least of its units: a unit of its first row.
     first: u32,
-    /// Its last unit, inclusive: at least `first + 1`.
+    /// Its last unit, inclusive, the greatest of its units: a unit of its last row. Every unit in
+    /// `first..=last` is the group's, or a plain unit that sits between two whole rows
+    /// ([`LaneMap::discover`]).
     last: u32,
     /// The chains' width `W`, the lanes per unit a position counts.
     width: u32,
+    /// The lane chains: at least two.
+    chains: u32,
+    /// The units per chain: at least one.
+    rows: u32,
+    /// Where this group's units start in [`LaneMap`]'s `chain_units`.
+    units_base: u32,
     /// Where this group's positions start in [`LaneMap`]'s `at` and `home`.
     base: u32,
-    /// Every unit folds its routes into the one master ([`FoldTarget`]); `false`: none folds.
+    /// The last row's units fold their routes into the one master ([`FoldTarget`]); `false`: none
+    /// folds. Only a chain's last unit can fold: every earlier one feeds the next.
     folded: bool,
     /// Where a folded group's master is. Meaningless when `folded` is `false`.
     master: FoldTarget,
     /// The strips not at their home position. Zero is the identity map, under which every unit
     /// folds in its own fused epilogue exactly as before #1782.
     displaced: u32,
-    /// The strips of this group that were packable after the last block their units rendered
-    /// (issue #1981: idle for [`PACK_IDLE_BLOCKS`] blocks or more). Zero, with `displaced` zero,
-    /// lets [`Runtime::pack_lanes`] pass the group by at the cost of one load.
+    /// The strips of this group that were packable after the last block their first-row units
+    /// rendered (issue #1981: idle for [`PACK_IDLE_BLOCKS`] blocks or more). Zero, with `displaced`
+    /// zero, lets [`Runtime::pack_lanes`] pass the group by at the cost of one load.
     packable: u32,
     /// Something the packer decides on changed since its last step (issue #1981): a strip's idle
-    /// count crossed [`PACK_IDLE_BLOCKS`] either way, a strip moved, or the plan is new. Clear, the same facts would make the same refused
-    /// attempts, so [`Runtime::pack_lanes`] passes the group by.
+    /// count crossed [`PACK_IDLE_BLOCKS`] either way, a strip moved, or the plan is new. Clear, the
+    /// same facts would make the same refused attempts, so [`Runtime::pack_lanes`] passes the
+    /// group by.
     dirty: bool,
 }
 
 impl PackGroup {
-    /// The local position of unit `unit`, lane `lane`: `None` outside this group.
+    /// The group's positions: `chains * width`.
     #[inline]
-    fn local(&self, unit: usize, lane: usize) -> Option<usize> {
-        let width = self.width as usize;
-        let offset = unit.checked_sub(self.first as usize)?;
-        (unit <= self.last as usize && lane < width).then(|| offset * width + lane)
-    }
-
-    /// The unit and lane of local position `position`: `None` past this group's span.
-    #[inline]
-    fn unit_lane(&self, position: usize) -> Option<(usize, usize)> {
-        let width = self.width as usize;
-        let unit = self.first as usize + position.checked_div(width)?;
-        (unit <= self.last as usize).then(|| (unit, position % width))
+    fn span(&self) -> usize {
+        self.chains as usize * self.width as usize
     }
 }
 
@@ -9993,30 +10002,41 @@ impl PackGroup {
 /// permutation [`Runtime::swap_bank_lanes`] maintains. Built by [`LaneMap::discover`]; empty, and
 /// allocation-free, in a plan with no group.
 ///
-/// A strip is named by its **home** position, the one bind gave it. Every reader keyed by a unit
-/// and a lane that a move does not carry with the strip's member ops translates through this map:
-/// the master fold of a displaced group ([`fold_displaced_group`]), the response-snapshot bindings
+/// A strip is named by its **home** position, the one bind gave it, and it renders at one position
+/// in every row of its group (issue #2142). Every reader keyed by a unit and a lane that a move
+/// does not carry with the strip's member ops translates through this map: the master fold of a
+/// displaced group ([`fold_displaced_group`]), the response-snapshot bindings
 /// ([`Runtime::copy_response_snapshot`]), the unit eligibility rows
-/// ([`Runtime::lane_eligibility_of`]) and the fade arms ([`Runtime::current_location`]). The plan
-/// carry, whose tables group a bank's lanes by home location, takes both plans back to the
-/// identity first ([`Runtime::restore_home_lanes`]).
+/// ([`Runtime::lane_eligibility_of`]), the fade arms ([`Runtime::current_location`]) and the
+/// input term of a per-node op whose producer is a grouped bank (`producer_lane`). The plan carry,
+/// whose tables group a bank's lanes by home location, takes both plans back to the identity first
+/// ([`Runtime::restore_home_lanes`]).
 #[derive(Default)]
 pub(crate) struct LaneMap {
     groups: Box<[PackGroup]>,
     /// Unit -> its group's index, or [`NO_PACK_GROUP`]. Empty when there is no group.
     group_of: Box<[u32]>,
+    /// Unit -> its place in its group, `chain * rows + row`; meaningless outside a group. Empty
+    /// when there is no group.
+    unit_slot: Box<[u32]>,
+    /// Every group's units, chain-major from its `units_base`: `rows` units per chain.
+    chain_units: Box<[u32]>,
     /// Home position -> the position that strip renders at, per group from its `base`.
     at: Box<[u32]>,
     /// Position -> the home position of the strip it renders: `at`'s inverse.
     home: Box<[u32]>,
+    /// Unit -> the home lane, in its one producer unit, of the strip a per-node op unit reads
+    /// (issue #2142), when that producer is a grouped bank; [`NO_PRODUCER_LANE`] otherwise. The
+    /// op's input term asks the unit that renders the strip now. Empty when no such op exists.
+    producer_lane: Box<[u8]>,
     /// Both planes of one re-materialised home tile, `width * frames` words each, for the widest
     /// folded group; empty when no group folds.
     staging: Box<[f32]>,
     /// The scratch [`BankChain::swap_lanes`] needs, the most any grouped chain does.
     swap_scratch: Box<[u8]>,
-    /// Home position -> the blocks in a row, up to the last one its unit rendered, in which that
-    /// strip's input was exact `+0.0` on both planes and its lane was at rest after the block
-    /// (issue #1981), saturating. A strip is packable at [`PACK_IDLE_BLOCKS`].
+    /// Home position -> the blocks in a row, up to the last one its first-row unit rendered, in
+    /// which that strip's input was exact `+0.0` on both planes and its lane was at rest after the
+    /// block (issue #1981), saturating. A strip is packable at [`PACK_IDLE_BLOCKS`].
     idle: Box<[u16]>,
     /// The lane moves [`Runtime::pack_lanes`] made, packing or homing (issue #1981): test
     /// evidence only.
@@ -10040,162 +10060,335 @@ pub(crate) enum BankLaneMoveRefusal {
     Chain(rack::ChainLaneSwapRefusal),
 }
 
+/// One group [`LaneMap::discover`] found, before [`LaneMap::from_groups`] gives it its place in
+/// the tables: the group (its `base` and `units_base` unset) and its units, chain-major.
+pub(crate) struct DiscoveredGroup {
+    group: PackGroup,
+    units: Vec<u32>,
+}
+
 impl LaneMap {
     /// The heap the map retains (#1074).
     fn retained_bytes(&self) -> u64 {
         use engine::realtime::retained::slice;
         slice(&self.groups)
             .saturating_add(slice(&self.group_of))
+            .saturating_add(slice(&self.unit_slot))
+            .saturating_add(slice(&self.chain_units))
             .saturating_add(slice(&self.at))
             .saturating_add(slice(&self.home))
+            .saturating_add(slice(&self.producer_lane))
             .saturating_add(slice(&self.staging))
             .saturating_add(slice(&self.swap_scratch))
             .saturating_add(slice(&self.idle))
     }
 
-    /// The pack groups of `units`, at bind (issue #1782a). Allocates; never on the render thread.
+    /// The pack groups of `units`, at bind (issues #1782a, #2142). Allocates; never on the render
+    /// thread.
     ///
-    /// A unit may join a group when it is a bank chain that
+    /// **Lane chains.** A bank unit's predecessor is the unit it gathers every lane from by
+    /// position: the unit before it when it takes resident input ([`UnitIdentity::resident_input`]),
+    /// or the one bank unit of its [`input_producer_table`] row when that unit renders the same
+    /// strips on the same lanes (`lane_tracks` equal). A chain is a unit with no predecessor and
+    /// its successors in turn. A unit that two units name as predecessor, a resident unit whose row
+    /// names another unit, and a bank whose row is not such a link (a consumer of a subset of its
+    /// producer's strips, or of a per-node op) are in no group, and neither is any bank its row
+    /// names: those relations name a unit's lanes by position across a chain boundary, which a
+    /// move would leave behind. A per-node op's row is no such relation: its one read per block
+    /// translates through `producer_lane` instead ([`Self::producer_unit`]).
     ///
-    /// * gathers every lane directly from its producer's buffer ([`bank_gather_source`]), so no
-    ///   member op of it runs and a member that moves to a later or an earlier unit of the group
-    ///   reads what it read before: every producer precedes the group, whose units are adjacent;
-    /// * neither takes resident input nor gives it ([`UnitIdentity::resident_input`]), and has no
-    ///   [`input_producer_table`] row and is in none: those relations name a unit's lanes by
-    ///   position;
+    /// **A chain may join a group** when every unit of it is a bank chain that
+    ///
+    /// * gathers every lane directly from one buffer ([`bank_gather_source`]), so no member op of
+    ///   it runs; and a unit after the first gathers lane `l` from its predecessor's final lane
+    ///   `l`;
     /// * has no armed auxiliary destination, a trailing active mask and at most eight lanes (the
     ///   width of [`UnitIdentity::source_lanes`]); and
-    /// * folds every populated lane or none (`route_fold`).
+    /// * folds every populated lane or none (`route_fold`), and only the chain's last unit folds.
     ///
-    /// Two adjacent such units are peers when their chains have one width and one slot count, they
-    /// fold into one master or neither folds, and some lane of one can trade its whole state with
-    /// some lane of the other in every slot ([`BankStage::can_swap_lanes`]): one slot program. A
-    /// group is a maximal run of two or more peers. The collapse arming is not a group term: it is
-    /// joined after bind (`arm_mono_collapse`), and a move between chains armed differently is
-    /// refused by the chain ([`BankChain::swap_lanes`]).
+    /// **Peers.** Two chains are peers when they have one length and unit `j` of one is a peer of
+    /// unit `j` of the other: one width and one slot count, they fold into one master or neither
+    /// folds, and some lane of one can trade its whole state with some lane of the other in every
+    /// slot ([`BankStage::can_swap_lanes`]): one slot program. The collapse arming is not a group
+    /// term: it is joined after bind (`arm_mono_collapse`), and a move between chains armed
+    /// differently is refused by the chain ([`BankChain::swap_lanes`]).
+    ///
+    /// **Groups.** A group is a run of two or more peer chains, consecutive in the order of their
+    /// first units, whose layout lets any permutation of their strips render what the identity
+    /// renders ([`group_layout_holds`]): every buffer the group's units read or write holds one
+    /// value over the group's span, and a plain unit inside the span sits between two whole rows.
+    /// From each run the longest prefix that holds is taken.
     fn discover(
         units: &mut [RuntimeUnit],
         identity: &[UnitIdentity],
         input_producers: &[Box<[u32]>],
         frames: usize,
     ) -> Self {
-        let mut referenced = vec![false; units.len()];
-        for row in input_producers {
-            for &producer in row.iter() {
-                if let Some(flag) = referenced.get_mut(producer as usize) {
-                    *flag = true;
-                }
-            }
-        }
-        let eligible: Vec<bool> = (0..units.len())
-            .map(|index| pack_member_eligible(units, identity, input_producers, &referenced, index))
+        let count = units.len();
+        let bank = |units: &[RuntimeUnit], index: usize| {
+            matches!(units.get(index), Some(RuntimeUnit::Bank { .. }))
+        };
+        let mut eligible: Vec<bool> = (0..count)
+            .map(|index| lane_chain_eligible(units, index))
             .collect();
-        let mut runs = Vec::new();
-        let mut index = 0;
-        while index < units.len() {
-            if !eligible[index] {
-                index += 1;
+        let mut predecessor: Vec<Option<usize>> = vec![None; count];
+        for unit in 0..count {
+            if !bank(units, unit) {
                 continue;
             }
-            let first = index;
-            while index + 1 < units.len()
-                && eligible[index + 1]
-                && pack_peers(units, index, index + 1)
-            {
-                index += 1;
+            let row: &[u32] = input_producers.get(unit).map_or(&[], |row| row);
+            let same_strips = |producer: usize| {
+                bank(units, producer)
+                    && producer < unit
+                    && matches!(
+                        (identity.get(producer), identity.get(unit)),
+                        (Some(earlier), Some(later))
+                            if !later.lane_tracks.is_empty()
+                                && earlier.lane_tracks == later.lane_tracks
+                    )
+            };
+            let resident = identity.get(unit).is_some_and(|row| row.resident_input);
+            let link = if resident {
+                unit.checked_sub(1).filter(|&before| {
+                    same_strips(before)
+                        && (row.is_empty() || (row.len() == 1 && row[0] as usize == before))
+                })
+            } else {
+                match row {
+                    [producer] if same_strips(*producer as usize) => Some(*producer as usize),
+                    _ => None,
+                }
+            };
+            match link {
+                Some(producer) => predecessor[unit] = Some(producer),
+                None if resident || !row.is_empty() => {
+                    // A positional relation across a chain boundary: neither side moves.
+                    eligible[unit] = false;
+                    if resident && let Some(before) = unit.checked_sub(1) {
+                        eligible[before] = false;
+                    }
+                    for &producer in row {
+                        if bank(units, producer as usize) {
+                            eligible[producer as usize] = false;
+                        }
+                    }
+                }
+                None => {}
             }
-            if index > first {
-                runs.push((first, index));
+        }
+        let mut successor: Vec<Option<usize>> = vec![None; count];
+        for unit in 0..count {
+            let Some(producer) = predecessor[unit] else {
+                continue;
+            };
+            if let Some(other) = successor[producer] {
+                // Two consumers of one unit's lanes by position: no chain is well defined.
+                eligible[producer] = false;
+                eligible[other] = false;
+                eligible[unit] = false;
+            } else {
+                successor[producer] = Some(unit);
             }
-            index += 1;
         }
-        if runs.is_empty() {
-            return Self::default();
+        let mut chains: Vec<Vec<usize>> = Vec::new();
+        for head in 0..count {
+            if !bank(units, head) || predecessor[head].is_some() {
+                continue;
+            }
+            let mut chain = vec![head];
+            let mut at = head;
+            while let Some(next) = successor[at] {
+                chain.push(next);
+                at = next;
+            }
+            chains.push(chain);
         }
-        let mut groups = Vec::with_capacity(runs.len());
+        let usable: Vec<bool> = chains
+            .iter()
+            .map(|chain| chain.iter().all(|&unit| eligible[unit]) && chain_links_hold(units, chain))
+            .collect();
+        let mut found: Vec<DiscoveredGroup> = Vec::new();
         let mut widest_folded = 0_usize;
         let mut scratch = 0_usize;
-        for &(first, last) in &runs {
-            let RuntimeUnit::Bank {
-                chain,
-                fold,
-                master,
-                ..
-            } = &units[first]
-            else {
+        let mut start = 0;
+        while start < chains.len() {
+            if !usable[start] {
+                start += 1;
+                continue;
+            }
+            let mut end = start;
+            while end + 1 < chains.len()
+                && usable[end + 1]
+                && chain_peers(units, &chains[end], &chains[end + 1])
+            {
+                end += 1;
+            }
+            let taken = (start + 1..=end)
+                .rev()
+                .find(|&last| group_layout_holds(units, &chains[start..=last]));
+            let Some(last) = taken else {
+                start += 1;
+                continue;
+            };
+            let run = &chains[start..=last];
+            let rows = run[0].len();
+            let head = run[0][0];
+            let Some(RuntimeUnit::Bank { chain, .. }) = units.get(head) else {
+                start = last + 1;
                 continue;
             };
             let width = chain.width().lanes() as usize;
-            let folded = !fold.is_empty();
+            let mut folded = false;
+            let mut master = FoldTarget::Output;
+            for &unit in run.iter().flatten() {
+                if let RuntimeUnit::Bank {
+                    chain,
+                    fold,
+                    master: own,
+                    ..
+                } = &units[unit]
+                {
+                    scratch = scratch.max(chain.lane_swap_scratch_bytes());
+                    if !fold.is_empty() {
+                        folded = true;
+                        master = *own;
+                    }
+                }
+            }
             if folded {
                 widest_folded = widest_folded.max(width);
             }
-            let master = *master;
-            for unit in &units[first..=last] {
-                if let RuntimeUnit::Bank { chain, .. } = unit {
-                    scratch = scratch.max(chain.lane_swap_scratch_bytes());
-                }
-            }
-            groups.push(PackGroup {
-                first: u32::try_from(first).expect("a unit index fits"),
-                last: u32::try_from(last).expect("a unit index fits"),
-                width: u32::try_from(width).expect("a bank width fits"),
-                base: 0,
-                folded,
-                master,
-                displaced: 0,
-                packable: 0,
-                dirty: true,
+            let first = run.iter().flatten().copied().min().unwrap_or(head);
+            let end_unit = run.iter().flatten().copied().max().unwrap_or(head);
+            let index = |value: usize| u32::try_from(value).expect("a unit index fits");
+            found.push(DiscoveredGroup {
+                group: PackGroup {
+                    first: index(first),
+                    last: index(end_unit),
+                    width: u32::try_from(width).expect("a bank width fits"),
+                    chains: u32::try_from(run.len()).expect("a chain count fits"),
+                    rows: u32::try_from(rows).expect("a row count fits"),
+                    units_base: 0,
+                    base: 0,
+                    folded,
+                    master,
+                    displaced: 0,
+                    packable: 0,
+                    dirty: true,
+                },
+                units: run.iter().flatten().map(|&unit| index(unit)).collect(),
             });
+            start = last + 1;
         }
-        Self::from_groups(groups, units.len(), 2 * widest_folded * frames, scratch)
+        if found.is_empty() {
+            return Self::default();
+        }
+        Self::from_groups(found, count, 2 * widest_folded * frames, scratch)
     }
 
-    /// The identity map over `groups` (their `base` and `displaced` are assigned here) for a plan
-    /// of `units` units, with `staging` words of fold staging and `scratch` bytes of swap scratch.
-    /// Bind-time; allocates.
+    /// The identity map over `groups` (their `base`, `units_base` and `displaced` are assigned
+    /// here) for a plan of `units` units, with `staging` words of fold staging and `scratch` bytes
+    /// of swap scratch. Bind-time; allocates.
     ///
     /// The index spaces, which every reader keeps: `at` and `home` are one table of every group's
     /// positions, group `g` owning the slots `base(g)..base(g) + span(g)`; the slot `base + p`
     /// describes the group's **local** position `p` (`0..span`), and the value it holds is a local
     /// position too: `home[base + p]` is the home of the strip at `p`, `at[base + h]` where the
-    /// strip whose home is `h` renders. Under the identity both hold `p` at `base + p`.
+    /// strip whose home is `h` renders. Under the identity both hold `p` at `base + p`. A position
+    /// names a chain and a lane, the same in every row.
     fn from_groups(
-        mut groups: Vec<PackGroup>,
+        groups: Vec<DiscoveredGroup>,
         units: usize,
         staging: usize,
         scratch: usize,
     ) -> Self {
         let mut group_of = vec![NO_PACK_GROUP; units];
+        let mut unit_slot = vec![0_u32; units];
+        let mut chain_units = Vec::new();
         let mut local = Vec::new();
-        for (index, group) in groups.iter_mut().enumerate() {
+        let mut kept = Vec::with_capacity(groups.len());
+        for (index, found) in groups.into_iter().enumerate() {
+            let mut group = found.group;
             group.base = u32::try_from(local.len()).expect("a position fits");
+            group.units_base = u32::try_from(chain_units.len()).expect("a unit slot fits");
             group.displaced = 0;
             group.packable = 0;
             group.dirty = true;
-            let span = (group.last - group.first + 1) as usize * group.width as usize;
-            local.extend(
-                (0..span).map(|position| u32::try_from(position).expect("a position fits")),
+            debug_assert_eq!(
+                found.units.len(),
+                group.chains as usize * group.rows as usize,
+                "a group lists rows units per chain"
             );
-            for unit in group.first as usize..=group.last as usize {
-                if let Some(slot) = group_of.get_mut(unit) {
-                    *slot = u32::try_from(index).expect("a group index fits");
+            local.extend(
+                (0..group.span()).map(|position| u32::try_from(position).expect("a position fits")),
+            );
+            for (slot, &unit) in found.units.iter().enumerate() {
+                if let Some(entry) = group_of.get_mut(unit as usize) {
+                    *entry = u32::try_from(index).expect("a group index fits");
+                }
+                if let Some(entry) = unit_slot.get_mut(unit as usize) {
+                    *entry = u32::try_from(slot).expect("a unit slot fits");
                 }
             }
+            chain_units.extend_from_slice(&found.units);
+            kept.push(group);
         }
         let local: Box<[u32]> = local.into_boxed_slice();
         Self {
-            groups: groups.into_boxed_slice(),
+            groups: kept.into_boxed_slice(),
             group_of: group_of.into_boxed_slice(),
+            unit_slot: unit_slot.into_boxed_slice(),
+            chain_units: chain_units.into_boxed_slice(),
             home: local.clone(),
             idle: vec![0; local.len()].into_boxed_slice(),
             at: local,
+            producer_lane: Box::default(),
             staging: vec![0.0; staging].into_boxed_slice(),
             swap_scratch: vec![0; scratch].into_boxed_slice(),
             #[cfg(any(test, feature = "test-support"))]
             lane_moves: 0,
             #[cfg(any(test, feature = "test-support"))]
             pack_attempts: 0,
+        }
+    }
+
+    /// Issue #2142: name, for every per-node op unit whose one producer is a grouped bank, the
+    /// home lane of the strip it reads ([`Self::producer_unit`]). Bind-time; allocates only when
+    /// such an op exists.
+    fn bind_producer_lanes(
+        &mut self,
+        units: &[RuntimeUnit],
+        identity: &[UnitIdentity],
+        input_producers: &[Box<[u32]>],
+    ) {
+        if self.groups.is_empty() {
+            return;
+        }
+        let mut lanes = vec![NO_PRODUCER_LANE; units.len()];
+        let mut any = false;
+        for (unit, row) in input_producers.iter().enumerate() {
+            let (Some(RuntimeUnit::Op(_)), [producer]) = (units.get(unit), &**row) else {
+                continue;
+            };
+            let producer = *producer as usize;
+            if self.group(producer).is_none() {
+                continue;
+            }
+            let track = identity.get(unit).and_then(|row| row.lane_tracks.first());
+            let lane = identity.get(producer).and_then(|row| {
+                row.lane_tracks
+                    .iter()
+                    .position(|other| Some(other) == track)
+            });
+            // `input_producer_table` admitted the op only on a same-track bank lane.
+            debug_assert!(lane.is_some(), "a per-node op reads a lane of its producer");
+            if let Some(lane) = lane.and_then(|lane| u8::try_from(lane).ok()) {
+                lanes[unit] = lane;
+                any = true;
+            }
+        }
+        if any {
+            self.producer_lane = lanes.into_boxed_slice();
         }
     }
 
@@ -10214,32 +10407,76 @@ impl LaneMap {
             .is_some_and(|(_, group)| group.folded && group.displaced != 0)
     }
 
+    // REALTIME_POLICY_BEGIN
+    /// The local position of unit `unit`, lane `lane` of group `group`, and the unit's row:
+    /// `None` outside that group or past its width.
+    #[inline]
+    fn local(&self, group: usize, unit: usize, lane: usize) -> Option<(usize, usize)> {
+        if self.group_of.get(unit).copied() != u32::try_from(group).ok() {
+            return None;
+        }
+        let pack = self.groups.get(group)?;
+        let rows = pack.rows as usize;
+        let slot = *self.unit_slot.get(unit)? as usize;
+        let chain = slot.checked_div(rows)?;
+        (chain < pack.chains as usize && lane < pack.width as usize)
+            .then(|| (chain * pack.width as usize + lane, slot % rows))
+    }
+
+    /// The unit and lane of local position `position` of `pack`, in row `row`: `None` past the
+    /// group's span or rows.
+    #[inline]
+    fn unit_lane(&self, pack: &PackGroup, position: usize, row: usize) -> Option<(usize, usize)> {
+        let width = pack.width as usize;
+        let rows = pack.rows as usize;
+        let chain = position.checked_div(width)?;
+        if chain >= pack.chains as usize || row >= rows {
+            return None;
+        }
+        let unit = *self
+            .chain_units
+            .get(pack.units_base as usize + chain * rows + row)?;
+        Some((unit as usize, position % width))
+    }
+
     /// Where the strip whose home is unit `unit`, lane `lane` renders: itself outside a group.
     #[inline]
     fn current(&self, unit: usize, lane: usize) -> (usize, usize) {
-        let Some((_, group)) = self.group(unit) else {
+        let Some((group, pack)) = self.group(unit) else {
             return (unit, lane);
         };
-        match group
-            .local(unit, lane)
-            .and_then(|home| self.at.get(group.base as usize + home))
-            .and_then(|&position| group.unit_lane(position as usize))
-        {
+        match self.local(group, unit, lane).and_then(|(home, row)| {
+            self.at
+                .get(pack.base as usize + home)
+                .and_then(|&position| self.unit_lane(&pack, position as usize, row))
+        }) {
             Some(current) => current,
             None => (unit, lane),
         }
     }
 
-    // REALTIME_POLICY_BEGIN
+    /// The unit whose chain renders, this block, the strip per-node op unit `consumer` reads from
+    /// its producer unit `producer` (issue #2142): `producer` itself unless the op's producer is a
+    /// grouped bank, whose strip may have moved. One bounds-checked load in a plan with no such op.
+    #[inline]
+    fn producer_unit(&self, consumer: usize, producer: usize) -> usize {
+        match self.producer_lane.get(consumer) {
+            Some(&lane) if lane != NO_PRODUCER_LANE => self.current(producer, usize::from(lane)).0,
+            _ => producer,
+        }
+    }
+
     /// Record that the strips at `(unit, lane)` `a` and `b` of group `group` traded places: the
-    /// map half of [`Runtime::swap_bank_lanes`]. `false`, having changed nothing, when either
-    /// position is not in the group; panic-free, allocation-free, O(1).
+    /// map half of [`Runtime::swap_bank_lanes`]. Either unit may be of any row. `false`, having
+    /// changed nothing, when either position is not in the group; panic-free, allocation-free, O(1).
     fn record_swap(&mut self, group: usize, a: (usize, usize), b: (usize, usize)) -> bool {
         let Some(pack) = self.groups.get(group).copied() else {
             return false;
         };
         let base = pack.base as usize;
-        let (Some(local_a), Some(local_b)) = (pack.local(a.0, a.1), pack.local(b.0, b.1)) else {
+        let (Some((local_a, _)), Some((local_b, _))) =
+            (self.local(group, a.0, a.1), self.local(group, b.0, b.1))
+        else {
             return false;
         };
         let (Some(&strip_a), Some(&strip_b)) =
@@ -10280,8 +10517,11 @@ impl LaneMap {
     /// Record unit `unit`'s block for the packer (issue #1981), after its chain ran: bit `l` of
     /// `quiet` says lane `l`'s input was exact `+0.0` on both planes and the lane is at rest for
     /// the coming block. Each populated lane's strip's idle count grows by one or falls to zero,
-    /// and the group's packable count is recounted, from zero at its first unit. Panic-free,
-    /// allocation-free, O(lanes).
+    /// and the group's packable count is recounted, from zero at its first unit. Only a first-row
+    /// unit speaks for its strips (issue #2142): a later row's input is its predecessor's output,
+    /// whose silence is stated only when that chain skipped, so its fact would hide every strip
+    /// whose bank mates run. A later row's fact costs at most a bank's cost, never a bit, and is
+    /// not recorded. Panic-free, allocation-free, O(lanes).
     fn record_facts(&mut self, group: usize, unit: usize, lanes: usize, quiet: u32) {
         let Some(pack) = self.groups.get(group).copied() else {
             return;
@@ -10294,9 +10534,10 @@ impl LaneMap {
         };
         let mut crossed = false;
         for lane in 0..lanes {
-            let Some(&strip) = pack
-                .local(unit, lane)
-                .and_then(|position| self.home.get(base + position))
+            let Some(&strip) = self
+                .local(group, unit, lane)
+                .filter(|&(_, row)| row == 0)
+                .and_then(|(position, _)| self.home.get(base + position))
             else {
                 continue;
             };
@@ -10348,14 +10589,10 @@ enum PackClass {
     Running,
 }
 
-/// [`LaneMap::discover`]'s unit term: whether unit `index` may join a pack group.
-fn pack_member_eligible(
-    units: &[RuntimeUnit],
-    identity: &[UnitIdentity],
-    input_producers: &[Box<[u32]>],
-    referenced: &[bool],
-    index: usize,
-) -> bool {
+/// [`LaneMap::discover`]'s unit term (issue #2142, was #1782a's member term): whether unit `index`
+/// is a bank chain that may be a unit of a grouped lane chain. The relations that name a unit's
+/// lanes by position (resident input, producer rows) are the chain's terms, not this one's.
+fn lane_chain_eligible(units: &[RuntimeUnit], index: usize) -> bool {
     let Some(RuntimeUnit::Bank {
         members,
         lanes,
@@ -10379,15 +10616,159 @@ fn pack_member_eligible(
             .all(|(lane, active)| *active == (lane < lanes))
         && chain.aux_lanes().is_empty()
         && (fold.is_empty() || fold.len() == lanes)
-        && identity.get(index).is_some_and(|row| !row.resident_input)
-        && identity
-            .get(index + 1)
-            .is_none_or(|row| !row.resident_input)
-        && input_producers.get(index).is_none_or(|row| row.is_empty())
-        && !referenced.get(index).copied().unwrap_or(true)
         && members[..lanes]
             .iter()
             .all(|member| bank_gather_source(member).is_some())
+}
+
+/// The final-slot member outputs of bank unit `unit`: the buffers its chain writes, lane by lane.
+fn bank_final_outputs(units: &[RuntimeUnit], unit: usize) -> &[RuntimeOp] {
+    match units.get(unit) {
+        Some(RuntimeUnit::Bank { members, lanes, .. }) => {
+            &members[members.len().saturating_sub(*lanes)..]
+        }
+        _ => &[],
+    }
+}
+
+/// [`LaneMap::discover`]'s link term (issue #2142): every unit of `chain` after the first has its
+/// predecessor's populated lanes and gathers lane `l` from its predecessor's final lane `l`, and
+/// only the last unit folds.
+fn chain_links_hold(units: &[RuntimeUnit], chain: &[usize]) -> bool {
+    let lanes_of = |unit: usize| match units.get(unit) {
+        Some(RuntimeUnit::Bank { lanes, .. }) => *lanes,
+        _ => 0,
+    };
+    let folds = |unit: usize| match units.get(unit) {
+        Some(RuntimeUnit::Bank { fold, .. }) => !fold.is_empty(),
+        _ => false,
+    };
+    chain[..chain.len().saturating_sub(1)]
+        .iter()
+        .all(|&unit| !folds(unit))
+        && chain.windows(2).all(|pair| {
+            let lanes = lanes_of(pair[0]);
+            let Some(RuntimeUnit::Bank { members, .. }) = units.get(pair[1]) else {
+                return false;
+            };
+            lanes == lanes_of(pair[1])
+                && members[..lanes]
+                    .iter()
+                    .zip(bank_final_outputs(units, pair[0]))
+                    .all(|(member, producer)| bank_gather_source(member) == Some(producer.output))
+        })
+}
+
+/// [`LaneMap::discover`]'s pair term (issue #2142): whether lane chains `a` and `b` are peers,
+/// unit by unit ([`pack_peers`]).
+fn chain_peers(units: &mut [RuntimeUnit], a: &[usize], b: &[usize]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(&x, &y)| x != y && pack_peers(units, x.min(y), x.max(y)))
+}
+
+/// [`LaneMap::discover`]'s layout term (issue #2142): whether any permutation of the strips of
+/// `chains` (peer lane chains, one length) renders what the identity renders, buffer for buffer.
+///
+/// A move changes which unit runs a strip's member op of each row, and so **when** it reads and
+/// writes its buffers; what it reads and writes is the member's own, which moves with it. So a
+/// move is exact when every buffer the group's units touch holds one value over the group's span
+/// `first..=last` and every plain unit in that span sees the same values whichever unit of a row
+/// renders a strip:
+///
+/// 1. **One write per buffer.** The final-slot outputs of every populated lane of every unit are
+///    distinct: no buffer the group writes is written twice in the span, so no write can land
+///    before another's read of an earlier value.
+/// 2. **Inputs are never written.** No first-row gather source is a buffer the group writes: a
+///    strip moved to an earlier unit cannot overwrite a value a later unit still gathers. A later
+///    row's gather sources are its predecessor's outputs ([`chain_links_hold`]), which every
+///    permutation writes in the strip's own chain before the strip's next unit runs.
+/// 3. **No fold master among them**, when the group folds: the deferred fold
+///    ([`fold_displaced_group`]) writes the master after the last unit, and nothing in the span
+///    reads it.
+/// 4. **A plain unit in the span sits between two whole rows**: every unit of rows `0..=j` before
+///    it and every unit of rows `j+1..` after it, for one `j`. It then reads the group's values
+///    after every write of the rows before it under any permutation, and a buffer it writes is
+///    one the identity has no live group value in (a row `j` output a later row reads is live
+///    across it, so it writes none of those). With one row (#1782a), this is the adjacency of the
+///    group's units.
+fn group_layout_holds(units: &[RuntimeUnit], chains: &[Vec<usize>]) -> bool {
+    let Some(rows) = chains.first().map(Vec::len) else {
+        return false;
+    };
+    if rows == 0 || chains.iter().any(|chain| chain.len() != rows) {
+        return false;
+    }
+    let mut members: Vec<usize> = chains.iter().flatten().copied().collect();
+    members.sort_unstable();
+    if members.windows(2).any(|pair| pair[0] == pair[1]) {
+        return false;
+    }
+    let (Some(&first), Some(&last)) = (members.first(), members.last()) else {
+        return false;
+    };
+    let row_bounds: Vec<(usize, usize)> = (0..rows)
+        .map(|row| {
+            let units = chains.iter().map(|chain| chain[row]);
+            (
+                units.clone().min().unwrap_or(usize::MAX),
+                units.max().unwrap_or(0),
+            )
+        })
+        .collect();
+    for unit in first..=last {
+        if members.binary_search(&unit).is_ok() {
+            continue;
+        }
+        let before = row_bounds.iter().filter(|(_, max)| *max < unit).count();
+        if before == 0
+            || row_bounds[..before].iter().any(|(_, max)| *max >= unit)
+            || row_bounds[before..].iter().any(|(min, _)| *min <= unit)
+        {
+            return false;
+        }
+    }
+    let mut written: Vec<u32> = members
+        .iter()
+        .flat_map(|&unit| bank_final_outputs(units, unit).iter().map(|op| op.output))
+        .collect();
+    written.sort_unstable();
+    if written.windows(2).any(|pair| pair[0] == pair[1]) {
+        return false;
+    }
+    let writes = |buffer: u32| written.binary_search(&buffer).is_ok();
+    for chain in chains {
+        let Some(RuntimeUnit::Bank { members, lanes, .. }) = units.get(chain[0]) else {
+            return false;
+        };
+        if members[..*lanes]
+            .iter()
+            .any(|member| bank_gather_source(member).is_none_or(writes))
+        {
+            return false;
+        }
+    }
+    for &unit in &members {
+        if let Some(RuntimeUnit::Bank {
+            fold,
+            master: FoldTarget::Arena(buffer),
+            ..
+        }) = units.get(unit)
+            && !fold.is_empty()
+        {
+            let read = chains.iter().any(|chain| match units.get(chain[0]) {
+                Some(RuntimeUnit::Bank { members, lanes, .. }) => members[..*lanes]
+                    .iter()
+                    .any(|member| bank_gather_source(member) == Some(*buffer)),
+                _ => true,
+            });
+            if writes(*buffer) || read {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// The slots `chain` holds.
@@ -10460,9 +10841,11 @@ fn widen_block_end_units(table: &[u32], map: &LaneMap) -> Box<[u32]> {
     let mut widened: Vec<u32> = Vec::with_capacity(table.len());
     for unit in 0..map.group_of.len() {
         let wanted = listed(unit)
-            || map
-                .group(unit)
-                .is_some_and(|(_, group)| (group.first as usize..=group.last as usize).any(listed));
+            || map.group(unit).is_some_and(|(group, pack)| {
+                (pack.first as usize..=pack.last as usize).any(|other| {
+                    map.group_of.get(other).copied() == u32::try_from(group).ok() && listed(other)
+                })
+            });
         if wanted {
             widened.push(u32::try_from(unit).expect("a unit index fits"));
         }
@@ -10480,6 +10863,8 @@ impl Runtime {
             &self.input_producers,
             frames,
         );
+        self.lane_map
+            .bind_producer_lanes(&self.units, &self.identity, &self.input_producers);
         if !self.lane_map.groups.is_empty() && !self.block_end_units.is_empty() {
             self.block_end_units = widen_block_end_units(&self.block_end_units, &self.lane_map);
         }
@@ -10534,13 +10919,24 @@ impl Runtime {
         self.silent_readers = readers.into_boxed_slice();
     }
 
-    /// `(first unit, last unit, width)` of each pack group, in unit order. Off the render thread.
+    /// `(width, chains)` of each pack group, in unit order: `chains[c][j]` is unit `j` of lane
+    /// chain `c` (issue #2142). Off the render thread.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn pack_groups(&self) -> Vec<(u32, u32, u32)> {
+    pub(crate) fn pack_groups(&self) -> Vec<(u32, Vec<Vec<u32>>)> {
         self.lane_map
             .groups
             .iter()
-            .map(|group| (group.first, group.last, group.width))
+            .map(|group| {
+                let rows = group.rows as usize;
+                let base = group.units_base as usize;
+                let chains = (0..group.chains as usize)
+                    .map(|chain| {
+                        self.lane_map.chain_units[base + chain * rows..base + (chain + 1) * rows]
+                            .to_vec()
+                    })
+                    .collect();
+                (group.width, chains)
+            })
             .collect()
     }
 
@@ -10693,24 +11089,30 @@ impl Runtime {
     }
 
     /// Trade the strips at unit `a.0`, lane `a.1` and unit `b.0`, lane `b.1` of one pack group, at
-    /// a block boundary on the render thread (issue #1782a): #1782b's packing move.
+    /// a block boundary on the render thread (issue #1782a): #1782b's packing move. Either unit may
+    /// be any unit of its lane chain: the move trades the two strips in **every** unit of both
+    /// chains (issue #2142), so each row's unit still gathers its predecessor's lane at its own
+    /// position, by resident copy or by producer row, whatever moved.
     ///
-    /// The chains trade the two lanes' whole state first ([`BankChain::swap_lanes`]); every refusal
-    /// is theirs or decided before it, and leaves the plan as it was. Then, in the same call, every
-    /// reader that follows the strip by moving with it: the member op of every slot (its gather
-    /// source, its scatter target or redirect, its observers and meters), the lane's route fold
-    /// entry (`fold`, constants and store bit), and its [`UnitIdentity::source_lanes`] bit. The two
-    /// units' observation rows are derived again from their new members. Last, the lane map, which
-    /// every other reader translates through.
+    /// Every refusal is decided before the first write and leaves the plan as it was: the lanes and
+    /// identity rows of every row first, then every row's chains ([`BankChain::lane_swap_check`]).
+    /// Then each row in turn: the chains trade the two lanes' whole state
+    /// ([`BankChain::swap_lanes`]), and every reader that follows the strip by moving with it moves:
+    /// the member op of every slot (its gather source, its scatter target or redirect, its observers
+    /// and meters), the lane's route fold entry (`fold`, constants and store bit), and its
+    /// [`UnitIdentity::source_lanes`] bit, and the two units' observation rows are derived again
+    /// from their new members. A row whose chains refuse after their check passed is a defect: the
+    /// rows already traded are traded back. Last, the lane map, which every other reader
+    /// translates through.
     ///
     /// Allocation-free: element swaps, the chains' bounded swaps over the preallocated scratch, and
-    /// a walk of the two units' members.
+    /// a walk of each row's two units' members.
     pub(crate) fn swap_bank_lanes(
         &mut self,
         a: (usize, usize),
         b: (usize, usize),
     ) -> Result<(), BankLaneMoveRefusal> {
-        let (group, _) = self.lane_map.group(a.0).ok_or(BankLaneMoveRefusal::Group)?;
+        let (group, pack) = self.lane_map.group(a.0).ok_or(BankLaneMoveRefusal::Group)?;
         if self.lane_map.group(b.0).map(|(other, _)| other) != Some(group) {
             return Err(BankLaneMoveRefusal::Group);
         }
@@ -10718,27 +11120,45 @@ impl Runtime {
             Some(RuntimeUnit::Bank { lanes, .. }) => *lanes,
             _ => 0,
         };
-        // Every index below is checked here, before the chains change: both positions are in the
-        // group's map, both lanes fit the eight-bit source mask, and both units have identity rows.
-        // So nothing after the chains' swap can fail or panic.
-        let mapped = |(unit, lane): (usize, usize)| {
-            self.lane_map
-                .group(unit)
-                .and_then(|(_, pack)| pack.local(unit, lane))
-                .is_some()
-        };
-        if a.1 >= populated(a.0)
-            || b.1 >= populated(b.0)
-            || a.1 >= 8
-            || b.1 >= 8
-            || !mapped(a)
-            || !mapped(b)
-            || a.0.max(b.0) >= self.identity.len()
-        {
+        let (Some((position_a, _)), Some((position_b, _))) = (
+            self.lane_map.local(group, a.0, a.1),
+            self.lane_map.local(group, b.0, b.1),
+        ) else {
             return Err(BankLaneMoveRefusal::Lane);
+        };
+        // Every index below is checked here, before any chain changes: both positions are in the
+        // group's map in every row, every row's lanes fit the eight-bit source mask, and every
+        // row's units have identity rows. So nothing after the chains' swaps can fail or panic.
+        let rows = pack.rows as usize;
+        for row in 0..rows {
+            let (Some(at_a), Some(at_b)) = (
+                self.lane_map.unit_lane(&pack, position_a, row),
+                self.lane_map.unit_lane(&pack, position_b, row),
+            ) else {
+                return Err(BankLaneMoveRefusal::Lane);
+            };
+            if at_a.1 >= populated(at_a.0)
+                || at_b.1 >= populated(at_b.0)
+                || at_a.1 >= 8
+                || at_b.1 >= 8
+                || at_a.0.max(at_b.0) >= self.identity.len()
+            {
+                return Err(BankLaneMoveRefusal::Lane);
+            }
         }
-        if a == b {
+        if position_a == position_b {
             return Ok(());
+        }
+        let scratch = self.lane_map.swap_scratch.len();
+        for row in 0..rows {
+            let (Some(at_a), Some(at_b)) = (
+                self.lane_map.unit_lane(&pack, position_a, row),
+                self.lane_map.unit_lane(&pack, position_b, row),
+            ) else {
+                return Err(BankLaneMoveRefusal::Lane);
+            };
+            check_unit_lane_swap(&self.units, at_a, at_b, scratch)
+                .map_err(BankLaneMoveRefusal::Chain)?;
         }
         let Self {
             units,
@@ -10746,97 +11166,33 @@ impl Runtime {
             lane_map,
             ..
         } = self;
-        if a.0 == b.0 {
-            let Some(RuntimeUnit::Bank {
-                members,
-                lanes,
-                chain,
-                fold,
-                ..
-            }) = units.get_mut(a.0)
-            else {
-                return Err(BankLaneMoveRefusal::Group);
+        for row in 0..rows {
+            let (Some(at_a), Some(at_b)) = (
+                lane_map.unit_lane(&pack, position_a, row),
+                lane_map.unit_lane(&pack, position_b, row),
+            ) else {
+                return Err(BankLaneMoveRefusal::Lane);
             };
-            chain
-                .swap_lanes(
-                    a.1,
-                    rack::ChainLanePeer::Same(b.1),
-                    &mut lane_map.swap_scratch,
-                )
-                .map_err(BankLaneMoveRefusal::Chain)?;
-            // `a.1` and `b.1` are below `lanes`, so every index is below `members.len()`.
-            let lanes = *lanes;
-            for slot in 0..members.len() / lanes {
-                members.swap(slot * lanes + a.1, slot * lanes + b.1);
-            }
-            if a.1 < fold.len() && b.1 < fold.len() {
-                fold.swap(a.1, b.1);
-            }
-        } else {
-            let ((low, low_lane), (high, high_lane)) = if a.0 < b.0 { (a, b) } else { (b, a) };
-            let (head, tail) = units.split_at_mut(high);
-            let (
-                Some(RuntimeUnit::Bank {
-                    members: low_members,
-                    lanes: low_lanes,
-                    chain: low_chain,
-                    fold: low_fold,
-                    ..
-                }),
-                Some(RuntimeUnit::Bank {
-                    members: high_members,
-                    lanes: high_lanes,
-                    chain: high_chain,
-                    fold: high_fold,
-                    ..
-                }),
-            ) = (head.get_mut(low), tail.first_mut())
-            else {
-                return Err(BankLaneMoveRefusal::Group);
-            };
-            low_chain
-                .swap_lanes(
-                    low_lane,
-                    rack::ChainLanePeer::Other(high_chain, high_lane),
-                    &mut lane_map.swap_scratch,
-                )
-                .map_err(BankLaneMoveRefusal::Chain)?;
-            let (low_lanes, high_lanes) = (*low_lanes, *high_lanes);
-            for slot in 0..low_members.len() / low_lanes {
-                if let (Some(own), Some(theirs)) = (
-                    low_members.get_mut(slot * low_lanes + low_lane),
-                    high_members.get_mut(slot * high_lanes + high_lane),
-                ) {
-                    core::mem::swap(own, theirs);
-                }
-            }
-            if let (Some(own), Some(theirs)) =
-                (low_fold.get_mut(low_lane), high_fold.get_mut(high_lane))
+            if let Err(refusal) =
+                swap_unit_lanes(units, identity, &mut lane_map.swap_scratch, at_a, at_b)
             {
-                core::mem::swap(own, theirs);
-            }
-        }
-        // The source-claim bits: lane `a.1` of unit `a.0` now gathers what lane `b.1` of `b.0` did.
-        // Both rows exist and both lanes are below eight (checked above).
-        let bit = |unit: usize, lane: usize| {
-            identity
-                .get(unit)
-                .map_or(0, |row| (row.source_lanes >> lane) & 1)
-        };
-        let (bit_a, bit_b) = (bit(a.0, a.1), bit(b.0, b.1));
-        for ((unit, lane), value) in [(a, bit_b), (b, bit_a)] {
-            if let Some(row) = identity.get_mut(unit) {
-                row.source_lanes = (row.source_lanes & !(1 << lane)) | (value << lane);
-            }
-        }
-        for unit in [a.0, b.0] {
-            if let (Some(row), Some(identity)) = (units.get(unit), identity.get_mut(unit)) {
-                identity.observation = UnitObservation::of(
-                    row.has_observers(),
-                    row.accepts_sample_peak(),
-                    row.accepts_banked_meter(),
-                    row.meters_only(),
-                );
+                debug_assert!(false, "a checked row trades its lanes");
+                for undo in (0..row).rev() {
+                    if let (Some(at_a), Some(at_b)) = (
+                        lane_map.unit_lane(&pack, position_a, undo),
+                        lane_map.unit_lane(&pack, position_b, undo),
+                    ) {
+                        let undone = swap_unit_lanes(
+                            units,
+                            identity,
+                            &mut lane_map.swap_scratch,
+                            at_a,
+                            at_b,
+                        );
+                        debug_assert!(undone.is_ok(), "a traded row trades back");
+                    }
+                }
+                return Err(refusal);
             }
         }
         // The map: the strips at the two positions trade places.
@@ -10873,7 +11229,7 @@ impl Runtime {
                 continue;
             }
             let base = pack.base as usize;
-            let span = (pack.last as usize + 1 - pack.first as usize) * pack.width as usize;
+            let span = pack.span();
             for position in 0..span {
                 // Each trade puts one strip home, so a position needs at most `span` of them.
                 for _ in 0..=span {
@@ -10888,9 +11244,9 @@ impl Runtime {
                         break;
                     }
                     let (Some(here), Some(holder), Some(occupant_home)) = (
-                        pack.unit_lane(position),
-                        pack.unit_lane(holder as usize),
-                        pack.unit_lane(occupant),
+                        self.lane_map.unit_lane(&pack, position, 0),
+                        self.lane_map.unit_lane(&pack, holder as usize, 0),
+                        self.lane_map.unit_lane(&pack, occupant, 0),
                     ) else {
                         return false;
                     };
@@ -10940,7 +11296,7 @@ impl Runtime {
     /// The class of the strip at local position `position` of `pack`, for the packer: a padded
     /// lane is [`PackClass::Fixed`] (it never moves, and it never stops its bank's skip).
     fn pack_class(&self, pack: &PackGroup, position: usize) -> PackClass {
-        let Some((unit, lane)) = pack.unit_lane(position) else {
+        let Some((unit, lane)) = self.lane_map.unit_lane(pack, position, 0) else {
             return PackClass::Fixed;
         };
         let populated = match self.units.get(unit) {
@@ -10959,16 +11315,19 @@ impl Runtime {
         }
     }
 
-    /// Whether local unit `unit` of `pack` holds a running strip, so it renders whatever moves.
-    fn pack_unit_runs(&self, pack: &PackGroup, unit: usize) -> bool {
+    /// Whether lane chain `chain` of `pack` holds a running strip, so it renders whatever moves.
+    fn pack_unit_runs(&self, pack: &PackGroup, chain: usize) -> bool {
         let width = pack.width as usize;
-        (unit * width..(unit + 1) * width)
+        (chain * width..(chain + 1) * width)
             .any(|position| self.pack_class(pack, position) == PackClass::Running)
     }
 
     /// Trade the strips at local positions `a` and `b` of `pack`, counting the move.
     fn pack_swap(&mut self, pack: &PackGroup, a: usize, b: usize) -> bool {
-        let (Some(a), Some(b)) = (pack.unit_lane(a), pack.unit_lane(b)) else {
+        let (Some(a), Some(b)) = (
+            self.lane_map.unit_lane(pack, a, 0),
+            self.lane_map.unit_lane(pack, b, 0),
+        ) else {
             return false;
         };
         let moved = self.swap_bank_lanes(a, b).is_ok();
@@ -10983,6 +11342,9 @@ impl Runtime {
     }
 
     /// One group's packing step (issue #1981).
+    ///
+    /// A position names a lane chain and a lane (issue #2142); "unit" below is a lane chain, whose
+    /// classes are its first row's, and a move trades the strip in every unit of both chains.
     ///
     /// **Pack.** From the group's last position down, each running strip in a unit above the
     /// first trades places with a packable strip in a lower unit that runs anyway, lowest first:
@@ -11018,8 +11380,7 @@ impl Runtime {
     /// runs.
     fn pack_group(&mut self, group: usize, pack: PackGroup) {
         let width = pack.width as usize;
-        let units = (pack.last as usize + 1).saturating_sub(pack.first as usize);
-        let span = units * width;
+        let span = pack.span();
         let budget = width;
         let (mut moves, mut attempts) = (0_usize, 0_usize);
         // A move sets the bit again (`LaneMap::record_swap`). A step that moved nothing leaves it
@@ -11102,6 +11463,135 @@ impl Runtime {
     }
 }
 
+// REALTIME_POLICY_BEGIN
+/// Whether the chains of units `a.0` and `b.0` would trade lanes `a.1` and `b.1`
+/// ([`BankChain::lane_swap_check`]), asked in the order [`swap_unit_lanes`] swaps them; writes
+/// nothing (issue #2142).
+fn check_unit_lane_swap(
+    units: &[RuntimeUnit],
+    a: (usize, usize),
+    b: (usize, usize),
+    scratch: usize,
+) -> Result<(), rack::ChainLaneSwapRefusal> {
+    let chain_of = |unit: usize| match units.get(unit) {
+        Some(RuntimeUnit::Bank { chain, .. }) => Some(chain),
+        _ => None,
+    };
+    if a.0 == b.0 {
+        let chain = chain_of(a.0).ok_or(rack::ChainLaneSwapRefusal::Lane)?;
+        return chain.lane_swap_check(a.1, None, b.1, scratch);
+    }
+    let ((low, low_lane), (high, high_lane)) = if a.0 < b.0 { (a, b) } else { (b, a) };
+    let (Some(low), Some(high)) = (chain_of(low), chain_of(high)) else {
+        return Err(rack::ChainLaneSwapRefusal::Lane);
+    };
+    low.lane_swap_check(low_lane, Some(high), high_lane, scratch)
+}
+
+/// One row of [`Runtime::swap_bank_lanes`]: trade lane `a.1` of unit `a.0` and lane `b.1` of unit
+/// `b.0` (one unit or two) in the chains, then every reader that moves with the strip: the member
+/// op of every slot, the route fold entry, the source-claim bit, and the two units' observation
+/// rows. The caller checked every index and the chains' consent.
+fn swap_unit_lanes(
+    units: &mut [RuntimeUnit],
+    identity: &mut [UnitIdentity],
+    scratch: &mut [u8],
+    a: (usize, usize),
+    b: (usize, usize),
+) -> Result<(), BankLaneMoveRefusal> {
+    if a.0 == b.0 {
+        let Some(RuntimeUnit::Bank {
+            members,
+            lanes,
+            chain,
+            fold,
+            ..
+        }) = units.get_mut(a.0)
+        else {
+            return Err(BankLaneMoveRefusal::Group);
+        };
+        chain
+            .swap_lanes(a.1, rack::ChainLanePeer::Same(b.1), scratch)
+            .map_err(BankLaneMoveRefusal::Chain)?;
+        // `a.1` and `b.1` are below `lanes`, so every index is below `members.len()`.
+        let lanes = *lanes;
+        for slot in 0..members.len() / lanes {
+            members.swap(slot * lanes + a.1, slot * lanes + b.1);
+        }
+        if a.1 < fold.len() && b.1 < fold.len() {
+            fold.swap(a.1, b.1);
+        }
+    } else {
+        let ((low, low_lane), (high, high_lane)) = if a.0 < b.0 { (a, b) } else { (b, a) };
+        let (head, tail) = units.split_at_mut(high);
+        let (
+            Some(RuntimeUnit::Bank {
+                members: low_members,
+                lanes: low_lanes,
+                chain: low_chain,
+                fold: low_fold,
+                ..
+            }),
+            Some(RuntimeUnit::Bank {
+                members: high_members,
+                lanes: high_lanes,
+                chain: high_chain,
+                fold: high_fold,
+                ..
+            }),
+        ) = (head.get_mut(low), tail.first_mut())
+        else {
+            return Err(BankLaneMoveRefusal::Group);
+        };
+        low_chain
+            .swap_lanes(
+                low_lane,
+                rack::ChainLanePeer::Other(high_chain, high_lane),
+                scratch,
+            )
+            .map_err(BankLaneMoveRefusal::Chain)?;
+        let (low_lanes, high_lanes) = (*low_lanes, *high_lanes);
+        for slot in 0..low_members.len() / low_lanes {
+            if let (Some(own), Some(theirs)) = (
+                low_members.get_mut(slot * low_lanes + low_lane),
+                high_members.get_mut(slot * high_lanes + high_lane),
+            ) {
+                core::mem::swap(own, theirs);
+            }
+        }
+        if let (Some(own), Some(theirs)) =
+            (low_fold.get_mut(low_lane), high_fold.get_mut(high_lane))
+        {
+            core::mem::swap(own, theirs);
+        }
+    }
+    // The source-claim bits: lane `a.1` of unit `a.0` now gathers what lane `b.1` of `b.0` did.
+    // Both rows exist and both lanes are below eight (checked by the caller).
+    let bit = |identity: &[UnitIdentity], unit: usize, lane: usize| {
+        identity
+            .get(unit)
+            .map_or(0, |row| (row.source_lanes >> lane) & 1)
+    };
+    let (bit_a, bit_b) = (bit(identity, a.0, a.1), bit(identity, b.0, b.1));
+    for ((unit, lane), value) in [(a, bit_b), (b, bit_a)] {
+        if let Some(row) = identity.get_mut(unit) {
+            row.source_lanes = (row.source_lanes & !(1 << lane)) | (value << lane);
+        }
+    }
+    for unit in [a.0, b.0] {
+        if let (Some(row), Some(identity)) = (units.get(unit), identity.get_mut(unit)) {
+            identity.observation = UnitObservation::of(
+                row.has_observers(),
+                row.accepts_sample_peak(),
+                row.accepts_banked_meter(),
+                row.meters_only(),
+            );
+        }
+    }
+    Ok(())
+}
+// REALTIME_POLICY_END
+
 /// The master fold of a displaced pack group (issue #1782a), after its last unit has run: for
 /// each unit in schedule order, its home lanes' routed tiles accumulate into the master in home
 /// lane order, through the kernels its own epilogue would have used.
@@ -11111,8 +11601,10 @@ impl Runtime {
 /// `route_fold` proved the master's contributors are the group's units in schedule order and
 /// their lanes in ascending order, and a displaced group's units folded nothing in their own
 /// epilogues (`ArenaMembers::defer`). Nothing else writes the master between the group's first
-/// unit and this call: the group's units are adjacent. So the same contributions in the same
-/// order are what remain, and per unit they are:
+/// unit and this call: only the last row folds, only the group's own earlier rows (which fold
+/// nothing) can sit between its units, and a plain unit in the span sits between two whole rows,
+/// before every folding unit (issue #2142, [`group_layout_holds`]). So the same contributions in the same order are what remain, and per
+/// folding unit they are:
 ///
 /// * the home tile: lane `k` is the resident final output of the lane the strip whose home is
 ///   lane `k` renders at ([`LaneMap`]), every word moved unchanged. A unit none of whose home
@@ -11130,15 +11622,30 @@ impl Runtime {
 /// identity map writes. Allocation-free: the staging is the map's.
 fn fold_displaced_group(
     units: &[RuntimeUnit],
+    group: usize,
     pack: PackGroup,
-    at: &[u32],
-    staging: &mut [f32],
+    map: &mut LaneMap,
     arena: &mut DisjointArena,
     mut host: HostMaster<'_>,
 ) {
     let width = pack.width as usize;
     let first = pack.first as usize;
     let base = pack.base as usize;
+    let LaneMap {
+        at,
+        staging,
+        group_of,
+        unit_slot,
+        chain_units,
+        ..
+    } = map;
+    let rows = pack.rows as usize;
+    // Unit `j` of the chain at local position `position`.
+    let holder_unit = |position: usize, row: usize| {
+        chain_units
+            .get(pack.units_base as usize + (position / width) * rows + row)
+            .map(|&unit| unit as usize)
+    };
     let frames = arena.frames();
     let Ok(block) = u32::try_from(frames) else {
         return;
@@ -11155,9 +11662,26 @@ fn fold_displaced_group(
         _ => None,
     };
     for unit in first..=pack.last as usize {
-        let Some(RuntimeUnit::Bank { lanes, chain, .. }) = units.get(unit) else {
+        // Issue #2142: a plain unit between two rows, or a row that does not fold, adds nothing.
+        if group_of.get(unit).copied() != u32::try_from(group).ok() {
+            continue;
+        }
+        let Some(RuntimeUnit::Bank {
+            lanes,
+            chain,
+            fold: own_fold,
+            ..
+        }) = units.get(unit)
+        else {
             continue;
         };
+        if own_fold.is_empty() {
+            continue;
+        }
+        let Some(&slot) = unit_slot.get(unit) else {
+            return;
+        };
+        let (chain_index, row) = (slot as usize / rows, slot as usize % rows);
         let count = *lanes;
         if count > width {
             debug_assert!(false, "a grouped unit's lanes fit its width");
@@ -11170,10 +11694,13 @@ fn fold_displaced_group(
         let mut holders = [(unit, 0_usize); 8];
         let mut moved = false;
         for lane in 0..count {
-            let Some(&position) = at.get(base + (unit - first) * width + lane) else {
+            let Some(&position) = at.get(base + chain_index * width + lane) else {
                 return;
             };
-            let holder = (first + position as usize / width, position as usize % width);
+            let Some(holder) = holder_unit(position as usize, row) else {
+                return;
+            };
+            let holder = (holder, position as usize % width);
             let Some(RuntimeUnit::Bank { fold: list, .. }) = units.get(holder.0) else {
                 return;
             };
@@ -15762,16 +16289,22 @@ mod tests {
     /// the compiled-plan gates reach only at four lanes.
     #[test]
     fn a_move_in_a_later_pack_group_trades_exactly_its_two_strips() {
-        let group = |first: u32, last: u32| PackGroup {
-            first,
-            last,
-            width: 4,
-            base: 0,
-            folded: true,
-            master: FoldTarget::Output,
-            displaced: 0,
-            packable: 0,
-            dirty: true,
+        let group = |first: u32, last: u32| DiscoveredGroup {
+            group: PackGroup {
+                first,
+                last,
+                width: 4,
+                chains: last - first + 1,
+                rows: 1,
+                units_base: 0,
+                base: 0,
+                folded: true,
+                master: FoldTarget::Output,
+                displaced: 0,
+                packable: 0,
+                dirty: true,
+            },
+            units: (first..=last).collect(),
         };
         let mut map = LaneMap::from_groups(vec![group(0, 1), group(2, 4)], 5, 0, 0);
         assert_eq!(

@@ -4830,8 +4830,15 @@ impl BankChain {
     }
 
     /// Whether lane `lane` of this chain and lane `other_lane` of `other` (`None`: this chain)
-    /// can trade their whole state with a scratch of `scratch_bytes`; the refusal if not.
-    fn lane_swap_check(
+    /// can trade their whole state with a scratch of `scratch_bytes`; the refusal if not. Exactly
+    /// the check [`Self::swap_lanes`] makes before its first write, and it writes nothing, so a
+    /// caller that trades one strip in several chains at once (issue #2142: every unit of a split
+    /// strip) can ask every chain before it changes any.
+    ///
+    /// # Errors
+    ///
+    /// The [`ChainLaneSwapRefusal`] [`Self::swap_lanes`] would return.
+    pub fn lane_swap_check(
         &self,
         lane: usize,
         other: Option<&Self>,
