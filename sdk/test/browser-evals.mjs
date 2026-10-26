@@ -947,7 +947,13 @@ describe("browser session edits", () => {
         renderQuantumSize: QUANTUM,
         state: "running",
         close: async () => {},
-        async resume() { this.state = "running"; },
+        // `holdResume` stands for a browser that holds `resume()` until a user gesture.
+        holdResume: false,
+        resume() {
+          if (this.holdResume) return new Promise(() => {});
+          this.state = "running";
+          return Promise.resolve();
+        },
         async suspend() { this.state = "suspended"; },
         audioWorklet: { addModule: async () => {} },
       }),
@@ -1119,8 +1125,14 @@ describe("browser session edits", () => {
 
   test("#2100 gate 3: play() and stop() move the context and the transport together", async () => {
     // Red if `stop()` only suspends the context or only stops the transport (the two halves
-    // drift apart), or if `play()` leaves the transport stopped or the context suspended.
-    const { engine } = await boot(base());
+    // drift apart), if `play()` leaves the transport stopped or the context suspended, if a
+    // `resume()` the browser holds blocks a later `stop()`, if a refused play leaves the context
+    // running when it was suspended or suspends it when it was running, or if `close()` leaves a
+    // waiting call pending.
+    const { engine, host } = await boot(base());
+    const within = (promise) => Promise.race([promise, new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("the call did not settle")), 2_000).unref();
+    })]);
     try {
       const expected = { play: ["playing", "running"], stop: ["stopped", "suspended"] };
       for (const call of ["play", "stop", "play", "stop"]) {
@@ -1129,6 +1141,30 @@ describe("browser session edits", () => {
         assert.equal(engine.context.state, context, `${call} moves the context`);
         assert.equal((await engine.transport()).state, transport, `${call} moves the transport`);
       }
+      // A play outside a gesture: its resume stays pending, and a later stop still settles.
+      engine.context.holdResume = true;
+      const held = engine.play();
+      assert.equal((await within(engine.stop())).state, "stopped", "a held resume does not block stop()");
+      await assert.rejects(within(held), MisoUsageError);
+      assert.equal((await engine.transport()).state, "stopped");
+      engine.context.holdResume = false;
+      // A refused play restores the context state from before the call.
+      const control = host.control;
+      const refusal = new Error("transport refused");
+      host.control = async () => { throw refusal; };
+      await assert.rejects(engine.play(), (error) => error === refusal);
+      assert.equal(engine.context.state, "suspended", "a refused play from suspended suspends again");
+      host.control = control;
+      assert.equal((await engine.play()).state, "playing");
+      host.control = async () => { throw refusal; };
+      await assert.rejects(engine.play(), (error) => error === refusal);
+      assert.equal(engine.context.state, "running", "a refused play from running keeps it running");
+      host.control = control;
+      // A call that waits when close() runs rejects as a usage error.
+      engine.context.holdResume = true;
+      const waiting = engine.play();
+      await engine.close();
+      await assert.rejects(within(waiting), MisoUsageError);
     } finally {
       await engine.close();
     }

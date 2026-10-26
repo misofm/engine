@@ -394,23 +394,29 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * render sample, so `frame = sourceFrame + (atSample - firstSample)`. A seek that this engine
    * sent and that no block has rendered yet is in effect at the next block, so it reports the
    * seek's frame and generation. The host's status is read before the report, so a block that
-   * renders between the two reads cannot mix an old anchor with a new sample. The frame does not move while the context is suspended. A report that stays
-   * busy rejects with `MisoEngineError` `backpressure`; a closed engine throws `MisoUsageError`.
+   * renders between the two reads cannot mix an old anchor with a new sample. The frame does not
+   * move while the context is suspended. A report that stays busy rejects with `MisoEngineError`
+   * `backpressure`; a closed engine throws `MisoUsageError`.
    */
   position(): Promise<BrowserPosition>;
   /**
    * Resume the context, then set the transport to `playing` (#2100), in one call; resolves with
    * the new transport state. `setTransport` alone gates nothing: the transport state is a stored
-   * label (#1635), and in the browser the context is what renders or stops. A refused transport
-   * suspends the context again and rejects. `play` and `stop` run one at a time, in call order. A
-   * context with no `resume()`, or a closed engine, throws `MisoUsageError`.
+   * label (#1635), and in the browser the context is what renders or stops. The context's
+   * `resume()` is called at once; the transport is set after it settles, in call order with
+   * other `play()` and `stop()` calls. A browser holds `resume()` until a user gesture: a later
+   * `play()` or `stop()` does not wait for it, and this call then rejects with `MisoUsageError`.
+   * A refused transport rejects; if this is still the newest call and the context was suspended
+   * before it, the context is suspended again. A context with no `resume()` or `suspend()`, or a
+   * closed engine (also one closed while the call waits), rejects with `MisoUsageError`.
    */
   play(): Promise<TransportSnapshot>;
   /**
-   * Suspend the context, then set the transport to `stopped` (#2100), in one call; resolves with
-   * the new transport state. The playhead holds where the last block ended. A refused transport
-   * rejects and leaves the context suspended. A context with no `suspend()`, or a closed engine,
-   * throws `MisoUsageError`.
+   * Suspend the context at once, then set the transport to `stopped` (#2100), in one call;
+   * resolves with the new transport state. The playhead holds where the last block ended. A
+   * refused transport rejects and leaves the context suspended while the transport label still
+   * says `playing`. A context with no `resume()` or `suspend()`, or a closed engine, rejects with
+   * `MisoUsageError`.
    */
   stop(): Promise<TransportSnapshot>;
   /**
@@ -834,6 +840,67 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       if (chain === "position") positionChain = settledNext;
       else transportChain = settledNext;
       return next;
+    };
+    // #2100: the newest `play()`/`stop()` call, and the wake of the one call that waits for its
+    // context step. A newer call or `close()` wakes it, so a `resume()` the browser holds until a
+    // user gesture never blocks a later call.
+    let transportCalls = 0;
+    let wakeTransportWait: (() => void) | undefined;
+    const transportClosed = () => new MisoUsageError("the browser engine is closed");
+    const transportCall = (target: "playing" | "stopped"): Promise<TransportSnapshot> => {
+      const name = target === "playing" ? "play" : "stop";
+      if (closed) return Promise.reject(transportClosed());
+      const { resume, suspend } = context;
+      if (typeof resume !== "function" || typeof suspend !== "function") {
+        return Promise.reject(new MisoUsageError(`${name}() needs an AudioContext with resume() and suspend()`));
+      }
+      const before = context.state;
+      const call = (transportCalls += 1);
+      // The context step starts at once, outside the chain: the context orders its own calls.
+      let contextStep: Promise<void>;
+      try {
+        contextStep = Promise.resolve((target === "playing" ? resume : suspend).call(context));
+      } catch (error) {
+        contextStep = Promise.reject(error);
+      }
+      let stepSettled = false;
+      let wake!: () => void;
+      const woken = new Promise<"woken">((resolve) => {
+        wake = () => { if (!stepSettled) resolve("woken"); };
+      });
+      const stepDone = contextStep.then(
+        () => { stepSettled = true; return "done" as const; },
+        (error: unknown) => { stepSettled = true; throw error; },
+      );
+      // An abandoned step's rejection is not this call's failure once a later call took over.
+      stepDone.catch(() => undefined);
+      const previousWake = wakeTransportWait;
+      wakeTransportWait = wake;
+      previousWake?.();
+      return serialized("transport", async () => {
+        let waited: "done" | "woken";
+        try {
+          waited = await Promise.race([stepDone, woken]);
+        } catch (error) {
+          if (closed) throw transportClosed();
+          throw error;
+        }
+        if (closed) throw transportClosed();
+        if (waited === "woken") {
+          throw new MisoUsageError(`${name}() was superseded by a later call before its context step settled`);
+        }
+        try {
+          return await engine.setTransport({ state: target });
+        } catch (error) {
+          // A refused play does not leave the audio running when it was suspended before. A later
+          // call owns the context, so only the newest call restores it. A refused stop keeps the
+          // context suspended (the transport label stays `playing`).
+          if (target === "playing" && call === transportCalls && before === "suspended") {
+            try { await suspend.call(context); } catch { /* the transport refusal is the failure to report */ }
+          }
+          throw error;
+        }
+      });
     };
     const readTimelineReport = async () => {
       for (let attempt = 0; attempt < POSITION_READ_ATTEMPTS; attempt += 1) {
@@ -1456,34 +1523,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         if (closed) return Promise.reject(new MisoUsageError("the browser engine is closed"));
         return serialized("position", readPosition);
       },
-      play: () => {
-        if (closed) return Promise.reject(new MisoUsageError("the browser engine is closed"));
-        const { resume, suspend } = context;
-        if (typeof resume !== "function" || typeof suspend !== "function") {
-          return Promise.reject(new MisoUsageError("play() needs an AudioContext with resume() and suspend()"));
-        }
-        return serialized("transport", async () => {
-          await resume.call(context);
-          try {
-            return await engine.setTransport({ state: "playing" });
-          } catch (error) {
-            // The two halves stay together: a refused transport does not leave the audio running.
-            try { await suspend.call(context); } catch { /* the transport refusal is the failure to report */ }
-            throw error;
-          }
-        });
-      },
-      stop: () => {
-        if (closed) return Promise.reject(new MisoUsageError("the browser engine is closed"));
-        const { suspend } = context;
-        if (typeof suspend !== "function") {
-          return Promise.reject(new MisoUsageError("stop() needs an AudioContext with suspend()"));
-        }
-        return serialized("transport", async () => {
-          await suspend.call(context);
-          return engine.setTransport({ state: "stopped" });
-        });
-      },
+      play: () => transportCall("playing"),
+      stop: () => transportCall("stopped"),
       apply: async (transaction: SessionTransaction) => {
         if (closed) throw new MisoUsageError("the browser engine is closed");
         const outcome = await (await protocolClient()).applyTransaction(transaction);
@@ -1549,6 +1590,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       },
       close: () => {
         closed = true;
+        wakeTransportWait?.();
         stopWatermark();
         appliedLedger.rejectAll(new MisoUsageError("the browser engine is closed"));
         editQueue?.close();
