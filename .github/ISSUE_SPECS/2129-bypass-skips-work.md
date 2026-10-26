@@ -335,3 +335,7 @@ Findings for the rebrief:
   branch: the skip, per-lane staleness, travelling state, and the remaining S1 gates (the CPU row,
   the rulings amendments, the realtime-policy tool, the zero-allocation render test). S1b merges
   main after #2131 and #1981 (PR #2130) land. S2, the per-node delay, is unchanged.
+
+## Owner decision (2026-10-26): un-bypass from rest
+
+Root asked: "When you turn a bypassed effect back on, it starts fresh ("from rest"). It does not continue from where it was. [...] Reply yes or no." The owner answered, verbatim: "Yes". This approves the per-lane un-bypass law in the amendment above (every un-bypass from settled bypass resets that lane and holds dry for `W`, then crossfades). It is class B against E5 (#1341), where a bypassed lane kept computing and un-bypass continued warm.
