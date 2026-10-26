@@ -1353,11 +1353,18 @@ fn console_model(workload: Workload) -> SessionModel {
 /// silent. A track is silent when `input` feeds it exact zeros; a submix when every unmuted route
 /// into it comes from a silent strip. Bind-time, off the clock; the strips are read where bind put
 /// them, and a move inside a group changes no group's count.
+///
+/// Also returns the row's **key-class** ideal: the runs the active lanes of each key class need if
+/// they were packed together, whatever the pack groups are today. A key class is the compile's
+/// bound groups of one dependency level, rack, pool class, leader program and fold target (a group
+/// whose members route to different places is a class of its own); its ideal is
+/// `sum over slots of ceil(A / W)` over all its groups' active members at once.
 fn ideal_bank_slot_runs(
     plan: &mut PreparedRenderPlan,
     model: &SessionModel,
     input: InputSignal,
-) -> Vec<(u32, u64)> {
+    report: &graph_compiler::GraphRackBankReport,
+) -> (Vec<(u32, u64)>, u64) {
     let mut silent: std::collections::BTreeMap<&str, bool> = model
         .tracks
         .iter()
@@ -1421,8 +1428,9 @@ fn ideal_bank_slot_runs(
             })
             .unwrap_or(false)
     };
+    let key_class = key_class_ideal(report, model, &active);
     let lanes = graph::bank_effect_lanes(plan).unwrap_or_default();
-    graph::test_only_bank_slot_runs(plan)
+    let groups = graph::test_only_bank_slot_runs(plan)
         .into_iter()
         .map(|group| {
             // (slot, active lanes) over the group's units.
@@ -1440,7 +1448,66 @@ fn ideal_bank_slot_runs(
             let ideal = by_slot.values().map(|count| count.div_ceil(width)).sum();
             (group.first_unit, ideal)
         })
-        .collect()
+        .collect();
+    (groups, key_class)
+}
+
+/// The key-class ideal of [`ideal_bank_slot_runs`], from the compile's bank report.
+fn key_class_ideal(
+    report: &graph_compiler::GraphRackBankReport,
+    model: &SessionModel,
+    active: &dyn Fn(&str, &str) -> bool,
+) -> u64 {
+    let mut destinations: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for route in &model.routes {
+        let from = match &route.source {
+            session::RouteSource::Track { track_id, .. } => track_id.as_str(),
+            session::RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
+        };
+        let to = match &route.destination {
+            session::RouteDestination::SubmixInput { submix_id } => submix_id.as_str(),
+            session::RouteDestination::OutputInput { output_id } => output_id.as_str(),
+        };
+        destinations.entry(from).or_default().push(to);
+    }
+    for list in destinations.values_mut() {
+        list.sort_unstable();
+        list.dedup();
+    }
+    let none: Vec<&str> = Vec::new();
+    let key = |index: usize| {
+        let group = &report.plan.groups[index];
+        let mut folds = group
+            .members
+            .iter()
+            .flatten()
+            .map(|member| destinations.get(member.track_id.as_str()).unwrap_or(&none));
+        let first = folds.next();
+        // A mixed group is a class of its own: its index makes the key unique.
+        let fold = match first {
+            Some(first) if folds.all(|fold| fold == first) => format!("{first:?}"),
+            _ => format!("mixed#{index}"),
+        };
+        format!(
+            "{}|{:?}|{:?}|{:?}|{fold}",
+            group.level, group.rack, group.class, group.program
+        )
+    };
+    let width = report
+        .plan
+        .groups
+        .first()
+        .map_or(1, |group| group.members.len().max(1)) as u64;
+    let mut by_class: std::collections::BTreeMap<(String, usize), u64> = Default::default();
+    for bound in &report.bound_slots {
+        let count = bound
+            .members
+            .iter()
+            .filter(|member| active(member.track_id.as_str(), member.effect_id.as_str()))
+            .count() as u64;
+        *by_class.entry((key(bound.group), bound.slot)).or_default() += count;
+    }
+    by_class.values().map(|count| count.div_ceil(width)).sum()
 }
 
 /// Sets a C1 row's console slots and limiter to its [`C1State`] (issue #2132). The fixture is the
@@ -1627,6 +1694,9 @@ pub struct SessionRuntime {
     /// derived at bind from this row's own activity: `sum over slots of ceil(A / W)`, with `A` the
     /// group's strips whose slot is active and whose input is not silent.
     bsr_ideal: Vec<(u32, u64)>,
+    /// The row's key-class ideal runs per block (issue #2132): what the active lanes of each key
+    /// class would need packed together, whatever today's pack groups are.
+    bsr_ideal_key_class: u64,
     /// The live-control channel [`C1State::Toggle`] writes `ch00`'s gate bypass through, and
     /// `None` on every other row.
     toggle: Option<usize>,
@@ -2026,6 +2096,7 @@ impl SessionRuntime {
         .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
 
         let utilisation = artifact.report().rack_cohorts.utilisation;
+        let rack_cohorts = artifact.report().rack_cohorts.clone();
         let envelope = artifact.envelope();
         // Issue #965: every row binds its track inputs the way `host-core` binds a session
         // (`crates/host-core/src/prepare.rs`, `into_bound_with_source_set`): the artifact's track
@@ -2142,7 +2213,8 @@ impl SessionRuntime {
         // makes the paired delta the collapse and nothing else -- so the difference between them
         // has to be this switch and cannot be a fixture edit.
         plan.force_mono_collapse_off(workload.collapse_forced_off());
-        let bsr_ideal = ideal_bank_slot_runs(&mut plan, &model, input);
+        let (bsr_ideal, bsr_ideal_key_class) =
+            ideal_bank_slot_runs(&mut plan, &model, input, &rack_cohorts);
         let gate = plan.take_revision_gate().expect("the plan's gate handle");
         let mut runtime = Self {
             strip_controls,
@@ -2159,6 +2231,7 @@ impl SessionRuntime {
             live,
             utilisation,
             bsr_ideal,
+            bsr_ideal_key_class,
             toggle: None,
         };
         if toggles {
@@ -2465,6 +2538,13 @@ impl SessionRuntime {
     #[must_use]
     pub const fn bank_utilisation(&self) -> graph_compiler::BankUtilisation {
         self.utilisation
+    }
+
+    /// The row's key-class ideal bank-slot runs per block (issue #2132), beside the per-group ideal
+    /// [`Self::bank_slot_runs`] reports.
+    #[must_use]
+    pub const fn bsr_ideal_key_class(&self) -> u64 {
+        self.bsr_ideal_key_class
     }
 
     /// Every pack group's bank-slot runs since bind beside its ideal per block (issue #2132), in
@@ -3496,6 +3576,40 @@ mod tests {
             workload.strip_content(),
             workload.strip_layout(),
         )
+    }
+
+    /// Issue #2132: the key-class ideal packs a key class's active lanes across pack groups. On C1
+    /// at 16 tracks the two track banks are in no pack group; with the odd tracks silent each
+    /// holds four active lanes, so the per-group ideal is 4 + 4 for the tracks and the key-class
+    /// ideal 4 (the eight active tracks fill one bank per slot). The submixes are the same in
+    /// both: {drums, vox} active in the {4 groups, aux B} banks (3 + 1), aux A silent (0), and the
+    /// master (3 + 1). All active, every bank of the tracks is full and the two ideals agree.
+    ///
+    /// Test value: red when the key-class ideal stops merging the groups of one key class (it
+    /// then equals the per-group ideal on the sparse row).
+    #[test]
+    fn the_key_class_ideal_packs_across_pack_groups() {
+        if Backend::current().width() != 8 {
+            return;
+        }
+        for (state, per_group, key_class) in
+            [(C1State::Sparse, 16, 12), (C1State::AllActive, 16, 16)]
+        {
+            let mut runtime = SessionRuntime::new(Workload::C1Console {
+                tracks: C1Tracks::Sixteen,
+                state,
+            });
+            let groups: u64 = runtime
+                .bank_slot_runs()
+                .iter()
+                .map(|group| group.ideal)
+                .sum();
+            assert_eq!(
+                (groups, runtime.bsr_ideal_key_class()),
+                (per_group, key_class),
+                "{state:?}: [per-group ideal, key-class ideal]"
+            );
+        }
     }
 
     /// Issue #965 gate 1: every session row the bench emits is fed the way a host feeds a

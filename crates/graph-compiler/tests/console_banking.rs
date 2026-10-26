@@ -198,4 +198,28 @@ fn the_bank_report_counts_mergeable_pairs() {
         0,
         "another fold target is another key"
     );
+    // Both groups route their members to different places: neither has one fold target, and two
+    // "mixed" groups are never one key.
+    let mut mixed = BTreeMap::new();
+    for (index, member) in first
+        .members
+        .iter()
+        .chain(second.members.iter())
+        .flatten()
+        .enumerate()
+    {
+        mixed.insert(member.track_id.clone(), vec![format!("bus{}", index % 2)]);
+    }
+    assert_eq!(
+        BankUtilisation::of(
+            &[first.clone(), second.clone()],
+            &slots,
+            lanes,
+            &mixed,
+            None
+        )
+        .mergeable_partial_pairs,
+        0,
+        "two groups of mixed fold targets are not one key"
+    );
 }

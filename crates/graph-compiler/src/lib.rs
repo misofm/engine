@@ -320,7 +320,8 @@ impl BankUtilisation {
     /// `lanes` lanes, over the groups `rack` admits (`None`: every rack).
     ///
     /// `fold_targets` maps a strip ID to the sorted destination IDs of its routes; a group's fold
-    /// target is that list when every member has the same one, and "mixed" otherwise. A strip the
+    /// target is that list when every member has the same one, and "mixed" otherwise. A mixed
+    /// group shares a fold target with no group. A strip the
     /// map does not name has no route. Pure, so a hand-built plan can be measured as well as a
     /// compiled one.
     #[must_use]
@@ -359,6 +360,8 @@ impl BankUtilisation {
             let first = targets.next()?;
             targets.all(|target| target == first).then_some(first)
         };
+        // `None` is "mixed": a group whose members route to different places has no one fold
+        // target, so it is never one key with another group, mixed or not.
         // Every member's own program, from the leader's and its lane's slot mask.
         let fits_under = |members: &BankGroup<RackChainId>, leader: &BankGroup<RackChainId>| {
             let program = leader.program();
@@ -390,7 +393,7 @@ impl BankUtilisation {
                     && a.rack == b.rack
                     && a.class == b.class
                     && a.level == b.level
-                    && fold_of(a) == fold_of(b)
+                    && matches!((fold_of(a), fold_of(b)), (Some(a), Some(b)) if a == b)
                     && (fits_under(a, b) || fits_under(b, a))
                 {
                     mergeable_partial_pairs = mergeable_partial_pairs.saturating_add(1);

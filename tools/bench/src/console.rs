@@ -450,7 +450,8 @@ const BANK_REPORT_WARMUP_BLOCKS: u64 = 2 * console_workload::C1_TOGGLE_BLOCKS;
 /// `bench console --bank-report` (issue #2132): every [`console_workload::BANK_REPORT_WORKLOADS`]
 /// row, in one invocation of one untimed warmup round and two measured rounds, one JSON line per
 /// row and measured round: the plan's bank utilisation, each pack group's bank-slot runs per block
-/// beside the row's ideal, and the p50 microseconds per block. `--bank-report-preflight` builds
+/// beside the row's per-group ideal, the row's key-class ideal (its key classes' active lanes
+/// packed together, whatever the pack groups), and the p50 microseconds per block. `--bank-report-preflight` builds
 /// every row and renders [`BANK_REPORT_WARMUP_BLOCKS`] untimed blocks, checks every fact the record
 /// states is readable, and prints no number.
 ///
@@ -497,7 +498,7 @@ fn bank_report(preflight: bool) {
                     .collect();
                 println!(
                     "{} preflight: banks {} mergeable_partial_pairs {} lane_use_permille {} \
-                     bsr_static {} groups [units x effect slots: ideal] {}",
+                     bsr_static {} bsr_ideal_key_class {} groups [units x effect slots: ideal] {}",
                     workload.kind(),
                     utilisation.banks,
                     utilisation.mergeable_partial_pairs,
@@ -509,6 +510,7 @@ fn bank_report(preflight: bool) {
                                 * u64::from(group.last_unit - group.first_unit + 1)
                         })
                         .sum::<u64>(),
+                    runtime.bsr_ideal_key_class(),
                     groups.join(" ")
                 );
                 continue;
@@ -563,7 +565,7 @@ fn bank_report(preflight: bool) {
             let ideal: u64 = after.iter().map(|group| group.ideal).sum();
             let p50 = Percentiles::from_samples(&durations).p50;
             println!(
-                "{{\"issue\":2132,\"round\":{round},\"workload_kind\":\"{}\",\"backend\":\"{}\",\"width\":{width},\"tracks\":{},\"toggle_blocks\":{},\"observations\":{BANK_REPORT_OBSERVATIONS},\"render_errors\":{render_errors},\"forbidden_operations\":{forbidden},\"banks\":{},\"mergeable_partial_pairs\":{},\"lane_use_permille\":{},\"bsr_static\":{bsr_static},\"bsr_per_block\":{},\"bsr_ideal\":{ideal},\"groups\":[{}],\"p50_us\":{}}}",
+                "{{\"issue\":2132,\"round\":{round},\"workload_kind\":\"{}\",\"backend\":\"{}\",\"width\":{width},\"tracks\":{},\"toggle_blocks\":{},\"observations\":{BANK_REPORT_OBSERVATIONS},\"render_errors\":{render_errors},\"forbidden_operations\":{forbidden},\"banks\":{},\"mergeable_partial_pairs\":{},\"lane_use_permille\":{},\"bsr_static\":{bsr_static},\"bsr_per_block\":{},\"bsr_ideal\":{ideal},\"bsr_ideal_key_class\":{},\"groups\":[{}],\"p50_us\":{}}}",
                 workload.kind(),
                 backend_name(backend),
                 workload.tracks(),
@@ -576,6 +578,7 @@ fn bank_report(preflight: bool) {
                 utilisation.mergeable_partial_pairs,
                 utilisation.lane_use_permille,
                 format_f64(bsr),
+                runtime.bsr_ideal_key_class(),
                 groups.join(","),
                 microseconds(p50)
             );

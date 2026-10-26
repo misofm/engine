@@ -29,8 +29,11 @@ the state the console opens in.
 - The plan's render counters: `bank_slot_runs` per pack group (one per bank per slot executed; a
   skipped slot or chain counts none) beside the existing `silent_skips` and #2129's
   `bypass_skips`, read through one `test_only_bank_slot_runs(plan)` and reported by the bench
-  runner per row and per pack group as `bsr_per_block` with the per-group ideal
-  `sum over slots of ceil(A_{g,k}/W)` computed by the workload from its own activity state.
+  runner per row and per pack group as `bsr_per_block` with two ideals computed by the workload
+  from its own activity state: the per-group ideal `sum over slots of ceil(A_{g,k}/W)`, and the
+  per-row **key-class** ideal, the same sum over each key class's active lanes packed together
+  whatever today's pack groups are (amended after attempt 1's review: a row whose banks are in no
+  pack group reads close to the per-group ideal while a joint pack would halve its runs).
 - `tools/console-workload`: a `C1Console { tracks, state }` family: 16, 32 and 64 tracks over the
   C1 shape read from the console app's session constants (copied as a fixture under
   `fixtures/session/v1/console-c1-*.json`, not referenced across repos), in four states: `Load`
@@ -41,7 +44,8 @@ the state the console opens in.
   ragged inserts (0-3 per track), one sidechained insert, three submix depths, mono and stereo
   stems mixed, two tracks routed to the master directly.
 - `tools/bench console` prints, per row, `banks`, `mergeable_partial_pairs`, `lane_use`, and per
-  pack group `bsr_per_block` and `bsr_ideal`, then p50 us per block. Native (W=8) and the V8
+  pack group `bsr_per_block` and `bsr_ideal`, the row's `bsr_ideal_key_class`, then p50 us per
+  block. Native (W=8) and the V8
   runner (W=4).
 
 ## Gates (one test per claim, red first)
@@ -140,6 +144,18 @@ None. Unblocks the finish-line measurement for every later slice.
    console effect slots; builtin stages fused into the same chains are not counted.
 4. **Sparse and Toggle are on the all-active base**; Typical keeps the limiter bypassed.
 
+### Review fold (attempt 1 verdict PASS with one MAJOR, one MINOR)
+
+- **MAJOR, key-class ideal.** `SessionRuntime::bsr_ideal_key_class` (and the record's
+  `bsr_ideal_key_class`): from the compile's bank report, the bound groups of one dependency level,
+  rack, pool class, leader program and fold target (a mixed group is a class of its own) form a key
+  class, and its ideal is `sum over slots of ceil(A / W)` over all its groups' active members at
+  once. Test `the_key_class_ideal_packs_across_pack_groups` (C1 16: sparse per-group 16, key-class
+  12; all active 16 and 16). Red: a key unique per group -> `Sparse: left (16, 16), right (16, 12)`.
+- **MINOR, mixed fold targets.** Two groups whose fold targets are both "mixed" no longer compare
+  equal (`BankUtilisation::of`). Gate 1 gains the row; red before the fix: `two groups of mixed fold
+  targets are not one key`, left 1.
+
 ### Red evidence (each mutant run against the gate, then reverted)
 
 - Gate 1, `the_bank_report_counts_mergeable_pairs`: drop the pool-class clause -> red ("another
@@ -171,24 +187,28 @@ host load before and after beside it). The host was shared with other agents (lo
 the start), so the p50 column is uncontrolled and descriptive only; the counters are exact.
 `render_errors` and forbidden operations are 0 on every row. Round 2:
 
-| row | banks | pairs | lane use | BSR static | BSR/block | ideal | p50 us |
-|---|---|---|---|---|---|---|---|
-| c1 16 load | 10 | 0 | 57.5 % | 20 | 20.00 | 0 | 125.2 |
-| c1 16 typical | 10 | 0 | 57.5 % | 20 | 20.00 | 9 | 125.1 |
-| c1 16 all active | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 96.9 |
-| c1 16 sparse | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 96.4 |
-| c1 16 toggle | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 98.4 |
-| c1 32 load | 14 | 0 | 69.6 % | 28 | 28.00 | 0 | 184.6 |
-| c1 32 typical | 14 | 0 | 69.6 % | 28 | 28.00 | 17 | 179.6 |
-| c1 32 all active | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 146.3 |
-| c1 32 sparse | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 148.1 |
-| c1 32 toggle | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 146.5 |
-| c1 64 load | 22 | 0 | 80.7 % | 44 | 44.00 | 0 | 304.0 |
-| c1 64 typical | 22 | 0 | 80.7 % | 44 | 44.00 | 28 | 302.0 |
-| c1 64 all active | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 247.3 |
-| c1 64 sparse | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 245.0 |
-| c1 64 toggle | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 247.1 |
-| irregular | 23 | 0 | 46.4 % | 38 | 38.00 | 38 | 266.1 |
+| row | banks | pairs | lane use | BSR static | BSR/block | ideal (groups) | ideal (key class) | p50 us |
+|---|---|---|---|---|---|---|---|---|
+| c1 16 load | 10 | 0 | 57.5 % | 20 | 20.00 | 0 | 0 | 125.2 |
+| c1 16 typical | 10 | 0 | 57.5 % | 20 | 20.00 | 9 | 9 | 125.1 |
+| c1 16 all active | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 16 | 96.9 |
+| c1 16 sparse | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 12 | 96.4 |
+| c1 16 toggle | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 16 | 98.4 |
+| c1 32 load | 14 | 0 | 69.6 % | 28 | 28.00 | 0 | 0 | 184.6 |
+| c1 32 typical | 14 | 0 | 69.6 % | 28 | 28.00 | 17 | 12 | 179.6 |
+| c1 32 all active | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 24 | 146.3 |
+| c1 32 sparse | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 16 | 148.1 |
+| c1 32 toggle | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 24 | 146.5 |
+| c1 64 load | 22 | 0 | 80.7 % | 44 | 44.00 | 0 | 0 | 304.0 |
+| c1 64 typical | 22 | 0 | 80.7 % | 44 | 44.00 | 28 | 17 | 302.0 |
+| c1 64 all active | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 40 | 247.3 |
+| c1 64 sparse | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 24 | 245.0 |
+| c1 64 toggle | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 40 | 247.1 |
+| irregular | 23 | 0 | 46.4 % | 38 | 38.00 | 38 | 38 | 266.1 |
+
+The key-class column is deterministic and was added after the timed run: it is read from
+`bench console --bank-report-preflight` at the review-fold commit (no timed rerun), and the timed
+records under `bank-design-0/` predate the field.
 
 Against the design's "today" column (section 7, finish line), W=8:
 
@@ -201,7 +221,10 @@ Against the design's "today" column (section 7, finish line), W=8:
 The track banks match the design (`tracks / 8` banks x 4 slots). The submixes bind 12 BSR, not
 13: {4 groups, aux B} pre (3) and drive (1), aux A pre (3) and drive (1), master pre (3) and drive
 (1). Findings for the later slices: no C1 track bank is in a pack group (every track unit is its
-own row); mergeable pairs are 0 on every row, as the one-level rule makes them structurally; in
+own row). The verifier traced why (attempt 1, item 4): C1's `post_fader` sends split each track
+strip at the fader (`graph-compiler/src/lib.rs:11141-11148`); the matrix bank then gets a
+collapse-proof producer row (`runtime.rs:11496`), and `pack_member_eligible`
+(`runtime.rs:10027-10028`) drops both parts. Root will file a slice for it. Further: mergeable pairs are 0 on every row, as the one-level rule makes them structurally; in
 the load state every BSR runs and nothing skips, while all-active skips 3.34 BSR per block (the
 silent aux A's banks, whose sends are muted); typical and load cost the same as each other and
 about 30 % more than all-active (the bypassed lanes run wet and never rest).
