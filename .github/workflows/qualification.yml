@@ -777,9 +777,10 @@ jobs:
       - name: Input section tail and exact-rest gates (tail_contract) in release
         run: cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract
       # #1375: the compressor's and the limiter's tail and exact-rest gates at release scale (every
-      # launch rate and both peak cases; debug runs 48 kHz and one peak case only).
-      - name: Compressor and limiter tail and exact-rest gates (tail_contract) in release
-        run: cargo test --locked --release -p compressor -p true-peak-limiter -p gate-expander -p transient-shaper -p soft-clip --test tail_contract
+      # launch rate and both peak cases; debug runs 48 kHz and one peak case only). #1374: the
+      # delay's, whose real-kernel soundness gate (about 200M frames) runs in release only.
+      - name: Compressor, limiter and delay tail and exact-rest gates (tail_contract) in release
+        run: cargo test --locked --release -p compressor -p true-peak-limiter -p gate-expander -p transient-shaper -p soft-clip -p delay --test tail_contract
       # #1379: the graph tail composition's real-kernel gates (C1, C2, C6 at every launch rate,
       # C11 (b)), ignored in debug.
       - name: Graph tail composition gates (host-core tail_composition) in release

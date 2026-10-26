@@ -79,8 +79,13 @@ damping state reach exact rest. Today it declares `Infinite`.
 
 ## Hazards
 
-- The tail is minutes long. Hosts cap tails at `u64::MAX` (`crates/host-core/src/prepare.rs:1559`);
-  `graph_fixture` caps at 10,000,000 and a fixture graph with a delay would hit `graph.tail.limit`.
+- The tail is minutes long. Hosts cap tails at `u64::MAX` (`crates/host-core/src/prepare.rs:1559`).
+  The real exposure (verifier, attempt 1): console-workload's `graph_caps`
+  (`tools/console-workload/src/lib.rs` ~2483) and the audit tools cap finite tails at 10,000,000
+  samples, and the delay's tail is 35M samples and more. The sends fixture's output tail stays
+  `Infinite` today only because its parametric EQ is `Infinite`; when #1372 makes the EQ finite,
+  that fixture is refused with `graph.tail.limit`. `graph_fixture` prepares no effects, so it is
+  not exposed. Root files the tool-cap change as its own issue, ordered before #1372.
 
 ## Objective gates
 
@@ -117,3 +122,49 @@ damping state reach exact rest. Today it declares `Infinite`.
 - *Define how node tails compose through gain in the graph extent* (#1379)
 - *Report a zero tail beyond latency for the compressor and the true-peak limiter* (#1375), for the
   one-pole helper
+
+## Decision record (attempt 1, 2026-10-25/26)
+
+- **Owner ruling (2026-10-25), option 1, class B.** D1 was false at 44.1 and 48 kHz: the damping
+  cutoff reached 19,845 Hz, so `g` reached 0.863 / 0.782 and the TPT state's gain from the tap
+  exceeded 1. The cutoff is now capped at `min(19,845 Hz, fs / 4)` (`damping_cutoff_max_hz`;
+  `g <= 1/2` at every launch rate, `g = 1/2` exactly at the cap). Bits move only at 44.1 and
+  48 kHz, for every non-zero `f32` damping control `c <= 0.23617806` (44.1 kHz) and
+  `c <= 0.20787954` (48 kHz), found by comparing both mappings on every `f32` in `(0, 0.995]`;
+  the default 0.25 and every value at 88.2 and 96 kHz are unchanged.
+- **A1 anchors (stale in the spec).** `tail_and_rest` was at `crates/delay/src/lib.rs:286`; the
+  `Infinite` unit assertion at `:1883`; the E4 clamp test at `:2027-2055`; graph-compiler's
+  delay fixture `launch_delay_fixture_closes_scalar_state_tail_pdc_and_transactional_caps`
+  (three `Infinite` assertions: metadata tail, output tail, node tail), not `:13803/:13867/:13878`.
+- **A2 D1a amended: a per-sample positive majorant replaces the period potential.** The spec's
+  `V(t + L) <= q V(t)`, `L = D_max + K_d`, is within about 2 % at `D = 2 fs` but 6 to 8 times loose at
+  `D = 48` (each period pays the damping's `K_d ~ 2,000` samples), so gate 3's 80 % check could
+  not hold. The note's majorant (`F(r) = A r^-D (beta + alpha b / (r - a)) <= 1`, certified by
+  bisection) is the real loop's slowest pole up to rounding: gate 3 rests 0.18 % below its bound.
+  `TailDecay` is per sample (`r^D20 < 1/10`), not `L` times a period count.
+- **A3 Gains and stalls stated as the maximum of both clauses.** (N1)'s hull gain (20.0) is a
+  little below (N2)'s settled-loop gain (20.07-20.13), and (N1)'s stall far below (N2)'s, so
+  `G_p = G_t` and `sigma_p = sigma_t` are each the larger value (2,605 / 2,608 mB).
+- **A4 Gate 3 non-vacuity is checked at damping 0.995 only**, the design the bound is taken at;
+  damping 0 rests at 145,408 samples, 41 % of the bound (the ring wrap of `2 fs + 3` dominates).
+- **A5 Gate 2 is release-only** (`ignore` in debug, about 200M frames). `qualification.yml`'s
+  release `tail_contract` step needs `-p delay` added; the stream rules forbid this stream to edit
+  CI workflows, so root adds it.
+- **A6 Re-pin.** G5 `delay/ping_pong_automated` (48 kHz) moved: its 0.15 damping event is inside
+  the capped range. Re-pinned from the scalar-oracle digest gate G5 prints
+  (`crates/delay/src/corpus.rs`). No other delay fixture moved (record below).
+- **A7 Root rulings (2026-10-26).** The release `tail_contract` step of `qualification.yml` runs
+  `-p delay`; the f64 oracle (`crates/dsp-reference/src/delay.rs`) caps the cutoff at
+  `min(19,845 Hz, fs / 4)` from the equation (E3 re-run at damping 0.1, inside the cap, matched at
+  all four rates as scratch evidence); `crates/delay/tests/MUTATIONS.md` M4 names the new cap.
+- **A8 Tool tail caps (verifier MINOR-2).** See Hazards: console-workload and the audit tools cap
+  finite tails at 10M samples; the sends fixture is refused once #1372 makes the EQ finite. A
+  separate root issue, ordered before #1372, owns the cap change.
+
+**No-bit-move record (PR evidence, base `b0dc1216f` vs branch, own target dirs, removed after).**
+A scratch harness rendered the two G5 corpus cases and 23 damping values (0 to 0.995, both sides
+of each boundary) x cross 0 / 0.5 / 1 x feedback 0.95 / -0.6, plus a damping automation run per
+value, at all four rates (652 renders). 149 moved: at 44.1 kHz every damping value up to 0.23617
+and the automated corpus case; at 48 kHz every value up to 0.2078 and the automated corpus case.
+Nothing moved at 88.2 or 96 kHz, at 0.2362 (44.1 kHz) or 0.20788 (48 kHz) and above, or in the
+`dual_mono` corpus case. Every moved render uses a damping control inside the capped range.
