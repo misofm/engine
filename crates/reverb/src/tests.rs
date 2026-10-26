@@ -80,8 +80,8 @@ fn point(parameter_index: usize, sample: u64, value: f32) -> PreparedAutomationS
 const EVENT_EVERY: usize = 3_584;
 
 /// The events at sample `sample` (a multiple of [`EVENT_EVERY`]): every parameter moves. A
-/// second `size` and `pre_delay_ms` event follows 64 samples later on [`EVENT_EVERY`]-aligned
-/// renders of block length up to 64, so a crossfade is queued behind a running one.
+/// second `size` and `pre_delay_ms` event follows [`QUEUED_AFTER`] samples later on renders of
+/// block length 1 and 7, so a crossfade is queued behind a running one.
 fn events(sample: usize) -> Vec<PreparedAutomationSpan> {
     let step = sample / EVENT_EVERY;
     let at = sample as u64;
@@ -103,11 +103,17 @@ fn events(sample: usize) -> Vec<PreparedAutomationSpan> {
     ]
 }
 
-/// The follow-up events 64 samples after each [`events`] block start: a size and a pre-delay
-/// change while the first crossfade is still running, so they queue.
+/// Samples from an [`events`] block start to its [`queued_events`]: a multiple of 7, so blocks of
+/// 1 and 7 both start a block there, and below the 128-sample crossfade, so the change queues. The
+/// running crossfade ends at sample 128, which is not a multiple of 7: the queued one starts
+/// mid-block at block length 7 and on its own block at block length 1.
+const QUEUED_AFTER: usize = 70;
+
+/// The follow-up events [`QUEUED_AFTER`] samples after each [`events`] block start: a size and a
+/// pre-delay change while the first crossfade is still running, so they queue.
 fn queued_events(sample: usize) -> Vec<PreparedAutomationSpan> {
     let step = sample / EVENT_EVERY;
-    let at = (sample + 64) as u64;
+    let at = (sample + QUEUED_AFTER) as u64;
     let pre = [9.0_f32, 0.5, 120.0];
     let size = [1.7_f32, 0.4, 0.9];
     vec![
@@ -116,8 +122,8 @@ fn queued_events(sample: usize) -> Vec<PreparedAutomationSpan> {
     ]
 }
 
-/// Renders `frames` frames in blocks of `block` frames (`block` divides 64 or is 128/512 -- the
-/// queued events then land at a block start of every partition used) at lane type `L`.
+/// Renders `frames` frames in blocks of `block` frames at lane type `L`; blocks of 1 and 7 also
+/// carry the [`queued_events`].
 fn render_with<L: Lane>(
     effect: &mut PreparedReverb,
     frames: usize,
@@ -129,8 +135,11 @@ fn render_with<L: Lane>(
         let end = (offset + block).min(frames);
         let spans = if offset > 0 && offset % EVENT_EVERY == 0 {
             events(offset)
-        } else if block <= 64 && offset > 64 && (offset - 64) % EVENT_EVERY == 0 {
-            queued_events(offset - 64)
+        } else if (block == 1 || block == 7)
+            && offset > QUEUED_AFTER
+            && (offset - QUEUED_AFTER).is_multiple_of(EVENT_EVERY)
+        {
+            queued_events(offset - QUEUED_AFTER)
         } else {
             Vec::new()
         };
@@ -179,9 +188,9 @@ fn snapshot(effect: &PreparedReverb) -> Vec<u8> {
 #[test]
 fn every_lane_width_renders_the_same_bits() {
     const FRAMES: usize = 40_000;
-    let reference = render_with::<f32>(&mut prepare_at(&defaults(), 48_000), FRAMES, 64);
+    let reference = render_with::<f32>(&mut prepare_at(&defaults(), 48_000), FRAMES, 7);
     lane::each_vector_lane!(|L| {
-        let produced = render_with::<L>(&mut prepare_at(&defaults(), 48_000), FRAMES, 64);
+        let produced = render_with::<L>(&mut prepare_at(&defaults(), 48_000), FRAMES, 7);
         assert!(
             produced == reference,
             "width {} differs from the scalar kernel",
@@ -206,15 +215,15 @@ fn partition_invariance_over_1_7_64_128_512() {
         |block| render_with::<lane::Native>(&mut prepare_at(&defaults(), 48_000), FRAMES, block);
     // Every block length starts a block at each `EVENT_EVERY` multiple.
     let reference = render(512);
-    for block in [7_usize, 128] {
+    for block in [64_usize, 128] {
         assert!(
             render(block) == reference,
             "block {block} differs from block 512"
         );
     }
-    // Blocks of 1 and 64 also start a block 64 samples later, where `queued_events` lands while
-    // the first crossfades run: the queued crossfade starts mid-block for 64, per sample for 1.
-    assert!(render(1) == render(64), "block 1 differs from block 64");
+    // Blocks of 1 and 7 also carry `queued_events`: the queued crossfade starts mid-block at 7
+    // and on its own sample at 1.
+    assert!(render(1) == render(7), "block 1 differs from block 7");
 }
 
 fn reference_parameters(values: &[f32; PARAMETER_COUNT]) -> ReferenceReverbParameters {
