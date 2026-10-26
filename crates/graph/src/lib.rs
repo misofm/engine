@@ -6266,8 +6266,7 @@ pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
 }
 
 /// One pack group's bank-slot runs since bind (issue #2132), or one bank unit's that is in no
-/// pack group. Test-only evidence, read off the render thread.
-#[cfg(any(test, feature = "test-support"))]
+/// pack group. Evidence, read off the render thread.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TestOnlyBankSlotRuns {
@@ -6289,7 +6288,11 @@ pub struct TestOnlyBankSlotRuns {
 /// Every pack group's bank-slot runs (issue #2132), then, in unit order among them, every bank
 /// unit in no group that has an effect slot; empty for any other plan. Read between renders, on
 /// the render thread's side of a block boundary.
-#[cfg(any(test, feature = "test-support"))]
+///
+/// Not gated on `test-support`, unlike the other `test_only_` readers: the console bench reads it
+/// (`bench console --bank-report`), and building the bench with `test-support` would put that
+/// feature's render-path switches into the binary it measures. It reads counters every build
+/// keeps (each chain's round trips and whole-chain skips) and adds no render-path state.
 #[doc(hidden)]
 #[must_use]
 pub fn test_only_bank_slot_runs(plan: &mut PreparedRenderPlan) -> Vec<TestOnlyBankSlotRuns> {

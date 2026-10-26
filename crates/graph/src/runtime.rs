@@ -10145,7 +10145,6 @@ impl Runtime {
     /// a block it skips whole runs none: a unit's runs are its effect slots times its completed
     /// round trips ([`BankChain::transposes`], one per rendered block and none per skipped one).
     /// No render-path state is added for it. A per-slot skip (#2129) subtracts its own count here.
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn bank_slot_runs(&mut self) -> Vec<[u64; 6]> {
         let mut rows: Vec<[u64; 6]> = Vec::new();
         for index in 0..self.units.len() {

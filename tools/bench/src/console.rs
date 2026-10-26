@@ -301,7 +301,19 @@ pub(crate) fn main() {
             mixing_preflight(Backend::current());
             return;
         }
-        _ => panic!("benchmark accepts no arguments but --preflight"),
+        // Issue #2132: the bank-utilisation rows, outside the standing record set.
+        [flag] if flag == "--bank-report" => {
+            bank_report(false);
+            return;
+        }
+        [flag] if flag == "--bank-report-preflight" => {
+            bank_report(true);
+            return;
+        }
+        _ => panic!(
+            "benchmark accepts no arguments but --preflight, --bank-report or \
+             --bank-report-preflight"
+        ),
     }
     let round = round_from_runner();
     // Feature detection ends here, before every timed observation.
@@ -425,6 +437,149 @@ pub(crate) fn main() {
     println!("{}", ride.record(round, backend, metadata));
     for arm in &product_lanes {
         println!("{}", arm.record(round, backend, metadata));
+    }
+}
+
+/// Timed blocks per bank-report row and round (issue #2132).
+const BANK_REPORT_OBSERVATIONS: u64 = 1_000;
+
+/// Untimed blocks before a bank-report row's clock starts: two of [`C1_TOGGLE_BLOCKS`]'s turns, so
+/// the toggle row has written a bypass and an un-bypass before it is timed.
+const BANK_REPORT_WARMUP_BLOCKS: u64 = 2 * console_workload::C1_TOGGLE_BLOCKS;
+
+/// `bench console --bank-report` (issue #2132): every [`console_workload::BANK_REPORT_WORKLOADS`]
+/// row, in one invocation of one untimed warmup round and two measured rounds, one JSON line per
+/// row and measured round: the plan's bank utilisation, each pack group's bank-slot runs per block
+/// beside the row's ideal, and the p50 microseconds per block. `--bank-report-preflight` builds
+/// every row and renders [`BANK_REPORT_WARMUP_BLOCKS`] untimed blocks, checks every fact the record
+/// states is readable, and prints no number.
+///
+/// Descriptive (AGENTS.md): a fixed workload, one warmup and two rounds, no tuning or retry. The
+/// clock holds the render call alone; the toggle row's bypass writes and every counter read sit
+/// outside it.
+fn bank_report(preflight: bool) {
+    use console_workload::{BANK_REPORT_WORKLOADS, BankGroupRuns, C1_TOGGLE_BLOCKS};
+    let backend = Backend::current();
+    let width = BankWidth::for_backend(backend)
+        .expect("a native bank width")
+        .lanes();
+    let rounds: &[u32] = if preflight { &[0] } else { &[0, 1, 2] };
+    for &round in rounds {
+        for workload in BANK_REPORT_WORKLOADS {
+            let mut runtime = SessionRuntime::new(workload);
+            let mut block = 0_u64;
+            for _ in 0..BANK_REPORT_WARMUP_BLOCKS {
+                runtime.before_block(block);
+                runtime.render(block).expect("bank-report warmup render");
+                block += 1;
+            }
+            let utilisation = runtime.bank_utilisation();
+            let before = runtime.bank_slot_runs();
+            assert!(
+                !before.is_empty(),
+                "{}: the row has bank units",
+                workload.kind()
+            );
+            assert!(
+                before.iter().all(|group| group.width == width),
+                "{}: every unit at the build's width",
+                workload.kind()
+            );
+            if preflight {
+                let groups: Vec<String> = before
+                    .iter()
+                    .map(|group| {
+                        format!(
+                            "{}..={}x{}:{}",
+                            group.first_unit, group.last_unit, group.effect_slots, group.ideal
+                        )
+                    })
+                    .collect();
+                println!(
+                    "{} preflight: banks {} mergeable_partial_pairs {} lane_use_permille {} \
+                     bsr_static {} groups [units x effect slots: ideal] {}",
+                    workload.kind(),
+                    utilisation.banks,
+                    utilisation.mergeable_partial_pairs,
+                    utilisation.lane_use_permille,
+                    before
+                        .iter()
+                        .map(|group| {
+                            u64::from(group.effect_slots)
+                                * u64::from(group.last_unit - group.first_unit + 1)
+                        })
+                        .sum::<u64>(),
+                    groups.join(" ")
+                );
+                continue;
+            }
+            let mut durations = Vec::with_capacity(BANK_REPORT_OBSERVATIONS as usize);
+            let mut render_errors = 0_u64;
+            audit::warm_up();
+            audit::reset();
+            for _ in 0..BANK_REPORT_OBSERVATIONS {
+                runtime.before_block(block);
+                let (elapsed_ns, result) = timing::timed(|| runtime.render(block));
+                render_errors += u64::from(result.is_err());
+                durations.push(elapsed_ns);
+                block += 1;
+            }
+            let forbidden = audit::snapshot().total();
+            let after = runtime.bank_slot_runs();
+            if round == 0 {
+                continue;
+            }
+            let per_block = |before: &BankGroupRuns, after: &BankGroupRuns| {
+                (after.runs - before.runs) as f64 / BANK_REPORT_OBSERVATIONS as f64
+            };
+            let groups: Vec<String> = before
+                .iter()
+                .zip(&after)
+                .map(|(before, after)| {
+                    format!(
+                        "{{\"units\":[{},{}],\"effect_slots\":{},\"bsr_static\":{},\"bsr_per_block\":{},\"bsr_ideal\":{}}}",
+                        after.first_unit,
+                        after.last_unit,
+                        after.effect_slots,
+                        u64::from(after.effect_slots)
+                            * u64::from(after.last_unit - after.first_unit + 1),
+                        format_f64(per_block(before, after)),
+                        after.ideal
+                    )
+                })
+                .collect();
+            let bsr_static: u64 = after
+                .iter()
+                .map(|group| {
+                    u64::from(group.effect_slots)
+                        * u64::from(group.last_unit - group.first_unit + 1)
+                })
+                .sum();
+            let bsr: f64 = before
+                .iter()
+                .zip(&after)
+                .map(|(before, after)| per_block(before, after))
+                .sum();
+            let ideal: u64 = after.iter().map(|group| group.ideal).sum();
+            let p50 = Percentiles::from_samples(&durations).p50;
+            println!(
+                "{{\"issue\":2132,\"round\":{round},\"workload_kind\":\"{}\",\"backend\":\"{}\",\"width\":{width},\"tracks\":{},\"toggle_blocks\":{},\"observations\":{BANK_REPORT_OBSERVATIONS},\"render_errors\":{render_errors},\"forbidden_operations\":{forbidden},\"banks\":{},\"mergeable_partial_pairs\":{},\"lane_use_permille\":{},\"bsr_static\":{bsr_static},\"bsr_per_block\":{},\"bsr_ideal\":{ideal},\"groups\":[{}],\"p50_us\":{}}}",
+                workload.kind(),
+                backend_name(backend),
+                workload.tracks(),
+                if workload.kind().ends_with("_toggle") {
+                    C1_TOGGLE_BLOCKS
+                } else {
+                    0
+                },
+                utilisation.banks,
+                utilisation.mergeable_partial_pairs,
+                utilisation.lane_use_permille,
+                format_f64(bsr),
+                groups.join(","),
+                microseconds(p50)
+            );
+        }
     }
 }
 

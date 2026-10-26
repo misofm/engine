@@ -346,11 +346,9 @@ impl BankUtilisation {
             .collect();
         let active: u64 = slots.iter().map(|bound| bound.members.len() as u64).sum();
         let capacity = slots.len() as u64 * lanes as u64;
-        let lane_use_permille = if capacity == 0 {
-            0
-        } else {
-            u32::try_from((active * 1000 + capacity / 2) / capacity).unwrap_or(u32::MAX)
-        };
+        let lane_use_permille = (active * 1000 + capacity / 2)
+            .checked_div(capacity)
+            .map_or(0, |permille| u32::try_from(permille).unwrap_or(u32::MAX));
         let no_route: Vec<String> = Vec::new();
         let fold_of = |group: &BankGroup<RackChainId>| -> Option<&Vec<String>> {
             let mut targets = group
