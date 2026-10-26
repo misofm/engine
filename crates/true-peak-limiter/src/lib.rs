@@ -105,7 +105,7 @@ const PARAMETER_COUNT: usize = 3;
 /// Ramped parameters: ceiling and release. Lookahead is preparation-only.
 const RAMP_COUNT: usize = 2;
 /// Detector history words.
-const HISTORY_WORDS: usize = 12;
+pub const HISTORY_WORDS: usize = 12;
 /// Discrete alignment of the 23.5-high-rate-sample FIR group delay, in base-rate samples.
 const FIR_ALIGNMENT_SAMPLES: usize = 6;
 /// Widest backend, so per-frame scratch is a fixed-size array and never an allocation.
@@ -444,12 +444,23 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
 /// version/length header.
 pub const STATE_LAYOUT_VERSION: u32 = 1;
 
+/// The limiter's BS.1770 Annex-2 true-peak detector, for other measurements to share (#2115).
+///
+/// Visibility only: these are the items the limiter itself calls, unchanged, so a measurement that
+/// uses them reads exactly the peak words the limiter's gain law reads. A caller keeps one
+/// [`annex2::History`] per bank of lanes, starts it at [`annex2::History::zero`], splats each
+/// [`annex2::ANNEX2_FIR`] coefficient across its lane type once, and calls
+/// [`annex2::detector_peak`] once per sample.
+pub mod annex2 {
+    pub use super::{ANNEX2_FIR, HISTORY_WORDS, History, annex2_phases, detector_peak};
+}
+
 /// Factory for the fixed-latency scalar limiter.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TruePeakLimiterFactory;
 
 /// The exact Annex-2 four-phase detector table, indexed by history tap then phase.
-const ANNEX2_FIR: [[f32; 4]; HISTORY_WORDS] = [
+pub const ANNEX2_FIR: [[f32; 4]; HISTORY_WORDS] = [
     [
         0.001_708_984_4,
         -0.029_174_805,
@@ -1641,14 +1652,14 @@ fn scalar_min(a: f32, b: f32) -> f32 {
 /// Twelve named fields cannot be memmoved. The shift becomes twelve local-to-local moves that
 /// register allocation coalesces away, and every tap read is a live value rather than a load.
 ///
-/// Nothing about the arithmetic moves: [`History::shift`] writes exactly the assignments the
+/// Nothing about the arithmetic moves: `History::shift` writes exactly the assignments the
 /// `while tap > 0` loop wrote, in the same order, and [`annex2_phases`] walks the same taps against
 /// the same table rows in the same tap-major order with the same separately rounded
 /// `add(mul(..))` steps per accumulator (twelve then; eleven since #1013 dropped the `+0.0` seed).
 /// The native target reaches the same code either way once SROA has promoted the array, which is
 /// why this is a wasm change with a native no-op attached.
 #[derive(Clone, Copy)]
-struct History<L: Lane> {
+pub struct History<L: Lane> {
     t0: L,
     t1: L,
     t2: L,
@@ -1709,11 +1720,12 @@ impl<L: Lane> History<L> {
 
     /// All twelve taps `+0.0`, the rest state of a silent lane.
     ///
-    /// Test-only: the render path reaches the rest state through [`History::load`] of an arena
-    /// `clear_runtime` has already zeroed, so a second constructor on it would be dead code.
-    #[cfg(test)]
+    /// The limiter's own render path reaches the rest state through `History::load` of an arena
+    /// `clear_runtime` has already zeroed; this constructor is the rest state for a detector that
+    /// keeps its history in locals instead, such as the loudness meter through [`annex2`] (#2115),
+    /// and for this crate's tests.
     #[inline(always)]
-    fn zero() -> Self {
+    pub fn zero() -> Self {
         let zero = L::zero();
         Self {
             t0: zero,
@@ -1767,7 +1779,7 @@ impl<L: Lane> History<L> {
 /// phases against a sample six frames in the future, which is the sole reason its gain law needed a
 /// six-sample hold.
 #[inline(always)]
-fn detector_peak<L: Lane>(history: &mut History<L>, x: L, fir: &[[L; 4]; HISTORY_WORDS]) -> L {
+pub fn detector_peak<L: Lane>(history: &mut History<L>, x: L, fir: &[[L; 4]; HISTORY_WORDS]) -> L {
     history.shift(x);
     let mut peak = history.t6.abs();
     for phase in annex2_phases(history, fir) {
@@ -1820,7 +1832,7 @@ fn detector_peak<L: Lane>(history: &mut History<L>, x: L, fir: &[[L; 4]; HISTORY
 /// with `-0.0`, the additive identity, is the same computation as this one; seeding with `+0.0` is
 /// not, and that is the whole of the difference.
 #[inline(always)]
-fn annex2_phases<L: Lane>(history: &History<L>, fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {
+pub fn annex2_phases<L: Lane>(history: &History<L>, fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {
     let row = &fir[0];
     let sample = history.t0;
     let mut phase0 = row[0].mul(sample);
