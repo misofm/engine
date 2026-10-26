@@ -95,6 +95,15 @@ evidence. Not on the browser's product path.
   table: the counters (labelled with the file's `source`) beside the V8 `p50_ns` of the document
   with the same `workload_kind`, labelled `V8`, or "not measured: no V8 document of this name".
 
+### Root ruling (2026-10-26)
+
+Root accepts the G5-style comparison of decision 1 below: both legs equal one table of exact
+counts, and the counts are the claim, so the table is allowed. The wasm leg runs on x86
+(`wasm-guests`); the native `Simd4` leg runs on CI's `aarch64-release`. Reason: an eight-lane build
+refuses `Simd4` console banks (`console.slot.foreign_width`, #1694).
+
+**Successor action for #2129: replace `bypass_skips` and re-pin Load.**
+
 ### Decisions taken without a ruling (for review)
 
 1. **The native `Simd4` leg runs on arm64 only, and both legs meet at pinned counts.** The spec
@@ -129,12 +138,19 @@ evidence. Not on the browser's product path.
   guest reads row `(row + 2) % 4` (the wrong state for a row) -> exit 1, `c1_console_16_load
   silent_skips: expected 0, got 259`; the track counter drops its track filter -> exit 1 (track runs
   7424 against 4096).
-- **Not red: the `Sparse` state fed to the wrong tracks.** Silencing tracks 8..15 instead of the odd
-  ones leaves every counter unchanged (exit 0), and `Sparse` equals `AllActive` on every counter.
-  No track bank skips on input silence today: a fed `+0.0` is not a silence fact until slice 4
-  (#2133) propagates it; the 259 skips in both rows are the submixes' (aux A's sends are muted).
-  The spec's named mutant therefore cannot turn gate 1 red before #2133; #2133's W=4 evidence
-  should see `Sparse` part from `AllActive` here.
+- **Not red: the `Sparse` state fed to the wrong tracks**, before or after #2133. Silencing
+  tracks 8..15 instead of the odd ones leaves every counter unchanged (exit 0), on the base and
+  again on the tree merged with origin/main at `7e824290f` (#2133). `Sparse` still equals
+  `AllActive` on every counter after the merge, and no pin moved. A diagnostic run (every track of
+  `Sparse` silent, then reverted) shows why: the track runs stay 4096 and only the submixes skip
+  more (1024 skips, 6400 runs). **No C1 track bank skips on input silence at W=4, even when every
+  track is silent.** #2133 changed where the packer's silence fact comes from (and states it for a
+  grouped unit only; every C1 track unit is ungrouped, #2142). It did not change the #1107 skip's
+  conditions (`rack` `BankChain::run`: inputs `+0.0`, every slot at rest, no armed auxiliary
+  destination), and one of them fails on every C1 track chain. Which one fails is not
+  investigated here, because it is outside this slice's paths. Candidates: the auxiliary
+  destination of the `post_fader` sends' split, or a slot that never reports rest. The spec's named
+  mutant can turn gate 1 red only once a C1 track bank can skip.
 - Gate 2 (`w4_counters_describe_the_designs_plan`): re-pinning the table from the unfiltered track
   counter (track runs 7424 / 7165) -> red, `c1_console_16_load: track bank-slot runs, left 7424,
   right 4096`.
@@ -154,6 +170,9 @@ evidence. Not on the browser's product path.
   --no-deps`, and every hermetic policy script and self-test of that job, `check-lane-policy.sh`
   included: 48 of 48 ok.
 - Not run: the arm64 native leg (no arm64 host here; CI's `aarch64-release` runs it).
+- After the merge with origin/main `7e824290f` (#2133): the wasm leg, the touched crates' tests and
+  the lint job's checks again: wasm gates ok (G5 155 cases, no mismatch; 4 console rows, no
+  mismatch), every test passes, lint 48 of 48 ok; the pins and the artifacts are unchanged.
 
 ### Measurement (W=4 wasmtime, `artifacts/steps/bank-design-0a/`)
 
