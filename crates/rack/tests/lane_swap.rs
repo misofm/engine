@@ -232,6 +232,7 @@ impl PreparedNativeEffectBank for StripBank {
             + engine::realtime::retained::arc(&self.defaults)
     }
     fn reset(&mut self, _kind: ResetKind) {}
+    fn reset_lane(&mut self, _lane: usize, _kind: ResetKind) {}
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
         let lanes = self.lanes.len();

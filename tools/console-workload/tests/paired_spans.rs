@@ -323,6 +323,9 @@ impl PreparedNativeEffectBank for SharedBank {
     fn reset(&mut self, kind: ResetKind) {
         self.lock().bank.reset(kind);
     }
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        self.lock().bank.reset_lane(lane, kind);
+    }
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
         let mut shared = self.lock();
         let report = shared.bank.process_bank(block);

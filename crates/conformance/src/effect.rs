@@ -287,6 +287,11 @@ impl PreparedNativeEffectBank for DualAccumulatorDelayBank {
             lane.reset(kind);
         }
     }
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if let Some(state) = self.lanes[..self.width.lanes() as usize].get_mut(lane) {
+            state.reset(kind);
+        }
+    }
     fn process_bank(
         &mut self,
         block: effect_contract::EffectBankProcessBlock<'_>,

@@ -541,6 +541,7 @@ mod effect_bank {
             engine::realtime::retained::vec(&self.line)
         }
         fn reset(&mut self, _: ResetKind) {}
+        fn reset_lane(&mut self, _: usize, _: ResetKind) {}
         fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
             for frame in 0..block.frames as usize {
                 for lane in 0..self.width {

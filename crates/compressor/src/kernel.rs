@@ -137,13 +137,18 @@ impl<L: Lane> Channel<L> {
 
     fn seed_from_defaults(&mut self, sample_rate: u32) {
         for lane in 0..MAX_WIDTH {
-            let values = self.defaults[lane];
-            for (parameter, ramp) in self.ramps.iter_mut().enumerate() {
-                ramp[lane] = LinearRamp::fixed(values[parameter]);
-            }
-            design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
-            self.seed_rate_ramps(lane);
+            self.seed_lane_from_defaults(lane, sample_rate);
         }
+    }
+
+    /// Lane `lane`'s ramps, coefficient words and rate ramps from its preparation values.
+    fn seed_lane_from_defaults(&mut self, lane: usize, sample_rate: u32) {
+        let values = self.defaults[lane];
+        for (parameter, ramp) in self.ramps.iter_mut().enumerate() {
+            ramp[lane] = LinearRamp::fixed(values[parameter]);
+        }
+        design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
+        self.seed_rate_ramps(lane);
     }
 
     /// Full reset: clear the envelope and restore the seven preparation values.
@@ -152,27 +157,54 @@ impl<L: Lane> Channel<L> {
         self.seed_from_defaults(sample_rate);
     }
 
+    /// [`full_reset`](Self::full_reset) for lane `lane` alone (issue #2131): the same words at
+    /// that lane, and no other lane's.
+    pub(crate) fn full_reset_lane(&mut self, lane: usize, sample_rate: u32) {
+        self.clear_lane_state(lane);
+        self.seed_lane_from_defaults(lane, sample_rate);
+    }
+
     /// Discontinuity reset: clear the envelope and snap ramps to their targets.
     pub(crate) fn discontinuity_reset(&mut self, sample_rate: u32) {
         self.clear_state();
         for lane in 0..L::WIDTH {
-            let mut values = [0.0; RAMP_COUNT];
-            for (parameter, ramp) in self.ramps.iter_mut().enumerate() {
-                ramp[lane].snap();
-                values[parameter] = ramp[lane].current;
-            }
-            design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
-            self.seed_rate_ramps(lane);
-            // A glide in flight arrives at once: its target is the lane's mode (issue #1370).
-            for weight in &mut self.link_ramps {
-                weight[lane].snap();
-            }
+            self.snap_lane(lane, sample_rate);
+        }
+    }
+
+    /// [`discontinuity_reset`](Self::discontinuity_reset) for lane `lane` alone (issue #2131).
+    pub(crate) fn discontinuity_reset_lane(&mut self, lane: usize, sample_rate: u32) {
+        self.clear_lane_state(lane);
+        self.snap_lane(lane, sample_rate);
+    }
+
+    /// The per-lane half of a discontinuity reset: lane `lane`'s ramps snapped to their targets
+    /// and its coefficient words designed from them.
+    fn snap_lane(&mut self, lane: usize, sample_rate: u32) {
+        let mut values = [0.0; RAMP_COUNT];
+        for (parameter, ramp) in self.ramps.iter_mut().enumerate() {
+            ramp[lane].snap();
+            values[parameter] = ramp[lane].current;
+        }
+        design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
+        self.seed_rate_ramps(lane);
+        // A glide in flight arrives at once: its target is the lane's mode (issue #1370).
+        for weight in &mut self.link_ramps {
+            weight[lane].snap();
         }
     }
 
     /// Clears only cross-frame processing state.
     pub(crate) fn clear_state(&mut self) {
         self.gain_reduction_db = L::zero();
+    }
+
+    /// [`clear_state`](Self::clear_state) for lane `lane` alone: its envelope word to `+0.0`.
+    fn clear_lane_state(&mut self, lane: usize) {
+        let mut words = [0.0_f32; MAX_WIDTH];
+        self.gain_reduction_db.store(&mut words[..L::WIDTH]);
+        words[lane] = 0.0;
+        self.gain_reduction_db = L::load(&words[..L::WIDTH]);
     }
 
     pub(crate) fn current_values(&self, lane: usize) -> [f32; RAMP_COUNT] {
