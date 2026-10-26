@@ -293,6 +293,119 @@ pub struct GraphRackBankReport {
     /// The effect node each chain runs at each of its own slots, in session order. Keyed the same
     /// way the plan is, so a group member can be resolved back to graph nodes.
     pub chains: BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    /// How well the bound banks use their lanes, over every rack (issue #2132).
+    pub utilisation: BankUtilisation,
+    /// The same, per rack, in [`RackLocation::ALL`] order.
+    pub utilisation_by_rack: [(RackLocation, BankUtilisation); 3],
+}
+
+/// How well a plan's bound banks use their lanes (issue #2132, `docs/BANKING_DESIGN.md`'s
+/// finish line), computed at compile from the plan by [`BankUtilisation::of`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BankUtilisation {
+    /// Plan groups with at least one bound slot: one bank of `W` lanes each.
+    pub banks: u32,
+    /// Pairs of partial banks the planner could have merged into one: one rack, one pool class,
+    /// one dependency level (this slice's rule; slice 6b, #2136, widens it to intersecting level
+    /// windows), one fold target, every member of one a subsequence of the other's leader program,
+    /// and together no more than `W` active lanes. A checkable property, not a `ceil(n / W)` bound.
+    pub mergeable_partial_pairs: u32,
+    /// Static lane use in permille: the active lanes of every bound slot over that slot count times
+    /// `W`, rounded to nearest. A padded lane is not active. `0` when nothing is bound.
+    pub lane_use_permille: u32,
+}
+
+impl BankUtilisation {
+    /// The utilisation of the bound banks of `groups` (indexed by `bound_slots[i].group`) at
+    /// `lanes` lanes, over the groups `rack` admits (`None`: every rack).
+    ///
+    /// `fold_targets` maps a strip ID to the sorted destination IDs of its routes; a group's fold
+    /// target is that list when every member has the same one, and "mixed" otherwise. A mixed
+    /// group shares a fold target with no group. A strip the
+    /// map does not name has no route. Pure, so a hand-built plan can be measured as well as a
+    /// compiled one.
+    #[must_use]
+    pub fn of(
+        groups: &[BankGroup<RackChainId>],
+        bound_slots: &[GraphRackBoundSlot],
+        lanes: usize,
+        fold_targets: &BTreeMap<String, Vec<String>>,
+        rack: Option<RackLocation>,
+    ) -> Self {
+        let admitted = |group: &BankGroup<RackChainId>| rack.is_none_or(|rack| group.rack == rack);
+        let banked: Vec<&BankGroup<RackChainId>> = groups
+            .iter()
+            .enumerate()
+            .filter(|(index, group)| {
+                admitted(group) && bound_slots.iter().any(|bound| bound.group == *index)
+            })
+            .map(|(_, group)| group)
+            .collect();
+        let slots: Vec<&GraphRackBoundSlot> = bound_slots
+            .iter()
+            .filter(|bound| groups.get(bound.group).is_some_and(admitted))
+            .collect();
+        let active: u64 = slots.iter().map(|bound| bound.members.len() as u64).sum();
+        let capacity = slots.len() as u64 * lanes as u64;
+        let lane_use_permille = (active * 1000 + capacity / 2)
+            .checked_div(capacity)
+            .map_or(0, |permille| u32::try_from(permille).unwrap_or(u32::MAX));
+        let no_route: Vec<String> = Vec::new();
+        let fold_of = |group: &BankGroup<RackChainId>| -> Option<&Vec<String>> {
+            let mut targets = group
+                .members
+                .iter()
+                .flatten()
+                .map(|member| fold_targets.get(&member.track_id).unwrap_or(&no_route));
+            let first = targets.next()?;
+            targets.all(|target| target == first).then_some(first)
+        };
+        // `None` is "mixed": a group whose members route to different places has no one fold
+        // target, so it is never one key with another group, mixed or not.
+        // Every member's own program, from the leader's and its lane's slot mask.
+        let fits_under = |members: &BankGroup<RackChainId>, leader: &BankGroup<RackChainId>| {
+            let program = leader.program();
+            members
+                .active_slots
+                .iter()
+                .zip(members.active_mask.iter())
+                .filter(|(_, active)| **active)
+                .all(|(mask, _)| {
+                    let own: Vec<_> = members
+                        .program
+                        .iter()
+                        .zip(mask.iter())
+                        .filter(|(_, runs)| **runs)
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    RackProgram::new(members.rack, own)
+                        .subsequence_mask(&program)
+                        .is_some()
+                })
+        };
+        let mut mergeable_partial_pairs = 0_u32;
+        for (index, a) in banked.iter().enumerate() {
+            for b in &banked[index + 1..] {
+                let (a_lanes, b_lanes) = (a.active_count(), b.active_count());
+                if a_lanes < lanes
+                    && b_lanes < lanes
+                    && a_lanes + b_lanes <= lanes
+                    && a.rack == b.rack
+                    && a.class == b.class
+                    && a.level == b.level
+                    && matches!((fold_of(a), fold_of(b)), (Some(a), Some(b)) if a == b)
+                    && (fits_under(a, b) || fits_under(b, a))
+                {
+                    mergeable_partial_pairs = mergeable_partial_pairs.saturating_add(1);
+                }
+            }
+        }
+        Self {
+            banks: u32::try_from(banked.len()).unwrap_or(u32::MAX),
+            mergeable_partial_pairs,
+            lane_use_permille,
+        }
+    }
 }
 
 /// Identifies one track's program in one bankable rack: the unit the cohort planner groups.

@@ -176,6 +176,9 @@ impl FloorRow {
 ///
 /// The bypassed sixteen-track row (issue #2129) is absent because its bypassed banks skip their wet
 /// path: what it renders is shunt copies, which no inventory counts.
+///
+/// The bank-utilisation rows (issue #2132) are absent because no standing record carries them, and
+/// no inventory counts a gate, a drive or a submix strip.
 pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
     let full = 1.0_f64;
     Some(match workload {
@@ -189,7 +192,10 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         | Workload::SixtyFourTrackConsoleSparse
         | Workload::SixtyFourTrackConsoleToggle
         | Workload::SixtyFourTrackConsoleOnePerBank
-        | Workload::SixteenTrackStripBypassed => return None,
+        | Workload::SixteenTrackStripBypassed
+        // The bank-utilisation rows (issue #2132) are no standing record's: no floor.
+        | Workload::C1Console { .. }
+        | Workload::IrregularGraph => return None,
         Workload::NineTrackRaggedStrip => FloorRow {
             lane_ops: BUILTINS_LANE_OPS + EQ_LANE_OPS + COMPRESSOR_LANE_OPS + LIMITER_LANE_OPS,
             width_factor: RAGGED_NINE_TRACK_WIDTH_FACTOR,

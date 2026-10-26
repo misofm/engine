@@ -159,6 +159,66 @@ const SIXTY_FOUR_TRACK_APP: &str =
 const SIXTY_FOUR_TRACK_SENDS: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-sends.json");
 
+/// The console app's C1 session at 16, 32 and 64 tracks (issue #2132), copied from the app's session
+/// builder (`misofm/console`, `app/src/studio/console-session.ts`, `buildConsoleSession`) as it
+/// stands, with every track assigned to group `index mod 4`. Not referenced across repositories.
+const C1_SIXTEEN: &str = include_str!("../../../fixtures/session/v1/console-c1-16.json");
+const C1_THIRTY_TWO: &str = include_str!("../../../fixtures/session/v1/console-c1-32.json");
+const C1_SIXTY_FOUR: &str = include_str!("../../../fixtures/session/v1/console-c1-64.json");
+/// The irregular graph (issue #2132): C1's console slots on every strip, every one active; ragged
+/// inserts (0 to 3 per track), one sidechained insert, three submix depths, mono and stereo stems
+/// mixed, and two tracks routed to the master directly.
+const IRREGULAR_GRAPH: &str = include_str!("../../../fixtures/session/v1/irregular-graph.json");
+
+/// The C1 rows' track counts (issue #2132).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum C1Tracks {
+    /// Sixteen tracks.
+    Sixteen,
+    /// Thirty-two tracks.
+    ThirtyTwo,
+    /// Sixty-four tracks.
+    SixtyFour,
+}
+
+impl C1Tracks {
+    /// The track count.
+    #[must_use]
+    pub const fn count(self) -> u32 {
+        match self {
+            Self::Sixteen => 16,
+            Self::ThirtyTwo => 32,
+            Self::SixtyFour => 64,
+        }
+    }
+}
+
+/// What a C1 row's console slots are doing (issue #2132).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum C1State {
+    /// The session as the console loads it: every console slot bypassed, the limiter bypassed.
+    Load,
+    /// A seeded mix ([`C1_TYPICAL_SEED`]): on each strip, independently, the EQ is active with
+    /// probability 75 %, the compressor 50 %, the gate 10 % and the drive 10 %. The limiter stays
+    /// bypassed.
+    Typical,
+    /// Every console slot and the limiter active.
+    AllActive,
+    /// [`Self::AllActive`] with every odd track fed exact zeros.
+    Sparse,
+    /// [`Self::AllActive`] with `ch00`'s gate bypassed and un-bypassed in turns of
+    /// [`C1_TOGGLE_BLOCKS`] blocks, through its live-control channel
+    /// ([`SessionRuntime::before_block`]), so every later slice's `to_bits` evidence carries
+    /// un-bypass transitions.
+    Toggle,
+}
+
+/// The seed of [`C1State::Typical`]'s slot draw.
+pub const C1_TYPICAL_SEED: u64 = 2132;
+
+/// The blocks between two of [`C1State::Toggle`]'s bypass writes.
+pub const C1_TOGGLE_BLOCKS: u64 = 64;
+
 /// The standing session workloads, in emission order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Workload {
@@ -473,6 +533,20 @@ pub enum Workload {
     ///
     /// Not in [`WORKLOADS`]: see [`PACKING_WORKLOADS`].
     SixtyFourTrackConsoleOnePerBank,
+    /// The console app's C1 shape (issue #2132): `tracks` tracks feeding four groups, two aux
+    /// returns and a master, every strip carrying `gate, eq, comp | drive`, in `state`.
+    ///
+    /// Not in any standing list: see [`BANK_REPORT_WORKLOADS`].
+    C1Console {
+        /// The track count.
+        tracks: C1Tracks,
+        /// What the console slots are doing.
+        state: C1State,
+    },
+    /// The irregular graph (issue #2132), every console slot active.
+    ///
+    /// Not in any standing list: see [`BANK_REPORT_WORKLOADS`].
+    IrregularGraph,
 }
 
 impl Workload {
@@ -711,6 +785,35 @@ pub const PACKING_WORKLOADS: [Workload; 2] = [
 /// [`Workload::SixteenTrackStrip`]. Descriptive; it states no floor.
 pub const BYPASS_WORKLOADS: [Workload; 1] = [Workload::SixteenTrackStripBypassed];
 
+/// The bank-utilisation rows (issue #2132): the C1 shape at 16, 32 and 64 tracks in each
+/// [`C1State`], then the irregular graph. `bench console --bank-report` measures them; no standing
+/// record carries them, so the standing record set and its validator are unchanged.
+pub const BANK_REPORT_WORKLOADS: [Workload; 16] = {
+    const fn c1(tracks: C1Tracks, state: C1State) -> Workload {
+        Workload::C1Console { tracks, state }
+    }
+    use C1State::{AllActive, Load, Sparse, Toggle, Typical};
+    use C1Tracks::{Sixteen, SixtyFour, ThirtyTwo};
+    [
+        c1(Sixteen, Load),
+        c1(Sixteen, Typical),
+        c1(Sixteen, AllActive),
+        c1(Sixteen, Sparse),
+        c1(Sixteen, Toggle),
+        c1(ThirtyTwo, Load),
+        c1(ThirtyTwo, Typical),
+        c1(ThirtyTwo, AllActive),
+        c1(ThirtyTwo, Sparse),
+        c1(ThirtyTwo, Toggle),
+        c1(SixtyFour, Load),
+        c1(SixtyFour, Typical),
+        c1(SixtyFour, AllActive),
+        c1(SixtyFour, Sparse),
+        c1(SixtyFour, Toggle),
+        Workload::IrregularGraph,
+    ]
+};
+
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
 /// [`DRIVER_FED_WORKLOADS`], then [`LIVE_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then
 /// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`], then
@@ -832,6 +935,28 @@ impl Workload {
             Self::SixtyFourTrackConsoleToggle => "sixty_four_track_console_toggle",
             Self::SixtyFourTrackConsoleOnePerBank => "sixty_four_track_console_one_per_bank",
             Self::SixteenTrackStripBypassed => "sixteen_track_strip_bypassed",
+            Self::C1Console { tracks, state } => {
+                use C1State::{AllActive, Load, Sparse, Toggle, Typical};
+                use C1Tracks::{Sixteen, SixtyFour, ThirtyTwo};
+                match (tracks, state) {
+                    (Sixteen, Load) => "c1_console_16_load",
+                    (Sixteen, Typical) => "c1_console_16_typical",
+                    (Sixteen, AllActive) => "c1_console_16_all_active",
+                    (Sixteen, Sparse) => "c1_console_16_sparse",
+                    (Sixteen, Toggle) => "c1_console_16_toggle",
+                    (ThirtyTwo, Load) => "c1_console_32_load",
+                    (ThirtyTwo, Typical) => "c1_console_32_typical",
+                    (ThirtyTwo, AllActive) => "c1_console_32_all_active",
+                    (ThirtyTwo, Sparse) => "c1_console_32_sparse",
+                    (ThirtyTwo, Toggle) => "c1_console_32_toggle",
+                    (SixtyFour, Load) => "c1_console_64_load",
+                    (SixtyFour, Typical) => "c1_console_64_typical",
+                    (SixtyFour, AllActive) => "c1_console_64_all_active",
+                    (SixtyFour, Sparse) => "c1_console_64_sparse",
+                    (SixtyFour, Toggle) => "c1_console_64_toggle",
+                }
+            }
+            Self::IrregularGraph => "irregular_graph",
         }
     }
     /// How many console tracks this workload renders.
@@ -842,6 +967,8 @@ impl Workload {
             Self::ThirteenTrackRaggedStrip => 13,
             Self::SixteenTrackStrip | Self::SixteenTrackStripBypassed => 16,
             Self::OneTwentyEightTrackStretch => 128,
+            Self::C1Console { tracks, .. } => tracks.count(),
+            Self::IrregularGraph => 24,
             _ => 64,
         }
     }
@@ -861,6 +988,19 @@ impl Workload {
             Self::SixtyFourTrackConsoleSends => {
                 "fixtures/session/v1/console-sixty-four-track-sends.json"
             }
+            Self::C1Console {
+                tracks: C1Tracks::Sixteen,
+                ..
+            } => "fixtures/session/v1/console-c1-16.json",
+            Self::C1Console {
+                tracks: C1Tracks::ThirtyTwo,
+                ..
+            } => "fixtures/session/v1/console-c1-32.json",
+            Self::C1Console {
+                tracks: C1Tracks::SixtyFour,
+                ..
+            } => "fixtures/session/v1/console-c1-64.json",
+            Self::IrregularGraph => "fixtures/session/v1/irregular-graph.json",
             _ => "fixtures/session/v1/console-sixty-four-track-intended.json",
         }
     }
@@ -890,6 +1030,12 @@ impl Workload {
                 | Self::SixtyFourTrackAppShape
                 // The bus-and-send row is a committed fixture, rendered as written.
                 | Self::SixtyFourTrackConsoleSends
+                // C1 at load and the irregular graph are committed fixtures, rendered as written.
+                | Self::C1Console {
+                    state: C1State::Load,
+                    ..
+                }
+                | Self::IrregularGraph
         )
     }
     /// The edit this row makes to the fixture's channel strip.
@@ -919,6 +1065,7 @@ impl Workload {
             | Self::SixtyFourTrackEqCompSimd1
             | Self::SixtyFourTrackAppShape => "eq+compressor",
             Self::SixtyFourTrackGainPanRing | Self::SixtyFourTrackGainPanLive => "gain+pan",
+            Self::C1Console { .. } | Self::IrregularGraph => "gate+eq+compressor+drive",
             _ => "eq+compressor+limiter",
         }
     }
@@ -960,6 +1107,10 @@ impl Workload {
             // The app shape: EQ -> compressor as the session's two `pre_insert` slots (#1093), no
             // limiter. Before the console migration it was `inserts:eq+compressor`.
             Self::SixtyFourTrackAppShape => "pre_insert:eq+compressor",
+            // The console app's C1 strip (issue #2132).
+            Self::C1Console { .. } | Self::IrregularGraph => {
+                "pre_insert:gate+eq+compressor,post_insert:drive"
+            }
             // The intended production layout.
             _ => "pre_insert:eq+compressor,post_insert:limiter",
         }
@@ -975,6 +1126,10 @@ impl Workload {
             Self::SixtyFourTrackConsoleSparse => InputSignal::OddTracksSilent,
             Self::SixtyFourTrackConsoleToggle => InputSignal::OddTracksToggle,
             Self::SixtyFourTrackConsoleOnePerBank => InputSignal::OneTrackPerBank,
+            Self::C1Console {
+                state: C1State::Sparse,
+                ..
+            } => InputSignal::OddTracksSilent,
             _ => InputSignal::Tone,
         }
     }
@@ -1182,6 +1337,12 @@ fn console_model(workload: Workload) -> SessionModel {
         | Workload::SixtyFourTrackConsoleHalfMono => SIXTY_FOUR_TRACK_MONO,
         Workload::SixtyFourTrackAppShape => SIXTY_FOUR_TRACK_APP,
         Workload::SixtyFourTrackConsoleSends => SIXTY_FOUR_TRACK_SENDS,
+        Workload::C1Console { tracks, .. } => match tracks {
+            C1Tracks::Sixteen => C1_SIXTEEN,
+            C1Tracks::ThirtyTwo => C1_THIRTY_TWO,
+            C1Tracks::SixtyFour => C1_SIXTY_FOUR,
+        },
+        Workload::IrregularGraph => IRREGULAR_GRAPH,
         _ => SIXTY_FOUR_TRACK,
     };
     let mut model = parse_session_json(text).expect("frozen console session fixture");
@@ -1196,6 +1357,9 @@ fn console_model(workload: Workload) -> SessionModel {
             entry.bypass = true;
         }
     }
+    if let Workload::C1Console { state, .. } = workload {
+        apply_c1_state(&mut model, state);
+    }
     assert_eq!(
         model.tracks.len(),
         workload.tracks() as usize,
@@ -1203,6 +1367,216 @@ fn console_model(workload: Workload) -> SessionModel {
         workload.kind()
     );
     model
+}
+
+/// Each pack group's ideal bank-slot runs per block (issue #2132): `sum over slots of ceil(A / W)`,
+/// `A` the strips of the group whose effect at that slot is not bypassed and whose input is not
+/// silent. A track is silent when `input` feeds it exact zeros; a submix when every unmuted route
+/// into it comes from a silent strip. Bind-time, off the clock; the strips are read where bind put
+/// them, and a move inside a group changes no group's count.
+///
+/// Also returns the row's **key-class** ideal: the runs the active lanes of each key class need if
+/// they were packed together, whatever the pack groups are today. A key class is the compile's
+/// bound groups of one dependency level, rack, pool class, leader program and fold target (a group
+/// whose members route to different places is a class of its own); its ideal is
+/// `sum over slots of ceil(A / W)` over all its groups' active members at once.
+fn ideal_bank_slot_runs(
+    plan: &mut PreparedRenderPlan,
+    model: &SessionModel,
+    input: InputSignal,
+    report: &graph_compiler::GraphRackBankReport,
+) -> (Vec<(u32, u64)>, u64) {
+    let mut silent: std::collections::BTreeMap<&str, bool> = model
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| (track.id.as_str(), input.silent(index)))
+        .collect();
+    for submix in &model.submixes {
+        silent.insert(submix.id.as_str(), true);
+    }
+    // Only true -> false moves, so this reaches its fixed point within one pass per submix.
+    loop {
+        let mut changed = false;
+        for submix in &model.submixes {
+            let id = submix.id.as_str();
+            let heard = model.routes.iter().any(|route| {
+                let into = matches!(
+                    &route.destination,
+                    session::RouteDestination::SubmixInput { submix_id } if submix_id.as_str() == id
+                );
+                let from = match &route.source {
+                    session::RouteSource::Track { track_id, .. } => track_id.as_str(),
+                    session::RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
+                };
+                into && !route.mute && !silent.get(from).copied().unwrap_or(true)
+            });
+            if heard && silent[id] {
+                silent.insert(id, false);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let active = |strip: &str, effect: &str| -> bool {
+        if silent.get(strip).copied().unwrap_or(false) {
+            return false;
+        }
+        let (console, inserts) = match model.tracks.iter().find(|track| track.id.as_str() == strip)
+        {
+            Some(track) => (&track.console, &track.inserts),
+            None => match model
+                .submixes
+                .iter()
+                .find(|submix| submix.id.as_str() == strip)
+            {
+                Some(submix) => (&submix.console, &submix.inserts),
+                None => return false,
+            },
+        };
+        console
+            .iter()
+            .find(|entry| entry.slot.as_str() == effect)
+            .map(|entry| !entry.bypass)
+            .or_else(|| {
+                inserts
+                    .effects
+                    .iter()
+                    .find(|insert| insert.id.as_str() == effect)
+                    .map(|insert| !insert.bypass)
+            })
+            .unwrap_or(false)
+    };
+    let key_class = key_class_ideal(report, model, &active);
+    let lanes = graph::bank_effect_lanes(plan).unwrap_or_default();
+    let groups = graph::test_only_bank_slot_runs(plan)
+        .into_iter()
+        .map(|group| {
+            // (slot, active lanes) over the group's units.
+            let mut by_slot: std::collections::BTreeMap<u16, u64> = Default::default();
+            for (strip, lane) in &lanes {
+                let graph::GraphEffectSite::Lane(at) = lane.location else {
+                    continue;
+                };
+                if (group.first_unit..=group.last_unit).contains(&at.unit) {
+                    *by_slot.entry(at.slot).or_default() +=
+                        u64::from(active(strip, &lane.effect_id));
+                }
+            }
+            let width = u64::from(group.width.max(1));
+            let ideal = by_slot.values().map(|count| count.div_ceil(width)).sum();
+            (group.first_unit, ideal)
+        })
+        .collect();
+    (groups, key_class)
+}
+
+/// The key-class ideal of [`ideal_bank_slot_runs`], from the compile's bank report.
+fn key_class_ideal(
+    report: &graph_compiler::GraphRackBankReport,
+    model: &SessionModel,
+    active: &dyn Fn(&str, &str) -> bool,
+) -> u64 {
+    let mut destinations: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for route in &model.routes {
+        let from = match &route.source {
+            session::RouteSource::Track { track_id, .. } => track_id.as_str(),
+            session::RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
+        };
+        let to = match &route.destination {
+            session::RouteDestination::SubmixInput { submix_id } => submix_id.as_str(),
+            session::RouteDestination::OutputInput { output_id } => output_id.as_str(),
+        };
+        destinations.entry(from).or_default().push(to);
+    }
+    for list in destinations.values_mut() {
+        list.sort_unstable();
+        list.dedup();
+    }
+    let none: Vec<&str> = Vec::new();
+    let key = |index: usize| {
+        let group = &report.plan.groups[index];
+        let mut folds = group
+            .members
+            .iter()
+            .flatten()
+            .map(|member| destinations.get(member.track_id.as_str()).unwrap_or(&none));
+        let first = folds.next();
+        // A mixed group is a class of its own: its index makes the key unique.
+        let fold = match first {
+            Some(first) if folds.all(|fold| fold == first) => format!("{first:?}"),
+            _ => format!("mixed#{index}"),
+        };
+        format!(
+            "{}|{:?}|{:?}|{:?}|{fold}",
+            group.level, group.rack, group.class, group.program
+        )
+    };
+    let width = report
+        .plan
+        .groups
+        .first()
+        .map_or(1, |group| group.members.len().max(1)) as u64;
+    let mut by_class: std::collections::BTreeMap<(String, usize), u64> = Default::default();
+    for bound in &report.bound_slots {
+        let count = bound
+            .members
+            .iter()
+            .filter(|member| active(member.track_id.as_str(), member.effect_id.as_str()))
+            .count() as u64;
+        *by_class.entry((key(bound.group), bound.slot)).or_default() += count;
+    }
+    by_class.values().map(|count| count.div_ceil(width)).sum()
+}
+
+/// Sets a C1 row's console slots and limiter to its [`C1State`] (issue #2132). The fixture is the
+/// load state; every other state un-bypasses slots and nothing else.
+fn apply_c1_state(model: &mut SessionModel, state: C1State) {
+    let mut seed = C1_TYPICAL_SEED;
+    // xorshift64*, in [0, 1): deterministic and the same on every target.
+    let mut draw = move || {
+        seed ^= seed >> 12;
+        seed ^= seed << 25;
+        seed ^= seed >> 27;
+        (seed.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1_u64 << 53) as f64
+    };
+    let active = |slot: &str, draw: &mut dyn FnMut() -> f64| match state {
+        C1State::Load => false,
+        C1State::Typical => {
+            let probability = match slot {
+                "eq" => 0.75,
+                "comp" => 0.5,
+                "gate" | "drive" => 0.1,
+                other => panic!("C1 has no console slot {other}"),
+            };
+            draw() < probability
+        }
+        C1State::AllActive | C1State::Sparse | C1State::Toggle => true,
+    };
+    let limiter = matches!(
+        state,
+        C1State::AllActive | C1State::Sparse | C1State::Toggle
+    );
+    let tracks = model
+        .tracks
+        .iter_mut()
+        .map(|track| (&mut track.console, &mut track.inserts));
+    let submixes = model
+        .submixes
+        .iter_mut()
+        .map(|submix| (&mut submix.console, &mut submix.inserts));
+    for (console, inserts) in tracks.chain(submixes) {
+        for entry in console.iter_mut() {
+            entry.bypass = !active(entry.slot.as_str(), &mut draw);
+        }
+        for effect in &mut inserts.effects {
+            if effect.id.as_str() == "limiter" {
+                effect.bypass = !limiter;
+            }
+        }
+    }
 }
 
 /// One meter stream per track at the post-matrix tap, in canonical track order.
@@ -1335,6 +1709,36 @@ pub struct SessionRuntime {
     bypass: BypassCensus,
     /// The live row's rings and producer (issue #938), and `None` on every other row.
     live: Option<LiveFeed>,
+    /// The compiled plan's bank utilisation (issue #2132), taken from its bank report at compile.
+    utilisation: graph_compiler::BankUtilisation,
+    /// Each pack group's ideal bank-slot runs per block (issue #2132), keyed by its first unit,
+    /// derived at bind from this row's own activity: `sum over slots of ceil(A / W)`, with `A` the
+    /// group's strips whose slot is active and whose input is not silent.
+    bsr_ideal: Vec<(u32, u64)>,
+    /// The row's key-class ideal runs per block (issue #2132): what the active lanes of each key
+    /// class would need packed together, whatever today's pack groups are.
+    bsr_ideal_key_class: u64,
+    /// The live-control channel [`C1State::Toggle`] writes `ch00`'s gate bypass through, and
+    /// `None` on every other row.
+    toggle: Option<usize>,
+}
+
+/// One pack group's bank-slot runs (issue #2132), as [`SessionRuntime::bank_slot_runs`] reads
+/// them: the graph's counters beside the row's own ideal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BankGroupRuns {
+    /// The group's first runtime unit.
+    pub first_unit: u32,
+    /// Its last runtime unit, inclusive.
+    pub last_unit: u32,
+    /// Lanes per unit.
+    pub width: u32,
+    /// Effect slots per unit.
+    pub effect_slots: u32,
+    /// Bank-slot runs since bind.
+    pub runs: u64,
+    /// The row's ideal runs per block for this group.
+    pub ideal: u64,
 }
 
 /// One transaction of live writes, as a host makes it: stamp the next revision on the plan's gate,
@@ -1619,7 +2023,15 @@ impl SessionRuntime {
                 workload.kind()
             );
         }
-        let controls = if config.control || live_lanes.is_some_and(|lanes| lanes.effects) {
+        let toggles = matches!(
+            workload,
+            Workload::C1Console {
+                state: C1State::Toggle,
+                ..
+            }
+        );
+        let controls = if config.control || toggles || live_lanes.is_some_and(|lanes| lanes.effects)
+        {
             attach_effect_live_controls(
                 &mut effects,
                 &superseded,
@@ -1704,6 +2116,8 @@ impl SessionRuntime {
         })
         .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
 
+        let utilisation = artifact.report().rack_cohorts.utilisation;
+        let rack_cohorts = artifact.report().rack_cohorts.clone();
         let envelope = artifact.envelope();
         // Issue #965: every row binds its track inputs the way `host-core` binds a session
         // (`crates/host-core/src/prepare.rs`, `into_bound_with_source_set`): the artifact's track
@@ -1820,6 +2234,8 @@ impl SessionRuntime {
         // makes the paired delta the collapse and nothing else -- so the difference between them
         // has to be this switch and cannot be a fixture edit.
         plan.force_mono_collapse_off(workload.collapse_forced_off());
+        let (bsr_ideal, bsr_ideal_key_class) =
+            ideal_bank_slot_runs(&mut plan, &model, input, &rack_cohorts);
         let gate = plan.take_revision_gate().expect("the plan's gate handle");
         let mut runtime = Self {
             strip_controls,
@@ -1834,7 +2250,18 @@ impl SessionRuntime {
             structural_symmetry: structural,
             bypass: BypassCensus::of(session.normalized_model()),
             live,
+            utilisation,
+            bsr_ideal,
+            bsr_ideal_key_class,
+            toggle: None,
         };
+        if toggles {
+            runtime.toggle = Some(
+                runtime
+                    .control_channel("ch00", "miso.gate-expander")
+                    .expect("ch00's gate has a live-control channel"),
+            );
+        }
         if config.observation == ObservationArm::Armed {
             runtime.arm_observation();
         }
@@ -2126,6 +2553,59 @@ impl SessionRuntime {
     #[must_use]
     pub fn bypass_census(&self) -> BypassCensus {
         self.bypass
+    }
+
+    /// The compiled plan's bank utilisation (issue #2132).
+    #[must_use]
+    pub const fn bank_utilisation(&self) -> graph_compiler::BankUtilisation {
+        self.utilisation
+    }
+
+    /// The row's key-class ideal bank-slot runs per block (issue #2132), beside the per-group ideal
+    /// [`Self::bank_slot_runs`] reports.
+    #[must_use]
+    pub const fn bsr_ideal_key_class(&self) -> u64 {
+        self.bsr_ideal_key_class
+    }
+
+    /// Every pack group's bank-slot runs since bind beside its ideal per block (issue #2132), in
+    /// unit order. Off the clock.
+    pub fn bank_slot_runs(&mut self) -> Vec<BankGroupRuns> {
+        let ideal = &self.bsr_ideal;
+        graph::test_only_bank_slot_runs(&mut self.plan)
+            .into_iter()
+            .map(|group| BankGroupRuns {
+                first_unit: group.first_unit,
+                last_unit: group.last_unit,
+                width: group.width,
+                effect_slots: group.effect_slots,
+                runs: group.runs,
+                ideal: ideal
+                    .iter()
+                    .find(|(first, _)| *first == group.first_unit)
+                    .map_or(0, |(_, ideal)| *ideal),
+            })
+            .collect()
+    }
+
+    /// The row's control work before block `block` renders, off the clock: on
+    /// [`C1State::Toggle`], every [`C1_TOGGLE_BLOCKS`] blocks, `ch00`'s gate is bypassed and then
+    /// un-bypassed in turn; a no-op on every other row.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the gate's lane refuses the write.
+    pub fn before_block(&mut self, block: u64) {
+        if let Some(channel) = self.toggle
+            && block > 0
+            && block.is_multiple_of(C1_TOGGLE_BLOCKS)
+        {
+            let bypassed = (block / C1_TOGGLE_BLOCKS) % 2 == 1;
+            assert!(
+                self.push_bypass(channel, bypassed),
+                "ch00's gate refused a bypass write"
+            );
+        }
     }
 
     /// Tracks whose structural channel-symmetry witness holds: the `SOURCE` term, per track.
@@ -2724,6 +3204,12 @@ struct FrozenSourceDriver {
     toggled: Box<[FrozenGraphSource]>,
     /// Whether this block serves [`Self::toggled`].
     in_toggled_phase: bool,
+    /// Issue #2133: whether claim `i`'s first-phase block is exact `+0.0` on both planes, decided
+    /// here where the blocks are written, so render answers `played_block_silent` by one load as
+    /// the engine's own ring does.
+    claims_silent: Box<[bool]>,
+    /// The same for [`Self::toggled`].
+    toggled_silent: Box<[bool]>,
 }
 
 impl FrozenSourceDriver {
@@ -2756,8 +3242,23 @@ impl FrozenSourceDriver {
         } else {
             Box::default()
         };
+        let silent = |blocks: &[FrozenGraphSource]| -> Box<[bool]> {
+            blocks
+                .iter()
+                .map(|block| {
+                    block
+                        .left
+                        .iter()
+                        .chain(&block.right)
+                        .all(|word| word.to_bits() == 0)
+                })
+                .collect()
+        };
+        let claims = phase(0);
         Self {
-            claims: phase(0),
+            claims_silent: silent(&claims),
+            toggled_silent: silent(&toggled),
+            claims,
             toggled,
             in_toggled_phase: false,
         }
@@ -2777,8 +3278,10 @@ impl FrozenSourceDriver {
     /// Charged as overhead (source-plane storage) and not as PCM already charged by the session
     /// declaration, because no session declaration charges the benchmark's frozen tone.
     fn resource_report(&self) -> GraphSourceSetResourceReport {
-        let bytes =
-            (core::mem::size_of_val(&*self.claims) + core::mem::size_of_val(&*self.toggled)) as u64;
+        let bytes = (core::mem::size_of_val(&*self.claims)
+            + core::mem::size_of_val(&*self.toggled)
+            + core::mem::size_of_val(&*self.claims_silent)
+            + core::mem::size_of_val(&*self.toggled_silent)) as u64;
         GraphSourceSetResourceReport {
             pcm_payload_already_charged_bytes: 0,
             overhead_bytes: bytes,
@@ -2789,11 +3292,13 @@ impl FrozenSourceDriver {
 }
 
 // REALTIME_POLICY_BEGIN
-// The five methods below run on the render thread: no allocation, lock, syscall or panic path.
+// The methods below run on the render thread: no allocation, lock, syscall or panic path.
 impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
     fn retained_bytes(&self) -> u64 {
         effect_contract::retained::slice(&self.claims)
             + effect_contract::retained::slice(&self.toggled)
+            + effect_contract::retained::slice(&self.claims_silent)
+            + effect_contract::retained::slice(&self.toggled_silent)
     }
 
     fn claim_count(&self) -> usize {
@@ -2839,6 +3344,17 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
         self.served()
             .get(claim_index)
             .map(|claim| (&claim.left[..], &claim.right[..]))
+    }
+
+    /// Whether claim `claim_index`'s served block is all `+0.0`, as [`FrozenSourceDriver::new`]
+    /// recorded it (issue #2133).
+    fn played_block_silent(&self, claim_index: usize) -> bool {
+        let silent = if self.in_toggled_phase {
+            &self.toggled_silent
+        } else {
+            &self.claims_silent
+        };
+        silent.get(claim_index).copied().unwrap_or(false)
     }
 }
 // REALTIME_POLICY_END
@@ -3119,6 +3635,40 @@ mod tests {
         )
     }
 
+    /// Issue #2132: the key-class ideal packs a key class's active lanes across pack groups. On C1
+    /// at 16 tracks the two track banks are in no pack group; with the odd tracks silent each
+    /// holds four active lanes, so the per-group ideal is 4 + 4 for the tracks and the key-class
+    /// ideal 4 (the eight active tracks fill one bank per slot). The submixes are the same in
+    /// both: {drums, vox} active in the {4 groups, aux B} banks (3 + 1), aux A silent (0), and the
+    /// master (3 + 1). All active, every bank of the tracks is full and the two ideals agree.
+    ///
+    /// Test value: red when the key-class ideal stops merging the groups of one key class (it
+    /// then equals the per-group ideal on the sparse row).
+    #[test]
+    fn the_key_class_ideal_packs_across_pack_groups() {
+        if Backend::current().width() != 8 {
+            return;
+        }
+        for (state, per_group, key_class) in
+            [(C1State::Sparse, 16, 12), (C1State::AllActive, 16, 16)]
+        {
+            let mut runtime = SessionRuntime::new(Workload::C1Console {
+                tracks: C1Tracks::Sixteen,
+                state,
+            });
+            let groups: u64 = runtime
+                .bank_slot_runs()
+                .iter()
+                .map(|group| group.ideal)
+                .sum();
+            assert_eq!(
+                (groups, runtime.bsr_ideal_key_class()),
+                (per_group, key_class),
+                "{state:?}: [per-group ideal, key-class ideal]"
+            );
+        }
+    }
+
     /// Issue #965 gate 1: every session row the bench emits is fed the way a host feeds a
     /// session, and every claim is read in place by its bank's gather.
     ///
@@ -3140,7 +3690,8 @@ mod tests {
     #[test]
     fn every_row_is_fed_through_a_source_set_and_gathered_in_place() {
         const BLOCKS: u64 = 64;
-        for workload in native_session_rows() {
+        // Issue #2132: the bank-utilisation rows are fed and gathered as every session row is.
+        for workload in native_session_rows().chain(BANK_REPORT_WORKLOADS) {
             let kind = workload.kind();
             let live = LIVE_FED_WORKLOADS.contains(&workload);
             assert_eq!(
@@ -3270,9 +3821,10 @@ mod tests {
         let mut driver = FrozenSourceDriver::new(&claims, InputSignal::Tone, &injected, &mappings);
         let count = claims.len();
         let report = driver.resource_report();
+        // The frozen planes, and one silence flag per claim (issue #2133); a tone never toggles.
         assert_eq!(
             report.total_engine_owned_bytes,
-            (count * SOURCE_BLOCK_VALUES * core::mem::size_of::<f32>()) as u64
+            (count * SOURCE_BLOCK_VALUES * core::mem::size_of::<f32>() + count) as u64
         );
         assert_eq!(
             report.pcm_payload_already_charged_bytes + report.overhead_bytes,

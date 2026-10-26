@@ -63,6 +63,17 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_LANE_PACKING_DISABLED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    static TEST_ONLY_EVERY_SILENCE_FACT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Make (`true`) every op on this thread state its full silence fact (issue #2133), whether or
+/// not a lane packer reads it, so a test can read a fact no bank of its plan consumes; `false`
+/// restores the bind-time reader table. Test-support only.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_state_every_silence_fact(every: bool) {
+    TEST_ONLY_EVERY_SILENCE_FACT.with(|value| value.set(every));
 }
 
 /// Forbid (`true`) or allow (`false`) every bank chain's whole-bank silent skip (issue #1107) on
@@ -4760,6 +4771,26 @@ pub(crate) struct Runtime {
     /// hands it over with the state it describes). Meaningful only at a unit with an
     /// `input_producers` row that is a plain op; empty (no allocation) when there is none.
     channels_agree: Box<[bool]>,
+    /// Issue #2133: arena buffer -> whether its last writer this block left exact `+0.0` (raw bits
+    /// zero) on every word of both planes, as a propagated fact: the source set's record for a
+    /// copied claim, a skipped chain for its unfolded lanes, a route or a sum from the facts of
+    /// what it read. Never computed from the words, except for a host processor with no graph
+    /// input ([`op_output_silent`]). Every writer of a buffer states its flag after it writes, and
+    /// every buffer a reader consults was last written this block (a claim's at the block top, by
+    /// #932), so no flag is stale; a writer this does not model states `false`. Read only by the
+    /// lane packer's input fact ([`BankChain::set_input_silent_lanes`]): a `false` costs an
+    /// opportunity, and since every skip keeps its own input test, not even a wrong `true` could
+    /// move a rendered word. Sized at construction; empty in a test's arena-less runtime.
+    silent: Box<[bool]>,
+    /// Issue #2133: unit -> whether its op's output is the plain reduction of its main inputs, so
+    /// its silence is the AND of theirs: an `Identity` op that is neither the session Output (the
+    /// host's planes) nor a fold master (whose words the folding chains wrote). Bind-time.
+    silent_sum: Box<[bool]>,
+    /// Issue #2133: unit -> whether some reader uses its op's silence fact: the walk back from
+    /// each grouped bank's lane inputs through the routes and sums that feed them
+    /// ([`Self::bind_silence_readers`]). An op outside it states `false` without computing its
+    /// fact, which is always sound. Empty (every op computes) until bind builds it.
+    silent_readers: Box<[bool]>,
 }
 
 // The plan's retained-bytes walk (#1074): control thread only, from lengths and capacities, never
@@ -4838,6 +4869,9 @@ impl Runtime {
             .saturating_add(input_producers)
             .saturating_add(slice(&self.channels_agree))
             .saturating_add(self.lane_map.retained_bytes())
+            .saturating_add(slice(&self.silent))
+            .saturating_add(slice(&self.silent_sum))
+            .saturating_add(slice(&self.silent_readers))
     }
 }
 
@@ -5134,7 +5168,12 @@ impl Runtime {
             .max()
             .unwrap_or(0);
         let block_end_units = block_end_units(&units);
+        let silent = vec![false; arena.buffers()].into_boxed_slice();
+        let silent_sum = silent_sum_units(&units, output_unit);
         Self {
+            silent,
+            silent_sum,
+            silent_readers: Box::default(),
             arena,
             delays: delays.into_boxed_slice(),
             track_delays: track_delays.into_boxed_slice(),
@@ -5218,10 +5257,40 @@ impl Runtime {
             )
     }
 
+    /// Test-only (issue #2133): the flag of each route destination that is a plain sum, in unit
+    /// order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn route_destination_silence(&self) -> Vec<bool> {
+        let Some(activity) = self.route_activity.as_deref() else {
+            return Vec::new();
+        };
+        self.units
+            .iter()
+            .enumerate()
+            .filter_map(|(index, unit)| match unit {
+                RuntimeUnit::Op(op)
+                    if activity.destination_of(index).is_some()
+                        && self.silent_sum.get(index).copied() == Some(true) =>
+                {
+                    Some(self.silent.get(op.output as usize).copied() == Some(true))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     // REALTIME_POLICY_BEGIN
     /// The audio of one buffer, for the source set to fill.
     pub(crate) fn buffer_mut(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
         self.arena.write_stereo(buffer)
+    }
+
+    /// State buffer `buffer`'s silence fact (issue #2133, [`Self::silent`]) after the source set
+    /// filled it: the source set's own record of the claim it copied.
+    pub(crate) fn set_buffer_silent(&mut self, buffer: u32, silent: bool) {
+        if let Some(flag) = self.silent.get_mut(buffer as usize) {
+            *flag = silent;
+        }
     }
 
     /// The audio of one buffer, shared. Since issue #916 no production path reads a buffer back
@@ -5268,6 +5337,9 @@ impl Runtime {
             input_producers,
             channels_agree,
             lane_map,
+            silent,
+            silent_sum,
+            silent_readers,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -5321,6 +5393,26 @@ impl Runtime {
                         .map(|activity| (activity, index)),
                     block_time,
                 )?;
+                // Issue #2133: the op states its output's silence fact after writing it. A claim's
+                // input op wrote nothing (the source set stated its fact at the block top), and the
+                // session Output writes the host's planes, which no fact describes.
+                // A fact no reader uses (`silent_readers`) is stated `false` without computing it.
+                if !matches!(op.kind, NodeKind::SourceInput) && *output_unit != Some(index) {
+                    let read = silent_readers.get(index).copied().unwrap_or(true);
+                    #[cfg(any(test, feature = "test-support"))]
+                    let read = read || TEST_ONLY_EVERY_SILENCE_FACT.with(std::cell::Cell::get);
+                    let sum = silent_sum.get(index).copied().unwrap_or(false);
+                    let fact = read
+                        && op_output_silent(
+                            op,
+                            arena,
+                            silent,
+                            route_activity.as_deref(),
+                            index,
+                            sum,
+                        );
+                    state_op_silence(silent, op, fact);
+                }
                 // Issue #1899: an admitted per-node effect op, after its block. Its left and right
                 // state still agree, and so does the block it just wrote, only if they agreed
                 // before it, its input planes were identical, and its words -- as this block's
@@ -5368,6 +5460,9 @@ impl Runtime {
                             None,
                             block_time,
                         )?;
+                        // Issue #2133: a member's reduction is the plain sum of its inputs.
+                        let fact = op_output_silent(member, arena, silent, None, index, true);
+                        state_op_silence(silent, member, fact);
                         bank_inputs[lane] = member.output;
                     }
                 }
@@ -5376,28 +5471,33 @@ impl Runtime {
                     bank_outputs[lane] = members[last + lane].output;
                 }
                 let frames = arena.frames();
+                let master_buffer = match *master {
+                    FoldTarget::Arena(buffer) => Some(buffer),
+                    FoldTarget::Output => None,
+                };
                 let master = match *master {
                     FoldTarget::Arena(buffer) => MasterPlanes::Arena(buffer),
                     FoldTarget::Output => MasterPlanes::Host(host.reborrow()),
                 };
                 // Issue #1782a: a displaced pack group folds after its last unit, in home order.
                 let defer = lane_map.defers(index);
+                let gather = SourceGather {
+                    planes: sources,
+                    of_buffer: source_plane_of_buffer,
+                    lanes: identity[index].source_lanes,
+                };
+                // Issue #1981: a grouped unit's packer fact is read after its chain runs (one load
+                // for an ungrouped unit); the skip counter says whether the chain skipped.
+                let grouped = lane_map.group(index).map(|(group, _)| group);
                 let mut planes = ArenaMembers {
                     arena: &mut *arena,
                     inputs: &bank_inputs[..lanes],
                     outputs: &bank_outputs[..lanes],
                     fold,
                     master,
-                    sources: SourceGather {
-                        planes: sources,
-                        of_buffer: source_plane_of_buffer,
-                        lanes: identity[index].source_lanes,
-                    },
+                    sources: gather,
                     defer,
                 };
-                // Issue #1981: a grouped unit's packer fact is read after its chain runs (one load
-                // for an ungrouped unit); the skip counter says whether the chain skipped.
-                let grouped = lane_map.group(index).map(|(group, _)| group);
                 let skips = chain.silent_skips();
                 let frames = u32::try_from(frames).unwrap_or(u32::MAX);
                 set_block_time(chain, block_time);
@@ -5422,6 +5522,39 @@ impl Runtime {
                 } else {
                     chain.run(&mut planes, frames, first_sample, snapshot)?;
                 }
+                // Issue #2133: the chain flag. A skipped chain wrote `+0.0` into every unfolded
+                // active lane's output (#1107 D7); a chain that ran states nothing it could prove.
+                // A folded lane writes no output of its own, and its master's words are the
+                // folding chains', whose fact is `false` (its sum is not a plain reduction).
+                let skipped = chain.silent_skips() != skips;
+                // Issue #2133: the packer's input fact, read only after a block that ran (a skip
+                // proved every lane itself), and before this unit states its outputs' flags, one
+                // of which may be a lane's input (a member that reduced in place): from each
+                // lane's propagated flag, the played block's record for a lane gathering a claim
+                // in place, its buffer's flag otherwise. No word is read; the played planes are
+                // held until the next block's top. An ungrouped unit, whose fact nothing reads,
+                // states none.
+                if !skipped {
+                    let input_silent = if grouped.is_some() {
+                        lane_input_silence(&gather, silent, &bank_inputs[..lanes])
+                    } else {
+                        0
+                    };
+                    chain.set_input_silent_lanes(input_silent);
+                }
+                let folded = chain.fold_lanes();
+                for (lane, &buffer) in bank_outputs[..lanes].iter().enumerate() {
+                    let fact = skipped && !folded.get(lane).copied().unwrap_or(false);
+                    if let Some(flag) = silent.get_mut(buffer as usize) {
+                        *flag = fact;
+                    }
+                }
+                if folded.iter().any(|&lane| lane)
+                    && let Some(flag) =
+                        master_buffer.and_then(|buffer| silent.get_mut(buffer as usize))
+                {
+                    *flag = false;
+                }
                 // Issue #1981: the packer's fact, which lanes had an exact `+0.0` input and are at
                 // rest for the coming block. A skipped block proved both for every lane, so it asks
                 // nothing (silence costs no work). Otherwise the chain's gather already folded each
@@ -5429,7 +5562,7 @@ impl Runtime {
                 // lane's input was silent: a running unit with no silent lane pays one load.
                 if let Some(group) = grouped {
                     let populated = (1_u32 << lanes.min(8)) - 1;
-                    let quiet = if chain.silent_skips() != skips {
+                    let quiet = if skipped {
                         populated
                     } else {
                         let silent = chain.input_silent_lanes() & populated;
@@ -5702,6 +5835,202 @@ fn block_end_units(units: &[RuntimeUnit]) -> Box<[u32]> {
         .filter_map(|(index, _)| u32::try_from(index).ok())
         .collect()
 }
+
+/// Issue #2133: [`Runtime`]'s `silent_sum` table. An `Identity` op's output is the plain reduction
+/// of its main inputs, so its silence is theirs, unless it is the session Output (the host's planes)
+/// or a fold master: a chain folding a lane writes the master's words itself and its route op is
+/// retired, so the op's input list no longer says what the buffer holds. Bind-time; allocates.
+fn silent_sum_units(units: &[RuntimeUnit], output_unit: Option<usize>) -> Box<[bool]> {
+    let masters: Vec<u32> = units
+        .iter()
+        .filter_map(|unit| match unit {
+            // A chain that folds nothing holds an inert placeholder here (`Arena(0)`, the silence
+            // buffer, never an op's output); excluding it costs nothing, and naming every master
+            // keeps the table right for a fold armed after construction.
+            RuntimeUnit::Bank {
+                master: FoldTarget::Arena(buffer),
+                ..
+            } => Some(*buffer),
+            _ => None,
+        })
+        .collect();
+    units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| match unit {
+            RuntimeUnit::Op(op) => {
+                matches!(op.kind, NodeKind::Identity)
+                    && output_unit != Some(index)
+                    && !masters.contains(&op.output)
+            }
+            RuntimeUnit::Bank { .. } => false,
+        })
+        .collect()
+}
+
+// REALTIME_POLICY_BEGIN
+/// Issue #2133: whether a coefficient times an exact `+0.0` is exact `+0.0`: a finite value whose
+/// sign bit is clear. A negative one (`-0.0` included) makes `-0.0`, a non-finite one a NaN.
+#[inline]
+fn keeps_positive_zero(coefficient: f32) -> bool {
+    coefficient.is_finite() && coefficient.is_sign_positive()
+}
+
+/// Issue #2133: whether [`mix2x2_block`] by `c` maps an input that is exact `+0.0` on both planes
+/// to an output that is. Each output plane is `fma(b, r, a * l)`: two exact zeros summed, which is
+/// `-0.0` only when both are, so a plane stays `+0.0` when one of its two coefficients keeps
+/// `+0.0`. A route whose row is negative on both columns turns silence into `-0.0`, which is not
+/// silence to any skip's input test, so its output is never flagged.
+#[inline]
+fn mix_keeps_positive_zero(c: [f32; 4]) -> bool {
+    (keeps_positive_zero(c[0]) || keeps_positive_zero(c[1]))
+        && (keeps_positive_zero(c[2]) || keeps_positive_zero(c[3]))
+}
+
+/// Issue #2133: [`mix_keeps_positive_zero`] for every frame a live route's indexed ramp can mix.
+/// A settled ramp mixes by `target` alone. A ramping column's coefficient `fma(k, step, start)` is
+/// only bounded near its target, not signed (`IndexedRamp`'s subnormal-step note), so a column
+/// counts while ramping only when it does not move (`step` a zero, which leaves `start`) and keeps
+/// `+0.0` at both ends.
+#[inline]
+fn ramp_keeps_positive_zero(ramp: &IndexedRamp) -> bool {
+    if ramp.length == 0 {
+        return mix_keeps_positive_zero(ramp.target);
+    }
+    let column = |c: usize| {
+        keeps_positive_zero(ramp.target[c])
+            && ramp.step[c] == 0.0
+            && keeps_positive_zero(ramp.start[c])
+    };
+    (column(0) || column(1)) && (column(2) || column(3))
+}
+
+/// Issue #2133: whether every input a reduction mixes this block is flagged silent. A route
+/// destination leaves an inactive route out of its sum (#1217 D3), so a muted, settled route
+/// counts as silent whatever its source; every other input, and a route that mixes any frame,
+/// must be flagged. A sum of exact `+0.0` words is exact `+0.0`, and so is the `fill(0.0)` of a
+/// reduction with nothing to mix. One AND per input.
+#[inline]
+fn sum_silent(inputs: &[u32], gated: Option<GatedInputs<'_>>, silent: &[bool]) -> bool {
+    let flag = |buffer: u32| silent.get(buffer as usize).copied().unwrap_or(false);
+    let Some(gated) = gated else {
+        return inputs.iter().all(|&buffer| flag(buffer));
+    };
+    // `pairs` are ascending by position, so one forward walk pairs them with the inputs.
+    let mut pairs = gated.pairs.iter().peekable();
+    inputs.iter().enumerate().all(|(position, &buffer)| {
+        while pairs
+            .peek()
+            .is_some_and(|pair| (pair.position as usize) < position)
+        {
+            pairs.next();
+        }
+        let left_out = pairs.peek().is_some_and(|pair| {
+            pair.position as usize == position
+                && !gated
+                    .active
+                    .get(pair.route as usize)
+                    .copied()
+                    .unwrap_or(true)
+        });
+        left_out || flag(buffer)
+    })
+}
+
+/// Issue #2133: whether op `op`'s output, as its block left it, is exact `+0.0` on every word of
+/// both planes, from the flags of what it read (`silent`, [`Runtime`]'s table), never its words.
+///
+/// * A plain reduction (`sum`: an [`Runtime`] `silent_sum` op, or a bank member) is
+///   [`sum_silent`].
+/// * A route is silent when it mixed, its one input is silent and its coefficients keep `+0.0`
+///   ([`mix_keeps_positive_zero`], [`ramp_keeps_positive_zero`]). A route that did not mix wrote
+///   nothing: `false`, and its destination leaves it out of its sum instead.
+/// * A host processor with no graph input is the one writer whose words no engine fact describes
+///   (no shipped host binds one, #965: a source set feeds every track input); its output is read,
+///   with the same test a skip makes. Every other host processor, an effect, a delay line and a
+///   following route state `false`.
+///
+/// A staged (delayed) input makes the op read its compensation line, whose words no flag
+/// describes: `false`.
+#[inline]
+fn op_output_silent(
+    op: &RuntimeOp,
+    arena: &DisjointArena,
+    silent: &[bool],
+    routes: Option<&RouteActivity>,
+    unit: usize,
+    sum: bool,
+) -> bool {
+    if !op.staged.is_empty() {
+        return false;
+    }
+    let single = |silent: &[bool]| match &*op.inputs {
+        [input] => silent.get(*input as usize).copied().unwrap_or(false),
+        _ => false,
+    };
+    match &op.kind {
+        NodeKind::Identity | NodeKind::BankMember if sum => sum_silent(
+            &op.inputs,
+            routes.and_then(|activity| activity.gated(unit)),
+            silent,
+        ),
+        NodeKind::Route(coefficients) => {
+            let mixed = routes
+                .and_then(|activity| {
+                    activity
+                        .route_of(unit)
+                        .map(|route| activity.is_active(route))
+                })
+                .unwrap_or(true);
+            mixed && single(silent) && mix_keeps_positive_zero(*coefficients)
+        }
+        NodeKind::LiveRoute(live) => {
+            let mixed = routes.map_or_else(
+                || live.active(),
+                |activity| activity.is_active(live.route as usize),
+            );
+            mixed && single(silent) && ramp_keeps_positive_zero(&live.ramp)
+        }
+        NodeKind::Bound(_) if op.inputs.is_empty() => {
+            let (left, right) = arena.read_stereo(op.output);
+            rack::planes_are_positive_zero(left, right, arena.frames())
+        }
+        _ => false,
+    }
+}
+
+/// Issue #2133: record op `op`'s output fact, and `false` for each compensation line's staging
+/// buffer it filled: a writer states the flag of every buffer it wrote.
+#[inline]
+fn state_op_silence(silent: &mut [bool], op: &RuntimeOp, fact: bool) {
+    for staged in &op.staged {
+        if let Some(flag) = silent.get_mut(staged.staging as usize) {
+            *flag = false;
+        }
+    }
+    if let Some(flag) = silent.get_mut(op.output as usize) {
+        *flag = fact;
+    }
+}
+
+/// Issue #2133: a bank's lane input facts, bit `l` for lane `l`, read from where each lane's gather
+/// will read: a claim gathered in place is its source set's record of the played block, and any
+/// other lane is its input buffer's flag. One load per lane; no word.
+#[inline]
+fn lane_input_silence(gather: &SourceGather<'_>, silent: &[bool], inputs: &[u32]) -> u32 {
+    inputs
+        .iter()
+        .enumerate()
+        .take(32)
+        .fold(0, |mask, (lane, &buffer)| {
+            let quiet = match (gather.planes, gather.claim(lane, buffer)) {
+                (Some(planes), Some(claim)) => planes.played_block_silent(claim),
+                _ => silent.get(buffer as usize).copied().unwrap_or(false),
+            };
+            mask | (u32::from(quiet) << lane)
+        })
+}
+// REALTIME_POLICY_END
 
 // REALTIME_POLICY_BEGIN
 /// The buffer a first-slot bank member's gather may read **instead of** the member's own output,
@@ -9594,6 +9923,7 @@ pub(crate) fn build_sequential(
         &runtime.identity,
     );
     runtime.bind_lane_map();
+    runtime.bind_silence_readers();
     (
         runtime,
         BindIdentities {
@@ -10155,6 +10485,55 @@ impl Runtime {
         }
     }
 
+    /// Issue #2133: build [`Self::silent_readers`] once the pack groups are known. The only
+    /// consumer of a fact is a grouped bank's lane input, so the walk runs back from the end: a
+    /// grouped bank wants the flags of its first-slot members' inputs; an op whose output is
+    /// wanted is a reader-feeding op, and then wants its own inputs; a writer satisfies the want
+    /// on what it writes, so an earlier writer of the same buffer is not one. A bank states its
+    /// final lanes' flags whatever this says. Pack-group lane moves trade members between peer
+    /// units only, whose inputs all come from before the group, so they move no want. Bind-time;
+    /// allocates.
+    fn bind_silence_readers(&mut self) {
+        let mut wanted = vec![false; self.silent.len()];
+        let mut readers = vec![false; self.units.len()];
+        for index in (0..self.units.len()).rev() {
+            let read = match &self.units[index] {
+                RuntimeUnit::Op(op) => wanted.get(op.output as usize).copied().unwrap_or(false),
+                RuntimeUnit::Bank { .. } => false,
+            };
+            let mut want = |buffer: u32, value: bool| {
+                if let Some(flag) = wanted.get_mut(buffer as usize) {
+                    *flag = value;
+                }
+            };
+            match &self.units[index] {
+                RuntimeUnit::Op(op) => {
+                    want(op.output, false);
+                    if read && !matches!(op.kind, NodeKind::SourceInput) {
+                        readers[index] = true;
+                        for &input in &op.inputs {
+                            want(input, true);
+                        }
+                    }
+                }
+                RuntimeUnit::Bank { members, lanes, .. } => {
+                    let last = members.len().saturating_sub(*lanes);
+                    for member in &members[last..] {
+                        want(member.output, false);
+                    }
+                    if self.lane_map.group(index).is_some() {
+                        for member in &members[..*lanes] {
+                            for &input in &member.inputs {
+                                want(input, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.silent_readers = readers.into_boxed_slice();
+    }
+
     /// `(first unit, last unit, width)` of each pack group, in unit order. Off the render thread.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn pack_groups(&self) -> Vec<(u32, u32, u32)> {
@@ -10163,6 +10542,57 @@ impl Runtime {
             .iter()
             .map(|group| (group.first, group.last, group.width))
             .collect()
+    }
+
+    /// The bank-slot runs (issue #2132) of every pack group and of every bank unit in none, in
+    /// unit order: `[first unit, last unit, width, effect slots per unit, runs, whole-chain skips]`.
+    /// Units with no effect slot are left out. Off the render thread.
+    ///
+    /// A run is one bank executing one effect slot for one block. Every slot of a chain has the
+    /// chain's lane mask (`bank_chain_with_fold`), so a block the chain renders runs every slot and
+    /// a block it skips whole runs none: a unit's runs are its effect slots times its completed
+    /// round trips ([`BankChain::transposes`], one per rendered block and none per skipped one).
+    /// No render-path state is added for it. A per-slot skip (#2129) subtracts its own count here.
+    pub(crate) fn bank_slot_runs(&mut self) -> Vec<[u64; 6]> {
+        let mut rows: Vec<[u64; 6]> = Vec::new();
+        for index in 0..self.units.len() {
+            let RuntimeUnit::Bank { chain, .. } = &mut self.units[index] else {
+                continue;
+            };
+            let slots = chain_slot_count(chain);
+            let effect_slots = (0..slots)
+                .filter(|&slot| builtin_processor_mut(chain, slot).is_none())
+                .count() as u64;
+            if effect_slots == 0 {
+                continue;
+            }
+            let runs = effect_slots.saturating_mul(chain.transposes());
+            let skips = chain.silent_skips();
+            let width = u64::from(chain.width().lanes());
+            let unit = index as u64;
+            match self.lane_map.group(index) {
+                Some((_, group))
+                    if rows
+                        .last()
+                        .is_some_and(|row| row[0] == u64::from(group.first)) =>
+                {
+                    let row = rows.last_mut().expect("the group's row");
+                    row[1] = unit;
+                    row[4] = row[4].saturating_add(runs);
+                    row[5] = row[5].saturating_add(skips);
+                }
+                Some((_, group)) => rows.push([
+                    u64::from(group.first),
+                    unit,
+                    width,
+                    effect_slots,
+                    runs,
+                    skips,
+                ]),
+                None => rows.push([unit, unit, width, effect_slots, runs, skips]),
+            }
+        }
+        rows
     }
 
     /// The lane moves the packer made (issue #1981). Off the render thread.
