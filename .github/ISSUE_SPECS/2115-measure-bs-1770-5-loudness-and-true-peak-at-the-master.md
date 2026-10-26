@@ -222,3 +222,19 @@ start.
 - **Gates** (the stream coordinator re-ran them on d4653cc56): `check-sdk-types`, `check-sdk-headless` (682/682),
   `check-sdk-deletions.py`, `sdk-package.sh check` and `lint-checks.sh`. The timing evals passed 12 of 12 concurrent
   runs under load.
+
+## S3 attempt 3 (the review found that a failed second start stopped the open handle's meter)
+- **Fix.** After a start fails in transport, the quiet `stop` goes out only when no handle is open: an open handle owns
+  the armed meter. A typed core refusal sends no stop.
+- **New eval rows, and what each catches:**
+  - (9) Handle A is open and a second start fails in transport. The frames must be start, start, read, and A's read
+    must still be armed. Catches a quiet stop that turns off an open handle's meter.
+  - (10) The core refuses a start (`loudness.active`). The frames must be start, start, and the core must stay armed.
+    Catches a stop sent on every start failure.
+- **Red evidence.** Row 9 is red on attempt 2's code. Mutants: a stop on every failure turns 10 red; the open-handle
+  guard removed turns 9 red; the quiet stop removed turns 8 red.
+- **Eval 7.** Its time bounds are raised to `<= 10 * DEADLINE`. The frame-order assertions carry the claim.
+- **Gates** (the stream coordinator re-ran them after merging origin/main, which carries S2, with artifacts built fresh
+  from the merged tree, module 66573ae5): `check-sdk-types`, `check-sdk-generated`, `check-sdk-headless` (684/684),
+  `check-sdk-deletions.py`, `sdk-package.sh check` and `lint-checks.sh`. The loudness evals passed 8 of 8 concurrent
+  runs.
