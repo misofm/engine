@@ -177,7 +177,7 @@ fn limits() -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
         source_ring_frames: 1_024,
-        maximum_automation_spans_per_block: 128,
+        reserved1: 0,
         reserved0: 0,
         maximum_document_bytes: 1_000_000,
         maximum_diagnostic_bytes: 4_096,
@@ -527,7 +527,6 @@ fn host_caps(limits: &CompileLimits) -> host_core::HostPrepareCaps {
     host_core::HostPrepareCaps {
         shape: host_core::HostShapePolicy::AnyLaunchRate,
         source_ring_frames: limits.source_ring_frames,
-        maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
         maximum_tracks: limits.maximum_tracks,
         maximum_submixes: if limits.maximum_submixes == 0 {
             limits.maximum_tracks
@@ -3905,7 +3904,7 @@ fn submix_limits(maximum_tracks: u64, maximum_submixes: u64) -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
         source_ring_frames: 1_024,
-        maximum_automation_spans_per_block: 128,
+        reserved1: 0,
         reserved0: 0,
         maximum_document_bytes: 1_000_000,
         maximum_diagnostic_bytes: 4_096,

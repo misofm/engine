@@ -1595,7 +1595,6 @@ pub fn prepare_caps(limits: ControlLimits) -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: limits.source_ring_frames,
-        maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
         maximum_tracks: limits.maximum_tracks,
         // #1206 D2: zero is every pre-#1206 caller's value, and means "bound submixes by tracks".
         maximum_submixes: if limits.maximum_submixes == 0 {
@@ -2557,7 +2556,6 @@ mod admission_tests {
     fn unlimited() -> ControlLimits {
         ControlLimits {
             source_ring_frames: 0,
-            maximum_automation_spans_per_block: 0,
             maximum_document_bytes: 0,
             maximum_diagnostic_bytes: 0,
             maximum_tracks: 0,

@@ -65,8 +65,6 @@ pub trait ControlAdapter {
 pub struct ControlLimits {
     /// Frames of each source ring; zero derives the value from the session's rate and quantum.
     pub source_ring_frames: u32,
-    /// Automation spans the protocol admits per render block.
-    pub maximum_automation_spans_per_block: u32,
     /// Bytes of the canonical session document.
     pub maximum_document_bytes: u64,
     /// Bytes of one diagnostic report.

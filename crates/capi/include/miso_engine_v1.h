@@ -730,7 +730,9 @@ typedef struct miso_engine_v1_engine_config {
 typedef struct miso_engine_v1_compile_limits {
     uint32_t struct_size;
     uint32_t source_ring_frames;
-    uint32_t maximum_automation_spans_per_block;
+    /* Formerly maximum_automation_spans_per_block; must be zero in ABI V1;
+       the layout is unchanged. */
+    uint32_t reserved1;
     uint32_t reserved0;
     uint64_t maximum_document_bytes;
     uint64_t maximum_diagnostic_bytes;

@@ -67,6 +67,7 @@ ABI_ASSERT(_Alignof(miso_engine_v1_plan_resource_report) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v1_watermark) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v1_seek_report) == 8);
 
+ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, reserved1) == 8);
 ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_document_bytes) == 16);
 ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_replay_entries) == 168);
 ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_submixes) == 176);
@@ -196,7 +197,7 @@ static int check_plan_watermark(miso_engine_v1_engine *engine) {
 
     limits.struct_size = MISO_ENGINE_V1_COMPILE_LIMITS_SIZE;
     limits.source_ring_frames = 1024;
-    limits.maximum_automation_spans_per_block = 128;
+    limits.reserved1 = 0;
     limits.maximum_document_bytes = 1000000;
     limits.maximum_diagnostic_bytes = 4096;
     limits.maximum_tracks = 100;

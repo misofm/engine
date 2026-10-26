@@ -260,3 +260,148 @@ Root's ruling on finding F23 of the stored-automation check (`docs/handoffs/stor
 - **Dependencies.** #1611 (landed) and #1621 (the per-node window; this issue lands after it). #1629
   (batch P1) removes S's protocol read; this issue and #1668 form batch P2, after P1. The #1058
   rendering slices no longer depend on this issue.
+
+## Current-source implementation record (2026-10-26, attempt 1)
+
+Root approved the amended D3 slice on `8f32d1673`; the user requested Astra
+for implementation and root retains independent adversarial review. #1629 is
+closed; #1306 and #1668 are delivered as sequential reviewed checkpoints in one PR.
+Both host-core preparation paths (main preparation and the arrivals-only compile)
+now pass the independent effect ceiling `u32::MAX`. The effect compiler derives
+`max(1, descriptor live parameter cells)` and refuses an insufficient ceiling with
+`effect.resource.limit`. Response-preview limits retain their existing purpose.
+
+All `HostPrepareCaps` literals lose S, including the current-source literals in
+`crates/capi/tests/response_strip.rs`, `tools/bench/src/swap.rs` and host-core's
+response fixture (root-approved inventory additions). The browser no longer counts
+stored segments; its obsolete, now unread `ControlLimits` S field temporarily
+receives zero until #1668 removes the field in the next checkpoint.
+
+Root approved the test-ownership refinement: the temporary CAPI parity test
+compares actual FFI graph rows at S = 128 and 4,096. PreparedHost intentionally
+exposes no prepared-effect metadata inspector, so per-instance capacity is tested
+only by the existing effect-compiler owner test, rewritten in place. No production
+inspection API or duplicate preparation test is added. That owner test covers all
+ten launch descriptors, exact versus generous ceilings, zero and cells-minus-one
+refusals, every-cell staging, and a no-live-cell descriptor's minimum capacity 1.
+The metadata-forgery and native-session fixtures use sufficient ceilings, preserving
+their original diagnostic claims.
+
+Test value: the owner test fails if caller capacity inflates descriptor capacity,
+if insufficient ceilings are accepted, if the minimum becomes zero, or if a dirty
+cell cannot fit in its lane's window; the temporary CAPI row fails if caller S
+changes host graph resources. #1668 deletes the temporary parity test when S is
+reserved. No rendered-output digest is committed as a test.
+
+Baseline `audit capi` (`8f32d1673`): `pcm_digest=bffc21e857b5e134`, 100,000
+render calls, zero errors and zero allocations, deallocations, locks, syscalls or
+other realtime violations. Local evidence is `/tmp/issue1668-base-audit.json`.
+The historical policy command names `scripts/check-realtime-policy.sh` and
+`test-realtime-policy.sh`, which no longer exist; this is recorded rather than
+creating substitute scripts. The current replacement is `cargo run --locked
+--release -p realtime-policy` plus `cargo test --locked -p realtime-policy`
+(running at this checkpoint). Host-core and workspace policy checks and mutation
+suites pass.
+
+Focused validation passed: capi's complete test suite; effect-compiler and
+host-core complete suites (including doctests); the rewritten owner test;
+`cargo fmt --all -- --check`; and `git diff --check`. The initial effect-compiler
+run exposed old fixture ceilings below EQ's current live-cell requirement; correcting only those
+fixtures restored their intended metadata/diagnostic tests.
+Head `audit capi` matches baseline `bffc21e857b5e134`, all violation counters zero.
+Eight-lane reference graph rows: session-plus-plan 374,654; incremental 374,414;
+metadata 114,049. Existing resource ceilings pass unchanged. Broader portability,
+browser and workspace qualification run on the coherent #1306/#1668 boundary.
+
+Root adversarial review of `89b6208bc`: **PASS, attempt 1**, conditional on the
+shared final browser/portability/workspace qualification. Independent owner-test
+mutations fail when caller ceiling replaces descriptor capacity and when the
+ceiling check is deleted; the restored owner test passes. Test value: the owner
+test catches capacity inflation, insufficient-ceiling acceptance, missing minimum
+1 and dropped dirty cells; the temporary CAPI test catches host resource coupling
+to S and is deleted by #1668. Review evidence is preserved under
+`/home/bl/misofm/engine-work-evidence/1668/root-review/1306-*.log`.
+The current realtime-policy binary passes (233 marked regions, 43 files), with
+2 unit and 240 policy tests passing.
+
+## Final integration correction (attempt 2, root-approved 2026-10-26)
+
+The provisional component PASS is superseded by **attempt 1 final integration
+FAIL**: the full debug-a corpus reached 43 graph-compiler test refusals where
+existing launch-effect fixtures passed a ceiling of 32. Current generated
+descriptors have 60 live cells for parametric EQ and 96 for dynamic EQ (the old
+brief's 44-cell EQ count is historical); every other launch descriptor has at most
+22. The bounded correction sets formerly generous launch-fixture ceilings to 128
+in graph-compiler's test helpers, retaining custom-registry, delay-only,
+multiband-only and third-party-refusal ceilings that were already sufficient.
+This changes no named graph, memory or release budget and no negative ceiling gate.
+The authorized paths include `crates/graph-compiler/src/lib.rs` (test module),
+`src/tests/{bank_padding,console_banking}.rs`, and its existing integration fixtures
+`bank_levels`, `bypass_cohorts`, `console_banking`, `console_link_override`, `scale`,
+`silent_bank_skip`, `tail_composition` and `bypass_resources`.
+
+One production **tool** caller, `tools/console-workload/src/lib.rs::effect_caps`,
+also prepares all launch descriptors; its ceiling becomes 128 for the same reason.
+Its functional tests run without timing. Direct audit requests such as dynamic
+EQ's 16 and parametric EQ's 48 use `PrepareEffectLimits` through native factories,
+not the changed session-compiler ceiling, and remain untouched.
+
+Two bypass_resources tests are deleted as superseded: the per-node 128/4096
+capacity comparison and the MAX-capacity/OOM reproducer. Their compiler ceilings
+no longer change prepared capacity, so their stated window mutations no longer
+turn them red. Measured allocator-accounting and render-allocation tests remain;
+direct graph/rack owner tests that vary actual prepared capacity retain the
+window-sizing claim, and the effect-compiler owner retains descriptor sizing and
+ceiling-refusal claims. No replacement harness or new test is added.
+
+Attempt 2 focused validation: graph-compiler's complete all-targets
+`--no-fail-fast` suite passed every target except one indirect `bind(...,32,None)`
+ceiling in the retained bypass allocation test. That argument now uses 128; its
+four-test target then passes with allocation assertions unchanged. This was
+within the same bounded correction pass, before review. The production-tool
+console-workload release functional suite passes (56 tests, no timing workload).
+The exact workspace debug-a doctest leg also passes. Logs, including the command
+preflight errors and the initial indirect-ceiling failure, remain in the external
+evidence directory. The final full debug-a run uses `--no-fail-fast` so every
+required target runs before a verdict.
+
+## Final aggregate qualification (2026-10-26)
+
+Root's independent final bounded reviews: **#1306 attempt 2 PASS** at
+`1f6e12dcf`; **#1668 attempt 2 PASS** at `8a10367ca`. These supersede the
+provisional attempt-1 component passes and their recorded integration failures.
+The final full `qualification.yml` debug-a workspace/all-target corpus, using its
+exact exclusions/features with `--no-fail-fast`, passes on `1f6e12dcf` (exit 0).
+Its separate workspace doctest step with the same exclusions/features also passes.
+
+Other completed gates: workspace/all-target/all-feature clippy with warnings
+denied; formatting and diff checks; host-core and workspace policies and their
+mutation suites; current realtime-policy binary plus 242 tests; C11/C++17 ABI
+checker and its mutation suite, including shared/static consumers; and the full
+cross-target matrix (iOS/Android checks and lint, iOS memset ratchet, Wasm SIMD,
+32-bit/scalar-Wasm refusal rows). The capi/control-plane focused suites pass.
+Console-workload's affected production-tool preparation passes its 56 release
+functional tests; no timed benchmark was run. The later changes are test fixtures
+and that tool helper, outside the engine/browser closure, so the already-passed
+product qualification remains applicable as independently reviewed by root.
+
+Production baseline `8f32d1673` and integrated production `1508be064` both give
+`audit capi` PCM digest `bffc21e857b5e134` over 100,000 calls, with zero render errors
+and zero allocations, frees, locks, syscalls or other realtime violations.
+The source-built browser module SHA-256 is
+`408bd79a0570609afa12f7578b2149449477c432a9d6908b98ea9332cc9e63af`.
+Static/object/closure gates, native/SIMD digest and resource parity, hermetic
+host/worklet tests, and current supported Chromium 151.0.7922.34/WebKit 26.5
+qualification with matrix checks and red mutations all pass. Expected PCM
+digests are unchanged. The checked release matrix retains its own lineage;
+`final-browser-matrix.log` is the current-run evidence, linked to the artifact
+and source commit by `final-browser-run-receipt.json`.
+
+All logs (including initial failures), browser artifacts and the run receipt
+are preserved outside the worktree at
+`/home/bl/misofm/engine-work-evidence/1668/astra/`; independent reviewer mutation
+evidence is under `../root-review/`. Final full-corpus/clippy logs are
+`final-debug-a-complete.log`, `final-debug-a-doc.log` and
+`final-clippy-complete.log`. This evidence checkpoint changes only the two issue
+specs; root owns PR qualification, merged-body synchronization and explicit
+GitHub closure.

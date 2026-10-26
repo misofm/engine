@@ -26,7 +26,6 @@ fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: 1_024,
-        maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
         maximum_submixes: 100,
         maximum_vcas: 100,

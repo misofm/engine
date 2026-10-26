@@ -66,6 +66,18 @@ The accepted Rust exported-C regressions supply the complete 11-command, six-eve
 replacement, retirement/reclaim, source-preserving/source-changing, failure, replay, and lifecycle
 matrix without copying protocol semantics into the qualification consumer.
 
+The compile-limit word at offset 8 is `reserved1` and must be zero (#1668).
+It formerly held `maximum_automation_spans_per_block`: #1306 derives each effect's
+capacity from its descriptor, and #1627–#1629 retired the protocol automation queue.
+The 208-byte layout, exported symbols, feature mask and ABI version are unchanged.
+A nonzero reserved word returns `MISO_ENGINE_V1_INVALID_ARGUMENT` before the document
+or diagnostics is read; both output handle locations are cleared to null under
+the existing failure-publication rule and diagnostics remains untouched.
+Prelaunch apps and library move together: an older library refuses a zero word
+with `MISO_ENGINE_V1_INVALID_ARGUMENT`; an older caller's nonzero value is refused
+by this library. Rebuilding against the renamed header requires setting `reserved1`
+to zero. No new feature bit is added because this removes a role.
+
 A structural transaction keeps every unchanged source playing (#1273, slice 4 of #1269). The
 replacement plan is prepared from the newest plan's state inventory and committed session model,
 with no ring for a source whose declaration and ring configuration are unchanged; at its swap block
@@ -959,7 +971,7 @@ their cells, and #1265 publishes live EQ targets through the owners (below). The
   compiled model plus the payload `capi_retained_bytes` charges for the producers (15,361 bytes on
   the reference session below). A replacement's two-plan peak and the live admission dominate it.
 - **Resource movement on the nine-track EQ reference session** at the reference `limits()`
-  (`maximum_automation_spans_per_block` S = 128, a 128-frame quantum; x86-64, eight lanes). These
+  (a 128-frame quantum; x86-64, eight lanes). These
   are that session's figures, not general ones:
 
   | row | before | after |
@@ -969,7 +981,9 @@ their cells, and #1265 publishes live EQ targets through the owners (below). The
   | `capi_retained_bytes` | 258,231 | 273,640 |
   | `largest_named_allocation_bytes` | 90,720 | 90,720 |
 
-- **The general formula.** The graph rows grow by a per-member term plus a per-bank term:
+- **The historical #1263 formula.** Before cell-sized windows (#1611/#1621) and
+  descriptor-derived preparation capacity (#1306), the graph rows grew by a per-member
+  term plus a per-bank term:
 
   - each parametric EQ member 2,104 bytes, each other effect member 1,208 (no 896-byte target
     staging);
@@ -1008,8 +1022,11 @@ their cells, and #1265 publishes live EQ targets through the owners (below). The
   that declares a tap, and the reference session has none, so its rows charge none. `tests/bypass_resources.rs` holds the lane term and the queue table to the audited
   allocator, exactly. The member and bank terms above no longer
   hold: a member's term is its cell arrays, which grow with the effect's live parameter cells and,
-  for the parametric EQ, its target slots, and the staging window is `max(S, live parameter
-  cells)` spans. A caller whose `maximum_graph_session_plus_plan_bytes` or
+  for the parametric EQ, its target slots. Since #1611/#1621 the staging window follows
+  the live parameter cells. #1306 also makes each prepared effect capacity
+  `max(1, descriptor live parameter cells)`, independent of caller S; the independent
+  `EffectCompileCaps` value is a ceiling and rejects an insufficient value. Host
+  preparation uses `u32::MAX` for that ceiling and charges the resulting graph bytes. A caller whose `maximum_graph_session_plus_plan_bytes` or
   `maximum_capi_retained_bytes` was exact before this change must raise it.
 
 ## Value-only effect parameter edits on the running plan (#1264)
