@@ -475,12 +475,12 @@ fn signal_ending_silent(rng: &mut Rng) -> (Vec<f32>, Vec<f32>) {
     planes
 }
 
-/// [`signal_ending_silent`] on lane `lane` alone (its pole must be `0`), from a seeded generator.
+/// [`signal_ending_silent`] on lane `lane` alone (its pole must be `0`) and on its right plane
+/// alone, from a seeded generator: a line that holds signal on one plane only.
 fn signal_on(lane: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
     let mut rng = Rng(seed);
     let mut planes = (vec![0.0; WORDS], vec![0.0; WORDS]);
     for frame in 0..QUANTUM as usize - 1 {
-        planes.0[frame * LANES + lane] = rng.signed();
         planes.1[frame * LANES + lane] = rng.signed();
     }
     planes

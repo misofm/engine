@@ -834,9 +834,16 @@ fn swap_bits(own: &mut u8, first: usize, other: &mut u8, second: usize) {
 
 /// Fold one block's input into each lane's run of trailing `+0.0` frames the shunt's latency line
 /// has taken (issue #2129 D6), saturated at `latency`: a lane's run is the block's trailing
-/// `+0.0` frames on both planes, or its old run plus the block when the whole block is `+0.0`. The
-/// walk stops at each lane's last word that is not `+0.0`, so an audible block costs a word per
-/// lane and plane.
+/// `+0.0` frames on both planes, or its old run plus the block when the whole block is `+0.0`.
+///
+/// The walk is frame-major over the interleaved block (each frame is the bank's `lanes`
+/// contiguous words, so every lane advances in one pass over contiguous memory) from the block's
+/// end, and it stops when no lane is still counting, or after `latency` frames: a run that reaches
+/// `latency` saturates there whatever the earlier frames hold. So an audible block costs one frame
+/// and a silent one at most `latency` frames. The test is on raw bits, because `-0.0` is not
+/// `+0.0`: the lane vocabulary has no bitwise test on a lane vector (its `eq` compares `-0.0`
+/// equal to `+0.0`), so the walk folds `u32` words over a fixed eight-lane array, which the
+/// compiler vectorizes.
 fn note_line_input(
     zero_run: &mut [u32; 8],
     latency: u32,
@@ -844,17 +851,32 @@ fn note_line_input(
     left: &[f32],
     right: &[f32],
 ) {
+    let lanes = lanes.min(8);
     let words = left.len().min(right.len());
     let frames = words / lanes.max(1);
-    for (lane, run) in zero_run.iter_mut().enumerate().take(lanes) {
-        let trailing = (0..frames)
-            .rev()
-            .take_while(|frame| {
-                let word = frame * lanes + lane;
-                left[word].to_bits() == 0 && right[word].to_bits() == 0
-            })
-            .count();
-        let trailing = u32::try_from(trailing).unwrap_or(u32::MAX);
+    let walk = frames.min(latency as usize);
+    let mut counting = [false; 8];
+    counting[..lanes].fill(true);
+    let mut trailing = [0_u32; 8];
+    for frame in (frames - walk..frames).rev() {
+        let base = frame * lanes;
+        let (left, right) = (&left[base..base + lanes], &right[base..base + lanes]);
+        let mut any = false;
+        for (((count, run), left), right) in counting
+            .iter_mut()
+            .zip(trailing.iter_mut())
+            .zip(left)
+            .zip(right)
+        {
+            *count &= (left.to_bits() | right.to_bits()) == 0;
+            *run += u32::from(*count);
+            any |= *count;
+        }
+        if !any {
+            break;
+        }
+    }
+    for (run, trailing) in zero_run.iter_mut().zip(trailing).take(lanes) {
         *run = if trailing as usize == frames {
             run.saturating_add(trailing)
         } else {
