@@ -3456,10 +3456,10 @@ fn bypass_crossfade_documents(
 ///
 /// Test value: red if the C ABI producer forgets the session ramp (the toggle steps, so the first
 /// block is already D), if the record's ramp is another row's (the fader's or pan's length), if a
-/// ramp block allocates, if a lift leaves `D` before its warm-up ends, or if the per-node and the
-/// banked lift disagree. The delay's and the
-/// multiband's rows are red if the bypass is still prepared: the lift is refused or rebuilds a
-/// plan, or is acked and renders the prepared bypass (#1339 gate 4, #1340 gate 5).
+/// ramp block allocates, if a lift leaves `D` before its warm-up ends, if a lift is acked and its
+/// output stays `D` past its warm-up and ramp (every effect row; the delay's and the multiband's
+/// red if their bypass is still prepared, #1339 gate 4, #1340 gate 5), if the lift is refused or
+/// rebuilds a plan, or if the per-node and the banked lift disagree.
 #[test]
 fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed_control() {
     bench_support::alloc::assert_installed();
@@ -3544,6 +3544,8 @@ fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed
                     );
                     let mut ramping = 0_usize;
                     let mut between = 0_usize;
+                    // A lift's words past its warm-up and ramp that are not the dry control's.
+                    let mut lifted_off_dry = 0_usize;
                     for block in record_block..blocks {
                         let planes = noise_chunk(rig.fed, quantum);
                         let (live, used) = rig.step_planes_counted(planes);
@@ -3563,6 +3565,10 @@ fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed
                                         sample.to_bits(),
                                         dry[block as usize][index].to_bits(),
                                         "{effect_id}: block {block} sample {index} holds dry"
+                                    );
+                                } else if frame >= warmup + u64::from(ramp) {
+                                    lifted_off_dry += usize::from(
+                                        sample.to_bits() != dry[block as usize][index].to_bits(),
                                     );
                                 }
                             }
@@ -3616,6 +3622,10 @@ fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed
                         }
                     }
                     if lift {
+                        assert!(
+                            lifted_off_dry > 0,
+                            "{effect_id}: the lift was acked but its output stayed dry"
+                        );
                         lifted.push(lifted_rows);
                         continue;
                     }
