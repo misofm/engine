@@ -260,7 +260,7 @@ const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
  * sender gives up on a frame after `deadlineMs` while the core still serves it, as the browser's
  * deadline does.
  */
-function fakeCore({ startMs = 0, frameMs = 0, deadlineMs = 1_000, stuckReads = false, failStops = 0, failStartsAfter } = {}) {
+function fakeCore({ startMs = 0, frameMs = 0, deadlineMs = 1_000, stuckReads = false, failStops = 0, failStartsAfter, failFirstStart = false } = {}) {
   const sent = [];
   let armed = false;
   let serving = Promise.resolve();
@@ -274,6 +274,9 @@ function fakeCore({ startMs = 0, frameMs = 0, deadlineMs = 1_000, stuckReads = f
   const send = (operation) => {
     sent.push(operation);
     if (operation === "read" && stuckReads) return new Promise((_resolve, reject) => setTimeout(() => reject(new Error("deadline")), deadlineMs));
+    if (operation === "start" && failFirstStart && sent.filter((name) => name === "start").length === 1) {
+      return sleep(5).then(() => { throw new Error("the port failed"); });
+    }
     if (operation === "start" && failStartsAfter !== undefined
         && sent.filter((name) => name === "start").length > failStartsAfter) {
       return Promise.reject(new Error("the port failed"));
@@ -353,6 +356,19 @@ test("a second start that fails in transport while a handle is open sends no sto
   assert.equal(reading.armed, true, "the open handle's meter was stopped");
   assert.deepEqual(core.sent, ["start", "start", "read"]);
   await first.close();
+});
+
+test("a subscribe queued behind a start that fails in transport keeps its meter", { timeout: 5_000 }, async () => {
+  const core = fakeCore({ failFirstStart: true });
+  const owner = new LoudnessOwner({ send: core.send, capabilityFlags: async () => 1n << 17n });
+  const first = owner.subscribe();
+  const second = owner.subscribe();
+  await assert.rejects(first, /the port failed/);
+  const handle = await second;
+  await sleep(20);
+  assert.equal(core.armed(), true, "the failed start's stop disarmed the queued subscriber's meter");
+  assert.deepEqual(core.sent, ["start", "stop", "start"], "the quiet stop goes directly behind the failed start");
+  await handle.close();
 });
 
 test("a start the core refuses sends no stop", { timeout: 5_000 }, async () => {
