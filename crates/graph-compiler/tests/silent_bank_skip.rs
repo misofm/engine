@@ -203,15 +203,21 @@ const WINDOWS: [(core::ops::Range<usize>, core::ops::Range<usize>); 3] = [
     (400..530, 16..TRACKS),
 ];
 
+/// The block from which every track plays (issue #1981): in a schedule of more blocks than this,
+/// the all-active tail after which a packing plan must be back at its home lanes.
+const TAIL: usize = 560;
+
 /// Every track's per-block schedule: random signal runs (a sixth of them at `1e-30`, another
 /// sixth at `1e-6`), a `-0.0` block after a quarter of them and `+0.0` runs of up to 120 blocks;
-/// then [`WINDOWS`], and one [`Block::RightTail`] in the last of them.
+/// then [`WINDOWS`], one [`Block::RightTail`] in the last of them, and from [`TAIL`] on signal.
 fn schedules(blocks: usize, seed: u64) -> Vec<Arc<[Block]>> {
     let mut rng = Rng(seed);
     (0..TRACKS)
         .map(|track| {
+            // The random part is the same for every `blocks` from [`TAIL`] on.
+            let random = blocks.min(TAIL);
             let mut schedule = Vec::with_capacity(blocks);
-            while schedule.len() < blocks {
+            while schedule.len() < random {
                 let level = match rng.below(6) {
                     0 => 1e-30,
                     1 => 1e-6,
@@ -227,7 +233,9 @@ fn schedules(blocks: usize, seed: u64) -> Vec<Arc<[Block]>> {
                     schedule.push(Block::Silence);
                 }
             }
-            schedule.truncate(blocks);
+            schedule.truncate(random);
+            // Gate 1's all-active tail (issue #1981): every track plays, so every strip runs.
+            schedule.resize(blocks, Block::Signal(0.05));
             for (block, kind) in schedule.iter_mut().enumerate() {
                 if WINDOWS
                     .iter()
@@ -328,6 +336,8 @@ struct Bound {
     plan: PreparedRenderPlan,
     frames: usize,
     latency: u64,
+    /// Whether the plan packs its lanes each block (issue #1981; on, as every shipped plan).
+    pack: bool,
     /// Each track's post-matrix words, when observed.
     sinks: Vec<Arc<Mutex<Vec<u32>>>>,
 }
@@ -457,6 +467,7 @@ fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bou
         plan,
         frames,
         latency,
+        pack: true,
         sinks,
     }
 }
@@ -466,6 +477,7 @@ impl Bound {
     /// so an unwritten word shows.
     fn render(&mut self, block: u64, skip: bool, pcm: &mut [f32]) {
         graph::test_only_disable_bank_skip(!skip);
+        graph::test_only_disable_lane_packing(!self.pack);
         pcm.fill(7.0);
         let frames = self.frames;
         let rendered = self.plan.render(
@@ -477,11 +489,20 @@ impl Bound {
             },
         );
         graph::test_only_disable_bank_skip(false);
+        graph::test_only_disable_lane_packing(false);
         rendered.expect("render");
     }
 
     fn skips(&self) -> u64 {
         graph::test_only_bank_silent_skips(&self.plan)
+    }
+
+    fn lane_moves(&self) -> u64 {
+        graph::test_only_bank_lane_moves(&self.plan)
+    }
+
+    fn displaced(&self) -> u64 {
+        graph::test_only_displaced_strips(&self.plan)
     }
 }
 
@@ -517,16 +538,72 @@ fn a_skipped_bank_renders_the_bits_of_a_processed_one() {
         ("right rows negative except on 4..8", all_but_four_to_eight),
     ] {
         eprintln!("layout: {name}");
-        gate_one(layout);
+        gate_one(layout, Twin::Processed);
     }
 }
 
-fn gate_one(layout: RightNegative) {
-    let blocks = 560;
-    let schedules = schedules(blocks, 0x1107);
-    let model = session(layout);
+/// Gate 1 of issue #1981: one session compiled twice, one plan packing its lanes each block and
+/// its twin never packing (`graph::test_only_disable_lane_packing`), the skip allowed on both,
+/// over gate 1's inputs and both route-sign layouts, then an all-active tail ([`TAIL`]). Every
+/// block's host output and every track's post-matrix words must agree by `to_bits`, NaNs folded;
+/// the packing plan must have moved lanes, skipped more banks than its twin, and be back at its
+/// home lanes after the tail. The moves meet both refusals: the mono bank is collapse-armed and
+/// the others are not, and `ch11`'s stored ride keeps it running and its fader bank the only one
+/// with automation slots.
+///
+/// The generator also seeks (the render clock jumps [`SEEK_JUMP`] blocks at [`SEEK`], strips
+/// displaced), and gives `ch09` and `ch17` a linked compressor detector (#1369), which their moves
+/// must carry (#1371).
+///
+/// Test value: red when a pack moves a strip's or the master's bits, makes a pack that skips no
+/// more than the unpacked twin, never packs, or leaves a group displaced (paying the displaced
+/// fold) after activity returns, which no other test reaches: the #1782a gate moves lanes only by
+/// hand.
+#[test]
+fn a_packing_plan_renders_the_bits_of_an_unpacked_one() {
+    for (name, layout) in [
+        (
+            "right rows negative on 0..16",
+            first_sixteen as RightNegative,
+        ),
+        ("right rows negative except on 4..8", all_but_four_to_eight),
+    ] {
+        eprintln!("layout: {name}");
+        gate_one(layout, Twin::Unpacked);
+    }
+}
+
+/// What gate 1's twin plan leaves out. Both plans pack their lanes in [`Twin::Processed`], so the
+/// skip differential also runs over displaced groups.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Twin {
+    /// The whole-bank skip (issue #1107): every block is processed.
+    Processed,
+    /// The per-block lane packing (issue #1981).
+    Unpacked,
+}
+
+/// The packing gate's discontinuity: from this block on, the render clock runs [`SEEK_JUMP`] blocks
+/// ahead, while strips are displaced (asserted).
+const SEEK: u64 = 545;
+const SEEK_JUMP: u64 = 10;
+
+fn gate_one(layout: RightNegative, kind: Twin) {
+    let blocks = TAIL + 40;
+    let jump = if kind == Twin::Unpacked { SEEK_JUMP } else { 0 };
+    let schedules = schedules(blocks + jump as usize, 0x1107);
+    let mut model = session(layout);
+    if kind == Twin::Unpacked {
+        resting_second_bank(&mut model);
+        // Two strips whose compressor links its detectors (#1369): a move must carry the lane's
+        // link (#1371) with the rest of its state.
+        for track in [9, 17] {
+            model.tracks[track].console[1].link_mode = session::ConsoleLinkMode::Maximum;
+        }
+    }
     let mut skip = bind(&model, &schedules, true);
     let mut twin = bind(&model, &schedules, true);
+    twin.pack = kind != Twin::Unpacked;
     let frames = skip.frames;
     let mut skip_pcm = vec![0.0_f32; frames * 2];
     let mut twin_pcm = vec![0.0_f32; frames * 2];
@@ -536,9 +613,13 @@ fn gate_one(layout: RightNegative) {
     let mut silent_master = [0_usize; 2];
     let mut skipped = vec![0_u64; blocks];
     for block in 0..blocks as u64 {
+        if jump != 0 && block == SEEK {
+            assert!(skip.displaced() > 0, "strips are displaced at the seek");
+        }
+        let time = if block >= SEEK { block + jump } else { block };
         let before = skip.skips();
-        skip.render(block, true, &mut skip_pcm);
-        twin.render(block, false, &mut twin_pcm);
+        skip.render(time, true, &mut skip_pcm);
+        twin.render(time, kind == Twin::Unpacked, &mut twin_pcm);
         for (index, (a, b)) in skip_pcm.iter().zip(&twin_pcm).enumerate() {
             assert_eq!(
                 fold_nan(a.to_bits()),
@@ -562,15 +643,32 @@ fn gate_one(layout: RightNegative) {
             }
         }
     }
-    assert_eq!(twin.skips(), 0, "the twin never skips");
     let skips = skip.skips();
     eprintln!(
-        "skips {skips}, blocks skipped while audible {skipped_while_audible}, audible blocks \
-         {audible}, -0.0 master blocks {silent_master:?}, latency {}, collapses {:?}, folds {}",
+        "skips {skips} (twin {}), blocks skipped while audible {skipped_while_audible}, audible \
+         blocks {audible}, -0.0 master blocks {silent_master:?}, latency {}, collapses {:?}, \
+         folds {}, lane moves {} (twin {}), displaced at the end {}",
+        twin.skips(),
         skip.latency,
         skip.plan.bank_collapse_counters(),
-        skip.plan.bank_route_folds()
+        skip.plan.bank_route_folds(),
+        skip.lane_moves(),
+        twin.lane_moves(),
+        skip.displaced(),
     );
+    match kind {
+        Twin::Processed => assert_eq!(twin.skips(), 0, "the twin never skips"),
+        Twin::Unpacked => {
+            assert_eq!(twin.lane_moves(), 0, "the twin never packs");
+            assert!(skip.lane_moves() > 0, "the packing plan moved lanes");
+            assert!(
+                skips > twin.skips(),
+                "packing let more banks skip ({skips} against {})",
+                twin.skips()
+            );
+            assert_eq!(skip.displaced(), 0, "every strip is home after the tail");
+        }
+    }
     for (window, _) in &WINDOWS {
         assert!(
             skipped[window.clone()].iter().sum::<u64>() > 0,
@@ -612,18 +710,22 @@ fn gate_one(layout: RightNegative) {
 // ---- Gate 2 -------------------------------------------------------------------------------------
 
 /// Gate 2. Test value: red if a skipped block -- the input test, the rest query, the scratch
-/// zeroing, the clock advance or the silent fold -- allocates or frees on the render thread; and
+/// zeroing, the clock advance or the silent fold -- allocates or frees on the render thread;
 /// (#1782a) if a forced lane move, or a block of a displaced group -- the deferred epilogues, the
-/// home-tile re-materialisation and the group fold, skipping or not -- does.
+/// home-tile re-materialisation and the group fold, skipping or not -- does; and (#1981) if the
+/// per-block packer -- its facts, a pack or homing move -- or a carry from a displaced predecessor
+/// and the successor's first block do.
 #[test]
 fn a_skipping_block_allocates_nothing() {
     let blocks = 400;
-    // Signal for the first 40 blocks, then exact silence on every track.
+    // Signal for the first 40 blocks, then exact silence on every track but `ch17`, which plays
+    // again in 200..280: the packer moves it into the second bank, which `ch11`'s ride keeps
+    // rendering, and the predecessor is still displaced at the swap.
     let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
-        .map(|_| {
+        .map(|track| {
             (0..blocks)
                 .map(|block| {
-                    if block < 40 {
+                    if block < 40 || (track == 17 && (200..280).contains(&block)) {
                         Block::Signal(0.1)
                     } else {
                         Block::Silence
@@ -633,17 +735,25 @@ fn a_skipping_block_allocates_nothing() {
                 .into()
         })
         .collect();
-    let mut bound = bind(&session(first_four), &schedules, false);
-    let mut placement = Placement::of(&bound.plan);
-    let mut pcm = vec![0.0_f32; bound.frames * 2];
+    let mut model = session(first_four);
+    resting_second_bank(&mut model);
+    let Pair {
+        mut before,
+        mut after,
+    } = carried_pair(&model, &schedules);
+    // Forced moves only until block 100's, so `Placement` stays exact; the packer from then on.
+    before.pack = false;
+    let mut placement = Placement::of(&before.plan);
+    let mut pcm = vec![0.0_f32; before.frames * 2];
     assert_installed();
     let mut measured = 0;
+    let swap = 300;
     for block in 0..blocks as u64 {
         // #1782a: moves while the tracks play, and again once every bank skips.
         if block == 10 || block == 100 {
             let mark = current_thread_counters();
             for (x, y) in [(0, 5), (9, 17), (12, 16)] {
-                placement.swap(&mut bound.plan, x, y);
+                placement.swap(&mut before.plan, x, y);
             }
             let delta = current_thread_delta_since(mark);
             assert_eq!(
@@ -652,20 +762,129 @@ fn a_skipping_block_allocates_nothing() {
                 "block {block}: a lane move allocated or freed"
             );
         }
-        let before = bound.skips();
+        before.pack = block > 100;
         let mark = current_thread_counters();
+        if block == swap {
+            assert!(
+                before.displaced() > 0,
+                "the predecessor is displaced at the swap"
+            );
+            assert_eq!(
+                after.plan.adopt_predecessor_plan(&mut before.plan),
+                engine::realtime::CarryOutcome::Carried,
+                "the successor takes the carry"
+            );
+        }
+        let bound = if block < swap {
+            &mut before
+        } else {
+            &mut after
+        };
+        let skips = bound.skips();
         bound.render(block, true, &mut pcm);
         let delta = current_thread_delta_since(mark);
-        if block >= 10 || (block >= 2 && bound.skips() > before) {
-            measured += usize::from(bound.skips() > before);
+        if block >= 10 || (block >= 2 && bound.skips() > skips) {
+            measured += usize::from(bound.skips() > skips);
             assert_eq!(
                 (delta.allocations, delta.reallocations, delta.deallocations),
                 (0, 0, 0),
-                "block {block}: a skipping or displaced block allocated or freed"
+                "block {block}: a skipping, displaced, packing or carried block allocated or freed"
             );
         }
     }
     assert!(measured > 0, "some block skipped");
+    assert!(before.lane_moves() > 0, "the packer moved lanes");
+}
+
+/// Which tracks play a signal.
+type Playing = fn(usize) -> bool;
+
+/// Issue #1981: a pack shape the chains refuse, whose facts do not change, is attempted once and
+/// not again. `ch00` keeps the collapse-armed mono bank running with packable lanes beside it, and
+/// stereo strips run in higher banks; the only lower bank that runs is the mono one, and the
+/// chains refuse a move between differently armed banks. No ride: the second bank rests and does
+/// not run. Two shapes: `ch17` alone, whose refusals stay below the attempt budget, and enough
+/// running stereo strips that one step's refusals reach the group's span (`ch16..ch20` on eight
+/// lanes, 4 x 7 attempts against 24; `ch12..ch20` on four, 8 x 3 against 20).
+///
+/// Test value: red when the packer retries a refused move every block although nothing it decides
+/// on changed (the `PackGroup::dirty` bit), a standing render cost no bit shows, including when the
+/// refusals use up the step's attempt budget.
+#[test]
+fn a_refused_pack_is_not_retried() {
+    let blocks = 200;
+    let silent: Vec<Arc<[Block]>> = (0..TRACKS)
+        .map(|_| vec![Block::Silence; blocks].into())
+        .collect();
+    let probe = bind(&session(first_sixteen), &silent, false);
+    let groups = graph::test_only_pack_groups(&probe.plan);
+    assert_eq!(groups.len(), 1, "one pack group: {groups:?}");
+    let (first, last, lanes) = groups[0];
+    let span = u64::from(last - first + 1) * u64::from(lanes);
+    drop(probe);
+    let wide: Playing = if lanes == 8 {
+        |track| track == 0 || track >= 16
+    } else {
+        |track| track == 0 || track >= 12
+    };
+    let shapes: [(&str, Playing, bool); 2] = [
+        ("ch17", |track| track == 0 || track == 17, false),
+        ("the span", wide, true),
+    ];
+    for (name, playing, reaches_span) in shapes {
+        let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
+            .map(|track| {
+                let kind = if playing(track) {
+                    Block::Signal(0.1)
+                } else {
+                    Block::Silence
+                };
+                vec![kind; blocks].into()
+            })
+            .collect();
+        let mut model = session(first_sixteen);
+        model.automation.clear();
+        resting_second_bank(&mut model);
+        let mut bound = bind(&model, &schedules, false);
+        let mut pcm = vec![0.0_f32; bound.frames * 2];
+        let (mut settled, mut peak) = (0, 0);
+        for block in 0..blocks as u64 {
+            if block == 60 {
+                settled = graph::test_only_bank_pack_attempts(&bound.plan);
+            }
+            let before = graph::test_only_bank_pack_attempts(&bound.plan);
+            bound.render(block, true, &mut pcm);
+            peak = peak.max(graph::test_only_bank_pack_attempts(&bound.plan) - before);
+        }
+        let attempts = graph::test_only_bank_pack_attempts(&bound.plan);
+        eprintln!(
+            "{name}: attempts by block 60 {settled}, by the end {attempts}, peak step {peak}"
+        );
+        assert!(settled > 0, "{name}: the packer tried the refused move");
+        assert_eq!(bound.lane_moves(), 0, "{name}: every move was refused");
+        if reaches_span {
+            assert_eq!(peak, span, "{name}: a step's refusals reach the span");
+        } else {
+            assert!(peak < span, "{name}: the refusals stay below the span");
+        }
+        assert_eq!(
+            attempts, settled,
+            "{name}: no attempt after the shape settled: the same facts make the same refusal"
+        );
+    }
+}
+
+/// Give the second bank (`ch08..ch16`) the 0 dB compressor threshold the other banks have, so its
+/// strips rest once silent and can take a running strip from a higher bank (issue #1981);
+/// `ch11`'s ride still keeps that bank rendering every block.
+fn resting_second_bank(model: &mut SessionModel) {
+    for track in &mut model.tracks[8..16] {
+        for param in &mut track.console[1].params {
+            if param.parameter_id == 1 {
+                param.value = 0.0;
+            }
+        }
+    }
 }
 
 // ---- Gate 3 (issue #1782a) ----------------------------------------------------------------------
@@ -938,6 +1157,16 @@ fn gate_three(model: &SessionModel, inserts: bool) {
     let schedules = schedules(blocks, 0x1782);
     let mut moved = carried_pair(model, &schedules);
     let mut home = carried_pair(model, &schedules);
+    // The moves here are the forced ones alone: the per-block packer (issue #1981) is off, so the
+    // unmoved pair stays at the identity and `Placement` stays exact.
+    for bound in [
+        &mut moved.before,
+        &mut moved.after,
+        &mut home.before,
+        &mut home.after,
+    ] {
+        bound.pack = false;
+    }
     assert_eq!(
         moved.before.plan.bank_route_folds(),
         TRACKS as u64,

@@ -19,6 +19,9 @@ import type {
 import { isResponseReady } from "../core/response-frame.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import { cloneSpectrumCollection, cloneSpectrumQuery } from "../core/spectrum.ts";
+import { LoudnessOwner } from "../core/loudness.ts";
+import type { LoudnessSubscription, LoudnessSubscriptionRequest } from "../core/loudness.ts";
+import { decodeLoudnessReply, encodeLoudnessCommand } from "../core/loudness-frame.ts";
 import type {
   SpectrumCollection,
   SpectrumConfigureOptions,
@@ -43,7 +46,7 @@ import type {
   SpectrumSubscriptionLimits,
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
-import { decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
+import { decodeControlLimits, encodeRevisionProbe, malformed } from "../core/control-frame.ts";
 import { ControlTransactionQueue } from "../core/control-queue.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type {
@@ -155,6 +158,8 @@ export class OfflineEngine {
   #booted: Uint8Array | undefined;
   readonly #observationLimits: ObservationSubscriptionLimits | undefined;
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
+  /** The engine's one loudness owner (#2115 S3), made on first use. */
+  #loudness: LoudnessOwner | undefined;
   /** The engine's one transaction queue (#1563 D4), made on first use. */
   #controlQueue: ControlTransactionQueue | undefined;
   /** The engine's protocol calls (#1571 D2), made on first use. */
@@ -307,6 +312,27 @@ export class OfflineEngine {
   /** Subscribe to the prepared continuous spectrum boundary; values are refreshed by `pump()`. */
   subscribeSpectrum(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscription> {
     return this.#observationOwner().subscribeSpectrum(request).then((receipt) => receipt.handle);
+  }
+
+  /**
+   * Start the session's output loudness meter (`LOUDNESS` start, #2115) and return its managed
+   * handle; readings are refreshed by the handle's `pump()`, one `LOUDNESS` read each, which reads
+   * the hops the renders since the last read delivered. `close()` stops the meter. The core refuses
+   * a start while the meter is armed (`invalidArgument`, `diagnosticCode` `loudness.active`), and an
+   * engine whose `CAPABILITIES_GET` lacks flag bit 17 is refused `unsupported`
+   * (`sdk.asset.capability`). `loadSession()` and `dispose()` end the handle.
+   */
+  subscribeLoudness(request?: LoudnessSubscriptionRequest): Promise<LoudnessSubscription> {
+    this.#loudness ??= new LoudnessOwner({
+      send: async (operation) => {
+        const requestId = this.#boundary.controlRequestIds.next();
+        const reply = decodeLoudnessReply(this.controlFrame(encodeLoudnessCommand(requestId, operation)));
+        if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+        return reply;
+      },
+      capabilityFlags: async () => (await this.capabilities()).flags,
+    });
+    return this.#loudness.subscribe(request);
   }
 
   /**
@@ -747,6 +773,7 @@ export class OfflineEngine {
   loadSession(document: SessionDocument, options: BootOptions = {}): void {
     this.#sessionEpoch += 1;
     this.#observationSubscriptions?.invalidate();
+    this.#loudness?.invalidate();
     // Revisions restart with the new session: a pending revision of the old one never applies.
     this.#applied.rejectAll(new MisoUsageError(
       "loadSession() rebooted the engine: the pending revision belongs to the replaced session",
@@ -773,6 +800,7 @@ export class OfflineEngine {
     this.#applied.rejectAll(new MisoUsageError("this engine was disposed"));
     this.#controlQueue?.close();
     this.#observationSubscriptions?.invalidate(true);
+    this.#loudness?.invalidate(true);
     this.#boundary.dispose();
   }
 

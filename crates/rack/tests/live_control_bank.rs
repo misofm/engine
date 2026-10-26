@@ -91,6 +91,7 @@ impl PreparedNativeEffectBank for MockGainBank {
         engine::realtime::retained::vec(&self.line)
     }
     fn reset(&mut self, _kind: ResetKind) {}
+    fn reset_lane(&mut self, _lane: usize, _kind: ResetKind) {}
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
         let report = BankProcessReport::empty(BankWidth::Four);
         for lane in 0..LANES {

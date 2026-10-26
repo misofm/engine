@@ -807,22 +807,33 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        for lane in 0..L::WIDTH {
+            self.reset_lane(lane, kind);
+        }
+        self.ramp_frames_left = 0;
+    }
+
+    /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
+    /// [`reset`](Self::reset) on both channels, and nothing of any other lane. The bank-level
+    /// `ramp_frames_left` stays: it only chooses where `run_block` splits a block, no output bit
+    /// reads it, and its invariant (`>=` every lane's `remaining`) still holds once this lane's
+    /// ramps rest. `collapsed` stays as the whole-bank reset leaves it. A lane past the width
+    /// changes nothing. Bounded by one lane's words.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if lane >= L::WIDTH {
+            return;
+        }
         for channel in 0..2 {
-            for lane in 0..L::WIDTH {
-                match kind {
-                    ResetKind::FullToDefaults => self.reset_lane_full(channel, lane),
-                    ResetKind::DiscontinuityKeepParameters => {
-                        self.reset_lane_discontinuity(channel, lane);
-                    }
+            match kind {
+                ResetKind::FullToDefaults => self.reset_lane_full(channel, lane),
+                ResetKind::DiscontinuityKeepParameters => {
+                    self.reset_lane_discontinuity(channel, lane);
                 }
             }
         }
         if kind == ResetKind::FullToDefaults {
-            for lane in 0..L::WIDTH {
-                self.rest_link(lane);
-            }
+            self.rest_link(lane);
         }
-        self.ramp_frames_left = 0;
     }
 
     /// Validates one block's automation spans for one lane and points its ramps at the accepted
@@ -1649,6 +1660,9 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for PreparedGate<$lane, false> {
+            fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+                PreparedGate::reset_lane(self, lane, kind);
+            }
             /// Every field is inline: this instance owns no heap (#1074).
             fn retained_bytes(&self) -> u64 {
                 0

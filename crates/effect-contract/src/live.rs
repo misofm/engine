@@ -3356,6 +3356,7 @@ mod lane_swap_tests {
 
     impl PreparedNativeEffectBank for Words {
         fn reset(&mut self, _kind: ResetKind) {}
+        fn reset_lane(&mut self, _lane: usize, _kind: ResetKind) {}
 
         fn process_bank(&mut self, _block: EffectBankProcessBlock<'_>) -> BankProcessReport {
             BankProcessReport::empty(BankWidth::Four)

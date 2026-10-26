@@ -113,6 +113,7 @@ impl PreparedNativeEffectBank for MockBank {
         engine::realtime::retained::arc(&self.0)
     }
     fn reset(&mut self, _kind: ResetKind) {}
+    fn reset_lane(&mut self, _lane: usize, _kind: ResetKind) {}
 
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
         let mut state = self.0.lock().expect("state");

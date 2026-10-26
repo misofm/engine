@@ -33,6 +33,7 @@ const BLOCKS: u64 = 6;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Call {
     Reset(ResetKind),
+    ResetLane(usize, ResetKind),
     Process,
     Target,
 }
@@ -55,6 +56,14 @@ impl PreparedNativeEffectBank for Recorder {
         log.calls.push(Call::Reset(kind));
         if kind == ResetKind::FullToDefaults {
             log.gain = [1.0; LANES];
+        }
+    }
+
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        let mut log = self.0.lock().expect("log");
+        log.calls.push(Call::ResetLane(lane, kind));
+        if kind == ResetKind::FullToDefaults {
+            log.gain[lane] = 1.0;
         }
     }
 

@@ -20,13 +20,13 @@ use protocol::{
     Capabilities, CapabilityFlags, CommandPayload, CounterId, CounterSnapshot, CounterSnapshotRef,
     CounterValue, CountersRequest, DecodeScratch, DecodedCommandPayload, Diagnostic,
     DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest, EventPayload, ExpectedRevision,
-    MessageId, MeterBatch, MeterComponent, MeterEntry, MeterMetric, MeterRecord, MeterTarget,
-    NonOkResponse, ObservationEnded, ObservationSection, ObservationTapKey, PathSegment,
-    ProtocolCodec, ProtocolVersion, RequestId, SampleTime, SessionCommitted, SessionRevision,
-    SessionSnapshot, SessionSnapshotRequest, StatusCode, SuccessResponsePayload,
-    TelemetryConfiguration, TransportSetRequest, TransportSnapshot, TransportState,
-    TransportStateEvent, TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame,
-    TypedSuccessResponseFrame,
+    LoudnessReply, LoudnessRequest, MessageId, MeterBatch, MeterComponent, MeterEntry, MeterMetric,
+    MeterRecord, MeterTarget, NonOkResponse, ObservationEnded, ObservationSection,
+    ObservationTapKey, PathSegment, ProtocolCodec, ProtocolVersion, RequestId, SampleTime,
+    SessionCommitted, SessionRevision, SessionSnapshot, SessionSnapshotRequest, StatusCode,
+    SuccessResponsePayload, TelemetryConfiguration, TransportSetRequest, TransportSnapshot,
+    TransportState, TransportStateEvent, TypedCommandFrame, TypedEventFrame,
+    TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 
 const FIXTURE: &str = "../../sdk/test/fixtures/protocol-messages.json";
@@ -1237,6 +1237,114 @@ fn events() -> Vec<Row> {
     ]
 }
 
+/// A `LOUDNESS` reply as the SDK's `LoudnessReading` spells it (#2115 S3): an absent level is an
+/// absent key, and `sanitizedSamples` and `gatedBlockCount` are not part of it.
+fn loudness_reading_json(value: &LoudnessReply) -> J {
+    let mut fields = Vec::new();
+    let mut level = |key: &'static str, level: Option<f32>| {
+        if let Some(level) = level {
+            fields.push((key, J::Float(level)));
+        }
+    };
+    level("momentary", value.momentary_lufs);
+    level("shortTerm", value.short_term_lufs);
+    level("integrated", value.integrated_lufs);
+    level("range", value.loudness_range_lu);
+    level("maxMomentary", value.momentary_max_lufs);
+    level("maxShortTerm", value.short_term_max_lufs);
+    let pair = |[left, right]: [f32; 2]| J::Arr(vec![J::Float(left), J::Float(right)]);
+    if let Some(peak) = value.true_peak_dbtp {
+        fields.push(("truePeak", pair(peak)));
+    }
+    if let Some(peak) = value.hop_true_peak_dbtp {
+        fields.push(("truePeakLastHop", pair(peak)));
+    }
+    if let Some(since) = value.integrating_since {
+        fields.push(("integratingSince", big(since)));
+    }
+    fields.push(("hopsDropped", big(value.hops_dropped)));
+    fields.push(("observedSample", big(value.observed_sample)));
+    fields.push(("armed", J::Bool(value.armed)));
+    obj(fields)
+}
+
+/// `LOUDNESS` (`0x0014`, #2115 S3): each operation's command, and a reply with every field present
+/// (each level a distinct value, so the SDK cannot read one field for another) and one with none.
+/// `sdk/test/loudness-evals.mjs` reads this section; the generic loops above do not.
+fn loudness() -> Vec<Row> {
+    let operations = [
+        ("start", LoudnessRequest::Start),
+        ("read", LoudnessRequest::Read),
+        ("reset", LoudnessRequest::Reset),
+        ("stop", LoudnessRequest::Stop),
+    ];
+    let mut rows: Vec<Row> = operations
+        .into_iter()
+        .zip(50_u64..)
+        .map(|((name, operation), request)| Row {
+            name,
+            fields: vec![(
+                "request",
+                obj(vec![("requestId", big(request)), ("op", text(name))]),
+            )],
+            bytes: command_bytes(
+                request,
+                ExpectedRevision::Any,
+                CommandPayload::Loudness(operation),
+            ),
+        })
+        .collect();
+    let full = LoudnessReply {
+        observed_sample: (1 << 40) + 480,
+        armed: true,
+        integrating_since: Some(48_480),
+        hops_dropped: 7,
+        sanitized_samples: 3,
+        gated_block_count: 290,
+        momentary_lufs: Some(-23.25),
+        short_term_lufs: Some(-22.5),
+        integrated_lufs: Some(-24.125),
+        loudness_range_lu: Some(4.5),
+        momentary_max_lufs: Some(-18.0),
+        short_term_max_lufs: Some(-20.75),
+        true_peak_dbtp: Some([-1.5, -2.25]),
+        hop_true_peak_dbtp: Some([-6.0, -120.0]),
+    };
+    let empty = LoudnessReply {
+        observed_sample: 1_024,
+        armed: true,
+        integrating_since: None,
+        hops_dropped: 0,
+        sanitized_samples: 0,
+        gated_block_count: 0,
+        momentary_lufs: None,
+        short_term_lufs: None,
+        integrated_lufs: None,
+        loudness_range_lu: None,
+        momentary_max_lufs: None,
+        short_term_max_lufs: None,
+        true_peak_dbtp: None,
+        hop_true_peak_dbtp: None,
+    };
+    rows.push(success(
+        "reply_full",
+        "loudness",
+        54,
+        9,
+        SuccessResponsePayload::Loudness(full),
+        loudness_reading_json(&full),
+    ));
+    rows.push(success(
+        "reply_empty",
+        "loudness",
+        55,
+        9,
+        SuccessResponsePayload::Loudness(empty),
+        loudness_reading_json(&empty),
+    ));
+    rows
+}
+
 fn section(text: &mut String, key: &str, rows: Vec<Row>, last: bool) {
     writeln!(text, "  \"{key}\": [").expect("write to a string");
     let count = rows.len();
@@ -1266,7 +1374,8 @@ fn render() -> String {
     text.push_str(",\n");
     section(&mut text, "commands", commands(), false);
     section(&mut text, "replies", replies(), false);
-    section(&mut text, "events", events(), true);
+    section(&mut text, "events", events(), false);
+    section(&mut text, "loudness", loudness(), true);
     text.push_str("}\n");
     text
 }

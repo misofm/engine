@@ -4281,6 +4281,57 @@ impl<L: Lane> LimiterCore<L> {
         self.gain_linked = lane_shapes_agree(&self.left, &self.right);
     }
 
+    /// [`reset`](Self::reset) for lane `lane` alone (issue #2131), from the D7 recovery's pieces.
+    ///
+    /// Both channels of the lane take [`reset`](Self::reset)'s words: for `FullToDefaults` the
+    /// lane's defaults ([`ChannelState::reset_lane_to_defaults`]) and its link weight at rest at its
+    /// mode, for `DiscontinuityKeepParameters` its two ramps and its link glide snapped to their
+    /// targets and its runtime words cleared ([`ChannelState::clear_lane_runtime`]). Every other
+    /// lane keeps every word.
+    ///
+    /// The shared [`Cursors`] stay where they are, as in the per-lane D7 recovery: the cleared
+    /// words are uniform along each ring, so the lane renders what it renders after a whole reset
+    /// at cursor zero. The lane's van Herk `phase` takes a surviving lane's with its window
+    /// ([`ChannelState::align_phase_to_survivor`]), which is bit-neutral and keeps the uniform
+    /// body. The #182 S2 claim is withdrawn as `reset` withdraws it. The #990 record survives only
+    /// if the lane's two channels' gain words agree; the D5 countdown is left running, because a
+    /// bank mate's glide may still be in flight.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if lane >= L::WIDTH {
+            return;
+        }
+        self.silent_fixed_point = false;
+        let shape = self.shape;
+        let rate = self.sample_rate;
+        match kind {
+            ResetKind::FullToDefaults => {
+                self.left
+                    .reset_lane_to_defaults(lane, &shape, &self.left_defaults[lane], rate);
+                self.right
+                    .reset_lane_to_defaults(lane, &shape, &self.right_defaults[lane], rate);
+                self.rest_link(lane);
+            }
+            ResetKind::DiscontinuityKeepParameters => {
+                for channel in [&mut self.left, &mut self.right] {
+                    channel.limit[lane].snap();
+                    channel.release[lane].snap();
+                    channel.link[lane].snap();
+                    channel.clear_lane_runtime(lane, &shape);
+                }
+            }
+        }
+        let failed = 1 << lane;
+        self.left.align_phase_to_survivor(lane, failed);
+        self.right.align_phase_to_survivor(lane, failed);
+        // #990: every other lane's gain words are as they were; the reset lane's rings are `1.0`
+        // on both channels, so its planar gain words decide.
+        let (left, right) = (&self.left, &self.right);
+        self.gain_linked &= left.phase[lane] == right.phase[lane]
+            && left.prefix[lane].to_bits() == right.prefix[lane].to_bits()
+            && left.box_sum[lane].to_bits() == right.box_sum[lane].to_bits()
+            && left.reduction[lane].to_bits() == right.reduction[lane].to_bits();
+    }
+
     /// Runs one block and applies the master plan §4.4 boundary check (decision D7).
     ///
     /// A block whose output is NaN or at least `1e30` in magnitude is recovered lane by lane
@@ -5564,6 +5615,10 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
+    /// Issue #2131: see [`LimiterCore::reset_lane`].
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        self.core.reset_lane(lane, kind);
+    }
     fn retained_bytes(&self) -> u64 {
         self.core.heap_bytes()
     }
