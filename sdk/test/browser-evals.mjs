@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
+import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { StructView } from "../src/core/abi.ts";
 import { WasmBoundary } from "../src/core/boundary.ts";
@@ -428,6 +429,104 @@ describe("the browser open sequence", () => {
       workletBootOptions(policy, { sampleRateHz: 96_000, quantumFrames: 127 }),
       seen.options,
     );
+  });
+
+  test("#2100 gate 1: pcmFeed loads the feed prelude before the engine worklet, and is off by default", async () => {
+    // Red if the prelude loads after the engine worklet (the worklet then registers the unwrapped
+    // engine processor and no ring ever attaches), if `{ moduleUrl }` is ignored, or if a boot
+    // without `pcmFeed` loads the prelude.
+    const loads = async (pcmFeed) => {
+      const loaded = [];
+      const engine = await createEngine({
+        document: sessionDocument(),
+        simd128ModuleUrl: "/wasm",
+        workletModuleUrl: "/worklet",
+        scratchBoot,
+        ...(pcmFeed === undefined ? {} : { pcmFeed }),
+        createContext: (request) => ({
+          sampleRate: request.sampleRate,
+          renderQuantumSize: 128,
+          state: "suspended",
+          close: async () => {},
+          audioWorklet: { addModule: async (url) => { loaded.push(url); } },
+        }),
+        // As the shipped host does: its first step on the context loads the engine worklet.
+        createHost: async ({ context, workletModuleUrl }) => {
+          await context.audioWorklet.addModule(workletModuleUrl);
+          return { dispose: async () => {} };
+        },
+      });
+      await engine.close();
+      return loaded;
+    };
+    assert.deepEqual(await loads(true), [BUNDLED_ENGINE_ASSETS.pcmFeedWorklet.href, "/worklet"]);
+    assert.deepEqual(await loads({ moduleUrl: "/feed" }), ["/feed", "/worklet"]);
+    assert.deepEqual(await loads(undefined), ["/worklet"]);
+  });
+
+  test("#2100 gate 2: position() is the seek's frame plus the frames rendered since", async () => {
+    // Red if the frame is built from the wrong anchor (the render sample alone, or the report
+    // without its first sample), if a seek no block rendered yet reports the old timeline, or if
+    // the report is read before the status, so that a block rendered between them mixes an old
+    // anchor with a new sample.
+    const quantum = 128n;
+    let next = 0n;
+    let report = { generation: 1n, firstSample: 0n, sourceFrame: 0n, cumulativeUnderrunFrames: 0n, cumulativeHeldFrames: 0n };
+    let pending;
+    let renderAtStatus = false;
+    /** One rendered block, as the host's timeline does: an accepted seek starts at the next block. */
+    const tick = () => {
+      if (pending !== undefined) {
+        report = { ...report, generation: pending.generation, firstSample: next, sourceFrame: pending.frame };
+        pending = undefined;
+      }
+      next += quantum;
+    };
+    const engine = await createEngine({
+      document: sessionDocument(),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "running",
+        close: async () => {},
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => ({
+        seekSession: async ({ generation, frame }) => {
+          pending = { generation, frame };
+          return { tag: "miso.session-seek.v1", requestId: 1, result: 0, generation };
+        },
+        status: async () => {
+          if (renderAtStatus) { renderAtStatus = false; tick(); }
+          return { nextAbsoluteSample: next };
+        },
+        seekReport: async (sourceId) => {
+          assert.equal(sourceId, "$timeline");
+          return { tag: "miso.seek-report.v1", requestId: 1, result: 0, report: { ...report } };
+        },
+        dispose: async () => {},
+      }),
+    });
+    try {
+      tick();
+      tick();
+      assert.deepEqual(await engine.position(), { frame: 256n, generation: 1n, atSample: 256n });
+      assert.deepEqual(await engine.seek(480n), { generation: 2n });
+      assert.deepEqual(await engine.position(), { frame: 480n, generation: 2n, atSample: 256n },
+        "a seek no block rendered yet plays at the next block");
+      for (let block = 0; block < 3; block += 1) tick();
+      assert.deepEqual(await engine.position(), { frame: 480n + 3n * quantum, generation: 2n, atSample: 640n });
+      await engine.seek(96n);
+      renderAtStatus = true;
+      assert.deepEqual(await engine.position(), { frame: 96n + quantum, generation: 3n, atSample: 768n },
+        "a block that renders the seek during the reads is counted once");
+    } finally {
+      await engine.close();
+    }
+    await assert.rejects(engine.position(), MisoUsageError);
   });
 
   test("close disposes the worklet before its context and is idempotent", async () => {
@@ -848,6 +947,8 @@ describe("browser session edits", () => {
         renderQuantumSize: QUANTUM,
         state: "running",
         close: async () => {},
+        async resume() { this.state = "running"; },
+        async suspend() { this.state = "suspended"; },
         audioWorklet: { addModule: async () => {} },
       }),
       createHost: async () => host,
@@ -1012,6 +1113,23 @@ describe("browser session edits", () => {
       assert.deepEqual(feed.rings, [a]);
     } finally {
       feed.close();
+      await engine.close();
+    }
+  });
+
+  test("#2100 gate 3: play() and stop() move the context and the transport together", async () => {
+    // Red if `stop()` only suspends the context or only stops the transport (the two halves
+    // drift apart), or if `play()` leaves the transport stopped or the context suspended.
+    const { engine } = await boot(base());
+    try {
+      const expected = { play: ["playing", "running"], stop: ["stopped", "suspended"] };
+      for (const call of ["play", "stop", "play", "stop"]) {
+        const [transport, context] = expected[call];
+        assert.equal((await engine[call]()).state, transport, call);
+        assert.equal(engine.context.state, context, `${call} moves the context`);
+        assert.equal((await engine.transport()).state, transport, `${call} moves the transport`);
+      }
+    } finally {
       await engine.close();
     }
   });

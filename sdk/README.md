@@ -277,6 +277,56 @@ The npm hosts both execute Wasm. Native and mobile applications must integrate t
 Rust/C-ABI host layer and platform audio callbacks; this package supplies no native binaries or
 mobile audio-device adapter.
 
+### Boot with a PCM feed, read the playhead, play and stop
+
+Set `pcmFeed: true` (or `pcmFeed: { moduleUrl }`) in `createEngine` to use shared-ring delivery.
+The feed's worklet prelude must load before the engine worklet, because it wraps
+`registerProcessor`. With `pcmFeed`, `createEngine` loads the prelude after it verifies the
+context and before it creates the host, so you do not wrap `createHost`. `pcmFeed` is off by
+default. If the prelude does not load, `createEngine` rejects with `PcmFeedError` (`moduleLoad`)
+and closes the context.
+
+The engine has one timeline playhead. `engine.position()` resolves with `{ frame, generation,
+atSample }`: `frame` is the timeline frame that the next rendered block starts at, and `atSample`
+is the absolute render sample of that block. The SDK reads the timeline's seek report and the
+host's next render sample, and calculates `frame = sourceFrame + (atSample - firstSample)`. After
+`engine.seek(f)`, `position()` gives `f` until the first block renders, and then `f` plus the
+frames rendered since. The frame does not move while the context is suspended. You do not need
+the meters to calculate a position.
+
+`engine.play()` resumes the context and then sets the transport to `playing`. `engine.stop()`
+suspends the context and then sets the transport to `stopped`. Each resolves with the new
+transport state, and they run one at a time in call order. `engine.setTransport()` alone does not
+start or stop the audio: the transport state is a label that the core keeps (#1635). In the
+browser, the context is what renders. If the core refuses the transport, `play()` suspends the
+context again and rejects, and `stop()` rejects and keeps the context suspended.
+
+The session has no master strip. The master is an ordinary submix that you designate after boot
+with `controls.edit.submix(id).master(true)` (#1683). Its meter row carries gain reduction only
+(#1690 D3).
+
+```ts
+import { createEngine } from "@misofm/engine/browser";
+import type { BrowserEngine, SessionSeekProducer } from "@misofm/engine/browser";
+
+export async function openFedMix(
+  document: string,
+  attachSources: (engine: BrowserEngine) => Promise<SessionSeekProducer>,
+) {
+  const engine = await createEngine({ document, pcmFeed: true });
+  engine.host.node.connect(engine.context.destination);
+  // Attach the feed with attachEngineFeed({ engine, ... }) and prefill its rings here.
+  const producer = await attachSources(engine);
+  await engine.seek(0n, { producers: [producer] });
+  return engine;
+}
+
+// Call play() from a user gesture, so that the browser lets the context resume.
+export const play = (engine: BrowserEngine) => engine.play();
+export const stop = (engine: BrowserEngine) => engine.stop();
+export const playhead = async (engine: BrowserEngine) => (await engine.position()).frame;
+```
+
 ### Edit a playing session
 
 The browser engine edits a playing session with the same calls as the headless engine.
