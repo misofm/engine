@@ -58,7 +58,7 @@ impl Rng {
     }
     /// Uniform in `[-1, 1)`.
     fn signed(&mut self) -> f32 {
-        ((self.next() >> 40) as f32 / (1_u64 << 24) as f32).mul_add(2.0, -1.0)
+        ((self.next() >> 40) as f32 / (1_u64 << 24) as f32) * 2.0 - 1.0
     }
 }
 
@@ -343,7 +343,7 @@ fn blocks(
                 _ => (13.0, -53.0),
             };
             let levels: Vec<f32> = (0..lanes)
-                .map(|_| math::powf(10.0, rng.signed().mul_add(spread, centre) / 20.0))
+                .map(|_| math::powf(10.0, (rng.signed() * spread + centre) / 20.0))
                 .collect();
             for frame in 0..frames as usize {
                 let t = (sample + frame as u64) as f32;
