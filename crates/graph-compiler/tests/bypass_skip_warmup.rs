@@ -107,12 +107,13 @@ enum Leg {
     Running,
 }
 
-/// The input of sample `n` on channel `channel`: a 100 Hz sine at `amplitude`, the right channel a
-/// quarter period behind.
+/// The input of sample `n` on channel `channel`: a 100 Hz triangle at `amplitude` (exact
+/// arithmetic, the same on every target), the right channel a quarter period behind.
 fn input(n: u64, channel: usize, amplitude: f32) -> f32 {
-    let phase = 2.0 * core::f64::consts::PI * 100.0 * (n as f64) / f64::from(RATE)
-        - channel as f64 * core::f64::consts::FRAC_PI_2;
-    amplitude * phase.sin() as f32
+    const PERIOD: u64 = 480;
+    let phase = (n + PERIOD - channel as u64 * PERIOD / 4) % PERIOD;
+    let unit = phase as f32 / PERIOD as f32;
+    amplitude * (4.0 * (unit - 0.5).abs() - 1.0)
 }
 
 /// One leg: lane 0's output `[channel][sample]`, the bank's skip count, its latency and its
@@ -236,7 +237,7 @@ fn dry(n: usize, channel: usize, latency: usize, amplitude: f32) -> f32 {
     }
 }
 
-/// Gate 5, the crossfade rows, for the limiter and the soft clip on a sub-threshold sine:
+/// Gate 5, the crossfade rows, for the limiter and the soft clip on a sub-threshold triangle:
 ///
 /// * the resumed leg skipped every block before [`RESUME`], and its output has no NaN and no
 ///   subnormal;
@@ -281,9 +282,9 @@ fn a_resumed_lane_holds_dry_for_its_warmup_then_crossfades_without_a_dip() {
                     "{effect_id}: channel {channel} sample {n} is {sample:e}"
                 );
             }
-            for n in resume..resume + warmup {
+            for (n, sample) in out.iter().enumerate().take(resume + warmup).skip(resume) {
                 assert_eq!(
-                    out[n].to_bits(),
+                    sample.to_bits(),
                     dry(n, channel, latency, amplitude).to_bits(),
                     "{effect_id}: channel {channel} sample {n} holds dry"
                 );
@@ -306,10 +307,16 @@ fn a_resumed_lane_holds_dry_for_its_warmup_then_crossfades_without_a_dip() {
                     "{effect_id}: channel {channel} sample {n} is the reference"
                 );
             }
-            for n in resume + RAMP as usize..end {
+            let settled = resume + RAMP as usize;
+            for (n, (sample, wet)) in running.output[channel]
+                .iter()
+                .zip(wet)
+                .enumerate()
+                .skip(settled)
+            {
                 assert_eq!(
-                    running.output[channel][n].to_bits(),
-                    wet[n].to_bits(),
+                    sample.to_bits(),
+                    wet.to_bits(),
                     "{effect_id}: the running leg's channel {channel} sample {n} took no hold"
                 );
             }
@@ -317,7 +324,7 @@ fn a_resumed_lane_holds_dry_for_its_warmup_then_crossfades_without_a_dip() {
     }
 }
 
-/// Gate 5, the ceiling row: the limiter on a sine about 10 dB over its ceiling, un-bypassed with
+/// Gate 5, the ceiling row: the limiter on a triangle about 10 dB over its ceiling, un-bypassed with
 /// a step, so every sample from `s_B + W` is wet. None is above the ceiling: at `T + N` the box ramp
 /// averages only post-reset gains, so the gain law's bound holds from the first wet frame.
 ///
@@ -337,7 +344,7 @@ fn a_resumed_limiter_keeps_its_ceiling_from_the_first_wet_frame() {
         .find(|parameter| parameter.name == "ceiling_db")
         .expect("a ceiling parameter")
         .default_value;
-    let limit = 10.0_f32.powf(ceiling / 20.0);
+    let limit = math::db_to_gain_f32(ceiling);
     let resumed = render(effect_id, Leg::Resumed, 3.0, 0);
     let resume = (RESUME * u64::from(QUANTUM)) as usize;
     let warmup = resumed.warmup;

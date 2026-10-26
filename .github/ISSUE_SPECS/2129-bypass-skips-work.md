@@ -270,3 +270,44 @@ its evidence.
 - D3's reading of D15-2 (applied at `B`, audible at `s_B + W + 1`), recommended as written.
 - D5 (an armed tap publishes its declared bypass value, so it does not keep a bypassed bank
   running), amended by root.
+
+## Evidence record
+
+### S1 attempt 1 (2026-10-26), paused at a checkpoint
+
+Paused by the coordinator: a design review found that D2/D3 make a lane's reset and hold depend on
+whether its bank mates were bypassed too, which couples bits across a bank. Root is amending the
+ruling to per-lane staleness (`reset_lane` on the bank trait, every un-bypass resets and holds);
+the work splits into S1a (`reset_lane` for every banking effect) and S1b (the skip on per-lane
+staleness). This checkpoint implements D1-D6 as first written and is not the final shape.
+
+Done on this branch (per the original D1-D6):
+
+- D1 skip in `LiveControlEffectBankStage` (`skips_wet_path`, `pass_bypassed`,
+  `BypassShunt::passthrough`), `bypass_skips` per stage and summed on `BankChain`; padded lanes via
+  a new `BankStage::bind_active_lanes`.
+- D2 whole-bank resume reset; D3 per-lane hold (`EffectControlLane::begin_hold`, the bank
+  crossfade's `k < 1` dry select), `warmup_samples` on both effect traits (limiter `T + N`, soft
+  clip `latency + tail = 60`); D4 `settle_for_carry` from `disengage_for_carry`; D5
+  `ObservationDescriptor::bypass_observation` (`Some(0.0)` on every launch tap) folded for every
+  settled-bypassed lane; D6 per-lane zero run of the shunt line in `lanes_at_rest`.
+- Gates: 1 (`bypass_shunt_identity` skip count), 3 and 4 (`crates/rack/tests/bypass_skip.rs`), D6
+  rows in `crates/rack/tests/lane_rest.rs`, 5 (`crates/graph-compiler/tests/bypass_skip_warmup.rs`).
+  Each red on named mutants, except as listed below.
+- One-time bit identity against the branch base 0f6a1734e (not committed): the master output of
+  `sixteen_track_strip_bypassed`, the same with the product's live lanes, `sixty_four_track_app_shape`
+  (with and without live lanes) and `sixteen_track_strip`, 400 blocks each: byte-identical
+  (sha256 28ba0504...e1e9f both sides).
+
+Findings for the rebrief:
+
+- The gate 5 mutant "limiter `W = T`" stays green, and so does `T + 1`: after a reset the box ring
+  holds only post-reset `m_q` once `n >= s_B + Wb` and `Wb <= N + 1 <= T`, so `g[n] <= r[n-N]`
+  holds from `s_B + T`. `T + N` is safe but appears conservative by `N`; the gate's claim that `T`
+  fails the ceiling row could not be made red.
+- Gate 5's soft-clip `W = 59` is not distinguishable from 60 at the 1e-6 dip tolerance; `W = 32` is
+  red.
+- Gate 5 stays green with the resume reset removed (the skipped bank's frozen state is not seen
+  through the hold at this fixture); gate 4 is the reset's red row.
+- Not started: gate 6 CPU row (the workload variant exists, not yet emitted by `tools/bench`),
+  the rulings amendments, the realtime-policy tool run.
