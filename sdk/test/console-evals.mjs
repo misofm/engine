@@ -1106,6 +1106,8 @@ function busSession() {
     .submix("verb", {
       console: bypassedEntries,
       inserts: [effect("miso.delay", { "delay time": 80 }, { slotId: "space" })],
+      // An explicit pan keeps the pan arm in this round trip: an absent pan is the identity matrix (#2101).
+      pan: { left: 0, right: 0 },
     })
     .track("kick", { source: "kit", console: [{ slot: "eq" }, { slot: "glue" }] })
     .track("vox", { source: "voice", console: bypassedEntries, inserts: [duck] })
