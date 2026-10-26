@@ -45,8 +45,11 @@ use lane::Lane;
 
 mod kernel;
 mod state;
+mod tail;
 #[cfg(test)]
 mod tests;
+
+pub use tail::tail_bound_at;
 
 /// Number of feedback lines.
 pub const LINES: usize = 16;
@@ -474,10 +477,13 @@ const QUALITIES: [effect_contract::QualityDescriptor; 4] = [
     quality(96_000),
 ];
 
-/// The descriptor's tail and rest bound. Slice S3 states the certified bound; until then the
-/// effect declares none.
-fn uncertified_tail_and_rest(_sample_rate: u32, _quality: EffectQuality) -> NodeTailBound {
-    NodeTailBound::UNBOUNDED
+/// This effect's tail, tail over every peak and exact-rest bound, the one place they are stated
+/// (decision 15 D15-4(b), #2114 S3): [`tail_bound_at`] at the descriptor's longest decay.
+fn tail_and_rest(sample_rate: u32, _quality: EffectQuality) -> NodeTailBound {
+    match REVERB_PARAMETERS[DECAY].maximum {
+        Some(decay_max_ms) => tail_bound_at(sample_rate, decay_max_ms),
+        None => NodeTailBound::UNBOUNDED,
+    }
 }
 
 /// Immutable descriptor of `miso.reverb`.
@@ -492,7 +498,7 @@ pub const REVERB_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     parameters: &REVERB_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    tail_and_rest: uncertified_tail_and_rest,
+    tail_and_rest,
     observations: &[],
 };
 

@@ -237,7 +237,7 @@ neither N1 nor a `G_p` could be stated. With clear-on-read, the re-read words ar
 non-zero word enters the loop at most once with blend weight at most 1. The audible effect: a large
 size increase leaves a gap in each line instead of a repeat (Known gaps).
 
-**N1, the unconditional peak (outline and estimate).** Under any admitted history, with
+**N1, the unconditional peak (outline and estimate).** *Superseded by `docs/derivations/2114-reverb-tail-and-rest.md` (S3): the storage `E` below is not passive under `damping_hz` or `low_cut_hz` automation (the TPT weight `1/(2G)` moves), so no peak bound linear in `X` is proved, and the certified tail starts from the block check's limit instead. The outline is kept as the record of the S1 estimate.* Under any admitted history, with
 clear-on-read: the total read energy is at most the total written energy. Each word is at most
 `R_max` samples old, and every `c_i <= c_max = g_max / 4` with `g_max = 0.998282` (decay 20 s,
 size 0.25). A discounted l2 sum (`lambda^(n - k)`, with `c_max lambda^(-R_max) < 1`) then bounds
