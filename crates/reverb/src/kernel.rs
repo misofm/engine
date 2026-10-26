@@ -168,7 +168,12 @@ fn blend(old: f32, new: f32, remaining: u32) -> f32 {
 impl PreparedReverb {
     /// Renders one block in place. `FULL` is "every ring word is valid history", which holds for
     /// the whole block when it holds at its start (the counter only grows).
-    #[inline(always)]
+    ///
+    /// Out of line on purpose: the symbol then carries the lane type (`4wide6f32x4` in the
+    /// browser build), which is how `scripts/check-web-audioworklet-callgraph.py` finds and
+    /// rosters the reverb's render (#2114 S4). Inlined, the whole body sat in
+    /// `PreparedReverb::process`, whose name carries no lane type, so the gate never saw it.
+    #[inline(never)]
     pub(crate) fn render<L: Lane, const FULL: bool>(
         &mut self,
         io_left: &mut [f32],
