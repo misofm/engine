@@ -44,17 +44,22 @@ def d3_valid($record):
             "browser_headroom","browser_headroom_engine","browser_sample_rate_hz","margin",
             "o_ns","prime_bytes_max","prime_bytes_max_refusal","rates"]) and
   .o_ns == $o and .a_p_ns == $a and .b_p_bytes == $b and
-  .margin == 0.7 and .browser_headroom == 13.7 and .browser_headroom_engine == "webkit" and
+  .margin == 0.7 and .browser_headroom == 13.67 and .browser_headroom_engine == "webkit" and
   .browser_sample_rate_hz == 48000 and
   (if $a > $o then
      (((0.7 * $quantum_ns - $o) * $b / ($a - $o)) | floor) as $native |
-     (((0.7 * 13.7 - 1) * $o * $b / ($a - $o)) | floor) as $browser |
+     (((0.7 * 13.67 - 1) * $o * $b / ($a - $o)) | floor) as $browser |
+     # β in ps/byte at the record's three-decimal precision (`format_f64`).
      (.beta_ps_per_byte | type == "number") and
+     ((.beta_ps_per_byte - (($a - $o) * 1000 / $b)) | fabs) <= 0.0005000001 and
      .b_native_bytes == $native and .b_browser_bytes == $browser and
      (if $native >= $b and $browser >= $b then
         .prime_bytes_max == ([$native, $browser] | min) and .prime_bytes_max_refusal == null
       else
-        .prime_bytes_max == null and (.prime_bytes_max_refusal | type == "string")
+        # The subject's order: the native row is tested before the browser row.
+        .prime_bytes_max == null and
+        .prime_bytes_max_refusal ==
+          (if $native < $b then "native_row_below_b_p" else "browser_row_below_b_p" end)
       end)
    else
      .beta_ps_per_byte == null and .b_native_bytes == null and .b_browser_bytes == null and

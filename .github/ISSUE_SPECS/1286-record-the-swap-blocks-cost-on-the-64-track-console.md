@@ -250,8 +250,9 @@ whole-bank move (#1269, Deferred) earns a brief.
   D3's derivation (gate 3), after 1286a.
 - **Browser row (Q1 closed).** The owner ruled on 2026-10-25 that only Chrome and Safari are
   supported. #1331 D7 recorded `h = 16.1` (Chromium) and `h = 13.7` (WebKit, the slowest
-  supported engine). D3 item 3 uses WebKit's `h = 13.7` at `fs_h = 48 kHz`; the subject carries it
-  as a constant and the validator pins it.
+  supported engine; measured 13.67 and 13.69). D3 item 3 uses the smaller measured WebKit value,
+  `h = 13.67`, at `fs_h = 48 kHz`: the rounded 13.7 overstates the headroom by about 0.25 %, which
+  is not conservative. The subject carries it as a constant and the validator pins it.
 - **Publication (R2).** Phase 2 reserves each warm successor through
   `PlanPublisher::reserve_replacement(plan, Primed { not_before, lead_blocks })` with `not_before`
   the publisher's render clock (the next block), after the bench writes the `prime_required`
@@ -260,6 +261,19 @@ whole-bank move (#1269, Deferred) earns a brief.
   order. host-core's `publish_primed` does the same but sits behind `control-provider`, which
   `scripts/check-host-core-policy.sh` lets only control-plane enable. No control-plane
   `WarmConfig` plumbing (R1).
+- **Bench publication against production (conservative).** In production a warm growth goes
+  through a duck-swap and is published with `not_before = S`; the bench publishes at the render
+  clock. The adoption block's work (the carry and the prime) is the same, so the bench's adoption
+  block costs the same or more: conservative. The bench does not time `PlanState::render`'s
+  per-block meter-gate wrapper; it times the render call of the plan exchange's owner.
+- **`a_P` and the ratio assumption.** `a_P` is the adoption block of `C_3 -> C_4`, so it also holds
+  `C_4`'s steady effect cost (four limiters and four soft clippers on track 1) over `o`, A's
+  ordinary block; `β` charges that to the prime bytes too, so it is conservative. The browser row
+  assumes D3's ratio: the browser's adoption block exceeds its ordinary block in the native ratio
+  `(o + β · b) / o`.
+- **Prime flags in the self-test.** Each primed publication counts the running set's rings it
+  flags `prime_required`; the self-test asserts exactly one per publication (the fixture's one
+  source).
 - **Carry refusals (R4).** `RealtimePlanOwner::active_plan_mut` is test-support only, so the
   bench reads `graph::carry_refusal_count` on every plan the retirer reclaims, and each phase ends
   with one untimed closing swap so that every measured plan is reclaimed. The count is reported per
@@ -278,7 +292,8 @@ whole-bank move (#1269, Deferred) earns a brief.
   `β` (ps/byte), `b_native`, `b_browser`, `PRIME_BYTES_MAX` (or `null` with the refusal reason)
   and items 1-2 at every launch rate (ring PCM bytes are session A's one stereo source, `f32`).
   The validator recomputes D3's rows from the record's own numbers in the subject's order of
-  operations.
+  operations, `β` at the record's three-decimal precision, and the refusal reason in the
+  subject's order (`native_row_below_b_p` before `browser_row_below_b_p`).
 - **Validator home.** `scripts/operator/swap-benchmark-validator.jq`: only the operator runner
   reaches it, and `scripts/check-script-reachability.py` requires a file no workflow reaches to
   live in `scripts/operator/`. `cargo test -p bench` runs it on the subject's own record.

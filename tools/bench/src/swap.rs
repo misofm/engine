@@ -95,7 +95,9 @@ const PRIME_CYCLES: usize = 32;
 const MARGIN: f64 = 0.7;
 /// D3: #1331 D7's browser headroom `h` of the slowest supported engine (WebKit; owner ruling
 /// 2026-10-25: Chrome and Safari only), measured on the 64-track app session at [`BROWSER_RATE`].
-const BROWSER_HEADROOM: f64 = 13.7;
+/// The smaller of WebKit's two measured values (13.67 and 13.69): the rounded 13.7 would overstate
+/// the headroom by about 0.25 %.
+const BROWSER_HEADROOM: f64 = 13.67;
 const BROWSER_HEADROOM_ENGINE: &str = "webkit";
 const BROWSER_RATE: u32 = 48_000;
 /// The successor revision the first published plan commits as: the first plan is at revision 1.
@@ -212,6 +214,10 @@ pub(crate) fn self_test() -> Measurement {
     assert_eq!(
         measured.silent_blocks, 0,
         "every block has a nonzero output peak"
+    );
+    assert_eq!(
+        measured.primed_flags, [1; GROWTHS],
+        "every primed publication flags the fixture's one carried ring"
     );
     measured
 }
@@ -414,6 +420,8 @@ struct Stream {
     superseded: LiveValuesSuperseded,
     /// The carry refusals (#1279 D6) of every plan reclaimed so far.
     carry_refusals: u64,
+    /// The rings the newest primed publication flagged `prime_required`.
+    flagged: usize,
 }
 
 impl Stream {
@@ -455,6 +463,7 @@ impl Stream {
             output: vec![0.0; QUANTUM_FRAMES * 2],
             superseded,
             carry_refusals: 0,
+            flagged: 0,
         }
     }
 
@@ -558,8 +567,14 @@ impl Stream {
         let not_before = lead_blocks.map(|_| self.publisher.render_clock());
         let adoption = match (not_before, lead_blocks) {
             (Some(not_before), Some(lead_blocks)) => {
-                self.sources.set_prime_flags(|id| sources.holds_vacant(id));
+                let mut flagged = 0;
+                self.sources.set_prime_flags(|id| {
+                    let carried = sources.holds_vacant(id);
+                    flagged += usize::from(carried);
+                    carried
+                });
                 sources.set_prime_flags(|_| false);
+                self.flagged = flagged;
                 PlanAdoption::Primed {
                     not_before,
                     lead_blocks,
@@ -637,6 +652,8 @@ pub(crate) struct Measurement {
     sum_lead_samples: u64,
     move_carry_refusals: u64,
     prime_carry_refusals: u64,
+    /// The rings each primed publication flagged `prime_required`, in publication order.
+    primed_flags: Vec<usize>,
     /// Blocks rendered with a zero output peak, and the smallest peak, over the timed
     /// observations (every rendered block in the self-test, which times none).
     silent_blocks: usize,
@@ -663,6 +680,7 @@ impl Measurement {
             sum_lead_samples: 0,
             move_carry_refusals: 0,
             prime_carry_refusals: 0,
+            primed_flags: Vec::new(),
             silent_blocks: 0,
             min_peak: f32::INFINITY,
             observed_blocks: 0,
@@ -794,6 +812,7 @@ impl Measurement {
             let not_before = stream
                 .publish(host, handles, session, Some(lead_blocks))
                 .expect("a primed candidate");
+            self.primed_flags.push(stream.flagged);
             // Render until the candidate is adopted; a late adoption is recorded, never hidden.
             let mut rendered = 0;
             let adoption = loop {
@@ -1090,9 +1109,10 @@ mod tests {
     }
 
     /// The measured run's counts at the frozen shape: the self-test's swap, adoptions and prime
-    /// bytes repeated to the frozen counts, with distinct positive timings, so `record` derives D3
+    /// bytes repeated to the frozen counts, with distinct positive timings from `ordinary_ns` (the
+    /// ordinary and move blocks) and `adoption_ns` (the adoption blocks), so `record` derives D3
     /// from numbers the validator can check.
-    fn frozen_from(measured: &Measurement) -> Measurement {
+    fn frozen_from(measured: &Measurement, ordinary_ns: u64, adoption_ns: u64) -> Measurement {
         let swaps = FROZEN.move_swaps;
         let cycles = FROZEN.prime_cycles;
         let mut growths: Vec<_> = measured
@@ -1108,7 +1128,7 @@ mod tests {
         for (step, growth) in growths.iter_mut().enumerate() {
             growth.adoptions = (0..cycles as u64)
                 .map(|cycle| Adoption {
-                    nanoseconds: 30_000 + 1_000 * step as u64 + cycle,
+                    nanoseconds: adoption_ns + 1_000 * step as u64 + cycle,
                     ..measured.growths[step].adoptions[0]
                 })
                 .collect();
@@ -1116,11 +1136,11 @@ mod tests {
         Measurement {
             shape: FROZEN,
             ordinary: (0..(swaps * (FROZEN.interval_blocks - 1)) as u64)
-                .map(|block| 10_000 + block % 97)
+                .map(|block| ordinary_ns + block % 97)
                 .collect(),
             moves: (0..swaps as u64)
                 .map(|swap| MoveSwap {
-                    nanoseconds: 20_000 + swap,
+                    nanoseconds: ordinary_ns + 10_000 + swap,
                     ..measured.moves[0]
                 })
                 .collect(),
@@ -1128,6 +1148,7 @@ mod tests {
             sum_lead_samples: measured.sum_lead_samples,
             move_carry_refusals: measured.move_carry_refusals,
             prime_carry_refusals: measured.prime_carry_refusals,
+            primed_flags: measured.primed_flags.clone(),
             silent_blocks: measured.silent_blocks,
             min_peak: measured.min_peak,
             observed_blocks: swaps * FROZEN.interval_blocks + GROWTHS * cycles,
@@ -1208,7 +1229,7 @@ mod tests {
             !validator_accepts(&shortened, RUNNER),
             "the self-test's shortened, untimed run must not pass for the frozen one"
         );
-        let frozen = frozen_from(measured);
+        let frozen = frozen_from(measured, 10_000, 30_000);
         let records = [1, 2].map(|round| frozen.record(round, backend, metadata));
         assert!(
             validator_accepts(&records, RUNNER),
@@ -1243,11 +1264,36 @@ mod tests {
                 "a native row the numbers do not give",
             ),
             (".move.ordinary_ns.min = 0", "an untimed distribution"),
+            (
+                ".d3.beta_ps_per_byte += 0.002",
+                "a β the numbers do not give",
+            ),
         ] {
             assert!(
                 !validator_accepts(&records, &format!("{RUNNER} | {edit}")),
                 "{why}"
             );
         }
+        // D3's refusal branch: an ordinary block close to `m · D` leaves the native row below
+        // `b_P`, so the record derives no `PRIME_BYTES_MAX` and names the native row first.
+        let slow = frozen_from(measured, 933_000, 940_000);
+        let refused = [1, 2].map(|round| slow.record(round, backend, metadata));
+        assert!(
+            refused[0].contains("\"prime_bytes_max\":null")
+                && refused[0].contains("\"native_row_below_b_p\""),
+            "the slow record takes the refusal branch: {}",
+            refused[0]
+        );
+        assert!(
+            validator_accepts(&refused, RUNNER),
+            "a refusal the numbers give is a valid record"
+        );
+        assert!(
+            !validator_accepts(
+                &refused,
+                &format!("{RUNNER} | .d3.prime_bytes_max_refusal = \"browser_row_below_b_p\"")
+            ),
+            "a refusal reason out of the subject's order"
+        );
     }
 }
