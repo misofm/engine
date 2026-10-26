@@ -323,3 +323,44 @@ to S and is deleted by #1668. Review evidence is preserved under
 `/home/bl/misofm/engine-work-evidence/1668/root-review/1306-*.log`.
 The current realtime-policy binary passes (233 marked regions, 43 files), with
 2 unit and 240 policy tests passing.
+
+## Final integration correction (attempt 2, root-approved 2026-10-26)
+
+The provisional component PASS is superseded by **attempt 1 final integration
+FAIL**: the full debug-a corpus reached 43 graph-compiler test refusals where
+existing launch-effect fixtures passed a ceiling of 32. Current generated
+descriptors have 60 live cells for parametric EQ and 96 for dynamic EQ (the old
+brief's 44-cell EQ count is historical); every other launch descriptor has at most
+22. The bounded correction sets formerly generous launch-fixture ceilings to 128
+in graph-compiler's test helpers, retaining custom-registry, delay-only,
+multiband-only and third-party-refusal ceilings that were already sufficient.
+This changes no named graph, memory or release budget and no negative ceiling gate.
+The authorized paths include `crates/graph-compiler/src/lib.rs` (test module),
+`src/tests/{bank_padding,console_banking}.rs`, and its existing integration fixtures
+`bank_levels`, `bypass_cohorts`, `console_banking`, `console_link_override`, `scale`,
+`silent_bank_skip`, `tail_composition` and `bypass_resources`.
+
+One production **tool** caller, `tools/console-workload/src/lib.rs::effect_caps`,
+also prepares all launch descriptors; its ceiling becomes 128 for the same reason.
+Its functional tests run without timing. Direct audit requests such as dynamic
+EQ's 16 and parametric EQ's 48 use `PrepareEffectLimits` through native factories,
+not the changed session-compiler ceiling, and remain untouched.
+
+Two bypass_resources tests are deleted as superseded: the per-node 128/4096
+capacity comparison and the MAX-capacity/OOM reproducer. Their compiler ceilings
+no longer change prepared capacity, so their stated window mutations no longer
+turn them red. Measured allocator-accounting and render-allocation tests remain;
+direct graph/rack owner tests that vary actual prepared capacity retain the
+window-sizing claim, and the effect-compiler owner retains descriptor sizing and
+ceiling-refusal claims. No replacement harness or new test is added.
+
+Attempt 2 focused validation: graph-compiler's complete all-targets
+`--no-fail-fast` suite passed every target except one indirect `bind(...,32,None)`
+ceiling in the retained bypass allocation test. That argument now uses 128; its
+four-test target then passes with allocation assertions unchanged. This was
+within the same bounded correction pass, before review. The production-tool
+console-workload release functional suite passes (56 tests, no timing workload).
+The exact workspace debug-a doctest leg also passes. Logs, including the command
+preflight errors and the initial indirect-ceiling failure, remain in the external
+evidence directory. The final full debug-a run uses `--no-fail-fast` so every
+required target runs before a verdict.

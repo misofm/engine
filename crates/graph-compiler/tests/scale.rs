@@ -732,7 +732,7 @@ fn compiles_and_binds_65_537_tracks_with_builtins() {
         EffectCompileCaps {
             maximum_total_state_bytes: u64::MAX,
             maximum_scratch_bytes: u64::MAX,
-            maximum_automation_spans_per_block: 32,
+            maximum_automation_spans_per_block: 128,
         },
     )
     .expect("scale effects");
