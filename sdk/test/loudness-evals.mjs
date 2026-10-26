@@ -6,12 +6,15 @@
  */
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import process from "node:process";
 import { test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
+import { LoudnessOwner, loudnessReadingOf } from "../src/core/loudness.ts";
+import { decodeLoudnessReply, encodeLoudnessCommand } from "../src/core/loudness-frame.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
 
 const SKIP = { skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX };
@@ -132,4 +135,64 @@ test("close stops the meter: a fresh subscribe succeeds and the closed handle re
   } finally {
     engine.dispose();
   }
+});
+
+/** The Rust codec's `LOUDNESS` frames (`crates/protocol/tests/sdk_message_fixture.rs`). */
+const FIXTURE = JSON.parse(await readFile(new URL("./fixtures/protocol-messages.json", import.meta.url), "utf8")).loudness;
+const fixtureRow = (name) => FIXTURE.find((row) => row.name === name);
+const bytesOf = (hex) => Uint8Array.from(Buffer.from(hex, "hex"));
+/** A value in the fixture's spelling: bigints as decimal strings. */
+const plain = (value) => JSON.parse(JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item)));
+
+test("the LOUDNESS codec is the Rust codec's: every operation's bytes, every reply field, and a reply that breaks a rule", () => {
+  for (const name of ["start", "read", "reset", "stop"]) {
+    const row = fixtureRow(name);
+    assert.equal(Buffer.from(encodeLoudnessCommand(BigInt(row.request.requestId), row.request.op)).toString("hex"), row.hex, name);
+  }
+  for (const name of ["reply_full", "reply_empty"]) {
+    const row = fixtureRow(name);
+    const reply = decodeLoudnessReply(bytesOf(row.hex));
+    assert.equal(reply.ok, true, name);
+    assert.deepEqual(
+      plain({ ok: reply.ok, requestId: reply.requestId, revision: reply.revision, value: loudnessReadingOf(reply.value) }),
+      row.expect,
+      name,
+    );
+  }
+  // The full reply with its momentary level (field 7, F32) made NaN: the Rust codec refuses it on
+  // both sides, and so does this one.
+  const broken = bytesOf(fixtureRow("reply_full").hex);
+  const at = broken.findIndex((_byte, index) => broken[index] === 7 && broken[index + 1] === 0 && broken[index + 2] === 6
+    && broken[index + 4] === 4 && broken[index + 5] === 0 && broken[index + 6] === 0 && broken[index + 7] === 0);
+  assert.ok(at > 48, "the full reply carries a momentary level");
+  new DataView(broken.buffer).setFloat32(at + 8, Number.NaN, true);
+  assert.throws(() => decodeLoudnessReply(broken), (error) => error instanceof MisoEngineError && error.code === "internal");
+});
+
+test("a managed loudness handle reads on its scheduler's tick and tells onUpdate", async () => {
+  const reply = decodeLoudnessReply(bytesOf(fixtureRow("reply_full").hex));
+  const sent = [];
+  let tick;
+  const owner = new LoudnessOwner({
+    send: async (operation) => { sent.push(operation); return reply; },
+    capabilityFlags: async () => 1n << 17n,
+    scheduler: {
+      setInterval: (callback, milliseconds) => { assert.equal(milliseconds, 100); tick = callback; return 1; },
+      clearInterval: () => { tick = undefined; },
+    },
+  });
+  const updates = [];
+  const handle = await owner.subscribe({ onUpdate: (notification) => updates.push(notification) });
+  assert.deepEqual(sent, ["start"]);
+  assert.equal(handle.readLatest(), undefined);
+  assert.equal(typeof tick, "function", "the subscribe started the timer");
+  tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent, ["start", "read"]);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].handle, handle);
+  assert.deepEqual(updates[0].reading, loudnessReadingOf(reply.value));
+  assert.equal(handle.readLatest(), updates[0].reading);
+  await handle.close();
+  assert.equal(tick, undefined, "close stopped the timer");
 });

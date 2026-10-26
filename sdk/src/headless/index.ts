@@ -32,6 +32,7 @@ export type {
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
 export { DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS } from "../core/observation-subscriptions.ts";
+export type { LoudnessReading, LoudnessSubscription, LoudnessSubscriptionNotification, LoudnessSubscriptionRequest } from "../core/loudness.ts";
 export type {
   TrackResponseGrid,
   TrackResponseLimits,
