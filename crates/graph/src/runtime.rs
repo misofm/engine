@@ -10136,6 +10136,58 @@ impl Runtime {
             .collect()
     }
 
+    /// The bank-slot runs (issue #2132) of every pack group and of every bank unit in none, in
+    /// unit order: `[first unit, last unit, width, effect slots per unit, runs, whole-chain skips]`.
+    /// Units with no effect slot are left out. Off the render thread.
+    ///
+    /// A run is one bank executing one effect slot for one block. Every slot of a chain has the
+    /// chain's lane mask (`bank_chain_with_fold`), so a block the chain renders runs every slot and
+    /// a block it skips whole runs none: a unit's runs are its effect slots times its completed
+    /// round trips ([`BankChain::transposes`], one per rendered block and none per skipped one).
+    /// No render-path state is added for it. A per-slot skip (#2129) subtracts its own count here.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn bank_slot_runs(&mut self) -> Vec<[u64; 6]> {
+        let mut rows: Vec<[u64; 6]> = Vec::new();
+        for index in 0..self.units.len() {
+            let RuntimeUnit::Bank { chain, .. } = &mut self.units[index] else {
+                continue;
+            };
+            let slots = chain_slot_count(chain);
+            let effect_slots = (0..slots)
+                .filter(|&slot| builtin_processor_mut(chain, slot).is_none())
+                .count() as u64;
+            if effect_slots == 0 {
+                continue;
+            }
+            let runs = effect_slots.saturating_mul(chain.transposes());
+            let skips = chain.silent_skips();
+            let width = u64::from(chain.width().lanes());
+            let unit = index as u64;
+            match self.lane_map.group(index) {
+                Some((_, group))
+                    if rows
+                        .last()
+                        .is_some_and(|row| row[0] == u64::from(group.first)) =>
+                {
+                    let row = rows.last_mut().expect("the group's row");
+                    row[1] = unit;
+                    row[4] = row[4].saturating_add(runs);
+                    row[5] = row[5].saturating_add(skips);
+                }
+                Some((_, group)) => rows.push([
+                    u64::from(group.first),
+                    unit,
+                    width,
+                    effect_slots,
+                    runs,
+                    skips,
+                ]),
+                None => rows.push([unit, unit, width, effect_slots, runs, skips]),
+            }
+        }
+        rows
+    }
+
     /// The lane moves the packer made (issue #1981). Off the render thread.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn lane_moves(&self) -> u64 {
