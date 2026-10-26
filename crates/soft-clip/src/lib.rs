@@ -1711,6 +1711,10 @@ impl PreparedNativeEffect for PreparedSoftClip {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
+    // #2131 placeholder: replaced by the per-lane reset.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        let _ = (lane, kind);
+    }
     fn retained_bytes(&self) -> u64 {
         self.inner.heap_bytes()
     }

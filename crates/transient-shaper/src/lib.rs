@@ -1975,6 +1975,10 @@ impl PreparedNativeEffect for PreparedTransientShaper {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
+    // #2131 placeholder: replaced by the per-lane reset.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        let _ = (lane, kind);
+    }
     /// Every field is inline: this instance owns no heap (#1074).
     fn retained_bytes(&self) -> u64 {
         0

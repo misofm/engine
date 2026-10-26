@@ -1769,6 +1769,10 @@ impl<L: Lane> DynamicEq<L, false> {
 macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for DynamicEq<$lane, false> {
+            // #2131 placeholder: replaced by the per-lane reset.
+            fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+                let _ = (lane, kind);
+            }
             /// Every field is inline: this instance owns no heap (#1074).
             fn retained_bytes(&self) -> u64 {
                 0

@@ -9026,6 +9026,9 @@ mod tests {
         fn reset(&mut self, kind: effect_contract::ResetKind) {
             self.inner.reset(kind);
         }
+        fn reset_lane(&mut self, lane: usize, kind: effect_contract::ResetKind) {
+            self.inner.reset_lane(lane, kind);
+        }
         fn process_bank(
             &mut self,
             block: effect_contract::EffectBankProcessBlock<'_>,

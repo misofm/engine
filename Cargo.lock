@@ -690,6 +690,7 @@ dependencies = [
 name = "effect-compiler"
 version = "0.1.0"
 dependencies = [
+ "bench-support",
  "builtins",
  "compressor",
  "de-esser",
