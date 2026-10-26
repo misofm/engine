@@ -3000,7 +3000,7 @@ fn paired_median(left: &[u64], right: &[u64]) -> i64 {
 // Shared plumbing.
 // ---------------------------------------------------------------------------------------------
 
-fn backend_name(backend: Backend) -> &'static str {
+pub(crate) fn backend_name(backend: Backend) -> &'static str {
     // By width, not by variant: `Backend::Scalar` exists only in `lane/test-support` builds
     // (#1059), so a match on the variants compiles in only one of them.
     match backend.width() {
@@ -3022,7 +3022,7 @@ fn backend_name(backend: Backend) -> &'static str {
 /// Thread pinning is Linux-only, and so is this module's body: on any other target the bench pins
 /// nothing and names the placement `unsupported_platform`, which a controlled run refuses. That is
 /// a property of this tool, never of the engine.
-mod affinity {
+pub(crate) mod affinity {
     use bench_support::metadata::Metadata;
 
     /// The render core and the producer core, and where the second sits relative to the first.

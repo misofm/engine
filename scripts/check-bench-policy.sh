@@ -189,8 +189,9 @@ forbidden_under_tools 'a private SHA-256 initial hash word (H0) or round-constan
 # benchmark (`tools/audit/src/fp_env.rs`), and no other file under `tools/` calls `timing::timed`.
 # #1075 retired the protocol benchmark (`tools/bench/src/protocol.rs`, owner ruling R9). It timed
 # with its own `Instant::now` and had never joined the list, so the list is unchanged; with it gone,
-# `console.rs` is the only benchmark subject under `tools/bench` that times anything.
-timed_subjects=(tools/bench/src/console.rs)
+# `console.rs` is the only benchmark subject under `tools/bench` that times anything. #1286 added
+# the swap subject (`tools/bench/src/swap.rs`) on the shared timer from its first commit.
+timed_subjects=(tools/bench/src/console.rs tools/bench/src/swap.rs)
 for subject in "${timed_subjects[@]}"; do
     [[ -f "$subject" ]] || fail "converted subject is missing: $subject"
     if grep -n 'timing::timed' "$subject" >"$scratch/subject-timer" 2>"$scratch/subject-timer.err"; then

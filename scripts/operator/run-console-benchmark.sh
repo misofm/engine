@@ -3,7 +3,7 @@
 # runner is what supplies the round marker and the host metadata, and a direct invocation produces
 # a record whose provenance is a guess.
 #
-# Usage: scripts/operator/run-console-benchmark.sh --step NAME
+# Usage: scripts/operator/run-console-benchmark.sh [--swap] --step NAME
 #
 # A person runs it; no workflow does, which is why it lives in `scripts/operator/` (moved from
 # `scripts/` by #1027).
@@ -12,6 +12,11 @@
 # issue, written to `artifacts/steps/NAME`, so each issue's motion is read against the step before
 # it rather than against one paired baseline. NAME is lowercase kebab-case, at most 64 characters.
 # Any other invocation, including none, is a usage error (exit 2).
+#
+# `--swap` (#1286) runs the `bench swap` subject instead of `bench console`: the swap block's cost
+# on the 64-track app-shape console. Everything below holds for it, with its own artifact names
+# (`swap-benchmark.*` in the same step directory), two records (one per measured round) and its own
+# frozen validator, `scripts/operator/swap-benchmark-validator.jq`.
 #
 # Before anything is timed the run refuses (exit 1), in this order: when a record already exists
 # in that directory (a record is never overwritten), when the host is not x86_64 with AVX2, when
@@ -39,8 +44,13 @@
 # carries `measurement_control: "uncontrolled"` and the validator refuses to let that record claim
 # otherwise.
 set -euo pipefail
+subject=console
+if [[ "$#" == 3 && "$1" == --swap ]]; then
+    subject=swap
+    shift
+fi
 if [[ "$#" != 2 || "$1" != --step ]]; then
-    printf 'usage: %s --step NAME\n' "$0" >&2
+    printf 'usage: %s [--swap] --step NAME\n' "$0" >&2
     exit 2
 fi
 [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$2" >&2; exit 2; }
@@ -51,14 +61,20 @@ cd "$root"
 source "$root/scripts/check-bench-preconditions.sh"
 
 artifact_dir="$root/artifacts/$step_directory"
-raw="$artifact_dir/console-benchmark.raw.jsonl"
-accepted="$artifact_dir/console-benchmark.accepted.jsonl"
-stderr_log="$artifact_dir/console-benchmark.stderr.log"
-disposition="$artifact_dir/console-benchmark.disposition.json"
+# The subject's frozen record count, its disposition's issue and its validator.
+if [[ "$subject" == swap ]]; then
+    artifact=swap-benchmark records_required=2 disposition_issue=1286
+else
+    artifact=console-benchmark records_required=78 disposition_issue=149
+fi
+raw="$artifact_dir/$artifact.raw.jsonl"
+accepted="$artifact_dir/$artifact.accepted.jsonl"
+stderr_log="$artifact_dir/$artifact.stderr.log"
+disposition="$artifact_dir/$artifact.disposition.json"
 # #184: the perf-counter evidence behind the records' cycle columns. One file per launch that was
 # counted, kept beside the records for the same reason the stderr log is kept -- a derived column
 # whose instrument left no trace is a claim, not a measurement.
-core_clock_log="$artifact_dir/console-benchmark.core-clock.csv"
+core_clock_log="$artifact_dir/$artifact.core-clock.csv"
 for path in "$raw" "$accepted" "$stderr_log" "$disposition" "$core_clock_log"; do
     [[ ! -e "$path" ]] || { printf 'refusing to overwrite console artifact: %s\n' "$path" >&2; exit 1; }
 done
@@ -108,8 +124,8 @@ write_disposition() {
     [[ -n "$candidate_commit" ]] && candidate_json="\"$candidate_commit\""
     [[ -n "$candidate_commit_sha256" ]] && candidate_sha_json="\"$candidate_commit_sha256\""
     [[ -n "$binary_sha256" ]] && binary_sha_json="\"$binary_sha256\""
-    printf '{"schema_version":1,"issue":149,"status":"%s","reason":"%s","runner_invocations":1,"workload_process_launches":%s,"warmup_launches":%s,"measured_rounds_completed":%s,"measurement_control":"%s","cpu_affinity":"%s","candidate_commit":%s,"candidate_commit_sha256":%s,"binary_sha256":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
-        "$status" "$reason" "$workload_process_launches" "$warmup_launches" \
+    printf '{"schema_version":1,"issue":%s,"status":"%s","reason":"%s","runner_invocations":1,"workload_process_launches":%s,"warmup_launches":%s,"measured_rounds_completed":%s,"measurement_control":"%s","cpu_affinity":"%s","candidate_commit":%s,"candidate_commit_sha256":%s,"binary_sha256":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
+        "$disposition_issue" "$status" "$reason" "$workload_process_launches" "$warmup_launches" \
         "$measured_rounds_completed" "$measurement_control" "$cpu_affinity" \
         "$candidate_json" "$candidate_sha_json" \
         "$binary_sha_json" "$raw_sha" "$raw_bytes" "$accepted_sha" "$accepted_bytes" \
@@ -359,7 +375,7 @@ run_round() {
     MISO_ENGINE_BENCH_MEASUREMENT_CONTROL="$measurement_control" \
     MISO_ENGINE_BENCH_CPU_AFFINITY="$cpu_affinity" \
     MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$governor_or_power_mode" \
-    "${counter[@]}" "${affinity[@]}" "$binary" console
+    "${counter[@]}" "${affinity[@]}" "$binary" "$subject"
 }
 
 # One untimed warmup, then exactly the two frozen measured rounds. Raw stdout is append-only after
@@ -400,9 +416,13 @@ if [[ -n "$counted" ]]; then
     }
 fi
 failure_reason=record_count
-[[ "$(wc -l <"$raw")" == 78 ]] || exit 1
+[[ "$(wc -l <"$raw")" == "$records_required" ]] || exit 1
 failure_reason=validation_failed
-jq -s -e -L scripts -f scripts/console-benchmark-validator.jq "$raw" >/dev/null || exit 1
+if [[ "$subject" == swap ]]; then
+    jq -s -e -f scripts/operator/swap-benchmark-validator.jq "$raw" >/dev/null || exit 1
+else
+    jq -s -e -L scripts -f scripts/console-benchmark-validator.jq "$raw" >/dev/null || exit 1
+fi
 failure_reason=accepted_promotion_failed
 : >"$accepted"
 cp -- "$raw" "$accepted"
