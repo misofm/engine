@@ -62,3 +62,42 @@ The row's p50 us per block, native W=8, under `artifacts/steps/bank-design-2147/
 ## Dependencies
 
 None. Parallel to every engine slice (disjoint files). Lands any time after #2154.
+
+## Decision record (attempt 1)
+
+- The row is `C1State::Reverb` (`c1_console_16_reverb`): the `AllActive` state plus the reverb
+  edit, built in code by `add_c1_reverb` (`tools/console-workload/src/lib.rs`). The reverb insert
+  is `aux.a`'s delay declaration with the identity changed to `miso.reverb` and its one parameter
+  set to 8 (mix) = 1.0; every track's send to `aux.b` is unmuted at `C1_REVERB_SEND_DB` (-6 dB).
+  The 32- and 64-track names exist (the match is total) but only the 16-track row joins
+  `BANK_REPORT_WORKLOADS` (now 17 rows). Only `AllActive` is kept: the smallest slice.
+- Gate 2's digest: `bench console --bank-report` records now carry `output_sha256`, the SHA-256 of
+  the timed blocks' output, hashed outside the clock (`tools/bench/src/console.rs`).
+- Gate 1 is a new test, `the_reverb_row_feeds_one_per_node_reverb_on_aux_b`, not a new assertion
+  in the feed test: the feed test already covers the row through `BANK_REPORT_WORKLOADS` (its own
+  claim, unchanged). The new test asserts the prepared session carries one reverb, on `aux.b`, in
+  no bank (`graph::bank_effect_lanes` lists none), that sixteen track sends into `aux.b` are
+  unmuted, and that the row renders other words than `c1_console_16_all_active` over 64 blocks.
+  Red evidence, mutant "the sends stay muted" (`route.mute = false` removed): red on the send
+  count (`left: 0, right: 16`); with that assertion also removed, red on the digest (both rows
+  `0a356e2e...`, the reverb reads silence).
+
+## Evidence (attempt 1, W=8 native, `artifacts/steps/bank-design-2147/`)
+
+One invocation of `bench console --bank-report` on base `35bc46570` plus this change (the
+uncommitted tree; a later doc-comment reflow changed no code), pinned with `taskset -c 31`, one
+warmup and two measured rounds of 1000 blocks per row (`bank-report.jsonl`, stderr empty; `preflight.txt` and the
+host load before and after beside it). The host was shared (load average 14.6 at the start), so
+p50 is uncontrolled and descriptive only; the counters are exact. `render_errors` and forbidden
+operations are 0 on every row, and every row's `output_sha256` is equal in both measured rounds
+(17 rows). Rounds 1 and 2:
+
+| row | banks | lane use | BSR static | BSR/block | ideal (groups) | ideal (key class) | p50 us r1 | p50 us r2 |
+|---|---|---|---|---|---|---|---|---|
+| c1 16 all active (reference) | 10 | 57.5 % | 20 | 16.66 | 16 | 16 | 96.6 | 97.5 |
+| c1 16 reverb | 9 | 60.5 % | 19 | 19.00 | 19 | 19 | 129.3 | 129.4 |
+
+The reverb row costs about 32 us per block more than the reference (+33 %). That delta holds the
+fed per-node reverb and the bank changes the insert causes (one bank fewer, and 19.00 executed
+BSR/block against the reference's 16.66, whose silent-input banks skip); this record does not
+split the two. V8: not measured (no C1 document, #2143).
