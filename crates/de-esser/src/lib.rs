@@ -52,10 +52,12 @@ use effect_runtime::params::{
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use effect_runtime::svf::{RAMP_PATH_NORM_TOLERANCE, transition_norm};
-use lane::kernels::{SvfState, silence_advance, silence_skip_block, svf_state_held};
+use lane::kernels::{silence_advance, silence_skip_block, svf_state_held};
 use lane::{Backend, Lane, Simd4, silence_armable_holding};
 
-use kernel::{Args, C1, Chan, Coef, LINK_COUNT, MAX_WIDTH, RAMPS, SHELF_C1, segment};
+use kernel::{
+    Args, C1, Chan, Coef, DETECTOR, LINK_COUNT, MAX_WIDTH, MODE, RAMPS, SHELF_C1, segment,
+};
 
 const PARAMETER_COUNT: usize = 10;
 
@@ -159,7 +161,9 @@ const MODE_CHOICES: [EnumChoice; 2] = [
 /// The detector choices. The selected tap is also what the listen arm plays. The split arm cuts
 /// the band with the band detector, and with the high-pass detector it is a dynamic high shelf
 /// that never boosts (#1984): `g x + (1 - g) v2s`, `v2s` a Butterworth low-pass at the band's
-/// frequency (`kernel`), unity at DC and the held gain toward Nyquist.
+/// frequency (`kernel`), unity at DC and the held gain toward Nyquist. There the frequency is
+/// where the cut begins (the shelf's corner, about -3 to -5 dB at it, the held gain about an
+/// octave above it), and Q shapes only the detector.
 const DETECTOR_CHOICES: [EnumChoice; 2] = [
     EnumChoice {
         value: 1.0,
@@ -943,6 +947,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         let armed_after = L::splat(lane::silence_frames(self.sample_rate) as f32);
         // Issue #1969: only the ramping prefix of a block with a glide in flight takes the blend.
         let glide = self.gliding::<MONO>();
+        let shelf = self.shelf_can_be_live::<MONO>();
         let (first, rest) = self.state.split_at_mut(1);
         let mut run = |ramping: bool, range: core::ops::Range<usize>| {
             let (left, right) = (&mut left[range.clone()], &mut right[..]);
@@ -955,13 +960,14 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             let states = [&mut first[0], &mut rest[0]];
             let frames = range.len() / L::WIDTH;
             // Issue #1328 A9: the armed form only where a lane can arm while holding state.
-            let arms = |run: L, svf: SvfState<L>| {
-                silence_armable_holding(run, frames, armed_after, svf_state_held([svf]))
+            let arms = |run: L, held: <L as Lane>::Mask| {
+                silence_armable_holding(run, frames, armed_after, held)
             };
             let channels = if MONO { 1 } else { 2 };
-            let armable = states[..channels]
-                .iter()
-                .any(|s| arms(s.run, s.main) || (CONNECTED && arms(s.side_run, s.side)));
+            let armable = states[..channels].iter().any(|s| {
+                arms(s.run, svf_state_held([s.main, s.shelf]))
+                    || (CONNECTED && arms(s.side_run, svf_state_held([s.side])))
+            });
             let [state_left, state_right] = states;
             if !armable {
                 let planes: [&[f32]; 2] = [left, right];
@@ -984,6 +990,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                 armed_after,
                 coef: (&self.coef[0], &self.coef[1]),
                 state: (state_left, state_right),
+                shelf,
             };
             match (ramping, armable, ramping && glide) {
                 (true, true, true) => segment::<L, CONNECTED, true, MONO, true, true>(args),
@@ -1001,6 +1008,19 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             run(false, split..total);
         }
         self.finish_block::<MONO>(left, right, frames, reports);
+    }
+
+    /// Whether any lane can be live on the shelf path this block (#1984): its mode and detector
+    /// words are each nonzero or still ramping. Read at the block's start, after its automation;
+    /// a lane that cannot be live already holds a `+0.0` shelf state (its last rendered frame was
+    /// not live, or it was reset or restored so), so skipping the shelf step moves no bit.
+    fn shelf_can_be_live<const MONO: bool>(&self) -> bool {
+        let zero = L::zero();
+        let path = |ramp: &WordRamp<L>| L::mask_or(ramp.current.gt(zero), ramp.remaining.gt(zero));
+        let channels = if MONO { 1 } else { 2 };
+        self.state[..channels]
+            .iter()
+            .any(|s| L::mask_any(L::mask_and(path(&s.ramps[MODE]), path(&s.ramps[DETECTOR]))))
     }
 
     /// Whether the block may skip the kernel (issue #1746): every input plane is exact `+0.0` and
@@ -1260,6 +1280,15 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                 > RAMP_PATH_NORM_TOLERANCE
         }) {
             return Err(state_error("effect.state.parameter"));
+        }
+        // #1984: a lane that cannot be live on the shelf path holds an exact `+0.0` shelf state,
+        // which a block that skips the shelf step relies on.
+        let path = |ramp: usize| {
+            let at = SIGNAL_WORDS + ramp * 4;
+            words[at] != 0.0 || words[at + 3] != 0.0
+        };
+        if !(path(MODE) && path(DETECTOR)) && words[SHELF_WORD..].iter().any(|w| w.to_bits() != 0) {
+            return Err(state_error("effect.state.signal"));
         }
         // Issue #1969 (#1370 D6): each weight lies in `[0, 1]` on its whole path, the engine never
         // holds `-0.0` there, a glide in flight moves (its step is `(t - c) / n` with `t` in

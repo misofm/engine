@@ -35,8 +35,9 @@ fn render(values: &support::Values, signal: impl Fn(usize) -> f32) -> Vec<f32> {
     out
 }
 
-/// Wideband `g x`, split `x - (1 - g) f` on the band and the high tap, and listen `f` each match
-/// the reference sample for sample within `1e-5` (the input peaks near `0.53`; measured `2.9e-7`).
+/// Wideband `g x`, split `x - (1 - g) b` on the band tap, split on the high-pass tap (the high
+/// shelf `g x + (1 - g) l`, `l` the Butterworth low-pass, #1984), and listen `f` each match the
+/// reference sample for sample within `1e-5` (the input peaks near `0.53`; measured `2.9e-7`).
 #[test]
 fn every_output_arm_matches_the_reference() {
     use ReferenceDeEsserOutput::{Listen, Split, Wideband};
@@ -173,7 +174,7 @@ fn render_connected(
 /// Split mode with the high-pass detector is a dynamic high shelf with no boost (#1984): with a
 /// sidechain holding the range (-20 dB, `g = 0.1`), each low-level probe tone from 2 octaves below
 /// to 2 octaves above the 6.5 kHz centre, at 96 kHz and Q 0.5, 1, 2 and 4, is at most +0.02 dB
-/// over its dry level and within 0.5 dB of `|g + (1 - g) LP(w)|`, `LP` the Butterworth low-pass at
+/// over its dry level and within 0.01 dB of `|g + (1 - g) LP(w)|`, `LP` the Butterworth low-pass at
 /// the centre and `w = tan(pi f / fs) / tan(pi f_c / fs)`, whatever Q is.
 #[test]
 fn split_with_the_high_pass_detector_is_a_shelf_without_boost() {
@@ -229,7 +230,7 @@ fn split_with_the_high_pass_detector_is_a_shelf_without_boost() {
             let analytic = 20.0 * hr.hypot(hi).log10();
             assert!(got <= 0.02, "Q {q}, {octave:+} oct: boosted {got:.3} dB");
             assert!(
-                (got - analytic).abs() <= 0.5,
+                (got - analytic).abs() <= 0.01,
                 "Q {q}, {octave:+} oct: {got:.3} dB, the shelf {analytic:.3} dB"
             );
         }
