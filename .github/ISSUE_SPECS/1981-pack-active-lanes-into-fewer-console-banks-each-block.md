@@ -126,3 +126,13 @@ Root accepted the scope note's R1-R6 (`scratchpad/opt/scope/1981.md`); where it 
   - sparse -39.1/-39.0, one-per-bank -61.3/-61.6
   - The twin's own rounds agree within 0.3 %.
 - **Owner question (spec condition):** native holds all-active within 2 % and V8 does not (+3 %). Accept the measured V8 cost for the sparse and one-per-bank wins (-39 % and -61 % in V8, -40 % and -74 % native), or shelve packing.
+
+## Decision record (owner decision, 2026-10-26)
+
+- **Owner decision (2026-10-26), verbatim: "1981 - accept."** This answers the owner condition and the attempt-3 owner question: the owner accepts the measured V8 all-active cost (+3.2 %/+3.0 %) for the sparse and one-per-bank wins. Native holds all-active within 2 %. The gate text is unchanged; this ruling is the record. No new timing run: the attempt-3 measurement stands.
+
+## Evidence (merge of origin/main, 2026-10-26)
+
+- Merged `origin/main` at `80532ee4a` with a merge commit (no rebase). No file conflicted. Every line the branch changes in `crates/graph/src/{lib,runtime}.rs`, `crates/rack/src/lib.rs`, `crates/graph-compiler/tests/silent_bank_skip.rs` and `tools/console-workload/src/lib.rs` is the same in the merged tree, so the packing code did not change in the merge.
+- Gates on the merged tree, all green: `cargo fmt --all -- --check`; `cargo test --locked -p rack -p graph -p graph-compiler -p console-workload --features graph/test-support` (gates 1 and 2 in `silent_bank_skip.rs`: `a_packing_plan_renders_the_bits_of_an_unpacked_one`, `a_skipping_block_allocates_nothing`, `a_refused_pack_is_not_retried`, and the other two); `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; `scripts/check-workspace-policy.sh`, `check-graph-policy.sh`, `check-rack-policy.sh`, `check-realtime-audit-leak.sh`; `realtime-policy` (233 marked regions in 43 files).
+- Bit identity: gate 1 (the committed packed-against-unpacked bit test) is green on the merged tree. The 78-digest comparison against a main twin is a benchmark-run check and was not run again.
