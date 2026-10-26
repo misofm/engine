@@ -11,7 +11,9 @@ use crate::dynamic_band::{
 pub enum ReferenceDeEsserOutput {
     /// `g x`.
     Wideband,
-    /// `x - (1 - g) f`, `f` the selected filter tap.
+    /// The selected band cut: `x - (1 - g) f` with the band-pass tap `f`; with the high-pass tap,
+    /// the dynamic high shelf `g x + (1 - g) l` (#1984), `l` the Butterworth (`Q = 1/sqrt 2`)
+    /// low-pass of `x` at the same frequency.
     Split,
     /// `f` itself.
     Listen,
@@ -22,6 +24,8 @@ pub enum ReferenceDeEsserOutput {
 #[derive(Clone, Debug)]
 pub struct ReferenceDeEsser {
     filter: ReferenceRbjBiquad,
+    /// The high shelf's Butterworth low-pass, present for the split arm on the high-pass tap.
+    shelf: Option<ReferenceRbjBiquad>,
     band: ReferenceDynamicBand,
     output: ReferenceDeEsserOutput,
 }
@@ -37,8 +41,20 @@ impl ReferenceDeEsser {
         law: ReferenceDynamicBandLaw,
         output: ReferenceDeEsserOutput,
     ) -> Option<Self> {
+        let shelf = if output == ReferenceDeEsserOutput::Split && tap == ReferenceBandTap::HighPass
+        {
+            Some(ReferenceRbjBiquad::new(
+                rate_hz,
+                frequency_hz,
+                core::f64::consts::FRAC_1_SQRT_2,
+                ReferenceBandTap::LowPass,
+            )?)
+        } else {
+            None
+        };
         Some(Self {
             filter: ReferenceRbjBiquad::new(rate_hz, frequency_hz, q, tap)?,
+            shelf,
             band: ReferenceDynamicBand::new(rate_hz, law),
             output,
         })
@@ -64,7 +80,10 @@ impl ReferenceDeEsser {
         let gain = 10.0_f64.powf(change / 20.0);
         let y = match self.output {
             ReferenceDeEsserOutput::Wideband => gain * x,
-            ReferenceDeEsserOutput::Split => x - (1.0 - gain) * tap,
+            ReferenceDeEsserOutput::Split => match &mut self.shelf {
+                Some(shelf) => gain * x + (1.0 - gain) * shelf.process(x),
+                None => x - (1.0 - gain) * tap,
+            },
             ReferenceDeEsserOutput::Listen => tap,
         };
         (y, change)

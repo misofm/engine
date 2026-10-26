@@ -1,12 +1,20 @@
 //! The de-esser's one generic per-sample kernel (issue #15 S1).
 //!
-//! Per channel and frame: the twelve live words step one sample along their ramps, the shared
+//! Per channel and frame: the fifteen live words step one sample along their ramps, the shared
 //! dynamic band step (`effect_runtime::dynamic_band`, also the dynamic EQ's) filters the main
 //! input into its band-pass tap and gives the high-pass tap `x - k v1 - v2` beside it, a
 //! connected sidechain runs a second SVF for the detector only, and the band's hard-knee,
 //! downward gain law smooths the reduction in dB. This module owns only the de-esser's output
 //! law: the wideband, split and listen arms. `Lane` keeps the scalar, four-lane and eight-lane
 //! paths on this one body.
+//!
+//! The split arm cuts the selected band. With the band-pass detector it is `x - (1 - g) b`, `b`
+//! the unity-peak band tap. With the high-pass detector it is the dynamic high shelf
+//! `g x + (1 - g) v2s` (#1984), `v2s` the low-pass output of a third, shelf SVF on the main input
+//! at the same frequency with fixed Butterworth damping `k = sqrt 2`: unity at DC, `g` at
+//! Nyquist, and `|H| <= 1` at every frequency and every held gain, which a shelf on the band
+//! SVF's own poles cannot be for `Q > 1/sqrt 2` (`dsp-research/de-esser.md`). The shelf SVF steps
+//! in every mode, so a detector or mode switch never starts it cold.
 
 use effect_runtime::dynamic_band::WordRamp;
 use effect_runtime::dynamic_band::{
@@ -14,14 +22,14 @@ use effect_runtime::dynamic_band::{
     detector_level_db, dynamic_band_gain,
 };
 use effect_runtime::dynamics::GainComputerCoef;
-use lane::kernels::SvfState;
+use lane::kernels::{SvfState, svf_step_when};
 use lane::{Lane, silence_step};
 
 /// The widest backend and the length of lane scratch arrays owned by this effect.
 pub const MAX_WIDTH: usize = 8;
 
 /// Live words per channel, each a 64-sample ramp ([`WordRamp`]), in this order.
-pub const RAMPS: usize = 12;
+pub const RAMPS: usize = 15;
 /// Threshold in dB.
 pub const THRESHOLD: usize = 0;
 /// The gain computer's slope `1/R - 1`.
@@ -42,6 +50,9 @@ pub const MODE: usize = 9;
 pub const DETECTOR: usize = 10;
 /// `1.0` to output the filter tap itself (listen).
 pub const LISTEN: usize = 11;
+/// The shelf SVF's word `c1` (#1984), Butterworth damping at the band's frequency; `a2` and `a3`
+/// follow it.
+pub const SHELF_C1: usize = 12;
 
 /// The detector link glide weights per channel (issue #1969, #1370 D2): `w_link`, then `w_avg`.
 pub const LINK_COUNT: usize = 2;
@@ -64,6 +75,9 @@ pub struct Chan<L: Lane> {
     pub main: SvfState<L>,
     /// The sidechain's SVF integrators; `+0.0` while the sidechain is unconnected.
     pub side: SvfState<L>,
+    /// The shelf SVF's integrators (#1984): the main input at Butterworth damping, whose low-pass
+    /// output is the split arm's pass band with the high-pass detector.
+    pub shelf: SvfState<L>,
     /// Exactly-zero main input frames, the clock that arms the SVF's joint flush (#1328).
     pub run: L,
     /// The sidechain's silence clock.
@@ -84,6 +98,7 @@ impl<L: Lane> Default for Chan<L> {
         Self {
             main: SvfState::default(),
             side: SvfState::default(),
+            shelf: SvfState::default(),
             run: zero,
             side_run: zero,
             gain_db: zero,
@@ -110,9 +125,10 @@ pub struct Args<'a, L: Lane> {
 }
 
 /// One SVF step on `x` and the selected tap: band `k v1` (0 dB at the centre) or high
-/// `x - k v1 - v2`, crossfaded by the detector word. The joint flush is armed by `x`'s own
-/// silence clock; an unarmable segment (`ARMABLE = false`) had its clock advanced before the frame
-/// loop (`lane::kernels::silence_skip_block`) and reads no threshold.
+/// `x - k v1 - v2`, crossfaded by the detector word, and the joint-flush threshold of `x`. The
+/// joint flush is armed by `x`'s own silence clock; an unarmable segment (`ARMABLE = false`) had
+/// its clock advanced before the frame loop (`lane::kernels::silence_skip_block`) and reads no
+/// threshold.
 #[inline(always)]
 fn filter<L: Lane, const ARMABLE: bool>(
     x: L,
@@ -120,7 +136,7 @@ fn filter<L: Lane, const ARMABLE: bool>(
     run: &mut L,
     words: &[WordRamp<L>; RAMPS],
     armed_after: L,
-) -> L {
+) -> (L, L) {
     let rest = if ARMABLE {
         silence_step(x, run, armed_after)
     } else {
@@ -134,27 +150,38 @@ fn filter<L: Lane, const ARMABLE: bool>(
     };
     let (_, v2, band) = band_step(ARMABLE, x, &band_words, rest, s);
     let high = x.sub(band).sub(v2);
-    blend(band, high, words[DETECTOR].current)
+    (blend(band, high, words[DETECTOR].current), rest)
 }
 
-/// One channel's front half: the ramps, the main tap and the detector tap.
+/// One channel's front half: the ramps, the main tap, the shelf SVF's low-pass output `v2s` of the
+/// main input (stepped with the main input's own flush threshold, #1328) and the detector tap.
 #[inline(always)]
 fn front<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: bool>(
     s: &mut Chan<L>,
     x: L,
     side: L,
     armed_after: L,
-) -> (L, L) {
+) -> (L, L, L) {
     if RAMPING {
         advance_word_ramps(&mut s.ramps);
     }
-    let tap = filter::<L, ARMABLE>(x, &mut s.main, &mut s.run, &s.ramps, armed_after);
+    let (tap, rest) = filter::<L, ARMABLE>(x, &mut s.main, &mut s.run, &s.ramps, armed_after);
+    let w = &s.ramps;
+    let (_, shelf) = svf_step_when(
+        ARMABLE,
+        x,
+        w[SHELF_C1].current.neg(),
+        w[SHELF_C1 + 1].current,
+        w[SHELF_C1 + 2].current,
+        rest,
+        &mut s.shelf,
+    );
     let detector = if CONNECTED {
-        filter::<L, ARMABLE>(side, &mut s.side, &mut s.side_run, &s.ramps, armed_after)
+        filter::<L, ARMABLE>(side, &mut s.side, &mut s.side_run, &s.ramps, armed_after).0
     } else {
         tap
     };
-    (tap, detector)
+    (tap, shelf, detector)
 }
 
 /// One frame's linked detector level in dB of one channel: the lane's prepared link law, as its
@@ -197,8 +224,11 @@ pub(crate) fn detector_level<L: Lane, const GLIDE: bool>(
 
 /// One channel's back half: the linked level, the downward hard-knee gain law and the output
 /// arm. A zero gain word selects the dry word on the wideband and split arms, so the split arm at
-/// rest is `x` exactly, not `x + 0 b`.
+/// rest is `x` exactly, not `x + 0 b`. The split arm crossfades, by the detector word, the band
+/// cut `x - (1 - g) tap` and the high shelf `g (x - v2s) + v2s`; the crossfade's endpoints are
+/// selected, so the band detector's split is its own bits.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn back<L: Lane, const GLIDE: bool>(
     c: &Coef<L>,
     s: &mut Chan<L>,
@@ -206,6 +236,7 @@ fn back<L: Lane, const GLIDE: bool>(
     partner: L,
     x: L,
     tap: L,
+    shelf: L,
 ) -> L {
     let zero = L::zero();
     let level_db = detector_level::<L, GLIDE>(c, &mut s.links, own, partner);
@@ -226,8 +257,10 @@ fn back<L: Lane, const GLIDE: bool>(
     let g = applied_gain(gain_db);
     let unity = gain_db.eq(zero);
     let wide = L::select(unity, x, x.mul(g));
-    let split = L::select(unity, x, g.sub(L::splat(1.0)).fma(tap, x));
     let r = &s.ramps;
+    let cut = g.sub(L::splat(1.0)).fma(tap, x);
+    let high_shelf = g.fma(x.sub(shelf), shelf);
+    let split = L::select(unity, x, blend(cut, high_shelf, r[DETECTOR].current));
     let out = blend(blend(wide, split, r[MODE].current), tap, r[LISTEN].current);
     L::select(c.bypass.gt(zero), x, out)
 }
@@ -272,9 +305,9 @@ pub fn segment<
         let span = frame * width..frame * width + width;
         let x_left = L::load(&left[span.clone()]);
         if MONO {
-            let (tap, detector) =
+            let (tap, shelf, detector) =
                 front::<L, RAMPING, false, ARMABLE>(&mut l, x_left, x_left, armed_after);
-            back::<L, GLIDE>(coef_left, &mut l, detector, detector, x_left, tap)
+            back::<L, GLIDE>(coef_left, &mut l, detector, detector, x_left, tap, shelf)
                 .store(&mut left[span]);
             continue;
         }
@@ -287,12 +320,12 @@ pub fn segment<
         } else {
             (x_left, x_right)
         };
-        let (tap_l, det_l) =
+        let (tap_l, shelf_l, det_l) =
             front::<L, RAMPING, CONNECTED, ARMABLE>(&mut l, x_left, s_left, armed_after);
-        let (tap_r, det_r) =
+        let (tap_r, shelf_r, det_r) =
             front::<L, RAMPING, CONNECTED, ARMABLE>(&mut r, x_right, s_right, armed_after);
-        let out_left = back::<L, GLIDE>(coef_left, &mut l, det_l, det_r, x_left, tap_l);
-        let out_right = back::<L, GLIDE>(coef_right, &mut r, det_r, det_l, x_right, tap_r);
+        let out_left = back::<L, GLIDE>(coef_left, &mut l, det_l, det_r, x_left, tap_l, shelf_l);
+        let out_right = back::<L, GLIDE>(coef_right, &mut r, det_r, det_l, x_right, tap_r, shelf_r);
         out_left.store(&mut left[span.clone()]);
         out_right.store(&mut right[span]);
     }

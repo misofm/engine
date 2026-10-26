@@ -55,19 +55,30 @@ use effect_runtime::svf::{RAMP_PATH_NORM_TOLERANCE, transition_norm};
 use lane::kernels::{SvfState, silence_advance, silence_skip_block, svf_state_held};
 use lane::{Backend, Lane, Simd4, silence_armable_holding};
 
-use kernel::{Args, C1, Chan, Coef, LINK_COUNT, MAX_WIDTH, RAMPS, segment};
+use kernel::{Args, C1, Chan, Coef, LINK_COUNT, MAX_WIDTH, RAMPS, SHELF_C1, segment};
 
 const PARAMETER_COUNT: usize = 10;
 
 /// Samples every live word takes to reach a new target (decision 15: every live value ramps).
 const RAMP_SAMPLES: u32 = 64;
 
-/// The state words of one channel the kernel carries ([`Chan`]): four SVF integrators, two
-/// silence clocks, the gain word, then each ramp's `current`, `target`, `step` and `remaining`.
-const CHAN_WORDS: usize = 7 + RAMPS * 4;
+/// The leading signal words of one channel ([`Chan`]): the main and sidechain SVFs' four
+/// integrators, two silence clocks and the gain word.
+const SIGNAL_WORDS: usize = 7;
+
+/// Word index of the shelf SVF's two integrators (#1984), after each ramp's `current`, `target`,
+/// `step` and `remaining`. They follow the ramps so that every earlier word keeps its index.
+const SHELF_WORD: usize = SIGNAL_WORDS + RAMPS * 4;
+
+/// The state words of one channel the kernel carries ([`Chan`]): the signal words, the ramps,
+/// then the shelf integrators.
+const CHAN_WORDS: usize = SHELF_WORD + 2;
+
+/// The ramp words of [`CHAN_WORDS`].
+const RAMP_WORDS: core::ops::Range<usize> = SIGNAL_WORDS..SHELF_WORD;
 
 /// One channel section of the payload: the seven signal words, the ten committed values, the ramp
-/// words, then the two link weight quadruples (issue #1969, #1370 D6). The lane's link mode is
+/// words and the shelf integrators, then the two link weight quadruples (issue #1969, #1370 D6). The lane's link mode is
 /// the weights' targets (`effect_contract::link_glide_mode`), so it takes no word of its own.
 const STATE_LANE_WORDS: usize = STATE_LINK_WORD + LINK_COUNT * 4;
 
@@ -413,7 +424,7 @@ pub const DE_ESSER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
 /// The interval each live word stays inside, for a restore's path check: a parameter's domain,
 /// the slope's, every rate design over the time domains at every launch rate (the 500 ms release
 /// at 96 kHz, `2.08e-5`, to the 0.1 ms attack at 44.1 kHz, `0.2029`), the SVF words' `(0, 1)` and
-/// `k = 1/Q`'s `[1/8, 2]`, and the switches' `[0, 1]`.
+/// `k = 1/Q`'s `[1/8, 2]`, the switches' `[0, 1]` and the shelf SVF words' `(0, 1)`.
 const WORD_BOUNDS: [(f32, f32); RAMPS] = [
     (-60.0, 0.0),
     (1.0 / 20.0 - 1.0, 0.0),
@@ -427,14 +438,18 @@ const WORD_BOUNDS: [(f32, f32); RAMPS] = [
     (0.0, 1.0),
     (0.0, 1.0),
     (0.0, 1.0),
+    (0.0, 1.0),
+    (0.0, 1.0),
+    (0.0, 1.0),
 ];
 
-/// The twelve words the committed `values` design, in [`kernel`]'s ramp order.
+/// The fifteen words the committed `values` design, in [`kernel`]'s ramp order.
 ///
 /// The SVF words are the parametric EQ's `f64` design (`parametric_eq::design_svf_words_f64`, a
 /// high-pass row at 0 dB, whose `c1, a2, a3` depend on `g = tan(pi f / fs)` and `k = 1/Q` only),
-/// rounded once; `k` is the negated band mix word of that row. Out of line, so the scalar `tan`
-/// and `exp` stay out of `process_bank`.
+/// rounded once; `k` is the negated band mix word of that row. The shelf SVF's words (#1984) are
+/// the same design at the same frequency with Butterworth damping, `Q = 1/sqrt 2`, whatever the
+/// band's Q. Out of line, so the scalar `tan` and `exp` stay out of `process_bank`.
 #[inline(never)]
 fn targets(values: &[f32; PARAMETER_COUNT], sample_rate: u32) -> [f32; RAMPS] {
     let words = parametric_eq::design_svf_words_f64(
@@ -442,6 +457,14 @@ fn targets(values: &[f32; PARAMETER_COUNT], sample_rate: u32) -> [f32; RAMPS] {
         f64::from(values[0]),
         0.0,
         f64::from(values[1]),
+        1.0,
+        f64::from(sample_rate),
+    );
+    let shelf = parametric_eq::design_svf_words_f64(
+        parametric_eq::EqBandKind::HighPass,
+        f64::from(values[0]),
+        0.0,
+        core::f64::consts::FRAC_1_SQRT_2,
         1.0,
         f64::from(sample_rate),
     );
@@ -459,6 +482,9 @@ fn targets(values: &[f32; PARAMETER_COUNT], sample_rate: u32) -> [f32; RAMPS] {
         on(values[7]),
         on(values[8]),
         values[9],
+        shelf[0] as f32,
+        shelf[1] as f32,
+        shelf[2] as f32,
     ]
 }
 
@@ -505,12 +531,18 @@ fn lane_set<L: Lane>(value: &mut L, lane: usize, sample: f32) {
 /// Every word of one channel's state, in payload order ([`CHAN_WORDS`]).
 fn chan_words<L: Lane>(s: &Chan<L>) -> [L; CHAN_WORDS] {
     let mut words = [L::zero(); CHAN_WORDS];
-    words[..7].copy_from_slice(&[
+    words[..SIGNAL_WORDS].copy_from_slice(&[
         s.main.ic1, s.main.ic2, s.side.ic1, s.side.ic2, s.run, s.side_run, s.gain_db,
     ]);
-    for (chunk, ramp) in words[7..].as_chunks_mut::<4>().0.iter_mut().zip(&s.ramps) {
+    for (chunk, ramp) in words[RAMP_WORDS]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(&s.ramps)
+    {
         chunk.copy_from_slice(&[ramp.current, ramp.target, ramp.step, ramp.remaining]);
     }
+    words[SHELF_WORD..].copy_from_slice(&[s.shelf.ic1, s.shelf.ic2]);
     words
 }
 
@@ -519,10 +551,15 @@ fn chan_from_words<L: Lane>(words: &[L; CHAN_WORDS]) -> Chan<L> {
     let mut s = Chan::default();
     [s.main.ic1, s.main.ic2, s.side.ic1, s.side.ic2] = [words[0], words[1], words[2], words[3]];
     [s.run, s.side_run, s.gain_db] = [words[4], words[5], words[6]];
-    for (ramp, chunk) in s.ramps.iter_mut().zip(words[7..].as_chunks::<4>().0.iter()) {
+    for (ramp, chunk) in s
+        .ramps
+        .iter_mut()
+        .zip(words[RAMP_WORDS].as_chunks::<4>().0.iter())
+    {
         [ramp.current, ramp.target, ramp.step, ramp.remaining] =
             [chunk[0], chunk[1], chunk[2], chunk[3]];
     }
+    [s.shelf.ic1, s.shelf.ic2] = [words[SHELF_WORD], words[SHELF_WORD + 1]];
     s
 }
 
@@ -731,7 +768,12 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         self.values[lane][channel] = self.defaults[lane][channel];
         let mut words = [0.0_f32; CHAN_WORDS];
         let designs = targets(&self.values[lane][channel], self.sample_rate);
-        for (chunk, design) in words[7..].as_chunks_mut::<4>().0.iter_mut().zip(designs) {
+        for (chunk, design) in words[RAMP_WORDS]
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(designs)
+        {
             chunk[..2].copy_from_slice(&[design, design]);
         }
         set_lane_words(&mut self.state[channel], lane, &words);
@@ -741,8 +783,9 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     /// every ramp snaps to its target, the committed values stay.
     fn reset_lane_discontinuity(&mut self, channel: usize, lane: usize) {
         let mut words = lane_words(&self.state[channel], lane);
-        words[..7].fill(0.0);
-        for chunk in words[7..].as_chunks_mut::<4>().0.iter_mut() {
+        words[..SIGNAL_WORDS].fill(0.0);
+        words[SHELF_WORD..].fill(0.0);
+        for chunk in words[RAMP_WORDS].as_chunks_mut::<4>().0.iter_mut() {
             chunk[0] = chunk[1];
             chunk[2..].fill(0.0);
         }
@@ -836,15 +879,20 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         let svf = C1..C1 + 3;
         let svf_moved = svf
             .clone()
-            .any(|ramp| words[7 + ramp * 4 + 1].to_bits() != designs[ramp].to_bits());
-        for (ramp, (chunk, design)) in words[7..]
+            .any(|ramp| words[SIGNAL_WORDS + ramp * 4 + 1].to_bits() != designs[ramp].to_bits());
+        let shelf = SHELF_C1..SHELF_C1 + 3;
+        let shelf_moved = shelf
+            .clone()
+            .any(|ramp| words[SIGNAL_WORDS + ramp * 4 + 1].to_bits() != designs[ramp].to_bits());
+        for (ramp, (chunk, design)) in words[RAMP_WORDS]
             .as_chunks_mut::<4>()
             .0
             .iter_mut()
             .zip(designs)
             .enumerate()
         {
-            let restart = svf_moved && svf.contains(&ramp);
+            let restart =
+                (svf_moved && svf.contains(&ramp)) || (shelf_moved && shelf.contains(&ramp));
             if !restart && chunk[1].to_bits() == design.to_bits() {
                 continue;
             }
@@ -997,12 +1045,20 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
     /// settled ramp is an exact no-op of both segment variants.
     fn channel_rest_lanes(&self, channel: usize) -> u32 {
         let s = &self.state[channel];
-        [s.main.ic1, s.main.ic2, s.side.ic1, s.side.ic2, s.gain_db]
-            .into_iter()
-            .chain(s.ramps.iter().chain(&s.links).map(|ramp| ramp.remaining))
-            .fold(all_lanes(L::WIDTH), |mask, word| {
-                mask & positive_zero_lanes(word)
-            })
+        [
+            s.main.ic1,
+            s.main.ic2,
+            s.side.ic1,
+            s.side.ic2,
+            s.shelf.ic1,
+            s.shelf.ic2,
+            s.gain_db,
+        ]
+        .into_iter()
+        .chain(s.ramps.iter().chain(&s.links).map(|ramp| ramp.remaining))
+        .fold(all_lanes(L::WIDTH), |mask, word| {
+            mask & positive_zero_lanes(word)
+        })
     }
 
     /// The clocks a `+0.0` block of `frames` frames moves, on the lanes of `mask` and the first
@@ -1040,14 +1096,20 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         let channels = if MONO { 1 } else { 2 };
         for (channel, block) in [left, right].into_iter().enumerate().take(channels) {
             let s = &self.state[channel];
-            let mut words = [0.0_f32; 5 * MAX_WIDTH];
-            for (index, word) in [s.gain_db, s.main.ic1, s.main.ic2, s.side.ic1, s.side.ic2]
-                .into_iter()
-                .enumerate()
-            {
+            let state = [
+                s.gain_db,
+                s.main.ic1,
+                s.main.ic2,
+                s.side.ic1,
+                s.side.ic2,
+                s.shelf.ic1,
+                s.shelf.ic2,
+            ];
+            let mut words = [0.0_f32; 7 * MAX_WIDTH];
+            for (index, word) in state.into_iter().enumerate() {
                 word.store(&mut words[index * width..(index + 1) * width]);
             }
-            let words = &words[..5 * width];
+            let words = &words[..state.len() * width];
             if check_block::<L>(block) && check_block::<L>(words) {
                 continue;
             }
@@ -1097,9 +1159,9 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             .iter()
             .zip(&coef(&self.coef[1]))
             .all(|(a, b)| lane_get(*a, lane).to_bits() == lane_get(*b, lane).to_bits())
-            && designed(l)[7..]
+            && designed(l)[RAMP_WORDS]
                 .iter()
-                .zip(&designed(r)[7..])
+                .zip(&designed(r)[RAMP_WORDS])
                 .all(|(a, b)| a.to_bits() == b.to_bits())
             && l.links.iter().zip(&r.links).all(|(a, b)| {
                 link_lane(a, lane)
@@ -1125,7 +1187,10 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         {
             let words = lane_words(&self.state[channel], lane);
             let values = &self.values[lane][channel];
-            let all = words[..7].iter().chain(values).chain(&words[7..]);
+            let all = words[..SIGNAL_WORDS]
+                .iter()
+                .chain(values)
+                .chain(&words[SIGNAL_WORDS..]);
             for (index, &word) in all.enumerate() {
                 payload::write_f32(bytes, index, word);
             }
@@ -1147,14 +1212,14 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         let read = |index: usize| payload::read_f32(bytes, index);
         let mut values = [0.0_f32; PARAMETER_COUNT];
         for (index, value) in values.iter_mut().enumerate() {
-            *value = read(7 + index);
+            *value = read(SIGNAL_WORDS + index);
             if is_negative_zero(*value) || !parameter_value_valid(&SPECS[index], *value) {
                 return Err(state_error("effect.state.parameter"));
             }
         }
         let mut words = [0.0_f32; CHAN_WORDS];
         for (index, word) in words.iter_mut().enumerate() {
-            *word = read(if index < 7 {
+            *word = read(if index < SIGNAL_WORDS {
                 index
             } else {
                 index + PARAMETER_COUNT
@@ -1162,6 +1227,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         }
         let gain = words[6];
         if !check_block::<f32>(&words[..4])
+            || !check_block::<f32>(&words[SHELF_WORD..])
             || !integral_within(words[4], RUN_MAX)
             || !integral_within(words[5], RUN_MAX)
             || !gain.is_finite()
@@ -1171,7 +1237,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             return Err(state_error("effect.state.signal"));
         }
         let designs = targets(&values, self.sample_rate);
-        for (index, chunk) in words[7..].as_chunks::<4>().0.iter().enumerate() {
+        for (index, chunk) in words[RAMP_WORDS].as_chunks::<4>().0.iter().enumerate() {
             let ramp = LinearRamp {
                 current: chunk[0],
                 target: chunk[1],
@@ -1186,9 +1252,11 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                 return Err(state_error("effect.state.parameter"));
             }
         }
-        let current = |index: usize| words[7 + index * 4];
-        if transition_norm(current(C1), current(C1 + 1), current(C1 + 2)) > RAMP_PATH_NORM_TOLERANCE
-        {
+        let current = |index: usize| words[SIGNAL_WORDS + index * 4];
+        if [C1, SHELF_C1].into_iter().any(|c1| {
+            transition_norm(current(c1), current(c1 + 1), current(c1 + 2))
+                > RAMP_PATH_NORM_TOLERANCE
+        }) {
             return Err(state_error("effect.state.parameter"));
         }
         // Issue #1969 (#1370 D6): each weight lies in `[0, 1]` on its whole path, the engine never
@@ -1257,7 +1325,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         for (channel, restore) in parsed.iter().enumerate() {
             set_lane_words(&mut self.state[channel], lane, &restore.words);
             self.values[lane][channel] = restore.values;
-            if restore.words[7..]
+            if restore.words[RAMP_WORDS]
                 .as_chunks::<4>()
                 .0
                 .iter()
