@@ -841,14 +841,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     let lastSessionSeek: { readonly generation: bigint; readonly frame: bigint } | undefined;
     // #2100: `position()` reads one at a time (the host refuses a second unsettled report read),
     // and `play()`/`stop()` run one at a time, so their two halves never interleave.
-    let positionChain: Promise<unknown> = Promise.resolve();
-    let transportChain: Promise<unknown> = Promise.resolve();
-    const serialized = <T>(chain: "position" | "transport", run: () => Promise<T>): Promise<T> => {
-      const previous = chain === "position" ? positionChain : transportChain;
-      const next = previous.then(run, run);
-      const settledNext = next.catch(() => undefined);
-      if (chain === "position") positionChain = settledNext;
-      else transportChain = settledNext;
+    // #2116: `planLatency()` reads one at a time too (the host refuses a second unsettled read).
+    const chains: Record<"position" | "transport" | "planLatency", Promise<unknown>> = {
+      position: Promise.resolve(),
+      transport: Promise.resolve(),
+      planLatency: Promise.resolve(),
+    };
+    const serialized = <T>(chain: keyof typeof chains, run: () => Promise<T>): Promise<T> => {
+      const next = chains[chain].then(run, run);
+      chains[chain] = next.catch(() => undefined);
       return next;
     };
     // #2100: the newest `play()`/`stop()` call, and the wake of the one call that waits for its
@@ -937,8 +938,6 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       return undefined;
     };
-    // #2116: the host refuses a second unsettled latency read, so this engine sends one at a time.
-    let planLatencyChain: Promise<unknown> = Promise.resolve();
     const readPlanLatency = async (): Promise<PlanLatency> => {
       let result: number;
       let latency: Awaited<ReturnType<MisoAudioWorkletHost["planLatency"]>>["latency"] = null;
@@ -1556,9 +1555,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       },
       planLatency: () => {
         if (closed) return Promise.reject(new MisoUsageError("the browser engine is closed"));
-        const next = planLatencyChain.then(readPlanLatency, readPlanLatency);
-        planLatencyChain = next.catch(() => undefined);
-        return next;
+        return serialized("planLatency", readPlanLatency);
       },
       play: () => transportCall("playing"),
       stop: () => transportCall("stopped"),

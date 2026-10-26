@@ -246,7 +246,6 @@ export interface EngineStatus {
   readonly memoryBytes: number;
 }
 
-/** One copied decimated meter window. No field retains a view onto mutable Wasm memory. */
 /**
  * The output latency and tail of the plan that renders now (#2116): the words of the C ABI's plan
  * resource report (`latency_samples`, `tail_kind`, `tail_samples`), the same on both hosts.
@@ -283,6 +282,7 @@ export function planLatencyOf(samples: bigint, tailKind: bigint, tailSamples: bi
   });
 }
 
+/** One copied decimated meter window. No field retains a view onto mutable Wasm memory. */
 export interface MeterFrame {
   readonly tag: "miso.meter.v1";
   readonly sequence: bigint;

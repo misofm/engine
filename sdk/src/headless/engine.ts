@@ -5,9 +5,9 @@ import { MAXIMUM_DOCUMENT_BYTES, WasmBoundary } from "../core/boundary.ts";
 import type {
   ControlEvent,
   EngineCallResult,
-  PlanLatency,
   EngineStatus,
   MeterFrame,
+  PlanLatency,
   SessionMap,
   SessionShape,
 } from "../core/boundary.ts";
