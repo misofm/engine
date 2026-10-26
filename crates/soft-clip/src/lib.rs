@@ -612,6 +612,7 @@ impl<L: Lane> Channel<L> {
         self.history.pos = 0;
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Zeroes one lane's rows of every history, leaving every other lane bit-unchanged.
     ///
     /// The shared cursor is not moved. It need not be: every row of the lane is zero, so the ring
@@ -629,7 +630,9 @@ impl<L: Lane> Channel<L> {
             }
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset_full`](Self::reset_full) for one lane (issue #2131): its rows of every history are
     /// zeroed and its ramps rest at `defaults`, and every other lane and the shared cursor are left
     /// bit-unchanged, as in [`reset_lane_discontinuity`](Self::reset_lane_discontinuity).
@@ -640,7 +643,9 @@ impl<L: Lane> Channel<L> {
             set_lane(self.state.field_mut(parameter), lane, value);
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset_discontinuity`](Self::reset_discontinuity) for one lane: its rows of every history
     /// are zeroed and its ramps snapped, and every other lane is left bit-unchanged (issue #1092).
     /// The shared cursor is not moved ([`clear_lane_rows`](Self::clear_lane_rows)), so this is
@@ -652,6 +657,7 @@ impl<L: Lane> Channel<L> {
             set_lane(self.state.field_mut(parameter), lane, ramp.current);
         }
     }
+    // REALTIME_POLICY_END
 
     /// Renders one AoSoA block, splitting it wherever a D11 ramp reaches its target.
     ///
@@ -1246,6 +1252,7 @@ impl<L: Lane> SoftClip<L> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
     /// [`reset`](Self::reset) on both channels, and nothing of any other lane. Each channel's
     /// shared cursor stays where it is, as the D7 recovery leaves it: the lane's rows are all zero,
@@ -1267,6 +1274,7 @@ impl<L: Lane> SoftClip<L> {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     /// Renders one block of both channels and applies the master plan §4.4 boundary check.
     ///
@@ -1707,9 +1715,11 @@ impl PreparedNativeEffect for PreparedSoftClip {
         self.inner.heap_bytes()
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
@@ -1772,9 +1782,11 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         warmup_samples(declared_latency)
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
         self.inner.reset_lane(lane, kind);
     }
+    // REALTIME_POLICY_END
     fn retained_bytes(&self) -> u64 {
         self.inner.heap_bytes()
     }

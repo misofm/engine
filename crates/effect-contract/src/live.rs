@@ -2786,7 +2786,9 @@ impl BypassShunt {
             settled_dry,
         );
     }
+    // REALTIME_POLICY_END
 }
+// REALTIME_POLICY_BEGIN
 
 /// The body of [`BypassShunt::crossfade`] over planes and their aligned dry words.
 #[inline(never)]
@@ -2858,8 +2860,10 @@ fn crossfade_planes<L: Lane>(
         }
     }
 }
+// REALTIME_POLICY_END
 
 impl BypassShunt {
+    // REALTIME_POLICY_BEGIN
     /// Crossfade a bank's interleaved wet block against the captured dry block, in place, one
     /// vector per frame and channel, each lane along its own ramp (#1341 D4).
     ///

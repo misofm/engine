@@ -965,6 +965,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`discontinuity_reset`](Self::discontinuity_reset) on lane `track` alone (issue #1340, D1):
     /// that lane's four crossover words, both smoother words and its silence clock go to `+0.0`
     /// and its track's ramps snap, which leaves every ramp's step `+0.0`, so the lane can rest
@@ -983,6 +984,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
             ramp.snap();
         }
     }
+    // REALTIME_POLICY_END
 
     /// Clears history. Coefficients and parameters are deliberately untouched. A link glide in
     /// flight snaps to its target, the lane's mode (issue #1367, #1370's rule).
@@ -1024,6 +1026,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// The whole-side reset of `kind` on lane `track` alone (issue #2131): the D7 recovery's
     /// words ([`discontinuity_reset_lane`](Self::discontinuity_reset_lane)), then the lane's link
     /// glide snapped to its target as [`discontinuity_reset`](Self::discontinuity_reset) snaps
@@ -1039,6 +1042,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
             self.seed_lane_defaults(track);
         }
     }
+    // REALTIME_POLICY_END
 }
 
 /// One prepared bank of `W` tracks: the whole effect, at one width.
@@ -1186,6 +1190,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset`](Self::reset) for lane `lane` alone (issue #2131): both sides' words of that lane
     /// ([`Side::reset_lane`]), and for `FullToDefaults` its link weights at rest at its mode. A
     /// lane past the width changes nothing. The silence counters are per lane; the bank's silent
@@ -1201,6 +1206,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             self.rest_links(lane);
         }
     }
+    // REALTIME_POLICY_END
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2733,9 +2739,11 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
         true
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         self.instance.reset(kind);
     }
+    // REALTIME_POLICY_END
 
     /// Issue #1871: `Instance::designed_channel_symmetry` on lane 0.
     fn channel_symmetry(&self) -> bool {
@@ -2790,6 +2798,7 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBank<L, W> {
+    // REALTIME_POLICY_BEGIN
     /// Issue #2131: [`Instance::reset_lane`], withdrawing the silent claim as
     /// [`reset`](PreparedNativeEffectBank::reset) withdraws it.
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
@@ -2799,6 +2808,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         self.silent_fixed_point = false;
         self.instance.reset_lane(lane, kind);
     }
+    // REALTIME_POLICY_END
     /// Every field is inline: this instance owns no heap (#1074).
     fn retained_bytes(&self) -> u64 {
         0

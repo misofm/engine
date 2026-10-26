@@ -778,13 +778,16 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     }
     // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// Clears one lane of one channel back to its prepared defaults: gain, phase, hold and resting
     /// ramps. This is `ResetKind::FullToDefaults` for one lane, and it is also the D7 recovery
     /// action for a lane whose block failed the boundary check.
     fn reset_lane_full(&mut self, channel: usize, lane: usize) {
         let _ = self.seed_lane(channel, lane);
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// `ResetKind::DiscontinuityKeepParameters` for one lane: recursive state clears, smoothed
     /// values snap to their targets and unsmoothed times are kept.
     fn reset_lane_discontinuity(&mut self, channel: usize, lane: usize) {
@@ -805,6 +808,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             lane_set(&mut ramp.remaining, lane, 0.0);
         }
     }
+    // REALTIME_POLICY_END
 
     fn reset(&mut self, kind: ResetKind) {
         for lane in 0..L::WIDTH {
@@ -813,6 +817,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         self.ramp_frames_left = 0;
     }
 
+    // REALTIME_POLICY_BEGIN
     /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
     /// [`reset`](Self::reset) on both channels, and nothing of any other lane. The bank-level
     /// `ramp_frames_left` stays: it only chooses where `run_block` splits a block, no output bit
@@ -835,6 +840,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             self.rest_link(lane);
         }
     }
+    // REALTIME_POLICY_END
 
     /// Validates one block's automation spans for one lane and points its ramps at the accepted
     /// values. The division that D11 permits happens exactly here, in
@@ -1578,9 +1584,11 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
         0
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         PreparedGate::reset(self, kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut reports = [ProcessReport::default(); MAX_WIDTH];

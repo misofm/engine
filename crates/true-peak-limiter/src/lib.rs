@@ -831,6 +831,7 @@ impl ChannelState {
         self.release[lane] = LinearRamp::fixed(release_coefficient(values[1], rate));
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset_to_defaults`](Self::reset_to_defaults) for lane `lane` alone: the D7 recovery of
     /// one lane of a bank (issue #1091). Every other lane's words are untouched.
     fn reset_lane_to_defaults(
@@ -843,6 +844,7 @@ impl ChannelState {
         self.seed_lane_defaults(lane, shape, values, rate);
         self.clear_lane_runtime(lane, shape);
     }
+    // REALTIME_POLICY_END
 
     /// `DiscontinuityKeepParameters`: the same runtime words, ramps snapped to their targets, a
     /// link glide included: it lands on the lane's mode (issue #1370).
@@ -933,6 +935,7 @@ impl ChannelState {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`clear_runtime`](Self::clear_runtime) for lane `lane` alone, word for word: the same list,
     /// written at that lane's stride of every ring (issue #1091).
     ///
@@ -964,6 +967,7 @@ impl ChannelState {
         self.phase[lane] = 0;
         self.box_sum[lane] = self.lane[lane].window as f32;
     }
+    // REALTIME_POLICY_END
 
     /// The lanes of this channel whose every running word is exactly what [`clear_runtime`]
     /// writes, and whose two ramps are at rest: bit `l` set means one block of exact `+0.0` input
@@ -4280,6 +4284,7 @@ impl<L: Lane> LimiterCore<L> {
         self.gain_linked = lane_shapes_agree(&self.left, &self.right);
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset`](Self::reset) for lane `lane` alone (issue #2131), from the D7 recovery's pieces.
     ///
     /// Both channels of the lane take [`reset`](Self::reset)'s words: for `FullToDefaults` the
@@ -4330,6 +4335,7 @@ impl<L: Lane> LimiterCore<L> {
             && left.box_sum[lane].to_bits() == right.box_sum[lane].to_bits()
             && left.reduction[lane].to_bits() == right.reduction[lane].to_bits();
     }
+    // REALTIME_POLICY_END
 
     /// Runs one block and applies the master plan §4.4 boundary check (decision D7).
     ///
@@ -5563,9 +5569,11 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
         true
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         self.core.reset(kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         // #182 S2, as in `process_bank`.
@@ -5609,10 +5617,12 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
+    // REALTIME_POLICY_BEGIN
     /// Issue #2131: see [`LimiterCore::reset_lane`].
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
         self.core.reset_lane(lane, kind);
     }
+    // REALTIME_POLICY_END
     fn retained_bytes(&self) -> u64 {
         self.core.heap_bytes()
     }

@@ -769,6 +769,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         self.active & (1 << lane) != 0
     }
 
+    // REALTIME_POLICY_BEGIN
     /// `ResetKind::FullToDefaults` for one lane and channel, and the D7 recovery: the prepared
     /// values are committed again, every signal word is `+0.0` and every ramp rests at its design.
     fn reset_lane_full(&mut self, channel: usize, lane: usize) {
@@ -785,7 +786,9 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         }
         set_lane_words(&mut self.state[channel], lane, &words);
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// `ResetKind::DiscontinuityKeepParameters` for one lane and channel: the signal words clear,
     /// every ramp snaps to its target, the committed values stay.
     fn reset_lane_discontinuity(&mut self, channel: usize, lane: usize) {
@@ -798,6 +801,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         }
         set_lane_words(&mut self.state[channel], lane, &words);
     }
+    // REALTIME_POLICY_END
 
     fn reset(&mut self, kind: ResetKind) {
         for lane in 0..L::WIDTH {
@@ -806,6 +810,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         self.ramp_frames_left = 0;
     }
 
+    // REALTIME_POLICY_BEGIN
     /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
     /// [`reset`](Self::reset) on both channels, its silence clocks included, and nothing of any
     /// other lane. The bank-level `ramp_frames_left` stays: it only chooses where `run_block`
@@ -833,6 +838,7 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
             self.rest_link(lane);
         }
     }
+    // REALTIME_POLICY_END
 
     /// Validates one block's spans for one lane, commits the accepted values and retargets the
     /// ramps whose design moved. The one division D11 permits happens in `LinearRamp::set_target`.
@@ -1432,9 +1438,11 @@ impl<const CONNECTED: bool> PreparedNativeEffect for DeEsser<f32, CONNECTED> {
         0
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         DeEsser::reset(self, kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut reports = [ProcessReport::default(); MAX_WIDTH];
