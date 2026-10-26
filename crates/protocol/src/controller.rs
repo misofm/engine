@@ -22,21 +22,20 @@ use crate::{
     ControlListPage, ControlListRequest, ControlStatePage, CounterSnapshot, CounterSnapshotRef,
     CounterTelemetryRecord, CounterValue, CountersRequest, DecodeError, DecodeScratch,
     DecodedCommandPayload, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
-    EditPath, EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord,
-    NonOkResponse, ObservationEnded, ObservationReadPage, ObservationReadRequest,
-    ObservationTapKey, PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport,
-    ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest, ResponseResult, SampleTime,
-    SessionCommitted, SessionEdit, SessionReplaceRequest, SessionRevision, SessionSnapshot,
-    SessionStore, SessionStoreError, SpectrumCaptureReply, SpectrumCaptureRequest,
-    SpectrumConfigureRequest, SpectrumConfigured, SpectrumStreamReply, SpectrumStreamRequest,
-    StatusCode, SuccessResponsePayload, TelemetryConfiguration, TelemetryKey, TelemetryRecord,
-    TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
-    TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    EditPath, EncodeError, EventPayload, ExpectedRevision, LoudnessReply, LoudnessRequest,
+    MessageId, MeterBatch, MeterRecord, NonOkResponse, ObservationEnded, ObservationReadPage,
+    ObservationReadRequest, ObservationTapKey, PreparedSessionTransaction, ProtocolCodec,
+    ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
+    ResponseReady, ResponseResult, ResponseTarget, SampleTime, SessionCommitted, SessionEdit,
+    SessionReplaceRequest, SessionRevision, SessionSnapshot, SessionStore, SessionStoreError,
+    SpectrumCaptureReply, SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured,
+    SpectrumStreamReply, SpectrumStreamRequest, StatusCode, SuccessResponsePayload,
+    TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
+    TransportSnapshot, TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame,
+    TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
-use crate::{
-    ControlBody, ControlEntry, ParameterChannel, ResponseCurves, ResponseTarget, TransportState,
-};
+use crate::{ControlBody, ControlEntry, ParameterChannel, ResponseCurves, TransportState};
 
 /// Bounded replay storage configuration for one logical endpoint lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -206,6 +205,9 @@ pub struct ProviderFeatures {
     /// #1594 D10, #1595 D8): a host whose session serves the spectrum reads on its own transport
     /// advertises the three together.
     pub spectrum: bool,
+    /// `LOUDNESS` (capability flag bit 17, #2115): a host whose session serves the output
+    /// loudness meter on its own transport advertises it.
+    pub loudness: bool,
     /// `OBSERVATION_READ` (capability flag bit 15, #1586 D6): a host whose session serves the
     /// read and the `Observe` edit on its own transport advertises it. It rides the session
     /// family, so it needs `session_events`.
@@ -225,6 +227,7 @@ impl ProviderFeatures {
         transport_events: true,
         observation_events: true,
         spectrum: true,
+        loudness: true,
         observation: true,
     };
     /// Disable every optional provider and event family.
@@ -239,6 +242,7 @@ impl ProviderFeatures {
         transport_events: false,
         observation_events: false,
         spectrum: false,
+        loudness: false,
         observation: false,
     };
 }
@@ -1136,6 +1140,11 @@ pub enum ControlCommand<'a> {
     SpectrumStream {
         request: SpectrumStreamRequest,
     },
+    /// `LOUDNESS` (#2115): executed by the session, refused here as
+    /// [`Self::SpectrumConfigure`] is.
+    Loudness {
+        request: LoudnessRequest,
+    },
     /// `OBSERVATION_READ` (#1586): executed by the session, refused here as
     /// [`Self::SpectrumConfigure`] is.
     ObservationRead {
@@ -1171,6 +1180,7 @@ impl ControlCommand<'_> {
             Self::SpectrumConfigure { .. } => MessageId::SpectrumConfigure,
             Self::SpectrumCapture { .. } => MessageId::SpectrumCapture,
             Self::SpectrumStream { .. } => MessageId::SpectrumStream,
+            Self::Loudness { .. } => MessageId::Loudness,
             Self::ObservationRead { .. } => MessageId::ObservationRead,
         }
     }
@@ -1204,9 +1214,9 @@ pub struct ControllerResponse {
 
 #[derive(Clone, Copy)]
 struct CapabilitySet {
-    commands: [u16; 16],
+    commands: [u16; 17],
     command_len: u8,
-    events: [u16; 6],
+    events: [u16; 7],
     event_len: u8,
     flags: CapabilityFlags,
 }
@@ -1385,6 +1395,8 @@ pub enum SessionCommand {
     SpectrumCapture(SpectrumCaptureRequest),
     /// `SPECTRUM_STREAM` (#1595).
     SpectrumStream(SpectrumStreamRequest),
+    /// `LOUDNESS` (#2115).
+    Loudness(LoudnessRequest),
 }
 
 /// The success reply of a command the session executed. A reply borrows what it carries (a
@@ -1397,6 +1409,8 @@ pub enum SessionCommandReply<'a> {
     SpectrumCaptured(SpectrumCaptureReply<'a>),
     /// The `SPECTRUM_STREAM` reply.
     SpectrumStreamed(SpectrumStreamReply<'a>),
+    /// The `LOUDNESS` reply (#2115).
+    Loudness(LoudnessReply),
 }
 
 /// A command the session executes, decoded and checked, whose replay entry is planned against
@@ -1622,10 +1636,17 @@ pub enum EventEgressError {
     Disabled,
     /// Prepared reliable diagnostic storage has no free slot.
     DiagnosticStorageFull,
+    /// A reliable `RESPONSE_READY` slot finds no retained event of its sequence. An internal
+    /// invariant: the event fills the cell together with its slot, and the cell stays until the
+    /// slot's frame is delivered (#1578 D4). Reported, never expected.
+    ResponseReadyMissing,
     /// A reliable `OBSERVATION_ENDED` slot names a cell that holds no event. An internal
     /// invariant: the commit fills the cell before it queues the slot, and the cell stays until
     /// the slot's frame is delivered. Reported, never expected.
     ObservationEndedCellMissing,
+    /// The endpoint's one `RESPONSE_READY` cell holds an event whose frame has not reached caller
+    /// output yet (#1578 D4).
+    ResponseReadyOccupied,
     /// A reliable queue rejected the original event without dropping or coalescing it.
     ReliableQueueFull(QueueReport),
     /// The typed caller-buffer encoder rejected the requested event/output.
@@ -1639,6 +1660,37 @@ impl fmt::Display for EventEgressError {
 }
 
 impl std::error::Error for EventEgressError {}
+
+/// Why [`ProtocolController::enqueue_response_ready_event`] queued nothing: the reason and the
+/// event, returned unchanged so the host keeps it and retries (#1578 D4). No event is dropped.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResponseReadyEnqueueError {
+    /// Why the event was not queued.
+    pub reason: EventEgressError,
+    /// The event, as the caller passed it.
+    pub event: ResponseReady,
+}
+
+impl fmt::Display for ResponseReadyEnqueueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:?}", self.reason)
+    }
+}
+
+impl std::error::Error for ResponseReadyEnqueueError {}
+
+/// The backpressure record of a strip `RESPONSE_GET` refused while the session's one capture is
+/// in flight or its `RESPONSE_READY` is unread (#1578 D3): capacity 1, occupancy 1, no generation.
+pub(crate) const RESPONSE_CAPTURE_BACKPRESSURE: Backpressure = Backpressure {
+    queue_kind: BackpressureQueueKind::ResponseCapture,
+    capacity: 1,
+    occupancy: 1,
+    requested_items: 1,
+    generation: None,
+    retry_boundary: None,
+    requested_bytes: None,
+    available_bytes: None,
+};
 
 const EMPTY_METER_RECORD: MeterRecord = MeterRecord {
     handle: 1,
@@ -1710,6 +1762,11 @@ pub struct ProtocolController<P: ControlProvider> {
     /// `pending_reliable_event` until its frame reaches the caller. A cell is taken by a commit
     /// whose room the queue reserved, so a commit never finds none.
     observation_ended_cells: Box<[Option<ObservationEnded>]>,
+    /// The one retained `RESPONSE_READY` event (#1578 D4): filled by
+    /// [`Self::enqueue_response_ready_event`] together with its queued slot, emptied only after the
+    /// slot's complete frame reached caller output. While it is full, a strip `RESPONSE_GET` is
+    /// refused with `BACKPRESSURE` `response.capture.pending`.
+    response_ready: Option<ResponseReady>,
     pending_reliable_event: Option<ReliableSlot>,
     pending_meter_record: Option<TelemetryRecord>,
     pending_counter_record: Option<CounterTelemetryRecord>,
@@ -1754,6 +1811,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             telemetry_generation: 0,
             diagnostic_event_slots: diagnostics.into_boxed_slice(),
             observation_ended_cells: observation_ended_cells.into_boxed_slice(),
+            response_ready: None,
             pending_reliable_event: None,
             pending_meter_record: None,
             pending_counter_record: None,
@@ -1970,6 +2028,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumStream(request) => {
                 ControlCommand::SpectrumStream { request }
             }
+            DecodedCommandPayload::Loudness(request) => ControlCommand::Loudness { request },
             DecodedCommandPayload::ObservationRead(request) => {
                 ControlCommand::ObservationRead { request }
             }
@@ -2203,7 +2262,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         if matches!(
             header.message_id,
             MessageId::SpectrumConfigure | MessageId::SpectrumCapture | MessageId::SpectrumStream
-        ) {
+        ) || (header.message_id == MessageId::Loudness && self.config.provider_features.loudness)
+        {
             return self.prepare_session_command(input, scratch, output_capacity, header);
         }
         if header.message_id == MessageId::ObservationRead && self.serves_observation_read() {
@@ -2272,6 +2332,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 DecodedCommandPayload::SpectrumStream(request) => {
                     SessionCommand::SpectrumStream(request)
                 }
+                DecodedCommandPayload::Loudness(request) => SessionCommand::Loudness(request),
                 _ => {
                     let outcome = refusal(self, StatusCode::Internal);
                     return self.prepare_planned_immediate(
@@ -2527,6 +2588,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                 return self.complete_session_borrowed(
                     prepared,
                     SuccessResponsePayload::SpectrumStreamed(value),
+                    output,
+                );
+            }
+            SessionCommandReply::Loudness(value) => {
+                return self.complete_session_borrowed(
+                    prepared,
+                    SuccessResponsePayload::Loudness(value),
                     output,
                 );
             }
@@ -3505,6 +3573,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumStream(request) => {
                 ControlCommand::SpectrumStream { request }
             }
+            DecodedCommandPayload::Loudness(request) => ControlCommand::Loudness { request },
             DecodedCommandPayload::ObservationRead(request) => {
                 ControlCommand::ObservationRead { request }
             }
@@ -3935,6 +4004,78 @@ impl<P: ControlProvider> ProtocolController<P> {
         Ok(())
     }
 
+    /// Reliably queue the `RESPONSE_READY` event of one strip `RESPONSE_GET` (#1578 D4). The event
+    /// moves into the endpoint's one response-ready cell with the next reliable event sequence (it
+    /// overwrites `event.sequence`), and a [`ReliablePayload::ResponseReady`] slot that names it
+    /// enters the reliable event queue. The cell is emptied only after that slot's complete frame
+    /// reached caller output in [`Self::dequeue_reliable_event_frame_into`].
+    ///
+    /// # Errors
+    ///
+    /// [`ResponseReadyEnqueueError`], which returns the event unchanged, when a structural
+    /// transaction is outstanding or the reliable event queue is full
+    /// ([`EventEgressError::ReliableQueueFull`]), the cell is occupied
+    /// ([`EventEgressError::ResponseReadyOccupied`]), the endpoint does not serve `RESPONSE_GET`
+    /// ([`EventEgressError::Disabled`]), or the event's frame cannot be encoded or the sequence is
+    /// exhausted ([`EventEgressError::Encode`]). Nothing changes on an error.
+    // The refusal returns the event by value, so the host keeps it without a copy or an
+    // allocation and retries; nothing is dropped (#1578 D4).
+    #[allow(clippy::result_large_err)]
+    pub fn enqueue_response_ready_event(
+        &mut self,
+        revision: SessionRevision,
+        mut event: ResponseReady,
+    ) -> Result<(), ResponseReadyEnqueueError> {
+        let refuse = |reason, event| Err(ResponseReadyEnqueueError { reason, event });
+        if self.structural_outstanding() {
+            let report = self.queues.report(crate::QueueKind::ReliableEvent);
+            return refuse(EventEgressError::ReliableQueueFull(report), event);
+        }
+        if !self.config.provider_features.response {
+            return refuse(EventEgressError::Disabled, event);
+        }
+        if self.response_ready.is_some() {
+            return refuse(EventEgressError::ResponseReadyOccupied, event);
+        }
+        let event_sequence = self.next_reliable_event_sequence;
+        if event_sequence.checked_add(1).is_none() {
+            return refuse(EventEgressError::Encode(EncodeError::LimitExceeded), event);
+        }
+        let previous_sequence = event.sequence;
+        event.sequence = event_sequence;
+        // An empty output sizes the complete frame with every check the egress encode makes.
+        let probe = self.codec.encode_event_frame_into(
+            &TypedEventFrame {
+                revision,
+                payload: EventPayload::ResponseReady(&event),
+            },
+            &mut [],
+        );
+        if let Err(error) = probe
+            && !matches!(error, EncodeError::OutputTooSmall { .. })
+        {
+            event.sequence = previous_sequence;
+            return refuse(EventEgressError::Encode(error), event);
+        }
+        if let Err(error) = self
+            .queues
+            .try_enqueue_event(ReliableSlot::response_ready(revision, event_sequence))
+        {
+            event.sequence = previous_sequence;
+            return refuse(EventEgressError::ReliableQueueFull(error.report), event);
+        }
+        self.response_ready = Some(event);
+        self.next_reliable_event_sequence = event_sequence.saturating_add(1);
+        Ok(())
+    }
+
+    /// Whether the endpoint's one `RESPONSE_READY` cell holds an event whose frame has not reached
+    /// caller output yet (#1578 D4, R1): a host releases its capture once this is false again.
+    #[must_use]
+    pub const fn response_ready_pending(&self) -> bool {
+        self.response_ready.is_some()
+    }
+
     /// Dequeue and encode one complete reliable event frame. A short caller output buffer leaves
     /// the exact queued event pending, so retrying with the required size neither loses nor
     /// reorders reliable events.
@@ -3961,6 +4102,9 @@ impl<P: ControlProvider> ProtocolController<P> {
                 && let Some(storage) = self.observation_ended_cells.get_mut(index)
             {
                 *storage = None;
+            }
+            if let ReliablePayload::ResponseReady { .. } = slot.payload {
+                self.response_ready = None;
             }
             self.pending_reliable_event = None;
         }
@@ -4067,6 +4211,20 @@ impl<P: ControlProvider> ProtocolController<P> {
                     &TypedEventFrame {
                         revision: slot.revision,
                         payload: EventPayload::ObservationEnded(event),
+                    },
+                    output,
+                )
+            }
+            ReliablePayload::ResponseReady { event_sequence } => {
+                let event = self
+                    .response_ready
+                    .as_ref()
+                    .filter(|event| event.sequence == event_sequence)
+                    .ok_or(EventEgressError::ResponseReadyMissing)?;
+                self.codec.encode_event_frame_into(
+                    &TypedEventFrame {
+                        revision: slot.revision,
+                        payload: EventPayload::ResponseReady(event),
                     },
                     output,
                 )
@@ -4314,6 +4472,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             ControlCommand::SpectrumConfigure { .. }
             | ControlCommand::SpectrumCapture { .. }
             | ControlCommand::SpectrumStream { .. }
+            | ControlCommand::Loudness { .. }
             | ControlCommand::ObservationRead { .. } => self.non_ok(StatusCode::Unavailable, None),
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
@@ -4334,14 +4493,24 @@ impl<P: ControlProvider> ProtocolController<P> {
                 }
             }
             ControlCommand::ResponseGet { request } => {
+                // #1578 D3 (R2): one capture per session. A strip request is refused while the
+                // last one's `RESPONSE_READY` is unread, before the provider sees it.
+                if matches!(request.target, ResponseTarget::Strip(_))
+                    && self.response_ready.is_some()
+                {
+                    return self.response_get_refusal(ResponseProviderError {
+                        status: StatusCode::Backpressure,
+                        code: "response.capture.pending",
+                    });
+                }
                 // A read of the committed model: nothing it touches survives the call.
                 let model = self.session.compiled().normalized_model();
                 match self.provider.response_get(model, request) {
                     Ok(reply) => match self.fit_response(&reply) {
                         Ok(()) => self.ok(Body::Response(reply)),
-                        Err(error) => self.response_error_outcome(error),
+                        Err(error) => self.response_get_refusal(error),
                     },
-                    Err(error) => self.response_error_outcome(error),
+                    Err(error) => self.response_get_refusal(error),
                 }
             }
             ControlCommand::TransportGet => {
@@ -4625,6 +4794,18 @@ impl<P: ControlProvider> ProtocolController<P> {
         )
     }
 
+    /// The outcome of a `RESPONSE_GET` refusal. The only `BACKPRESSURE` it answers is the session's
+    /// one capture slot, so that status carries its record (#1578 D3).
+    fn response_get_refusal(&self, error: ResponseProviderError) -> Outcome {
+        let mut outcome = self.response_error_outcome(error);
+        if error.status == StatusCode::Backpressure
+            && let Body::NonOk(payload) = &mut outcome.body
+        {
+            payload.backpressure = Some(RESPONSE_CAPTURE_BACKPRESSURE);
+        }
+        outcome
+    }
+
     fn response_error_outcome(&self, error: ResponseProviderError) -> Outcome {
         self.non_ok_value(
             error.status,
@@ -4775,11 +4956,12 @@ impl<P: ControlProvider> ProtocolController<P> {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = [0_u16; 16];
+        let mut commands = [0_u16; 17];
         let mut command_len = 0_usize;
         // The three spectrum commands are listed together, with bit 16, or not at all (#1595 D8);
         // `OBSERVATION_READ` with bit 15, on the session family (#1586 D6).
-        for id in 1_u16..=0x0013 {
+        // `LOUDNESS` with bit 17 (#2115).
+        for id in 1_u16..=0x0014 {
             let enabled = match id {
                 // The retired IDs are never advertised.
                 id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
@@ -4793,6 +4975,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 0x000f => self.serves_observation_read(),
                 0x0010..=0x0012 => features.spectrum,
                 0x0013 => session_transactions && self.config.document_replace.is_some(),
+                0x0014 => features.loudness,
                 _ => true,
             };
             if enabled {
@@ -4800,8 +4983,8 @@ impl<P: ControlProvider> ProtocolController<P> {
                 command_len += 1;
             }
         }
-        let candidates = [0x8001_u16, 0x8010, 0x8011, 0x8020, 0x8021, 0x8030];
-        let mut events = [0_u16; 6];
+        let candidates = [0x8001_u16, 0x8010, 0x8011, 0x8020, 0x8021, 0x8030, 0x8040];
+        let mut events = [0_u16; 7];
         let mut event_len = 0_usize;
         for id in candidates {
             let enabled = match id {
@@ -4811,6 +4994,8 @@ impl<P: ControlProvider> ProtocolController<P> {
                 0x8020 => features.meters,
                 0x8021 => features.counters,
                 0x8030 => features.diagnostics,
+                // `RESPONSE_READY` with `RESPONSE_GET`, under bit 14 (#1578 D1).
+                0x8040 => features.response,
                 _ => false,
             };
             if enabled {
@@ -4852,6 +5037,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if features.spectrum {
             flags |= CapabilityFlags::SPECTRUM.0;
+        }
+        if features.loudness {
+            flags |= CapabilityFlags::LOUDNESS.0;
         }
         CapabilitySet {
             commands,

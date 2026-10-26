@@ -5,7 +5,6 @@ import test from "node:test";
 import { createEngine } from "../src/browser/engine.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { createMeasurementFeeds, meterProjection } from "../src/browser/measurement.ts";
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 
 const meterFrame = () => ({
   tag: "miso.meter.v1",
@@ -209,50 +208,21 @@ test("a meter frame for another submix list is refused with sdk.meter.submix_cou
   refused({ ...busFrame(), submixGrDb: new Float32Array(1) }, ["aaa-bus", "zzz-bus"]);
 });
 
-test("the browser engine meters and observes a bus by its submix ID", async () => {
+test("the browser engine meters a bus by its submix ID", async () => {
   // Issue #1210 D4/D5 on the browser path: the engine hands the scratch shape's submixes to the
-  // meter projection and resolves observation bindings against the strips, tracks first. Red if
-  // `engine.ts` passes the track list alone to the feeds, the map, the resolver or the decoder.
+  // meter projection. Red if `engine.ts` passes the track list alone to the feeds. (The observation
+  // half went with the index map, #1590 D3: a binding names its strip by ID, and a bus tap's
+  // subscription is `capability-evals`' "a managed subscription to a bus tap".)
   const host = fakeHost();
-  const reads = [];
   Object.assign(host, {
     // The strip order the SDK reads from the core's list: the track, then the bus.
     control: scriptedControl({ strips: { tracks: ["t"], submixes: ["bus"] } }),
     onControlEvent() { return () => {}; },
-    async observationMap() {
-      return {
-        tag: "miso.observationmap.v1", result: 0, structureEpoch: 1,
-        bindings: [
-          { trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
-            nativeEffectId: "miso.compressor", tapIds: [1] },
-          { trackIndex: 1, rack: 1, effectIndex: 0, effectSlotId: "bus-comp",
-            nativeEffectId: "miso.compressor", tapIds: [1] },
-        ],
-      };
-    },
-    async readObservations(request) {
-      reads.push(request.selections);
-      return {
-        tag: "miso.observation.v1", result: 0,
-        rows: request.selections.map((selection) => ({ ...selection, status: 1,
-          sampleRateHz: 48_000, firstSample: 0n, endSample: 0n, sequence: 0n, blocks: 0,
-          leftPresent: 0, rightPresent: 0, left: 0, right: 0 })),
-      };
-    },
   });
   const engine = await openBrowser(host, {
-    liveControls: { meterBlocks: 1, observationTaps: 1 },
+    liveControls: { meterBlocks: 1 },
   }, ["bus"]);
   try {
-    const map = await engine.observationMap();
-    assert.deepEqual(map.bindings.map((binding) => binding.trackId), ["t", "bus"]);
-    const selection = (trackId, effectSlotId) => ({
-      trackId, rack: "inserts", effectSlotId, tapId: 1, channels: "both",
-    });
-    const rows = await engine.readObservations([selection("t", "comp"), selection("bus", "bus-comp")]);
-    assert.deepEqual(reads[0].map((address) => address.trackIndex), [0, 1]);
-    assert.deepEqual(rows.map((row) => row.trackId), ["t", "bus"]);
-
     const updates = [];
     await engine.subscribeMeters((update) => updates.push(update));
     host.emitMeter({
@@ -493,120 +463,6 @@ test("engine close clears measurement callbacks and releases a late successful a
   lateListener?.({ ...meterFrame(), trackCount: 1, peaks: new Float32Array([0.1, 0.2, 0.9, 0.8]), trackGrDb: new Float32Array([1]) });
   assert.equal(delivered, 0, "a late successful lease cannot revive a closed owner");
   await engine.close();
-});
-
-test("browser live controls retain the managed observation conflict hook", async () => {
-  const host = fakeHost();
-  const commands = [];
-  Object.assign(host, {
-    control: scriptedControl(),
-    async sessionMap() {
-      return {
-        tag: "miso.sessionmap.v1", result: 0, sources: [], metersAttached: true,
-      };
-    },
-    async command(request) {
-      commands.push(request.commands);
-      return {
-        tag: "miso.ack.v1", result: 0, reason: 0, rejectedIndex: 0,
-        admitted: request.commands.length, appliedAtSample: 0n,
-      };
-    },
-    onControlEvent() { return () => {}; },
-    async observationMap() {
-      return {
-        tag: "miso.observationmap.v1", result: 0, structureEpoch: 1,
-        bindings: [{ trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
-          nativeEffectId: "miso.compressor", tapIds: [1] }],
-      };
-    },
-    async readObservations(request) {
-      return {
-        tag: "miso.observation.v1", result: 0,
-        rows: request.selections.map((selection) => ({ ...selection, status: 2,
-          sampleRateHz: 48_000, firstSample: 0n, endSample: 0n, sequence: 0n, blocks: 0,
-          leftPresent: 0, rightPresent: 0, left: 0, right: 0 })),
-      };
-    },
-  });
-  const engine = await openBrowser(host, {
-    liveControls: { meterBlocks: 1, observationTaps: 1 },
-  });
-  try {
-    const managed = await engine.subscribeObservations({
-      selections: [{ trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
-      windowBlocks: 1,
-    });
-    const liveControls = await engine.liveControls();
-    const manual = liveControls.edit.track("t").insert("comp", "miso.compressor")
-      .observe("Gain Reduction", false, 1);
-    await assert.rejects(liveControls.submit(manual), /conflict/);
-    assert.equal(commands.length, 1, "the manual conflicting edit is stopped by the existing hook");
-    await managed.close();
-    assert.equal(commands.length, 2, "managed close still uses the owner bypass");
-    assert.equal(commands[0][0].kind, ABI_LAYOUT.constants.wireCommandKinds.find((row) => row.name === "observeSubscribe").value);
-    assert.equal(commands[1][0].kind, ABI_LAYOUT.constants.wireCommandKinds.find((row) => row.name === "observeUnsubscribe").value);
-  } finally {
-    await engine.close();
-  }
-});
-
-
-test("the browser engine sends an observation record that names its tap by key, whatever the map says (#1677)", async () => {
-  // A rebuild is committed: the control list is already epoch 2 (comp moved from effect 1 to 0),
-  // and the plan that renders still reports epoch 1 and comp at effect 1 until a block adopts the
-  // replacement. The record carries no index, so it is sent at once and names the same tap.
-  const host = fakeHost();
-  const strips = { tracks: ["t"], submixes: [], structureEpoch: 1n };
-  let rendered = 0n;
-  const commands = [];
-  Object.assign(host, {
-    control: scriptedControl({ strips }),
-    async sessionMap() {
-      return { tag: "miso.sessionmap.v1", result: 0, sources: [], metersAttached: true };
-    },
-    async status() { rendered += 1n; return { renderedQuanta: rendered }; },
-    async command(request) {
-      commands.push(request.commands);
-      return {
-        tag: "miso.ack.v1", result: 0, reason: 0, rejectedIndex: 0,
-        admitted: request.commands.length, appliedAtSample: 0n,
-      };
-    },
-    onControlEvent() { return () => {}; },
-    async observationMap() {
-      return {
-        tag: "miso.observationmap.v1", result: 0, structureEpoch: 1,
-        bindings: [{ trackIndex: 0, rack: 1, effectIndex: 1, effectSlotId: "comp",
-          nativeEffectId: "miso.compressor", tapIds: [1] }],
-      };
-    },
-    async readObservations(request) {
-      return {
-        tag: "miso.observation.v1", result: 0,
-        rows: request.selections.map((selection) => ({ ...selection, status: 2,
-          sampleRateHz: 48_000, firstSample: 0n, endSample: 0n, sequence: 0n, blocks: 0,
-          leftPresent: 0, rightPresent: 0, left: 0, right: 0 })),
-      };
-    },
-  });
-  const engine = await openBrowser(host, { liveControls: { meterBlocks: 1, observationTaps: 1 } });
-  try {
-    await engine.liveControls();
-    strips.structureEpoch = 2n;
-    const managed = await engine.subscribeObservations({
-      selections: [{ trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
-      windowBlocks: 1,
-    });
-    assert.equal(commands.length, 1, "one record batch");
-    assert.deepEqual(commands[0], [{
-      kind: ABI_LAYOUT.constants.wireCommandKinds.find((row) => row.name === "observeSubscribe").value,
-      rack: 1, stripId: "t", effectId: "comp", tapId: 1, windowBlocks: 1,
-    }], "the record names the tap by its key, and no index of any plan");
-    await managed.close();
-  } finally {
-    await engine.close();
-  }
 });
 
 test("telemetry shares one lease until its last subscription and isolates throwing callbacks", async () => {

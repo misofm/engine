@@ -64,16 +64,42 @@ pub struct ProviderEpoch {
     /// (its promotion exchanges them by pointer, `MeterDelivery::adopt`), and here again once it
     /// is parked. The running epoch holds empty tables, which allocate nothing.
     pub(crate) meter_tables: host_core::MeterTables,
+    /// The control half of this epoch's plan's meter frame ring (#1588 D2), for a render-half
+    /// meter fold: the frames the render half published while the plan rendered, staged in epoch
+    /// order (`stage_meter_batches`). `None` for any other adapter.
+    pub(crate) meter_frames: Option<host_core::MeterFrameConsumer>,
+    /// The render half of the same ring until the adapter takes it for the plan's render half
+    /// ([`SessionState::take_meter_frame_producer`]).
+    pub(crate) meter_frame_producer: Option<host_core::MeterFrameProducer>,
     /// The readers of this epoch's plan's effect observation taps (#1584 D7), one per observed
     /// effect instance in `HostLiveControlHandles::effect_observations` order: the windows a tap an
     /// `Observe` edit armed publishes. Empty for a host whose preparer keeps them itself (the
     /// browser's). Their slots are `Arc`s shared with the plan's lanes, as the meters' rings are.
     /// `OBSERVATION_READ` reads them through [`Self::observation_index`] (#1586 D6).
+    /// The meter delivery's gain reduction reads them too (#1587b).
     pub(crate) observations: Box<[host_core::EffectObservationHandle]>,
+    /// Each observation handle's strip (#1587b), in `observations` order: its frame strip by
+    /// [`strip_meter_index`], the rule a meter entry's strip resolves by, `u32::MAX` for none;
+    /// built with the plan.
+    pub(crate) observation_strips: Box<[u32]>,
+    /// The observation readers the swap block that adopted this epoch's plan carried (#1587b),
+    /// shared with the plan's attachment; `None` for a host whose preparer keeps its readers.
+    pub(crate) carried_taps: Option<std::sync::Arc<CarriedTaps>>,
+    /// The epoch this one displaced, while their observation readers wait to be paired: this
+    /// epoch was promoted before render wrote `carried_taps` ([`CarriedTaps`]'s three states).
+    pub(crate) observations_pending: Option<u64>,
+    /// The master strip of this epoch's plan (#1690 D2): its frame strip by
+    /// [`strip_meter_index`], or `None` when no strip is the master or the plan has none of its
+    /// ID. A master meter entry reads a frame through its own epoch's value. Kept by the browser's
+    /// `sync_master` rule ([`sync_master_meters`]): a pending epoch takes every
+    /// master the commits write, and the rendering epoch only while nothing waits, so a frame the
+    /// rendering plan publishes after a waiting replacement moved the master reads its own.
+    pub(crate) master_meter: Option<u32>,
     /// The plan's effect instances by stable key, with each one's position in
     /// [`Self::observations`] (#1586 D3, R1): built with the epoch, on the control thread, so a
-    /// read resolves a stable address without allocating. Empty for a host whose preparer keeps
-    /// the readers itself (the browser's).
+    /// read resolves a stable address without allocating. For a host whose preparer keeps the
+    /// readers in its plan (the browser's), the positions are in that list
+    /// ([`crate::RuntimePreparer::kept_observations`], #1589 R2): the plan's one index.
     pub(crate) observation_index: host_core::observation::ObservationIndex,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
@@ -263,6 +289,19 @@ enum Rebuild {
         model: Box<CompiledSession>,
         configuration: Option<host_core::SpectrumConfiguration>,
     },
+    /// The transition fallback across a withdrawn `Primed` donor (#1397 D2): the committed model
+    /// (the control plane's own copy) re-prepared as an ordinary successor of the plan the donor
+    /// succeeds, with the duck set as its forced restarts, and published as a duck-swap that
+    /// reports `TRANSITION_FALLBACK`. It carries like a transaction that supersedes the donor and
+    /// commits like a monitor rebuild: nothing is committed and the revision does not change, but
+    /// the candidate's gate is stamped with the committed revision, which the donor carried.
+    Transition {
+        model: Box<CompiledSession>,
+        /// The injected refusal of this re-preparation (#1397 deliverable 3), taken from the
+        /// thread's hook when the fallback starts.
+        #[cfg(feature = "test-support")]
+        injected_refusal: bool,
+    },
 }
 
 /// The edit ramps of a discontinuity successor: no edit gave a row a length (#1323).
@@ -290,6 +329,13 @@ fn spectrum_invariant(failure: CompileFailure) -> CommandError {
     } else {
         CommandError::CompileRejected(failure)
     }
+}
+
+/// The plan a host lends one command ([`SessionState::command_with_plan`]), with the reader
+/// list of its running plan.
+struct LentPlan<'a, A: ControlAdapter> {
+    plan: &'a mut PlanState<A>,
+    readers: fn(&mut PlanState<A>) -> &[host_core::EffectObservationHandle],
 }
 
 /// How a `SPECTRUM_CONFIGURE` is refused (#1594 D4): a typed reply, recorded for replay, or a
@@ -494,26 +540,6 @@ fn tap_fits(channels: protocol::ParameterChannel, target_id_bytes: usize, limit:
     ) && stream_reply_fits(channels, target_id_bytes, limit)
 }
 
-/// #1595 R6 on a boot configuration: whether every tap of `preparation` passes [`tap_fits`].
-pub(crate) fn preparation_fits(preparation: &host_core::SpectrumPreparation, limit: u64) -> bool {
-    match preparation {
-        host_core::SpectrumPreparation::Single(request) => tap_fits(
-            protocol_channels(request.channels),
-            spectrum_target_id(&request.target).len(),
-            limit,
-        ),
-        host_core::SpectrumPreparation::Collection(request) => {
-            request.entries.iter().all(|entry| {
-                tap_fits(
-                    protocol_channels(entry.channels),
-                    spectrum_target_id(&entry.target).len(),
-                    limit,
-                )
-            })
-        }
-    }
-}
-
 const fn protocol_target_kind(target: &host_core::SpectrumTarget) -> protocol::SpectrumTargetKind {
     match target {
         host_core::SpectrumTarget::TrackPostInputBuiltins(_) => {
@@ -702,7 +728,13 @@ impl ProviderEpoch {
             effects,
             meters,
             meter_tables: host_core::MeterTables::empty(),
+            meter_frames: None,
+            meter_frame_producer: None,
             observations: Box::default(),
+            observation_strips: Box::default(),
+            carried_taps: None,
+            observations_pending: None,
+            master_meter: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -717,14 +749,28 @@ impl ProviderEpoch {
         owner
     }
 
-    /// This epoch with its plan's observation readers (#1584 D7) and their index (#1586 D6).
+    /// This epoch with its plan's meter frame ring (#1588 D2), if it has one.
+    pub(crate) fn with_meter_frames(mut self, ring: Option<host_core::MeterFrameRing>) -> Self {
+        if let Some(ring) = ring {
+            self.meter_frames = Some(ring.consumer);
+            self.meter_frame_producer = Some(ring.producer);
+        }
+        self
+    }
+
+    /// This epoch with its plan's observation readers (#1584 D7), their index (#1586 D6), their
+    /// strips and the record of the ones its swap block carries (#1587b).
     pub(crate) fn with_observations(
         mut self,
         observations: Box<[host_core::EffectObservationHandle]>,
         observation_index: host_core::observation::ObservationIndex,
+        observation_strips: Box<[u32]>,
+        carried_taps: Option<std::sync::Arc<CarriedTaps>>,
     ) -> Self {
         self.observations = observations;
         self.observation_index = observation_index;
+        self.observation_strips = observation_strips;
+        self.carried_taps = carried_taps;
         self
     }
 
@@ -747,7 +793,13 @@ impl ProviderEpoch {
             effects,
             meters,
             meter_tables: host_core::MeterTables::empty(),
+            meter_frames: None,
+            meter_frame_producer: None,
             observations: Box::default(),
+            observation_strips: Box::default(),
+            carried_taps: None,
+            observations_pending: None,
+            master_meter: None,
             observation_index: host_core::observation::ObservationIndex::default(),
             capi,
             revision_gate,
@@ -802,6 +854,13 @@ pub enum TestStructuralFaultPhase {
     ProtocolCommit,
     /// The live arm, after every fallible check and before its first write (#1257 D7).
     BeforeLivePush,
+    /// A panic inside a rebuild, after the pending candidate was withdrawn and the successor
+    /// prepared, before admission (#2010).
+    PanicAfterWithdrawal,
+    /// A panic just after a rebuild publishes a warm candidate's `Primed` schedule, before the
+    /// protocol commit (#2044): it stands in for every step there that can panic (that
+    /// publication's `expect`, the commit's own), the last before the candidate is taken.
+    PanicAtPrimedPublication,
 }
 
 /// How many of each owner the structural and live paths constructed, published and disposed.
@@ -944,12 +1003,20 @@ pub type TestOwnerState = (u64, Box<str>, Box<str>, u64, String, Vec<u32>, Vec<u
 thread_local! {
     static TEST_FAULT_STATE: core::cell::Cell<([Option<TestStructuralFaultPhase>; 2], usize)> =
         const { core::cell::Cell::new(([None; 2], 0)) };
+    static TEST_PUBLISHED_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
+        const { core::cell::Cell::new(None) };
     static TEST_NEXT_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
         const { core::cell::Cell::new(None) };
     /// The source-read offset the next plan this thread prepares is given (#1396 deliverable 3).
     static TEST_NEXT_SOURCE_READ_OFFSET: core::cell::Cell<Option<u64>> =
         const { core::cell::Cell::new(None) };
     static FORCE_FULL_PREPARATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// Whether the next transition re-preparation across a donor refuses (#1397 deliverable 3).
+    static TEST_REFUSE_REPREPARE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    /// The strips the next `warm_lead` answer restarts whole with a zero lead, in place of the
+    /// answer itself (#1397a: no edit of the gates' session family reaches that answer).
+    static TEST_NEXT_ZERO_LEAD: core::cell::RefCell<Option<Vec<&'static str>>> =
+        const { core::cell::RefCell::new(None) };
     /// Whether the service step leaves displaced plans in the retirement queue (batch 15a review
     /// fold M1): a render preempted between claiming a candidate and retiring the plan it displaced.
     static TEST_HOLD_RECLAMATION: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
@@ -1015,8 +1082,11 @@ pub fn test_reset_lifecycle_observer() {
     TEST_FAULT_STATE.with(|state| state.set(([None; 2], 0)));
     TEST_OWNER_STATE.with(|state| state.set(TestOwnerCounters::default()));
     TEST_NEXT_ADOPTION.with(|state| state.set(None));
+    TEST_PUBLISHED_ADOPTION.with(|state| state.set(None));
     TEST_NEXT_SOURCE_READ_OFFSET.with(|state| state.set(None));
     TEST_HOLD_RECLAMATION.with(|state| state.set(false));
+    TEST_REFUSE_REPREPARE.with(|state| state.set(false));
+    TEST_NEXT_ZERO_LEAD.with(|state| state.replace(None));
 }
 
 /// Takes the source-read offset [`SessionState::test_set_next_source_read_offset`] scheduled for
@@ -1117,6 +1187,11 @@ pub struct SessionState<A: ControlAdapter> {
     /// withdrawn candidate adds nothing; the control plane copies it into the provider's counters
     /// with `live_values_superseded`. Render does not touch it.
     pub(crate) strips_restarted: u64,
+    /// The session's `transition_reprepare_refusals` count (#1397 D2 step 3): every transition
+    /// re-preparation across a withdrawn donor that was refused, a defect (the donor is kept
+    /// whole and republished). Saturating; copied into the provider's counters with
+    /// `strips_restarted`.
+    pub(crate) transition_reprepare_refusals: u64,
     /// The session's `source_frames_discarded` count (#1699 D1): the accepted source frames
     /// render never read because the caller's transaction removed or redeclared their source.
     /// [`Self::synchronize_plan_epochs`] adds each retired plan's unread frames before the plan is
@@ -1205,38 +1280,95 @@ pub struct SessionState<A: ControlAdapter> {
     /// snapshot, and no change of it advances the revision. Every plan is prepared with its
     /// configuration.
     pub(crate) spectrum: crate::spectrum::SpectrumMonitor,
+    /// The control half of the session's output loudness meter (#2115): host-local monitor
+    /// state, never saved and in no revision, drained by [`Self::service`] and before every
+    /// `LOUDNESS` reply.
+    pub(crate) loudness: crate::loudness::LoudnessMonitor,
     /// The output meter's reader and gate (#1581 D4) until the adapter takes them: the browser's
     /// render half does. `None` from boot when the session serves the meter batches itself
     /// ([`Self::meters`]).
     pub(crate) output_meter: Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)>,
-    /// The response capture's delivered result (#1577 D5), kept by `service` until a host takes
-    /// it; #1578 turns it into an event.
-    pub(crate) response_ready: Option<host_core::ResponseReady>,
+    /// The response capture's delivered result, as its `RESPONSE_READY` event, while the
+    /// controller's one cell cannot take it yet (#1578 D4): `service` retries until it is queued.
+    pub(crate) response_ready: Option<PendingResponse>,
     /// The session's meter delivery when its control plane serves the meter batches (#1583 D5,
     /// R2: the C ABI's), built at boot over the output meter's reader and a requested gate.
     pub(crate) meters: Option<SessionMeters>,
+    /// The session's warm-successor bounds (#1403 D1), set when the session is created: with
+    /// `None`, no rebuild is classified and every rebuild takes today's path. Every product
+    /// session holds `None` until #1360 and #1361 build the production bounds.
+    pub(crate) warm: Option<host_core::WarmConfig>,
+    /// The record of the pending candidate published `Primed` (#1403 D4), at most one because at
+    /// most one candidate is pending. Set by the publication; dropped when render adopts it
+    /// (`synchronize_plan_epochs`), by a withdrawal that does not return its candidate
+    /// (`withdraw_pending_candidate`), and when a supersession or a declared stop drops the
+    /// candidate (#1310 D5 step 6). A refused supersession republishes the candidate and keeps it.
+    pub(crate) primed: Option<host_core::PrimedCandidate>,
 }
 
-/// The meter delivery a control plane serves (#1583 D5, #1587a): the delivery over the output
-/// meter and the strip meters of the epoch whose tables it holds, the fold of its frames into
-/// batches, each table entry's strip in that epoch, and the configuration they were last set for.
+/// A delivered response capture that `service` has not yet queued (#1578 D4).
+pub(crate) enum PendingResponse {
+    /// The `RESPONSE_READY` event of a strip `RESPONSE_GET`, waiting for the controller's cell.
+    Event(protocol::ResponseReady),
+    /// Test seam (#1577): a capture armed by [`SessionState::test_arm_track_response`], which
+    /// issued no protocol tag and so owes no event.
+    #[cfg(feature = "test-support")]
+    SeamArmed,
+    /// Test seam (#1577): the seam-armed capture's result, until the test takes it.
+    #[cfg(feature = "test-support")]
+    SeamResult(host_core::ResponseReady),
+}
+
+/// The meter batches a control plane serves (#1583 D5, #1587a, #1588 D4): where its frames come
+/// from, and the one fold of them into batches that both sources share.
 pub(crate) struct SessionMeters {
-    delivery: host_core::MeterDelivery,
+    source: MeterSource,
+    batches: MeterBatches,
+}
+
+/// Where a control plane's meter frames come from (#1588 R1). One per session, inline in the
+/// session as the delivery was before, so the variants' size difference costs no allocation.
+#[allow(clippy::large_enum_variant)]
+enum MeterSource {
+    /// The C ABI's: the session's own delivery over the output meter and the strip meters of the
+    /// epoch whose tables it holds.
+    Delivery {
+        delivery: host_core::MeterDelivery,
+        /// The provider epoch whose meter tables the delivery holds (#1587a): the plan whose
+        /// frames it folds. It follows render one reclaimed plan at a time (`adopt_meters`), and
+        /// the poll runs only while it is the running epoch.
+        epoch: u64,
+    },
+    /// The browser's: the render half folds and pushes the frames the table needs into each
+    /// plan's frame ring, which its provider epoch holds; the session sets the level word's
+    /// [`host_core::MeterLevel::TELEMETRY`] bit.
+    Rendered {
+        level: host_core::MeterLevel,
+        /// The output meter's dropped-window count, whose reader the render half holds.
+        output_drops: host_core::OutputPeakDrops,
+        /// The windows the rings of reclaimed epochs dropped.
+        retired_drops: u64,
+    },
+}
+
+/// The fold of a control plane's meter frames into `METER_BATCH` events (#1583 D5, #1587a), the
+/// same for both sources.
+struct MeterBatches {
     fold: host_core::meters::MeterBatchFold,
-    /// The provider epoch whose meter tables the delivery holds (#1587a): the plan whose frames it
-    /// folds. It follows render one reclaimed plan at a time (`adopt_meters`), and the poll runs
-    /// only while it is the running epoch.
-    epoch: u64,
-    /// Each table entry's strip in `epoch`'s plan (#1587a D2, R4): its index in the frame's strip
-    /// peaks, or `None` for an absent strip and for every entry that reads no strip peak. Rebuilt
-    /// at each accepted configure and each meter adoption, never searched by a batch. Reserved at
-    /// boot for the most entries a table holds, so neither rebuild allocates.
+    /// The provider epoch `resolution` was resolved against (#1588 D3), `None` after a configure
+    /// and after an epoch's master moves (#1690 D2): a frame of another epoch, or the next frame
+    /// after either, resolves the entries again first.
+    resolved_epoch: Option<u64>,
+    /// Each table entry's strip in `resolved_epoch`'s plan (#1587a D2, R4): its index in the
+    /// frame's strip peaks, or `None` for an absent strip and for every entry that reads no strip;
+    /// a master entry's is the master strip's (#1690 D2). Rebuilt at a frame of another epoch, never searched by a batch. Reserved at boot for
+    /// the most entries a table holds, so no rebuild allocates.
     resolution: Vec<Option<u32>>,
     /// Each table entry's peak fold over the open batch, as long as `resolution`.
     folds: Vec<host_core::meters::StripPeakFold>,
     /// The meter window in blocks, which the provider echoes and the period divides.
     window_blocks: core::num::NonZeroU32,
-    /// The controller's telemetry generation the delivery's level and the fold were set for.
+    /// The controller's telemetry generation the level and the fold were set for.
     generation: u64,
     /// The windows of completed batches the lossy lane refused to stage.
     unstaged: u64,
@@ -1249,14 +1381,74 @@ impl SessionMeters {
         window_blocks: core::num::NonZeroU32,
         entries: usize,
     ) -> Result<Self, std::collections::TryReserveError> {
+        Ok(Self {
+            source: MeterSource::Delivery { delivery, epoch: 0 },
+            batches: MeterBatches::new(window_blocks, entries)?,
+        })
+    }
+
+    /// The batches of a render-half fold (#1588 R1) under `level`, reporting `output_drops`, with
+    /// room for `entries` table entries.
+    pub(crate) fn rendered(
+        level: host_core::MeterLevel,
+        output_drops: host_core::OutputPeakDrops,
+        window_blocks: core::num::NonZeroU32,
+        entries: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        Ok(Self {
+            source: MeterSource::Rendered {
+                level,
+                output_drops,
+                retired_drops: 0,
+            },
+            batches: MeterBatches::new(window_blocks, entries)?,
+        })
+    }
+
+    /// Every closed meter window that never reached a `METER_BATCH` (#1583 D5, #1588 R4): the
+    /// output windows render dropped at a full queue, the windows a full ring dropped (`rings`, the
+    /// live epochs' rings' count, plus the reclaimed ones'), the windows of partial batches the
+    /// fold discarded (at a gap, or when a nonempty configuration replaced the one it folded
+    /// for), and the windows of batches the lane refused. When a configure empties the table,
+    /// neither the windows the delivery pops unread nor the open partial batch are counted: the
+    /// client turned the meters off.
+    ///
+    /// `unstaged` is defensive: no service step can see a refusal. The step runs at the start of
+    /// every session call, before a structural token exists (none outlives its call), so
+    /// `stage_meter_batch_event` is never refused as structural-outstanding; the level is on only
+    /// with a nonempty table, which is not `Disabled`; and an accepted table's batch encodes,
+    /// because the provider checks the 256-record bound at the configure (`meter.records`,
+    /// #1587a). A stage that is refused all the same counts its batch's windows here.
+    fn windows_lost(&self, rings: u64) -> u64 {
+        let render = match &self.source {
+            MeterSource::Delivery { delivery, .. } => delivery.output_dropped_windows(),
+            MeterSource::Rendered {
+                output_drops,
+                retired_drops,
+                ..
+            } => output_drops
+                .get()
+                .saturating_add(*retired_drops)
+                .saturating_add(rings),
+        };
+        render
+            .saturating_add(self.batches.fold.discarded_windows())
+            .saturating_add(self.batches.unstaged)
+    }
+}
+
+impl MeterBatches {
+    fn new(
+        window_blocks: core::num::NonZeroU32,
+        entries: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
         let mut resolution = Vec::new();
         resolution.try_reserve_exact(entries)?;
         let mut folds = Vec::new();
         folds.try_reserve_exact(entries)?;
         Ok(Self {
-            delivery,
             fold: host_core::meters::MeterBatchFold::new(core::num::NonZeroU32::MIN),
-            epoch: 0,
+            resolved_epoch: None,
             resolution,
             folds,
             window_blocks,
@@ -1265,69 +1457,403 @@ impl SessionMeters {
         })
     }
 
-    /// Resolve every entry of `table` against `consumers`, the strip meters of the epoch whose
-    /// tables the delivery holds (one per strip, in the frame's strip order), and size the folds
-    /// to the table. The folds keep their values: they are indexed by table entry, so a batch an
-    /// adoption interrupts goes on folding into them, and `push_with_strips` resets them at a
-    /// batch's first frame. A table never holds more entries than were reserved, so this
-    /// allocates nothing.
-    fn resolve(&mut self, table: &[protocol::MeterEntry], consumers: &[host_core::MeterConsumer]) {
+    /// Resolve every entry of `table` against `meters`, the meter readers of the epoch whose
+    /// frames are folded (`PlanStateInventory::meter_targets`: meter `i` is the frame's strip `i`;
+    /// `None` when no epoch held is that one, and then no entry has a strip): a strip's peak or gain
+    /// reduction entry (#1587b) reads the first post-matrix sample-peak meter of its strip, so a caller selection (a
+    /// subset, another order, several taps on one strip) never reads another meter's peak. A
+    /// master's gain reduction entry (#1690 D2, D3) reads `master`, the master strip the epoch
+    /// holds ([`ProviderEpoch::master_meter`], resolved by the same rule): no strip when no strip
+    /// is the master or the epoch has none of that ID. Then
+    /// size the folds to the table. The folds keep their
+    /// values: they are indexed by table entry, so a batch an adoption interrupts goes on folding
+    /// into them, and `push_with_strips` resets them at a batch's first frame. A table never
+    /// holds more entries than were reserved, so this allocates nothing.
+    fn resolve(
+        &mut self,
+        table: &[protocol::MeterEntry],
+        meters: Option<&host_core::PlanStateInventory>,
+        master: Option<u32>,
+    ) {
         self.resolution.clear();
-        self.resolution.extend(table.iter().map(|entry| {
-            match (&entry.target, entry.metric) {
-                (protocol::MeterTarget::Strip(id), protocol::MeterMetric::Peak) => consumers
-                    .iter()
-                    .position(|meter| *meter.track_id == **id)
-                    .and_then(|index| u32::try_from(index).ok()),
-                _ => None,
-            }
-        }));
+        self.resolution.extend(
+            table
+                .iter()
+                .map(|entry| match (&entry.target, entry.metric) {
+                    (protocol::MeterTarget::Strip(id), _) => strip_meter_index(meters?, id),
+                    (protocol::MeterTarget::Master, protocol::MeterMetric::GainReduction) => master,
+                    _ => None,
+                }),
+        );
         self.folds.resize(
             self.resolution.len(),
             host_core::meters::StripPeakFold::START,
         );
     }
 
-    /// Every closed meter window that never reached a `METER_BATCH` (#1583 D5): the output
-    /// windows render dropped at a full queue, the windows of partial batches the fold discarded
-    /// (at a gap, or when a nonempty configuration replaced the one it folded for), and the
-    /// windows of batches the lane refused. When a configure empties the table, neither the
-    /// windows the delivery pops unread nor the open partial batch are counted: the client turned
-    /// the meters off.
+    /// Fold one published `frame` of provider epoch `epoch` and stage the `METER_BATCH` it
+    /// completes (#1583 D5, #1587a, #1588 D4), the one staging both sources share. A frame of
+    /// another epoch than the last one resolved resolves the entries against `epochs`' strips of
+    /// its epoch first (#1588 D3), a master entry with that epoch's own master (#1690 D2).
     ///
-    /// `unstaged` is defensive: on the C ABI no service step can see a refusal. The step runs at
-    /// the start of every session call, before a structural token exists (none outlives its
-    /// call), so `stage_meter_batch_event` is never refused as structural-outstanding; the level
-    /// is on only with a nonempty table, which is not `Disabled`; and an accepted table's batch
-    /// encodes, because the provider checks the 256-record bound at the configure
-    /// (`meter.records`, #1587a). A stage that is refused all the same counts its batch's windows
-    /// here.
-    fn windows_lost(&self) -> u64 {
-        self.delivery
-            .output_dropped_windows()
-            .saturating_add(self.fold.discarded_windows())
-            .saturating_add(self.unstaged)
+    /// Records follow the table (D3): the output's peak entry gives the batch's left and right
+    /// output peak, `VALID` when the output peak covered the batch's span; a strip's peak entry
+    /// gives its strip's left and right peak, the maxima over the batch's frames, `VALID` when
+    /// every frame had the strip; `CLIPPED` marks a valid peak above `1.0`. A strip's gain
+    /// reduction entry gives one `Aggregate` record (#1587b), the last frame's reading that is
+    /// present, `VALID` when any frame's is: only an armed tap's window from at or after its arm
+    /// sample is a reading. The master's gain reduction entry (#1690 D3) is the same record of the
+    /// master strip. A value that is not valid is `0.0` with flags `0`. An accepted table needs at most
+    /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, so the records stay on the stack.
+    fn stage(
+        &mut self,
+        frame: &host_core::MeterFrame,
+        epoch: u64,
+        epochs: &ProviderEpochs<'_>,
+        controller: &mut ObservedController,
+        revision: protocol::SessionRevision,
+    ) {
+        /// `METER_BATCH` record flags (registry): valid and clipped.
+        const VALID: u16 = 1;
+        const CLIPPED: u16 = 1 << 1;
+        if self.resolved_epoch != Some(epoch) {
+            self.resolve(
+                &controller.telemetry_configuration().meters,
+                epochs.meters(epoch),
+                epochs.master(epoch),
+            );
+            self.resolved_epoch = Some(epoch);
+        }
+        let Some(batch) = self
+            .fold
+            .push_with_strips(frame, &self.resolution, &mut self.folds)
+        else {
+            return;
+        };
+        let blank = protocol::MeterRecord {
+            handle: 0,
+            component: protocol::MeterComponent::Left,
+            flags: 0,
+            value: 0.0,
+        };
+        let mut records = [blank; host_core::MAXIMUM_METER_BATCH_RECORDS];
+        let table = &controller.telemetry_configuration().meters;
+        let mut count = 0;
+        for ((entry, fold), handle) in table.iter().zip(&self.folds).zip(1_u32..) {
+            let (valid, peak) = match (&entry.target, entry.metric) {
+                (protocol::MeterTarget::Output, protocol::MeterMetric::Peak) => {
+                    (batch.output_valid, batch.output_peak)
+                }
+                // The wire refuses a master peak entry, which resolves no strip.
+                (
+                    protocol::MeterTarget::Strip(_) | protocol::MeterTarget::Master,
+                    protocol::MeterMetric::Peak,
+                ) => (fold.present, fold.peak),
+                // #1587b D3, #1690 D3: one aggregate record, never clipped. The wire refuses an
+                // output gain-reduction entry.
+                (_, protocol::MeterMetric::GainReduction) => {
+                    if let Some(slot) = records.get_mut(count) {
+                        let valid = fold.gain_reduction_present;
+                        *slot = protocol::MeterRecord {
+                            handle,
+                            component: protocol::MeterComponent::Aggregate,
+                            flags: if valid { VALID } else { 0 },
+                            value: if valid { fold.gain_reduction_db } else { 0.0 },
+                        };
+                        count += 1;
+                    }
+                    continue;
+                }
+            };
+            for (component, value) in [
+                (protocol::MeterComponent::Left, peak[0]),
+                (protocol::MeterComponent::Right, peak[1]),
+            ] {
+                let Some(slot) = records.get_mut(count) else {
+                    continue;
+                };
+                let mut flags = 0;
+                if valid {
+                    flags |= VALID;
+                    if value > 1.0 {
+                        flags |= CLIPPED;
+                    }
+                }
+                *slot = protocol::MeterRecord {
+                    handle,
+                    component,
+                    flags,
+                    value: if valid { value } else { 0.0 },
+                };
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return;
+        }
+        let span = protocol::MeterWindowSpan {
+            first_sample: protocol::SampleTime(batch.first_sample),
+            end_sample: protocol::SampleTime(batch.end_sample),
+            window_sequence: batch.sequence,
+        };
+        if controller
+            .stage_meter_batch_event(revision, span, &records[..count])
+            .is_err()
+        {
+            self.unstaged = self
+                .unstaged
+                .saturating_add(u64::from(self.fold.windows_per_batch()));
+        }
     }
 }
 
-/// The strip meter consumers of provider epoch `epoch`: the running one's or a parked one's, or
-/// `None` when neither is `epoch`.
-fn epoch_meters<'a>(
-    current: &'a ProviderEpoch,
-    retired: &'a [ProviderEpoch],
-    epoch: u64,
-) -> Option<&'a [host_core::MeterConsumer]> {
-    core::iter::once(current)
-        .chain(retired)
-        .find(|provider| provider.epoch == epoch)
-        .map(|provider| &*provider.meters)
+/// Keep each epoch's master strip ([`ProviderEpoch::master_meter`]) by the browser's `sync_master`
+/// rule (#1690 D2): every pending epoch takes the master the core's `master` row names now
+/// (`monitor`), and the running epoch takes it only while nothing waits, so the plan still
+/// rendering keeps its own until a replacement displaces it. Each is resolved by ID against its own
+/// plan. When any changes, the meter entries resolve again at the next frame. Called after every
+/// commit that writes the monitor overlay, after a successor is published and after each
+/// promotion. Control thread; allocates nothing; `O(epochs x meters)`.
+fn sync_master_meters(
+    monitor: &controls::MonitorOverlay,
+    running: &mut ProviderEpoch,
+    pending: &mut [ProviderEpoch],
+    meters: &mut Option<SessionMeters>,
+) {
+    let master = monitor.master().map(session::StableId::as_str);
+    let resolve = |provider: &mut ProviderEpoch| {
+        let index = master.and_then(|id| strip_meter_index(&provider.inventory, id));
+        core::mem::replace(&mut provider.master_meter, index) != index
+    };
+    let mut moved = false;
+    for provider in pending.iter_mut() {
+        moved |= resolve(provider);
+    }
+    if pending.is_empty() {
+        moved |= resolve(running);
+    }
+    if moved && let Some(meters) = meters.as_mut() {
+        meters.batches.resolved_epoch = None;
+    }
 }
 
-/// The C ABI's delivery reads no gain-reduction tap until #1587b.
-struct NoGainReductionTaps;
+/// The frame strip of strip `id` in a plan whose inventory is `meters`: the index of its first
+/// post-matrix sample-peak meter (`PlanStateInventory::meter_targets`), or `None`. The one rule
+/// for a meter entry's strip (#1588 D3) and an observation tap's (#1587b), so both read the same
+/// frame strip.
+pub(crate) fn strip_meter_index(meters: &host_core::PlanStateInventory, id: &str) -> Option<u32> {
+    meters
+        .meter_targets()
+        .find(|&(_, strip, tap, metrics)| {
+            strip == id
+                && tap == host_core::MeterTap::PostMatrix
+                && metrics.contains(host_core::MeterMetricSet::SAMPLE_PEAK)
+        })
+        .and_then(|(index, ..)| u32::try_from(index).ok())
+}
 
-impl host_core::GainReductionTaps for NoGainReductionTaps {
-    fn for_each_tap(&mut self, _visit: &mut impl FnMut(host_core::TapView<'_>)) {}
+/// The provider epochs a session holds: the running one, the parked ones and the pending ones.
+struct ProviderEpochs<'a> {
+    current: &'a ProviderEpoch,
+    retired: &'a [ProviderEpoch],
+    pending: &'a [ProviderEpoch],
+}
+
+impl<'a> ProviderEpochs<'a> {
+    fn all(&self) -> impl Iterator<Item = &'a ProviderEpoch> {
+        core::iter::once(self.current)
+            .chain(self.retired)
+            .chain(self.pending)
+    }
+
+    /// The master strip provider epoch `epoch` holds (#1690 D2), its frame strip, or `None` when
+    /// no epoch held is `epoch` or it has no master.
+    fn master(&self, epoch: u64) -> Option<u32> {
+        self.all()
+            .find(|provider| provider.epoch == epoch)
+            .and_then(|provider| provider.master_meter)
+    }
+
+    /// The plan inventory of provider epoch `epoch`, whose meter rows are its meter readers in
+    /// reader order, or `None` when no epoch held is `epoch`.
+    fn meters(&self, epoch: u64) -> Option<&'a host_core::PlanStateInventory> {
+        self.all()
+            .find(|provider| provider.epoch == epoch)
+            .map(|provider| &provider.inventory)
+    }
+}
+
+/// The observation reader pairs the swap block that adopted a plan carried (#1674's observation
+/// half, #1587b): the swap record's [`engine::realtime::ObserverKind::Observation`] entries,
+/// which render copies here in that block ([`CarriedTapsAttachment`]) and the control thread
+/// reads when it promotes the plan's epoch. The record is what actually carried: a tap enters it
+/// only when its effect's restore succeeded at the swap, which preparation cannot know (#1674 R1).
+///
+/// Sized at preparation, one pair per observation handle of the plan (a successor handle is
+/// paired at most once), so render writes into storage it never grows. A plan is adopted at most
+/// once, so the pairs are written once; `count` is stored last, with `Release`.
+///
+/// **Three states (#1587b attempt 4).** `count` starts at [`Self::UNWRITTEN`]: render has not run
+/// the plan's swap block. Render claims a candidate a little before it carries into it
+/// (`plan_exchange`'s claim, then `carry_from`), and the control thread promotes a claimed
+/// candidate (`withdraw_pending_candidate`) without waiting, so a promotion can find the record
+/// unwritten. It then marks the epoch's pairing pending (`ProviderEpoch::observations_pending`),
+/// and later steps settle it:
+/// - **Early read.** Each service step reads `count` with `Acquire`; once it is written, that
+///   load synchronizes with render's `Release` store, after the pairs, so the pairs read whole.
+/// - **Reclaim fallback.** Render retires the displaced plan into the retirement queue only after
+///   the carry returned (or after a swap whose hook never ran: a plan with no attachment), and the
+///   control thread's reclaim takes it from the queue, which orders the hook before the reclaim.
+///   A record still unwritten there means nothing carried, and the mark clears.
+///
+/// While the mark stands the epoch's readers are the successor's own, which no carried tap
+/// publishes to: the strip shows no reading, never a wrong one.
+pub(crate) struct CarriedTaps {
+    pairs: Box<[[core::sync::atomic::AtomicU32; 2]]>,
+    count: core::sync::atomic::AtomicU32,
+}
+
+impl CarriedTaps {
+    /// Room for `handles` pairs. Allocates; control thread.
+    pub(crate) fn new(handles: usize) -> Result<Self, std::collections::TryReserveError> {
+        let mut pairs = Vec::new();
+        pairs.try_reserve_exact(handles)?;
+        pairs.resize_with(handles, || {
+            [
+                core::sync::atomic::AtomicU32::new(0),
+                core::sync::atomic::AtomicU32::new(0),
+            ]
+        });
+        Ok(Self {
+            pairs: pairs.into_boxed_slice(),
+            count: core::sync::atomic::AtomicU32::new(Self::UNWRITTEN),
+        })
+    }
+
+    /// The heap a record of `handles` pairs holds with its attachment: the attachment's box, the
+    /// shared allocation (its two counts and the record) and the pairs.
+    pub(crate) fn retained_bytes(handles: usize) -> Option<usize> {
+        handles
+            .checked_mul(size_of::<[core::sync::atomic::AtomicU32; 2]>())?
+            .checked_add(size_of::<CarriedTapsAttachment>())?
+            .checked_add(2 * size_of::<usize>() + size_of::<Self>())
+    }
+
+    /// `count` before render ran the plan's swap block.
+    const UNWRITTEN: u32 = u32::MAX;
+
+    /// The carried pairs, as carry records, or `None` while render has not written the record.
+    /// Allocates nothing.
+    fn carries(&self) -> Option<impl Iterator<Item = engine::realtime::ObserverCarry> + '_> {
+        let count = self.count.load(Ordering::Acquire);
+        if count == Self::UNWRITTEN {
+            return None;
+        }
+        Some(
+            self.pairs
+                .iter()
+                .take(count as usize)
+                .map(|[successor, predecessor]| engine::realtime::ObserverCarry {
+                    kind: engine::realtime::ObserverKind::Observation,
+                    successor: successor.load(Ordering::Relaxed) as usize,
+                    predecessor: predecessor.load(Ordering::Relaxed) as usize,
+                }),
+        )
+    }
+}
+
+/// Pair `successor`'s observation readers with `predecessor`'s from `successor`'s carry record
+/// (#1587b), if render has written it; returns whether the pairing is settled. An unwritten
+/// record leaves it pending: [`SessionState::settle_observation_pairings`] settles it once the
+/// record is written, or as nothing carried once the predecessor's epoch is gone.
+fn pair_observations(successor: &mut ProviderEpoch, predecessor: &mut ProviderEpoch) -> bool {
+    let Some(record) = successor.carried_taps.as_deref() else {
+        return true;
+    };
+    let Some(carries) = record.carries() else {
+        return false;
+    };
+    // One record at a time: `pair_carried_observations` takes a slice, and the record's pairs
+    // are atomics, so collecting them would allocate; a one-element slice per pair does not.
+    for carry in carries {
+        host_core::pair_carried_observations(
+            &mut successor.observations,
+            &mut predecessor.observations,
+            core::slice::from_ref(&carry),
+        );
+    }
+    true
+}
+
+/// The C ABI plan's host attachment (#1587b): the plan's [`CarriedTaps`], shared with its
+/// provider epoch.
+pub(crate) struct CarriedTapsAttachment(pub(crate) std::sync::Arc<CarriedTaps>);
+
+impl engine::realtime::HostAttachment for CarriedTapsAttachment {
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+
+    // REALTIME_POLICY_BEGIN: #1587b, the swap block's carried observation readers.
+    /// Copy the swap record's observation entries into the plan's [`CarriedTaps`]. Render thread,
+    /// in the swap block: atomic stores into storage sized at preparation; an entry past it, or
+    /// whose index does not fit a `u32`, is skipped.
+    fn adopt_predecessor(
+        &mut self,
+        _predecessor: &mut dyn engine::realtime::HostAttachment,
+        carries: &[engine::realtime::ObserverCarry],
+    ) {
+        let record = &*self.0;
+        let mut written = 0_u32;
+        let mut slots = record.pairs.iter();
+        for carry in carries {
+            if carry.kind != engine::realtime::ObserverKind::Observation {
+                continue;
+            }
+            let (Ok(successor), Ok(predecessor)) = (
+                u32::try_from(carry.successor),
+                u32::try_from(carry.predecessor),
+            ) else {
+                continue;
+            };
+            let Some([into, from]) = slots.next() else {
+                break;
+            };
+            into.store(successor, Ordering::Relaxed);
+            from.store(predecessor, Ordering::Relaxed);
+            written += 1;
+        }
+        record.count.store(written, Ordering::Release);
+    }
+    // REALTIME_POLICY_END
+}
+
+/// The observation taps of a provider epoch, as the meter delivery's gain reduction reads them
+/// (#1587b): every declared tap of every observed instance, on its instance's strip, with the arm
+/// state render publishes in the tap's slot (#1585 D2). A torn read is an unarmed tap for this
+/// poll.
+struct CapiGainReductionTaps<'a> {
+    observations: &'a [host_core::EffectObservationHandle],
+    strips: &'a [u32],
+}
+
+impl host_core::GainReductionTaps for CapiGainReductionTaps<'_> {
+    fn for_each_tap(&mut self, visit: &mut impl FnMut(host_core::TapView<'_>)) {
+        for (handle, &strip) in self.observations.iter().zip(self.strips) {
+            for (descriptor, reader) in handle.descriptor.observations.iter().zip(&handle.readers) {
+                let (armed, arm_sample) = reader
+                    .read_state()
+                    .map_or((false, 0), |state| (state.armed, state.arm_sample));
+                visit(host_core::TapView {
+                    strip,
+                    descriptor,
+                    reader,
+                    armed,
+                    arm_sample,
+                });
+            }
+        }
+    }
 }
 
 /// Every live send move (a following route's record with a ramp, written by a live commit or by a
@@ -1483,10 +2009,10 @@ const fn observation_refusal(
     }
 }
 
-/// Where [`SessionState::resolve_observation_key`] found a tap, on the newest plan.
+/// Where the session resolved an observation tap's stable key, on the newest plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResolvedObservationTap {
-    /// The position of the tap's effect in [`SessionState::effect_producers`].
+    /// The position of the tap's effect in the newest plan's effect producers.
     pub producer: usize,
     /// The tap's index in its effect's declared menu, which the render side arms.
     pub tap_index: u32,
@@ -1519,10 +2045,10 @@ pub struct ObservationLimit {
 }
 
 /// One subscription change of a batch handed to
-/// [`SessionState::admit_and_push_observation_batch`] (#1676).
+/// the session's observation admission (#1676), which the core's `Observe` edit runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationChange {
-    /// The producer's position in [`SessionState::effect_producers`].
+    /// The producer's position in the newest plan's effect producers.
     pub position: usize,
     /// The tap's index in the producer's observation menu.
     pub tap_index: u32,
@@ -1532,7 +2058,7 @@ pub struct ObservationChange {
     pub window_blocks: u32,
 }
 
-/// Why [`SessionState::admit_and_push_observation_batch`] refused a batch. Nothing was queued.
+/// Why the session's observation admission refused a batch. Nothing was queued.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObservationRefusal {
     /// The batch would leave armed taps whose ended event outgrows one control frame. Not
@@ -1544,7 +2070,7 @@ pub enum ObservationRefusal {
         /// The change's position in the batch.
         index: usize,
     },
-    /// The change at `index` names a position past [`SessionState::effect_producers`].
+    /// The change at `index` names a position past the newest plan's effect producers.
     NoProducer {
         /// The change's position in the batch.
         index: usize,
@@ -1724,7 +2250,7 @@ pub(crate) enum PendingArm {
     Disarm,
 }
 
-/// The borrowed form of `key` that [`SessionState::resolve_observation_key`] takes.
+/// The borrowed form of an observation tap's stable key, as the session resolves it.
 fn observation_key_ref(key: &controls::TapKey) -> ObservationKeyRef<'_> {
     let (rack, effect) = match &key.section {
         controls::TapSection::Console(id) => (host_core::LiveEffectRack::Console, id),
@@ -1762,7 +2288,7 @@ fn tap_key_of(
 /// publishes each tap's arm state in its slot when it drains the record (#1585 D3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationForward {
-    /// The replacement's effect producer, a position in [`SessionState::effect_producers`].
+    /// The replacement's effect producer, a position in the newest plan's effect producers.
     pub position: usize,
     /// The tap's index in that producer's observation menu.
     pub tap_index: u32,
@@ -2092,6 +2618,19 @@ impl Drop for ObservedPreparedToken {
 /// "re-prepare" result.
 pub const REPREPARE_REQUIRED: &str = "control.apply.reprepare_required";
 
+/// What one transition fallback across the pending `Primed` candidate did (#1397 D2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransitionStep {
+    /// No warm candidate was pending, or render had already adopted it: nothing to do, and its
+    /// record is gone.
+    NotPending,
+    /// The transition was published in the donor's place, `TRANSITION_FALLBACK`.
+    Published,
+    /// The re-preparation was refused (a defect): the donor was republished whole with its record,
+    /// `transition_reprepare_refusals` rose, and its revision stays pending.
+    Refused,
+}
+
 /// Why a control command was refused.
 #[derive(Debug)]
 pub enum CommandError {
@@ -2234,10 +2773,13 @@ pub(crate) fn map_event_egress_error(error: EventEgressError) -> EventError {
                 required: u64::try_from(required).unwrap_or(u64::MAX),
             }
         }
-        EventEgressError::ReliableQueueFull(_) => EventError::Backpressure,
+        EventEgressError::ReliableQueueFull(_) | EventEgressError::ResponseReadyOccupied => {
+            EventError::Backpressure
+        }
         EventEgressError::Disabled
         | EventEgressError::DiagnosticStorageFull
         | EventEgressError::ObservationEndedCellMissing
+        | EventEgressError::ResponseReadyMissing
         | EventEgressError::Encode(_) => EventError::Internal,
     }
 }
@@ -2266,140 +2808,167 @@ where
         take_test_fault_state(phase)
     }
 
-    /// Set the meter delivery's level and the batch fold for the accepted telemetry configuration
-    /// once per accepted `TELEMETRY_CONFIGURE` (#1583 D5): a nonempty table turns the level on
+    /// Set the meter level and the batch fold for the accepted telemetry configuration once per
+    /// accepted `TELEMETRY_CONFIGURE` (#1583 D5, #1588 D1): a nonempty table turns the level on
     /// from the next block, an empty one off, and the fold restarts with
     /// `meter_period_blocks / meter_window_blocks` windows per batch and sequence `1` next. The
-    /// level writes the requested gate, which render applies before its next block. An exact
+    /// entries resolve again at the next frame (#1588 D3). The C ABI's level writes the requested
+    /// gate, which render applies before its next block; a render-half fold's sets or clears the
+    /// level word's telemetry bit, which the render half applies at its next poll. An exact
     /// replay answers from the cache and changes nothing here.
     pub(crate) fn sync_meter_configuration(&mut self) {
         let generation = self.controller.telemetry_configuration_generation();
         let Some(meters) = self.meters.as_mut() else {
             return;
         };
-        if meters.generation == generation {
+        let batches = &mut meters.batches;
+        if batches.generation == generation {
             return;
         }
-        meters.generation = generation;
+        batches.generation = generation;
         let telemetry = self.controller.telemetry_configuration();
         let on = !telemetry.meters.is_empty() && telemetry.meter_period_blocks != 0;
         let windows =
-            core::num::NonZeroU32::new(telemetry.meter_period_blocks / meters.window_blocks.get())
+            core::num::NonZeroU32::new(telemetry.meter_period_blocks / batches.window_blocks.get())
                 .unwrap_or(core::num::NonZeroU32::MIN);
         // One turn-off rule: an empty table owes the client nothing, so neither the open partial
         // batch nor the windows the delivery pops unread are counted lost.
         if !on {
-            meters.fold.drop_partial();
+            batches.fold.drop_partial();
         }
-        meters.fold.restart(windows);
-        // #1587a D2: the entries' strips in the plan whose frames the delivery folds.
-        if let Some(consumers) =
-            epoch_meters(&self.providers, &self.retired_providers, meters.epoch)
-        {
-            meters.resolve(&telemetry.meters, consumers);
+        batches.fold.restart(windows);
+        batches.resolved_epoch = None;
+        match &mut meters.source {
+            MeterSource::Delivery { delivery, .. } => {
+                let next_sample = self.shared.render_sample.load(Ordering::Acquire);
+                delivery.set_level(on, next_sample);
+            }
+            MeterSource::Rendered { level, .. } => {
+                level.set(host_core::MeterLevel::TELEMETRY, on);
+            }
         }
-        let next_sample = self.shared.render_sample.load(Ordering::Acquire);
-        meters.delivery.set_level(on, next_sample);
     }
 
-    /// Stage one `METER_BATCH` per batch the delivery's closed windows complete (#1583 D5,
-    /// #1587a): the delivery publishes at most one frame per poll, so the loop polls until it
+    /// Stage one `METER_BATCH` per batch the closed windows complete (#1583 D5, #1587a, #1588
+    /// D4), from either source through [`MeterBatches::stage`].
+    ///
+    /// The C ABI's delivery publishes at most one frame per poll, so the loop polls until it
     /// publishes none, bounded by the window queue's depth and one more. It polls only while the
     /// delivery holds the running epoch's tables, with that epoch's strip meters.
     ///
-    /// Records follow the table (D3), two per entry: the output's peak entry gives the batch's
-    /// left and right output peak, `VALID` when the output peak covered the batch's span; a strip's
-    /// peak entry gives its strip's left and right peak, the maxima over the batch's frames,
-    /// `VALID` when every frame had the strip; `CLIPPED` marks a valid value above `1.0`, and a
-    /// value that is not valid is `0.0` with flags `0`. An accepted table needs at most
-    /// [`host_core::MAXIMUM_METER_BATCH_RECORDS`] records, so the records stay on the stack.
+    /// A render-half fold's frames are in the rings of the epochs render has run. Render fills a
+    /// plan's ring only before it adopts the next plan, so the frames are staged in epoch order:
+    /// every ring's count is loaded newest epoch first (whatever a newer ring holds, the older
+    /// rings' frames before it are then seen), and each ring is drained oldest epoch first up to
+    /// its count. With an empty table the frames are released unstaged. Bounded by the rings'
+    /// depths.
     fn stage_meter_batches(&mut self, revision: protocol::SessionRevision) {
-        /// `METER_BATCH` record flags (registry): valid and clipped.
-        const VALID: u16 = 1;
-        const CLIPPED: u16 = 1 << 1;
-        let Some(meters) = self.meters.as_mut() else {
+        let SessionState {
+            meters,
+            controller,
+            providers,
+            retired_providers,
+            pending_providers,
+            shared,
+            ..
+        } = self;
+        let Some(meters) = meters.as_mut() else {
             return;
         };
-        if meters.epoch != self.providers.epoch {
-            return;
-        }
-        let next_sample = self.shared.render_sample.load(Ordering::Acquire);
-        let blank = protocol::MeterRecord {
-            handle: 0,
-            component: protocol::MeterComponent::Left,
-            flags: 0,
-            value: 0.0,
-        };
-        let mut records = [blank; host_core::MAXIMUM_METER_BATCH_RECORDS];
-        for _ in 0..=host_core::METER_QUEUE_DEPTH {
-            let Some(frame) = meters.delivery.poll(
-                &mut self.providers.meters,
-                &mut NoGainReductionTaps,
-                next_sample,
-            ) else {
-                break;
-            };
-            let Some(batch) =
-                meters
-                    .fold
-                    .push_with_strips(frame, &meters.resolution, &mut meters.folds)
-            else {
-                continue;
-            };
-            let table = &self.controller.telemetry_configuration().meters;
-            let mut count = 0;
-            for ((entry, fold), handle) in table.iter().zip(&meters.folds).zip(1_u32..) {
-                let (valid, peak) = match (&entry.target, entry.metric) {
-                    (protocol::MeterTarget::Output, protocol::MeterMetric::Peak) => {
-                        (batch.output_valid, batch.output_peak)
-                    }
-                    (protocol::MeterTarget::Strip(_), protocol::MeterMetric::Peak) => {
-                        (fold.present, fold.peak)
-                    }
-                    // Refused at the configure until #1587b.
-                    (_, protocol::MeterMetric::GainReduction) => continue,
-                };
-                for (component, value) in [
-                    (protocol::MeterComponent::Left, peak[0]),
-                    (protocol::MeterComponent::Right, peak[1]),
-                ] {
-                    let Some(slot) = records.get_mut(count) else {
-                        continue;
+        match &mut meters.source {
+            MeterSource::Delivery { delivery, epoch } => {
+                if *epoch != providers.epoch {
+                    return;
+                }
+                let next_sample = shared.render_sample.load(Ordering::Acquire);
+                for _ in 0..=host_core::METER_QUEUE_DEPTH {
+                    let mut taps = CapiGainReductionTaps {
+                        observations: &providers.observations,
+                        strips: &providers.observation_strips,
                     };
-                    let mut flags = 0;
-                    if valid {
-                        flags |= VALID;
-                        if value > 1.0 {
-                            flags |= CLIPPED;
-                        }
-                    }
-                    *slot = protocol::MeterRecord {
-                        handle,
-                        component,
-                        flags,
-                        value: if valid { value } else { 0.0 },
+                    let Some(frame) = delivery.poll(&mut providers.meters, &mut taps, next_sample)
+                    else {
+                        break;
                     };
-                    count += 1;
+                    let epochs = ProviderEpochs {
+                        current: providers,
+                        retired: retired_providers,
+                        pending: pending_providers,
+                    };
+                    meters
+                        .batches
+                        .stage(frame, frame.plan_epoch, &epochs, controller, revision);
                 }
             }
-            if count == 0 {
-                continue;
-            }
-            let span = protocol::MeterWindowSpan {
-                first_sample: protocol::SampleTime(batch.first_sample),
-                end_sample: protocol::SampleTime(batch.end_sample),
-                window_sequence: batch.sequence,
-            };
-            if self
-                .controller
-                .stage_meter_batch_event(revision, span, &records[..count])
-                .is_err()
-            {
-                meters.unstaged = meters
-                    .unstaged
-                    .saturating_add(u64::from(meters.fold.windows_per_batch()));
+            MeterSource::Rendered { .. } => {
+                let on = {
+                    let telemetry = controller.telemetry_configuration();
+                    !telemetry.meters.is_empty() && telemetry.meter_period_blocks != 0
+                };
+                let mut counts = [(0_u64, 0_usize); 1 + RETIRED_PROVIDERS + PENDING_PROVIDERS];
+                let mut held = 0;
+                let mut below = None;
+                while let Some(provider) = (ProviderEpochs {
+                    current: providers,
+                    retired: retired_providers,
+                    pending: pending_providers,
+                })
+                .all()
+                .filter(|provider| below.is_none_or(|below| provider.epoch < below))
+                .max_by_key(|provider| provider.epoch)
+                {
+                    below = Some(provider.epoch);
+                    let available = provider
+                        .meter_frames
+                        .as_ref()
+                        .map_or(0, host_core::MeterFrameConsumer::available);
+                    if let Some(slot) = counts.get_mut(held) {
+                        *slot = (provider.epoch, available);
+                        held += 1;
+                    }
+                }
+                for &(epoch, available) in counts[..held].iter().rev() {
+                    for _ in 0..available {
+                        let epochs = ProviderEpochs {
+                            current: providers,
+                            retired: retired_providers,
+                            pending: pending_providers,
+                        };
+                        let Some(frame) = epochs
+                            .all()
+                            .find(|provider| provider.epoch == epoch)
+                            .and_then(|provider| provider.meter_frames.as_ref())
+                            .and_then(host_core::MeterFrameConsumer::peek)
+                        else {
+                            break;
+                        };
+                        if on {
+                            meters
+                                .batches
+                                .stage(frame, epoch, &epochs, controller, revision);
+                        }
+                        if let Some(ring) = core::iter::once(&mut *providers)
+                            .chain(retired_providers.iter_mut())
+                            .chain(pending_providers.iter_mut())
+                            .find(|provider| provider.epoch == epoch)
+                            .and_then(|provider| provider.meter_frames.as_mut())
+                        {
+                            ring.release_frame();
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// The windows every held epoch's ring dropped (#1588 R4).
+    fn ring_drops(&self) -> u64 {
+        core::iter::once(&self.providers)
+            .chain(&self.retired_providers)
+            .chain(&self.pending_providers)
+            .filter_map(|provider| provider.meter_frames.as_ref())
+            .map(host_core::MeterFrameConsumer::dropped_windows)
+            .fold(0, u64::saturating_add)
     }
 
     /// Stages the `COUNTER_SNAPSHOT` event once render has completed at least the configured
@@ -2437,6 +3006,24 @@ where
                 values: snapshot.values,
             },
         );
+    }
+
+    /// Stage a render-half fold's ring frames at a reclaim (#1588 D4), with the configuration the
+    /// next render activity would stage them under. Nothing for the C ABI's delivery, whose
+    /// adoption carries its frames.
+    fn stage_reclaimed_frames(&mut self) {
+        if !matches!(
+            self.meters,
+            Some(SessionMeters {
+                source: MeterSource::Rendered { .. },
+                ..
+            })
+        ) {
+            return;
+        }
+        self.sync_meter_configuration();
+        let revision = self.controller.session().revision();
+        self.stage_meter_batches(revision);
     }
 
     pub(crate) fn collect_render_activity(&mut self) {
@@ -2707,14 +3294,17 @@ where
     }
 
     /// The session's spectrum monitor (#1593): its configuration, epochs, service and analysis.
+    /// Test support (#1597): every host reads spectrum through the session's frames.
     #[cfg(feature = "test-support")]
-    pub fn test_spectrum(&self) -> &crate::spectrum::SpectrumMonitor {
+    #[must_use]
+    pub const fn spectrum_monitor(&self) -> &crate::spectrum::SpectrumMonitor {
         &self.spectrum
     }
 
-    /// The session's spectrum monitor, for the service's arm, read and stream calls (#1593).
+    /// The session's spectrum monitor, for a test's direct arm, read and stream calls on the
+    /// service (#1593). Test support (#1597): no host calls the service but through the frames.
     #[cfg(feature = "test-support")]
-    pub fn test_spectrum_mut(&mut self) -> &mut crate::spectrum::SpectrumMonitor {
+    pub fn spectrum_monitor_mut(&mut self) -> &mut crate::spectrum::SpectrumMonitor {
         &mut self.spectrum
     }
 
@@ -2725,6 +3315,43 @@ where
         &mut self,
     ) -> Option<(host_core::OutputPeakReader, host_core::OutputPeakGate)> {
         self.output_meter.take()
+    }
+
+    /// Promote the oldest pending candidate now, before render has run its swap block (#1587b):
+    /// what `withdraw_pending_candidate` does for a candidate render has claimed but not yet
+    /// carried into, so a test can render the carry after the promotion.
+    #[cfg(feature = "test-support")]
+    pub fn test_promote_pending_before_carry(&mut self) -> Result<(), CommandError> {
+        let epoch = self
+            .pending_providers
+            .first()
+            .ok_or(CommandError::Internal)?
+            .epoch;
+        self.promote_pending_provider(epoch)
+    }
+
+    /// The render half of provider epoch `epoch`'s meter frame ring (#1588 D2), handed out once
+    /// for the plan's render half: `None` for an epoch held no more or not yet, and on every later
+    /// call. Only a render-half meter fold's plans have one. The running or a pending epoch.
+    pub fn take_meter_frame_producer(
+        &mut self,
+        epoch: u64,
+    ) -> Option<host_core::MeterFrameProducer> {
+        core::iter::once(&mut self.providers)
+            .chain(self.pending_providers.iter_mut())
+            .find(|provider| provider.epoch == epoch)
+            .and_then(|provider| provider.meter_frame_producer.take())
+    }
+
+    /// The meter level word of a render-half meter fold (#1588 D1), which the render half reads
+    /// at each poll and its lease sets: a second handle on the session's word. `None` for any
+    /// other adapter.
+    #[must_use]
+    pub fn meter_level(&self) -> Option<host_core::MeterLevel> {
+        match &self.meters.as_ref()?.source {
+            MeterSource::Rendered { level, .. } => Some(level.clone()),
+            MeterSource::Delivery { .. } => None,
+        }
     }
 
     /// The current provider epoch.
@@ -2800,6 +3427,53 @@ where
     pub fn test_set_next_adoption(&mut self, adoption: PlanAdoption) {
         let _ = self;
         TEST_NEXT_ADOPTION.with(|state| state.set(Some(adoption)));
+    }
+
+    /// Makes the next transition re-preparation across a donor refuse after its preparation, as
+    /// a defect would (#1397 deliverable 3). Taken once, by that re-preparation on this thread.
+    #[cfg(feature = "test-support")]
+    pub fn test_refuse_next_reprepare(&mut self) {
+        let _ = self;
+        TEST_REFUSE_REPREPARE.with(|state| state.set(true));
+    }
+
+    /// Makes the next `warm_lead` answer on this thread `Warm` with a zero lead that restarts
+    /// `restart_whole` (#1397 D1's second arm), whatever the edit (#1397a). Taken once.
+    #[cfg(feature = "test-support")]
+    pub fn test_set_next_zero_lead(&mut self, restart_whole: Vec<&'static str>) {
+        let _ = self;
+        TEST_NEXT_ZERO_LEAD.with(|state| state.replace(Some(restart_whole)));
+    }
+
+    /// The warm-successor deadline step (#1358 D3), as the hosts' service steps will run it
+    /// (#1360 D2, #1361).
+    ///
+    /// # Errors
+    ///
+    /// As the step itself (`check_prime_deadline`): an internal fault.
+    #[cfg(feature = "test-support")]
+    pub fn test_check_prime_deadline(&mut self) -> Result<Option<TransitionStep>, CommandError> {
+        self.check_prime_deadline()
+    }
+
+    /// The session's `transition_reprepare_refusals` count (#1397 D2 step 3).
+    #[cfg(feature = "test-support")]
+    pub fn test_transition_reprepare_refusals(&self) -> u64 {
+        self.transition_reprepare_refusals
+    }
+
+    /// The adoption the last structural publication on this thread was committed with (#1403
+    /// gates), taken once: `None` when nothing was published since the last call.
+    #[cfg(feature = "test-support")]
+    pub fn test_take_published_adoption(&mut self) -> Option<PlanAdoption> {
+        let _ = self;
+        TEST_PUBLISHED_ADOPTION.with(core::cell::Cell::take)
+    }
+
+    /// The record of the pending warm candidate (#1403 D4), if one is pending.
+    #[cfg(feature = "test-support")]
+    pub fn test_primed(&self) -> Option<host_core::PrimedCandidate> {
+        self.primed
     }
 
     /// The provider's counter snapshot, every counter, as `COUNTERS_GET` would read it now, without
@@ -2947,16 +3621,38 @@ where
                 self.promote_pending_provider(replacement)?;
             }
             self.adopt_meters(retired_epoch.0, adoption_sample);
+            self.settle_observation_pairings();
+            // #1588 D4: render filled the reclaimed plan's ring before it retired the plan, so
+            // its frames are staged now, while their epoch's strips are still held.
+            self.stage_reclaimed_frames();
             let index = self
                 .retired_providers
                 .iter()
                 .position(|provider| provider.epoch == retired_epoch.0)
                 .ok_or(CommandError::Internal)?;
-            self.retired_providers.remove(index);
+            let reclaimed = self.retired_providers.remove(index);
+            if let (
+                Some(ring),
+                Some(SessionMeters {
+                    source: MeterSource::Rendered { retired_drops, .. },
+                    ..
+                }),
+            ) = (reclaimed.meter_frames.as_ref(), self.meters.as_mut())
+            {
+                *retired_drops = retired_drops.saturating_add(ring.dropped_windows());
+            }
         }
 
         if active_epoch > self.providers.epoch {
             self.promote_pending_provider(active_epoch)?;
+        }
+        self.settle_observation_pairings();
+        // #1403 D4: render adopted the warm candidate, or a candidate published after it.
+        if self
+            .primed
+            .is_some_and(|record| self.providers.epoch >= record.epoch)
+        {
+            self.primed = None;
         }
 
         // Keep exactly the rows a reader can still ask for: the atomic's (possibly lagging), the
@@ -2978,6 +3674,44 @@ where
         Ok(())
     }
 
+    /// Settle the pending observation pairings ([`CarriedTaps`]'s three states), oldest epoch
+    /// first: one whose record render has written pairs as at promotion, and one whose displaced
+    /// epoch is gone (its plan was reclaimed, so the hook has run or never will) settles as
+    /// nothing carried. An epoch whose displaced epoch is itself still pending waits, so the
+    /// readers always pair in adoption order. Run at each reclaim before the parked epoch drops
+    /// (a record written by then pairs), at the end of each service step (after the drop, an
+    /// unwritten one clears) and before each promotion. Bounded by the parked list; allocates
+    /// nothing.
+    fn settle_observation_pairings(&mut self) {
+        for index in 0..=self.retired_providers.len() {
+            let (successor, older) = if index == self.retired_providers.len() {
+                (&mut self.providers, &mut self.retired_providers[..])
+            } else {
+                let (older, rest) = self.retired_providers.split_at_mut(index);
+                let Some(successor) = rest.first_mut() else {
+                    continue;
+                };
+                (successor, older)
+            };
+            let Some(displaced) = successor.observations_pending else {
+                continue;
+            };
+            let settled = match older
+                .iter_mut()
+                .find(|provider| provider.epoch == displaced)
+            {
+                // Its own readers are not paired yet: pairing now would take the wrong ones.
+                Some(predecessor) if predecessor.observations_pending.is_some() => false,
+                Some(predecessor) => pair_observations(successor, predecessor),
+                // The displaced epoch is gone: nothing is left to pair with.
+                None => true,
+            };
+            if settled {
+                successor.observations_pending = None;
+            }
+        }
+    }
+
     /// Hand the meter delivery from the plan of `displaced`, whose reclaim this is, to its
     /// successor, adopted at `adoption_sample` (#1587a D1, R1', R3). Nothing happens unless the
     /// delivery holds `displaced`'s tables; the successor is the oldest promoted epoch after it,
@@ -2993,10 +3727,14 @@ where
     /// Run once per reclaimed plan, in reclaim order, so after a test hold's lagging promotions
     /// the delivery catches up one epoch per reclaim. Allocates nothing.
     fn adopt_meters(&mut self, displaced: u64, adoption_sample: u64) {
-        let Some(meters) = self.meters.as_mut() else {
+        let Some(SessionMeters {
+            source: MeterSource::Delivery { delivery, epoch },
+            ..
+        }) = self.meters.as_mut()
+        else {
             return;
         };
-        if meters.epoch != displaced {
+        if *epoch != displaced {
             return;
         }
         let Some(successor) = core::iter::once(&mut self.providers)
@@ -3033,14 +3771,10 @@ where
                 predecessor_handle: previous.meters.get(carry.predecessor)?.handle.0.get(),
             })
         });
-        meters
-            .delivery
-            .adopt(&mut tables, carries, carried, adoption_sample);
-        meters.epoch = successor_epoch;
-        meters.resolve(
-            &self.controller.telemetry_configuration().meters,
-            &next.meters,
-        );
+        // #1588 D3: the frames the successor's tables publish name its epoch.
+        tables.set_plan_epoch(successor_epoch);
+        delivery.adopt(&mut tables, carries, carried, adoption_sample);
+        *epoch = successor_epoch;
         if let Some(previous) = core::iter::once(&mut self.providers)
             .chain(self.retired_providers.iter_mut())
             .find(|provider| provider.epoch == displaced)
@@ -3121,7 +3855,29 @@ where
                 &mut self.providers.meters,
                 next.inventory.meter_pairing(),
             );
+            // #1674's observation half (#1587b): likewise the observation readers of the taps the
+            // swap block carried, from its record (what actually carried), so a carried tap's
+            // reader, and its arm state, follow the tap that renders on. A record render has not
+            // written yet leaves the pairing pending, which a later step settles. The pending
+            // pairings settle first, and `next` waits while the running epoch's own still stands:
+            // the narrow race is render carrying into B's plan and then claiming C's between an
+            // edit's service step and its `withdraw_pending_candidate`, which promotes B and C in
+            // one call. So the readers pair in adoption order without relying on claim order.
+            self.settle_observation_pairings();
+            if self.providers.observations_pending.is_some()
+                || !pair_observations(&mut next, &mut self.providers)
+            {
+                next.observations_pending = Some(self.providers.epoch);
+            }
             let mut previous = core::mem::replace(&mut self.providers, next);
+            // #1690 D2: the promoted epoch brings its own master; the running one follows the
+            // row again once nothing waits.
+            sync_master_meters(
+                &self.monitor,
+                &mut self.providers,
+                &mut self.pending_providers,
+                &mut self.meters,
+            );
             // Dropped with the parked epoch, when its plan is reclaimed.
             previous.spectrum = displaced;
             // #1310 D3: render no longer runs the previous plan, so no successor is prepared
@@ -3161,6 +3917,8 @@ where
     /// already displaced; a committed revision's plan is never among them.
     pub fn service(&mut self) -> Result<(), CommandError> {
         self.fold_observation_pending();
+        // #2115: at most the record queue's depth of hops.
+        self.loudness.drain();
         self.synchronize_plan_epochs()?;
         self.poll_response_capture();
         self.refresh_provider_counters();
@@ -3169,13 +3927,91 @@ where
         Ok(())
     }
 
-    /// Takes the response capture's reply, if one is there and no result is waiting (#1577 D5).
+    /// Delivers the response capture (#1578 D4, R1): releases the capture once its event has
+    /// left the controller's cell, takes the render step's reply (#1577 D5) as its
+    /// `RESPONSE_READY` event, and moves the event into the controller.
+    ///
+    /// **Acked-batch question: can an ack precede a drop? No.** Every strip `RESPONSE_GET` that
+    /// was answered a tag armed one capture, and the client delivers each capture's result once
+    /// (a rebuild or a supersession re-arms it from the newest plan, and a strip the newest model
+    /// no longer has is `NOT_FOUND`). The result becomes one event, held here until the controller
+    /// queues it: a full queue, a held cell or an outstanding structural transaction keeps it for
+    /// the next call, and an event the endpoint cannot encode is replaced by its refusal, never
+    /// dropped. The capture is released, so a new request can arm, only after the event's frame
+    /// reached the host.
     fn poll_response_capture(&mut self) {
-        if self.response_ready.is_some() {
-            return;
+        match &self.response_ready {
+            #[cfg(feature = "test-support")]
+            Some(PendingResponse::SeamArmed) => {
+                let (provider, store) = self.controller.provider_and_session_mut();
+                if let Some(ready) =
+                    provider.poll_response_capture(store.compiled().normalized_model())
+                {
+                    self.response_ready = Some(PendingResponse::SeamResult(ready));
+                }
+                return;
+            }
+            #[cfg(feature = "test-support")]
+            Some(PendingResponse::SeamResult(_)) => return,
+            Some(PendingResponse::Event(_)) => {}
+            None => {
+                if !self.controller.response_ready_pending() {
+                    // A no-op unless a delivered event has reached the host.
+                    self.controller.provider_mut().release_response_capture();
+                }
+                let (provider, store) = self.controller.provider_and_session_mut();
+                if let Some(ready) =
+                    provider.poll_response_capture(store.compiled().normalized_model())
+                {
+                    self.response_ready = Some(PendingResponse::Event(
+                        host_core::response_ready_event(ready),
+                    ));
+                }
+            }
         }
-        let (provider, store) = self.controller.provider_and_session_mut();
-        self.response_ready = provider.poll_response_capture(store.compiled().normalized_model());
+        self.queue_response_event();
+    }
+
+    /// Moves a held `RESPONSE_READY` into the controller's cell (#1578 D4). A refusal keeps the
+    /// event for the next `service`; an event the endpoint cannot encode becomes its refusal
+    /// (`LIMIT_EXCEEDED` `response.reply_too_large` for one over the frame limit, `INTERNAL`
+    /// `response.capture` otherwise), which is queued in its place.
+    fn queue_response_event(&mut self) {
+        for _ in 0..2 {
+            let Some(PendingResponse::Event(event)) = self.response_ready.take() else {
+                return;
+            };
+            let revision = self.controller.session().revision();
+            let Err(refused) = self
+                .controller
+                .enqueue_response_ready_event(revision, event)
+            else {
+                return;
+            };
+            let mut event = refused.event;
+            let retry = if let EventEgressError::Encode(error) = refused.reason {
+                event.outcome = protocol::ResponseReadyOutcome::Refused {
+                    status: if error == EncodeError::LimitExceeded {
+                        protocol::StatusCode::LimitExceeded
+                    } else {
+                        protocol::StatusCode::Internal
+                    },
+                    diagnostic: if error == EncodeError::LimitExceeded {
+                        "response.reply_too_large"
+                    } else {
+                        "response.capture"
+                    }
+                    .to_owned(),
+                };
+                true
+            } else {
+                false
+            };
+            self.response_ready = Some(PendingResponse::Event(event));
+            if !retry {
+                return;
+            }
+        }
     }
 
     /// Test seam (#1577 D5): arm one capture of `strip_id`'s response owners from the newest plan.
@@ -3191,12 +4027,14 @@ where
         channels: host_core::ResponseChannels,
     ) -> Result<u64, host_core::ResponseCaptureRefusal> {
         let (provider, store) = self.controller.provider_and_session_mut();
-        provider.arm_response_capture(
+        let tag = provider.arm_response_capture(
             store.compiled().normalized_model(),
             strip_id,
             grid,
             channels,
-        )
+        )?;
+        self.response_ready = Some(PendingResponse::SeamArmed);
+        Ok(tag)
     }
 
     /// Test seam (#1577): the response capture row the newest epoch's plan was charged
@@ -3214,7 +4052,12 @@ where
     /// does when the host dequeues its event.
     #[cfg(feature = "test-support")]
     pub fn test_take_track_response(&mut self) -> Option<host_core::ResponseReady> {
-        let ready = self.response_ready.take()?;
+        let Some(PendingResponse::SeamResult(_)) = &self.response_ready else {
+            return None;
+        };
+        let Some(PendingResponse::SeamResult(ready)) = self.response_ready.take() else {
+            return None;
+        };
         self.controller.provider_mut().release_response_capture();
         Some(ready)
     }
@@ -3229,14 +4072,20 @@ where
         let telemetry_counters = self.controller.queues().telemetry_counters();
         let superseded = self.live_values_superseded.get();
         let restarted = self.strips_restarted;
+        let refusals = self.transition_reprepare_refusals;
         let errors = self.shared.live_block_errors.load(Ordering::Acquire);
         let underruns = self.shared.source_underrun_blocks.load(Ordering::Acquire);
         let discarded = self.source_frames_discarded;
-        let meter_windows_lost = self.meters.as_ref().map_or(0, SessionMeters::windows_lost);
+        let rings = self.ring_drops();
+        let meter_windows_lost = self
+            .meters
+            .as_ref()
+            .map_or(0, |meters| meters.windows_lost(rings));
         let provider = self.controller.provider_mut();
         provider.set_telemetry_counters(telemetry_counters);
         provider.set_live_values_superseded(superseded);
         provider.set_strips_restarted(restarted);
+        provider.set_transition_reprepare_refusals(refusals);
         provider.set_live_block_errors(errors);
         provider.set_source_underrun_blocks(underruns);
         provider.set_source_frames_discarded(discarded);
@@ -3274,6 +4123,66 @@ where
         document: &[u8],
         output_capacity: u64,
     ) -> Result<usize, CommandError> {
+        self.command_with_readers(request, document, output_capacity, None)
+    }
+
+    /// [`Self::command_with_document`] for a host that holds the session's plan beside it, between
+    /// blocks (the browser, whose one instance renders and serves control), lent for this call
+    /// only:
+    ///
+    /// - An adapter whose preparer keeps its plans' observation readers in the plan
+    ///   ([`crate::RuntimePreparer::kept_observations`]) reads them with `readers`, the reader
+    ///   list of the plan render runs. An `OBSERVATION_READ` reads them through the running plan's
+    ///   index (#1589 R2) and faults (`Internal`) when the plan's epoch is any other plan's, so the
+    ///   index and the readers are always one plan's.
+    /// - A `SPECTRUM_CONFIGURE` that prepares a successor before the plan's first block has the
+    ///   plan adopt it in place (#1597, through
+    ///   [`engine::realtime::RealtimePlanOwner::adopt_before_first_block`]) and promotes it, so
+    ///   its reply reports `adopted_epoch == configured_epoch` and a capture armed now covers
+    ///   the first block. No render has adopted anything yet, so this is the plan the first block
+    ///   would have adopted: a boot configures its taps through the command and still gets them in
+    ///   the plan that renders sample 0.
+    ///
+    /// Every other command ignores the plan.
+    pub fn command_with_plan(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+        plan: &mut PlanState<A>,
+        readers: fn(&mut PlanState<A>) -> &[host_core::EffectObservationHandle],
+    ) -> Result<usize, CommandError> {
+        self.command_with_readers(
+            request,
+            document,
+            output_capacity,
+            Some(LentPlan { plan, readers }),
+        )
+    }
+
+    /// The `OBSERVATION_READ` index of the plan of epoch `epoch` (#1586 D6, #1589 R2): the
+    /// running plan's or a pending candidate's, `None` for an epoch the session does not hold. A
+    /// host that keeps the readers in its plan reads them through it, with the epoch of the plan
+    /// whose readers it reads.
+    #[must_use]
+    pub fn observation_index(
+        &self,
+        epoch: u64,
+    ) -> Option<&host_core::observation::ObservationIndex> {
+        core::iter::once(&self.providers)
+            .chain(&self.pending_providers)
+            .find(|provider| provider.epoch == epoch)
+            .map(|provider| &provider.observation_index)
+    }
+
+    /// The body of [`Self::command_with_document`], with the plan a host lends.
+    fn command_with_readers(
+        &mut self,
+        request: &[u8],
+        document: &[u8],
+        output_capacity: u64,
+        lent: Option<LentPlan<'_, A>>,
+    ) -> Result<usize, CommandError> {
         let _canonical = lane::CanonicalFpEnv::enter();
         self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
@@ -3289,7 +4198,8 @@ where
         // them at all.
         let observe = protocol::ObserveContext {
             bindings: &self.observation,
-            enabled: A::OBSERVE_EDIT,
+            // #1589 R1: only a session whose plans bind every tap's queue serves the edit.
+            enabled: A::OBSERVE_EDIT && self.preparer.observation_queues(),
             // #1585 D4: the records are tagged from the session's one counter.
             next_arm_tag: self.next_arm_tag,
         };
@@ -3321,10 +4231,16 @@ where
                 written
             }
             // #1594 D9: a command the session executes.
-            PreparedCommandFrame::Session(prepared) => self.session_command(*prepared),
+            PreparedCommandFrame::Session(prepared) => {
+                self.session_command(*prepared, lent.map(|lent| lent.plan))
+            }
             // #1586 D6: the read, which allocates nothing.
             PreparedCommandFrame::ObservationRead(prepared) => {
-                self.observation_read(prepared, request)
+                let readers = lent.map(|lent| {
+                    let epoch = lent.plan.owner().active_epoch().0;
+                    (epoch, (lent.readers)(lent.plan))
+                });
+                self.observation_read(prepared, request, readers)
             }
             PreparedCommandFrame::Structural(prepared) => {
                 let prepared = ObservedPreparedToken::new(prepared);
@@ -3452,26 +4368,12 @@ where
                         Err(_) => return Err(CommandError::Internal),
                     }
                 }
-                // #1310 D1: a pending candidate is taken back before anything is prepared, so the
-                // replacement knows the plan render runs and the candidate's host-fed rings can
-                // move while the control thread owns them.
-                let mut withdrawn = self.withdraw_pending_candidate()?;
-                let result = self.rebuild(
+                self.rebuild_superseding(
                     Rebuild::Transaction(prepared),
                     revision,
                     monitor_change,
                     observation_change,
-                    &mut withdrawn,
-                );
-                // #1310 D4: a refusal leaves the withdrawn candidate here, whole; it is published
-                // again with its own epoch, credit, revision gate and words. Nothing was published
-                // since it was withdrawn, so this cannot fail.
-                if let Some(candidate) = withdrawn.take() {
-                    self.publisher.republish(candidate);
-                    #[cfg(feature = "test-support")]
-                    update_test_owners(|owners| owners.candidate_republished += 1);
-                }
-                result
+                )
             }
         }
     }
@@ -3547,21 +4449,13 @@ where
         if !observation_change.ended.is_empty() {
             return Err(CommandError::Internal);
         }
-        let mut withdrawn = self.withdraw_pending_candidate()?;
-        let result = self.rebuild(
+        self.rebuild_superseding(
             Rebuild::Discontinuity(model),
             revision,
             monitor_change,
             observation_change,
-            &mut withdrawn,
-        );
-        // #1310 D4: as for a transaction, a refusal republishes the withdrawn candidate whole.
-        if let Some(candidate) = withdrawn.take() {
-            self.publisher.republish(candidate);
-            #[cfg(feature = "test-support")]
-            update_test_owners(|owners| owners.candidate_republished += 1);
-        }
-        result.map(|_| ())
+        )
+        .map(|_| ())
     }
 
     /// Executes a command the session runs (#1594 D9) and completes it: a reply or a typed
@@ -3571,6 +4465,7 @@ where
     fn session_command(
         &mut self,
         prepared: protocol::PreparedSessionCommand,
+        plan: Option<&mut PlanState<A>>,
     ) -> Result<usize, CommandError> {
         let request = match prepared.command() {
             protocol::SessionCommand::SpectrumConfigure(request) => request,
@@ -3582,8 +4477,27 @@ where
                 let outcome = self.spectrum_stream(request);
                 return self.complete_spectrum_stream(prepared, outcome);
             }
+            protocol::SessionCommand::Loudness(request) => {
+                let render_sample = self.shared.render_sample.load(Ordering::Acquire);
+                return match self.loudness.apply(*request, render_sample) {
+                    Ok(reply) => self
+                        .controller
+                        .complete_session_command(
+                            prepared,
+                            protocol::SessionCommandReply::Loudness(reply),
+                            &mut self.response_scratch,
+                        )
+                        .map_err(map_command_process_error),
+                    // #2115: a start while armed changes nothing.
+                    Err(crate::loudness::LoudnessActive) => self.complete_spectrum_refusal(
+                        prepared,
+                        protocol::StatusCode::ValidationFailed,
+                        "loudness.active",
+                    ),
+                };
+            }
         };
-        let outcome = self.spectrum_configure(request);
+        let outcome = self.spectrum_configure(request, plan);
         match outcome {
             Ok(reply) => self
                 .controller
@@ -3619,6 +4533,7 @@ where
         &mut self,
         prepared: protocol::PreparedObservationRead,
         request: &[u8],
+        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<usize, CommandError> {
         let mut selections = [protocol::ObservationSelectionRef::EMPTY;
             protocol::OBSERVATION_READ_MAXIMUM_SELECTIONS];
@@ -3646,7 +4561,7 @@ where
         }
         let mut rows = core::mem::take(&mut self.observation_rows);
         let outcome = match rows.get_mut(..count) {
-            Some(table) => self.read_observation_rows(&selections[..count], table),
+            Some(table) => self.read_observation_rows(&selections[..count], table, readers),
             None => Err(None),
         };
         let observed_sample = self.shared.render_sample.load(Ordering::Acquire);
@@ -3692,18 +4607,27 @@ where
         result
     }
 
-    /// Reads one row per selection into `rows` on the running plan's readers, with the whole
-    /// batch checked first (#1586 D4): the core read and the wire rows, no allocation. `Err(None)`
-    /// for a refusal the codec rules out (an internal fault).
+    /// Reads one row per selection into `rows` on the running plan's readers, or on the readers an
+    /// adapter lent with their plan's epoch (#1589 R2), with the whole batch checked first (#1586
+    /// D4): the core read and the wire rows, no allocation. `Err(None)` for a refusal the codec
+    /// rules out (an internal fault), and for lent readers whose epoch is not the running plan's:
+    /// the index and the readers are always one plan's.
     fn read_observation_rows(
         &self,
         selections: &[protocol::ObservationSelectionRef<'_>],
         rows: &mut [protocol::ObservationReadRow],
+        readers: Option<(u64, &[host_core::EffectObservationHandle])>,
     ) -> Result<(), Option<host_core::observation::ObservationReadError>> {
-        let provider = &self.providers;
+        // One plan: the lent readers are the running plan's, since `command_with_readers` serviced
+        // first, so they read through the running plan's index; another epoch is a fault.
+        let handles = match readers {
+            Some((epoch, _)) if epoch != self.providers.epoch => return Err(None),
+            Some((_, handles)) => handles,
+            None => &*self.providers.observations,
+        };
         host_core::observation::read_with(
-            &provider.observation_index,
-            &provider.observations,
+            &self.providers.observation_index,
+            handles,
             selections,
             |selection| {
                 Ok::<_, host_core::observation::ObservationReadError>(core_selection(selection))
@@ -4106,6 +5030,7 @@ where
     fn spectrum_configure(
         &mut self,
         request: &protocol::SpectrumConfigureRequest,
+        plan: Option<&mut PlanState<A>>,
     ) -> Result<protocol::SpectrumConfigured, SpectrumRefusal> {
         use protocol::StatusCode;
         let configuration = spectrum_configuration_of(request)?;
@@ -4198,6 +5123,17 @@ where
             return Ok(reply(&self.spectrum, None));
         }
         let epoch = self.monitor_rebuild(configuration)?;
+        // #1597: before the first block, a lent plan adopts the successor in place, and the
+        // promotion installs its captures now. Not an ack before a drop: the candidate is adopted
+        // and nothing is lost if the promotion below fails, which only an `Internal` invariant
+        // fault can make it do; the reply is then not sent, and the next service step meets the
+        // same fault.
+        if let Some(plan) = plan
+            && plan.adopt_before_first_block()
+        {
+            self.synchronize_plan_epochs()
+                .map_err(SpectrumRefusal::Error)?;
+        }
         Ok(reply(&self.spectrum, Some(epoch)))
     }
 
@@ -4230,10 +5166,9 @@ where
         if !observation_change.ended.is_empty() {
             return Err(SpectrumRefusal::Error(CommandError::Internal));
         }
-        let mut withdrawn = self
-            .withdraw_pending_candidate()
-            .map_err(SpectrumRefusal::Error)?;
-        let result = self.rebuild(
+        // This assumes a withdrawal refuses only with `Internal` (`promote_pending_provider`),
+        // which the arm below answers as an error, never as a `LimitExceeded` reply.
+        let result = self.rebuild_superseding(
             Rebuild::Monitor {
                 model,
                 configuration,
@@ -4241,14 +5176,7 @@ where
             revision,
             monitor_change,
             observation_change,
-            &mut withdrawn,
         );
-        // #1310 D4: as for a transaction, a refusal republishes the withdrawn candidate whole.
-        if let Some(candidate) = withdrawn.take() {
-            self.publisher.republish(candidate);
-            #[cfg(feature = "test-support")]
-            update_test_owners(|owners| owners.candidate_republished += 1);
-        }
         match result {
             Ok(_) => self
                 .pending_providers
@@ -4261,6 +5189,241 @@ where
                 first_diagnostic_code(&failure),
             )),
             Err(error) => Err(SpectrumRefusal::Error(error)),
+        }
+    }
+
+    /// The warm-successor deadline step (#1358 D3): run once per control call while a `Primed`
+    /// record is held. `None` when there is no record, its deadline has not passed
+    /// ([`host_core::warm::prime_deadline_samples`] render samples past its `not_before`; a paused
+    /// render clock never passes it), or the record is stale (not the newest epoch: it is dropped
+    /// and nothing is withdrawn). Past the deadline it runs the transition fallback, whose one
+    /// withdrawal answers it: render adopted W first (`Taken`, `Nothing`: the record drops and the
+    /// revision completes `EXACT` through the watermark), the transition was published in W's
+    /// place, or the re-preparation was refused and W was republished whole with its record, so
+    /// the next call's step is past the deadline at once.
+    ///
+    /// **Acked-batch question (D4): can an ack ever precede a drop? No.** The step drops only a
+    /// record; every candidate it withdraws is either the donor of a transition prepared from the
+    /// committed model or republished whole, and it adds no queue. One step does at most one
+    /// withdrawal, one re-preparation and one republication, and never waits on render.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(
+            dead_code,
+            reason = "#1360 and #1361 wire the hosts' service steps to it"
+        )
+    )]
+    pub(crate) fn check_prime_deadline(&mut self) -> Result<Option<TransitionStep>, CommandError> {
+        let Some(record) = self.primed else {
+            return Ok(None);
+        };
+        let model = self.controller.session().compiled().normalized_model();
+        let (sample_rate_hz, quantum_frames) = (model.sample_rate_hz, model.quantum_frames);
+        match host_core::warm::check_prime_deadline(
+            &self.publisher,
+            self.newest_plan_epoch(),
+            &record,
+            sample_rate_hz,
+            quantum_frames,
+        ) {
+            host_core::warm::DeadlineStep::Pending => Ok(None),
+            host_core::warm::DeadlineStep::Stale => {
+                self.primed = None;
+                Ok(None)
+            }
+            host_core::warm::DeadlineStep::Due => self.fall_back_pending_warm().map(Some),
+        }
+    }
+
+    /// Withdraws the pending candidate, rebuilds, and republishes the candidate when the rebuild
+    /// does not take it: the one supersession path of a transaction, a declared discontinuity and
+    /// a monitor change.
+    ///
+    /// #1310 D1: a pending candidate is taken back before anything is prepared, so the replacement
+    /// knows the plan render runs and the candidate's host-fed rings can move while the control
+    /// thread owns them. The preparation reads the withdrawn candidate (its carried base, the
+    /// donation check), so the withdrawal cannot wait until after it (#2010). #1310 D4: a refusal
+    /// leaves the withdrawn candidate here, whole; it is published again with its own epoch,
+    /// credit, revision gate and words. Nothing was published since it was withdrawn, so this
+    /// cannot fail.
+    ///
+    /// #2010: a panic inside the rebuild before its commit republishes the candidate too, then
+    /// resumes the panic, so a host that catches it (the C ABI answers `RESULT_INTERNAL`) keeps
+    /// the candidate whose revisions it acked. Under `panic = "abort"` nothing unwinds and this
+    /// changes nothing. #2044: every step of the rebuild that can panic runs before the protocol
+    /// commit (`prepared.commit`), and the candidate is taken right after it, before any write to
+    /// the controller's own fields; only `take_displaced`, which cannot panic, runs between them.
+    /// So `withdrawn` is still `Some` exactly when the protocol commit did not happen, and a
+    /// republished candidate always meets the controller it was published under. A panic after
+    /// the take, which has taken the candidate, is not covered.
+    fn rebuild_superseding(
+        &mut self,
+        kind: Rebuild,
+        revision: u64,
+        monitor_change: controls::MonitorChange,
+        observation_change: controls::ObservationChange,
+    ) -> Result<usize, CommandError> {
+        let mut withdrawn = self.withdraw_pending_candidate()?;
+        self.rebuild_withdrawn(
+            kind,
+            revision,
+            monitor_change,
+            observation_change,
+            &mut withdrawn,
+        )
+    }
+
+    /// [`Self::rebuild_superseding`] after its withdrawal: rebuilds with `withdrawn` and
+    /// republishes a candidate the rebuild did not take, on a refusal and on a panic before the
+    /// commit, which it then resumes (#2010). The transition fallback (#1397 D2) runs it on the
+    /// candidate it withdrew itself; `withdrawn` is `None` on return.
+    fn rebuild_withdrawn(
+        &mut self,
+        kind: Rebuild,
+        revision: u64,
+        monitor_change: controls::MonitorChange,
+        observation_change: controls::ObservationChange,
+        withdrawn: &mut Option<engine::realtime::UnadoptedCandidate>,
+    ) -> Result<usize, CommandError> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.rebuild(
+                kind,
+                revision,
+                monitor_change,
+                observation_change,
+                withdrawn,
+            )
+        }));
+        if let Some(candidate) = withdrawn.take() {
+            // #2044: a panic after the successor's `publish_primed` wrote its prime flags (the
+            // protocol commit's own steps) leaves the flags of the rings the candidate carries
+            // as the successor set them. A `Primed` candidate is judged by them, so every
+            // republished one gets its own flags back first (idempotent: a refusal before
+            // `publish_primed` writes the same values again).
+            let epoch = candidate.epoch().0;
+            if self.primed.is_some_and(|record| record.epoch == epoch) {
+                self.restore_prime_flags(epoch);
+            }
+            self.publisher.republish(candidate);
+            #[cfg(feature = "test-support")]
+            update_test_owners(|owners| owners.candidate_republished += 1);
+        }
+        result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    }
+
+    /// Sets the prime flags of the newest pending candidate's carry again, as its own
+    /// `publish_primed` set them (#1403 D3, #2044), before it is republished.
+    ///
+    /// Its publication moved every producer it held vacant in from the epoch it succeeds, which
+    /// then holds those entries vacant. So the candidate carries exactly the rings whose
+    /// producers it holds and whose IDs that epoch holds vacant (a redeclared source's entry
+    /// there keeps its own producer); every producer that epoch still holds is of a ring the
+    /// candidate does not carry. No allocation.
+    fn restore_prime_flags(&self, epoch: u64) {
+        let len = self.pending_providers.len();
+        let Some(candidate) = self.pending_providers.last() else {
+            return;
+        };
+        debug_assert_eq!(
+            candidate.epoch, epoch,
+            "the republished candidate is the newest pending epoch"
+        );
+        let holder = match len {
+            0 | 1 => &self.providers,
+            _ => &self.pending_providers[len - 2],
+        };
+        holder
+            .sources
+            .set_prime_flags(|id| candidate.sources.holds_vacant(id));
+        candidate
+            .sources
+            .set_prime_flags(|id| holder.sources.holds_vacant(id));
+    }
+
+    /// The transition fallback across the pending `Primed` candidate W, the donor (#1397 D2): the
+    /// step the deadline step (`check_prime_deadline`, #1358 D3) runs once W is not ready by its
+    /// deadline.
+    ///
+    /// It withdraws W. A `Taken` or `Nothing` withdrawal means render adopted W, and nothing is
+    /// done. A withdrawn W is the donor of [`Rebuild::Transition`]: the committed model is
+    /// re-prepared against the plan W succeeds (#1344 D2), with the duck set as its forced
+    /// restarts, W's added rings are donated only after that preparation succeeds, W drops on this
+    /// thread, and the transition is published with `TRANSITION_FALLBACK`. The cross-plan
+    /// admission is not run again: W's submit admitted this re-preparation with the reprepare
+    /// peak (#1398 D4, #1403).
+    ///
+    /// **A refused re-preparation is a defect (D2 step 3).** W is republished whole, its record is
+    /// set again unchanged and `transition_reprepare_refusals` rises (counted, not asserted: root
+    /// ruling on #1358). W's revision stays pending and the next step retries. **Acked-batch
+    /// question (D4): can an ack ever precede a drop? No:** W drops only after its replacement is prepared from the committed model, which holds
+    /// every acked edit, and its rings move by a donation checked before anything is published.
+    #[cfg_attr(
+        not(feature = "test-support"),
+        expect(
+            dead_code,
+            reason = "its caller, the deadline step, is not yet wired (#1360)"
+        )
+    )]
+    fn fall_back_pending_warm(&mut self) -> Result<TransitionStep, CommandError> {
+        let Some(record) = self.primed else {
+            return Ok(TransitionStep::NotPending);
+        };
+        if !self.shared.plan_alive.load(Ordering::Acquire) {
+            return Err(CommandError::Backpressure);
+        }
+        let revision = self.controller.session().revision().0;
+        let model = Box::new(self.controller.session().compiled().clone());
+        // The transition renders under the overlay and the subscriptions the donor holds.
+        let monitor_change = self.monitor.after(&[], model.normalized_model());
+        let observation_change = self
+            .observation
+            .after(model.normalized_model())
+            .map_err(|_| CommandError::CompileRejected(failure(ResourceFault::Allocation)))?;
+        if !observation_change.ended.is_empty() {
+            return Err(CommandError::Internal);
+        }
+        let mut withdrawn = self.withdraw_pending_candidate()?;
+        match withdrawn.as_ref() {
+            None => return Ok(TransitionStep::NotPending),
+            Some(candidate) if candidate.epoch().0 != record.epoch => {
+                // A record of another epoch is stale and was dropped with the withdrawal; the
+                // deadline step's epoch check makes this unreachable (#1358 D3).
+                if let Some(candidate) = withdrawn.take() {
+                    self.publisher.republish(candidate);
+                }
+                debug_assert!(
+                    false,
+                    "#1358 D3: a withdrawal of another epoch than the record's"
+                );
+                return Ok(TransitionStep::NotPending);
+            }
+            Some(_) => {}
+        }
+        #[cfg(feature = "test-support")]
+        let injected = TEST_REFUSE_REPREPARE.with(|state| state.replace(false));
+        // A refusal republishes W whole, as a panic before the commit does (#2010).
+        let result = self.rebuild_withdrawn(
+            Rebuild::Transition {
+                model,
+                #[cfg(feature = "test-support")]
+                injected_refusal: injected,
+            },
+            revision,
+            monitor_change,
+            observation_change,
+            &mut withdrawn,
+        );
+        match result {
+            Ok(_) => Ok(TransitionStep::Published),
+            Err(_) => {
+                // W's record stays: the withdrawal of the epoch it names keeps it.
+                debug_assert_eq!(self.primed, Some(record));
+                // Root ruling (#1358): a refusal is counted, never asserted, since a real one
+                // reaches this path once the deadline step is wired (#1360).
+                self.transition_reprepare_refusals =
+                    self.transition_reprepare_refusals.saturating_add(1);
+                Ok(TransitionStep::Refused)
+            }
         }
     }
 
@@ -4289,16 +5452,26 @@ where
             engine::realtime::Withdrawal::Withdrawn(candidate) => {
                 #[cfg(feature = "test-support")]
                 update_test_owners(|owners| owners.candidate_withdrawn += 1);
+                // #1403 D4: the record goes with its candidate to the path that withdrew it; a
+                // record of another epoch is stale.
+                if self
+                    .primed
+                    .is_some_and(|record| record.epoch != candidate.epoch().0)
+                {
+                    self.primed = None;
+                }
                 Ok(Some(candidate))
             }
             engine::realtime::Withdrawal::Taken => {
                 #[cfg(feature = "test-support")]
                 update_test_owners(|owners| owners.candidate_taken += 1);
+                self.primed = None;
                 self.promote_pending_provider(newest)?;
                 Ok(None)
             }
             // An earlier withdrawal found it taken: render runs it.
             engine::realtime::Withdrawal::Nothing => {
+                self.primed = None;
                 self.promote_pending_provider(newest)?;
                 Ok(None)
             }
@@ -4359,18 +5532,24 @@ where
                     .is_some_and(|newest| newest.discontinuity));
         let own_ramps = match &kind {
             Rebuild::Transaction(prepared) => prepared.get().prospective_session().edit_ramps(),
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => &NO_EDIT_RAMPS,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
+                &NO_EDIT_RAMPS
+            }
         };
         // Whether B writes a monitor row: then its overlay change's ramp is the latest.
         let writes_monitor = match &kind {
             Rebuild::Transaction(prepared) => !prepared.get().monitor_edits().is_empty(),
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => false,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
+                false
+            }
         };
         // #1594 D6: a monitor rebuild keeps the committed revision, which may be 0. Against the
         // running plan its model is the base's, so nothing retargets; across a withdrawn
         // candidate at a newer revision the base is the older plan's, whose retargets the
         // preparation stamps with that revision as it does for a transaction.
         let monitor = matches!(kind, Rebuild::Monitor { .. });
+        // #1397 D2: the transition fallback across a donor.
+        let fallback = matches!(kind, Rebuild::Transition { .. });
         let unchanged_revision = monitor && (!superseding || revision == 0);
         // The ramp lengths the epoch B succeeds keeps from now on: B's own, or, across a
         // withdrawn candidate, the kept base's with B's laid over them (B wins on a shared row).
@@ -4389,7 +5568,9 @@ where
                 .prospective_session()
                 .compiled()
                 .ok_or(CommandError::Internal)?,
-            Rebuild::Discontinuity(model) | Rebuild::Monitor { model, .. } => &**model,
+            Rebuild::Discontinuity(model)
+            | Rebuild::Monitor { model, .. }
+            | Rebuild::Transition { model, .. } => &**model,
         };
         // #1696 root ruling: a kept base holds only the rows of owners B's model has, and no
         // rewritten targets, so the ramp row of B's model bounds it.
@@ -4478,42 +5659,145 @@ where
                 .spectrum
                 .successor_configuration(prospective.normalized_model()),
         };
-        let prepared_runtime = prepare_runtime::<A>(
-            &*self.preparer,
-            prospective,
-            self.limits,
-            spectrum_configuration
-                .as_ref()
-                .map(|configuration| &configuration.preparation),
-            Some(base),
-            &self.live_values_superseded,
-            self.observation_slots_high_water,
-            self.capture_owners_high_water,
-        )
-        .map_err(spectrum_invariant)?;
+        let prepare = |base: SuccessorBase<'_>| {
+            prepare_runtime::<A>(
+                &*self.preparer,
+                prospective,
+                self.limits,
+                spectrum_configuration
+                    .as_ref()
+                    .map(|configuration| &configuration.preparation),
+                Some(base),
+                &self.live_values_superseded,
+                self.observation_slots_high_water,
+                self.capture_owners_high_water,
+            )
+            .map_err(spectrum_invariant)
+        };
+        let mut prepared_runtime = prepare(base)?;
         // #1325 D7: after preparation, the pure transition step against the plan the successor
         // displaces. A declared discontinuity need not continue the running plan's output
         // (#1323 D2): it ducks nothing and is adopted at the next block. Everything phase 1 needs
         // is built here, before anything is reserved or committed.
-        let transition = if declared {
+        let plan_transition = |restarted: &[Box<str>]| {
+            host_core::plan_strip_transition(&base, duck, prospective.normalized_model(), restarted)
+                .map_err(|_| CommandError::Internal)
+        };
+        let mut transition = if declared {
             None
         } else {
-            Some(
-                host_core::plan_strip_transition(&base, duck, prospective.normalized_model())
-                    .map_err(|_| CommandError::Internal)?,
+            // #1324 D4: the strips the successor restarts duck-swap.
+            Some(plan_transition(
+                prepared_runtime.inventory.restarted_strips(),
+            )?)
+        };
+        let quantum = prospective.normalized_model().quantum_frames;
+        // #1403 D2, #1397 D1: with the session's warm bounds, the edit is classified against the
+        // plan it displaces, from the ordinary successor's inventory (#1354a ruling 1). While a
+        // phase 1 of an earlier transaction still ducks a strip on that plan, a `Warm` or
+        // `Unavailable` answer takes the transition fallback (below). Otherwise a `Warm` answer
+        // is prepared with its lead (#1354 D4), so the lead's
+        // whole restarts join the successor's `restarted_strips()`, and the transition is planned
+        // again over that set: the duck set is the strips the edit removes plus every strip the
+        // warm successor restarts (#1324 D4), and each restarted strip is restarted whole and
+        // armed by the preparation (#1324 D2-D3). With `lead_samples > 0` it is admitted with the
+        // reprepare peak and published `Primed`, no earlier than the duck's `S` when it ducks a
+        // strip. With `lead_samples == 0` there is no lead and no prime: it is an ordinary
+        // duck-swap, admitted at the single peak and published as one.
+        let mut warm_lead_blocks = None;
+        // #1397 D2: whether this successor is the transition fallback: at submit (`warm_lead`
+        // answered `Unavailable`) or across a withdrawn donor (`Rebuild::Transition`).
+        let mut transition_fallback = false;
+        let mut replanned = false;
+        let fall_back = |ordinary: PreparedRuntime| {
+            host_core::fall_back_to_transition(
+                base,
+                prospective.normalized_model(),
+                ordinary,
+                |runtime: &PreparedRuntime| &runtime.inventory,
+                prepare,
             )
         };
+        if fallback {
+            prepared_runtime = fall_back(prepared_runtime)?;
+            (transition_fallback, replanned) = (true, true);
+        } else if let Some(config) = self.warm
+            && transition.is_some()
+        {
+            let decision = host_core::warm_lead(
+                prospective,
+                &prepare_caps(self.limits),
+                base,
+                &prepared_runtime.inventory,
+                &config,
+            )
+            .map_err(|diagnostics| spectrum_invariant(prepare_failure(diagnostics)))?;
+            #[cfg(feature = "test-support")]
+            let decision = match TEST_NEXT_ZERO_LEAD.with(|state| state.borrow_mut().take()) {
+                Some(whole) => host_core::WarmDecision::Warm(
+                    host_core::WarmLead::test_only_zero_lead(&prepared_runtime.inventory, &whole),
+                ),
+                None => decision,
+            };
+            // #1397a attempt 2 (root ruling): while a phase 1 that ducks a strip is pending, a
+            // growth is not prepared warm (its successor would wait for the inherited `S` with
+            // carried nodes a lead ahead), and an ordinary successor would step a carried strip
+            // whose line changes length: it takes the transition, whose duck joins the overlay.
+            match decision {
+                host_core::WarmDecision::Warm(lead) if duck.strips().is_empty() => {
+                    let lead_blocks = u32::try_from(lead.lead_samples / u64::from(quantum))
+                        .map_err(|_| CommandError::Internal)?;
+                    drop(prepared_runtime);
+                    prepared_runtime = prepare(SuccessorBase {
+                        warm: Some(&lead),
+                        ..base
+                    })?;
+                    replanned = true;
+                    if lead.lead_samples > 0 {
+                        warm_lead_blocks = Some(lead_blocks);
+                    }
+                }
+                // #1397 D2 at submit, with no donor: a failure refuses the edit before its commit.
+                host_core::WarmDecision::Warm(_) | host_core::WarmDecision::Unavailable(_) => {
+                    prepared_runtime = fall_back(prepared_runtime)?;
+                    (transition_fallback, replanned) = (true, true);
+                }
+                host_core::WarmDecision::Ordinary => {}
+            }
+        }
+        // The duck set is the strips the edit removes plus every strip the successor restarts:
+        // the warm successor's (#1397 D1), or the transition's, its forced restarts (D2 step 4).
+        if replanned {
+            transition = Some(plan_transition(
+                prepared_runtime.inventory.restarted_strips(),
+            )?);
+        }
+        // #1397 deliverable 3: the injected refusal of a transition re-preparation, after it.
+        #[cfg(feature = "test-support")]
+        if matches!(
+            kind,
+            Rebuild::Transition {
+                injected_refusal: true,
+                ..
+            }
+        ) {
+            drop(prepared_runtime);
+            drop(kind);
+            return Err(CommandError::Backpressure);
+        }
         let next_duck = transition
             .as_ref()
             .map(|transition| duck.joined(transition));
-        let quantum = prospective.normalized_model().quantum_frames;
         let PreparedRuntime {
             sources,
             strips,
             effects,
             meters,
             meter_tables,
+            meter_frames,
             observations,
+            observation_strips,
+            carried_taps,
             observation_index,
             plan: candidate_plan,
             resources,
@@ -4546,8 +5830,11 @@ where
         );
         candidate_provider.discontinuity = discontinuity;
         candidate_provider.observations = observations;
+        candidate_provider.observation_strips = observation_strips;
+        candidate_provider.carried_taps = carried_taps;
         candidate_provider.observation_index = observation_index;
         candidate_provider.meter_tables = meter_tables;
+        candidate_provider = candidate_provider.with_meter_frames(meter_frames);
         // The configuration epoch is set beside the push, after the commit.
         candidate_provider.spectrum = crate::spectrum::EpochSpectrum::Candidate {
             captures: candidate_captures,
@@ -4565,6 +5852,9 @@ where
                 drop(kind);
                 return Err(CommandError::Backpressure);
             }
+            if self.take_test_fault(TestStructuralFaultPhase::PanicAfterWithdrawal) {
+                panic!("test fault: a rebuild panics after the withdrawal");
+            }
         }
         // #1398 D4: the candidate beside every plan the control plane holds unreclaimed, a
         // withdrawn candidate included, and every model it holds, the kept ones included (#1310
@@ -4572,7 +5862,18 @@ where
         let held = self.held_epochs()?;
         let models = self.held_models()?;
         let limits = self.limits;
-        let admit = |held: &[LiveEpochResources], models: &[session::ResourceEstimate]| {
+        // #1403 D2: a warm candidate is admitted with the reprepare peak too, beside the held
+        // plans that are not candidates (every parked epoch and the running plan).
+        let peak = |running: usize| {
+            if warm_lead_blocks.is_some() {
+                AdmissionPeak::WithReprepare { running }
+            } else {
+                AdmissionPeak::Single
+            }
+        };
+        let admit = |held: &[LiveEpochResources],
+                     models: &[session::ResourceEstimate],
+                     admission: AdmissionPeak| {
             validate_replacement_peak(
                 held,
                 ProspectivePlan {
@@ -4582,9 +5883,18 @@ where
                 },
                 compiled_model_admission_over(models, prospective.resource_estimate())?,
                 limits,
+                admission,
             )
         };
-        if let Err(failure) = admit(held.as_slice(), models.as_slice()) {
+        let running = held
+            .as_slice()
+            .len()
+            .checked_sub(self.pending_providers.len())
+            .ok_or(CommandError::Internal)?;
+        // #1397 D2: the transition across a donor is not admitted again: the donor's submit
+        // admitted this re-preparation with the reprepare peak, from the same committed model.
+        if !fallback && let Err(failure) = admit(held.as_slice(), models.as_slice(), peak(running))
+        {
             // Batch 15a review fold, item 2: a refusal is permanent only if the edit cannot fit
             // even beside the newest plan alone and the committed model, which is all a retry
             // meets once render has adopted every pending candidate (the plans before it are
@@ -4597,8 +5907,12 @@ where
             return Err(
                 match held.split_last().filter(|(_, older)| !older.is_empty()) {
                     Some((newest, _))
-                        if admit(core::slice::from_ref(newest), &models.as_slice()[..1])
-                            .is_ok() =>
+                        if admit(
+                            core::slice::from_ref(newest),
+                            &models.as_slice()[..1],
+                            peak(1),
+                        )
+                        .is_ok() =>
                     {
                         CommandError::Backpressure
                     }
@@ -4652,7 +5966,7 @@ where
         // it covers a revision the plan it succeeds has not published: a withdrawn monitor
         // candidate at the same revision carried no edit, and a claim at a revision the watermark
         // already reached would pass its outcome to the next advance.
-        let carries_withdrawn_edits = monitor
+        let carries_withdrawn_edits = (monitor || fallback)
             && superseding
             && self
                 .kept_holder()
@@ -4680,20 +5994,24 @@ where
                 follow_retarget_ramp.max(send_landing_ramp(next))
             }
             Rebuild::Transaction(_) => follow_retarget_ramp,
-            Rebuild::Monitor { model, .. } if carries_withdrawn_edits => {
+            Rebuild::Monitor { model, .. } | Rebuild::Transition { model, .. }
+                if carries_withdrawn_edits =>
+            {
                 if follow_loses_a_curve || send_fallback {
                     follow_retarget_ramp.max(send_landing_ramp(model.normalized_model()))
                 } else {
                     follow_retarget_ramp
                 }
             }
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => 0,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => 0,
         };
-        let outcome = if transaction && (follow_into_six_word || send_fallback) {
-            engine::realtime::CandidateOutcome::TransitionFallback
-        } else {
-            engine::realtime::CandidateOutcome::Exact
-        };
+        // #1397 D5: the transition is the one writer of `TRANSITION_FALLBACK` beside these.
+        let outcome =
+            if transition_fallback || (transaction && (follow_into_six_word || send_fallback)) {
+                engine::realtime::CandidateOutcome::TransitionFallback
+            } else {
+                engine::realtime::CandidateOutcome::Exact
+            };
         let reservation = match self
             .publisher
             .reserve_replacement(candidate_plan.take(), adoption)
@@ -4811,40 +6129,48 @@ where
                 &candidate_provider.effects,
                 &mut forwards,
             )?,
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => Vec::new(),
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
+                Vec::new()
+            }
         };
         // #1585 D4: the counter past the tags the preparation issued, installed at the commit.
         let next_arm_tag_after = match &kind {
             Rebuild::Transaction(prepared) => {
                 prepared.get().prospective_session().next_arm_tag_after()
             }
-            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } => None,
+            Rebuild::Discontinuity(_) | Rebuild::Monitor { .. } | Rebuild::Transition { .. } => {
+                None
+            }
         };
         let epoch = reservation.epoch();
         candidate_provider.epoch = epoch;
-        let mut reports = self
-            .shared
-            .reports
-            .lock()
-            .map_err(|_| CommandError::Internal)?;
         // #1398 D3: the report table and the pending list hold every row a candidate can meet
         // (#1398 D1), so a full one is an accounting fault. A superseded candidate's row and
-        // entry leave before B's arrive (#1310 D5).
-        let freed = usize::from(superseding);
-        if reports.len().saturating_sub(freed) >= reports.capacity()
-            || self.pending_providers.len().saturating_sub(freed)
-                >= self.pending_providers.capacity()
+        // entry leave before B's arrive (#1310 D5). #2044: the lock is held for this check only,
+        // so no step that can panic before the commit runs under it, and is taken again for the
+        // row's push after the take; only the control plane writes the table (through `&mut
+        // self`), so the check still holds there.
         {
-            debug_assert!(
-                false,
-                "#1398 D1 sizes the report table and the pending list"
-            );
-            return Err(CommandError::Internal);
+            let reports = self
+                .shared
+                .reports
+                .lock()
+                .map_err(|_| CommandError::Internal)?;
+            let freed = usize::from(superseding);
+            if reports.len().saturating_sub(freed) >= reports.capacity()
+                || self.pending_providers.len().saturating_sub(freed)
+                    >= self.pending_providers.capacity()
+            {
+                debug_assert!(
+                    false,
+                    "#1398 D1 sizes the report table and the pending list"
+                );
+                return Err(CommandError::Internal);
+            }
         }
 
         #[cfg(feature = "test-support")]
         if take_test_fault_state(TestStructuralFaultPhase::BeforeProtocolCommit) {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -4861,7 +6187,6 @@ where
         // #1594 D6: a monitor rebuild takes no stamp: it spends no revision, and the committed
         // one may be 0, which a gate never stamps.
         if !monitor && candidate_provider.revision_gate.stamp(revision).is_err() {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -4875,7 +6200,6 @@ where
             &observation_change.bindings,
             self.observation_wire,
         ) else {
-            drop(reports);
             drop(reservation);
             drop(candidate_provider);
             drop(kind);
@@ -4918,6 +6242,45 @@ where
             }
             None => None,
         };
+        // #1403 D3: a warm candidate's flags and `Primed` schedule, before its set takes any
+        // producer or donated ring: each entry it holds vacant is then a ring it carries from the
+        // plan it displaces, whose producer is still in that plan's set, or, across a withdrawn
+        // candidate, in the withdrawn candidate's. It sets the prime flags of rings render reads,
+        // so it runs after the last refusal: the commit below cannot refuse once its predicate
+        // passed above, with no controller write between. #2044: it runs before the protocol
+        // commit, so a panic here or in the commit (no lock is held) leaves the controller as it
+        // was and republishes the withdrawn candidate (#2010). Its flags are then the
+        // successor's: `rebuild_withdrawn` sets a `Primed` candidate's again before it republishes
+        // it (`restore_prime_flags`).
+        let mut primed = warm_lead_blocks.map(|lead_blocks| {
+            let (running, withdrawn_sources) = if superseding {
+                let len = self.pending_providers.len();
+                // A superseding rebuild holds the withdrawn candidate as its newest pending
+                // epoch: the check at the top of `rebuild` refused anything else.
+                debug_assert!(len > 0, "a withdrawn candidate is pending");
+                let holder = match len {
+                    0 | 1 => &self.providers,
+                    _ => &self.pending_providers[len - 2],
+                };
+                (holder, self.pending_providers.last())
+            } else {
+                (
+                    self.pending_providers.last().unwrap_or(&self.providers),
+                    None,
+                )
+            };
+            host_core::publish_primed(
+                reservation.inner.as_mut().expect("reservation is live"),
+                &running.sources,
+                &candidate_provider.sources,
+                withdrawn_sources.map(|withdrawn| &withdrawn.sources),
+                lead_blocks,
+            )
+        });
+        #[cfg(feature = "test-support")]
+        if take_test_fault_state(TestStructuralFaultPhase::PanicAtPrimedPublication) {
+            panic!("test fault: a rebuild panics after it publishes the primed schedule");
+        }
         let (committed, displaced) = match kind {
             Rebuild::Transaction(prepared) => {
                 // #1313 D2: a transaction that takes this arm is a rebuild, whatever else it holds.
@@ -4925,15 +6288,24 @@ where
                     .commit(&mut self.controller, protocol::EditPath::Rebuild)
                     .map_err(|_| CommandError::Internal)?;
                 // #1310 D3: the model the commit displaced, never one committed in place (#1613).
+                // `take_displaced` is `Option::take`, the one step between the commit and the
+                // candidate's take (#2044), and it cannot panic. It is `Some`: the preparation
+                // refused a token without a compilation (`compiled().ok_or`), a compiled token
+                // always displaces the committed model, and a monitor-only token, which displaces
+                // none, never takes this arm: it commits live (`commit_live`, #1603 D7).
                 let displaced = committed.take_displaced();
-                debug_assert!(displaced.is_some(), "a rebuild displaces a compiled model");
                 (Some(committed), displaced)
             }
             // #1323 D4: nothing is committed. The copy of the committed model is the base the
             // epoch this successor displaces keeps (the model that epoch renders), or, across a
             // withdrawn candidate, drops below as a commit's displaced model does.
-            Rebuild::Discontinuity(model) | Rebuild::Monitor { model, .. } => (None, Some(*model)),
+            Rebuild::Discontinuity(model)
+            | Rebuild::Monitor { model, .. }
+            | Rebuild::Transition { model, .. } => (None, Some(*model)),
         };
+        // #2044: the candidate is taken first, so no write below precedes the step after which a
+        // panic no longer republishes it.
+        let withdrawn = withdrawn.take();
         // B19-R7: the rebuild's own send moves ramp from its successor's first block.
         fold_send_move(&mut self.send_moves, revision, rebuild_send_ramp);
         // #1559 D8: the overlay is written after the last fallible step, with the commit.
@@ -4943,7 +6315,7 @@ where
         self.observation = observation_change.bindings;
         // From here on nothing fails.
         let mut superseded = None;
-        let superseded_revisions = match withdrawn.take() {
+        let superseded_revisions = match withdrawn {
             Some(candidate) => {
                 // #1310 D5 step 2: the checked donation, then the producers of the sources B
                 // carries from P0, which A's commit had moved into A's set. A's own model, which
@@ -5051,12 +6423,16 @@ where
                     .render_clock();
                 next_duck.raise_not_before(transition.not_before(p, quantum));
             }
+            // #1397 D1: a warm candidate whose transition ducks a strip stays `Primed`, no earlier
+            // than `S`; one whose overlay holds only removed sources no strip read keeps its
+            // render-clock `not_before`, which is never earlier. Every other candidate waits for
+            // `S` as a two-phase removal or a duck-swap does.
             if let Some(not_before) = next_duck.not_before() {
-                reservation
-                    .inner
-                    .as_mut()
-                    .expect("reservation is live")
-                    .set_adoption(PlanAdoption::NoEarlierThan(not_before));
+                let reservation = reservation.inner.as_mut().expect("reservation is live");
+                match primed.as_mut() {
+                    Some(record) => record.hold_until(reservation, not_before),
+                    None => reservation.set_adoption(PlanAdoption::NoEarlierThan(not_before)),
+                }
             }
             let held = self
                 .pending_providers
@@ -5132,6 +6508,14 @@ where
         }
         let candidate_epoch = candidate_provider.epoch;
         self.pending_providers.push(candidate_provider);
+        // #1690 D2: the successor takes the master this commit leaves; the plan still rendering
+        // keeps its own until it is displaced, as the browser's `sync_master` does.
+        sync_master_meters(
+            &self.monitor,
+            &mut self.providers,
+            &mut self.pending_providers,
+            &mut self.meters,
+        );
         // #1577 D4: a capture armed from here on waits for the candidate.
         self.controller
             .provider_mut()
@@ -5159,16 +6543,44 @@ where
             // transaction on an overflow, so the count is `Some` here.
             .unwrap_or(usize::MAX),
         );
+        // #2044: the report lock again, held to the publication so the row is in the table
+        // before render can adopt B. A poisoned lock is taken as it is: only the control plane
+        // writes the table (through `&mut self`), and no write of it can stop half done; every
+        // other holder only reads it (`active_resources`, the admissions' reads), so a panic that
+        // poisoned it left the rows whole. The step after the take must not fail.
+        let mut reports = self
+            .shared
+            .reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((_, donor)) = superseded.as_ref() {
             // #1310 D5 step 6: A's report row leaves; `retain` shrinks in place.
             let donor_epoch = donor.epoch;
             reports.retain(|(row, _)| *row != donor_epoch);
         }
         reports.push((epoch, A::Row::from(resources)));
+        #[cfg(feature = "test-support")]
+        TEST_PUBLISHED_ADOPTION.with(|state| {
+            state.set(
+                reservation
+                    .inner
+                    .as_ref()
+                    .map(PlanReplacementReservation::adoption),
+            );
+        });
         // #1310 D5 step 4: B is published only now, owning every donated ring and record. Its
         // payload carries the revision its gate carries, for the watermark's claim settle (#1482
         // R1).
         reservation.commit(revision);
+        // #1403 D4: B is the one pending candidate now. A record that named a candidate B
+        // superseded drops with it (#1310 D5 step 6, #1323's stop); B's own replaces it.
+        debug_assert!(
+            self.primed.is_none_or(|record| superseded
+                .as_ref()
+                .is_some_and(|(_, donor)| donor.epoch == record.epoch)),
+            "a record names the one pending candidate"
+        );
+        self.primed = primed;
         drop(reports);
         #[cfg(feature = "test-support")]
         {
@@ -5863,6 +7275,13 @@ where
                 .revision_gate
                 .publish_key(key);
         }
+        // #1690 D2: the master this commit leaves, by the `sync_master` rule.
+        sync_master_meters(
+            &self.monitor,
+            &mut self.providers,
+            &mut self.pending_providers,
+            &mut self.meters,
+        );
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
         )))
@@ -6103,7 +7522,7 @@ where
     /// swap, else the current plan's. It advances by a published rebuild, so a host that compares
     /// it across a command knows whether the command published a replacement plan, and, against
     /// the epoch of the plan it renders, whether a replacement is still waiting for its block. It
-    /// is the epoch of the plan whose producers [`Self::effect_producers`] lists.
+    /// is the epoch of the newest committed plan, whose producers an `Observe` edit reaches.
     #[must_use]
     pub fn newest_plan_epoch(&self) -> u64 {
         self.newest_providers().epoch
@@ -6167,40 +7586,29 @@ where
     }
 
     /// The newest plan's effect producers, in `HostLiveControlHandles::effect_controls` order
-    /// (#1381a), for reading: each producer's identity and descriptor, and the free room of its
-    /// observation queue. The adapter reaches an effect's observation queue for the browser's
-    /// observe kinds 7 and 8 (ruling C9) through [`Self::admit_and_push_observation_batch`], and
-    /// nothing else of a producer, so it cannot write a live value or open an owner behind the
-    /// commit.
-    ///
-    /// These are the producers of the newest committed plan (#1290a, batch 10 review): the
-    /// pending candidate's while one waits for its swap, else the current plan's. That is the plan
-    /// a live value, a source feed and a seek already reach, so an observation record is admitted
-    /// against the successor the way every other control call is. The adapter pairs them with the
-    /// addressing tables of the plan whose epoch is [`Self::newest_plan_epoch`]. The browser's
-    /// feature phase deletes this accessor together with those kinds.
+    /// (#1381a): the pending candidate's while one waits for its swap, else the current plan's.
+    /// Test support (#1590): no host reaches a producer; the core's `Observe` edit queues the
+    /// records.
+    #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn effect_producers(&self) -> &[host_core::EffectControlProducer] {
+    pub fn test_effect_producers(&self) -> &[host_core::EffectControlProducer] {
         &self.newest_providers().effects
     }
 
-    /// Resolves the stable key of an observation tap on the newest committed plan (#1677): the
-    /// plan [`Self::effect_producers`] lists, the pending candidate's while one waits for its swap.
-    /// A subscribe or unsubscribe names its tap by this key and no position of any plan, so a
-    /// rebuild between a client's last read and the record cannot make it arm another effect's
-    /// tap. The browser's record calls it, and the future C ABI observe edit (#1584) must call it.
+    /// Resolves the stable key of an observation tap on the newest committed plan (#1677), the
+    /// pending candidate's while one waits for its swap. An `Observe` edit names its tap by this
+    /// key and no position of any plan, so a rebuild between a client's last read and the record
+    /// cannot make it arm another effect's tap.
     ///
     /// The strip is looked up in the committed model, so a strip with no effect is still an
     /// unknown effect and not an unknown strip. The effect is the producer of the strip's console
-    /// slot or insert of that ID. The comparison is by bytes and the call allocates nothing: the
-    /// browser admits a record in the worklet's message handler, on the audio thread between
-    /// render quanta.
+    /// slot or insert of that ID. The comparison is by bytes and the call allocates nothing.
     ///
     /// # Errors
     ///
     /// The first of [`ObservationKeyError`] that applies, in the order strip, effect, tap. Nothing
     /// is written.
-    pub fn resolve_observation_key(
+    pub(crate) fn resolve_observation_key(
         &self,
         key: &ObservationKeyRef<'_>,
     ) -> Result<ResolvedObservationTap, ObservationKeyError> {
@@ -6259,7 +7667,7 @@ where
     /// pushes the table has not folded yet included, or `0` when none is armed (#1685 D1). A
     /// subscription is admitted only while this is at most [`Self::observation_frame_bytes`].
     #[must_use]
-    pub fn observation_ended_bytes(&self) -> usize {
+    pub(crate) fn observation_ended_bytes(&self) -> usize {
         self.observation_wire
             .event_bytes(self.observation_armed_bytes)
     }
@@ -6267,8 +7675,35 @@ where
     /// The control frame limit the ended event must fit (#1685 D1), the session's
     /// `maximum_control_frame_bytes`.
     #[must_use]
-    pub fn observation_frame_bytes(&self) -> usize {
+    pub(crate) fn observation_frame_bytes(&self) -> usize {
         self.observation_wire.frame()
+    }
+
+    /// Test support (#1590): `resolve_observation_key`, which no host calls.
+    ///
+    /// # Errors
+    ///
+    /// As `resolve_observation_key`.
+    #[cfg(feature = "test-support")]
+    pub fn test_resolve_observation_key(
+        &self,
+        key: &ObservationKeyRef<'_>,
+    ) -> Result<ResolvedObservationTap, ObservationKeyError> {
+        self.resolve_observation_key(key)
+    }
+
+    /// Test support (#1590): `observation_ended_bytes`, which no host calls.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_observation_ended_bytes(&self) -> usize {
+        self.observation_ended_bytes()
+    }
+
+    /// Test support (#1590): `observation_frame_bytes`, which no host calls.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_observation_frame_bytes(&self) -> usize {
+        self.observation_frame_bytes()
     }
 
     /// How many taps are armed now, pushes the table has not folded yet included.
@@ -6277,9 +7712,11 @@ where
         self.observation_armed
     }
 
-    /// Admits a batch of subscription changes, then queues it: the one way a host arms or disarms
-    /// an observation tap (#1676 D1, attempt 2). A change names the producer's position in
-    /// [`Self::effect_producers`] and the tap, as [`Self::resolve_observation_key`] returns them.
+    /// Admits a batch of subscription changes with nothing queued (#1676 D1, attempt 2; #1584 D4):
+    /// the core's `Observe` edit, which must finish other checks before the first write, admits its
+    /// net changes here and pushes them after, with nothing pushed to any observation queue in
+    /// between. A change names the producer's position in the newest plan's effect producers and
+    /// the tap, as [`Self::resolve_observation_key`] returns them.
     ///
     /// Three checks run before anything is written, in this order, and a refusal names the first
     /// change in the iterator's order that breaks the first check that fails:
@@ -6302,33 +7739,14 @@ where
     ///    [`ObservationRefusal::NoProducer`]. These two are one check: the first change in order
     ///    that names no producer or a producer without the room the batch needs is refused.
     ///
-    /// Then every change is queued. A refusal writes nothing observable, so it is whole and
-    /// precedes every acknowledgement. The call is linear in the batch, reads the per-slot state
-    /// the pushes keep and per-producer scratch sized with the plan, and allocates nothing, so it
-    /// runs in the browser worklet's message handler, on the audio thread between render quanta.
+    /// A refusal writes nothing observable, so it is whole and precedes every acknowledgement. The
+    /// check is linear in the batch and reads the per-slot state the pushes keep and per-producer
+    /// scratch sized with the plan; it allocates nothing itself (the edit that calls it builds its
+    /// list of changes on the control thread).
     ///
     /// # Errors
     ///
     /// [`ObservationRefusal`], as above. Nothing was queued and no state moved.
-    ///
-    /// # Panics
-    ///
-    /// Never in practice: the room check covers every push of the batch on the one control thread,
-    /// so a push that is refused after it is an engine fault, which would break the whole-batch
-    /// promise and is not returned as a typed refusal.
-    pub fn admit_and_push_observation_batch(
-        &mut self,
-        changes: impl Iterator<Item = ObservationChange> + Clone,
-    ) -> Result<(), ObservationRefusal> {
-        self.admit_observation_batch(changes.clone())?;
-        self.push_admitted_observation_batch(changes);
-        Ok(())
-    }
-
-    /// The three checks of [`Self::admit_and_push_observation_batch`], with nothing queued: a
-    /// caller that must finish other checks before the first write (the core's `Observe` edit,
-    /// #1584 D4) admits first and pushes with [`Self::push_admitted_observation_batch`] after them,
-    /// with nothing pushed to any observation queue in between.
     pub(crate) fn admit_observation_batch(
         &mut self,
         changes: impl Iterator<Item = ObservationChange> + Clone,
@@ -6379,16 +7797,7 @@ where
         Ok(())
     }
 
-    /// Queues a batch [`Self::admit_observation_batch`] admitted, with no observation record queued
-    /// since: the room it checked is still there, so no push can be refused.
-    pub(crate) fn push_admitted_observation_batch(
-        &mut self,
-        changes: impl Iterator<Item = ObservationChange>,
-    ) {
-        self.push_tagged_observation_batch(changes.map(|change| (change, 0)));
-    }
-
-    /// [`Self::push_admitted_observation_batch`] with each record's tag (#1585 D4): the tag a
+    /// Queues an admitted batch with each record's tag (#1585 D4): the tag a
     /// transaction preparation issued, or `0` for a fresh one from the counter.
     fn push_tagged_observation_batch(
         &mut self,
@@ -6439,7 +7848,7 @@ where
         Some(slot as usize).filter(|slot| *slot < self.observation_pending.len())
     }
 
-    /// The frame check of [`Self::admit_and_push_observation_batch`] (#1685 D1): moves nothing and
+    /// The frame check of [`Self::admit_observation_batch`] (#1685 D1): moves nothing and
     /// allocates nothing; each key's bytes are its slot's. Sound only for a batch that names each
     /// tap once, which the caller checks first.
     fn admit_observation_changes(
@@ -6490,10 +7899,9 @@ where
         self.push_effect_observe(position, tap_index, armed, window_blocks, 0)
     }
 
-    /// Queues one observation record on the newest plan's effect producer at `position` of
-    /// [`Self::effect_producers`]. Private to the crate: a host reaches it only through
-    /// [`Self::admit_and_push_observation_batch`], so no record is queued without the frame check
-    /// (#1676 attempt 2).
+    /// Queues one observation record on the newest plan's effect producer at `position`. Private
+    /// to the crate: a host reaches it only through the core's `Observe` edit, which admits first,
+    /// so no record is queued without the frame check (#1676 attempt 2).
     ///
     /// # Errors
     ///
@@ -6911,6 +8319,636 @@ mod tests {
         assert_eq!(EventError::Internal.diagnostic(), b"control.event.internal");
     }
 
+    /// #1588 D2, D4, R4: a render-half meter fold's frames reach the batches through the plan's
+    /// ring, and a frame the full ring dropped reaches `METER_WINDOWS_LOST`.
+    #[cfg(feature = "test-support")]
+    mod rendered_meters {
+        use crate::{
+            CompiledChildren, ControlAdapter, ControlLimits, EventLane, PlanResources,
+            RuntimePreparer, compile_children,
+        };
+        use engine::realtime::PlanarBufferMut;
+        use host_core::{
+            CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+            HostMeterRequest, HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics,
+            PreparedHost, SuccessorBase, prepare_host_runtime_with_live_lanes,
+            prepare_host_runtime_with_live_lanes_successor,
+            prepare_host_runtime_with_selected_meters,
+            prepare_host_runtime_with_selected_meters_successor,
+        };
+        use protocol::{
+            CommandPayload, CounterId, DiagnosticSeverity, ExpectedRevision, MeterEntry,
+            MeterMetric, MeterTarget, ProtocolCodec, RequestId, SessionEdit,
+            TelemetryConfiguration, TypedCommandFrame,
+        };
+        use session::{RouteSource, StableId, parse_session_json};
+
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        const QUANTUM: u64 = 128;
+
+        struct Adapter;
+
+        impl ControlAdapter for Adapter {
+            type Row = PlanResources;
+            const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+            const METER_DELIVERY: bool = true;
+            const RENDER_METER_FOLD: bool = true;
+        }
+
+        /// host-core's live-lanes entries, with one-block meter windows: the default meters, or
+        /// the caller's `selection`.
+        struct Preparer {
+            selection: Option<Vec<HostMeterRequest>>,
+        }
+
+        impl RuntimePreparer for Preparer {
+            fn prepare(
+                &self,
+                compiled: &CompiledSession,
+                caps: &HostPrepareCaps,
+                lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
+                successor: Option<SuccessorBase<'_>>,
+                superseded: &LiveValuesSuperseded,
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
+                let live = HostLiveControlRequest {
+                    meter_window_blocks: 1,
+                    ..HostLiveControlRequest::default()
+                };
+                let (host, handles) = match (successor, &self.selection) {
+                    (Some(base), None) => prepare_host_runtime_with_live_lanes_successor(
+                        compiled, caps, &live, lanes, base, superseded,
+                    ),
+                    (None, None) => prepare_host_runtime_with_live_lanes(
+                        compiled, caps, &live, lanes, superseded,
+                    ),
+                    (Some(base), Some(selection)) => {
+                        prepare_host_runtime_with_selected_meters_successor(
+                            compiled, caps, &live, selection, lanes, superseded, base,
+                        )
+                    }
+                    (None, Some(selection)) => prepare_host_runtime_with_selected_meters(
+                        compiled, caps, &live, selection, lanes, superseded,
+                    ),
+                }?;
+                Ok((host, handles, None))
+            }
+
+            fn meter_window_blocks(&self) -> u32 {
+                1
+            }
+        }
+
+        fn limits() -> ControlLimits {
+            ControlLimits {
+                source_ring_frames: 1_024,
+                maximum_automation_spans_per_block: 128,
+                maximum_document_bytes: 1_000_000,
+                maximum_diagnostic_bytes: 4_096,
+                maximum_tracks: 100,
+                maximum_sources: 100,
+                maximum_routes: 100,
+                maximum_effects: 100,
+                maximum_graph_session_plus_plan_bytes: 100_000_000,
+                maximum_source_total_bytes: 10_000_000,
+                maximum_source_overhead_bytes: 10_000_000,
+                maximum_effect_state_bytes: 100_000_000,
+                maximum_effect_scratch_bytes: 100_000_000,
+                maximum_builtin_retained_bytes: 100_000_000,
+                maximum_control_retained_bytes: 10_000_000,
+                maximum_named_allocation_bytes: 100_000_000,
+                maximum_meter_streams: 4_096,
+                maximum_meter_items: 1 << 20,
+                maximum_meter_bytes: 1 << 26,
+                maximum_control_frame_bytes: 4_096,
+                maximum_replay_bytes: 8_192,
+                maximum_replay_entries: 16,
+                maximum_submixes: 0,
+                maximum_vcas: 0,
+                maximum_vca_reach_pairs: u64::MAX,
+                maximum_replacement_peak_bytes: u64::MAX,
+            }
+        }
+
+        /// A session booted with `selection` (or the default meters) and the meter table `meters`
+        /// at one window per batch.
+        fn boot(
+            selection: Option<Vec<HostMeterRequest>>,
+            meters: Vec<MeterEntry>,
+        ) -> CompiledChildren<Adapter> {
+            let mut children =
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer { selection }))
+                    .expect("boot");
+            command(
+                &mut children,
+                1,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters,
+                    meter_period_blocks: 1,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            children.session.service().expect("service");
+            children
+        }
+
+        fn output_peak() -> MeterEntry {
+            MeterEntry {
+                target: MeterTarget::Output,
+                metric: MeterMetric::Peak,
+            }
+        }
+
+        /// Run `payload` as request `request`; the response bytes.
+        fn command(
+            children: &mut CompiledChildren<Adapter>,
+            request: u64,
+            payload: CommandPayload<'_>,
+        ) -> Vec<u8> {
+            let codec = ProtocolCodec::default();
+            let frame = TypedCommandFrame {
+                request_id: RequestId::new(request).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(
+                    children.session.test_controller().session().revision(),
+                ),
+                payload,
+            };
+            let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+            let length = codec
+                .encode_command_frame_into(&frame, &mut bytes)
+                .expect("typed command");
+            let response = children
+                .session
+                .command(&bytes[..length], 4_096)
+                .expect("command");
+            children.session.command_response(response).to_vec()
+        }
+
+        /// A complete one-window frame of `window` with output peak `[0.5, 0.25]` and `peaks` as
+        /// its strips' peaks.
+        fn frame(window: u64, peaks: &[[f32; 2]]) -> host_core::MeterFrame {
+            let mut frame = host_core::MeterFrame::new(peaks.len()).expect("frame");
+            frame.first_sample = window * QUANTUM;
+            frame.end_sample = (window + 1) * QUANTUM;
+            frame.windows = 1;
+            frame.sequence = window + 1;
+            frame.generation = 1;
+            frame.validity =
+                host_core::MeterValidity::COMPLETE.union(host_core::MeterValidity::OUTPUT);
+            frame.output_peak = [0.5, 0.25];
+            frame.strip_peaks.copy_from_slice(peaks);
+            frame
+        }
+
+        /// Render block `block` and observe it, then run the service step.
+        fn render(children: &mut CompiledChildren<Adapter>, block: u64) {
+            let mut samples = [0.0_f32; 2 * QUANTUM as usize];
+            let output =
+                PlanarBufferMut::try_new(&mut samples, 2, QUANTUM as usize, QUANTUM as usize)
+                    .expect("output");
+            children
+                .plan
+                .render(block * QUANTUM, output)
+                .expect("render");
+            let (left, right) = samples.split_at(QUANTUM as usize);
+            children.plan.observe_rendered_block(
+                [left, right],
+                block * QUANTUM,
+                (block + 1) * QUANTUM,
+            );
+            children.session.service().expect("service");
+        }
+
+        /// Every staged `METER_BATCH`, oldest first: its first sample and its records' values.
+        fn batches(children: &mut CompiledChildren<Adapter>) -> Vec<(u64, Vec<f32>)> {
+            let mut batches = Vec::new();
+            while let Some(length) = children
+                .session
+                .dequeue_event(EventLane::Lossy, 4_096)
+                .expect("an event")
+            {
+                let bytes = children.session.event_response(length).to_vec();
+                let mut fields = [0_u16; 64];
+                let decoded = ProtocolCodec::default()
+                    .decode_typed_event(&bytes, &mut protocol::DecodeScratch::new(&mut fields))
+                    .expect("a typed event");
+                if let protocol::DecodedEventPayload::MeterBatch(batch) = decoded.payload {
+                    let values = (0..usize::from(batch.count))
+                        .map(|index| batch.record(index).expect("a record").value)
+                        .collect();
+                    batches.push((batch.first_sample.0, values));
+                }
+            }
+            batches
+        }
+
+        /// The `METER_WINDOWS_LOST` counter, through `COUNTERS_GET`.
+        fn windows_lost(children: &mut CompiledChildren<Adapter>, request: u64) -> u64 {
+            let response = command(
+                children,
+                request,
+                CommandPayload::CountersGet(&protocol::CountersRequest {
+                    all: false,
+                    ids: vec![CounterId::MeterWindowsLost as u32],
+                }),
+            );
+            let mut fields = [0_u16; 64];
+            let protocol::DecodedTypedResponseFrame::Success {
+                payload: protocol::DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_response(&response, &mut protocol::DecodeScratch::new(&mut fields))
+                .expect("counters response")
+            else {
+                panic!("expected counters")
+            };
+            snapshot.values[0].value
+        }
+
+        /// A structural transaction: a muted copy of the first track and its route.
+        fn add_muted_track(children: &mut CompiledChildren<Adapter>, request: u64) {
+            let model = parse_session_json(SESSION).expect("fixture");
+            let mut track = model.tracks[0].clone();
+            track.id = StableId::parse("a-added").expect("track ID");
+            track.fader.left_mute = true;
+            track.fader.right_mute = true;
+            let mut route = model.routes[0].clone();
+            route.id = StableId::parse("a-added-main").expect("route ID");
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("track route")
+            };
+            *track_id = track.id.clone();
+            let edits = [
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ];
+            command(
+                children,
+                request,
+                CommandPayload::SessionTransactionApply(&edits),
+            );
+        }
+
+        /// Test value: red if a frame the full ring dropped never reaches `METER_WINDOWS_LOST`
+        /// (the browser's client would see a gap in the batches with no count), or if the
+        /// control half stages no batch from a plan's ring (the browser would accept a meter
+        /// table and serve nothing).
+        #[test]
+        fn a_full_ring_drop_reaches_meter_windows_lost_and_its_frames_become_batches() {
+            let mut children = boot(None, vec![output_peak()]);
+            let level = children.session.meter_level().expect("a meter level");
+            assert_eq!(level.load(), host_core::MeterLevel::TELEMETRY);
+            let epoch = children.session.newest_plan_epoch();
+            let mut producer = children
+                .session
+                .take_meter_frame_producer(epoch)
+                .expect("the boot plan's ring");
+            let published = (0..=host_core::METER_FRAME_RING_DEPTH as u64)
+                .filter(|&window| producer.publish_frame(&frame(window, &[])))
+                .count();
+            assert_eq!(published, host_core::METER_FRAME_RING_DEPTH);
+            render(&mut children, 0);
+            assert_eq!(
+                batches(&mut children).len(),
+                host_core::METER_FRAME_RING_DEPTH,
+                "one batch a frame"
+            );
+            assert_eq!(windows_lost(&mut children, 2), 1);
+        }
+
+        /// #1588 D2, D4: the frames of two epochs' rings are staged in window order, oldest
+        /// epoch first, and a reclaimed ring's drop stays counted.
+        ///
+        /// Test value: red if the rings are drained newest epoch first (the successor's windows
+        /// would reach the client before the predecessor's), or if a reclaimed ring's drops leave
+        /// `METER_WINDOWS_LOST` with its epoch.
+        #[test]
+        fn two_epochs_rings_are_staged_in_window_order_and_a_reclaimed_drop_stays_counted() {
+            let mut children = boot(None, vec![output_peak()]);
+            let first = children.session.newest_plan_epoch();
+            let mut older = children
+                .session
+                .take_meter_frame_producer(first)
+                .expect("the boot plan's ring");
+            add_muted_track(&mut children, 2);
+            let second = children.session.newest_plan_epoch();
+            assert!(second > first, "the transaction published a successor");
+            let mut newer = children
+                .session
+                .take_meter_frame_producer(second)
+                .expect("the successor's ring");
+            let depth = host_core::METER_FRAME_RING_DEPTH as u64;
+            for window in 0..=depth {
+                older.publish_frame(&frame(window, &[]));
+            }
+            for window in depth + 1..depth + 3 {
+                assert!(newer.publish_frame(&frame(window, &[])));
+            }
+            render(&mut children, 0);
+            render(&mut children, 1);
+            assert_eq!(
+                children.session.test_providers().epoch,
+                second,
+                "the boot epoch is reclaimed"
+            );
+            let starts: Vec<u64> = batches(&mut children)
+                .into_iter()
+                .map(|(first_sample, _)| first_sample)
+                .collect();
+            let expected: Vec<u64> = (0..depth)
+                .chain(depth + 1..depth + 3)
+                .map(|window| window * QUANTUM)
+                .collect();
+            assert_eq!(starts, expected);
+            assert_eq!(windows_lost(&mut children, 3), 1, "the boot ring's drop");
+        }
+
+        /// #1588 D3, MINOR-2: a strip entry reads its strip's own meter in a plan prepared with a
+        /// caller selection: here one meter, on the fourth track, so the frame's strip 0 is
+        /// `eq3`'s.
+        ///
+        /// Test value: red if an entry resolves against the plan's strip order instead of its
+        /// meters' (`eq3` would read the frame's strip 3, another meter's slot or none).
+        #[test]
+        fn a_strip_entry_reads_its_own_meter_under_a_caller_selection() {
+            let selection = vec![HostMeterRequest {
+                strip_id: "eq3".into(),
+                tap: host_core::MeterTap::PostMatrix,
+                metrics: host_core::MeterMetricSet::SAMPLE_PEAK,
+            }];
+            let mut children = boot(
+                Some(selection),
+                vec![MeterEntry {
+                    target: MeterTarget::Strip("eq3".into()),
+                    metric: MeterMetric::Peak,
+                }],
+            );
+            let epoch = children.session.newest_plan_epoch();
+            let mut producer = children
+                .session
+                .take_meter_frame_producer(epoch)
+                .expect("the boot plan's ring");
+            assert!(producer.publish_frame(&frame(0, &[[0.75, 0.5]])));
+            render(&mut children, 0);
+            assert_eq!(batches(&mut children), vec![(0, vec![0.75, 0.5])]);
+        }
+
+        /// #1690b attempt 2 (the browser's `sync_master` rule): with `eq1` the master, a rebuild
+        /// waits for adoption, a live `SET_CONTROL` moves the master to `eq2`, and a configure
+        /// re-resolves the entries. A frame the plan still rendering published (into its ring;
+        /// on the browser the render thread's frames reach the control half after its commits)
+        /// reads that plan's own master, `eq1`.
+        ///
+        /// Test value: red if a frame of the rendering plan resolves the master the row names now
+        /// (the replacement's) instead of the master its own epoch held, after the move or after a
+        /// configure that re-resolves the entries.
+        #[test]
+        fn a_master_moved_while_a_rebuild_waits_leaves_the_rendering_plans_master() {
+            let master_entry = || MeterEntry {
+                target: MeterTarget::Master,
+                metric: MeterMetric::GainReduction,
+            };
+            let mut children = boot(None, vec![master_entry()]);
+            let master = |strip: &str| SessionEdit::SetControl {
+                address: protocol::control_core::ControlAddress {
+                    owner: protocol::control_core::Owner::Strip(
+                        StableId::parse(strip).expect("strip ID"),
+                    ),
+                    section: protocol::control_core::Section::Own,
+                    control: 4,
+                    lane: protocol::control_core::Lane::Both,
+                },
+                value: 1.0,
+                ramp_samples: None,
+                expected_effect: None,
+            };
+            command(
+                &mut children,
+                2,
+                CommandPayload::SessionTransactionApply(&[master("eq1")]),
+            );
+            let epoch = children.session.newest_plan_epoch();
+            let mut producer = children
+                .session
+                .take_meter_frame_producer(epoch)
+                .expect("the boot plan's ring");
+            add_muted_track(&mut children, 3);
+            assert!(
+                children.session.newest_plan_epoch() > epoch,
+                "the rebuild waits"
+            );
+            command(
+                &mut children,
+                4,
+                CommandPayload::SessionTransactionApply(&[master("eq2")]),
+            );
+            // `eq1` reduces 3 dB; `eq2` has no reading.
+            let reducing = |window: u64| {
+                let mut frame = frame(window, &[[0.0; 2]; 9]);
+                frame.strip_gain_reduction_db[1] = 3.0;
+                frame.strip_gain_reduction_present[1] = true;
+                frame
+            };
+            // A configure while the rebuild waits re-resolves the entries.
+            command(
+                &mut children,
+                5,
+                CommandPayload::TelemetryConfigure(&TelemetryConfiguration {
+                    meters: vec![master_entry()],
+                    meter_period_blocks: 1,
+                    meter_window_blocks: None,
+                    counter_ids: Vec::new(),
+                    counter_period_blocks: 0,
+                    diagnostics_enabled: false,
+                    minimum_diagnostic_severity: DiagnosticSeverity::Info,
+                }),
+            );
+            assert!(producer.publish_frame(&reducing(0)));
+            render(&mut children, 0);
+            assert_eq!(batches(&mut children), vec![(0, vec![3.0])]);
+        }
+    }
+
+    /// #1676 the admission rules an `Observe` edit cannot reach (#1590 moved them here from the
+    /// integration tests, where they ran through a public batch entry no host calls): the edit
+    /// resolves every key to a producer and a declared tap, and nets each tap to one change, so a
+    /// tap with no slot, a position past the producers and a second naming of a tap reach
+    /// `admit_observation_batch` only through an engine fault. The edit maps each to
+    /// `CommandError::Internal`; these tests hold that the check itself refuses, at the right
+    /// index, before anything is queued.
+    #[cfg(feature = "test-support")]
+    mod observation_admission {
+        use crate::{
+            CompiledChildren, ControlAdapter, ControlLimits, ObservationChange, ObservationRefusal,
+            PlanResources, RuntimePreparer, compile_children,
+        };
+        use host_core::{
+            CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+            HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost, SuccessorBase,
+            prepare_host_runtime_with_live_lanes, prepare_host_runtime_with_live_lanes_successor,
+        };
+
+        /// Three tracks, `comp1` to `comp3`, each with one compressor insert `comp` (one tap).
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/compressor-dynamic-bank-observation.json");
+
+        struct Adapter;
+
+        impl ControlAdapter for Adapter {
+            type Row = PlanResources;
+            const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+            const OBSERVE_EDIT: bool = true;
+        }
+
+        /// A preparer that binds a queue slot for every declared tap.
+        struct Preparer;
+
+        impl RuntimePreparer for Preparer {
+            fn prepare(
+                &self,
+                compiled: &CompiledSession,
+                caps: &HostPrepareCaps,
+                lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
+                successor: Option<SuccessorBase<'_>>,
+                superseded: &LiveValuesSuperseded,
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
+                let live = HostLiveControlRequest {
+                    observation_taps: 4,
+                    ..HostLiveControlRequest::default()
+                };
+                let (host, handles) = match successor {
+                    Some(base) => prepare_host_runtime_with_live_lanes_successor(
+                        compiled, caps, &live, lanes, base, superseded,
+                    ),
+                    None => prepare_host_runtime_with_live_lanes(
+                        compiled, caps, &live, lanes, superseded,
+                    ),
+                }?;
+                Ok((host, handles, None))
+            }
+        }
+
+        fn limits() -> ControlLimits {
+            ControlLimits {
+                source_ring_frames: 1_024,
+                maximum_automation_spans_per_block: 128,
+                maximum_document_bytes: 1_000_000,
+                maximum_diagnostic_bytes: 4_096,
+                maximum_tracks: 100,
+                maximum_sources: 100,
+                maximum_routes: 100,
+                maximum_effects: 100,
+                maximum_graph_session_plus_plan_bytes: 1_000_000_000,
+                maximum_source_total_bytes: 100_000_000,
+                maximum_source_overhead_bytes: 100_000_000,
+                maximum_effect_state_bytes: 1_000_000_000,
+                maximum_effect_scratch_bytes: 1_000_000_000,
+                maximum_builtin_retained_bytes: 1_000_000_000,
+                maximum_control_retained_bytes: 100_000_000,
+                maximum_named_allocation_bytes: 1_000_000_000,
+                maximum_meter_streams: 4_096,
+                maximum_meter_items: 1 << 20,
+                maximum_meter_bytes: 1 << 26,
+                maximum_control_frame_bytes: 65_536,
+                maximum_replay_bytes: 262_144,
+                maximum_replay_entries: 16,
+                maximum_submixes: 0,
+                maximum_vcas: 0,
+                maximum_vca_reach_pairs: u64::MAX,
+                maximum_replacement_peak_bytes: u64::MAX,
+            }
+        }
+
+        const fn change(position: usize, tap_index: u32) -> ObservationChange {
+            ObservationChange {
+                position,
+                tap_index,
+                armed: true,
+                window_blocks: 4,
+            }
+        }
+
+        /// The free room of every producer's observation queue, and the armed count: what a refused
+        /// admission must leave as it was.
+        fn state(children: &CompiledChildren<Adapter>) -> (Vec<usize>, usize) {
+            (
+                children
+                    .session
+                    .test_effect_producers()
+                    .iter()
+                    .map(host_core::EffectControlProducer::observe_available_capacity)
+                    .collect(),
+                children.session.observation_armed(),
+            )
+        }
+
+        /// Test value: red if admission takes a tap index past the producer's menu (the record
+        /// would be queued and never applied), takes a position past the producers, or lets a
+        /// batch name one tap twice (the frame check counts each tap once, so `[disarm A, arm A,
+        /// arm B]` with the frame full would admit an event over it), or if a refusal names
+        /// another change or moves the queues or the armed count.
+        #[test]
+        fn a_tap_with_no_slot_a_missing_producer_and_a_second_naming_are_refused() {
+            let mut children =
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer)).expect("boot");
+            let producers = children.session.test_effect_producers().len();
+            let menu =
+                u32::try_from(children.session.test_effect_producers()[0].observe_capacity())
+                    .expect("a small menu");
+            let before = state(&children);
+            let session = &mut children.session;
+            assert_eq!(
+                session.admit_observation_batch([change(0, 0), change(0, menu)].into_iter()),
+                Err(ObservationRefusal::Unbound { index: 1 }),
+                "the tap past the menu, at its own index"
+            );
+            assert_eq!(
+                session.admit_observation_batch([change(0, 0), change(producers, 0)].into_iter()),
+                Err(ObservationRefusal::NoProducer { index: 1 }),
+                "the position past the producers"
+            );
+            assert_eq!(
+                session.admit_observation_batch(
+                    [change(0, 0), change(1, 0), change(0, 0)].into_iter()
+                ),
+                Err(ObservationRefusal::Duplicate { index: 2 }),
+                "the second naming of a tap"
+            );
+            assert_eq!(
+                state(&children),
+                before,
+                "a refusal queues and moves nothing"
+            );
+            // The marks of the refused batches do not leak: the same taps named once are admitted.
+            assert_eq!(
+                children
+                    .session
+                    .admit_observation_batch([change(0, 0), change(1, 0)].into_iter()),
+                Ok(())
+            );
+        }
+    }
+
     /// #1396 gate 5: a declaration resets a source-read offset that no raised floor goes with.
     #[cfg(feature = "test-support")]
     mod source_read_offset {
@@ -7059,8 +9097,7 @@ mod tests {
         fn declare_after(offset: u64) -> u64 {
             super::super::test_reset_lifecycle_observer();
             let mut children =
-                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer), None)
-                    .expect("boot");
+                compile_children::<Adapter>(SESSION, limits(), Box::new(Preparer)).expect("boot");
             if offset > 0 {
                 children.session.test_set_next_source_read_offset(offset);
             }
@@ -7102,6 +9139,1920 @@ mod tests {
         fn a_declaration_resets_an_offset_with_no_raised_floor() {
             assert_eq!(declare_after(OFFSET), 1, "the offset alone rebuilds");
             assert_eq!(declare_after(0), 0, "nothing to reset (#1323 gate 3)");
+        }
+    }
+
+    /// #1403 gates: a latency growth classified and published `Primed` through the control
+    /// plane, at 48 kHz, quantum 128, on this build's backend. A is two tracks, `eq0` on
+    /// [`SOURCE`] and `eq1` on [`AUX`], every console section and insert empty; every ring is
+    /// 7,296 frames (`stall_ring_frames` 5,120, plus `p_max_samples` 2,048, plus one quantum).
+    /// The growth W adds a muted track with a true-peak limiter (`P = 512`, four blocks). "A
+    /// continued" is A rendered on with no growth and the same live commands, bit for bit.
+    #[cfg(feature = "test-support")]
+    mod warm_successor {
+        use super::super::{CommandError, SourceFailure, TransitionStep};
+        use crate::EventLane;
+        use crate::{
+            CompiledChildren, ControlAdapter, ControlLimits, PlanResources, RuntimePreparer,
+            compile_children_warm,
+        };
+        use engine::realtime::{
+            OUTCOME_EXACT, OUTCOME_SUPERSEDED, OUTCOME_TRANSITION_FALLBACK, PlanAdoption,
+            PlanarBufferMut, RenderError,
+        };
+        use host_core::{
+            CompiledSession, HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes,
+            HostPrepareCaps, LiveValuesSuperseded, PrepareDiagnostics, PreparedHost,
+            PrimedCandidate, SourceControlError, SourceSubmission, SuccessorBase, WarmConfig,
+            prepare_host_runtime_with_live_lanes, prepare_host_runtime_with_live_lanes_successor,
+        };
+        use protocol::{
+            CommandPayload, DecodeScratch, DecodedSuccessResponsePayload,
+            DecodedTypedResponseFrame, EditPath, ExpectedRevision, ProtocolCodec, RequestId,
+            SessionEdit, TypedCommandFrame,
+        };
+        use session::{
+            ControlAddress, Effect, EffectIdentity, EffectQuality, LinkMode, Owner,
+            ParameterChannel, RouteSource, Section, SendTap, SessionModel, SidechainDeclaration,
+            Source, StableId, Track, parse_session_json,
+        };
+
+        const SESSION: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        const SOURCE: &str = "fixture-source";
+        const AUX: &str = "aux-source";
+        const UNUSED: &str = "unused-source";
+        const QUANTUM: u64 = 128;
+        const RING: u32 = 7_296;
+        /// `P` of the one-limiter growth.
+        const LEAD: u64 = 512;
+        /// Blocks rendered before an edit.
+        const BEFORE: usize = 6;
+        /// `prime_deadline_samples(48_000, 128)` (#1358 D1): one stall tolerance in whole quanta,
+        /// 4,864, plus `P_MAX` 2,048, plus one quantum.
+        const DEADLINE: u64 = 7_040;
+        /// How far ahead a ready host feeds: `P / q + 1` blocks, and one more.
+        const AHEAD: u64 = LEAD / QUANTUM + 2;
+        const CONFIG: WarmConfig = WarmConfig {
+            p_max: 2_048,
+            prime_bytes_max: u64::MAX,
+        };
+
+        struct Adapter;
+
+        impl ControlAdapter for Adapter {
+            type Row = PlanResources;
+            const ADAPTER_ALLOCATIONS: &'static [u64] = &[];
+        }
+
+        /// The C ABI's own preparation: host-core's live-lanes entries; or, on an explicit bank
+        /// width, host-core's width seam (#1272 D2), which attaches every live lane.
+        struct Preparer(Option<lane::Backend>);
+
+        impl RuntimePreparer for Preparer {
+            fn prepare(
+                &self,
+                compiled: &CompiledSession,
+                caps: &HostPrepareCaps,
+                lanes: HostLiveLanes,
+                _spectrum: Option<&host_core::SpectrumPreparation>,
+                successor: Option<SuccessorBase<'_>>,
+                superseded: &LiveValuesSuperseded,
+            ) -> Result<
+                (
+                    PreparedHost,
+                    HostLiveControlHandles,
+                    Option<host_core::PreparedSpectrumCaptures>,
+                ),
+                PrepareDiagnostics,
+            > {
+                let live = HostLiveControlRequest::default();
+                let (host, handles) = match (self.0, successor) {
+                    (None, Some(base)) => prepare_host_runtime_with_live_lanes_successor(
+                        compiled, caps, &live, lanes, base, superseded,
+                    ),
+                    (None, None) => prepare_host_runtime_with_live_lanes(
+                        compiled, caps, &live, lanes, superseded,
+                    ),
+                    (Some(backend), Some(base)) => {
+                        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                            compiled, caps, &live, base, backend,
+                        )
+                    }
+                    (Some(backend), None) => {
+                        host_core::test_only_prepare_host_runtime_with_live_controls_on(
+                            compiled, caps, &live, backend,
+                        )
+                    }
+                }?;
+                Ok((host, handles, None))
+            }
+        }
+
+        fn limits() -> ControlLimits {
+            ControlLimits {
+                source_ring_frames: RING,
+                maximum_automation_spans_per_block: 128,
+                maximum_document_bytes: 1_000_000,
+                maximum_diagnostic_bytes: 4_096,
+                maximum_tracks: 100,
+                maximum_sources: 100,
+                maximum_routes: 100,
+                maximum_effects: 100,
+                maximum_graph_session_plus_plan_bytes: 1_000_000_000,
+                maximum_source_total_bytes: 100_000_000,
+                maximum_source_overhead_bytes: 100_000_000,
+                maximum_effect_state_bytes: 1_000_000_000,
+                maximum_effect_scratch_bytes: 1_000_000_000,
+                maximum_builtin_retained_bytes: 1_000_000_000,
+                maximum_control_retained_bytes: 100_000_000,
+                maximum_named_allocation_bytes: 1_000_000_000,
+                maximum_meter_streams: 4_096,
+                maximum_meter_items: 1 << 20,
+                maximum_meter_bytes: 1 << 26,
+                maximum_control_frame_bytes: 65_536,
+                maximum_replay_bytes: 262_144,
+                maximum_replay_entries: 16,
+                maximum_submixes: 0,
+                maximum_vcas: 0,
+                maximum_vca_reach_pairs: u64::MAX,
+                maximum_replacement_peak_bytes: u64::MAX,
+            }
+        }
+
+        fn sid(text: &str) -> StableId {
+            StableId::parse(text).expect("stable ID")
+        }
+
+        /// Session A.
+        fn session_a() -> SessionModel {
+            let mut model = parse_session_json(SESSION).expect("fixture");
+            assert_eq!(model.sample_rate_hz, 48_000);
+            model.console.pre_insert.clear();
+            model.console.post_insert.clear();
+            model
+                .tracks
+                .retain(|track| matches!(track.id.as_str(), "eq0" | "eq1"));
+            for track in &mut model.tracks {
+                track.console.clear();
+                track.inserts.effects.clear();
+                for channel in [&mut track.builtins.left, &mut track.builtins.right] {
+                    channel.hpf_hz = 0.0;
+                    channel.lpf_hz = 0.0;
+                }
+            }
+            model
+                .routes
+                .retain(|route| matches!(route.id.as_str(), "eq0-main" | "eq1-main"));
+            let template = model.sources[0].clone();
+            model.sources.push(Source {
+                id: sid(AUX),
+                content: template.content.replace("7e94", "0a0a"),
+                ..template
+            });
+            model
+                .tracks
+                .iter_mut()
+                .find(|track| track.id.as_str() == "eq1")
+                .expect("eq1")
+                .source_id = sid(AUX);
+            model
+        }
+
+        fn limiter(id: &str) -> Effect {
+            Effect {
+                id: sid(id),
+                identity: EffectIdentity::Native {
+                    effect_id: sid("miso.true-peak-limiter"),
+                },
+                quality: EffectQuality::Normal,
+                bypass: false,
+                link_mode: LinkMode::Maximum,
+                params: Vec::new(),
+                sidechain: SidechainDeclaration::None,
+            }
+        }
+
+        /// A compressor insert `id` at its defaults: no latency.
+        fn compressor(id: &str) -> Effect {
+            Effect {
+                identity: EffectIdentity::Native {
+                    effect_id: sid("miso.compressor"),
+                },
+                ..limiter(id)
+            }
+        }
+
+        /// A muted copy of `eq0` named `id`, with `limiters` true-peak limiters in series, and
+        /// its route to the output: a growth of `P` for one limiter, `2P` for two.
+        fn muted_track(id: &str, limiters: usize) -> [SessionEdit; 2] {
+            let model = session_a();
+            let mut track: Track = model.tracks[0].clone();
+            track.id = sid(id);
+            track.fader.left_mute = true;
+            track.fader.right_mute = true;
+            track.inserts.effects = (0..limiters)
+                .map(|index| limiter(&format!("limiter-{index}")))
+                .collect();
+            let mut route = model.routes[0].clone();
+            route.id = sid(&format!("{id}-main"));
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("a track route")
+            };
+            *track_id = track.id.clone();
+            [
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ]
+        }
+
+        /// The growth W: a muted limiter track `t3`.
+        fn growth() -> Vec<SessionEdit> {
+            muted_track("t3", 1).into()
+        }
+
+        fn remove_track(id: &str) -> [SessionEdit; 2] {
+            [
+                SessionEdit::RemoveRoute {
+                    route_id: sid(&format!("{id}-main")),
+                },
+                SessionEdit::RemoveTrack { track_id: sid(id) },
+            ]
+        }
+
+        fn builtin(track: &str, control: u32, value: f32) -> SessionEdit {
+            SessionEdit::SetControl {
+                expected_effect: None,
+                address: ControlAddress {
+                    owner: Owner::Strip(sid(track)),
+                    section: Section::Builtins,
+                    control,
+                    lane: ParameterChannel::Both,
+                },
+                value,
+                ramp_samples: None,
+            }
+        }
+
+        /// A source's PCM: two planes, no exact-zero sample, distinct per `seed`.
+        fn pcm(seed: u32) -> [Vec<f32>; 2] {
+            let plane = |channel: u32| {
+                (0..48_000_u32)
+                    .map(|frame| {
+                        let step = frame
+                            .wrapping_mul(7_919)
+                            .wrapping_add(seed.wrapping_mul(104_729))
+                            .wrapping_add(channel * 31)
+                            % 1_999;
+                        (step as f32 - 999.5) / 2_000.0
+                    })
+                    .collect::<Vec<f32>>()
+            };
+            [plane(0), plane(1)]
+        }
+
+        /// One session as a host drives it: feed, command, render one block at a time.
+        struct Rig {
+            children: CompiledChildren<Adapter>,
+            request: u64,
+            /// The next block's render sample.
+            at: u64,
+            /// Each fed source: its ID, PCM and next frame.
+            feeds: Vec<(&'static str, [Vec<f32>; 2], u64)>,
+            /// Blocks the feed keeps past the next block's source-read sample.
+            ahead: u64,
+            /// A source fed no frame at or past the given frame.
+            stop_at: Option<(&'static str, u64)>,
+            /// Each rendered block's output bits, and the epoch render published after it.
+            blocks: Vec<Vec<u32>>,
+            epochs: Vec<u64>,
+            /// The boot plan's epoch.
+            boot: u64,
+            /// Whether [`Self::render`] runs the service step after each block.
+            serviced: bool,
+        }
+
+        impl Rig {
+            fn new(warm: Option<WarmConfig>) -> Self {
+                Self::with_limits(warm, limits())
+            }
+
+            fn with_limits(warm: Option<WarmConfig>, limits: ControlLimits) -> Self {
+                Self::boot(warm, limits, &session_a())
+            }
+
+            /// A with a third source, [`UNUSED`], that no track reads; it is fed as the others.
+            fn with_unused(warm: Option<WarmConfig>) -> Self {
+                let mut model = session_a();
+                let template = model.sources[0].clone();
+                model.sources.push(Source {
+                    id: sid(UNUSED),
+                    content: template.content.replace("7e94", "0b0b"),
+                    ..template
+                });
+                let mut rig = Self::boot(warm, limits(), &model);
+                rig.feeds.push((UNUSED, pcm(13), 0));
+                rig
+            }
+
+            fn boot(warm: Option<WarmConfig>, limits: ControlLimits, model: &SessionModel) -> Self {
+                Self::boot_on(warm, limits, model, None)
+            }
+
+            /// [`Self::boot`], prepared on `backend`'s bank width when it is `Some`.
+            fn boot_on(
+                warm: Option<WarmConfig>,
+                limits: ControlLimits,
+                model: &SessionModel,
+                backend: Option<lane::Backend>,
+            ) -> Self {
+                super::super::test_reset_lifecycle_observer();
+                let document = session::canonical_session_json(model).expect("canonical");
+                let children = compile_children_warm::<Adapter>(
+                    &document,
+                    limits,
+                    Box::new(Preparer(backend)),
+                    warm,
+                )
+                .expect("boot");
+                let boot = children
+                    .plan
+                    .test_active_epoch()
+                    .load(std::sync::atomic::Ordering::Acquire);
+                Self {
+                    boot,
+                    children,
+                    request: 0,
+                    at: 0,
+                    feeds: vec![(SOURCE, pcm(7), 0), (AUX, pcm(11), 0)],
+                    ahead: AHEAD,
+                    stop_at: None,
+                    blocks: Vec::new(),
+                    epochs: Vec::new(),
+                    serviced: true,
+                }
+            }
+
+            /// Feed whole blocks until every source holds `ahead` blocks past the frame the next
+            /// block reads, then render it and run the service step.
+            fn render(&mut self, count: usize) {
+                for _ in 0..count {
+                    let read = self.children.session.test_source_read_clock();
+                    let until = read + (self.ahead + 1) * QUANTUM;
+                    for (id, planes, next) in &mut self.feeds {
+                        let until = match self.stop_at {
+                            Some((stopped, frame)) if stopped == *id => until.min(frame),
+                            _ => until,
+                        };
+                        while *next < until {
+                            let range = *next as usize..(*next + QUANTUM) as usize;
+                            match self.children.session.submit(
+                                id.as_bytes(),
+                                SourceSubmission {
+                                    generation: 1,
+                                    start_frame: *next,
+                                    sample_rate_hz: 48_000,
+                                    planes: &[&planes[0][range.clone()], &planes[1][range]],
+                                    frames: QUANTUM as u32,
+                                    end_of_region: false,
+                                },
+                            ) {
+                                Ok(_) => *next += QUANTUM,
+                                // A source added after boot (W's `c-source`) queues from its
+                                // frame 0 while W waits, so its ring fills before any plan reads
+                                // it and stays full once one does (its consumer starts at that
+                                // backlog, behind the shared read clock): the chunk is refused,
+                                // not taken, and offered again at the next block. A full ring of a
+                                // source every plan carries from boot is a defect.
+                                Err(SourceFailure::Control(SourceControlError::Chunk(
+                                    ::source::HostChunkError::Full { .. },
+                                ))) if !matches!(*id, SOURCE | AUX | UNUSED) => break,
+                                Err(error) => panic!("{id} at {next}: {error:?}"),
+                            }
+                        }
+                    }
+                    let mut samples = [f32::NAN; 2 * QUANTUM as usize];
+                    let output = PlanarBufferMut::try_new(
+                        &mut samples,
+                        2,
+                        QUANTUM as usize,
+                        QUANTUM as usize,
+                    )
+                    .expect("output");
+                    self.children.plan.render(self.at, output).expect("render");
+                    self.at += QUANTUM;
+                    self.blocks
+                        .push(samples.iter().map(|sample| sample.to_bits()).collect());
+                    self.epochs.push(
+                        self.children
+                            .plan
+                            .test_active_epoch()
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    );
+                    if self.serviced {
+                        self.children.session.service().expect("service");
+                    }
+                }
+            }
+
+            /// [`Self::render`] until the render clock reads `clock`, a block boundary not behind
+            /// it.
+            fn render_to(&mut self, clock: u64) {
+                assert!(clock >= self.at && clock.is_multiple_of(QUANTUM));
+                self.render(usize::try_from((clock - self.at) / QUANTUM).expect("blocks"));
+                assert_eq!(self.children.session.test_render_clock(), clock);
+            }
+
+            /// One control call's deadline step (#1358 D3).
+            fn deadline(&mut self) -> Option<TransitionStep> {
+                self.children
+                    .session
+                    .test_check_prime_deadline()
+                    .expect("deadline step")
+            }
+
+            /// The committed revision.
+            fn revision(&self) -> u64 {
+                self.children
+                    .session
+                    .test_controller()
+                    .session()
+                    .revision()
+                    .0
+            }
+
+            /// A render call at the wrong sample: render adopts a due, ready candidate at the
+            /// block boundary, then refuses the call, so the adopted plan renders nothing.
+            fn refused_call(&mut self) {
+                let mut samples = [f32::NAN; 2 * QUANTUM as usize];
+                let output =
+                    PlanarBufferMut::try_new(&mut samples, 2, QUANTUM as usize, QUANTUM as usize)
+                        .expect("output");
+                let refused = self.children.plan.render(self.at + 1, output);
+                assert!(
+                    matches!(refused, Err(RenderError::TimeDiscontinuity { .. })),
+                    "the call is refused: {refused:?}"
+                );
+            }
+
+            /// Commit `edits` as one transaction: its edit path, or the refusal.
+            fn transact(&mut self, edits: &[SessionEdit]) -> Result<EditPath, CommandError> {
+                self.request += 1;
+                let codec = ProtocolCodec::default();
+                let mut bytes = vec![0_u8; codec.limits().max_frame_bytes];
+                let length = codec
+                    .encode_command_frame_into(
+                        &TypedCommandFrame {
+                            request_id: RequestId::new(self.request).expect("request"),
+                            expected_revision: ExpectedRevision::Exact(
+                                self.children.session.test_controller().session().revision(),
+                            ),
+                            payload: CommandPayload::SessionTransactionApply(edits),
+                        },
+                        &mut bytes,
+                    )
+                    .expect("a transaction frame");
+                let length = self.children.session.command(&bytes[..length], 65_536)?;
+                let mut fields = [0_u16; 64];
+                let path = match codec
+                    .decode_typed_response(
+                        self.children.session.command_response(length),
+                        &mut DecodeScratch::new(&mut fields),
+                    )
+                    .expect("a transaction response")
+                {
+                    DecodedTypedResponseFrame::Success {
+                        payload: DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+                        ..
+                    } => applied.edit_path,
+                    _ => panic!("not applied"),
+                };
+                while self
+                    .children
+                    .session
+                    .dequeue_event(EventLane::Reliable, 65_536)
+                    .expect("an event")
+                    .is_some()
+                {}
+                Ok(path)
+            }
+
+            /// [`Self::transact`], which must commit as a rebuild; the adoption it published.
+            fn rebuild(&mut self, edits: &[SessionEdit]) -> PlanAdoption {
+                assert!(matches!(self.transact(edits), Ok(EditPath::Rebuild)));
+                self.children
+                    .session
+                    .test_take_published_adoption()
+                    .expect("a publication")
+            }
+
+            fn primed(&self) -> Option<PrimedCandidate> {
+                self.children.session.test_primed()
+            }
+
+            /// The blocks render adopted a new plan at.
+            fn swaps(&self) -> Vec<usize> {
+                let boot = self.boot;
+                (0..self.epochs.len())
+                    .filter(|&index| {
+                        self.epochs[index] != index.checked_sub(1).map_or(boot, |i| self.epochs[i])
+                    })
+                    .collect()
+            }
+
+            fn underruns(&self) -> u64 {
+                self.children.plan.queries().source_underrun_blocks()
+            }
+        }
+
+        /// `S = ceil_q(p + q + N + C)` (#1325 D3) of a duck published at render clock `p` on A,
+        /// whose route lines are all 0 samples long (`C = 0`), with A's mute ramp `N`.
+        fn duck_sample(p: u64) -> u64 {
+            let n = u64::from(session_a().control_smoothing_samples().mute);
+            (p + QUANTUM + n).div_ceil(QUANTUM) * QUANTUM
+        }
+
+        /// The first block whose bits differ between two runs, if any.
+        fn first_divergence(left: &Rig, right: &Rig) -> Option<usize> {
+            assert_eq!(left.blocks.len(), right.blocks.len());
+            left.blocks
+                .iter()
+                .zip(&right.blocks)
+                .position(|(left, right)| left != right)
+        }
+
+        /// Gate 1, classification and publication. With the bounds, the growth is published
+        /// `Primed { not_before: render_clock(), lead_blocks: 4 }` and recorded as such; it waits
+        /// while the carried rings hold less than its prime (every ring A renders is flagged), is
+        /// adopted once fed, and renders A continued. Without the bounds the same growth is
+        /// published `Next` with no record; with them, an edit that grows nothing is too.
+        ///
+        /// Test value: a classifier that publishes the warm candidate `Next` (or with no flags
+        /// written) adopts it before render is ready -- its prime underruns or it repeats `P`
+        /// frames; a session with no bounds that classifies changes today's path.
+        #[test]
+        fn a_growth_is_published_primed_and_recorded() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let adoption = rig.rebuild(&growth());
+            let not_before = rig.children.session.test_render_clock();
+            assert_eq!(not_before, BEFORE as u64 * QUANTUM);
+            assert_eq!(
+                adoption,
+                PlanAdoption::Primed {
+                    not_before,
+                    lead_blocks: 4
+                }
+            );
+            assert_eq!(
+                rig.primed(),
+                Some(PrimedCandidate {
+                    epoch: rig.children.session.newest_plan_epoch(),
+                    not_before,
+                    lead_blocks: 4,
+                })
+            );
+            rig.render(3);
+            assert!(rig.swaps().is_empty(), "held while the prime is not fed");
+            rig.ahead = AHEAD;
+            rig.render(6);
+            assert_eq!(rig.swaps(), [BEFORE + 3], "adopted once fed");
+            assert_eq!(rig.primed(), None, "the adoption drops the record");
+            let mut continued = Rig::new(None);
+            continued.render(rig.blocks.len());
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
+
+            let mut plain = Rig::new(None);
+            plain.render(BEFORE);
+            assert_eq!(plain.rebuild(&growth()), PlanAdoption::Next, "no bounds");
+            assert_eq!(plain.primed(), None);
+            let mut flat = Rig::new(Some(CONFIG));
+            flat.render(BEFORE);
+            assert_eq!(
+                flat.rebuild(&muted_track("t4", 0)),
+                PlanAdoption::Next,
+                "no growth"
+            );
+            assert_eq!(flat.primed(), None);
+
+            // The growth with the removal of a source no track reads ducks no strip (#1403 D2,
+            // attempt 2): it stays `Primed`, and the removed source's frames go to A until W is
+            // adopted.
+            let mut rig = Rig::with_unused(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.push(SessionEdit::RemoveSource {
+                source_id: sid(UNUSED),
+            });
+            let adoption = rig.rebuild(&edits);
+            let not_before = rig.children.session.test_render_clock();
+            assert_eq!(
+                adoption,
+                PlanAdoption::Primed {
+                    not_before,
+                    lead_blocks: 4
+                },
+                "a removed unused source"
+            );
+            assert_eq!(
+                rig.primed(),
+                Some(PrimedCandidate {
+                    epoch: rig.children.session.newest_plan_epoch(),
+                    not_before,
+                    lead_blocks: 4,
+                })
+            );
+            rig.render(3);
+            assert!(rig.swaps().is_empty(), "held while the prime is not fed");
+            rig.ahead = AHEAD;
+            rig.render(1);
+            assert_eq!(rig.swaps(), [BEFORE + 3]);
+            rig.feeds.truncate(2);
+            rig.render(5);
+            let mut continued = Rig::with_unused(None);
+            continued.render(BEFORE + 4);
+            continued.feeds.truncate(2);
+            continued.render(5);
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
+        }
+
+        /// #1397 gates 1 and 2, a latent insert on an audible strip, on both bank widths: a
+        /// true-peak limiter added to track 1 grows the output's arrival and restarts track 1, so
+        /// the edit is published `Primed` no earlier than the duck's `S`, and with every source
+        /// fed ahead from the start it is adopted at exactly the block that starts at `S`. Every
+        /// block before track 1's fire block (the first at or after the adoption plus the
+        /// limiter's latency `D`) equals A with track 1 live-muted at the edit's block; from it,
+        /// for 64 blocks, the output is the sum of the same swap on A with track 2 muted and that
+        /// reference; the adoption reports `EXACT`.
+        ///
+        /// Test value: an adoption before the duck has settled moves the output before the fire;
+        /// a fire at the adoption instead of `D` later differs early; a carried track 2 that
+        /// drifts after the fire, or a track 1 left out or counted twice, breaks the sum.
+        #[test]
+        fn a_latent_insert_on_an_audible_strip_is_duck_swapped_warm() {
+            const AFTER: usize = 64;
+            /// The true-peak limiter's latency at 48 kHz, `D` of track 1's fade.
+            const LIMITER: u64 = 486;
+            let mut limited = session_a().tracks[0].clone();
+            limited.inserts.effects = vec![limiter("limiter-0")];
+            let edit = [SessionEdit::UpsertTrack { track: limited }];
+            let mut quiet = session_a();
+            let eq1 = quiet
+                .tracks
+                .iter_mut()
+                .find(|track| track.id.as_str() == "eq1")
+                .expect("eq1");
+            eq1.fader.left_mute = true;
+            eq1.fader.right_mute = true;
+            for &backend in lane::Backend::VECTOR {
+                let boot = |model: &SessionModel| {
+                    let mut rig = Rig::boot_on(Some(CONFIG), limits(), model, Some(backend));
+                    rig.render(BEFORE);
+                    rig
+                };
+                let swap = |model: &SessionModel| {
+                    let mut rig = boot(model);
+                    let s = duck_sample(rig.children.session.test_render_clock());
+                    assert_eq!(
+                        rig.rebuild(&edit),
+                        PlanAdoption::Primed {
+                            not_before: s,
+                            lead_blocks: 4
+                        },
+                        "{backend:?}"
+                    );
+                    (rig, s)
+                };
+                let (mut swapped, s) = swap(&session_a());
+                let (mut alone, _) = swap(&quiet);
+                let mut reference = boot(&session_a());
+                assert!(matches!(
+                    reference.transact(&[builtin("eq0", 6, 1.0)]),
+                    Ok(EditPath::Live)
+                ));
+                let s_block = usize::try_from(s / QUANTUM).expect("block");
+                let fire = usize::try_from((s + LIMITER).div_ceil(QUANTUM)).expect("block");
+                for rig in [&mut swapped, &mut alone, &mut reference] {
+                    rig.render(fire + AFTER - BEFORE);
+                }
+                assert_eq!(swapped.swaps(), [s_block], "{backend:?}: adopted at S");
+                let watermark = swapped
+                    .children
+                    .plan
+                    .queries()
+                    .watermark()
+                    .expect("watermark");
+                assert_eq!(watermark.outcome_flags, OUTCOME_EXACT, "{backend:?}");
+                assert_eq!(
+                    first_divergence(&swapped, &reference),
+                    Some(fire),
+                    "{backend:?}: the reference until the fire"
+                );
+                for block in fire..fire + AFTER {
+                    let sum: Vec<u32> = alone.blocks[block]
+                        .iter()
+                        .zip(&reference.blocks[block])
+                        .map(|(&left, &right)| {
+                            (f32::from_bits(left) + f32::from_bits(right)).to_bits()
+                        })
+                        .collect();
+                    assert_eq!(swapped.blocks[block], sum, "{backend:?}: block {block}");
+                }
+            }
+        }
+
+        /// #1397 gate 3, the transition at submit. A holds a compressor on track 2; the edit adds a
+        /// true-peak limiter to track 1 with `P_MAX` one quantum below `P`, so `warm_lead` answers
+        /// `LeadBound`. The edit commits as a rebuild, `grown_strips` names both tracks (the
+        /// output's arrival grows) and so does the successor's `restarted_strips()`, and it is
+        /// published `NoEarlierThan(S)` with no record. Up to `S` every block equals A with both
+        /// tracks live-muted at the edit's block; from `S` every block equals a fresh plan of the
+        /// edited session with both tracks muted, fed from frame `S`, and live-unmuted at their
+        /// fire blocks (track 2 at once, track 1 the limiter's latency later). The adoption reports
+        /// `TRANSITION_FALLBACK` and `transition_fallback` counts its revision.
+        ///
+        /// Test value: a bound that refuses the edit, a transition reported `EXACT`, a duck set
+        /// without track 2, or a successor that carries track 2 (its compressor's envelope or its
+        /// ducked fader) breaks the references.
+        #[test]
+        fn a_growth_past_the_bound_takes_the_transition_at_submit() {
+            const AFTER: usize = 64;
+            const LIMITER: u64 = 486;
+            let bound = WarmConfig {
+                p_max: LEAD - QUANTUM,
+                prime_bytes_max: u64::MAX,
+            };
+            let mut a = session_a();
+            a.tracks[1].inserts.effects = vec![compressor("comp")];
+            let mut b = a.clone();
+            b.tracks[0].inserts.effects = vec![limiter("limiter-0")];
+            let edit = [SessionEdit::UpsertTrack {
+                track: b.tracks[0].clone(),
+            }];
+            let mut rig = Rig::boot(Some(bound), limits(), &a);
+            rig.render(BEFORE);
+            let s = duck_sample(rig.children.session.test_render_clock());
+            assert_eq!(rig.rebuild(&edit), PlanAdoption::NoEarlierThan(s));
+            assert_eq!(rig.primed(), None);
+            // Track 1's limiter restarts it; only `grown_strips` adds track 2.
+            let newest = rig
+                .children
+                .session
+                .pending_providers
+                .last()
+                .expect("the transition");
+            assert_eq!(
+                newest
+                    .inventory
+                    .restarted_strips()
+                    .iter()
+                    .map(|id| &**id)
+                    .collect::<Vec<_>>(),
+                ["eq0", "eq1"]
+            );
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            let fire = usize::try_from(LIMITER.div_ceil(QUANTUM)).expect("blocks");
+            let total = s_block + fire + AFTER;
+            rig.render(total - BEFORE);
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.outcome_flags, watermark.transition_fallback),
+                (OUTCOME_TRANSITION_FALLBACK, 1)
+            );
+            let mut reference = Rig::boot(None, limits(), &a);
+            reference.render(BEFORE);
+            assert!(matches!(
+                reference.transact(&[builtin("eq0", 6, 1.0), builtin("eq1", 6, 1.0)]),
+                Ok(EditPath::Live)
+            ));
+            reference.render(s_block - BEFORE);
+            assert_eq!(
+                rig.blocks[..s_block],
+                reference.blocks[..],
+                "A with both tracks live-muted until S"
+            );
+            let mut muted = b.clone();
+            for track in &mut muted.tracks {
+                track.fader.left_mute = true;
+                track.fader.right_mute = true;
+            }
+            let mut fresh = Rig::boot(None, limits(), &muted);
+            let offset = usize::try_from(s).expect("frames");
+            for (_, planes, _) in &mut fresh.feeds {
+                for plane in planes.iter_mut() {
+                    plane.drain(..offset);
+                }
+            }
+            for block in 0..fire + AFTER {
+                for (track, at) in [("eq1", 0), ("eq0", fire)] {
+                    if block == at {
+                        assert!(matches!(
+                            fresh.transact(&[builtin(track, 6, 0.0)]),
+                            Ok(EditPath::Live)
+                        ));
+                    }
+                }
+                fresh.render(1);
+            }
+            assert_eq!(
+                rig.blocks[s_block..],
+                fresh.blocks[..],
+                "a fresh plan of the edit from S"
+            );
+        }
+
+        /// The gate-6 session (#1397b): track `t1` routed from its `post_fader` tap into submix
+        /// `g`, `g` into submix `h`, `h` to the output; track `t2` with two soft-clip inserts
+        /// (31 samples each) into `h`; track `k` with a true-peak limiter (486 samples) and then a
+        /// compressor keyed from `g`'s `key` tap, to the output. `t1` reads [`SOURCE`], `t2` and
+        /// `k` read [`AUX`]. With `clipped`, `t1` holds one soft-clip insert.
+        fn keyed_bus(key: SendTap, clipped: bool) -> SessionModel {
+            use session::{Route, RouteDestination, Sidechain, Submix};
+            let mut model = session_a();
+            let template_track = model.tracks[0].clone();
+            let template_route = model.routes[0].clone();
+            let soft_clip = |id: &str| Effect {
+                identity: EffectIdentity::Native {
+                    effect_id: sid("miso.soft-clip"),
+                },
+                link_mode: LinkMode::DualMono,
+                ..limiter(id)
+            };
+            let track = |id: &str, source: &str, inserts: Vec<Effect>| Track {
+                id: sid(id),
+                source_id: sid(source),
+                inserts: session::Rack { effects: inserts },
+                ..template_track.clone()
+            };
+            let mut keyed = compressor("comp");
+            keyed.link_mode = LinkMode::DualMono;
+            keyed.sidechain = SidechainDeclaration::Routed(Sidechain {
+                source: RouteSource::Submix {
+                    submix_id: sid("g"),
+                    tap: key,
+                },
+                port_id: sid("sidechain-in"),
+            });
+            model.tracks = vec![
+                track("k", AUX, vec![limiter("limiter-0"), keyed]),
+                track(
+                    "t1",
+                    SOURCE,
+                    if clipped {
+                        vec![soft_clip("clip-1")]
+                    } else {
+                        Vec::new()
+                    },
+                ),
+                track("t2", AUX, vec![soft_clip("clip-a"), soft_clip("clip-b")]),
+            ];
+            model.submixes = vec![
+                Submix::unity(sid("g"), &model.console),
+                Submix::unity(sid("h"), &model.console),
+            ];
+            let route = |id: &str, source: RouteSource, into: Option<&str>| Route {
+                id: sid(id),
+                source,
+                destination: into.map_or_else(
+                    || template_route.destination.clone(),
+                    |submix| RouteDestination::SubmixInput {
+                        submix_id: sid(submix),
+                    },
+                ),
+                ..template_route.clone()
+            };
+            let from_track = |id: &str, tap| RouteSource::Track {
+                track_id: sid(id),
+                tap,
+            };
+            let from_submix = |id: &str, tap| RouteSource::Submix {
+                submix_id: sid(id),
+                tap,
+            };
+            model.routes = vec![
+                route("g-h", from_submix("g", SendTap::PostFader), Some("h")),
+                route("h-main", from_submix("h", SendTap::PostPan), None),
+                route("k-main", from_track("k", SendTap::PostPan), None),
+                route("t1-g", from_track("t1", SendTap::PostFader), Some("g")),
+                route("t2-h", from_track("t2", SendTap::PostFader), Some("h")),
+            ];
+            model
+        }
+
+        /// #1397 gate 6, a sidechain key out of a grown strip, on both bank widths. A soft-clip
+        /// insert added to `t1` of [`keyed_bus`] with `P_MAX` 0 takes the transition at submit
+        /// (`warm_lead` answers `LeadBound`); `g`'s arrival grows by 31, so the `g`-to-`h` route
+        /// line shrinks from 62 to 31 samples and the `g`-to-`k` key line from 486 to 455.
+        /// - (a) Keyed from `g`'s `post_fader` tap: the successor restarts `[g, t1]`, and `S`
+        ///   counts the key line, `C = 486`.
+        /// - (b) Keyed from `g`'s `pre_fader` tap: #1324 D1's closure restarts `k` too,
+        ///   `[g, k, t1]`, and `C` is `g`-to-`h`'s 62.
+        ///
+        /// Each is published `NoEarlierThan(S)`, adopted at `S`, reports `TRANSITION_FALLBACK`,
+        /// and every block before `t1`'s fire block (the first at or after `S + 31`) equals the
+        /// session with no structural edit and the ducked strips live-muted at the edit's block.
+        ///
+        /// Test value: (a) a transition whose `C` misses the key line out of the forced restart
+        /// `g` publishes at the route lines' `S` (62, not 486); (b) a duck set that is not closed
+        /// over sidechains after the forced restarts join it (the preparation's closure run
+        /// before them) leaves `k` carried and audible through the duck, so the output differs
+        /// from the edit's block. (a)'s output part does not see that `S`: a shorter carried line
+        /// keeps its oldest samples and drops the newest δ (`CompensationDelay::adopt`), so the
+        /// route lines' `S` also drops only `+0.0`, and any drop would show only after the
+        /// comparison window, which ends at `t1`'s fire block.
+        #[test]
+        fn a_sidechain_key_out_of_a_grown_strip_is_ducked() {
+            const CLIP: u64 = 31;
+            let bound = WarmConfig {
+                p_max: 0,
+                prime_bytes_max: u64::MAX,
+            };
+            let limits = ControlLimits {
+                maximum_submixes: 2,
+                ..limits()
+            };
+            for (key, restarted, c) in [
+                (SendTap::PostFader, &["g", "t1"][..], 486),
+                (SendTap::PreFader, &["g", "k", "t1"][..], 62),
+            ] {
+                let a = keyed_bus(key, false);
+                let b = keyed_bus(key, true);
+                let edit = [SessionEdit::UpsertTrack {
+                    track: b.tracks[1].clone(),
+                }];
+                let n = u64::from(a.control_smoothing_samples().mute);
+                for &backend in lane::Backend::VECTOR {
+                    let boot = |warm| {
+                        let mut rig = Rig::boot_on(warm, limits, &a, Some(backend));
+                        rig.render(BEFORE);
+                        rig
+                    };
+                    let mut rig = boot(Some(bound));
+                    let p = rig.children.session.test_render_clock();
+                    let s = (p + QUANTUM + n + c).div_ceil(QUANTUM) * QUANTUM;
+                    assert_eq!(
+                        rig.rebuild(&edit),
+                        PlanAdoption::NoEarlierThan(s),
+                        "{key:?} {backend:?}"
+                    );
+                    assert_eq!(rig.primed(), None);
+                    let newest = rig
+                        .children
+                        .session
+                        .pending_providers
+                        .last()
+                        .expect("the transition");
+                    assert_eq!(
+                        newest
+                            .inventory
+                            .restarted_strips()
+                            .iter()
+                            .map(|id| &**id)
+                            .collect::<Vec<_>>(),
+                        restarted,
+                        "{key:?} {backend:?}"
+                    );
+                    let s_block = usize::try_from(s / QUANTUM).expect("block");
+                    let fire = usize::try_from((s + CLIP).div_ceil(QUANTUM)).expect("block");
+                    rig.render(fire - BEFORE);
+                    assert_eq!(rig.swaps(), [s_block], "{key:?} {backend:?}");
+                    let watermark = rig.children.plan.queries().watermark().expect("watermark");
+                    assert_eq!(watermark.outcome_flags, OUTCOME_TRANSITION_FALLBACK);
+                    let mut reference = boot(None);
+                    let mutes: Vec<SessionEdit> = restarted
+                        .iter()
+                        .map(|strip| builtin(strip, 6, 1.0))
+                        .collect();
+                    assert!(matches!(reference.transact(&mutes), Ok(EditPath::Live)));
+                    reference.render(fire - BEFORE);
+                    assert_eq!(
+                        first_divergence(&rig, &reference),
+                        None,
+                        "{key:?} {backend:?}: the reference until t1's fire block"
+                    );
+                }
+            }
+        }
+
+        /// #1397 D1's second arm: a `Warm` answer with a zero lead (injected: the restarts confine
+        /// a growth, and this session family reaches no such edit) is prepared with its lead, so
+        /// its whole restart, track 2, joins the successor's `restarted_strips()` and ducks; it is
+        /// published as an ordinary duck-swap, `NoEarlierThan(S)` with no record, and no block
+        /// before `S` differs from A with track 2 live-muted; its adoption reports `EXACT`.
+        ///
+        /// Test value: a zero lead published `Primed` (no prime to run), or a transition not
+        /// planned again over the warm successor's restarts (track 2 restarted unducked, published
+        /// `Next`), is red.
+        #[test]
+        fn a_zero_lead_is_published_as_an_ordinary_duck_swap() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let s = duck_sample(rig.children.session.test_render_clock());
+            rig.children.session.test_set_next_zero_lead(vec!["eq1"]);
+            assert_eq!(
+                rig.rebuild(&muted_track("t4", 0)),
+                PlanAdoption::NoEarlierThan(s)
+            );
+            assert_eq!(rig.primed(), None);
+            let newest = rig
+                .children
+                .session
+                .pending_providers
+                .last()
+                .expect("the successor");
+            assert_eq!(newest.inventory.restarted_strips(), [Box::from("eq1")]);
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.render(s_block + 1 - BEFORE);
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(watermark.outcome_flags, OUTCOME_EXACT);
+            let mut reference = Rig::new(None);
+            reference.render(BEFORE);
+            assert!(matches!(
+                reference.transact(&[builtin("eq1", 6, 1.0)]),
+                Ok(EditPath::Live)
+            ));
+            reference.render(s_block - BEFORE);
+            assert_eq!(rig.blocks[..s_block], reference.blocks[..]);
+        }
+
+        /// The growth W of #1397 gate 4: [`growth`], plus a source `c-source` and an audible track
+        /// `tc` on it, so W adds a ring the host feeds.
+        fn growth_with_source() -> Vec<SessionEdit> {
+            let model = session_a();
+            let template = model.sources[0].clone();
+            let source = Source {
+                id: sid("c-source"),
+                content: template.content.replace("7e94", "0c0c"),
+                ..template
+            };
+            let mut track: Track = model.tracks[0].clone();
+            track.id = sid("tc");
+            track.source_id = sid("c-source");
+            let mut route = model.routes[0].clone();
+            route.id = sid("tc-main");
+            let RouteSource::Track { track_id, .. } = &mut route.source else {
+                panic!("a track route")
+            };
+            *track_id = track.id.clone();
+            let mut edits = growth();
+            edits.extend([
+                SessionEdit::UpsertSource { source },
+                SessionEdit::UpsertTrack { track },
+                SessionEdit::UpsertRoute { route },
+            ]);
+            edits
+        }
+
+        /// #1358 gate 5's setup: W ([`growth_with_source`]) waits `Primed` with frames withheld
+        /// until its deadline, and the deadline step there, with #1397's injected refusal,
+        /// withdraws W, is refused and republishes W whole. Returns the rig, W's record and its
+        /// revision, after asserting the refusal: W is back in the mailbox with its record, one
+        /// `transition_reprepare_refusals`, the revision pending, nothing adopted.
+        fn refused_at_the_deadline() -> (Rig, PrimedCandidate, u64) {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            assert!(matches!(
+                rig.rebuild(&growth_with_source()),
+                PlanAdoption::Primed { .. }
+            ));
+            rig.feeds.push(("c-source", pcm(17), 0));
+            let record = rig.primed().expect("W's record");
+            let revision = rig.revision();
+            rig.render_to(record.not_before + DEADLINE);
+            rig.children.session.test_refuse_next_reprepare();
+            assert_eq!(rig.deadline(), Some(TransitionStep::Refused));
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
+            assert_eq!(rig.children.session.test_transition_reprepare_refusals(), 1);
+            assert_eq!(rig.primed(), Some(record), "W keeps its record");
+            assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+            rig.render(1);
+            assert!(rig.swaps().is_empty(), "W is still pending, unready");
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert!(watermark.revision < revision, "W's revision is pending");
+            (rig, record, revision)
+        }
+
+        /// #1358 gate 5 (and #1397 gate 4), a refused re-preparation at the deadline: the setup
+        /// [`refused_at_the_deadline`], then three runs.
+        /// 1. The next deadline step withdraws W again and publishes the transition
+        ///    `NoEarlierThan(S)` and drops the record; a structural edit refused while it waits
+        ///    republishes it. Adopted at `S`, it completes W's revision as `TRANSITION_FALLBACK`,
+        ///    with `c` played from the donor's ring and no underrun.
+        /// 2. W's frames are queued and render adopts W before the next step, which finds it
+        ///    taken: nothing is published and the revision completes `EXACT`.
+        /// 3. A structural edit supersedes W (#1310) before the next step: its adoption reports
+        ///    `EXACT | SUPERSEDED`, no transition is published, and `c` plays with no underrun.
+        ///
+        /// Test value: a refusal that keeps the donor outside the mailbox or drops the record
+        /// leaves the revision pending forever (no step runs without a record, and a superseding
+        /// edit never takes the donor, so `c`'s acked chunks are lost); a fallback that drops the
+        /// donor before preparing loses `c`'s acked frames (an underrun); a republish that resets
+        /// the words reports `EXACT`; a step that ignores `Taken` publishes over the adopted W.
+        #[test]
+        fn a_refused_fallback_at_the_deadline_keeps_the_donor_pending() {
+            // Run 1.
+            let (mut rig, _, revision) = refused_at_the_deadline();
+            assert_eq!(rig.deadline(), Some(TransitionStep::Published));
+            let Some(PlanAdoption::NoEarlierThan(s)) =
+                rig.children.session.test_take_published_adoption()
+            else {
+                panic!("the transition is a duck-swap")
+            };
+            assert_eq!(rig.primed(), None);
+            // A structural edit refused while the transition waits (#1310 D4).
+            let held = rig.children.session.held_epochs().expect("held");
+            let cap = rig.children.session.limits.maximum_effect_state_bytes;
+            rig.children.session.limits.maximum_effect_state_bytes = held
+                .as_slice()
+                .iter()
+                .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                .sum();
+            assert!(rig.transact(&muted_track("t4", 2)).is_err(), "B is refused");
+            rig.children.session.limits.maximum_effect_state_bytes = cap;
+            rig.ahead = AHEAD;
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.render(s_block + 8 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision, OUTCOME_TRANSITION_FALLBACK)
+            );
+            assert_eq!(watermark.transition_fallback, 1);
+            assert_eq!(rig.underruns(), 0, "c plays from the donor's ring");
+
+            // Run 2.
+            let (mut rig, _, revision) = refused_at_the_deadline();
+            rig.ahead = AHEAD;
+            rig.serviced = false;
+            rig.render(1);
+            rig.serviced = true;
+            let adopted = rig.blocks.len() - 1;
+            assert_eq!(rig.swaps(), [adopted], "render adopts W");
+            assert_eq!(rig.deadline(), Some(TransitionStep::NotPending));
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
+            assert_eq!(rig.primed(), None);
+            rig.render(4);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision, OUTCOME_EXACT)
+            );
+            assert_eq!(watermark.transition_fallback, 0);
+            assert_eq!(rig.underruns(), 0);
+
+            // Run 3.
+            let (mut rig, _, revision) = refused_at_the_deadline();
+            assert_eq!(rig.rebuild(&remove_track("t3")), PlanAdoption::Next);
+            assert_eq!(rig.primed(), None);
+            assert_eq!(rig.deadline(), None, "no record, no step");
+            rig.ahead = AHEAD;
+            rig.render(8);
+            assert_eq!(rig.swaps().len(), 1, "B is adopted");
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision + 1, OUTCOME_EXACT | OUTCOME_SUPERSEDED)
+            );
+            assert_eq!(watermark.transition_fallback, 0);
+            assert_eq!(rig.underruns(), 0, "every chunk submitted for c is played");
+        }
+
+        /// #1358 gates 1 and 3, never fed, in two arms: the growth W, whose `not_before` is the
+        /// render clock at publication, and W with track 2's removal, which ducks track 2, so its
+        /// `not_before` is the duck's `S`, past publication. The carried sources are fed no frame
+        /// past what A needs. With render paused, 1,000 deadline steps publish nothing. The step at
+        /// render clock `not_before + 7,040 - q` publishes nothing; the step at `not_before +
+        /// 7,040` withdraws W and publishes the transition, whose adoption completes W's revision
+        /// as `TRANSITION_FALLBACK`, `transition_fallback` 1. Until the step, the output is A
+        /// continued (with track 2 live-muted at the edit's block in the second arm).
+        ///
+        /// Test value: a deadline that never fires leaves the edit pending forever; one counted
+        /// from publication instead of `not_before` (second arm), one quantum short, or one taken
+        /// as the stall ring (7,296) fires at the wrong call; one counted in control calls falls
+        /// back on a paused host (no wall-clock sleep: scope note R2 refuses one).
+        #[test]
+        fn a_warm_candidate_not_ready_by_its_deadline_takes_the_transition() {
+            for ducks in [false, true] {
+                let mut rig = Rig::new(Some(CONFIG));
+                rig.ahead = 1;
+                rig.render(BEFORE);
+                let mut edits = growth();
+                if ducks {
+                    edits.extend(remove_track("eq1"));
+                }
+                let published = rig.children.session.test_render_clock();
+                let PlanAdoption::Primed { not_before, .. } = rig.rebuild(&edits) else {
+                    panic!("W is warm")
+                };
+                assert_eq!(not_before > published, ducks);
+                let record = rig.primed().expect("W's record");
+                let revision = rig.revision();
+                // Gate 3: a paused host.
+                for _ in 0..1_000 {
+                    assert_eq!(rig.deadline(), None, "paused");
+                }
+                assert_eq!(rig.children.session.test_take_published_adoption(), None);
+                rig.render_to(not_before + DEADLINE - QUANTUM);
+                assert_eq!(rig.deadline(), None, "one quantum short");
+                assert_eq!(rig.children.session.test_take_published_adoption(), None);
+                assert_eq!(rig.primed(), Some(record));
+                rig.render(1);
+                let stepped = rig.blocks.len();
+                assert_eq!(rig.deadline(), Some(TransitionStep::Published));
+                let Some(PlanAdoption::NoEarlierThan(s)) =
+                    rig.children.session.test_take_published_adoption()
+                else {
+                    panic!("the transition is a duck-swap")
+                };
+                assert_eq!(rig.primed(), None);
+                rig.ahead = AHEAD;
+                let s_block = usize::try_from(s / QUANTUM).expect("block");
+                rig.render(s_block + 1 - rig.blocks.len());
+                assert_eq!(rig.swaps(), [s_block]);
+                let watermark = rig.children.plan.queries().watermark().expect("watermark");
+                assert_eq!(
+                    (watermark.revision, watermark.outcome_flags),
+                    (revision, OUTCOME_TRANSITION_FALLBACK)
+                );
+                assert_eq!(watermark.transition_fallback, 1);
+                let mut continued = Rig::new(None);
+                continued.render(BEFORE);
+                if ducks {
+                    assert!(matches!(
+                        continued.transact(&[builtin("eq1", 6, 1.0)]),
+                        Ok(EditPath::Live)
+                    ));
+                }
+                continued.render(stepped - BEFORE);
+                assert_eq!(rig.blocks[..stepped], continued.blocks[..], "A continued");
+            }
+        }
+
+        /// #1358 gate 2, render adopts first: W's deadline passes with its frames withheld, then
+        /// the frames are queued and render adopts W in one block before the next control call.
+        /// That call's deadline step finds W taken: it publishes nothing and drops the record, the
+        /// revision completes `EXACT`, `transition_fallback` stays 0, and the output is A
+        /// continued.
+        ///
+        /// Test value: a step that ignores `Taken`, or falls back without withdrawing, publishes a
+        /// second swap over the adopted plan.
+        #[test]
+        fn a_candidate_render_adopts_past_its_deadline_completes_exact() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let PlanAdoption::Primed { not_before, .. } = rig.rebuild(&growth()) else {
+                panic!("W is warm")
+            };
+            let revision = rig.revision();
+            rig.render_to(not_before + DEADLINE + QUANTUM);
+            rig.ahead = AHEAD;
+            rig.serviced = false;
+            rig.render(1);
+            rig.serviced = true;
+            assert_eq!(rig.swaps(), [rig.blocks.len() - 1], "render adopts W");
+            assert!(rig.primed().is_some(), "no service step ran");
+            let taken = super::super::test_lifecycle_counters().candidate_taken;
+            assert_eq!(rig.deadline(), Some(TransitionStep::NotPending));
+            assert_eq!(
+                super::super::test_lifecycle_counters().candidate_taken,
+                taken + 1,
+                "the withdrawal found W taken"
+            );
+            assert_eq!(rig.children.session.test_take_published_adoption(), None);
+            assert_eq!(rig.primed(), None);
+            rig.render(4);
+            assert_eq!(rig.swaps().len(), 1);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision, OUTCOME_EXACT)
+            );
+            assert_eq!(watermark.transition_fallback, 0);
+            let mut continued = Rig::new(None);
+            continued.render(rig.blocks.len());
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
+        }
+
+        /// #1358 gate 4, a superseded candidate's deadline is not used. The session's mute ramp
+        /// is 24,000 samples. W (the growth) waits `Primed`, frames withheld; before W's deadline
+        /// a structural edit B removes W's track and track 2. B grows nothing over the running
+        /// plan, so it is a two-phase removal published `NoEarlierThan(S)`, `S` past W's
+        /// `not_before + 7,040`. Deadline steps after every block from W's deadline to `S`
+        /// publish nothing and withdraw nothing, and render adopts B at `S` with
+        /// `transition_fallback` 0. The same with W adopted by render first. Then, with frames
+        /// withheld, B's supersession is refused by the effect-state cap set one below what B's
+        /// admission needs: W is republished with its record, and the step at W's deadline
+        /// withdraws W and publishes the transition, which completes W's revision as
+        /// `TRANSITION_FALLBACK`.
+        ///
+        /// Test value: an unkeyed step together with a record kept across the supersession
+        /// withdraws B at W's deadline and loses its `S`; a record dropped on the refused
+        /// supersession leaves W pending forever, since the step runs only while a record exists.
+        #[test]
+        fn a_superseded_candidates_deadline_is_not_used() {
+            let mut slow = session_a();
+            slow.control_smoothing = Some(session::ControlSmoothing {
+                mute_ms: 500.0,
+                ..session::CONTROL_SMOOTHING_DEFAULT
+            });
+            assert_eq!(slow.control_smoothing_samples().mute, 24_000);
+            let mut b = remove_track("t3").to_vec();
+            b.extend(remove_track("eq1"));
+            for adopted in [false, true] {
+                let mut rig = Rig::boot(Some(CONFIG), limits(), &slow);
+                rig.ahead = if adopted { AHEAD } else { 1 };
+                rig.render(BEFORE);
+                let PlanAdoption::Primed { not_before, .. } = rig.rebuild(&growth()) else {
+                    panic!("W is warm")
+                };
+                rig.render(if adopted { 2 } else { 1 });
+                assert_eq!(rig.swaps().len(), usize::from(adopted));
+                let p = rig.children.session.test_render_clock();
+                let s = (p + QUANTUM + 24_000).div_ceil(QUANTUM) * QUANTUM;
+                assert!(s > not_before + DEADLINE);
+                assert_eq!(rig.rebuild(&b), PlanAdoption::NoEarlierThan(s));
+                let epoch = rig.children.session.newest_plan_epoch();
+                let withdrawn = super::super::test_lifecycle_counters().candidate_withdrawn;
+                rig.ahead = 1;
+                rig.render_to(not_before + DEADLINE);
+                while rig.at < s {
+                    assert_eq!(rig.deadline(), None);
+                    assert_eq!(rig.children.session.test_take_published_adoption(), None);
+                    rig.render(1);
+                }
+                assert_eq!(rig.children.session.newest_plan_epoch(), epoch, "B stays");
+                assert_eq!(
+                    super::super::test_lifecycle_counters().candidate_withdrawn,
+                    withdrawn,
+                    "no step withdraws B"
+                );
+                let s_block = usize::try_from(s / QUANTUM).expect("block");
+                assert_eq!(rig.swaps().len(), usize::from(adopted), "B waits for S");
+                rig.render(1);
+                assert_eq!(rig.swaps().last(), Some(&s_block), "B at S");
+                let watermark = rig.children.plan.queries().watermark().expect("watermark");
+                assert_eq!(watermark.transition_fallback, 0);
+            }
+
+            let mut rig = Rig::boot(Some(CONFIG), limits(), &slow);
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            assert!(matches!(
+                rig.rebuild(&growth()),
+                PlanAdoption::Primed { .. }
+            ));
+            let record = rig.primed().expect("W's record");
+            let revision = rig.revision();
+            rig.render(1);
+            let held = rig.children.session.held_epochs().expect("held");
+            let needs: u64 = held
+                .as_slice()
+                .iter()
+                .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                .sum();
+            let cap = rig.children.session.limits.maximum_effect_state_bytes;
+            rig.children.session.limits.maximum_effect_state_bytes = needs - 1;
+            assert!(rig.transact(&b).is_err(), "B is refused");
+            rig.children.session.limits.maximum_effect_state_bytes = cap;
+            assert_eq!(rig.primed(), Some(record), "W keeps its record");
+            assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+            rig.render_to(record.not_before + DEADLINE - QUANTUM);
+            assert_eq!(rig.deadline(), None);
+            rig.render(1);
+            assert_eq!(rig.deadline(), Some(TransitionStep::Published));
+            let Some(PlanAdoption::NoEarlierThan(s)) =
+                rig.children.session.test_take_published_adoption()
+            else {
+                panic!("the transition is a duck-swap")
+            };
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.render(s_block + 1 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.revision, watermark.outcome_flags),
+                (revision, OUTCOME_TRANSITION_FALLBACK)
+            );
+        }
+
+        /// Gate 1, the admission: a warm candidate C is admitted against the reprepare peak. With
+        /// the effect-state cap at `R + 2C - 1` the growth is refused before commit with that
+        /// cap's diagnostic, and nothing is published; at `R + 2C` it is published `Primed`.
+        /// Test value: a warm candidate admitted at the single peak passes one byte below.
+        #[test]
+        fn a_warm_candidate_is_admitted_with_the_reprepare_peak() {
+            let mut probe = Rig::new(Some(CONFIG));
+            probe.render(BEFORE);
+            probe.rebuild(&growth());
+            let held = probe.children.session.held_epochs().expect("held");
+            let [running, candidate] = held.as_slice() else {
+                panic!("the running plan and the candidate")
+            };
+            let (r, c) = (
+                running.report.effect_scalar_state_bytes,
+                candidate.report.effect_scalar_state_bytes,
+            );
+            assert!(c > 0, "the limiter holds state");
+            for (cap, expected) in [(r + 2 * c - 1, false), (r + 2 * c, true)] {
+                let mut rig = Rig::with_limits(
+                    Some(CONFIG),
+                    ControlLimits {
+                        maximum_effect_state_bytes: cap,
+                        ..limits()
+                    },
+                );
+                rig.render(BEFORE);
+                let epoch = rig.children.session.newest_plan_epoch();
+                match rig.transact(&growth()) {
+                    Ok(path) => {
+                        assert!(expected, "admitted at {cap}");
+                        assert_eq!(path, EditPath::Rebuild);
+                        assert!(matches!(
+                            rig.children.session.test_take_published_adoption(),
+                            Some(PlanAdoption::Primed { .. })
+                        ));
+                    }
+                    Err(CommandError::CompileRejected(failure)) => {
+                        assert!(!expected, "refused at {cap}");
+                        assert_eq!(&*failure.diagnostic(), b"effect.resource.limit\t$\n");
+                        assert_eq!(rig.children.session.newest_plan_epoch(), epoch);
+                        assert_eq!(rig.primed(), None);
+                    }
+                    Err(other) => panic!("{other:?}"),
+                }
+            }
+        }
+
+        /// Gate 2, routing on the duck set (rewritten by #1397 D1, deliverable 5): the growth with
+        /// track 2's removal ducks track 2, so it is published `Primed` no earlier than the duck's
+        /// `S`, its record names its epoch, and no block before `S` differs from A continued with
+        /// track 2 live-muted at the same block. Test value: a classifier that routes on
+        /// `restarted_strips()` alone publishes it at the render clock, and one that takes today's
+        /// path publishes it `NoEarlierThan(S)` with no record, so no deadline step can find it.
+        #[test]
+        fn a_growth_that_removes_a_strip_is_primed_at_the_ducks_sample() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.extend(remove_track("eq1"));
+            let s = duck_sample(rig.children.session.test_render_clock());
+            assert_eq!(
+                rig.rebuild(&edits),
+                PlanAdoption::Primed {
+                    not_before: s,
+                    lead_blocks: 4
+                }
+            );
+            assert_eq!(
+                rig.primed(),
+                Some(PrimedCandidate {
+                    epoch: rig.children.session.newest_plan_epoch(),
+                    not_before: s,
+                    lead_blocks: 4,
+                })
+            );
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            assert!(s_block > BEFORE);
+            rig.render(s_block - BEFORE);
+            let mut continued = Rig::new(None);
+            continued.render(BEFORE);
+            assert!(matches!(
+                continued.transact(&[builtin("eq1", 6, 1.0)]),
+                Ok(EditPath::Live)
+            ));
+            continued.render(s_block - BEFORE);
+            assert_eq!(first_divergence(&rig, &continued), None);
+
+            // A structural edit superseding a `Primed` W whose overlay ducks a strip (W is the
+            // growth with track 2's removal): B still grows over A, so it takes the transition,
+            // no earlier than W's `S`, with no record, and reports `TRANSITION_FALLBACK`. Red on
+            // attempt 1's routing, which published B as an ordinary successor (`EXACT`).
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.extend(remove_track("eq1"));
+            let PlanAdoption::Primed { not_before: s, .. } = rig.rebuild(&edits) else {
+                panic!("W is warm")
+            };
+            let adoption = rig.rebuild(&muted_track("t4", 0));
+            let PlanAdoption::NoEarlierThan(later) = adoption else {
+                panic!("published {adoption:?}")
+            };
+            assert!(later >= s);
+            assert_eq!(rig.primed(), None);
+            let s_block = usize::try_from(later / QUANTUM).expect("block");
+            rig.render(s_block + 1 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_ne!(watermark.outcome_flags & OUTCOME_TRANSITION_FALLBACK, 0);
+
+            // The growth while phase 1 of a removal is pending (#1397a attempt 2, root ruling):
+            // it takes the transition, which ducks track 1 too (the output's arrival grows) and
+            // inherits the overlay's `S`, with no record. Up to its `S'` the output is A with
+            // track 2 and then track 1 live-muted at the two edits' blocks; from `S'`, for 64
+            // blocks, a fresh plan of the committed session with track 1 muted, fed from frame
+            // `S'` and live-unmuted at once; the adoption reports `TRANSITION_FALLBACK`. Red on an
+            // ordinary successor, which carries track 1 across its changed line (`EXACT`).
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            let PlanAdoption::NoEarlierThan(s) = rig.rebuild(&remove_track("eq1")) else {
+                panic!("a two-phase removal")
+            };
+            rig.render(1);
+            let adoption = rig.rebuild(&growth());
+            let PlanAdoption::NoEarlierThan(later) = adoption else {
+                panic!("published {adoption:?}")
+            };
+            assert!(later >= s);
+            assert_eq!(rig.primed(), None);
+            let s_block = usize::try_from(later / QUANTUM).expect("block");
+            rig.render(s_block + 64 - rig.blocks.len());
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_ne!(watermark.outcome_flags & OUTCOME_TRANSITION_FALLBACK, 0);
+            let mut continued = Rig::new(None);
+            continued.render(BEFORE);
+            for track in ["eq1", "eq0"] {
+                assert!(matches!(
+                    continued.transact(&[builtin(track, 6, 1.0)]),
+                    Ok(EditPath::Live)
+                ));
+                continued.render(1);
+            }
+            continued.render(s_block - BEFORE - 2);
+            assert_eq!(rig.blocks[..s_block], continued.blocks[..], "A continued");
+            let mut muted = rig
+                .children
+                .session
+                .controller
+                .session()
+                .compiled()
+                .normalized_model()
+                .clone();
+            for track in &mut muted.tracks {
+                if track.id.as_str() == "eq0" {
+                    track.fader.left_mute = true;
+                    track.fader.right_mute = true;
+                }
+            }
+            let mut fresh = Rig::boot(None, limits(), &muted);
+            let offset = usize::try_from(later).expect("frames");
+            for (_, planes, _) in &mut fresh.feeds {
+                for plane in planes.iter_mut() {
+                    plane.drain(..offset);
+                }
+            }
+            assert!(matches!(
+                fresh.transact(&[builtin("eq0", 6, 0.0)]),
+                Ok(EditPath::Live)
+            ));
+            fresh.render(64);
+            assert_eq!(
+                rig.blocks[s_block..],
+                fresh.blocks[..],
+                "the fresh plan from S'"
+            );
+        }
+
+        /// Gate 3, edits while W is pending, frames withheld. A live fader edit on track 2 goes
+        /// to W's cells and applies at `S`, as the same value written to A's cell just before
+        /// block `S`. A structural edit that removes track 2's source supersedes W: the source's
+        /// producer is back in the running epoch, its submits are accepted and A plays them with
+        /// no underrun, and the adoption reports `EXACT | SUPERSEDED`. A declared stop supersedes
+        /// W, which folded in nothing: its revision completes `EXACT` alone.
+        ///
+        /// Test value: a supersession that drops W's producers with W leaves the removed source
+        /// with no producer, so its submits are refused and A underruns; a stop reported
+        /// `SUPERSEDED` for a candidate that folded in nothing miscounts it.
+        #[test]
+        fn edits_while_the_warm_candidate_waits() {
+            // A live edit.
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            rig.rebuild(&growth());
+            rig.render(1);
+            assert!(matches!(
+                rig.transact(&[builtin("eq1", 5, -6.0)]),
+                Ok(EditPath::Live)
+            ));
+            rig.render(2);
+            rig.ahead = AHEAD;
+            rig.render(8);
+            let s = BEFORE + 3;
+            assert_eq!(rig.swaps(), [s]);
+            let mut continued = Rig::new(None);
+            continued.render(s);
+            assert!(matches!(
+                continued.transact(&[builtin("eq1", 5, -6.0)]),
+                Ok(EditPath::Live)
+            ));
+            continued.render(8);
+            assert_eq!(first_divergence(&rig, &continued), None, "applied at S");
+
+            // A structural edit that removes the carried source `aux-source`.
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            rig.rebuild(&growth());
+            rig.render(1);
+            let mut edits: Vec<SessionEdit> = remove_track("eq1").into();
+            edits.push(SessionEdit::RemoveSource {
+                source_id: sid(AUX),
+            });
+            // #1397 D1 and gate 5: B still grows over A and ducks track 2, so it is `Primed` no
+            // earlier than the duck's `S`. `aux-source` is fed exactly the frames A renders up to
+            // `S` and none past them, the carried source its prime: B's publication cleared the
+            // flag W set on the removed source's ring, so B is adopted at `S`, and up to it and
+            // for 64 blocks on, the output is A continued with track 2 live-muted at the same
+            // block. A `publish_primed` that leaves the withdrawn candidate's flags alone keeps
+            // B waiting for frames the host never sends.
+            let s = duck_sample(rig.children.session.test_render_clock());
+            assert_eq!(
+                rig.rebuild(&edits),
+                PlanAdoption::Primed {
+                    not_before: s,
+                    lead_blocks: 4
+                }
+            );
+            let s_block = usize::try_from(s / QUANTUM).expect("block");
+            rig.stop_at = Some((AUX, s));
+            rig.ahead = AHEAD;
+            rig.render(s_block - rig.blocks.len());
+            assert!(rig.swaps().is_empty(), "A renders until S");
+            assert_eq!(rig.underruns(), 0, "A plays the removed source's frames");
+            rig.render(1);
+            assert_eq!(rig.swaps(), [s_block]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (watermark.outcome_flags, watermark.superseded),
+                (OUTCOME_EXACT | OUTCOME_SUPERSEDED, 1)
+            );
+            rig.render(63);
+            assert_eq!(rig.underruns(), 0);
+            let mut continued = Rig::new(None);
+            continued.render(BEFORE + 1);
+            assert!(matches!(
+                continued.transact(&[builtin("eq1", 6, 1.0)]),
+                Ok(EditPath::Live)
+            ));
+            continued.render(rig.blocks.len() - BEFORE - 1);
+            assert_eq!(first_divergence(&rig, &continued), None, "A continued");
+
+            // A declared stop.
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            rig.rebuild(&growth());
+            rig.render(1);
+            let revision = rig
+                .children
+                .session
+                .test_controller()
+                .session()
+                .revision()
+                .0;
+            rig.children
+                .session
+                .declare_discontinuity()
+                .expect("declaration");
+            rig.render(1);
+            assert_eq!(rig.swaps(), [BEFORE + 1]);
+            let watermark = rig.children.plan.queries().watermark().expect("watermark");
+            assert_eq!(
+                (
+                    watermark.revision,
+                    watermark.outcome_flags,
+                    watermark.superseded
+                ),
+                (revision, OUTCOME_EXACT, 0)
+            );
+        }
+
+        /// #2044: a warm B that does not carry W's [`UNUSED`] ring panics after its primed
+        /// publication wrote that ring's flag, before its commit. W is republished and, its own
+        /// flags set again, waits while that ring is not fed, as it does when no B ran; once fed,
+        /// it is adopted.
+        ///
+        /// Test value: red if the republish keeps B's flags: W is then judged without the ring
+        /// it carries, so it is adopted before that ring is primed.
+        #[test]
+        fn a_republished_warm_candidate_keeps_its_own_prime_flags() {
+            let mut b: Vec<SessionEdit> = muted_track("t4", 0).into();
+            b.push(SessionEdit::RemoveSource {
+                source_id: sid(UNUSED),
+            });
+            let run = |panics: bool| {
+                let mut rig = Rig::with_unused(Some(CONFIG));
+                rig.ahead = 1;
+                rig.render(BEFORE);
+                assert!(matches!(
+                    rig.rebuild(&growth()),
+                    PlanAdoption::Primed { .. }
+                ));
+                let record = rig.primed().expect("W's record");
+                if panics {
+                    rig.children.session.test_set_structural_faults([
+                        Some(super::super::TestStructuralFaultPhase::PanicAtPrimedPublication),
+                        None,
+                    ]);
+                    let caught =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rig.transact(&b)));
+                    assert!(caught.is_err(), "B panics");
+                    assert_eq!(rig.primed(), Some(record), "W keeps its record");
+                    assert_eq!(rig.children.session.newest_plan_epoch(), record.epoch);
+                }
+                let unused = rig
+                    .feeds
+                    .iter()
+                    .find(|(id, ..)| *id == UNUSED)
+                    .map(|(.., next)| *next)
+                    .expect("fed");
+                rig.stop_at = Some((UNUSED, unused));
+                rig.ahead = AHEAD;
+                rig.render(6);
+                let held = rig.swaps();
+                rig.stop_at = None;
+                rig.render(6);
+                (held, rig.swaps().len())
+            };
+            let reference = run(false);
+            assert_eq!(
+                reference,
+                (Vec::new(), 1),
+                "W waits for the ring, then is adopted"
+            );
+            assert_eq!(run(true), reference, "the republished W");
+        }
+
+        /// Gate 4, the record's lifecycle: each step that ends W's pendency drops W's record,
+        /// and a warm successor's publication records its own epoch; a refused supersession
+        /// republishes W and keeps W's record unchanged, and W is then adopted.
+        ///
+        /// Test value: a record kept after W's adoption or supersession names W's epoch (#1358's
+        /// deadline step would then act on B); a record dropped on a refused supersession leaves
+        /// W pending with no record; a `not_before` read from the source-read clock is `P` late
+        /// once a warm plan runs.
+        #[test]
+        fn the_record_names_the_one_pending_warm_candidate() {
+            /// W published and pending, frames withheld; its record.
+            fn pending() -> (Rig, PrimedCandidate) {
+                let mut rig = Rig::new(Some(CONFIG));
+                rig.ahead = 1;
+                rig.render(BEFORE);
+                rig.rebuild(&growth());
+                rig.render(1);
+                let record = rig.primed().expect("W's record");
+                (rig, record)
+            }
+            let warm_b: Vec<SessionEdit> = muted_track("t4", 2).into();
+            let plain_b: Vec<SessionEdit> = muted_track("t4", 0).into();
+
+            // Adopted, then a `Next` B or a warm B.
+            for (b, primed) in [(&plain_b, false), (&warm_b, true)] {
+                let (mut rig, _) = pending();
+                rig.ahead = AHEAD;
+                rig.render(1);
+                assert_eq!(rig.swaps(), [BEFORE + 1]);
+                assert_eq!(rig.primed(), None, "adopted");
+                let adoption = rig.rebuild(b);
+                assert_eq!(matches!(adoption, PlanAdoption::Primed { .. }), primed);
+                // W runs `P` ahead on the source-read clock: B's `not_before` is the render
+                // clock's.
+                let render_clock = rig.children.session.test_render_clock();
+                assert_eq!(
+                    rig.children.session.test_source_read_clock(),
+                    render_clock + LEAD
+                );
+                assert_eq!(
+                    rig.primed().map(|record| (record.epoch, record.not_before)),
+                    primed.then(|| (rig.children.session.newest_plan_epoch(), render_clock)),
+                    "after an adopted W, B warm: {primed}"
+                );
+            }
+
+            // Superseded by a `Next` B (W's growth reverted) or a warm B.
+            let mut reverted: Vec<SessionEdit> = remove_track("t3").into();
+            reverted.extend(plain_b.iter().cloned());
+            for (b, primed) in [(&reverted, false), (&plain_b, true)] {
+                let (mut rig, record) = pending();
+                let adoption = rig.rebuild(b);
+                assert_eq!(matches!(adoption, PlanAdoption::Primed { .. }), primed);
+                let newest = rig.children.session.newest_plan_epoch();
+                assert_ne!(newest, record.epoch);
+                assert_eq!(
+                    rig.primed().map(|record| record.epoch),
+                    primed.then_some(newest),
+                    "W superseded, B warm: {primed}"
+                );
+            }
+            // The warm B's admission at the effect-state cap `max(R + W + B, R + 2B)`: its
+            // reprepare row is the running plan alone, never the withdrawn W.
+            let state = |rig: &Rig| -> Vec<u64> {
+                let held = rig.children.session.held_epochs().expect("held");
+                held.as_slice()
+                    .iter()
+                    .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                    .collect()
+            };
+            let (mut probe, _) = pending();
+            let [r, w] = state(&probe)[..] else {
+                panic!("R and W")
+            };
+            probe.rebuild(&plain_b);
+            let [_, b] = state(&probe)[..] else {
+                panic!("R and B")
+            };
+            let (mut rig, _) = pending();
+            rig.children.session.limits.maximum_effect_state_bytes = (r + w + b).max(r + 2 * b);
+            assert!(
+                matches!(rig.rebuild(&plain_b), PlanAdoption::Primed { .. }),
+                "B fits beside R and W, and twice beside R"
+            );
+
+            // A warm B superseding a W whose overlay holds only a removed source no track read
+            // (#1397 D1, #1403 NIT-1): the overlay ducks no strip, so B is warm and recorded.
+            let mut rig = Rig::with_unused(Some(CONFIG));
+            rig.ahead = 1;
+            rig.render(BEFORE);
+            let mut edits = growth();
+            edits.push(SessionEdit::RemoveSource {
+                source_id: sid(UNUSED),
+            });
+            rig.rebuild(&edits);
+            rig.render(1);
+            let render_clock = rig.children.session.test_render_clock();
+            assert_eq!(
+                rig.rebuild(&plain_b),
+                PlanAdoption::Primed {
+                    not_before: render_clock,
+                    lead_blocks: 4
+                },
+                "B over a source-only overlay"
+            );
+            assert_eq!(
+                rig.primed().map(|record| record.epoch),
+                Some(rig.children.session.newest_plan_epoch())
+            );
+
+            // A declared stop.
+            let (mut rig, _) = pending();
+            rig.children
+                .session
+                .declare_discontinuity()
+                .expect("declaration");
+            assert_eq!(rig.primed(), None, "a stop");
+
+            // A refused supersession: B's admission does not fit the effect-state cap.
+            let (mut rig, record) = pending();
+            let held = rig.children.session.held_epochs().expect("held");
+            rig.children.session.limits.maximum_effect_state_bytes = held
+                .as_slice()
+                .iter()
+                .map(|epoch| epoch.report.effect_scalar_state_bytes)
+                .sum();
+            let epoch = rig.children.session.newest_plan_epoch();
+            assert!(rig.transact(&warm_b).is_err(), "B is refused");
+            assert_eq!(rig.children.session.newest_plan_epoch(), epoch);
+            assert_eq!(rig.primed(), Some(record), "W keeps its record");
+            rig.ahead = AHEAD;
+            rig.render(1);
+            assert_eq!(rig.swaps(), [BEFORE + 1], "W is still pending");
+            assert_eq!(rig.primed(), None);
+        }
+
+        /// #1355 MAJOR-1 at the control plane: render adopts the `Primed` W in a call it then
+        /// refuses, so W never renders; the next structural edit's successor C, prepared from
+        /// W's inventory and published `Next`, displaces W at its first block, and the output
+        /// equals A continued. Test value: a carry that takes W's lines and rings without its
+        /// pending prime shifts every carried track by `P` from C's adoption.
+        #[test]
+        fn a_primed_candidate_displaced_by_a_refused_call_continues() {
+            let mut rig = Rig::new(Some(CONFIG));
+            rig.render(BEFORE);
+            assert!(matches!(
+                rig.rebuild(&growth()),
+                PlanAdoption::Primed { .. }
+            ));
+            rig.refused_call();
+            assert_eq!(
+                rig.rebuild(&muted_track("t4", 0)),
+                PlanAdoption::Next,
+                "C grows nothing over W"
+            );
+            assert_eq!(rig.primed(), None, "W was adopted");
+            rig.render(10);
+            assert_eq!(rig.swaps(), [BEFORE]);
+            let mut continued = Rig::new(None);
+            continued.render(rig.blocks.len());
+            assert_eq!(first_divergence(&rig, &continued), None);
         }
     }
 }

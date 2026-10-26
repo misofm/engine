@@ -246,7 +246,7 @@ command -v wasm-objdump >/dev/null || {
   exit 2
 }
 
-# Issue #243: the set is six files. `miso-engine-v1-abi-layout.json` joined it because the boot
+# Issue #243: the set was six files; #2111 added the stem identities' BLAKE3 module, a seventh. `miso-engine-v1-abi-layout.json` joined it because the boot
 # ABI's bytes -- options offsets, result codes, the staging sequence -- were hand-written on the
 # JavaScript side five times over and drifted; it is emitted by the same generator, from the same
 # `offset_of!`s, and travels with the module it describes.
@@ -256,10 +256,11 @@ expected=$(printf '%s\n' \
   miso-engine-v1-audio-worklet-host.js \
   miso-engine-v1-audio-worklet.js \
   miso-engine-v1-audio-worklet.simd128.wasm \
+  miso-engine-v1-blake3.simd128.wasm \
   miso-engine-v1-parameter-metadata.json)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact six frozen outputs" >&2
+  echo "artifact directory does not contain the exact seven frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
@@ -279,11 +280,8 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_boot_diagnostic_bytes \
   miso_engine_web_v1_boot_options_ptr \
   miso_engine_web_v1_boot_result \
-  miso_engine_web_v1_boot_with_spectrum_hop \
   miso_engine_web_v1_buffer_capacity \
   miso_engine_web_v1_buffer_ptr \
-  miso_engine_web_v1_command_report_ptr \
-  miso_engine_web_v1_command_submit \
   miso_engine_web_v1_control_allocation_count \
   miso_engine_web_v1_control_command \
   miso_engine_web_v1_control_event \
@@ -297,27 +295,12 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
-  miso_engine_web_v1_observation_count \
-  miso_engine_web_v1_observation_effect_index \
-  miso_engine_web_v1_observation_effect_slot_id \
-  miso_engine_web_v1_observation_id_capacity \
-  miso_engine_web_v1_observation_id_ptr \
-  miso_engine_web_v1_observation_native_effect_id \
-  miso_engine_web_v1_observation_rack \
-  miso_engine_web_v1_observation_read \
-  miso_engine_web_v1_observation_result_bytes \
-  miso_engine_web_v1_observation_result_ptr \
-  miso_engine_web_v1_observation_selection_bytes \
-  miso_engine_web_v1_observation_selection_capacity \
-  miso_engine_web_v1_observation_selection_ptr \
-  miso_engine_web_v1_observation_tap_count \
-  miso_engine_web_v1_observation_tap_id \
-  miso_engine_web_v1_observation_track_index \
   miso_engine_web_v1_plan_latency_ptr \
   miso_engine_web_v1_plan_latency_read \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
   miso_engine_web_v1_replace_document_ptr \
+  miso_engine_web_v1_resolved_source_ring_frames \
   miso_engine_web_v1_response_frame_close \
   miso_engine_web_v1_response_frame_ptr \
   miso_engine_web_v1_response_frame_reply_bytes \
@@ -337,52 +320,6 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_seek_report_ptr \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr \
-  miso_engine_web_v1_spectrum_analysis \
-  miso_engine_web_v1_spectrum_arm \
-  miso_engine_web_v1_spectrum_cancel \
-  miso_engine_web_v1_spectrum_capture_bytes \
-  miso_engine_web_v1_spectrum_capture_capacity \
-  miso_engine_web_v1_spectrum_capture_ptr \
-  miso_engine_web_v1_spectrum_capture_set_bytes \
-  miso_engine_web_v1_spectrum_close \
-  miso_engine_web_v1_spectrum_collection_entry_bytes \
-  miso_engine_web_v1_spectrum_collection_entry_capacity \
-  miso_engine_web_v1_spectrum_collection_entry_ptr \
-  miso_engine_web_v1_spectrum_collection_request_bytes \
-  miso_engine_web_v1_spectrum_collection_request_ptr \
-  miso_engine_web_v1_spectrum_collection_target_ids_capacity \
-  miso_engine_web_v1_spectrum_collection_target_ids_ptr \
-  miso_engine_web_v1_spectrum_hop_capability \
-  miso_engine_web_v1_spectrum_read \
-  miso_engine_web_v1_spectrum_request_bytes \
-  miso_engine_web_v1_spectrum_request_ptr \
-  miso_engine_web_v1_spectrum_result_bytes \
-  miso_engine_web_v1_spectrum_result_ptr \
-  miso_engine_web_v1_spectrum_select \
-  miso_engine_web_v1_spectrum_selection_epoch \
-  miso_engine_web_v1_spectrum_stream_analysis \
-  miso_engine_web_v1_spectrum_stream_analysis_configure \
-  miso_engine_web_v1_spectrum_stream_metadata_bytes \
-  miso_engine_web_v1_spectrum_stream_metadata_ptr \
-  miso_engine_web_v1_spectrum_stream_read \
-  miso_engine_web_v1_spectrum_stream_reset \
-  miso_engine_web_v1_spectrum_stream_select \
-  miso_engine_web_v1_spectrum_stream_start \
-  miso_engine_web_v1_spectrum_stream_stop \
-  miso_engine_web_v1_spectrum_target_id_capacity \
-  miso_engine_web_v1_spectrum_target_id_ptr \
-  miso_engine_web_v1_track_response_analysis \
-  miso_engine_web_v1_track_response_capture \
-  miso_engine_web_v1_track_response_close \
-  miso_engine_web_v1_track_response_request_bytes \
-  miso_engine_web_v1_track_response_request_ptr \
-  miso_engine_web_v1_track_response_result_bytes \
-  miso_engine_web_v1_track_response_result_ptr \
-  miso_engine_web_v1_track_response_snapshot_capacity \
-  miso_engine_web_v1_track_response_snapshot_ptr \
-  miso_engine_web_v1_track_response_snapshot_set_bytes \
-  miso_engine_web_v1_track_response_track_id_capacity \
-  miso_engine_web_v1_track_response_track_id_ptr \
   miso_engine_web_v1_watermark_ptr \
   miso_engine_web_v1_watermark_read | sort)
 
@@ -404,23 +341,6 @@ expected_functions=$(grep -vx memory <<<"$expected_exports")
 [[ "$layout_exports" == "$expected_functions" ]] || {
   echo "the ABI layout document's published exports are not the frozen export set" >&2
   diff -u <(printf '%s\n' "$expected_functions") <(printf '%s\n' "$layout_exports") >&2 || true
-  exit 1
-}
-
-# Issue #382: both shipped JS files hand-type the command record stride, and the worklet reads
-# `records.byteLength / COMMAND_RECORD_BYTES` records. Each file must declare it exactly once, equal
-# to the shipped layout's `commandRecord.bytes`, so a generator change to the record cannot leave
-# either side reading misaligned records.
-python3 -B -c '
-import json, re, sys
-stride = json.load(open(sys.argv[1], encoding="utf-8"))["commandRecord"]["bytes"]
-for path in sys.argv[2:]:
-    text = open(path, encoding="utf-8").read()
-    found = re.findall(r"^const COMMAND_RECORD_BYTES = (\d+);$", text, re.M)
-    if found != [str(stride)]:
-        sys.exit(f"{path}: COMMAND_RECORD_BYTES {found} is not commandRecord.bytes {stride}")
-' "$layout_json" "$main_js" "$worklet_js" || {
-  echo "a shipped JS command record stride is not the ABI layout's" >&2
   exit 1
 }
 
@@ -526,7 +446,7 @@ fi
 # deliberately not asserted. (The eight-lane multiband body, 2560/20, left the browser build with
 # #1110.)
 #
-#   multiband dual          3464/0     multiband mono           1862/0
+#   multiband dual          3993/0     multiband mono           2131/0   [3464/0, 1862/0 before #1367b]
 #   transient-shaper dual    808/0     transient-shaper mono     407/0   [786/72 at M2]
 #   gate-expander dual       265/0     gate-expander mono        134/0   [180/8 at M2]
 #   true-peak-limiter dual  1139/0     true-peak-limiter mono    537/0   [448/0, 224/0]
@@ -537,7 +457,8 @@ fi
 #   soft-clip f32x4           55/0     route-mix-ramp f32x4       22/0   [25/0 soft-clip]
 #
 # The dynamic-eq and de-esser rows were re-measured after #1969 (its detector link glide), on the
-# named twin built from `e3e7cdab3`; the other rows are the #1970 build's.
+# named twin built from `e3e7cdab3`, and the multiband rows re-measured after #1367b (its detector
+# link glide); the other rows are the #1970 build's.
 #
 # The parametric EQ's one scalar operation per body is a once-per-block `f32.sub` of two splats in
 # `lane::silence_armable_holding`, inside the 0.10 ceiling's budget; the derivation table in the
@@ -569,51 +490,37 @@ fi
 # reviewed change.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 named_disassembly=$(wasm-objdump -d "$named")
-# Issue #1381a D4: the browser renders through the plan owner, so the render closure holds
-# `RealtimePlanOwner::enter_block`, which inlines the bounded SPSC endpoints' checked slot index
-# (the retirement queue's and the mailbox's), unreachable by their cursor invariant like the one
-# `meter_poll` admits below. It is named as the one owner, and nothing the block boundary calls
-# may trap. Issue #1581 D4 admits `OutputPeakObserver::observe`, the core output meter, for the
-# same site only: it inlines the engine SPSC producer's checked `slots[local]` index when it
-# pushes a closed window, unreachable by the cursor invariant, the site `enter_block` is admitted
-# for. It is pinned to that one site (`=1`), so another checked index inlined into the fold is
-# red. No other rule of the gate is loosened.
-# #1577: the SPSC slots[...] index of after_block's one pop and one push (panic_bounds_check), the
-# same class as enter_block. Pinned to those two sites (`=2`).
+# Issue #2041: no render closure admits an unpinned trap owner. #1381a, #1577, #1581 and #1588b
+# each pinned an engine SPSC ring's checked `slots[cursor]` index here (a `panic_bounds_check` that
+# could not fire); `spsc.rs` now reads a slot without a bounds check under its unsafe charter, so a
+# checked index inlined into the render closure again is red.
+# Issue #2068: the one trap owner left is pinned at its site count, not admitted by name.
+# `PreparedRenderPlan::render_inner` inlines `PlanarBufferMut::plane_mut`, whose `&mut
+# self.storage[start..end]` is a checked slice index, in the executor-less silence branch: one
+# `unreachable`. Every web plan carries an executor (both graph binding paths end in
+# `prepare_with_executor`), so the branch is dead; it is core-owned (#84). A new checked index
+# inlined into `render_inner` changes the count and is red.
+# #1588b: `MeterFrameProducer::publish_frame`'s published-queue push refusal, unreachable because
+# that queue has room for every frame the free queue does not hold, is forgotten rather than
+# dropped, so no free joins the closure.
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render \
-    --trap-owner 17RealtimePlanOwner11enter_block \
-    --trap-owner 18OutputPeakObserver7observe=1 \
-    --trap-owner 21ResponseCaptureServer11after_block=2 --render-thread || exit 1
+    --trap-owner '18PreparedRenderPlan12render_inner=1' --render-thread || exit 1
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||
   exit 1
 
-# #137 D1/D2: the two exports `process()` calls beside the render export get the same allocation
-# gate. `miso_engine_web_v1_meter_poll` runs on the render thread after every rendered block, and
-# `miso_engine_web_v1_command_submit` runs in `port.onmessage`, which the user agent dispatches
-# between quanta on that same thread; neither may reach an allocator or drop glue.
-# Each export's own symbol is the only admitted trap owner: the bounded SPSC endpoints inline
-# their checked slot indexing into the caller, and that index is unreachable by the queue's own
-# cursor invariant. The allocation half of the gate is not relaxed at all -- an allocator, a
-# deallocator or drop glue in either closure still fails. Issue #1582 R3: the meter poll's fold is
-# the core's `MeterDelivery::poll` (never inlined into the export), so it is the poll's one admitted
-# owner, pinned at its three sites: the strip meters' `try_pop`, and the output meter's `try_pop`
-# and `peek`, each the ring's checked `slots[..]` index. The export itself may hold none.
+# #137 D2: the export `process()` calls beside the render export gets the same allocation gate.
+# `miso_engine_web_v1_meter_poll` runs on the render thread after every rendered block; it may not
+# reach an allocator or drop glue. Its closure admits no trap owner (#2041; `render_inner` is not
+# in it). The allocation half of the gate is absolute: an allocator, a deallocator or drop glue in
+# the closure fails. (#1589c deleted `command_submit`, the observation records' export, which this
+# gate held too: an `Observe` edit is control work through `control_command`.)
 printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
-    --trap-owner 13MeterDelivery4poll=3 --render-thread || exit 1
-# `command_submit` runs in `port.onmessage`, not in `process()`, and since #1565A it carries only
-# the observation subscribe and unsubscribe records (the value kinds are deleted; every value goes
-# through `control_command`). The engine's rule for the control path is "never allocate on the
-# render thread", so the allocation half is what this export is held to -- and it is held to it
-# absolutely.
-printf '%s
-' "$named_disassembly" |
-  python3 -B "$callgraph" --callgraph miso_engine_web_v1_command_submit --allocation-only \
     --render-thread || exit 1
 
 # #137 D3 amends the browser-capability ban deliberately.
@@ -683,26 +590,11 @@ python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-abi-layout-v1.py" \
   "$artifact_dir/miso-engine-v1-abi-layout.json" || exit 1
 
-# Issues #143/#151: the command-reason vocabulary is written out five times -- Rust constants, the
-# host JS acknowledgement table, the `.d.ts` enum, the metadata generator's rows and the schema
-# gate's own list -- and the app's dead GR meters were what a two-reason drift between them cost.
-# The gate is run over the SHIPPED js/.d.ts/JSON, so a stale artifact fails here too, and it also
-# holds the `.d.ts`'s `observe()` declaration to the shipped implementation's actual field sets.
-python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-reason-vocabulary.py" \
-  --artifacts "$artifact_dir" || exit 1
-
-# Issue #210 phase 0: the command-KIND vocabulary, across the Rust constants, the wire's decode
-# whitelist, the host JS `COMMAND_KINDS` set, the `.d.ts` enum, the generator's rows, the schema
-# gate's list and the SHIPPED `commandKinds`. Before this gate the shipped document stopped at six
-# kinds while the wire decoded eight, and nothing in the tree could see it.
-python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-kind-vocabulary.py" \
-  --artifacts "$artifact_dir" || exit 1
-
 # Issue #207: the session map's shape, across the five places that now spell it -- the Rust FFI's
 # introspection exports (which decide each field's width), the frozen export list above, the
 # worklet that calls them, the main-realm host's acknowledgement validator, and the `.d.ts` an SDK
 # generates against. `--artifacts` additionally holds the SHIPPED js/.d.ts to the tree's, so a
-# stale artifact fails here as it does for the two vocabulary gates.
+# stale artifact fails here.
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-session-map-shape.py" \
   --artifacts "$artifact_dir" || exit 1
 

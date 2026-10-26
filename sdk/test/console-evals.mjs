@@ -27,7 +27,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
@@ -38,7 +37,6 @@ import { moduleBytes, ramp } from "./support.mjs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 const CONTENT = `blake3:${"0".repeat(64)}`;
-const RACK = Object.fromEntries(ABI_LAYOUT.constants.racks.map((row) => [row.name, row.value]));
 
 let asset;
 let scratch;
@@ -995,7 +993,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
     // Red mutation: skip the check when the booted document is absent -> any builder is accepted.
     const controls = new EngineLiveControls(
       { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [] },
-      { queue: undefined, observe: () => assert.fail("nothing is submitted") },
+      { queue: undefined },
     );
     assert.throws(() => controls.withSession(addressedStrip()), /constructed without it/);
   });
@@ -1108,6 +1106,8 @@ function busSession() {
     .submix("verb", {
       console: bypassedEntries,
       inserts: [effect("miso.delay", { "delay time": 80 }, { slotId: "space" })],
+      // An explicit pan keeps the pan arm in this round trip: an absent pan is the identity matrix (#2101).
+      pan: { left: 0, right: 0 },
     })
     .track("kick", { source: "kit", console: [{ slot: "eq" }, { slot: "glue" }] })
     .track("vox", { source: "voice", console: bypassedEntries, inserts: [duck] })

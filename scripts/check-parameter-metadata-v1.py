@@ -32,48 +32,9 @@ RATES = {2: "block", 3: "none"}
 POLICIES = {1: "shared", 2: "perLane"}
 SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
-# Slice #1565A: the command record carries only the two observation kinds. Kinds 1-6 and 9-17 were
-# value kinds, deleted because every value goes through a control transaction; their numbers are
-# retired and never reallocated, so the first declared value is 7 and the run is contiguous from it.
-COMMAND_KIND_FIRST = 7
-COMMAND_KINDS = ["observeSubscribe", "observeUnsubscribe"]
-RETIRED_COMMAND_KINDS = set(range(1, 7)) | set(range(9, 18))
-# The two host-level transaction kinds. They are applied -- `admit_commands` binds or unbinds the
-# tap and acknowledges `none` -- but what they apply to is the `miso.observe.v1` subscription map,
-# not anything the render thread reads. `plane` is what tells the render kinds apart from these
-# two. Spelled here rather than imported on purpose, and
-# `scripts/check-command-kind-vocabulary.py` is what proves this list, the Rust constants, the
-# decode whitelist, the host JS set, the `.d.ts` enum and the generator are one vocabulary.
-OBSERVE_COMMAND_KINDS = ["observeSubscribe", "observeUnsubscribe"]
-COMMAND_KIND_KEYS = {"value", "name", "applied", "plane"}
-PLANE_RENDER = "render"
-PLANE_OBSERVATION = "observation"
-# Issue #143 added `unknownTap` (10) and `observationUnbound` (11); issue #151 found that this
-# list, the host JS acknowledgement bound and the generator all still stopped at `wrongState`.
-# The list is spelled here rather than imported on purpose -- this validator is deliberately a
-# second implementation -- and `scripts/check-command-reason-vocabulary.py` is what proves the two
-# spellings, the Rust constants, the host JS table and the `.d.ts` enum are one vocabulary.
-# Issue #1676 added `observationLimit` (15), after the retired gap.
-COMMAND_REASONS = [
-    "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
-    "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
-    "observationLimit",
-]
-# Reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) belonged to the deleted value kinds and
-# are retired with them, never reallocated.
-RETIRED_COMMAND_REASONS = {12, 13, 14}
-
-
-def dense_reason_values(values: list[int]) -> bool:
-    """The declared values are exactly `range(0, max + 1)` minus the retired set, in order.
-
-    So a reallocated retired value, a gap other than the retired one and a missing reason are all
-    refused, and the next reason after 11 is 15.
-    """
-    if not values:
-        return False
-    expected = [value for value in range(max(values) + 1) if value not in RETIRED_COMMAND_REASONS]
-    return values == expected
+# Slice #1589c deleted the browser's command record, so the document no longer carries
+# `commandRecordBytes`, `maximumCommandRecords`, `commandKinds` or `commandReasons`; an observation
+# tap is armed by the core's `Observe` edit. The exact top-level key set below refuses their return.
 BUILTIN_UPDATE_RATES = {"preparedOnly", "blockTarget"}
 BUILTIN_SCOPES = {"perLane", "matrixShared"}
 BUILTIN_MAPPINGS = {"boolean", "decibelAmplitude", "hertz", "linear"}
@@ -111,8 +72,7 @@ EFFECT_PORT_KEYS = {"id", "role", "roleName", "required", "layout", "layoutName"
 # an engine this validator was not written against and must be refused rather than skimmed.
 PORT_ROLES = {1: "mainInput", 2: "mainOutput", 3: "sidechainInput"}
 PORT_LAYOUTS = {1: "dualMonoPlanar"}
-# The launch port table, spelled here rather than imported for exactly the reason `COMMAND_KINDS`
-# is: the generator walks the Rust registry and this walks the emitted JSON, so the two agreeing is
+# The launch port table, spelled here rather than imported on purpose: the generator walks the Rust registry and this walks the emitted JSON, so the two agreeing is
 # evidence rather than a tautology. Each role has one launch id and one launch `required` answer --
 # the main pair is mandatory, a sidechain input never is -- and the SDK's derived port-name type is
 # built from these strings, so a row that disagrees with the registry would retype an authoring
@@ -214,8 +174,7 @@ def validate(document: dict) -> None:
     # Decision 17 (#1550): the document also carries the control tables, whose rows the `controls`
     # crate's own tests hold row for row; this validator pins only that the object has its parts.
     require(set(document) - {"controls"} == {
-        "schema", "abiVersion", "commandRecordBytes", "maximumCommandRecords", "commandKinds",
-        "commandReasons", "observationVocabularies", "builtins", "effects",
+        "schema", "abiVersion", "observationVocabularies", "builtins", "effects",
     }, "top-level keys")
     if "controls" in document:
         require(isinstance(document["controls"], dict) and set(document["controls"]) == {
@@ -223,53 +182,6 @@ def validate(document: dict) -> None:
         }, "controls keys")
     require(document["schema"] == SCHEMA, "schema tag")
     require(document["abiVersion"] == ABI_VERSION, "abi version")
-    require(document["commandRecordBytes"] == 272, "command record bytes")
-    require(document["maximumCommandRecords"] >= 1, "maximum command records")
-
-    kinds = document["commandKinds"]
-    require(all(set(kind) == COMMAND_KIND_KEYS for kind in kinds), "command kind keys")
-    require([kind["name"] for kind in kinds] == COMMAND_KINDS, "command kinds")
-    # Derived, never a literal bound: this list used to read `range(1, 7)` while the wire decoded
-    # eight kinds, which is precisely the drift that went unnoticed for two releases. The run is
-    # contiguous from the first declared kind, and no retired number may come back.
-    require(
-        [kind["value"] for kind in kinds]
-        == list(range(COMMAND_KIND_FIRST, COMMAND_KIND_FIRST + len(COMMAND_KINDS))),
-        "command kind values",
-    )
-    require(
-        not RETIRED_COMMAND_KINDS & {kind["value"] for kind in kinds},
-        "a retired value-command number is reallocated",
-    )
-    applied = {kind["name"] for kind in kinds if kind["applied"]}
-    # Issue #140: every declared kind is applied. Nothing in the ABI is declared-and-refused any
-    # more, so a kind that reports `applied: false` is a regression, not a documented gap.
-    require(applied == set(COMMAND_KINDS), "applied command kinds")
-    # What "applied" means splits by plane, and the split is exact in both directions. Today every
-    # kind is on the observation plane: they move the `miso.observe.v1` subscription map and nothing
-    # else, and the render plane is declared but empty. A kind that reports the render plane would
-    # claim it moves state the render thread reads, which no command record does any more.
-    require(
-        all(kind["plane"] in (PLANE_RENDER, PLANE_OBSERVATION) for kind in kinds),
-        "command kind planes",
-    )
-    observation_plane = [kind["name"] for kind in kinds if kind["plane"] == PLANE_OBSERVATION]
-    require(observation_plane == OBSERVE_COMMAND_KINDS, "observation-plane command kinds")
-    render_plane = [kind["name"] for kind in kinds if kind["plane"] == PLANE_RENDER]
-    require(
-        render_plane == [name for name in COMMAND_KINDS if name not in OBSERVE_COMMAND_KINDS],
-        "render-plane command kinds",
-    )
-    reasons = document["commandReasons"]
-    require([reason["name"] for reason in reasons] == COMMAND_REASONS, "command reasons")
-    require(
-        dense_reason_values([reason["value"] for reason in reasons]),
-        "command reason values are dense from 0 except the retired 12-14",
-    )
-    require(
-        not RETIRED_COMMAND_REASONS & {reason["value"] for reason in reasons},
-        "a retired command reason number is reallocated",
-    )
 
     vocabularies = document["observationVocabularies"]
     require(set(vocabularies) == set(OBSERVATION_VOCABULARIES), "observation vocabulary keys")
@@ -647,58 +559,9 @@ def self_test() -> int:
     mutations: list[tuple[str, object]] = [
         ("schema", lambda d: d.update(schema="miso.web.parameter-metadata.v" + "2")),
         ("abi", lambda d: d.update(abiVersion=1)),
-        ("record bytes", lambda d: d.update(commandRecordBytes=32)),
-        ("kind not applied", lambda d: d["commandKinds"][0].update(applied=False)),
-        # The 6-vs-8 split the kind-vocabulary gate exists to close: the shipped document stopped
-        # at `effectBypass` while the wire decoded eight kinds. Its shape is red here now, and so
-        # is every way the plane column can lie about what a kind applies to.
-        (
-            "kind vocabulary truncated at observeSubscribe",
-            lambda d: d["commandKinds"].__delitem__(slice(1, None)),
-        ),
-        ("kind renamed", lambda d: d["commandKinds"][0].update(name="observeArm")),
-        (
-            "kind value renumbered onto a retired number",
-            lambda d: d["commandKinds"][1].update(value=9),
-        ),
-        (
-            "a retired value kind returns",
-            lambda d: d["commandKinds"].insert(
-                0, {"value": 4, "name": "mute", "applied": True, "plane": "render"}
-            ),
-        ),
-        (
-            "an observation kind claims the render plane",
-            lambda d: d["commandKinds"][0].update(plane="render"),
-        ),
-        ("a kind row drops its plane", lambda d: d["commandKinds"][0].pop("plane")),
-        ("a kind row invents a plane", lambda d: d["commandKinds"][0].update(plane="control")),
-        ("reason order", lambda d: d["commandReasons"].reverse()),
-        # Issue #151's exact defect shape: a vocabulary that stops one short of the reasons the
-        # observation path returns, and one whose value column no longer matches its name column.
-        ("reason vocabulary truncated at wrongState", lambda d: d["commandReasons"].__delitem__(
-            slice(10, None)
-        )),
-        ("reason renamed", lambda d: d["commandReasons"][10].update(name="unknownObservation")),
-        ("reason value renumbered", lambda d: d["commandReasons"][11].update(value=16)),
-        (
-            "a retired reason returns",
-            lambda d: d["commandReasons"].append({"value": 12, "name": "notSoloable"}),
-        ),
-        # Issue #1676: 15 follows the retired gap. Each way of breaking "dense except 12-14".
-        (
-            "observationLimit reallocates a retired value",
-            lambda d: d["commandReasons"][12].update(value=12),
-        ),
-        (
-            "a gap other than the retired one",
-            lambda d: d["commandReasons"][12].update(value=16),
-        ),
-        ("the newest reason is missing", lambda d: d["commandReasons"].pop(12)),
-        (
-            "an older reason is missing before the gap",
-            lambda d: d["commandReasons"].pop(11),
-        ),
+        # Issue #1589c: the deleted command vocabulary does not come back.
+        ("the command kinds return", lambda d: d.update(commandKinds=[])),
+        ("the command record size returns", lambda d: d.update(commandRecordBytes=272)),
         (
             "builtin live disagrees with update rate",
             lambda d: d["builtins"]["parameters"][6].update(liveUpdatable=False),

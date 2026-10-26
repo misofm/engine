@@ -66,7 +66,10 @@ that is not listed here needs a new decision, not an edit to a pattern.
   ring. It owns fixed `UnsafeCell<MaybeUninit<T>>` storage, and its `SAFETY` comments rely on one
   producer, one consumer, release publication after writes, acquire before reads, and shared `Arc`
   storage that outlives both non-cloneable endpoints. `Arc` creation and destruction stay outside
-  push, pop, and render.
+  push, pop, and render. Its slot lookup (`Ring::slot`, #2041) skips the bounds check: a ring
+  cursor advances only through `wrap_increment(cursor, slots_len)` and so stays below
+  `slots_len == slots.len()`, which the lookup `debug_assert`s. The plan mailbox's cell index stays
+  checked: the optimiser already proves it below 2.
 - `crates/engine/src/realtime/disjoint.rs` (issue 100): the plan-owned disjoint audio arena, which
   the sequential executor still renders through. #1154 removed its `UnsafeCell`, manual
   `Send`/`Sync` implementations and foreign leases. `read_stereo` and `write_stereo` use safe
@@ -183,17 +186,23 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   borrowed, the disjointness of raw field projections, or the `Box::into_raw`/`Box::from_raw`
   ownership transfer between create and destroy.
 - `hosts/host-web/src/ffi.rs` (issue 024): the raw Wasm32 handle, pointer and slice boundary of the
-  `miso_engine_web_v1_*` exports. Its non-test unsafe sites are the bounds-checked record copies
-  `copy_live_record` (`:894`) and `read_live_record` (`:1805`), the result-header copy
-  `response_header_bytes` (`:878`), and the staging slices of `miso_engine_web_v1_source_submit`
-  (`:3929`, `:3936`, `:3939`) and `miso_engine_web_v1_source_seek` (`:3982`). Each carries a
+  `miso_engine_web_v1_*` exports. Its non-test unsafe sites are the staging slices of
+  `miso_engine_web_v1_source_submit` (`:825`, `:832`, `:835`), `miso_engine_web_v1_source_seek`
+  (`:879`) and `with_staged_source_id` (`:904`). Each carries a
   `SAFETY` comment that names the bounds check, `repr(C)` layout or staging liveness it relies
   on; the module carries no `catch_unwind`, because the target and the release profile abort on
   panic. The file
-  has a second, test-only unsafe owner: the `#[cfg(test)]` module `live_response_ffi_tests`
-  (`:4881`) registers `CountingAllocator` as the unit-test binary's `#[global_allocator]` (added by
+  has a second, test-only unsafe owner: the `#[cfg(test)]` module `allocation_counter`
+  (`:2102`) registers `CountingAllocator` as the unit-test binary's `#[global_allocator]` (added by
   `708036a76`). It forwards every operation unchanged to `System` and counts successful operations
   in thread-local counters, only while armed; its `SAFETY` comments state that forwarding.
+- `hosts/blake3-web/src/lib.rs` (#2111): the raw Wasm32 hasher-handle boundary of the browser's
+  stem-identity BLAKE3 module (`miso_engine_blake3_v1_*`). Its unsafe sites are the
+  `#[unsafe(no_mangle)]` exports and the handle borrows of `input`, `update` and `finalize` and
+  the `Box::from_raw` of `free`; each carries a `SAFETY` comment naming the caller's live-handle
+  contract or the `Box::into_raw` it reverses. No export takes a data pointer: the hasher owns its
+  staging buffer and a length beyond it is refused. Control-side only; it never runs on an audio
+  thread.
 - `crates/capi/tests/plan_swap_race.rs` (#1042, #1273): races control calls against
   plan-swapping render calls, both through the exported C entries. Its unsafe is the C calls
   themselves, each with the handle and storage contract stated beside it; the allocator it runs
@@ -203,6 +212,12 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   C calls themselves (engine create and destroy, compile, command submit, session and plan
   destroy), each with the handle and storage contract stated beside it; it installs no allocator
   and calls no render entry.
+- `crates/capi/tests/response_strip.rs` (#1578): sends a strip `RESPONSE_GET` through the
+  exported `miso_engine_v1_submit_command` and reads its `RESPONSE_READY` through
+  `miso_engine_v1_dequeue_event`, and compares the curves with the core's own. Its unsafe is the
+  C calls themselves (engine create and destroy, compile, command submit, render, service, event
+  dequeue, session and plan destroy), each with the handle and storage contract stated beside it;
+  it installs no allocator.
 - `crates/capi/tests/session_replace.rs` (#1386): sends `SESSION_REPLACE` through the exported
   `miso_engine_v1_submit_document_command` and the equal transaction through
   `miso_engine_v1_submit_command` on a twin, and compares replies, events and rendered blocks.
@@ -281,12 +296,9 @@ bodies run inside `render_locked`. Two sets of exports matter here, and both are
    message handler alone (`render_locked_source.rs` measures both exports after a render with
    counter telemetry configured: zero allocations).
 2. **The exports whose bodies run inside `render_locked`.** Every export of set 1 except
-   `dispose`, `render_allocation_count`, `service` and `control_allocation_count`, and also eleven staging accessors that the engine
+   `dispose`, `render_allocation_count`, `service` and `control_allocation_count`, and also five staging accessors that the engine
    worklet calls only during boot: `observation_id_ptr`, `observation_id_capacity`,
-   `observation_selection_ptr`, `observation_selection_bytes`, `observation_selection_capacity`,
-   `track_response_request_ptr`, `track_response_request_bytes`,
-   `track_response_snapshot_ptr`, `track_response_snapshot_capacity`,
-   `track_response_track_id_ptr` and `track_response_track_id_capacity`.
+   `observation_selection_ptr`, `observation_selection_bytes` and `observation_selection_capacity`.
 
 Since #1488 the two sets are equal for the worklets' post-boot calls, apart from the named
 exceptions, as the `ffi` module header (`hosts/host-web/src/ffi.rs:14-39`) and
@@ -303,11 +315,8 @@ export: `control_command` runs `SessionState::command` in the message handler, w
 frees, so its allocations are control allocations too. Since #1570b the event entry `control_event`
 is the same kind: the worklet's message handler drains the reliable lane and then the lossy lane
 through it, after every message and service step, and posts each frame to the page. The
-render-locked count stays exactly zero. The spectrum
-request and collection accessors (`spectrum_request_*`, `spectrum_collection_*`) are outside both
-sets: the worklet calls them only during boot, before the `boot` export, where the collection
-staging is sized and allocated by design. `miso_engine_web_v1_spectrum_selection_epoch` is outside
-both sets too: neither worklet calls it, and it is not wrapped.
+render-locked count stays exactly zero. The browser has no spectrum export: spectrum is the
+session's `SPECTRUM_*` frames through `control_command` (#1597).
 
 ### Test-only counting allocators
 
@@ -354,9 +363,9 @@ in them; #1438's Amendment removes them from the allowlist.
 
 Approved unsafe code that runs on a render thread, per entry:
 
-- `spsc.rs`: yes. Its push and pop unsafe sites (`:381`, `:449`) lie inside the gate's marked
-  render region (`:295-459`); render drains event and control rings and exchanges plans through
-  them.
+- `spsc.rs`: yes. Its push, pop and peek unsafe sites and the unchecked `Ring::slot`
+  lookup lie inside the gate's marked render regions; render drains event and
+  control rings and exchanges plans through them.
 - `disjoint.rs`: yes. Its raw-slice borrows lie inside its marked region (`:106-347`), and the
   sequential executor forms its combined multi-buffer and stereo borrows through them.
 - `fpenv.rs`: yes, at every native render entry, on both `x86_64` and AArch64. On wasm its guard is
@@ -370,14 +379,7 @@ Approved unsafe code that runs on a render thread, per entry:
 - `hosts/host-web/src/ffi.rs`: yes, on the AudioWorklet thread, and every such site runs inside a
   render-locked window. The body of `miso_engine_web_v1_render` holds no unsafe block. The staging
   slices of `source_submit` and `source_seek` run in the PCM-feed worklet's `process()` before
-  each render and in the engine worklet's source and seek handlers. The render-locked staging
-  reads `spectrum_read`, `spectrum_stream_read` and `track_response_capture` reach only
-  `copy_live_record`, through `write_spectrum_window` and `spectrum_failure` (the two spectrum
-  reads) and through `run_live_response_capture`, `live_response_failure` and
-  `LiveResponseCaptureSink` (the capture). `read_live_record` is reached only from the
-  worker-side analysis exports (`spectrum_analysis`, `spectrum_stream_analysis`,
-  `spectrum_stream_analysis_configure` and `track_response_analysis`), none of which is
-  render-locked or called by either worklet. The five session-less `response_frame_*` exports
+  each render and in the engine worklet's source and seek handlers. The five session-less `response_frame_*` exports
   (#1574) are control work of the response-preview instance of the same kind: they stage one
   `RESPONSE_GET` frame and answer one frame through `host_core::serve_response_frame`, and no
   worklet calls them. Its
@@ -387,12 +389,10 @@ Approved unsafe code that runs on a render thread, per entry:
   runs from instantiation and is never reset. Calls outside every window are not counted: the boot
   exports themselves, the unwrapped boot accessors, `dispose`, `render_allocation_count`, `service`
   and `control_allocation_count` (the control counter counts every call outside a window, #1381a). The
-  worklet calls render-locked exports during boot too: the eleven staging accessors of set 2, and
-  `spectrum_target_id_ptr` and `spectrum_target_id_capacity`, which `stageSpectrumRequest` calls
-  before the boot export. Those calls are counted, and today they make no allocator call: the
-  stagings they touch are allocated outside any window, by boot's `reserve_stagings`
-  (`hosts/host-web/src/ffi.rs:617-626`) or, before the `boot` export, on first touch by the
-  unwrapped `spectrum_request_ptr`. Qualification reads the count of each instance before its
+  worklet calls render-locked exports during boot too: the eleven staging accessors of set 2.
+  Those calls are counted, and today they make no allocator call: the stagings they touch are
+  allocated outside any window, by boot's `reserve_stagings` (`hosts/host-web/src/ffi.rs`).
+  Qualification reads the count of each instance before its
   `dispose` and asserts it is zero, so a boot-time allocation inside a window fails it as a
   render-time one does.
 - Every other entry is test or tool code. `plan_swap_race.rs`, `resource_lifecycle.rs`,
@@ -478,6 +478,10 @@ names a kernel, and costs build time and artifact size, never speed.
   `tools/bench`. In a release artifact each of those is a diagnostic that no longer
   fires; none of them is load-bearing for a call that does not panic, so behaviour on a passing host
   is unchanged.
+- `rebuild_superseding` in `crates/control-plane/src/control.rs` (#2010) runs a rebuild under
+  `catch_unwind`, republishes a withdrawn candidate the rebuild did not take, then resumes the
+  panic. It runs on the control thread only, never in render. Under `panic = "abort"` nothing
+  unwinds, so it changes nothing in a release build.
 - Embedders must read this as: **the C ABI does not convert a panic into `RESULT_INTERNAL` in a
   release build of `libcapi`.** A panic is an engine defect, and unwinding across a C or
   Wasm frame is undefined by either ABI, so aborting is the honest contract. `RESULT_INTERNAL` stays

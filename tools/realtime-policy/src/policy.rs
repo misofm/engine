@@ -39,7 +39,15 @@ const RENDER_THREAD_EXPORTS: &str = include_str!("../render-thread-exports.json"
 /// Issue #1644 adds `session_seek` and `session_seek_at` (D1): the worklet's message handler seeks
 /// the timeline and every source through them between blocks, so their allocations are control
 /// allocations and they are never inside `process()` or a render-locked window.
-const UNWRAPPED_EXPORTS: [&str; 15] = [
+///
+/// Issue #1297a adds `source_seek_at` and `source_seek_report`: the worklet's message handler
+/// applies an anchored source seek and reads a seek report through them between blocks; both run
+/// the service step, so they are control work, never inside `process()` or a render-locked window.
+///
+/// Issue #2116 adds `plan_latency_read`: the worklet's message handler copies the running plan's
+/// latency and tail row into its fixed record, control work as `source_seek_report` is, never
+/// inside `process()` or a render-locked window.
+const UNWRAPPED_EXPORTS: [&str; 18] = [
     "dispose",
     "render_allocation_count",
     "service",
@@ -55,6 +63,10 @@ const UNWRAPPED_EXPORTS: [&str; 15] = [
     "watermark_read",
     "session_seek",
     "session_seek_at",
+    "source_seek_at",
+    "source_seek_report",
+    // #2116: control work in the message handler, as `source_seek_report` is.
+    "plan_latency_read",
 ];
 
 /// One entry of the control-side allowlist (#1443 D3): a function whose `try_pop` calls run on a
@@ -79,7 +91,14 @@ pub struct ControlSideEntry {
 /// The day-one control-side allowlist (#1443 D7): path, function, sites, thread, reason. A reason
 /// says why the pop never runs inside a product render callback (the C ABI render call, the
 /// worklet's `process()` or a worklet message handler).
-const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 12] = [
+const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 13] = [
+    (
+        "crates/control-plane/src/loudness.rs",
+        "LoudnessMonitor::drain",
+        1,
+        "the session's control thread (both hosts' service step and LOUDNESS commands)",
+        "the loudness meter's control half drains its hop records off the render thread; the render half only pushes (#2115)",
+    ),
     (
         "crates/protocol/src/queue.rs",
         "ProtocolQueues::try_dequeue_event",
@@ -195,7 +214,7 @@ impl Policy {
     pub fn workspace() -> Self {
         // The unsafe-ownership files. `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership",
         // carries the justification of each.
-        const UNSAFE_ALLOWLIST: [&str; 26] = [
+        const UNSAFE_ALLOWLIST: [&str; 28] = [
             "crates/engine/src/realtime/spsc.rs",
             "crates/engine/src/realtime/disjoint.rs",
             "crates/lane/src/softfma.rs",
@@ -212,6 +231,7 @@ impl Policy {
             "crates/capi/tests/input_design_bounds.rs",
             "crates/capi/tests/plan_swap_race.rs",
             "crates/capi/tests/response_get.rs",
+            "crates/capi/tests/response_strip.rs",
             "crates/capi/tests/session_replace.rs",
             "crates/capi/tests/empty_boot.rs",
             "crates/capi/tests/strip_transitions.rs",
@@ -220,6 +240,7 @@ impl Policy {
             "hosts/host-web/tests/boot_transient_budget.rs",
             "hosts/host-web/tests/control_parity.rs",
             "hosts/host-web/tests/protocol_cross_host.rs",
+            "hosts/blake3-web/src/lib.rs",
             "tools/bench-support/src/alloc.rs",
             "tools/audit/src/capi.rs",
         ];
@@ -245,8 +266,10 @@ impl Policy {
             // its counts again. A change that adds a marker raises them in the same change: #1640
             // adds two in `crates/source` (the shared seek state's observe and reads, and the
             // timeline consumer's block entry and history readers).
-            marked_files_floor: 33,
-            marked_regions_floor: 153,
+            // #2115 adds two: the loudness meter's render half in `crates/loudness` (S1) and its
+            // session tap in `crates/control-plane/src/loudness.rs` (S2).
+            marked_files_floor: 35,
+            marked_regions_floor: 155,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS

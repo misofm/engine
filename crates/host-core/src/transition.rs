@@ -10,16 +10,33 @@
 //! thread, before the commit; the records it returns are written after the commit and cannot
 //! fail.
 //!
+//! A structural transaction whose successor restarts a strip it keeps (an insert added, removed
+//! or reordered, a quality, `delay_samples` or another prepared value; the successor's
+//! `restarted_strips()`) ducks that strip the same way and adopts the successor at `S`; the
+//! successor arms the strip's fade-in (issue #1324, a duck-swap).
+//!
+//! A structural transaction that removes or re-points a route with a live lane between two strips
+//! it keeps ducks that route alone the same way (issue #1953a, D15-9: a re-point is a removal plus
+//! an addition, and the successor arms the re-pointed route's fade-in). A lane-less route into an
+//! output keeps the master fold and is not ducked: its successor fades it out from adoption as a
+//! fading copy (#1953b).
+//!
 //! The running plan keeps a [`DuckOverlay`] while the successor waits: the strips and routes
 //! phase 1 wrote, the removed sources that still feed that plan, and `S`. A later transaction in
 //! the same phase 1 writes no second ramp for anything in it and inherits its `S`.
 
 use builtins_compiler::{FaderOffsetsRecord, TrackFaderRecord};
-use session::{EditRamps, Route, RouteSource, SessionModel, StableId};
+use session::{
+    EditRamps, Route, RouteDestination, RouteSource, SendTap, SessionModel, SidechainDeclaration,
+    StableId,
+};
 
 use crate::duck::DuckOverlay;
 use crate::live_delta::classify_live_delta_with_monitor;
-use crate::prepare::{LiveRamps, LiveRebuild, MonitorBase, SendRecord, SuccessorBase};
+use crate::prepare::{
+    LiveRamps, LiveRebuild, MonitorBase, SendRecord, SuccessorBase, sidechain_line_samples,
+    source_strip, submix_input_is_quiet,
+};
 
 impl DuckOverlay {
     /// The overlay after `transition`'s writes join it, with `S` unchanged; the caller sets the
@@ -105,10 +122,11 @@ pub struct StripTransition {
 }
 
 impl StripTransition {
-    /// Whether the transaction ducks a strip now: then the successor waits for `S`.
+    /// Whether the transaction ducks a strip or a route now: then the successor waits for `S`.
+    /// A route ducks alone when the transaction removes or re-points it (#1953a).
     #[must_use]
     pub fn ducks(&self) -> bool {
-        !self.strips.is_empty()
+        !self.strips.is_empty() || !self.routes.is_empty()
     }
 
     /// The strips the transaction ducks now (D1), sorted.
@@ -158,7 +176,7 @@ impl StripTransition {
     }
 
     /// `C`, the longest compensation delay, in the running plan, of a route out of a strip the
-    /// transaction ducks now (0 if none).
+    /// transaction ducks now or of a route it ducks alone (0 if none).
     #[must_use]
     pub const fn compensation(&self) -> u64 {
         self.compensation
@@ -216,14 +234,29 @@ fn sorted_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<Box<str>> {
 ///
 /// `base.committed` is the running plan's committed model and `base.monitor.committed` the monitor
 /// overlay its cells hold; `overlay` is the running plan's [`DuckOverlay`], empty outside phase 1.
-/// The strips to duck are every strip of `base.committed` that `next` does not hold and `overlay`
-/// does not list; the sources `overlay` lists that `next` keeps are restored
-/// ([`StripTransition::restored_sources`]). The records are the classifier's for the running plan's
-/// base with `overlay` laid over it, against the same with each strip to duck muted on both
-/// channels and each of its routes whose tap precedes the fader muted, all at `next`'s mute ramp:
+/// The strips to duck are every strip of `base.committed` that `next` does not hold or that the
+/// prepared successor restarts (`restarted`, its [`crate::PreparedHost::restarted_strips`]: a
+/// duck-swap, #1324 D4; none at a declared discontinuity, `base.discontinuity`), and that
+/// `overlay` does not list; the sources `overlay` lists that `next` keeps are restored
+/// ([`StripTransition::restored_sources`]). The routes to duck alone (#1953a) are every route of
+/// `base.committed` with a live lane that `next` drops or re-points (another source, tap or
+/// destination), whose source and destination strips `next` keeps and nothing ducks; a lane-less
+/// route keeps the fold and is not one: the successor fades it out as a fading copy (#1953b).
+/// The records are the classifier's for the running plan's base with `overlay` laid over it,
+/// against the same with each strip to duck muted on both channels, each of its routes whose tap
+/// precedes the fader muted and each route to duck alone muted, all at `next`'s mute ramp:
 /// exactly the records a value-only transaction making those mutes would write, so a strip or route
 /// already in the overlay gets no second write. `C` reads the running plan's compensation lines
-/// (`base.inventory`), keyed by the route's two edges, which add.
+/// (`base.inventory`), keyed by the route's two edges, which add, over every route out of a
+/// ducked strip and every route ducked alone: a restarted strip's route lines must empty before
+/// `S` as a removed strip's do, and a removed route's last ducked frames leave its line by `S`.
+/// `C` also counts, into each carried strip's effects, every sidechain line from a ducked strip's
+/// `post_fader` or `post_pan` tap, and a ducked submix's `input`-tap sidechain line plus the
+/// longest route line into the submix when D1's exemption keeps the consumer carried (#1324 D4):
+/// a line the successor shortens then drops only exact `+0.0` at `S`. A carried effect keyed from
+/// a restarted strip's other taps is no case: its strip is restarted too (D1's closure).
+/// A warm successor whose transaction ducks strips or routes is published `Primed` no earlier
+/// than this `S` (#1397 D1), so the same holds for it.
 ///
 /// Control thread only: it clones the base model twice and allocates the lists.
 ///
@@ -234,16 +267,24 @@ pub fn plan_strip_transition(
     base: &SuccessorBase<'_>,
     overlay: &DuckOverlay,
     next: &SessionModel,
+    restarted: &[Box<str>],
 ) -> Result<StripTransition, StripTransitionError> {
     let committed = base.committed;
     let ramps = LiveRamps::for_session(next);
     let ramp = ramps.mute_samples;
     let in_next = |id: &str| next.strips().any(|strip| strip.id.as_str() == id);
+    // #1324 D4: a strip the successor restarts is ducked like a removed one. `restarted` names
+    // strips of both plans only. A successor at a declared discontinuity restarts every owner by
+    // design and need not continue the running plan's output (#1323 D2): its restarts duck
+    // nothing.
+    let restarts = |id: &str| {
+        !base.discontinuity && restarted.binary_search_by(|held| (**held).cmp(id)).is_ok()
+    };
     let strips = sorted_ids(
         committed
             .strips()
             .map(|strip| strip.id.as_str())
-            .filter(|id| !in_next(id) && !overlay.has_strip(id)),
+            .filter(|id| (!in_next(id) || restarts(id)) && !overlay.has_strip(id)),
     );
     let sources = sorted_ids(
         committed
@@ -272,7 +313,47 @@ pub fn plan_strip_transition(
         ramp,
         compensation: 0,
     };
-    if transition.strips.is_empty() {
+    // #1953a (D15-9: a re-point is a removal plus an addition): every route with a live lane
+    // (`controls::route_rows_live`) that `next` drops or holds with another source, tap or
+    // destination, between two strips that keep playing, is muted in phase 1 like a ducked
+    // strip's route. A route of a strip ducked now or earlier, or into one, stays as it is: that
+    // strip's own duck silences it. A route already muted, in the overlay, or following an
+    // automated mute (#2011's) is skipped. A lane-less route (`post_fader` or `post_pan` into an
+    // output) keeps the master fold: its successor fades it out from adoption as a fading copy
+    // (#1953b).
+    let quiet = |id: &str| {
+        transition
+            .strips
+            .binary_search_by(|held| (**held).cmp(id))
+            .is_ok()
+            || overlay.has_strip(id)
+            || !in_next(id)
+    };
+    let view = controls::ModelView::whole(committed);
+    let duck_routes: Vec<&Route> = committed
+        .routes
+        .iter()
+        .filter(|route| {
+            controls::route_rows_live(route)
+                && !route.mute
+                && !overlay.has_route(route.id.as_str())
+                && !crate::prepare::follows_automated_mute(view, route)
+                && !quiet(route_source_id(route).as_str())
+                && match &route.destination {
+                    RouteDestination::SubmixInput { submix_id } => !quiet(submix_id.as_str()),
+                    RouteDestination::OutputInput { output_id } => next
+                        .outputs
+                        .iter()
+                        .any(|output| output.id.as_str() == output_id.as_str()),
+                }
+                && !next.routes.iter().any(|kept| {
+                    kept.id == route.id
+                        && kept.source == route.source
+                        && kept.destination == route.destination
+                })
+        })
+        .collect();
+    if transition.strips.is_empty() && duck_routes.is_empty() {
         return Ok(transition);
     }
     let ducked = |id: &StableId| {
@@ -281,28 +362,100 @@ pub fn plan_strip_transition(
             .binary_search_by(|held| (**held).cmp(id.as_str()))
             .is_ok()
     };
+    let duck_route = |route: &Route| duck_routes.iter().any(|held| held.id == route.id);
 
     // C: the longest line of a route out of a ducked strip. A route's lines sit on its two edges.
     let lines = base.inventory.delay_lines();
+    let route_line = |route: &Route| {
+        lines
+            .iter()
+            .filter(|line| match &line.edge {
+                graph::GraphEdgeId::RouteSource { route_id }
+                | graph::GraphEdgeId::RouteDestination { route_id } => {
+                    route_id.as_str() == route.id.as_str()
+                }
+                _ => false,
+            })
+            .map(|line| line.samples)
+            .fold(0_u64, u64::saturating_add)
+    };
     transition.compensation = committed
         .routes
         .iter()
-        .filter(|route| ducked(route_source_id(route)))
-        .map(|route| {
-            lines
-                .iter()
-                .filter(|line| match &line.edge {
-                    graph::GraphEdgeId::RouteSource { route_id }
-                    | graph::GraphEdgeId::RouteDestination { route_id } => {
-                        route_id.as_str() == route.id.as_str()
-                    }
-                    _ => false,
-                })
-                .map(|line| line.samples)
-                .fold(0_u64, u64::saturating_add)
-        })
+        .filter(|route| ducked(route_source_id(route)) || duck_route(route))
+        .map(route_line)
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        // #1953b: and the lines of every fading copy out of a ducked strip whose fade has not
+        // settled: the copy leaves with its strip at `S`, so its fade tail must have left its
+        // destination line by then.
+        .max(
+            base.inventory
+                .unsettled_route_copies()
+                .filter(|copy| ducked(route_source_id(copy)))
+                .map(route_line)
+                .max()
+                .unwrap_or(0),
+        );
+    // #1324 D4: and the longest sidechain path into a carried node that the successor can
+    // shorten, so it holds only exact `+0.0` at `S`. A strip is carried when `next` keeps it and
+    // neither the successor nor the overlay restarts it. Each sidechain line from a ducked strip's
+    // `post_fader` or `post_pan` tap counts; so does, for a ducked submix whose `input` tap keys a
+    // carried node while every line into its `Input` stage comes from a ducked or an added strip
+    // (D1's exemption, [`submix_input_is_quiet`]), that sidechain line plus the longest route line
+    // into the stage. Any other keyed tap of a ducked strip has restarted its consumer (D1).
+    let not_carried = |id: &str| {
+        !in_next(id)
+            || restarted.binary_search_by(|held| (**held).cmp(id)).is_ok()
+            || overlay.has_strip(id)
+    };
+    for strip in committed.strips() {
+        let consumer = strip.id.as_str();
+        if not_carried(consumer) {
+            continue;
+        }
+        for effect in &strip.inserts.effects {
+            let SidechainDeclaration::Routed(sidechain) = &effect.sidechain else {
+                continue;
+            };
+            let (source, tap, submix) = source_strip(&sidechain.source);
+            let now = |id: &str| {
+                transition
+                    .strips
+                    .binary_search_by(|held| (**held).cmp(id))
+                    .is_ok()
+            };
+            if !now(source) {
+                continue;
+            }
+            let line = sidechain_line_samples(
+                lines,
+                consumer,
+                effect.id.as_str(),
+                sidechain.port_id.as_str(),
+            );
+            let length = match tap {
+                SendTap::PostFader | SendTap::PostPan => line,
+                SendTap::Input
+                    if submix && submix_input_is_quiet(committed, next, source, &not_carried) =>
+                {
+                    let into = committed
+                        .routes
+                        .iter()
+                        .filter(|route| {
+                            matches!(&route.destination, RouteDestination::SubmixInput { submix_id }
+                                if submix_id.as_str() == source)
+                        })
+                        .map(route_line)
+                        .max()
+                        .unwrap_or(0);
+                    line.saturating_add(into)
+                }
+                _ => 0,
+            };
+            transition.compensation = transition.compensation.max(length);
+        }
+    }
 
     // The records: the base with the overlay, against the same with the new mutes.
     let mut current = committed.clone();
@@ -321,7 +474,8 @@ pub fn plan_strip_transition(
         }
     }
     for route in &mut target.routes {
-        if ducked(route_source_id(route)) && route_tap_precedes_fader(route) {
+        if (ducked(route_source_id(route)) && route_tap_precedes_fader(route)) || duck_route(route)
+        {
             route.mute = true;
         }
     }
@@ -356,6 +510,143 @@ pub fn plan_strip_transition(
         transition.route_records.push(route.record);
     }
     Ok(transition)
+}
+
+/// The transition fallback's duck set (#1397 D2 step 4): every strip of both `committed` (the
+/// predecessor's model, whose plan's inventory is `predecessor`) and `next` whose content timing
+/// moves in `ordinary`, the inventory of `next` compiled as an ordinary successor (#1285 floors, no
+/// lead), sorted by ID. Called on that compile, before any carry join reads it (round-9 M1).
+///
+/// A strip is in the set when a node of it that both plans hold arrives later in `ordinary` than
+/// in `predecessor` (each plan's [`crate::PlanStateInventory::input_floors`], the arrivals it
+/// renders), or when an edge of it that both plans hold (a route out of it, or an edge of its own
+/// chain, `TrackMain`) has a compensation line whose length changes: a line that changes length
+/// restarts with a gap. A node or an edge only one plan holds moves no timing of the other: an added send
+/// or a removed route does not duck its source. When the output's arrival grows, every strip of
+/// both plans that reaches the output in `next` is in the set. An added strip never is: it is
+/// #1288's to arm.
+///
+/// The set is not closed over sidechains here. The host passes it as
+/// [`crate::SuccessorBase::forced_restart`], which the preparation adds to its restarted set
+/// before it runs #1324 D1's sidechain closure, the one closure rule (#1397b, root ruling). So a
+/// carried effect keyed from a `post_input`, `insert_send`, `insert_return` or `pre_fader` tap of
+/// a strip in the set joins the prepared `restarted_strips()`, the set the transition ducks. A
+/// sidechain line from a `post_fader` or `post_pan` tap adds no strip: the transition's `C` counts
+/// it ([`plan_strip_transition`], #1324 D4).
+///
+/// Control thread only; it allocates the set.
+#[must_use]
+pub fn grown_strips(
+    predecessor: &crate::PlanStateInventory,
+    committed: &SessionModel,
+    next: &SessionModel,
+    ordinary: &crate::PlanStateInventory,
+) -> Vec<String> {
+    use graph::{GraphEdgeId, GraphNodeId};
+    use std::collections::{BTreeMap, BTreeSet};
+    let routes: BTreeMap<&str, &Route> = committed
+        .routes
+        .iter()
+        .chain(&next.routes)
+        .map(|route| (route.id.as_str(), route))
+        .collect();
+    let owner = |node: &GraphNodeId| -> Option<String> {
+        match node {
+            GraphNodeId::Submix { submix_id } => Some(submix_id.as_str().to_owned()),
+            _ => crate::prepare::strip_owner(&routes, node).map(|(strip, _)| strip.to_owned()),
+        }
+    };
+    let in_both = |id: &str| {
+        crate::prepare::committed_has_strip(committed, id)
+            && crate::prepare::committed_has_strip(next, id)
+    };
+    let held = crate::prepare::session_graph_nodes(committed);
+    let arrival = |floors: &[(GraphNodeId, u64)], node: &GraphNodeId| {
+        floors
+            .binary_search_by(|(other, _)| other.cmp(node))
+            .map_or(0, |index| floors[index].1)
+    };
+    let mut grown: BTreeSet<String> = BTreeSet::new();
+    let mut output_grew = false;
+    for (node, samples) in ordinary.input_floors() {
+        let output = matches!(node, GraphNodeId::Output { .. });
+        if (output || held.contains(node)) && *samples > arrival(predecessor.input_floors(), node) {
+            if output {
+                output_grew = true;
+            } else if let Some(strip) = owner(node) {
+                grown.insert(strip);
+            }
+        }
+    }
+    // An edge both plans hold: a route of both models with the same ends, or an edge of a
+    // strip's own chain (`TrackMain`), whose source must be a node the predecessor holds (below)
+    // and whose strip must be in both plans. A `TrackMain` line into a node only the successor
+    // holds (an added insert) can only add that same strip, the one the edit changed, which its
+    // own restart already ducks: harmless.
+    let edge_in_both = |edge: &GraphEdgeId| match edge {
+        GraphEdgeId::RouteSource { route_id } | GraphEdgeId::RouteDestination { route_id } => {
+            let find = |model: &'_ SessionModel| {
+                model
+                    .routes
+                    .iter()
+                    .find(|route| route.id.as_str() == route_id.as_str())
+                    .map(|route| (route.source.clone(), route.destination.clone()))
+            };
+            find(committed).is_some_and(|before| find(next) == Some(before))
+        }
+        GraphEdgeId::TrackMain { .. } => true,
+        GraphEdgeId::EffectSidechain { .. } => false,
+    };
+    let lines =
+        |inventory: &crate::PlanStateInventory| -> BTreeMap<GraphEdgeId, (u64, GraphNodeId)> {
+            inventory
+                .delay_lines()
+                .iter()
+                .filter(|line| edge_in_both(&line.edge))
+                .map(|line| (line.edge.clone(), (line.samples, line.source.clone())))
+                .collect()
+        };
+    let (before, after) = (lines(predecessor), lines(ordinary));
+    for (edge, (_, source)) in before.iter().chain(&after) {
+        if before.get(edge).map(|line| line.0) != after.get(edge).map(|line| line.0)
+            && held.contains(source)
+            && let Some(strip) = owner(source)
+        {
+            grown.insert(strip);
+        }
+    }
+    if output_grew {
+        grown.extend(reaching_output(next));
+    }
+    grown.into_iter().filter(|id| in_both(id)).collect()
+}
+
+/// The strips of `model` that reach its output through their routes, directly or through
+/// submixes.
+fn reaching_output(model: &SessionModel) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut reaching: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let before = reaching.len();
+        for route in &model.routes {
+            let source = match &route.source {
+                RouteSource::Track { track_id, .. } => track_id.as_str(),
+                RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
+            };
+            let reaches = match &route.destination {
+                session::RouteDestination::OutputInput { .. } => true,
+                session::RouteDestination::SubmixInput { submix_id } => {
+                    reaching.contains(submix_id.as_str())
+                }
+            };
+            if reaches {
+                reaching.insert(source);
+            }
+        }
+        if reaching.len() == before {
+            return reaching.into_iter().map(str::to_owned).collect();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -503,6 +794,7 @@ mod tests {
                 &SuccessorBase::new(&prepared.inventory, committed, 2),
                 &overlay,
                 &next,
+                &[],
             )
             .expect("c's transition")
         };
@@ -518,6 +810,7 @@ mod tests {
             &SuccessorBase::new(&prepared.inventory, committed, 3),
             &overlay,
             &next,
+            &[],
         )
         .expect("b's transition");
 
@@ -635,6 +928,7 @@ mod tests {
             &SuccessorBase::new(&p1.inventory, committed, 3),
             &DuckOverlay::new(),
             &next,
+            &[],
         )
         .expect("b's transition");
         assert_eq!(
@@ -642,5 +936,232 @@ mod tests {
             p1.report.latency_samples,
             "C is the sum of b-main's two lines"
         );
+
+        // #1953a: a route with a lane that the successor drops or re-points between two kept
+        // strips ducks alone. A limiter on `c` makes `r`'s input arrive `L` late, so `b-send`
+        // (unlimited, `pre_fader` into `r`) has a destination line of `L`: `C`. The lane-less
+        // `b-main` (`post_pan` into the output) keeps the fold and ducks nothing.
+        let mut limited_c = model();
+        limited_c.tracks[2].inserts.effects.push(limiter("lim-c"));
+        // And `b-pre`, `b`'s `pre_fader` route into the output: a lane, and a line of `L`.
+        let mut pre = limited_c
+            .routes
+            .iter()
+            .find(|route| route.id.as_str() == "b-main")
+            .expect("b-main")
+            .clone();
+        pre.id = id("b-pre");
+        pre.source = RouteSource::Track {
+            track_id: id("b"),
+            tap: SendTap::PreFader,
+        };
+        limited_c.routes.push(pre);
+        limited_c
+            .routes
+            .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        let compiled = compile(&limited_c);
+        let prepared = crate::prepare::prepare_host_runtime(&compiled, &caps()).expect("prepares");
+        let committed = compiled.normalized_model();
+        let without = |edit: &dyn Fn(&mut SessionModel)| {
+            let mut next = committed.clone();
+            edit(&mut next);
+            plan_strip_transition(
+                &SuccessorBase::new(&prepared.inventory, committed, 2),
+                &DuckOverlay::new(),
+                &next,
+                &[],
+            )
+            .expect("the route's transition")
+        };
+        let removed = without(&|next| next.routes.retain(|route| route.id.as_str() != "b-send"));
+        let repointed = without(&|next| {
+            for route in &mut next.routes {
+                if route.id.as_str() == "b-send" {
+                    route.source = RouteSource::Track {
+                        track_id: id("b"),
+                        tap: SendTap::PostFader,
+                    };
+                }
+            }
+        });
+        for (case, transition) in [("removed", &removed), ("re-pointed", &repointed)] {
+            assert!(transition.ducks(), "{case}: the route ducks");
+            assert!(transition.strips().is_empty(), "{case}: b keeps playing");
+            assert_eq!(transition.routes(), [Box::<str>::from("b-send")], "{case}");
+            assert_eq!(
+                transition.compensation(),
+                latency,
+                "{case}: C is b-send's line"
+            );
+        }
+        let into_output = without(&|next| next.routes.retain(|route| route.id.as_str() != "b-pre"));
+        assert_eq!(
+            into_output.routes(),
+            [Box::<str>::from("b-pre")],
+            "a pre-fader route into the output ducks alone"
+        );
+        assert!(into_output.strips().is_empty());
+        assert_eq!(into_output.compensation(), latency, "C is b-pre's line");
+        let lane_less = without(&|next| next.routes.retain(|route| route.id.as_str() != "b-main"));
+        assert!(!lane_less.ducks(), "a lane-less route keeps the fold");
+    }
+
+    /// `grown_strips` over `first -> second`: the predecessor prepared fresh, `second` prepared
+    /// as its ordinary successor.
+    fn grown(first: &SessionModel, second: &SessionModel) -> Vec<String> {
+        let (first, second) = (compile(first), compile(second));
+        let p0 = crate::prepare::prepare_host_runtime(&first, &caps()).expect("prepares");
+        let p1 = crate::prepare::prepare_host_runtime_successor(
+            &second,
+            &caps(),
+            SuccessorBase::new(&p0.inventory, first.normalized_model(), 2),
+        )
+        .expect("the successor prepares");
+        super::grown_strips(
+            &p0.inventory,
+            first.normalized_model(),
+            second.normalized_model(),
+            &p1.inventory,
+        )
+    }
+
+    fn compressor(name: &str) -> session::Effect {
+        session::Effect {
+            identity: session::EffectIdentity::Native {
+                effect_id: id("miso.compressor"),
+            },
+            ..limiter(name)
+        }
+    }
+
+    /// #1397 D2 step 4, `grown_strips`'s rules, on [`model`] (output latency 486, `a`'s limiter):
+    /// - a line alone: a limiter on `c` raises `r`'s input, so `b`'s `pre_fader` send line into
+    ///   `r` grows while `b`'s nodes and the output's arrival stay: `[b, c, r]`;
+    /// - the output alone: with `b` feeding only `r` and a routeless track `d`, a second limiter
+    ///   on `a` raises the output's arrival, which neither `b`'s nodes nor its line show: every
+    ///   strip that reaches the output, `[a, b, c, r]`, and not `d`;
+    /// - an added send, a removed route, and a node only the successor holds, move nothing: `[]`.
+    ///
+    /// Test value: without the line rule `b` drops from the first set; without the output rule
+    /// `b` drops from the second; an output rule over every strip adds `d`; a line or node read
+    /// from one plan alone ducks `b` (the added send, the removed route) or `a` (the node).
+    #[test]
+    fn grown_strips_reads_lines_nodes_and_the_output() {
+        let base = model();
+        let with = |edit: &dyn Fn(&mut SessionModel)| {
+            let mut next = base.clone();
+            edit(&mut next);
+            next
+        };
+        let track = |model: &mut SessionModel, name: &str| -> usize {
+            model
+                .tracks
+                .iter()
+                .position(|track| track.id.as_str() == name)
+                .expect("a track")
+        };
+        let limited_c = with(&|next| {
+            let c = track(next, "c");
+            next.tracks[c].inserts.effects.push(limiter("lim-c"));
+        });
+        assert_eq!(grown(&base, &limited_c), ["b", "c", "r"], "a line alone");
+
+        let only_send = with(&|next| {
+            next.routes.retain(|route| route.id.as_str() != "b-main");
+            let mut d = next.tracks[0].clone();
+            d.id = id("d");
+            d.inserts.effects.clear();
+            next.tracks.push(d);
+            next.tracks
+                .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        });
+        let mut louder = only_send.clone();
+        let a = track(&mut louder, "a");
+        louder.tracks[a].inserts.effects.push(limiter("lim-2"));
+        assert_eq!(
+            grown(&only_send, &louder),
+            ["a", "b", "c", "r"],
+            "the output alone"
+        );
+
+        let added_send = with(&|next| {
+            let mut send = next
+                .routes
+                .iter()
+                .find(|route| route.id.as_str() == "b-main")
+                .expect("b-main")
+                .clone();
+            send.id = id("b-out");
+            send.source = RouteSource::Track {
+                track_id: id("b"),
+                tap: SendTap::PreFader,
+            };
+            next.routes.push(send);
+            next.routes
+                .sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        });
+        assert_eq!(
+            grown(&base, &added_send),
+            Vec::<String>::new(),
+            "an added send"
+        );
+        let removed_route = with(&|next| {
+            next.routes.retain(|route| route.id.as_str() != "b-main");
+        });
+        assert_eq!(
+            grown(&base, &removed_route),
+            Vec::<String>::new(),
+            "a removed route"
+        );
+        let added_node = with(&|next| {
+            let a = track(next, "a");
+            next.tracks[a].inserts.effects.push(compressor("comp-a"));
+        });
+        assert_eq!(
+            grown(&base, &added_node),
+            Vec::<String>::new(),
+            "an added node"
+        );
+    }
+
+    /// #1324 D4: `C` counts a sidechain line from a ducked strip's `post_fader` tap into a carried
+    /// node. `b` has no route and keys `c`'s compressor, which sits behind a limiter, so the key's
+    /// line is the limiter's latency `L`; a successor that restarts `b` (here: given an insert)
+    /// may shorten it, so `C` is `L`. Red if `C` counts route lines only (0 here: `b` has none).
+    #[test]
+    fn c_counts_a_post_fader_sidechain_line_into_a_carried_node() {
+        let mut committed = model();
+        committed
+            .routes
+            .retain(|route| !route.id.as_str().starts_with("b-"));
+        let mut key = limiter("key");
+        key.identity = session::EffectIdentity::Native {
+            effect_id: id("miso.compressor"),
+        };
+        key.link_mode = session::LinkMode::DualMono;
+        key.sidechain = session::SidechainDeclaration::Routed(session::Sidechain {
+            source: RouteSource::Track {
+                track_id: id("b"),
+                tap: SendTap::PostFader,
+            },
+            port_id: id("sidechain-in"),
+        });
+        committed.tracks[2].inserts.effects = vec![limiter("c-lim"), key];
+        let compiled = compile(&committed);
+        let prepared = crate::prepare::prepare_host_runtime(&compiled, &caps()).expect("prepares");
+        let latency = prepared.report.latency_samples;
+        assert!(latency > 0);
+        let committed = compiled.normalized_model();
+        let mut next = committed.clone();
+        next.tracks[1].inserts.effects.push(limiter("b-lim"));
+        let transition = plan_strip_transition(
+            &SuccessorBase::new(&prepared.inventory, committed, 2),
+            &DuckOverlay::new(),
+            &next,
+            &[Box::from("b")],
+        )
+        .expect("b's duck-swap");
+        assert_eq!(transition.strips(), [Box::<str>::from("b")]);
+        assert_eq!(transition.compensation(), latency, "C is the key's line");
     }
 }

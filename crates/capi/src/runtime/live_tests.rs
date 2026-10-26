@@ -1495,6 +1495,21 @@ fn a_replayed_live_edit_writes_nothing() {
     assert_eq!(rig.summary().0, revision);
 }
 
+/// Every word of the plan's watermark: `(revision, first sample, flags, exact, fallback,
+/// superseded)`.
+fn watermark_words(rig: &Rig) -> (u64, u64, u64, u64, u64, u64) {
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    (
+        watermark.revision,
+        watermark.first_sample,
+        watermark.outcome_flags,
+        watermark.exact_count,
+        watermark.transition_fallback_count,
+        watermark.superseded_count,
+    )
+}
+
 /// The plan's watermark as a host reads it: `(revision, first sample, flags, exact count)`.
 fn watermark(rig: &Rig) -> (u64, u64, u64, u64) {
     let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
@@ -1713,6 +1728,13 @@ fn a_live_fader_left_undrained_before_a_carrying_structural_commit_is_baked() {
 }
 
 fn assert_rebuilds(document: &str, edits: &[SessionEdit], label: &str) {
+    assert_rebuilds_ducking(document, edits, &[], label);
+}
+
+/// [`assert_rebuilds`] for a rebuild that restarts the strips `ducked`: a duck-swap, whose phase 1
+/// writes exactly one ramped mute to each channel of each of them on the rendering plan (#1324a,
+/// #1325 D2) and nothing else to any cell.
+fn assert_rebuilds_ducking(document: &str, edits: &[SessionEdit], ducked: &[&str], label: &str) {
     let mut rig = Rig::new(document);
     rig.step();
     let (revision, _, epoch, pending) = rig.summary();
@@ -1724,12 +1746,26 @@ fn assert_rebuilds(document: &str, edits: &[SessionEdit], label: &str) {
         (revision + 1, 1),
         "{label}: a rebuild prepares a candidate"
     );
-    assert!(
-        rig.current_cells()
-            .iter()
-            .all(|&cells| cells == ([0; 4], 0)),
-        "{label}: the rendering plan got no write"
-    );
+    let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
+    let cells: Vec<(&str, [u64; 4], u64)> = snapshot
+        .strip_cells
+        .iter()
+        .filter(|(epoch, ..)| *epoch == snapshot.provider_epoch)
+        .map(|(_, id, fader, matrix)| (&**id, *fader, *matrix))
+        .collect();
+    assert!(!cells.is_empty(), "{label}");
+    for (id, fader, matrix) in cells {
+        let expected = if ducked.contains(&id) {
+            [0, 0, 1, 1]
+        } else {
+            [0; 4]
+        };
+        assert_eq!(
+            (fader, matrix),
+            (expected, 0),
+            "{label}: the rendering plan got no write but the duck's, on {id}"
+        );
+    }
 }
 
 fn with_model(document: &str, change: impl FnOnce(&mut SessionModel)) -> String {
@@ -4574,18 +4610,21 @@ mod set_control {
         let model = parse_session_json(&document).expect("model");
         let track = model.tracks[0].clone();
         let name = track.id.as_str();
-        assert_rebuilds(
+        // A changed `delay_samples` restarts the strip: a duck-swap (#1324a).
+        assert_rebuilds_ducking(
             &document,
             &[set(builtin(name, DELAY_SAMPLES, Lane::Both), 64.0, None)],
+            &[name],
             "delay by address",
         );
         // The whole builtin section with the same delay is the same rebuild.
         let mut builtins = track.builtins.clone();
         builtins.left.delay_samples = 64;
         builtins.right.delay_samples = 64;
-        assert_rebuilds(
+        assert_rebuilds_ducking(
             &document,
             &protocol::control_core::builtins_edits(&track.id, &builtins),
+            &[name],
             "delay in the whole builtin section",
         );
         let route_id = model.routes[0].id.clone();
@@ -7292,8 +7331,8 @@ mod set_control {
         /// left, the last three shorter than the fader length `J` = 960). Every block of the
         /// rebuilt rig is bit-equal to the uninterrupted engine's over 44 blocks, allocation-free,
         /// the successor is adopted, and the rebuild's watermark advance reports `OUTCOME_EXACT`
-        /// with no transition fallback (#1711 D2: the B17-R14 flag is deleted). A table-only
-        /// rebuild with no live move reports `OUTCOME_EXACT` too (outcome only).
+        /// with no transition fallback (#1711 D2: the B17-R14 flag is deleted). The same rebuild
+        /// with no live move is `a_table_only_rebuild_with_no_move_is_bit_equal`.
         ///
         /// Test value: red if the adoption rule compares the curve with the stage's fader gain
         /// rather than its ramp's target (#1711 F0: the held grid events only remember a gain, so
@@ -7317,24 +7356,6 @@ mod set_control {
                     (SOURCE_FRAMES - 2_000, -6.0),
                 ),
             ];
-            // A table-only rebuild with no live move completes exactly too (outcome only: its bits
-            // are `a_table_only_rebuild_with_no_move_is_bit_equal`, red until #1716's fix).
-            let mut still = Rig::new(&document);
-            for _ in 0..4 {
-                still.step();
-            }
-            let offset = still.model().automation[0].offset;
-            send(
-                &mut still,
-                &[split_ride(&track, changes[0].1, offset)],
-                protocol::EditPath::Rebuild,
-                "no move",
-            );
-            for _ in 0..4 {
-                still.step();
-            }
-            assert_eq!(still.summary().3, 0, "no move: the successor is adopted");
-            assert_exact(&still, "no move");
             let timings = [
                 MoveTiming::Pending,
                 MoveTiming::SameTransaction,
@@ -7392,21 +7413,24 @@ mod set_control {
             }
         }
 
-        /// #1716 step 0 (red until the fix). Two table-only rebuilds of the riding fader with no
-        /// live move, 5 blocks apart: the ride split in two at sample 10,000 exactly on its line
-        /// (every split-table value equals the ride's in `f32` bits), then the single ride again.
-        /// Every block of the rebuilt rig is bit-equal to the uninterrupted engine's over 44
-        /// blocks, as a plan prepared with either table renders.
+        /// #1716 (fix D). Two table-only rebuilds of the riding fader with no live move, 5 blocks
+        /// apart: the ride split in two at sample 10,000 exactly on its line (every split-table
+        /// value equals the ride's in `f32` bits), then the single ride again. Every block of the
+        /// rebuilt rig is bit-equal to the uninterrupted engine's over 44 blocks, as a plan
+        /// prepared with either table renders, the successor is adopted, and each rebuild's
+        /// watermark advance reports `OUTCOME_EXACT` with no transition fallback.
         ///
         /// Test value: red when a table-only rebuild of an unchanged curve opens with an adoption
-        /// jump that a plan prepared with the new table never makes. At a block's first sample the
-        /// last grid ramp has completed (`G` divides the 128-sample block), so `settle_adoption`
-        /// compares the new curve at `span.start` with the stage's target, which is the old curve
-        /// at `span.start - 1`; on a ride they always differ, and the block opens with a jump over
-        /// `J` = 960 (measured: first difference at block 4, sample 0; at most 1.7e-4, block 7;
-        /// equal again from block 12). No other row compares bits with no move.
+        /// jump that a plan prepared with the new table never makes. When the block starts on the
+        /// grid (here every 128-sample block does), the last grid ramp has just completed, so the
+        /// stage's target is the old curve at `span.start - 1`; an adoption that compares the new
+        /// curve at `span.start` with it differs on every ride and opens the block with a jump
+        /// over `J` = 960 (measured on that compare: first difference at block 4, sample 0; at most
+        /// 1.7e-4, block 7; equal again from block 12). The claim is owned by builtins-compiler's
+        /// `a_carried_composed_lane_renders_the_uninterrupted_bits` (its 128-frame case); this is
+        /// the C ABI's parity row: it adds the C ABI rebuild's `Reposition` classification and
+        /// the watermark's `OUTCOME_EXACT`.
         #[test]
-        #[ignore = "#1716: red until the fix; see spec step 0"]
         fn a_table_only_rebuild_with_no_move_is_bit_equal() {
             bench_support::alloc::assert_installed();
             let document = riding();
@@ -7422,6 +7446,7 @@ mod set_control {
             let (first, _) = lockstep(&mut rigs, 5);
             assert_eq!(rigs[0].summary().3, 0, "split: the successor is adopted");
             assert_eq!(first, None, "split: first difference (block, sample)");
+            assert_exact(&rigs[0], "split");
             let mut whole = entry(
                 &track,
                 vec![segment(
@@ -7440,6 +7465,7 @@ mod set_control {
             let (first, _) = lockstep(&mut rigs, 39);
             assert_eq!(rigs[0].summary().3, 0, "whole: the successor is adopted");
             assert_eq!(first, None, "whole: first difference (block, sample)");
+            assert_exact(&rigs[0], "whole");
         }
 
         /// [`riding`]'s ride kept up to `at`, then a step to `db` from `at` to the source's end,
@@ -8256,7 +8282,19 @@ fn in_place_commands_equal_full_commands_through_the_c_abi() {
         );
         if step % 25 == 0 {
             assert_eq!(observed(&mut fast), observed(&mut full), "step {step}");
-            assert_eq!(watermark(&fast), watermark(&full), "step {step}");
+            // The whole watermark, its counters included: a drawn edit that restarts a strip is a
+            // duck-swap adopted at its `S` (#1324a), so the next step's edit may supersede it,
+            // alike on both paths.
+            assert_eq!(
+                watermark_words(&fast),
+                watermark_words(&full),
+                "step {step}"
+            );
+            assert_eq!(
+                watermark_words(&fast).4,
+                0,
+                "step {step}: no transition fallback"
+            );
             assert_eq!(fast.summary(), full.summary(), "step {step}");
         }
     }
@@ -9450,6 +9488,7 @@ fn an_observe_edit_arms_a_tap_through_the_c_abi() {
         tap_id: 1,
         armed: true,
         window_blocks: 4,
+        arm_tag: 0,
     }]);
     let (result, response) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
@@ -9497,16 +9536,18 @@ fn each_observe_reply_names_the_arm_tag_of_its_record() {
         .id
         .clone();
     let comp = StableId::parse("comp").expect("compressor");
-    let observe_with = |armed, window_blocks| SessionEdit::Observe {
+    // A disarm names the tag of the arm it ends (#2087), here the arm bound when it is sent.
+    let observe_with = |armed, window_blocks, arm_tag| SessionEdit::Observe {
         strip_id: track.clone(),
         section: protocol::control_core::TapSection::Inserts(comp.clone()),
         tap_id: 1,
         armed,
         window_blocks,
+        arm_tag: if armed { 0 } else { arm_tag },
     };
-    let observe = |armed| observe_with(armed, 4);
+    let observe = |armed, arm_tag| observe_with(armed, 4, arm_tag);
     for (armed, tag) in [(true, 1), (true, 1), (false, 1), (false, 2), (true, 3)] {
-        let bytes = rig.transaction(&[observe(armed)]);
+        let bytes = rig.transaction(&[observe(armed, 1)]);
         let (result, response) = rig.send(&bytes);
         assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
         let applied = applied_of(&response);
@@ -9520,10 +9561,10 @@ fn each_observe_reply_names_the_arm_tag_of_its_record() {
     // One transaction: a join and a disarm keep the binding tagged 3; the last disarm and an arm
     // with another window are one re-arm record, tag 4, which both report.
     let bytes = rig.transaction(&[
-        observe(true),
-        observe(false),
-        observe(false),
-        observe_with(true, 8),
+        observe(true, 0),
+        observe(false, 3),
+        observe(false, 3),
+        observe_with(true, 8, 0),
     ]);
     let (result, response) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
@@ -9531,7 +9572,7 @@ fn each_observe_reply_names_the_arm_tag_of_its_record() {
     rig.step();
     // The last disarm and an arm with the same window queue nothing: the tap stays as it was, and
     // its binding keeps tag 4.
-    let bytes = rig.transaction(&[observe_with(false, 8), observe_with(true, 8)]);
+    let bytes = rig.transaction(&[observe_with(false, 8, 4), observe_with(true, 8, 0)]);
     let (result, response) = rig.send(&bytes);
     assert_eq!(result, crate::RESULT_OK, "{:?}", rig.last_error());
     assert_eq!(applied_of(&response).observe_arm_tags, vec![4, 4]);
@@ -10077,7 +10118,7 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
             unit: protocol::ParameterUnit::Db,
         }
     );
-    let observe = |armed| SessionEdit::Observe {
+    let observe = |armed, arm_tag| SessionEdit::Observe {
         strip_id: track.clone(),
         section: protocol::control_core::TapSection::Inserts(
             StableId::parse("comp").expect("compressor"),
@@ -10085,8 +10126,9 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
         tap_id: 1,
         armed,
         window_blocks: 4,
+        arm_tag,
     };
-    let arm_tag = rig.observe_tags(&[observe(true)])[0];
+    let arm_tag = rig.observe_tags(&[observe(true, 0)])[0];
     assert_eq!(
         row(&mut rig),
         protocol::ObservationReadRow {
@@ -10160,7 +10202,7 @@ fn an_observation_read_follows_the_arm_through_the_c_abi() {
         );
     }
 
-    let disarm_tag = rig.observe_tags(&[observe(false)])[0];
+    let disarm_tag = rig.observe_tags(&[observe(false, arm_tag)])[0];
     assert!(disarm_tag > arm_tag, "the last disarm is its own record");
     assert_eq!(
         row(&mut rig).status,

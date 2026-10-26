@@ -87,14 +87,28 @@ pub fn session_jump_lengths(model: &SessionModel) -> GraphJumpLengths {
 /// The longest producer-thread stall the default source ring hides without an underrun.
 pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
 
-/// Derive the default per-source ring capacity from the document's rate and quantum.
+/// Derive the default per-source ring capacity from the document's rate and quantum (#1406 D2).
 ///
-/// The ring covers `ceil(100 ms * fs / quantum)` quanta plus one quantum held by the consumer and
-/// one in the recycle path. The result is therefore always a whole number of quanta. A zero
-/// quantum returns zero; callers validate the document before using the answer.
+/// The ring is [`stall_ring_frames`] (the stall tolerance in whole quanta, plus one quantum held
+/// by the consumer and one in the recycle path), plus [`p_max_samples`] (the largest `ΣP` a warm
+/// successor reads ahead), plus one quantum: so a producer that keeps the ring full through one
+/// stall still has the `(k + 1) · q` frames, `k · q <= p_max_samples`, that a warm successor's
+/// readiness asks to be queued. Every term is a whole number of quanta, so the result is too. A
+/// zero quantum returns zero, and so does a ring above `u32::MAX` frames; callers validate the
+/// document before using the answer.
 #[must_use]
 pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
-    stall_ring_frames(sample_rate_hz, quantum_frames)
+    let stall = stall_ring_frames(sample_rate_hz, quantum_frames) as u64;
+    let prime = p_max_samples(sample_rate_hz, quantum_frames) as u64;
+    if stall == 0 || prime == 0 {
+        return 0;
+    }
+    let frames = stall + prime + quantum_frames as u64;
+    if frames > u32::MAX as u64 {
+        0
+    } else {
+        frames as u32
+    }
 }
 
 /// The ring that hides one producer stall (#1354 D1): `ceil(100 ms * fs / quantum)` quanta plus
@@ -168,8 +182,9 @@ pub struct WarmLead {
     /// The strips the lead restarts whole (every node of the strip), sorted by ID. An added
     /// strip is never listed.
     pub restart_whole: Box<[String]>,
-    /// The strips the ordinary successor's carry join restarts (#1354a ruling 2): with
-    /// `restart_whole`, the set `R` the floors are derived from. Sorted.
+    /// `R`'s join part (#1354a ruling 2, #1354b): the strips the ordinary successor's carry join
+    /// restarts and the strips D2 step 2 adds on the lead's compile. With `restart_whole`, the set
+    /// `R` the floors are derived from; the warm successor restarts each. Sorted.
     restarted: Box<[Box<str>]>,
     /// D3's exact byte count.
     prime_bytes: u64,
@@ -177,14 +192,33 @@ pub struct WarmLead {
 
 impl WarmLead {
     /// The bytes render writes and reads in the adoption block to prime this lead (#1354 D3):
-    /// `4 · (P · Σ channels(s)` over the carried sources `+ Σ 2 · λ'` over every source-claim
-    /// line the prime's fill writes`)`. **Limit (#1354b):** the L3 term is not counted yet: the
-    /// fill writes every `input`-tap sidechain line from a restarted track into a carried node
-    /// (#1355 D5), and those words are left out, so the count is exact only for a successor with
-    /// no such line.
+    /// `4 · (P · Σ channels(s)` over the carried sources `+` the words the prime's fill writes
+    /// into every source-claim line (L2) and every `input`-tap sidechain line from a restarted
+    /// track into a carried node (L3, #1354b)`)`. Exact: the warm successor reports the same
+    /// count over its own lines ([`PreparedHost::prime_bytes`]).
     #[must_use]
     pub const fn prime_bytes(&self) -> u64 {
         self.prime_bytes
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl WarmLead {
+    /// Test-support seam (#1397a): the lead [`warm_lead`] answers when the strips it restarts
+    /// whole confine a growth (`Warm` with `lead_samples == 0`), for the edit whose ordinary
+    /// successor's inventory is `ordinary`, so a host can gate its routing of that answer on a
+    /// session family where no edit reaches it. `restart_whole` is sorted by the seam.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_only_zero_lead(ordinary: &PlanStateInventory, restart_whole: &[&str]) -> Self {
+        let mut whole: Vec<String> = restart_whole.iter().map(|id| (*id).to_owned()).collect();
+        whole.sort_unstable();
+        Self {
+            lead_samples: 0,
+            restart_whole: whole.into_boxed_slice(),
+            restarted: ordinary.restarted_strips().into(),
+            prime_bytes: 0,
+        }
     }
 }
 
@@ -825,8 +859,10 @@ impl PreparedHost {
     /// insert added, removed or reordered, or a session console slot added, removed or moved) is
     /// listed too, even when its remaining owners carry (D15-9). A strip whose surviving insert
     /// (an insert present in both plans' chains) is not banked in both plans, or differs, is
-    /// listed as well: its insert starts at rest on the swap. Sorted. Added strips are not
-    /// listed, and neither is any strip of a plan prepared without a predecessor.
+    /// listed as well: its insert starts at rest on the swap. So is a strip a warm lead restarts
+    /// whole, and, closed over the sidechain edges, a strip with an insert keyed from a listed
+    /// strip's tap behind a restarted owner (#1324 D1). Sorted. Added strips are not listed, and
+    /// neither is any strip of a plan prepared without a predecessor.
     /// *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it.
     #[must_use]
     pub fn restarted_strips(&self) -> &[Box<str>] {
@@ -1004,13 +1040,19 @@ pub struct PlanStateInventory {
     /// present in both, with at least one owner that does not carry. Sorted by strip ID. Empty
     /// for a plan prepared without a predecessor.
     restarted: Box<[Box<str>]>,
-    /// The strips whose fade-in this plan's table holds, sorted by strip ID (issue #1392 D1):
-    /// "this plan armed the strip", not "the fade still waits", which only render knows.
+    /// The strips and routes whose fade-in this plan's table holds, sorted by ID, then owner
+    /// (issues #1392 D1, #1877 D1): "this plan armed it", not "the fade still waits", which only
+    /// render knows.
     fade_arms: Box<[FadeArmInventoryRow]>,
     /// Which entries of this plan's fade table render has fired (issue #1392, root ruling of
     /// attempt 2): a successor drops the row of a fired entry, so rows never accumulate and a
-    /// fired fade is neither carried nor re-armed.
+    /// fired fade is neither carried nor re-armed. #1953b: a route row whose entry fired but has
+    /// not settled is re-armed and carried, so its ramp continues.
     fade_watch: graph::GraphFadeArmWatch,
+    /// The fading copies this plan compiles (#1953b), sorted by copy ID: each removed or
+    /// re-pointed lane-less route's copy, its fade-out entry in the fade table, until that entry
+    /// settles. A successor keeps each one that has not settled, carrying its op and its lines.
+    route_copies: Box<[RouteCopyRow]>,
     /// The input arrival this plan renders at every node where it is nonzero (#1285 D2): the
     /// floored `max` of PDC, in samples, sorted by node ID. A successor is compiled with these as
     /// its input floors, so no surviving node's latency drops across a structural transaction.
@@ -1036,14 +1078,55 @@ pub struct PlanStateInventory {
     prime_bytes: u64,
 }
 
-/// One fade-in entry of a prepared plan's table (issue #1392 D1): the strip and the entry's index,
-/// the index a successor's carry pair names.
+/// One fade-in entry of a prepared plan's table (issues #1392 D1, #1877 D1): the strip or route
+/// and the entry's index, the index a successor's carry pair names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FadeArmInventoryRow {
-    /// The strip ID: a track's or a submix's.
+    /// The strip ID (a track's or a submix's) or the route ID, as `owner` says.
     pub(crate) id: Box<str>,
     /// The entry's index in the plan's fade table.
     pub(crate) entry: u32,
+    /// What the entry fades in: a strip's fader or a route.
+    pub(crate) owner: FadeArmOwner,
+}
+
+/// One fading copy of a prepared plan (#1953b): the copy's route, under its copy ID, at the
+/// values of the route it replaces, and its fade-out entry in the plan's fade table.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RouteCopyRow {
+    /// The copy, as the plan compiled it: the removed route's source, destination and values,
+    /// under an ID no route of the plan's model holds.
+    pub(crate) route: session::Route,
+    /// The copy's fade-out entry in the plan's fade table.
+    pub(crate) entry: u32,
+}
+
+/// A compiled route's gain and matrix are finite (the session refuses a NaN), so equality is an
+/// equivalence on every row a plan holds.
+impl Eq for RouteCopyRow {}
+
+impl RouteCopyRow {
+    /// Heap bytes of the row's ID text: the copy's ID, its source strip's and its destination's.
+    fn heap_bytes(&self) -> usize {
+        let source = match &self.route.source {
+            session::RouteSource::Track { track_id, .. } => track_id.as_str().len(),
+            session::RouteSource::Submix { submix_id, .. } => submix_id.as_str().len(),
+        };
+        let destination = match &self.route.destination {
+            session::RouteDestination::SubmixInput { submix_id } => submix_id.as_str().len(),
+            session::RouteDestination::OutputInput { output_id } => output_id.as_str().len(),
+        };
+        self.route.id.as_str().len() + source + destination
+    }
+}
+
+/// What a fade-in entry of [`FadeArmInventoryRow`] fades in (#1877 D1).
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum FadeArmOwner {
+    /// A strip's fader lane (#1288, #1392).
+    Strip,
+    /// A route's live op, of either kind (#1363, #2011).
+    Route,
 }
 
 /// One strip stage of a prepared plan, owner key `(strip ID, PostFader)` or `(strip ID,
@@ -1214,6 +1297,16 @@ impl PlanStateInventory {
         self.meters.len()
     }
 
+    /// Each meter reader's index, strip ID, tap and metrics, in reader order (#1588 D3): meter
+    /// `i`'s window is strip `i` of a [`crate::MeterFrame`] the plan's delivery publishes, so a
+    /// reader of the frame resolves a strip to its meter here, whatever selection the plan was
+    /// prepared with.
+    pub fn meter_targets(&self) -> impl Iterator<Item = (usize, &str, MeterTap, MeterMetricSet)> {
+        self.meters
+            .iter()
+            .map(|row| (row.entry, &*row.id, row.tap, row.metrics))
+    }
+
     /// Observation rows, one per effect observation reader set (#1327).
     #[must_use]
     pub fn observation_count(&self) -> usize {
@@ -1277,6 +1370,16 @@ impl PlanStateInventory {
         self.live_routes.len()
     }
 
+    /// The fading copies whose fade entry render has not settled (#1953b): the ones a successor
+    /// keeps, so a phase 1 that ducks a copy's source strip waits for their lines.
+    #[cfg(feature = "control-provider")]
+    pub(crate) fn unsettled_route_copies(&self) -> impl Iterator<Item = &session::Route> {
+        self.route_copies
+            .iter()
+            .filter(|row| !self.fade_watch.settled(row.entry))
+            .map(|row| &row.route)
+    }
+
     /// The input floors a successor of this plan is compiled with (#1285 D2): every node whose
     /// input arrival in this plan is nonzero, with that arrival in samples, sorted by node ID.
     #[must_use]
@@ -1337,6 +1440,7 @@ impl PlanStateInventory {
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),
+            route_copies: Box::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
             // #1396 D2: no read-ahead.
@@ -1349,8 +1453,9 @@ impl PlanStateInventory {
         }
     }
 
-    /// An inventory that holds only this inventory's input floors (#1285, deliverable 2): a
-    /// successor prepared against it carries no state, so a test renders it from frame 0 as the
+    /// An inventory that holds this inventory's input floors (#1285, deliverable 2) and its join
+    /// rows, but no source, line or route row: a successor prepared against it and rendered
+    /// without adopting a predecessor carries no state, so a test renders it from frame 0 as the
     /// fresh reference of a plan compiled with the same floors.
     #[cfg(feature = "test-support")]
     #[must_use]
@@ -1358,9 +1463,12 @@ impl PlanStateInventory {
         Self {
             plan_identity: self.plan_identity,
             sources: Box::default(),
-            input_sections: Box::default(),
-            strip_stages: Box::default(),
-            effect_lanes: Box::default(),
+            // The strip, input-section, effect and strip-delay rows stay, so a successor's joins
+            // restart no strip it keeps and arm none (#1324 D3): rendered without adopting a
+            // predecessor, it runs no move and plays as a fresh plan.
+            input_sections: self.input_sections.clone(),
+            strip_stages: self.strip_stages.clone(),
+            effect_lanes: self.effect_lanes.clone(),
             meters: Box::default(),
             observations: Box::default(),
             sample_rate_hz: self.sample_rate_hz,
@@ -1370,7 +1478,7 @@ impl PlanStateInventory {
             spectrum_pairing: Box::default(),
             meter_pairing: Box::default(),
             delay_lines: Box::default(),
-            strip_delays: Box::default(),
+            strip_delays: self.strip_delays.clone(),
             live_routes: Box::default(),
             follow_into_six_word: false,
             follow_into_following: false,
@@ -1379,6 +1487,7 @@ impl PlanStateInventory {
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),
+            route_copies: Box::default(),
             input_floors: self.input_floors.clone(),
             raised_arrivals: self.raised_arrivals.clone(),
             source_read_offset: 0,
@@ -1481,6 +1590,11 @@ impl PlanStateInventory {
             + self.fade_arms.iter().map(|row| row.id.len()).sum::<usize>()
             + self.fade_watch.heap_bytes()
             + self
+                .route_copies
+                .iter()
+                .map(RouteCopyRow::heap_bytes)
+                .sum::<usize>()
+            + self
                 .input_floors
                 .iter()
                 .chain(self.raised_arrivals.iter())
@@ -1501,6 +1615,7 @@ impl PlanStateInventory {
                 + core::mem::size_of_val::<[graph::GraphLiveRoute]>(&self.live_routes)
                 + core::mem::size_of_val::<[Box<str>]>(&self.restarted)
                 + core::mem::size_of_val::<[FadeArmInventoryRow]>(&self.fade_arms)
+                + core::mem::size_of_val::<[RouteCopyRow]>(&self.route_copies)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.input_floors)
                 + core::mem::size_of_val::<[(graph::GraphNodeId, u64)]>(&self.raised_arrivals)
                 // #1642 B16-R2: the session's published generation, charged where it is held
@@ -1677,6 +1792,14 @@ pub struct SuccessorBase<'a> {
     /// the lead's is refused with `host.successor.warm_invariant`. `None` is the neutral value: an
     /// ordinary successor.
     pub warm: Option<&'a WarmLead>,
+    /// The strips the transition fallback restarts (#1397 D2 step 1): strip IDs, sorted, the duck
+    /// set `transition::grown_strips` computed from the ordinary compile (a `control-provider`
+    /// item, so not linked from here). Preparation restarts each one it holds as it restarts a
+    /// strip its carry join restarts (#1324 D2-D3: every owner before the fader and the fader
+    /// start at rest, and the fader is armed), and lists it in
+    /// [`PreparedHost::restarted_strips`]. An added strip in it is ignored. Empty, the neutral
+    /// value, for every other successor.
+    pub forced_restart: &'a [String],
 }
 
 impl<'a> SuccessorBase<'a> {
@@ -1702,6 +1825,7 @@ impl<'a> SuccessorBase<'a> {
             unchanged_revision: false,
             duck: &NO_DUCK,
             warm: None,
+            forced_restart: &[],
         }
     }
 }
@@ -1773,27 +1897,9 @@ impl<'a> WarmRestart<'a> {
         }
     }
 
-    /// The strip `node` belongs to, and whether it sits before the strip's fader or is its fader
-    /// (a strip's `PostMatrix` stage and its routes from a `post_fader` or `post_pan` tap do not).
-    /// A route node belongs to its source strip; the output belongs to no strip.
+    /// The strip `node` belongs to ([`strip_owner`]).
     fn owner<'n>(&'n self, node: &'n GraphNodeId) -> Option<(&'n str, bool)> {
-        match node {
-            GraphNodeId::TrackStage { track_id, stage } => {
-                Some((track_id.as_str(), *stage != TrackStage::PostMatrix))
-            }
-            GraphNodeId::Effect(effect) => Some((effect.track_id.as_str(), true)),
-            GraphNodeId::Route { route_id } => {
-                let route = self.routes.get(route_id.as_str())?;
-                let (strip, tap) = match &route.source {
-                    session::RouteSource::Track { track_id, tap } => (track_id, *tap),
-                    session::RouteSource::Submix { submix_id, tap } => (submix_id, *tap),
-                };
-                Some((strip.as_str(), tap_before_fader(tap)))
-            }
-            GraphNodeId::Submix { .. }
-            | GraphNodeId::Output { .. }
-            | GraphNodeId::CompensationDelay { .. } => None,
-        }
+        strip_owner(&self.routes, node)
     }
 
     /// Whether `node` is in `R`: a node of a strip restarted whole, or a node before the fader
@@ -1803,24 +1909,89 @@ impl<'a> WarmRestart<'a> {
             self.whole.contains(strip) || (before_fader && self.join.contains(strip))
         })
     }
+}
 
-    /// Whether the whole-strip restart filter drops this compensation line's carry (#1354a
-    /// decision 2): a line on a whole-restarted strip's chain before its matrix, into one of its
-    /// effects' sidechains, or on its routes from a tap before the fader. Matrix and post-fader
-    /// lines still carry.
+/// The strip `node` belongs to, and whether it sits before the strip's fader or is its fader
+/// (a strip's `PostMatrix` stage and its routes from a `post_fader` or `post_pan` tap do not).
+/// A route node belongs to its source strip, looked up in `routes` (the successor's routes by
+/// ID); the output belongs to no strip.
+pub(crate) fn strip_owner<'n>(
+    routes: &'n BTreeMap<&str, &session::Route>,
+    node: &'n GraphNodeId,
+) -> Option<(&'n str, bool)> {
+    match node {
+        GraphNodeId::TrackStage { track_id, stage } => {
+            Some((track_id.as_str(), *stage != TrackStage::PostMatrix))
+        }
+        GraphNodeId::Effect(effect) => Some((effect.track_id.as_str(), true)),
+        GraphNodeId::Route { route_id } => {
+            let route = routes.get(route_id.as_str())?;
+            let (strip, tap) = match &route.source {
+                session::RouteSource::Track { track_id, tap } => (track_id, *tap),
+                session::RouteSource::Submix { submix_id, tap } => (submix_id, *tap),
+            };
+            Some((strip.as_str(), tap_before_fader(tap)))
+        }
+        GraphNodeId::Submix { .. }
+        | GraphNodeId::Output { .. }
+        | GraphNodeId::CompensationDelay { .. } => None,
+    }
+}
+
+/// The whole-strip restart filter (#1354a decision 2, widened to every restarted strip by #1324
+/// D2): the strips whose owners before the fader and whose fader a successor starts at rest. A
+/// strip in [`PreparedHost::restarted_strips`] is duck-swapped, so no carry may leave a hole in
+/// front of a restarted owner: its input section, its effects, its fader, the compensation lines
+/// on its chain before its matrix and into its effects' sidechains, and its routes from a tap
+/// before the fader (their lines and their live lanes) all restart. Its matrix, its post-fader
+/// and post-pan routes and their lines carry as the join says; they carry the ducked tail.
+struct StripRestart<'a> {
+    strips: BTreeSet<&'a str>,
+    /// The successor's routes by ID: a route node belongs to its source strip.
+    routes: BTreeMap<&'a str, &'a session::Route>,
+}
+
+impl<'a> StripRestart<'a> {
+    fn new(model: &'a SessionModel, strips: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            strips: strips.into_iter().collect(),
+            routes: model
+                .routes
+                .iter()
+                .map(|route| (route.id.as_str(), route))
+                .collect(),
+        }
+    }
+
+    /// Whether `id` names a restarted strip.
+    fn contains(&self, id: &str) -> bool {
+        self.strips.contains(id)
+    }
+
+    /// Whether the route `id` leaves a restarted strip from a tap before its fader: its line and
+    /// its live lane restart.
+    fn restarts_route(&self, id: &str) -> bool {
+        let Some(route_id) = StableGraphId::parse(id) else {
+            return false;
+        };
+        strip_owner(&self.routes, &GraphNodeId::Route { route_id })
+            .is_some_and(|(strip, before_fader)| before_fader && self.contains(strip))
+    }
+
+    /// Whether the filter drops this compensation line's carry: a line on a restarted strip's
+    /// chain before its matrix, into one of its effects' sidechains, or on its routes from a tap
+    /// before the fader. Matrix and post-fader lines still carry.
     fn drops_line(&self, line: &graph::GraphDelayLine) -> bool {
-        let named = |strip: &str| self.whole.contains(strip);
         match &line.edge {
-            graph::GraphEdgeId::TrackMain { target } => self
-                .owner(target)
-                .is_some_and(|(strip, before_fader)| before_fader && named(strip)),
-            graph::GraphEdgeId::EffectSidechain { effect, .. } => named(effect.track_id.as_str()),
+            graph::GraphEdgeId::TrackMain { target } => strip_owner(&self.routes, target)
+                .is_some_and(|(strip, before_fader)| before_fader && self.contains(strip)),
+            graph::GraphEdgeId::EffectSidechain { effect, .. } => {
+                self.contains(effect.track_id.as_str())
+            }
             graph::GraphEdgeId::RouteSource { route_id }
-            | graph::GraphEdgeId::RouteDestination { route_id } => self
-                .owner(&GraphNodeId::Route {
-                    route_id: route_id.clone(),
-                })
-                .is_some_and(|(strip, before_fader)| before_fader && named(strip)),
+            | graph::GraphEdgeId::RouteDestination { route_id } => {
+                self.restarts_route(route_id.as_str())
+            }
         }
     }
 }
@@ -1833,7 +2004,7 @@ fn tap_before_fader(tap: session::SendTap) -> bool {
 /// The graph nodes a plan compiled from `model` has (#1354a): every strip's seven stages and
 /// its effects, every route and every output. The compiler emits no other node kind
 /// (`graph-compiler` `compile_graph`; a compensation line is not a node of the schedule).
-fn session_graph_nodes(model: &SessionModel) -> BTreeSet<GraphNodeId> {
+pub(crate) fn session_graph_nodes(model: &SessionModel) -> BTreeSet<GraphNodeId> {
     const STAGES: [TrackStage; 7] = [
         TrackStage::Input,
         TrackStage::PostInputBuiltins,
@@ -2111,10 +2282,8 @@ fn source_carries(
 /// a lane that grew by the lead takes its whole ring (the predecessor's pending words, then the
 /// lead), and a lane that moves takes the lead, up to its ring. An added track's line, a line on a
 /// source that does not carry, and a restarted lane take nothing. `before` is the predecessor's
-/// strip delay rows, sorted by strip ID. `None` on overflow.
-///
-/// **Limit (#1354b).** The `Input`-tap sidechain lines (L3) the fill writes are not counted; D3's
-/// L3 term is #1354b's.
+/// strip delay rows, sorted by strip ID. `None` on overflow. D3's L3 term is
+/// [`sidechain_fill_words`]'s.
 fn prime_bytes_of(
     lead: u64,
     channels: u64,
@@ -2164,15 +2333,23 @@ fn prime_bytes_of(
 /// graph once per pass and changes no queue (D5).
 ///
 /// `ordinary` is the inventory of the ordinary successor of `base` prepared from `compiled` with
-/// the host's own entry (#1354a ruling 1): its [`PlanStateInventory::restarted_strips`] is `R`'s
-/// join part and its [`PlanStateInventory::input_floors`] are step 3's arrivals. A host prepares it
-/// anyway, as the answer to [`WarmDecision::Ordinary`].
+/// the host's own entry (#1354a ruling 1): its [`PlanStateInventory::restarted_strips`] starts
+/// `R`'s join part and its [`PlanStateInventory::input_floors`] are step 3's arrivals. A host
+/// prepares it anyway, as the answer to [`WarmDecision::Ordinary`].
+///
+/// Step 2 (#1354b) runs on each pass's compile, before C1 is checked: the strips the lead's strip
+/// delay join restarts (a track re-pointed to a source that does not carry, whose claim line
+/// grows) and #1324 D1's sidechain closure over `R` (the strips restarted whole included) join
+/// `R`'s join part. On the lead's compile the closure's submix `input`-tap rule is step 6's M1
+/// rule: the sidechain line changes length exactly when the stage misses `a(n) + P`. A strip that
+/// joins `R` only on a lead's compile makes the answer `Warm` even when `P` falls to 0 (an ordinary
+/// rebuild that duck-swaps it).
 ///
 /// At a declared discontinuity nothing leads, so the answer is [`WarmDecision::Ordinary`].
 ///
-/// **Limits of this slice (#1354b).** Step 2's sidechain closure and step 6's submix
-/// `input`-tap rule are not applied: a consumer keyed from a restarted strip's `post_input`,
-/// `insert_send`, `insert_return` or `pre_fader` tap stays carried, and no L3 line is primed.
+/// It reads `base.committed`, not the model with [`SuccessorBase::duck`] applied: the overlay
+/// changes only mutes, which nothing here reads. A later reader of mutes must use the overlaid
+/// model, as preparation does.
 ///
 /// # Errors
 ///
@@ -2200,16 +2377,24 @@ pub fn warm_lead(
         .strips()
         .map(|strip| strip.id.as_str())
         .collect();
+    let rings = carried_rings(compiled, caps, &base);
+    let carried: BTreeSet<&str> = rings.iter().map(|(row, _)| &*row.id).collect();
+    let delay_joins = join_strip_delays(base.committed, model, &carried);
+    // `R`'s join part: the ordinary successor's restart set, then every strip step 2 and the
+    // lead's strip delay join add. A strip enters it, and `whole`, at most once.
+    let mut joined: BTreeSet<&str> = ordinary
+        .restarted_strips()
+        .iter()
+        .filter_map(|id| predecessor_strips.get(&**id).copied())
+        .collect();
+    let ordinary_set = joined.clone();
     let mut whole: BTreeSet<&str> = BTreeSet::new();
-    // Each pass adds a strip to `whole` or returns, so the loop ends within the strip count.
-    let passes = predecessor_strips.len() + 1;
+    // Each pass adds a strip to `joined` or to `whole`, or returns, so the loop ends within twice
+    // the strip count.
+    let passes = 2 * predecessor_strips.len() + 1;
     let mut found = None;
     for _ in 0..passes {
-        let restart = WarmRestart::new(
-            model,
-            ordinary.restarted_strips().iter().map(|id| &**id),
-            whole.iter().copied(),
-        );
+        let restart = WarmRestart::new(model, joined.iter().copied(), whole.iter().copied());
         // Step 3: `Δ` over C, from the ordinary successor's arrivals.
         let delta = predecessor
             .iter()
@@ -2217,15 +2402,35 @@ pub fn warm_lead(
             .map(|node| arrival_in(ordinary_arrivals, node).saturating_sub(arrival_in(a, node)))
             .max()
             .unwrap_or(0);
-        // Step 4.
+        // Step 4, with step 2 at `P = 0`: the lead's compile is the ordinary successor's.
         if delta == 0 {
-            return Ok(if whole.is_empty() {
+            let before = &base.inventory.strip_delays;
+            let after = |id: &str| {
+                ordinary
+                    .strip_delays
+                    .binary_search_by(|row| (*row.strip).cmp(id))
+                    .ok()
+                    .map(|index| ordinary.strip_delays[index].samples)
+            };
+            let added = close_warm_restart(
+                &base,
+                model,
+                &ordinary.delay_lines,
+                delay_restarted(&delay_joins, before, after, 0),
+                &joined,
+                &whole,
+            );
+            if !added.is_empty() {
+                joined.extend(added);
+                continue;
+            }
+            return Ok(if whole.is_empty() && joined == ordinary_set {
                 WarmDecision::Ordinary
             } else {
                 WarmDecision::Warm(WarmLead {
                     lead_samples: 0,
                     restart_whole: whole.iter().map(|id| (*id).to_owned()).collect(),
-                    restarted: ordinary.restarted_strips().into(),
+                    restarted: joined.iter().map(|id| Box::from(*id)).collect(),
                     prime_bytes: 0,
                 })
             });
@@ -2239,9 +2444,33 @@ pub fn warm_lead(
         let artifact = compile_for_arrivals(compiled, caps, base.monitor.next, floors)?;
         let arrivals = artifact_arrivals(&artifact);
         let graph = artifact.graph();
+        // Step 2 on the lead's compile: the strips its strip delay join restarts (a track's claim
+        // line that grows on a source that does not carry, #1354b), and the sidechain closure
+        // with the submix `input`-tap rule (M1) over its lines, join `R` before C1 is checked.
+        let lines = compiled_sidechain_lines(graph);
+        let after = |id: &str| {
+            let node = claim_node(id);
+            graph
+                .track_delays()
+                .iter()
+                .find(|row| row.node == node)
+                .map(|row| [row.left_samples, row.right_samples])
+        };
+        let added = close_warm_restart(
+            &base,
+            model,
+            &lines,
+            delay_restarted(&delay_joins, &base.inventory.strip_delays, after, lead),
+            &joined,
+            &whole,
+        );
+        if !added.is_empty() {
+            joined.extend(added);
+            continue;
+        }
         // Step 6, C1.
         let Some(late) = first_late_node(graph, &arrivals, a, &predecessor, &restart, lead) else {
-            found = Some((lead, artifact));
+            found = Some((lead, artifact, lines));
             break;
         };
         let reached = walk_back(
@@ -2275,8 +2504,11 @@ pub fn warm_lead(
             return Ok(WarmDecision::Unavailable(WarmUnavailable::Misaligned));
         }
     }
-    let Some((lead, artifact)) = found else {
-        debug_assert!(false, "#1354 D2: the walk ends within the strip count");
+    let Some((lead, artifact, lines)) = found else {
+        debug_assert!(
+            false,
+            "#1354 D2: the walk ends within twice the strip count"
+        );
         return Err(warm_invariant());
     };
     // Step 7, C3: the lead.
@@ -2292,16 +2524,16 @@ pub fn warm_lead(
         compiled.sample_rate().0,
         compiled.quantum().0,
     ));
-    let rings = carried_rings(compiled, caps, &base);
     if rings
         .iter()
         .any(|(row, _)| row.ring.frame_capacity.saturating_sub(stall) < lead + quantum)
     {
         return Ok(WarmDecision::Unavailable(WarmUnavailable::LeadBound));
     }
-    // Step 8, C3: the prime.
+    // Step 8, C3: the prime, its claim lines (L2) and its `input`-tap sidechain lines (L3).
     let channels = rings.iter().map(|(_, channels)| u64::from(*channels)).sum();
-    let carried: BTreeSet<&str> = rings.iter().map(|(row, _)| &*row.id).collect();
+    let restarted: BTreeSet<&str> = joined.union(&whole).copied().collect();
+    let fills = sidechain_fills(&base, &lines, &delay_joins, &restarted);
     let prime_bytes = prime_bytes_of(
         lead,
         channels,
@@ -2311,6 +2543,11 @@ pub fn warm_lead(
         &base.inventory.strip_delays,
         artifact.graph().track_delays(),
     )
+    .and_then(|bytes| {
+        sidechain_fill_words(&base, &lines, &fills, lead)?
+            .checked_mul(4)?
+            .checked_add(bytes)
+    })
     .ok_or_else(|| resource("host.resource.arithmetic"))?;
     if prime_bytes > config.prime_bytes_max {
         return Ok(WarmDecision::Unavailable(WarmUnavailable::PrimeBudget));
@@ -2319,9 +2556,138 @@ pub fn warm_lead(
     Ok(WarmDecision::Warm(WarmLead {
         lead_samples: lead,
         restart_whole: whole.iter().map(|id| (*id).to_owned()).collect(),
-        restarted: ordinary.restarted_strips().into(),
+        restarted: joined.iter().map(|id| Box::from(*id)).collect(),
         prime_bytes,
     }))
+}
+
+/// D2 step 2 on one compile of the warm successor (#1354b): the strips that join `R`'s join part.
+/// The compile's strip delay join restarts `delay_restarted` (sorted); #1324 D1's sidechain
+/// closure ([`close_over_sidechains`], the rule preparation applies after its joins) then runs
+/// over `R` (`joined`, `whole` and `delay_restarted`) with the compile's sidechain lines `after`
+/// against the predecessor's. On the lead's compile a submix `input`-tap line changes length
+/// exactly when the stage arrives at `a(n) + g` with `g ≠ P`, so the closure is step 6's M1 rule
+/// too. Returns the strips of the predecessor it adds, outside `joined` and `whole`.
+fn close_warm_restart<'m>(
+    base: &SuccessorBase<'_>,
+    model: &'m SessionModel,
+    after: &[graph::GraphDelayLine],
+    delay_restarted: Vec<Box<str>>,
+    joined: &BTreeSet<&str>,
+    whole: &BTreeSet<&str>,
+) -> Vec<&'m str> {
+    let mut set: Vec<Box<str>> = joined
+        .iter()
+        .chain(whole)
+        .map(|id| Box::from(*id))
+        .chain(delay_restarted.iter().cloned())
+        .collect();
+    set.sort_unstable();
+    set.dedup();
+    close_over_sidechains(
+        base.committed,
+        model,
+        &base.inventory.delay_lines,
+        after,
+        &delay_restarted,
+        &mut set,
+    );
+    model
+        .strips()
+        .map(|strip| strip.id.as_str())
+        .filter(|id| set.binary_search_by(|held| (**held).cmp(id)).is_ok())
+        .filter(|id| !joined.contains(id) && !whole.contains(id))
+        .filter(|id| committed_has_strip(base.committed, id))
+        .collect()
+}
+
+/// The strips the strip delay join restarts ([`strip_delay_restarts`]), sorted: `before` is the
+/// predecessor's strip delay rows (sorted by strip ID) and `after` a strip's lane rings in the
+/// successor, `None` when it holds no line.
+fn delay_restarted(
+    joins: &[StripDelayJoin<'_>],
+    before: &[graph::GraphStripDelayLine],
+    after: impl Fn(&str) -> Option<[u32; 2]>,
+    lead: u64,
+) -> Vec<Box<str>> {
+    let mut restarted: Vec<Box<str>> = joins
+        .iter()
+        .filter(|join| {
+            let earlier = before
+                .binary_search_by(|row| (*row.strip).cmp(join.id))
+                .ok()
+                .map(|index| before[index].samples);
+            strip_delay_restarts(join, earlier, after(join.id), lead)
+        })
+        .map(|join| Box::from(join.id))
+        .collect();
+    restarted.sort_unstable();
+    restarted
+}
+
+/// The sidechain compensation lines of a compiled, unbound graph, from its inserted delays (the
+/// lines its program lowers, one per delayed edge), each with its edge's endpoints. `line` is the
+/// row's index in the result: a bound plan's lines are read after bind
+/// ([`graph::take_compensation_lines`]), so these rows serve [`warm_lead`]'s closure and its L3
+/// count only.
+fn compiled_sidechain_lines(graph: &graph::PreparedGraphPlan) -> Vec<graph::GraphDelayLine> {
+    graph
+        .inserted_delays
+        .iter()
+        .filter(|delay| matches!(delay.edge_id, graph::GraphEdgeId::EffectSidechain { .. }))
+        .filter_map(|delay| {
+            let edge = graph
+                .spec
+                .edges
+                .iter()
+                .find(|edge| edge.id == delay.edge_id)?;
+            Some((edge, delay.samples.0))
+        })
+        .zip(0_u32..)
+        .map(|((edge, samples), line)| graph::GraphDelayLine {
+            edge: edge.id.clone(),
+            source: edge.source.node.clone(),
+            destination: edge.destination.node.clone(),
+            line,
+            samples,
+        })
+        .collect()
+}
+
+/// D3's L3 term, in words (#1354b): what the prime's fill writes into each `input`-tap sidechain
+/// line of `fills` (lines of `lines`). Each channel of a line of length `λ'` takes the head of the
+/// stream the predecessor's consumer would have heard, up to `λ'`: the predecessor's pending words
+/// of the same edge, then the source track's claim pending on that lane, then the `lead` words of
+/// the prime (#1355 D5). `None` on overflow.
+fn sidechain_fill_words(
+    base: &SuccessorBase<'_>,
+    lines: &[graph::GraphDelayLine],
+    fills: &[graph::GraphSidechainFill],
+    lead: u64,
+) -> Option<u64> {
+    let mut words = 0_u64;
+    for fill in fills {
+        let length = lines.iter().find(|line| line.line == fill.line)?.samples;
+        let edge = fill.predecessor.map_or(0, |line| {
+            base.inventory
+                .delay_lines
+                .iter()
+                .find(|earlier| earlier.line == line)
+                .map_or(0, |earlier| earlier.samples)
+        });
+        let claim = fill.claim_line.map_or([0; 2], |line| {
+            base.inventory
+                .strip_delays
+                .iter()
+                .find(|row| row.line == line)
+                .map_or([0; 2], |row| row.samples)
+        });
+        for pending in claim {
+            let available = edge.checked_add(u64::from(pending))?.checked_add(lead)?;
+            words = words.checked_add(length.min(available))?;
+        }
+    }
+    Some(words)
 }
 
 /// D2 step 6's walk from the late carried node `late`, whose lead arrival is `target`: back from
@@ -3151,7 +3517,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // each one copies from and the records that retarget it. Every strip of this plan attaches
     // the same control kind.
     let live_input = attach_live && lanes.strip_input;
-    let carried_inputs: Vec<InputJoin<'_>> = match successor {
+    let mut carried_inputs: Vec<InputJoin<'_>> = match successor {
         None => Vec::new(),
         Some(base) => {
             // `committed_input_section` binary-searches: a model that is not normalized would
@@ -3188,14 +3554,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                         // records, so the carried lane ramps as a live edit would. A value the
                         // live path refuses restarts the section.
                         let edit = StripEditRamps::of(base.edit_ramps, strip.id);
-                        let records = input_records(before, strip.builtins, rate, ramps, edit);
-                        // A compiled model's values are in the live domain, so a refusal here is
-                        // an internal fault that would silently restart the section.
-                        debug_assert!(
-                            records.is_ok(),
-                            "a compiled strip's input values have live records: {records:?}"
-                        );
-                        records.ok()?
+                        // A compiled model can hold values the live path refuses: a high-pass
+                        // above its low-pass compiles, and is a `Domain` rebuild with no live
+                        // record. The section then restarts at rest; it is no internal fault.
+                        input_records(before, strip.builtins, rate, ramps, edit).ok()?
                     } else if same_input_section(before, strip.builtins) {
                         Vec::new()
                     } else {
@@ -3372,6 +3734,25 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         })
         .collect::<Result<Vec<_>, PrepareDiagnostics>>()?;
 
+    // #1953b: the fading copies this successor compiles beside its model, on the terms of an
+    // added route's arm. Only the graph sees them: the effects, the builtins and the graph are
+    // prepared from the model with the copies added; every join, the catalog and the report read
+    // `model`.
+    let route_copies: Vec<RouteCopy> = match successor {
+        Some(base) if attach_live && !base.discontinuity => route_copies(&base, model),
+        _ => Vec::new(),
+    };
+    let copied_session = if route_copies.is_empty() {
+        None
+    } else {
+        let mut copied = model.clone();
+        copied
+            .routes
+            .extend(route_copies.iter().map(|copy| copy.route.clone()));
+        let copy_caps = caps.compile_caps(copied.sources.len())?;
+        Some(compile_host_model(&copied, copy_caps).map_err(|_| graph_failure("host.fade.copy"))?)
+    };
+    let graph_session = copied_session.as_ref().unwrap_or(compiled);
     let registry =
         launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
     // The stored automation is held to the row it names here, beside the effect diagnostics, so
@@ -3385,7 +3766,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             })
             .collect();
     let mut effects = match prepare_native_session_effects(
-        compiled,
+        graph_session,
         registry,
         EffectCompileCaps {
             maximum_total_state_bytes: caps.maximum_effect_state_bytes,
@@ -3588,11 +3969,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // alike whatever the caller's thread has set.
     let effective = {
         let _canonical = lane::CanonicalFpEnv::enter();
-        controls::effective(compiled.normalized_model(), overlay)
+        controls::effective(graph_session.normalized_model(), overlay)
     };
     let builtins = if selected_meters.is_some() {
         prepare_selected_session_builtins_with_live_controls(
-            compiled,
+            graph_session,
             &effective,
             &meter_requests,
             &control_requests,
@@ -3600,7 +3981,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         )
     } else {
         prepare_session_builtins_with_live_controls(
-            compiled,
+            graph_session,
             &effective,
             &meter_requests
                 .iter()
@@ -3684,24 +4065,39 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         // #1285 D2: a successor keeps every surviving node's input arrival; a first plan has no
         // floors. Across a withdrawn candidate the base is P0's inventory, so these are P0's.
         // #1354 D4: a warm successor takes the lead's floors instead.
-        input_floors: match (successor, warm, &warm_restart, &warm_predecessor) {
-            (Some(base), Some(lead), Some(restart), Some(predecessor)) => warm_floors(
-                &base.inventory.input_floors,
-                predecessor,
-                restart,
-                lead.lead_samples,
-            )?,
-            _ => successor
-                .map(|base| {
-                    base.inventory
-                        .input_floors
-                        .iter()
-                        .map(|(node, floor)| {
-                            (node.clone(), effect_contract::LatencySamples(*floor))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+        input_floors: {
+            let mut floors = match (successor, warm, &warm_restart, &warm_predecessor) {
+                (Some(base), Some(lead), Some(restart), Some(predecessor)) => warm_floors(
+                    &base.inventory.input_floors,
+                    predecessor,
+                    restart,
+                    lead.lead_samples,
+                )?,
+                _ => successor
+                    .map(|base| {
+                        base.inventory
+                            .input_floors
+                            .iter()
+                            .map(|(node, floor)| {
+                                (node.clone(), effect_contract::LatencySamples(*floor))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+            // #1953b: a copy's op arrives where the route it replaces arrived, so its lines are
+            // that route's and carry by alias.
+            for copy in &route_copies {
+                let node = |id: &str| {
+                    StableGraphId::parse(id).map(|route_id| GraphNodeId::Route { route_id })
+                };
+                if let (Some(alias), Some(own)) = (node(&copy.alias), node(copy.route.id.as_str()))
+                    && let Some(floor) = floors.get(&alias).copied()
+                {
+                    floors.insert(own, floor);
+                }
+            }
+            floors
         },
         caps: graph_compile_caps(caps),
         // #1379 Amendment 1 H3: with a control queue every strip's fader, mute and matrix lanes
@@ -3759,21 +4155,82 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         Some(base) if attach_live && !base.discontinuity => {
             let added = added_strips(base.committed, model);
             let watch = &base.inventory.fade_watch;
-            let waiting: Vec<&str> = base
-                .inventory
-                .fade_arms
-                .iter()
-                .filter(|row| !watch.fired(row.entry))
-                .map(|row| &*row.id)
+            let unfired = |owner: FadeArmOwner| {
+                base.inventory
+                    .fade_arms
+                    .iter()
+                    .filter(move |row| row.owner == owner && !watch.fired(row.entry))
+            };
+            let waiting: Vec<&str> = unfired(FadeArmOwner::Strip).map(|row| &*row.id).collect();
+            // #1877 D2: the routes whose predecessor entry has not fired, re-armed here.
+            // #1953b: and a lane-less route whose entry fired but has not settled, kept unchanged:
+            // its op still ramps, and a fold would step from its ramp to its constant. Re-armed
+            // and carried, it takes the displaced op's state (#1877 D6) and settles where the
+            // displaced entry would have. One kept at other values is not re-armed: its fading
+            // copy takes the op mid-ramp and the kept route fades in afresh (#2077).
+            let in_flight = |row: &&FadeArmInventoryRow| {
+                row.owner == FadeArmOwner::Route
+                    && watch.fired(row.entry)
+                    && !watch.settled(row.entry)
+                    && model.routes.iter().any(|route| {
+                        route.id.as_str() == &*row.id
+                            && !controls::route_rows_live(route)
+                            && base.committed.routes.contains(route)
+                    })
+            };
+            let waiting_routes: Vec<(&str, u32)> = unfired(FadeArmOwner::Route)
+                .chain(base.inventory.fade_arms.iter().filter(in_flight))
+                .map(|row| (&*row.id, row.entry))
                 .collect();
-            added_route_fades(base.committed, model, view, &added, &waiting)
+            // #2069: a muted route's mute is live when the route binds a lane: a six-word one,
+            // or a following one.
+            let live_mute = |route: &session::Route| {
+                (six_word && controls::route_rows_live(route))
+                    || follow_cells.iter().any(|(id, _)| *id == route.id.as_str())
+            };
+            added_route_fades(
+                base.committed,
+                model,
+                &added,
+                &waiting,
+                &waiting_routes,
+                live_mute,
+                |route| crossfades_values(&base, route),
+            )
         }
         _ => Vec::new(),
     };
+    // #1877 D6: a re-armed route the send join does not list (a transition route, which has no
+    // lane) joins too when its values are unchanged, so its op carries the displaced op's state:
+    // a fire the predecessor ran after this preparation read its watch then continues mid-ramp.
+    let route_joins: Vec<RouteJoin<'_>> = match successor {
+        Some(base) => {
+            let mut joins = route_joins;
+            for fade in route_fades
+                .iter()
+                .filter(|fade| fade.carried.is_some() && !controls::route_rows_live(fade.route))
+            {
+                let id = fade.route.id.as_str();
+                let unchanged = base
+                    .committed
+                    .routes
+                    .iter()
+                    .any(|before| before == fade.route);
+                if unchanged && !joins.iter().any(|join| join.id == id) {
+                    joins.push(RouteJoin { id, retarget: None });
+                }
+            }
+            joins
+        }
+        None => route_joins,
+    };
+    // #1953b: every fading copy binds as a transition route too.
     let transition: Vec<StableGraphId> = route_fades
         .iter()
         .filter(|fade| !(six_word && controls::route_rows_live(fade.route)))
-        .filter_map(|fade| StableGraphId::parse(fade.route.id.as_str()))
+        .map(|fade| fade.route.id.as_str())
+        .chain(route_copies.iter().map(|copy| copy.route.id.as_str()))
+        .filter_map(StableGraphId::parse)
         .collect();
     let (graph_route_controls, follow_route_controls, transition_routes) =
         if six_word || !follow_cells.is_empty() || !transition.is_empty() {
@@ -3898,7 +4355,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             })
         })
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    let session_resources = compiled.resource_estimate();
+    // #1953b: the session the graph was compiled from, fading copies included.
+    let session_resources = graph_session.resource_estimate();
     let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
         None => None,
         Some(SpectrumPreparation::Single(request)) => Some(
@@ -4159,22 +4617,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         })
         .collect();
     input_sections.sort_unstable_by(|left, right| left.id.cmp(&right.id));
-    if !carried_inputs.is_empty() {
-        let moves: Vec<graph::GraphLaneMove> = carried_inputs
-            .iter()
-            .filter_map(|join| {
-                input_section_row(&input_sections, join.id).map(|row| graph::GraphLaneMove {
-                    successor: row.location,
-                    predecessor: join.predecessor,
-                })
-            })
-            .collect();
-        // Every strip banks its input section in a shipped plan, so every carried strip finds
-        // its lane here; one that did not would silently restart at rest.
-        debug_assert_eq!(moves.len(), carried_inputs.len());
-        graph::install_builtin_input_carry(&mut plan, moves)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
     // Issue #1327 D1: this plan's own meters, in reader order: the inventory its successor joins
     // with, and the rows the join below looks this plan's observers up in.
     let observer_rows =
@@ -4284,7 +4726,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .collect();
     strip_stages
         .sort_unstable_by(|left, right| left.id.cmp(&right.id).then(left.owner.cmp(&right.owner)));
-    let strip_carry = match successor {
+    let mut strip_carry = match successor {
         Some(base) => resolve_strip_carry(
             base.inventory,
             &strip_joins,
@@ -4294,71 +4736,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         ),
         None => StripCarry::default(),
     };
-    // Issue #1288 D1: a strip the successor adds during playback fades in. Only a plan that
-    // attaches live lanes arms (decision 1: the plain entry binds a fader that cannot fade), and
-    // never at a declared discontinuity (decision 2: every owner restarts, and a seek is not
-    // declicked).
-    // Issue #1392 D2: a strip whose fade entry the predecessor's table holds is armed again, and
-    // takes that entry's render state at the swap block, exactly when its fader lane carries
-    // (D5 as root reads it: a strip restarted for its chain or its matrix still carries the
-    // fader lane, whose import restores the armed bits, so it must keep an entry). Each strip
-    // is paired with the predecessor entry it carries, `None` for an added strip.
-    let fade_strips: Vec<(&str, Option<u32>)> = match successor {
-        Some(base) if attach_live && !base.discontinuity => {
-            let mut strips: Vec<(&str, Option<u32>)> = added_strips(base.committed, model)
-                .into_iter()
-                .map(|id| (id, None))
-                .collect();
-            // A row whose entry render has fired is dropped: the strip's lane imports `armed =
-            // false`, so the successor needs no entry and never fades it again.
-            let watch = &base.inventory.fade_watch;
-            strips.extend(base.inventory.fade_arms.iter().filter_map(|row| {
-                if watch.fired(row.entry) {
-                    return None;
-                }
-                let lane =
-                    strip_stage_row(&strip_stages, &row.id, graph::BuiltinStripOwner::Fader)?;
-                strip_carry
-                    .moves
-                    .iter()
-                    .any(|step| {
-                        step.owner == graph::BuiltinStripOwner::Fader
-                            && step.successor == lane.location
-                    })
-                    .then_some((&*row.id, Some(row.entry)))
-            }));
-            strips
-        }
-        _ => Vec::new(),
-    };
-    let ids: Vec<&str> = fade_strips.iter().map(|(id, _)| *id).collect();
-    let fade_arms = fade_arms_for(model, &ids, &strip_stages, &input_floors);
-    let carried_arms = fade_strips
-        .iter()
-        .filter(|(_, from)| from.is_some())
-        .count();
-    // #1363 D3: the route arms join the strips' table after them, one entry each.
-    let fade_arm_bytes =
-        graph::fade_arm_table_bytes(fade_arms.len() + route_fades.len(), carried_arms)
-            .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    // The strip moves' table is charged at its exact length: which strips carry is known only
-    // once both plans' lanes are, so it is checked here, against the same cap as the rest of the
-    // plan, instead of before bind.
-    let strip_carry_bytes = u64::try_from(
-        strip_carry
-            .moves
-            .len()
-            .checked_mul(core::mem::size_of::<graph::GraphStripMove>())
-            .ok_or_else(|| resource("host.resource.arithmetic"))?,
-    )
-    .map_err(|_| resource("host.resource.arithmetic"))?;
-    if admitted_graph_and_model
-        .checked_add(strip_carry_bytes)
-        .ok_or_else(|| resource("host.resource.arithmetic"))?
-        > caps.maximum_graph_session_plus_plan_bytes
-    {
-        return Err(resource("host.graph.resource.limit"));
-    }
     // Issue #1279 D1: this plan's own effect bank lanes, sorted by owner key: the inventory its
     // successor joins with, and the table the join below looks this plan's lanes up in.
     let mut effect_lanes: Vec<EffectLaneInventoryRow> = graph::bank_effect_lanes(&mut plan)
@@ -4382,7 +4759,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // Issue #1280 D4: a carried lane's live difference is opened against the successor's own
     // producer here, so a lane whose producer has no cell for a record restarts instead of
     // writing it (and a preparation that fails later writes nothing).
-    let effect_carry = match successor {
+    let mut effect_carry = match successor {
         Some(base) => resolve_effect_carry(
             base.inventory,
             &chain_joins,
@@ -4416,6 +4793,356 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             })
         })
         .collect();
+    // Issue #1283 D1: this plan's own compensation lines, sorted by edge ID: the inventory its
+    // successor joins with, and the lines its own moves are resolved from.
+    let mut delay_lines = graph::take_compensation_lines(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
+    let mut delay_carry = match successor {
+        Some(base) => resolve_delay_carry(&base.inventory.delay_lines, &delay_lines, |id| {
+            same_strip_id_kind(base.committed, compiled.normalized_model(), id)
+        }),
+        None => Vec::new(),
+    };
+    // #1953b: each fading copy's lines are the lines of the route it replaces.
+    if let Some(base) = successor {
+        alias_copy_lines(
+            &base.inventory.delay_lines,
+            &delay_lines,
+            &route_copies,
+            &mut delay_carry,
+        );
+    }
+    // Issue #1284 D1, D2: this plan's own strip input alignment lines and live sends, sorted by ID:
+    // the inventory its successor joins with, and the rows its own moves are resolved from.
+    let mut strip_delays = graph::take_strip_delay_lines(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    strip_delays.sort_unstable_by(|left, right| left.strip.cmp(&right.strip));
+    let mut live_routes = graph::take_live_routes(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    live_routes.sort_unstable_by(|left, right| left.route_id.cmp(&right.route_id));
+    let mut strip_delay_carry = match successor {
+        Some(base) => resolve_strip_delay_carry(
+            &base.inventory.strip_delays,
+            &strip_delays,
+            &delay_joins,
+            warm.map_or(0, |lead| lead.lead_samples),
+        ),
+        None => StripDelayCarry::default(),
+    };
+    // #1324 D1, D2: the strips this successor restarts, in one place, after every join: each
+    // strip a join restarts (#1277 D6), and each strip a warm lead restarts whole (#1354a ruling
+    // 2). Each is duck-swapped, so the whole-strip restart filter ([`StripRestart`]) drops every
+    // carry in front of its fader and of its fader itself: a partial carry upstream of a
+    // restarted owner would leave a hole with a step at each edge. The joins' own rules stay as
+    // they are; only their outputs are filtered here.
+    let mut restarted = core::mem::take(&mut strip_carry.restarted);
+    restarted.extend(core::mem::take(&mut effect_carry.restarted));
+    // #1324 D1: a strip whose delay line restarts steps its `input` tap at `S`.
+    let mut delay_restarted = core::mem::take(&mut strip_delay_carry.restarted);
+    delay_restarted.sort_unstable();
+    delay_restarted.dedup();
+    restarted.extend(delay_restarted.iter().cloned());
+    restarted.sort_unstable();
+    restarted.dedup();
+    if let Some(lead) = warm {
+        // #1354a ruling 2, #1354b: every strip of the lead's `R` restarts, its join part (whose
+        // floors are its arrivals) whatever this join did, and a strip restarted whole whatever
+        // its owners did.
+        restarted.extend(
+            lead.restarted
+                .iter()
+                .filter(|id| committed_has_strip(model, id))
+                .cloned()
+                .chain(
+                    lead.restart_whole
+                        .iter()
+                        .filter(|id| committed_has_strip(model, id))
+                        .map(|id| Box::<str>::from(id.as_str())),
+                ),
+        );
+        restarted.sort_unstable();
+        restarted.dedup();
+    }
+    // #1397 D2 step 1: the transition fallback's duck set, restarted as the join's restarts are.
+    if let Some(base) = successor.filter(|base| !base.forced_restart.is_empty()) {
+        restarted.extend(
+            base.forced_restart
+                .iter()
+                .filter(|id| {
+                    committed_has_strip(base.committed, id) && committed_has_strip(model, id)
+                })
+                .map(|id| Box::<str>::from(id.as_str())),
+        );
+        restarted.sort_unstable();
+        restarted.dedup();
+    }
+    // #1324 D1: a carried effect keyed from a restarted strip's tap behind a restarted owner
+    // would read the old chain until `S` and the restarted chain's at-rest output after it, so
+    // its strip joins the set, until no strip is added. A warm lead's `R` is closed already
+    // (`warm_lead`'s step 2 runs this rule on the same compile).
+    if let Some(base) = successor {
+        close_over_sidechains(
+            base.committed,
+            model,
+            &base.inventory.delay_lines,
+            &delay_lines,
+            &delay_restarted,
+            &mut restarted,
+        );
+    }
+    // #1354a ruling 2: neither the joins nor the closure restart a strip outside the lead's `R`,
+    // whose floors are derived from it.
+    if let (Some(lead), Some(restart)) = (warm, &warm_restart)
+        && restarted
+            .iter()
+            .any(|id| !restart.whole.contains(&**id) && lead.restarted.binary_search(id).is_err())
+    {
+        return Err(warm_invariant());
+    }
+    let restart = StripRestart::new(model, restarted.iter().map(|id| &**id));
+    let carried_input_count = carried_inputs.len();
+    let route_joins: Vec<RouteJoin<'_>> = if restarted.is_empty() {
+        route_joins
+    } else {
+        // The fader's move and its retarget; the matrix's stay.
+        for id in &restarted {
+            if let Some(lane) = strip_stage_row(&strip_stages, id, graph::BuiltinStripOwner::Fader)
+            {
+                let location = lane.location;
+                strip_carry.moves.retain(|step| {
+                    !(step.owner == graph::BuiltinStripOwner::Fader && step.successor == location)
+                });
+            }
+        }
+        strip_carry.retargets.retain_mut(|retarget| {
+            if restart.contains(retarget.id) {
+                retarget.fader = [None; 4];
+                retarget.offsets = [None; 2];
+            }
+            retarget.fader[0].is_some()
+                || retarget.offsets != [None; 2]
+                || retarget.matrix.is_some()
+        });
+        // Every effect of the strip sits before its fader (console slots and inserts). A dropped
+        // retarget that opened an owner transaction on its producer discards it, so the producer
+        // is left as preparation built it.
+        let restarted_sites: Vec<graph::GraphEffectSite> = effect_lanes
+            .iter()
+            .filter(|row| restart.contains(&row.id))
+            .map(|row| row.location)
+            .collect();
+        effect_carry
+            .moves
+            .retain(|step| !restarted_sites.contains(&step.successor));
+        effect_carry.retargets.retain(|retarget| {
+            let producer = &mut effect_controls[retarget.producer];
+            let keep = !restart.contains(&producer.track_id);
+            if !keep && retarget.targets.is_some() {
+                let _ = producer.discard_owner();
+            }
+            keep
+        });
+        effect_carry.scratch_bytes = effect_carry
+            .moves
+            .iter()
+            .filter(|step| {
+                !matches!(
+                    (step.successor, step.predecessor),
+                    (
+                        graph::GraphEffectSite::Node(_),
+                        graph::GraphEffectSite::Node(_)
+                    )
+                )
+            })
+            .filter_map(|step| {
+                effect_lanes
+                    .iter()
+                    .find(|row| row.location == step.successor)
+            })
+            .map(|row| row.layout.payload_bytes())
+            .max()
+            .unwrap_or(0);
+        carried_inputs.retain(|join| !restart.contains(join.id));
+        let dropped: BTreeSet<u32> = delay_lines
+            .iter()
+            .filter(|line| restart.drops_line(line))
+            .map(|line| line.line)
+            .collect();
+        delay_carry.retain(|step| !dropped.contains(&step.successor));
+        // A route from a tap before the fader restarts its live lane: phase 1 ducked it, and the
+        // successor arms it (#1363 D1 (c)).
+        route_joins
+            .into_iter()
+            .filter(|join| !restart.restarts_route(join.id))
+            .collect()
+    };
+    let mut route_carry = match successor {
+        Some(base) => resolve_route_carry(&base.inventory.live_routes, &live_routes, &route_joins),
+        None => RouteCarry::default(),
+    };
+    // #1953b: a fading copy takes the op state of the route it replaces when the predecessor
+    // gave that route a live op (a transition route in flight, or a kept copy), so its fade-out
+    // starts where that route is. A copy out of a restarted strip takes none: phase 1 ducked the
+    // strip, so its tap is silent at the swap and the copy mutes at once.
+    if let Some(base) = successor {
+        let row = |rows: &[graph::GraphLiveRoute], id: &str| {
+            rows.binary_search_by(|row| (*row.route_id).cmp(id))
+                .ok()
+                .map(|index| (rows[index].unit, rows[index].following))
+        };
+        for copy in &route_copies {
+            let (strip, _, _) = source_strip(&copy.route.source);
+            if restart.contains(strip) {
+                continue;
+            }
+            if let (Some((successor, _)), Some((predecessor, follows))) = (
+                row(&live_routes, copy.route.id.as_str()),
+                row(&base.inventory.live_routes, &copy.alias),
+            ) {
+                route_carry.moves.push(graph::GraphRouteMove {
+                    successor,
+                    predecessor,
+                    predecessor_follows: follows,
+                });
+            }
+        }
+    }
+    // Issue #1324 D3, #1363 D1 (c): a duck-swapped strip's routes from a tap before its fader
+    // are armed with it and wait for its fade, as an added strip's are. Only a route with a
+    // live op can arm, a six-word one (the route lanes of #1391) or one that follows an
+    // automated source mute (#2011).
+    // The duck-swapped strips the successor arms, on the terms of an added strip's arm (#1288
+    // D1, D2): a plan that attaches live lanes, never at a declared discontinuity.
+    let armed_restarts: BTreeSet<&str> = match successor {
+        Some(base) if attach_live && !base.discontinuity => {
+            restarted.iter().map(|id| &**id).collect()
+        }
+        _ => BTreeSet::new(),
+    };
+    let route_fades: Vec<RouteFade<'_>> = match successor {
+        Some(base) if !armed_restarts.is_empty() => {
+            let mut fades = route_fades;
+            let added = added_strips(base.committed, model);
+            for route in &model.routes {
+                let (source, tap) = match &route.source {
+                    session::RouteSource::Track { track_id, tap } => (track_id.as_str(), *tap),
+                    session::RouteSource::Submix { submix_id, tap } => (submix_id.as_str(), *tap),
+                };
+                if !armed_restarts.contains(source) || !tap.precedes_fader() {
+                    continue;
+                }
+                if let Some(fade) = fades
+                    .iter_mut()
+                    .find(|fade| fade.route.id.as_str() == route.id.as_str())
+                {
+                    fade.strip = Some(source);
+                    // #1877, #1392 D2: a restarted strip's pending entry is replaced by the fresh
+                    // arm, never carried beside it; the send's entry goes with the fader's.
+                    fade.carried = None;
+                    continue;
+                }
+                let into_added = matches!(&route.destination,
+                    session::RouteDestination::SubmixInput { submix_id }
+                        if added.contains(&submix_id.as_str()));
+                let has_op = live_routes
+                    .binary_search_by(|row| (*row.route_id).cmp(route.id.as_str()))
+                    .is_ok();
+                // #2069: a route the session mutes arms too; its op holds a lane (a muted route
+                // is never a transition route outside `route_fades`), so its mute is live.
+                if into_added || !has_op {
+                    continue;
+                }
+                fades.push(RouteFade {
+                    route,
+                    strip: Some(source),
+                    carried: None,
+                });
+            }
+            fades
+        }
+        _ => route_fades,
+    };
+    // Issue #1288 D1: a strip the successor adds during playback fades in. Only a plan that
+    // attaches live lanes arms (decision 1: the plain entry binds a fader that cannot fade), and
+    // never at a declared discontinuity (decision 2: every owner restarts, and a seek is not
+    // declicked).
+    // Issue #1324 D3: a duck-swapped strip (one in `restarted`, present in both plans) is armed
+    // afresh, with this plan's `D`: its fader restarts (D2).
+    // Issue #1392 D2: a strip whose fade entry the predecessor's table holds is armed again, and
+    // takes that entry's render state at the swap block, exactly when its fader lane carries. A
+    // restarted strip's fader does not carry, so its pending entry is replaced by the fresh arm
+    // above, never carried beside it. Each strip is paired with the predecessor entry it
+    // carries, `None` for an added or a restarted strip.
+    let fade_strips: Vec<(&str, Option<u32>)> = match successor {
+        Some(base) if attach_live && !base.discontinuity => {
+            let mut strips: Vec<(&str, Option<u32>)> = added_strips(base.committed, model)
+                .into_iter()
+                .map(|id| (id, None))
+                .collect();
+            strips.extend(armed_restarts.iter().map(|id| (*id, None)));
+            // A row whose entry render has fired is dropped: the strip's lane imports `armed =
+            // false`, so the successor needs no entry and never fades it again.
+            let watch = &base.inventory.fade_watch;
+            strips.extend(base.inventory.fade_arms.iter().filter_map(|row| {
+                if row.owner != FadeArmOwner::Strip || watch.fired(row.entry) {
+                    return None;
+                }
+                let lane =
+                    strip_stage_row(&strip_stages, &row.id, graph::BuiltinStripOwner::Fader)?;
+                strip_carry
+                    .moves
+                    .iter()
+                    .any(|step| {
+                        step.owner == graph::BuiltinStripOwner::Fader
+                            && step.successor == lane.location
+                    })
+                    .then_some((&*row.id, Some(row.entry)))
+            }));
+            strips
+        }
+        _ => Vec::new(),
+    };
+    let ids: Vec<&str> = fade_strips.iter().map(|(id, _)| *id).collect();
+    let fade_arms = fade_arms_for(model, &ids, &strip_stages, &input_floors);
+    let carried_arms = fade_strips
+        .iter()
+        .filter(|(_, from)| from.is_some())
+        .count()
+        + route_fades
+            .iter()
+            .filter(|fade| fade.carried.is_some())
+            .count();
+    // #1363 D3: the route arms join the strips' table after them, one entry each.
+    // #1953b: and each fading copy's fade-out after them.
+    let carried_arms = carried_arms
+        + route_copies
+            .iter()
+            .filter(|copy| copy.carried.is_some())
+            .count();
+    let fade_arm_bytes = graph::fade_arm_table_bytes(
+        fade_arms.len() + route_fades.len() + route_copies.len(),
+        carried_arms,
+    )
+    .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    // The strip moves' table is charged at its exact length: which strips carry is known only
+    // once both plans' lanes are, so it is checked here, against the same cap as the rest of the
+    // plan, instead of before bind.
+    let strip_carry_bytes = u64::try_from(
+        strip_carry
+            .moves
+            .len()
+            .checked_mul(core::mem::size_of::<graph::GraphStripMove>())
+            .ok_or_else(|| resource("host.resource.arithmetic"))?,
+    )
+    .map_err(|_| resource("host.resource.arithmetic"))?;
+    if admitted_graph_and_model
+        .checked_add(strip_carry_bytes)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?
+        > caps.maximum_graph_session_plus_plan_bytes
+    {
+        return Err(resource("host.graph.resource.limit"));
+    }
     let observation_carry = match successor {
         Some(base) => resolve_observation_carry(
             &base.inventory.observations,
@@ -4430,60 +5157,31 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         observation_carry.len(),
     )
     .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    // Issue #1283 D1: this plan's own compensation lines, sorted by edge ID: the inventory its
-    // successor joins with, and the lines its own moves are resolved from.
-    let mut delay_lines = graph::take_compensation_lines(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-    delay_lines.sort_unstable_by(|left, right| left.edge.cmp(&right.edge));
-    let delay_carry = match successor {
-        Some(base) => {
-            // #1354a decision 2: a strip restarted whole carries no line before its matrix.
-            let kept: Vec<graph::GraphDelayLine>;
-            let own = match &warm_restart {
-                Some(restart) if !restart.whole.is_empty() => {
-                    kept = delay_lines
-                        .iter()
-                        .filter(|line| !restart.drops_line(line))
-                        .cloned()
-                        .collect();
-                    &kept[..]
-                }
-                _ => &delay_lines[..],
-            };
-            resolve_delay_carry(&base.inventory.delay_lines, own, |id| {
-                same_strip_id_kind(base.committed, compiled.normalized_model(), id)
-            })
-        }
-        None => Vec::new(),
-    };
     let delay_carry_bytes = graph::delay_carry_retained_bytes(delay_carry.len())
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    // Issue #1284 D1, D2: this plan's own strip input alignment lines and live sends, sorted by ID:
-    // the inventory its successor joins with, and the rows its own moves are resolved from.
-    let mut strip_delays = graph::take_strip_delay_lines(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-    strip_delays.sort_unstable_by(|left, right| left.strip.cmp(&right.strip));
-    let mut live_routes = graph::take_live_routes(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-    live_routes.sort_unstable_by(|left, right| left.route_id.cmp(&right.route_id));
-    let strip_delay_carry = match successor {
-        Some(base) => resolve_strip_delay_carry(
-            &base.inventory.strip_delays,
-            &strip_delays,
-            &delay_joins,
-            warm.map_or(0, |lead| lead.lead_samples),
-        ),
-        None => StripDelayCarry::default(),
-    };
+    if !carried_inputs.is_empty() {
+        let moves: Vec<graph::GraphLaneMove> = carried_inputs
+            .iter()
+            .filter_map(|join| {
+                input_section_row(&input_sections, join.id).map(|row| graph::GraphLaneMove {
+                    successor: row.location,
+                    predecessor: join.predecessor,
+                })
+            })
+            .collect();
+        // Every strip banks its input section in a shipped plan, so every carried strip finds
+        // its lane here; one that did not would silently restart at rest.
+        debug_assert_eq!(moves.len(), carried_inputs.len());
+        graph::install_builtin_input_carry(&mut plan, moves)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
     // #1355 D5, L3: a warm successor's `Input`-tap sidechain lines from a restarted track on a
-    // moved source into a carried strip.
+    // moved source into a carried strip. `restarted` is every join's restart set and the lead's
+    // whole restarts (#1324a), gathered above.
     let sidechain_fills = match (successor, warm) {
         (Some(base), Some(lead)) if lead.lead_samples != 0 => {
-            let restarted: BTreeSet<&str> = strip_carry
-                .restarted
+            let restarted: BTreeSet<&str> = restarted
                 .iter()
-                .chain(&effect_carry.restarted)
-                .chain(&strip_delay_carry.restarted)
                 .map(|id| &**id)
                 .chain(lead.restart_whole.iter().map(String::as_str))
                 .collect();
@@ -4491,13 +5189,18 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         }
         _ => Vec::new(),
     };
+    // D3's L3 term (#1354b): the words the prime writes into those lines.
+    let warm_prime_bytes = match (successor, warm) {
+        (Some(base), Some(lead)) if lead.lead_samples != 0 => {
+            sidechain_fill_words(&base, &delay_lines, &sidechain_fills, lead.lead_samples)
+                .and_then(|words| words.checked_mul(4)?.checked_add(warm_prime_bytes))
+                .ok_or_else(|| resource("host.resource.arithmetic"))?
+        }
+        _ => warm_prime_bytes,
+    };
     let prime_carry_bytes =
         graph::prime_carry_retained_bytes(strip_delay_carry.fills.len(), sidechain_fills.len())
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
-    let route_carry = match successor {
-        Some(base) => resolve_route_carry(&base.inventory.live_routes, &live_routes, &route_joins),
-        None => RouteCarry::default(),
-    };
     let strip_delay_carry_bytes =
         graph::strip_delay_carry_retained_bytes(strip_delay_carry.moves.len())
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
@@ -4544,8 +5247,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_builtin_strip_carry(&mut plan, strip_carry.moves)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
-    // Issue #1363 D3: each added route's arm, on its live route op; the routes take no inventory
-    // row, so a later successor neither carries nor re-arms them.
+    // Issue #1363 D3: each added route's arm, on its live route op. #1877 D1: each takes an
+    // inventory row, so a later successor re-arms it and carries its entry, as a strip's.
     let route_arms = route_fade_arms(
         model,
         &route_fades,
@@ -4554,17 +5257,28 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         &input_floors,
     )
     .ok_or_else(|| graph_failure("host.fade.install"))?;
+    // #1953b: each fading copy's fade-out, from its first block, over the session mute ramp; it
+    // settles once its destination line has delivered the fade. A copy out of a restarted strip
+    // mutes at once (ramp 0): its tap is silent at the swap.
+    let copy_arms = copy_fade_arms(model, &route_copies, &live_routes, &delay_lines, |strip| {
+        restart.contains(strip)
+    })
+    .ok_or_else(|| graph_failure("host.fade.install"))?;
     let mut fade_arm_rows = Vec::new();
+    let mut route_copy_rows = Vec::new();
     let mut fade_watch = graph::GraphFadeArmWatch::default();
-    if !fade_arms.is_empty() || !route_arms.is_empty() {
+    if !fade_arms.is_empty() || !route_arms.is_empty() || !copy_arms.is_empty() {
         let (strips, mut arms): (Vec<_>, Vec<_>) = fade_arms.into_iter().unzip();
+        let route_count = route_arms.len();
         arms.extend(route_arms);
+        arms.extend(copy_arms);
         let (entries, watch) = graph::install_fade_arms(&mut plan, arms)
             .map_err(|_| graph_failure("host.fade.install"))?;
         fade_watch = watch;
         let mut pairs = Vec::new();
-        for (id, entry) in strips.into_iter().zip(entries) {
-            let Some(entry) = entry else {
+        let strip_count = strips.len();
+        for (id, entry) in strips.into_iter().zip(&entries) {
+            let Some(entry) = *entry else {
                 continue;
             };
             if let Some(&(_, Some(predecessor))) =
@@ -4578,13 +5292,54 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             fade_arm_rows.push(FadeArmInventoryRow {
                 id: id.into(),
                 entry,
+                owner: FadeArmOwner::Strip,
             });
         }
+        // #1877 D1, D2: the route arms follow the strips' in `route_fades` order.
+        for (fade, entry) in route_fades.iter().zip(entries.iter().skip(strip_count)) {
+            let Some(entry) = *entry else {
+                continue;
+            };
+            if let Some(predecessor) = fade.carried {
+                pairs.push(graph::GraphFadeArmPair {
+                    successor: entry,
+                    predecessor,
+                });
+            }
+            fade_arm_rows.push(FadeArmInventoryRow {
+                id: fade.route.id.as_str().into(),
+                entry,
+                owner: FadeArmOwner::Route,
+            });
+        }
+        // #1953b: the copies' arms follow the routes'.
+        for (copy, entry) in route_copies
+            .iter()
+            .zip(entries.iter().skip(strip_count + route_count))
+        {
+            let Some(entry) = *entry else {
+                continue;
+            };
+            if let Some(predecessor) = copy.carried {
+                pairs.push(graph::GraphFadeArmPair {
+                    successor: entry,
+                    predecessor,
+                });
+            }
+            route_copy_rows.push(RouteCopyRow {
+                route: copy.route.clone(),
+                entry,
+            });
+        }
+        route_copy_rows.sort_unstable_by(|left: &RouteCopyRow, right: &RouteCopyRow| {
+            left.route.id.as_str().cmp(right.route.id.as_str())
+        });
         if !pairs.is_empty() {
             graph::install_fade_arm_carry(&mut plan, pairs)
                 .map_err(|_| graph_failure("host.carry.install"))?;
         }
-        fade_arm_rows.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        fade_arm_rows
+            .sort_unstable_by(|left, right| (&left.id, left.owner).cmp(&(&right.id, right.owner)));
     }
     // #1674 R1: the meter readers the control side pairs at promotion, in the swap block's record
     // order, read before the moves go to the plan.
@@ -4656,9 +5411,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
+    // The admission charged the input moves of every strip the input join carries; the
+    // restart filter (#1324 D2) may have dropped some since, and the program retains exactly
+    // the rest.
     debug_assert_eq!(
         carry_program_retained_bytes,
         carry_program_bytes
+            - ((carried_input_count - carried_inputs.len())
+                * core::mem::size_of::<graph::GraphLaneMove>()) as u64
             + strip_carry_bytes
             + effect_carry_bytes
             + meter_carry_bytes
@@ -4668,29 +5428,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             + route_carry_bytes
     );
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
-    let mut restarted = strip_carry.restarted;
-    restarted.extend(effect_carry.restarted);
-    restarted.extend(strip_delay_carry.restarted);
-    restarted.sort_unstable();
-    restarted.dedup();
-    if let (Some(lead), Some(restart)) = (warm, &warm_restart) {
-        // #1354a ruling 2: the join restarts no strip outside the lead's `R`; a strip restarted
-        // whole is listed whatever its owners did.
-        if restarted
-            .iter()
-            .any(|id| !restart.whole.contains(&**id) && lead.restarted.binary_search(id).is_err())
-        {
-            return Err(warm_invariant());
-        }
-        restarted.extend(
-            lead.restart_whole
-                .iter()
-                .filter(|id| committed_has_strip(model, id))
-                .map(|id| Box::<str>::from(id.as_str())),
-        );
-        restarted.sort_unstable();
-        restarted.dedup();
-    }
     // #1396 D2: an ordinary successor reads its sources as far ahead of its render clock as its
     // predecessor does, so the source-read clock never moves backwards across a rebuild. A first
     // plan reads on its render clock, and so does a discontinuity successor, whose base inventory
@@ -4725,6 +5462,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         restarted: restarted.into_boxed_slice(),
         fade_arms: fade_arm_rows.into_boxed_slice(),
         fade_watch,
+        route_copies: route_copy_rows.into_boxed_slice(),
         input_floors,
         raised_arrivals,
         source_read_offset,
@@ -7055,31 +7793,58 @@ fn added_strips<'a>(committed: &SessionModel, model: &'a SessionModel) -> Vec<&'
 struct RouteFade<'a> {
     route: &'a session::Route,
     strip: Option<&'a str>,
+    /// The predecessor's unfired entry for the route, whose render state this arm takes at the
+    /// swap block (#1877 D2); `None` for a route armed afresh.
+    carried: Option<u32>,
 }
 
 /// The routes of `model` a successor arms to fade in (#1363 D1 (a), (c)), in `model`'s route
-/// order: (a) a route `committed` does not hold whose source strip and destination it does
-/// hold, and (c) a route out of an added strip whose tap precedes the fader. A route from a
+/// order: (a) a route `committed` does not hold, or holds under its ID with another source, tap
+/// or destination (a re-point, #1953a; from a lane-less route too, #1953b, whose old half fades
+/// out as a fading copy), whose source strip and destination it does hold, and (c) a route out
+/// of an added strip whose tap precedes the fader. A route from a
 /// strip whose fader is armed (`added`, or `waiting`: a strip with an unfired predecessor entry)
 /// and whose tap follows the fader takes none (the fader's fade shapes it), and neither does a
-/// route whose destination strip is added (its fader's fade does), a route the session mutes
-/// (it arms nothing), or a following route ([`follows_automated_mute`], which binds no six-word
-/// op). A tap before an armed fader waits for that strip's fade.
+/// route whose destination strip is added (its fader's fade does). A route the session mutes
+/// arms as any other when its mute is live in this plan (`live_mute`, #2069): its fire goes to
+/// its prepared mute, so an unmute before the fire opens it at the fire, over the fade; one whose
+/// mute is not live (no lane: no value can unmute it before the fire) arms nothing. A route that
+/// follows an automated source mute ([`follows_automated_mute`]) arms as any other (#2011): its
+/// fire composes with the curve it hears. A tap before an armed fader waits for that strip's
+/// fade. #2077: (a) also takes a lane-less route `model` keeps with the same endpoints and other
+/// values (`retargeted`, [`crossfades_values`]): it fades in at its new values as its old ones
+/// fade out in a fading copy ([`route_copies`]); a kept route this model mutes arms nothing.
+///
+/// #1877 D2: a route of `waiting_routes` (one whose predecessor entry has not fired, with that
+/// entry) that `committed` holds with the same source, tap and destination is armed again on the
+/// terms of (a), carrying the entry, whatever its live op's kind in either plan, a route this
+/// model mutes included (#2069); one this model re-points is not (the displaced arm then fires
+/// at the swap, #1363 D3a).
 fn added_route_fades<'a>(
     committed: &SessionModel,
     model: &'a SessionModel,
-    view: controls::ModelView<'_>,
     added: &[&str],
     waiting: &[&str],
+    waiting_routes: &[(&str, u32)],
+    live_mute: impl Fn(&session::Route) -> bool,
+    retargeted: impl Fn(&session::Route) -> bool,
 ) -> Vec<RouteFade<'a>> {
-    let known: BTreeSet<&str> = committed
-        .routes
-        .iter()
-        .map(|route| route.id.as_str())
-        .collect();
+    // #1953a (D15-9): a route `committed` holds under the same ID with another source, tap or
+    // destination is a removal plus an addition, so it is not known: it arms as added. #1953b:
+    // so is one whose old route has no lane; its removal half fades out as a fading copy
+    // ([`route_copies`]). #2077: a known lane-less route whose values change arms as added too
+    // (`retargeted`); its old values fade out in a fading copy.
+    let same_endpoints = |route: &session::Route| {
+        committed.routes.iter().any(|before| {
+            before.id == route.id
+                && before.source == route.source
+                && before.destination == route.destination
+        })
+    };
+    let known = same_endpoints;
     let mut fades = Vec::new();
     for route in &model.routes {
-        if route.mute || follows_automated_mute(view, route) {
+        if route.mute && !live_mute(route) {
             continue;
         }
         let (source, tap) = match &route.source {
@@ -7099,12 +7864,21 @@ fn added_route_fades<'a>(
                 .any(|output| output.id.as_str() == output_id.as_str()),
         };
         let armed_source = added.contains(&source) || waiting.contains(&source);
-        let fade = if added.contains(&source) {
+        let carried = waiting_routes
+            .iter()
+            .find(|(id, _)| *id == route.id.as_str())
+            .filter(|_| same_endpoints(route))
+            .map(|&(_, entry)| entry);
+        let fade = if carried.is_some() {
+            // #1877 D2: an armed route that keeps its endpoints, armed again.
+            destination_known && (!armed_source || tap.precedes_fader())
+        } else if added.contains(&source) {
             // (c): a send of an added strip, from a tap before its fader.
             tap.precedes_fader()
         } else {
-            // (a): an added route between two strips that keep playing.
-            !known.contains(route.id.as_str())
+            // (a): an added route between two strips that keep playing, or (#2077) a kept
+            // lane-less route at new values, whose source `retargeted` never names armed (R2).
+            (!known(route) || retargeted(route))
                 && destination_known
                 && (!armed_source || tap.precedes_fader())
         };
@@ -7112,15 +7886,292 @@ fn added_route_fades<'a>(
             fades.push(RouteFade {
                 route,
                 strip: armed_source.then_some(source),
+                carried,
             });
         }
     }
     fades
 }
 
-/// The fade arm of each route of `fades` (#1363 D3, D6): its target is its six-word live route's
-/// unit in `live_routes` (sorted by route ID); `None` when one has no such row (preparation then
-/// fails: every route of `fades` binds one).
+/// One fading copy a successor compiles (#1953b): a lane-less route (`post_fader` or `post_pan`
+/// into the output, decision 14's master fold, D15-9) that the transaction removes from, or
+/// re-points on, a strip the successor keeps, or (#2077) whose values (gain, matrix or mute) it
+/// changes ([`crossfades_values`]). The folded route has no live op to ramp in phase 1,
+/// so the successor compiles the old route beside its own model, under a copy ID, as a transition
+/// route at the predecessor's coefficients, armed to fade *out* from its first block (`f = 0`:
+/// the destination line sits after the op). The copy takes the predecessor route's op state and
+/// its lines (by alias), and later successors keep it, carrying both, until its fade entry has
+/// settled: its ramp ended and its destination line delivered it.
+struct RouteCopy {
+    /// The copy: the old route's source, destination and values under the copy ID, unmuted.
+    route: session::Route,
+    /// The ID of the predecessor's route whose op and lines the copy takes: the removed route's
+    /// for a fresh copy, the predecessor's copy's for a kept one.
+    alias: Box<str>,
+    /// The predecessor's fade-out entry a kept copy carries (#1392 D3); `None` for a fresh copy.
+    carried: Option<u32>,
+}
+
+/// Whether a successor of `base` crossfades a value change of `after` (#2077): `after` is a
+/// lane-less route (no live rows, so no lane can ramp it) that `committed` holds under its ID with
+/// the same source and destination and other values (gain, matrix or mute: R3, a change of `mute`
+/// alone is a value change). Its old values fade out in a fading copy when `committed` does not
+/// mute it ([`route_copies`]) and its new values fade in when `after` is not muted
+/// ([`added_route_fades`]), both from the swap block: the route's own arm waits for nothing
+/// (`D = 0`), so the swap is its `S` and nothing carries (R1).
+///
+/// R2: never when the source strip's own fade owns the route: a strip with an unfired fade entry
+/// of the predecessor (an added strip still waiting; its fader is shut until its fire, which is
+/// pair-carried) or one a duck of the transaction already silences (the duck overlay's strips and
+/// the transition fallback's).
+///
+/// A route whose predecessor arm had not fired at preparation (a plan replaced before it renders)
+/// takes both halves too: its copy aliases the predecessor's op, which is mid-ramp when that arm
+/// fired before the swap and settled at `[+0.0; 4]`, muted, when it did not (the copy then fades
+/// out silence for one ramp), and the kept route is re-armed at its new values, carrying the entry
+/// (#1877 D2).
+fn crossfades_values(base: &SuccessorBase<'_>, after: &session::Route) -> bool {
+    if controls::route_rows_live(after) {
+        return false;
+    }
+    let Some(before) = base
+        .committed
+        .routes
+        .iter()
+        .find(|before| before.id == after.id)
+    else {
+        return false;
+    };
+    if before.source != after.source || before.destination != after.destination || before == after {
+        return false;
+    }
+    let (strip, _, _) = source_strip(&after.source);
+    let watch = &base.inventory.fade_watch;
+    let waiting = base.inventory.fade_arms.iter().any(|row| {
+        row.owner == FadeArmOwner::Strip && &*row.id == strip && !watch.fired(row.entry)
+    });
+    !base.duck.has_strip(strip) && !base.forced_restart.iter().any(|id| id == strip) && !waiting
+}
+
+/// The copy ID of a route `original` (#1953b): the shortest `original` followed by hyphens that
+/// `taken` does not hold, so the copy sorts next to where `original` sorted among a destination's
+/// routes (no ID lies between `original` and `original-`; `-` is the smallest ID byte). An ID at
+/// the length limit takes `-` and a number on a shortened prefix instead. `None` only when no
+/// such ID is free, which `taken` (a finite set) never makes so.
+fn copy_route_id(original: &str, taken: impl Fn(&str) -> bool) -> Option<session::StableId> {
+    let mut candidate = String::from(original);
+    while candidate.len() < session::STABLE_ID_MAXIMUM_BYTES {
+        candidate.push('-');
+        if !taken(&candidate) {
+            return session::StableId::parse(&candidate);
+        }
+    }
+    (0_u64..).take(1 << 16).find_map(|number| {
+        let suffix = format!("-{number}");
+        let keep = session::STABLE_ID_MAXIMUM_BYTES.saturating_sub(suffix.len());
+        let prefix: String = original.chars().take(keep).collect();
+        let candidate = format!("{prefix}{suffix}");
+        (!taken(&candidate))
+            .then(|| session::StableId::parse(&candidate))
+            .flatten()
+    })
+}
+
+/// The fading copies a successor of `base` compiles beside `model` (#1953b), on the terms of an
+/// added route's arm (a plan that attaches live lanes, never at a declared discontinuity, which
+/// the caller checks): first each copy of the predecessor whose fade entry has not settled and
+/// whose source strip `model` keeps, then a fresh copy of each lane-less route of `committed` that
+/// `model` lacks, or holds under its ID with another source, tap or destination (a re-point,
+/// D15-9: the removal half), or (#2077) holds with the same endpoints at other values (its old
+/// values, [`crossfades_values`]), that the session does not mute, from a strip `model` keeps and that
+/// no duck of the transaction already silences (the duck overlay's strips and the transition
+/// fallback's). Each copy ID is free in both models and among the copies before it.
+fn route_copies(base: &SuccessorBase<'_>, model: &SessionModel) -> Vec<RouteCopy> {
+    // The copy's source strip, of the same kind: a strip replaced by one of the other kind under
+    // its ID is a removal and an addition (#1324), whose routes its phase-1 duck silences.
+    let keeps_source = |route: &session::Route| match &route.source {
+        session::RouteSource::Track { track_id, .. } => model
+            .tracks
+            .binary_search_by(|track| track.id.as_str().cmp(track_id.as_str()))
+            .is_ok(),
+        session::RouteSource::Submix { submix_id, .. } => model
+            .submixes
+            .binary_search_by(|submix| submix.id.as_str().cmp(submix_id.as_str()))
+            .is_ok(),
+    };
+    let mut copies: Vec<RouteCopy> = Vec::new();
+    let taken = |copies: &[RouteCopy], id: &str| {
+        model.routes.iter().any(|route| route.id.as_str() == id)
+            || base
+                .committed
+                .routes
+                .iter()
+                .any(|route| route.id.as_str() == id)
+            || copies.iter().any(|copy| copy.route.id.as_str() == id)
+    };
+    let watch = &base.inventory.fade_watch;
+    for row in &base.inventory.route_copies {
+        if watch.settled(row.entry) || !keeps_source(&row.route) {
+            continue;
+        }
+        let held = row.route.id.as_str();
+        let id = if taken(&copies, held) {
+            copy_route_id(held, |id| taken(&copies, id))
+        } else {
+            Some(row.route.id.clone())
+        };
+        let Some(id) = id else {
+            continue;
+        };
+        let mut route = row.route.clone();
+        route.id = id;
+        copies.push(RouteCopy {
+            route,
+            alias: held.into(),
+            carried: Some(row.entry),
+        });
+    }
+    for before in &base.committed.routes {
+        if controls::route_rows_live(before) || before.mute || !keeps_source(before) {
+            continue;
+        }
+        let (strip, _, _) = source_strip(&before.source);
+        if base.duck.has_strip(strip) || base.forced_restart.iter().any(|id| id == strip) {
+            continue;
+        }
+        // #2077: a kept route at other values is copied too, at its old values (a value change
+        // fades out as a removal does; its kept route fades in, [`added_route_fades`]).
+        let kept = model.routes.iter().any(|after| {
+            after.id == before.id
+                && after.source == before.source
+                && after.destination == before.destination
+                && !crossfades_values(base, after)
+        });
+        let destination_kept = match &before.destination {
+            session::RouteDestination::OutputInput { output_id } => model
+                .outputs
+                .iter()
+                .any(|output| output.id.as_str() == output_id.as_str()),
+            session::RouteDestination::SubmixInput { .. } => false,
+        };
+        if kept || !destination_kept {
+            continue;
+        }
+        let Some(id) = copy_route_id(before.id.as_str(), |id| taken(&copies, id)) else {
+            continue;
+        };
+        let mut route = before.clone();
+        route.id = id;
+        copies.push(RouteCopy {
+            route,
+            alias: before.id.as_str().into(),
+            carried: None,
+        });
+    }
+    copies
+}
+
+/// The carry of each fading copy's lines (#1953b): each edge of a copy (its source and its
+/// destination edge) takes the predecessor's line on the same edge of the route it replaces
+/// (`alias`), when its endpoints are that line's; that line goes to the copy and to nothing else,
+/// so a route re-pointed under the old ID (whose endpoints differ anyway) never takes it. Both
+/// slices are sorted by edge.
+fn alias_copy_lines(
+    predecessor: &[graph::GraphDelayLine],
+    own: &[graph::GraphDelayLine],
+    copies: &[RouteCopy],
+    moves: &mut Vec<graph::GraphDelayMove>,
+) {
+    let find = |lines: &[graph::GraphDelayLine], edge: &graph::GraphEdgeId| {
+        lines
+            .binary_search_by(|line| line.edge.cmp(edge))
+            .ok()
+            .map(|index| lines[index].clone())
+    };
+    for copy in copies {
+        let (Some(id), Some(alias)) = (
+            StableGraphId::parse(copy.route.id.as_str()),
+            StableGraphId::parse(&copy.alias),
+        ) else {
+            continue;
+        };
+        let edges = [
+            (
+                graph::GraphEdgeId::RouteSource {
+                    route_id: id.clone(),
+                },
+                graph::GraphEdgeId::RouteSource {
+                    route_id: alias.clone(),
+                },
+            ),
+            (
+                graph::GraphEdgeId::RouteDestination { route_id: id },
+                graph::GraphEdgeId::RouteDestination { route_id: alias },
+            ),
+        ];
+        for (edge, alias_edge) in edges {
+            let (Some(line), Some(earlier)) = (find(own, &edge), find(predecessor, &alias_edge))
+            else {
+                continue;
+            };
+            if earlier.source != line.source || earlier.destination != line.destination {
+                continue;
+            }
+            moves.retain(|step| step.successor != line.line && step.predecessor != earlier.line);
+            moves.push(graph::GraphDelayMove {
+                successor: line.line,
+                predecessor: earlier.line,
+            });
+        }
+    }
+}
+
+/// The fade-out arm of each fading copy of `copies` (#1953b), in order: its target is its
+/// transition route's unit in `live_routes` (sorted by route ID); it waits for nothing (`D = 0`:
+/// the copy's destination line sits after its op, so the fade enters it at the first block); its
+/// ramp is the session mute ramp, or 0 for a copy whose source strip `restarted` names; its tail
+/// is its destination edge's line in `delay_lines` (sorted by edge). `None` when a copy has no
+/// live route row (preparation then fails: every copy binds as a transition route).
+fn copy_fade_arms(
+    model: &SessionModel,
+    copies: &[RouteCopy],
+    live_routes: &[graph::GraphLiveRoute],
+    delay_lines: &[graph::GraphDelayLine],
+    restarted: impl Fn(&str) -> bool,
+) -> Option<Vec<graph::GraphFadeArm>> {
+    let ramp_samples = LiveRamps::for_session(model).mute_samples;
+    copies
+        .iter()
+        .map(|copy| {
+            let id = copy.route.id.as_str();
+            let unit = live_routes
+                .binary_search_by(|row| (*row.route_id).cmp(id))
+                .ok()
+                .map(|index| live_routes[index].unit)?;
+            let edge = graph::GraphEdgeId::RouteDestination {
+                route_id: StableGraphId::parse(id)?,
+            };
+            let tail_samples = delay_lines
+                .binary_search_by(|line| line.edge.cmp(&edge))
+                .ok()
+                .map_or(Some(0), |index| {
+                    u32::try_from(delay_lines[index].samples).ok()
+                })?;
+            let (strip, _, _) = source_strip(&copy.route.source);
+            Some(graph::GraphFadeArm {
+                target: graph::GraphFadeTarget::RouteOut(unit),
+                source: None,
+                delay_samples: 0,
+                ramp_samples: if restarted(strip) { 0 } else { ramp_samples },
+                tail_samples,
+            })
+        })
+        .collect()
+}
+
+/// The fade arm of each route of `fades` (#1363 D3, D6): its target is its live route's unit in
+/// `live_routes` (sorted by route ID), of either kind (#2011); `None` when one has no such row
+/// (preparation then fails: every route of `fades` binds one).
 ///
 /// `D` is the samples before the route's own op that start at rest: for a route out of a strip
 /// whose fader is armed, the route's input arrival minus the strip's `Input` arrival (every node
@@ -7148,8 +8199,7 @@ fn route_fade_arms(
         let row = live_routes
             .binary_search_by(|row| (*row.route_id).cmp(fade.route.id.as_str()))
             .ok()
-            .map(|index| &live_routes[index])
-            .filter(|row| !row.following)?;
+            .map(|index| &live_routes[index])?;
         let route_id = StableGraphId::parse(fade.route.id.as_str())?;
         let route_node = GraphNodeId::Route {
             route_id: route_id.clone(),
@@ -7197,6 +8247,7 @@ fn route_fade_arms(
             }
         };
         arms.push(graph::GraphFadeArm {
+            tail_samples: 0,
             target: graph::GraphFadeTarget::Route(row.unit),
             source,
             delay_samples: u32::try_from(delay).unwrap_or(u32::MAX),
@@ -7269,9 +8320,12 @@ fn fade_arms_for<'a>(
                 .unwrap_or(0);
             delay = delay.saturating_add(into_submix);
         }
+        // #2080: a strip the session mutes is armed too; its fire goes to its prepared mute, so
+        // an unmute record before the fire opens it at the fire, over the fade.
         arms.push((
             id,
             graph::GraphFadeArm {
+                tail_samples: 0,
                 target: graph::GraphFadeTarget::Fader(row.location),
                 source: is_track.then_some(input),
                 delay_samples: u32::try_from(delay).unwrap_or(u32::MAX),
@@ -7283,7 +8337,7 @@ fn fade_arms_for<'a>(
 }
 
 /// Whether `committed` has a strip of any kind named `id`.
-fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
+pub(crate) fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
     committed
         .tracks
         .binary_search_by(|track| track.id.as_str().cmp(id))
@@ -7292,6 +8346,124 @@ fn committed_has_strip(committed: &SessionModel, id: &str) -> bool {
             .submixes
             .binary_search_by(|submix| submix.id.as_str().cmp(id))
             .is_ok()
+}
+
+/// The strip a route or a sidechain reads, and its tap; whether that strip is a submix.
+pub(crate) fn source_strip(source: &session::RouteSource) -> (&str, session::SendTap, bool) {
+    match source {
+        session::RouteSource::Track { track_id, tap } => (track_id.as_str(), *tap, false),
+        session::RouteSource::Submix { submix_id, tap } => (submix_id.as_str(), *tap, true),
+    }
+}
+
+/// The length, in `lines`, of the compensation line on the sidechain of effect `effect` of strip
+/// `strip` into its port `port`; 0 when it has none.
+pub(crate) fn sidechain_line_samples(
+    lines: &[graph::GraphDelayLine],
+    strip: &str,
+    effect: &str,
+    port: &str,
+) -> u64 {
+    lines
+        .iter()
+        .find(|line| {
+            matches!(&line.edge, graph::GraphEdgeId::EffectSidechain { effect: node, port: at }
+                if node.track_id.as_str() == strip
+                    && node.effect_id.as_str() == effect
+                    && at == port)
+        })
+        .map_or(0, |line| line.samples)
+}
+
+/// #1324 D1's exemption of a submix's `input` tap whatever its arrival: every line into submix
+/// `submix`'s `Input` stage, in `committed` and in `model`, comes from a ducked strip (`ducked`,
+/// which holds the removed strips) or, in `model`, from an added one. Its input then holds exact
+/// `+0.0` from the end of the duck until the fire: a route of `model` from a ducked or added
+/// strip's tap before its fader is armed, a following one too (#2011).
+pub(crate) fn submix_input_is_quiet(
+    committed: &SessionModel,
+    model: &SessionModel,
+    submix: &str,
+    ducked: &dyn Fn(&str) -> bool,
+) -> bool {
+    let into = |route: &&session::Route| {
+        matches!(&route.destination, session::RouteDestination::SubmixInput { submix_id }
+            if submix_id.as_str() == submix)
+    };
+    committed
+        .routes
+        .iter()
+        .filter(into)
+        .all(|route| ducked(source_strip(&route.source).0))
+        && model.routes.iter().filter(into).all(|route| {
+            let source = source_strip(&route.source).0;
+            !committed_has_strip(committed, source) || ducked(source)
+        })
+}
+
+/// #1324 D1's sidechain closure, on the restart set `restarted` (sorted) of a successor of
+/// `committed` prepared from `model`: a strip of both plans with an insert keyed from a tap of a
+/// restarted strip that follows a restarted owner with state (`post_input`, `insert_send`,
+/// `insert_return`, `pre_fader`) joins the set, repeated until no strip is added. A track's
+/// `input` tap is its raw source, and a `post_fader` or `post_pan` tap holds exact `+0.0` from
+/// the end of the duck until the fire, so neither adds its consumer, unless the strip's own delay
+/// line restarts (`delay_restarted`, sorted): the `input` tap is that line's output, which then
+/// starts at rest at `S`, so it adds its consumer, a track's or a submix's. Otherwise a submix's
+/// `input` tap adds its consumer only when the sidechain's line changes length (`before` is the
+/// predecessor's lines, `after` the successor's) and the submix's input is not quiet
+/// ([`submix_input_is_quiet`]). Console slots have no sidechain.
+fn close_over_sidechains(
+    committed: &SessionModel,
+    model: &SessionModel,
+    before: &[graph::GraphDelayLine],
+    after: &[graph::GraphDelayLine],
+    delay_restarted: &[Box<str>],
+    restarted: &mut Vec<Box<str>>,
+) {
+    loop {
+        let held =
+            |set: &[Box<str>], id: &str| set.binary_search_by(|held| (**held).cmp(id)).is_ok();
+        let set: &[Box<str>] = restarted;
+        let ducked = |id: &str| held(set, id) || !committed_has_strip(model, id);
+        let keyed = |strip: &str, effect: &session::Effect| {
+            let session::SidechainDeclaration::Routed(sidechain) = &effect.sidechain else {
+                return false;
+            };
+            let (source, tap, submix) = source_strip(&sidechain.source);
+            if !held(set, source) {
+                return false;
+            }
+            match tap {
+                session::SendTap::PostFader | session::SendTap::PostPan => false,
+                session::SendTap::Input if held(delay_restarted, source) => true,
+                session::SendTap::Input => {
+                    let port = sidechain.port_id.as_str();
+                    let id = effect.id.as_str();
+                    submix
+                        && sidechain_line_samples(before, strip, id, port)
+                            != sidechain_line_samples(after, strip, id, port)
+                        && !submix_input_is_quiet(committed, model, source, &ducked)
+                }
+                session::SendTap::PostInput
+                | session::SendTap::InsertSend
+                | session::SendTap::InsertReturn
+                | session::SendTap::PreFader => true,
+            }
+        };
+        let joined: Vec<Box<str>> = model
+            .strips()
+            .map(|strip| (strip.id.as_str(), strip.inserts))
+            .filter(|(id, _)| !held(set, id) && committed_has_strip(committed, id))
+            .filter(|(id, inserts)| inserts.effects.iter().any(|effect| keyed(id, effect)))
+            .map(|(id, _)| Box::from(id))
+            .collect();
+        if joined.is_empty() {
+            return;
+        }
+        restarted.extend(joined);
+        restarted.sort_unstable();
+        restarted.dedup();
+    }
 }
 
 /// The model half of the strip join (#1277 D3, D4): for every strip of `model` that `committed`
@@ -7475,6 +8647,44 @@ fn strip_delay_lanes(equal: u8, before: Option<[u32; 2]>, after: [u32; 2], lead:
     (moved, grown)
 }
 
+/// The lanes of strip `join`'s line in the successor (`after`, its lane rings) that hold pending
+/// samples worth carrying: a nonempty ring on a lane whose declared delay is equal in both models.
+fn needed_lanes(join: &StripDelayJoin<'_>, after: Option<[u32; 2]>) -> u8 {
+    after.map_or(0, |after| {
+        [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
+            .into_iter()
+            .zip(after)
+            .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
+            .fold(0, |mask, (bit, _)| mask | bit)
+    })
+}
+
+/// Whether the strip delay join restarts strip `join` (#1284 D1, #1354a ruling 3): a lane's
+/// declared delay changed, or a needed lane ([`needed_lanes`]) can neither move nor grow by
+/// exactly `lead` (its ring changed otherwise, the predecessor holds no line for it, or the strip
+/// reads another source). `before` and `after` are the strip's lane rings in the predecessor and
+/// the successor, `None` for a plan that holds no line for it. [`resolve_strip_delay_carry`] and
+/// [`warm_lead`] (on the lead's compile, before bind) read this one rule.
+fn strip_delay_restarts(
+    join: &StripDelayJoin<'_>,
+    before: Option<[u32; 2]>,
+    after: Option<[u32; 2]>,
+    lead: u64,
+) -> bool {
+    if join.equal != graph::STRIP_DELAY_LEFT | graph::STRIP_DELAY_RIGHT {
+        return true;
+    }
+    let needed = needed_lanes(join, after);
+    match (after, join.same_source) {
+        _ if needed == 0 => false,
+        (Some(after), true) => {
+            let (moved, grown) = strip_delay_lanes(join.equal, before, after, lead);
+            moved | grown != needed
+        }
+        _ => true,
+    }
+}
+
 /// The line half of the strip delay join (#1284 D1, #1402 D1): a lane carries when its
 /// `delay_samples` is the same in both models, the strip reads the same source, and both plans
 /// hold the strip's line with rings of one length on that lane. A lane is needed by its ring, not
@@ -7503,52 +8713,44 @@ fn resolve_strip_delay_carry(
     };
     let mut carry = StripDelayCarry::default();
     for join in joins {
-        let both = graph::STRIP_DELAY_LEFT | graph::STRIP_DELAY_RIGHT;
-        let mut restarts = join.equal != both;
+        let after = row(own, join.id);
+        let before = row(predecessor, join.id);
+        let restarts = strip_delay_restarts(
+            join,
+            before.as_ref().map(|before| before.samples),
+            after.as_ref().map(|after| after.samples),
+            lead,
+        );
         // A lane whose ring is empty in the successor has nothing to take; a lane of a line the
         // predecessor never had, or of a strip that reads another source, starts at rest.
-        let after = row(own, join.id);
-        let needed = after.as_ref().map_or(0, |after| {
-            [graph::STRIP_DELAY_LEFT, graph::STRIP_DELAY_RIGHT]
-                .into_iter()
-                .zip(after.samples)
-                .filter(|&(bit, samples)| join.equal & bit != 0 && samples != 0)
-                .fold(0, |mask, (bit, _)| mask | bit)
-        });
-        if needed != 0 {
-            match (after, join.same_source) {
-                (Some(after), true) => {
-                    let before = row(predecessor, join.id);
-                    let (moved, grown) = strip_delay_lanes(
-                        join.equal,
-                        before.as_ref().map(|before| before.samples),
-                        after.samples,
-                        lead,
-                    );
-                    restarts |= moved | grown != needed;
-                    if let Some(before) = &before
-                        && moved != 0
-                    {
-                        carry.moves.push(graph::GraphStripDelayMove {
-                            successor: after.line,
-                            predecessor: before.line,
-                            lanes: moved,
-                        });
-                    }
-                    // #1355 D5: a warm successor's track line on a moved source takes the prime
-                    // on every lane that continues, and the predecessor's pending words first on
-                    // the lanes that grew.
-                    if lead != 0 && join.track && moved | grown != 0 {
-                        carry.fills.push(graph::GraphClaimFill {
-                            line: after.line,
-                            claim: claim_node(join.id),
-                            predecessor: before.as_ref().map(|before| before.line),
-                            pending_lanes: grown & !moved,
-                            lanes: moved | grown,
-                        });
-                    }
-                }
-                _ => restarts = true,
+        let needed = needed_lanes(join, after.as_ref().map(|after| after.samples));
+        if let (Some(after), true) = (after.filter(|_| needed != 0), join.same_source) {
+            let (moved, grown) = strip_delay_lanes(
+                join.equal,
+                before.as_ref().map(|before| before.samples),
+                after.samples,
+                lead,
+            );
+            if let Some(before) = &before
+                && moved != 0
+            {
+                carry.moves.push(graph::GraphStripDelayMove {
+                    successor: after.line,
+                    predecessor: before.line,
+                    lanes: moved,
+                });
+            }
+            // #1355 D5: a warm successor's track line on a moved source takes the prime on every
+            // lane that continues, and the predecessor's pending words first on the lanes that
+            // grew.
+            if lead != 0 && join.track && moved | grown != 0 {
+                carry.fills.push(graph::GraphClaimFill {
+                    line: after.line,
+                    claim: claim_node(join.id),
+                    predecessor: before.as_ref().map(|before| before.line),
+                    pending_lanes: grown & !moved,
+                    lanes: moved | grown,
+                });
             }
         }
         if restarts {
@@ -8404,7 +9606,7 @@ mod tests {
     use effect_compiler::{EffectDiagnostic, EffectDiagnosticSet};
     use session::{DiagnosticCode, parse_session_json};
 
-    /// #1354a decision 2: the whole-strip restart filter drops exactly a restarted strip's
+    /// #1354a decision 2, #1324 D2: the whole-strip restart filter drops exactly a restarted strip's
     /// compensation lines before its matrix (its chain, its effects' sidechains, its routes from a
     /// tap before the fader), and keeps its matrix and post-fader lines and every other strip's.
     #[test]
@@ -8420,7 +9622,7 @@ mod tests {
             tap: session::SendTap::PreFader,
         };
         model.routes.push(pre);
-        let restart = super::WarmRestart::new(&model, [], ["eq0"]);
+        let restart = super::StripRestart::new(&model, ["eq0"]);
         let gid = |text: &str| graph::StableGraphId::parse(text).expect("graph ID");
         let stage = |strip: &str, stage| graph::GraphNodeId::TrackStage {
             track_id: gid(strip),
@@ -8941,6 +10143,7 @@ mod tests {
             restarted: Box::default(),
             fade_arms: Box::default(),
             fade_watch: graph::GraphFadeArmWatch::default(),
+            route_copies: Box::default(),
             input_floors: Box::default(),
             raised_arrivals: Box::default(),
             // #1396 D2: no read-ahead.

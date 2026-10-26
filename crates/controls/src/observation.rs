@@ -45,7 +45,8 @@ pub enum ObserveError {
     /// `observation.subscribers`: an arm of a tap that already has `u32::MAX` subscribers.
     Subscribers,
     /// `observation.unavailable`: the host does not serve the edit (its adapter's
-    /// `OBSERVE_EDIT` is off: the browser until #1589), or the endpoint has no host to apply it.
+    /// `OBSERVE_EDIT` is off, or a session whose plans bind no observation queue (#1589 R1)), or
+    /// the endpoint has no host to apply it.
     Unavailable,
 }
 
@@ -331,18 +332,35 @@ impl ObservationBindings {
     /// subscriber, an arm with the same window adds one, a disarm with the same window removes one
     /// and the binding goes at `0`. The window compared is the one asked for.
     ///
+    /// A disarm names the arm it ends by `arm_tag`, the tag its arm's reply gave (#2087); an arm
+    /// ignores it. A disarm whose tag is the bound arm's applies as above. A tag the host issued
+    /// (nonzero and below `next_arm_tag`) that names no bound arm of `key` is a disarm of an arm
+    /// the host already ended: the binding of `key`, if any, is a later subscriber's, so the disarm
+    /// changes nothing and is not an error.
+    ///
     /// # Errors
     ///
     /// [`ObserveError::WindowConflict`] for an arm of a tap bound with another window,
     /// [`ObserveError::Subscribers`] for an arm of a tap that has `u32::MAX` subscribers, and
-    /// [`ObserveError::NotSubscribed`] for a disarm of a tap that is not bound or bound with another
-    /// window. A refusal changes nothing.
+    /// [`ObserveError::NotSubscribed`] for a disarm whose tag the host never issued (`0`, or at or
+    /// above `next_arm_tag`), or whose tag is the bound arm's and whose window is not. A refusal
+    /// changes nothing.
     pub fn observe(
         &mut self,
         key: &TapKey,
         armed: bool,
         window_blocks: u32,
+        arm_tag: u64,
+        next_arm_tag: u64,
     ) -> Result<(), ObserveError> {
+        if !armed {
+            if self.names_ended_arm(key, arm_tag, next_arm_tag) {
+                return Ok(());
+            }
+            if arm_tag == 0 || arm_tag >= next_arm_tag {
+                return Err(ObserveError::NotSubscribed);
+            }
+        }
         match (self.search(key), armed) {
             (Err(index), true) => {
                 self.bindings.insert(
@@ -381,6 +399,19 @@ impl ObservationBindings {
                 Ok(())
             }
         }
+    }
+
+    /// Whether a disarm of `key` tagged `arm_tag` names an arm the host already ended (#2087): the
+    /// host issued the tag (nonzero and below `next_arm_tag`) and no bound arm of `key` has it. Such
+    /// a disarm changes nothing, whether or not the tap's target still exists, so a caller checks
+    /// this before it resolves the target.
+    #[must_use]
+    pub fn names_ended_arm(&self, key: &TapKey, arm_tag: u64, next_arm_tag: u64) -> bool {
+        arm_tag != 0
+            && arm_tag < next_arm_tag
+            && self
+                .binding(key)
+                .is_none_or(|binding| binding.arm_tag != arm_tag)
     }
 
     /// The records that take this table to `after` for the taps in `touched` (#1584 D3): at most

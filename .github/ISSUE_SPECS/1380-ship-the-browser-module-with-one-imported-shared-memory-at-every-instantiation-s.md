@@ -102,7 +102,11 @@ exactly this way for good: it is D15-10's `single` mode. A Worker joining the sa
   - `scripts/build-web-audioworklet.sh` (the `RUSTFLAGS` line);
   - `tools/parameter-metadata/src/abi_layout.rs` (the memory rows);
   - `scripts/check-web-boot-budget.mjs`, `scripts/web-mixing-automation-benchmark.mjs` and
-    `scripts/test-web-audioworklet.mjs` (the instantiation call only).
+    `scripts/test-web-audioworklet.mjs` (the instantiation call only);
+  - `tools/wasm-gates/` and `scripts/run-wasm-gates.sh` (G5's runner: the atomic guest imports
+    `env.memory` as shared, so wasmtime needs `Config::wasm_threads(true)`,
+    `Config::shared_memory(true)`, its `threads` feature and a `SharedMemory` for the import;
+    #1331a-2 gate 4, shim diff in `engine-work-evidence/1331/a2/gates/runner-threads-shim.diff`).
 
 ## Non-goals
 
@@ -153,3 +157,12 @@ exactly this way for good: it is D15-10's `single` mode. A Worker joining the sa
 - *Build the browser artifact on a pinned nightly toolchain* (#1334).
 - *Gate AudioWorklet render against allocation statically and at runtime* (#1333). Its static
   thread-local and atomic-wait checks must be in place before atomics ship.
+
+## Decision record
+
+- 2026-10-25 (root housekeeping, from #1331a-2): authorized paths add G5's runner
+  (`tools/wasm-gates/`, `scripts/run-wasm-gates.sh`). Without it the committed runner refuses the
+  atomic guest with `threads must be enabled for shared memories`; under the shim the atomic guest
+  has 0 mismatches over 270 comparisons. The atomic build prints `unstable feature specified for
+  -Ctarget-feature: atomics` once per build; it is harmless: it does not fail under `-D warnings`,
+  and `-A unstable_features` does not silence it (#1331 spec, "#1331a-2 result").

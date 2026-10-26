@@ -26,17 +26,26 @@ pub trait ControlAdapter {
     /// Whether the session serves the `Observe` edit (#1584 D7a): a transaction's subscriptions are
     /// checked against the session's binding table and queued on the effects' observation queues
     /// by the core. An adapter that keeps the default refuses every `Observe` edit with
-    /// `observation.unavailable`: the browser until #1589, because its observe kinds 7 and 8 still
-    /// write the same queues, and one queue must never have two writers. Its plans must carry an
-    /// observation queue for every declared tap.
+    /// `observation.unavailable`. Both hosts serve it (#1590 D5); the edit is the only writer of
+    /// each observation queue since #1589c deleted the browser's observe kinds 7 and 8. Its plans
+    /// must carry an observation queue for every declared tap.
     const OBSERVE_EDIT: bool = false;
     /// Whether the session owns a meter delivery that the control plane serves (#1583 D3-D5, R2):
     /// `TELEMETRY_CONFIGURE` then accepts a meter table, its echo carries the meter window, and the
     /// service step stages one `METER_BATCH` per completed batch of the output meter's windows,
     /// whose gate a relay applies on the render thread. An adapter that keeps the default refuses
     /// every meter entry with `meter.unavailable` and takes the output meter's reader and gate
-    /// itself (`take_output_meter`): the browser until #1588.
+    /// itself (`take_output_meter`).
     const METER_DELIVERY: bool = false;
+    /// Whether a meter-serving session's fold runs in the adapter's render half (#1588 R1): the
+    /// render half keeps the output meter's reader and gate (`take_output_meter`) and the strip
+    /// meters, folds them in its own [`host_core::MeterDelivery`] under a shared
+    /// [`host_core::MeterLevel`], and pushes each frame the protocol's table needs into the
+    /// plan's [`host_core::MeterFrameRing`]; the control plane stages the batches from the rings
+    /// with the same fold and records as its own delivery. The browser's. Read only with
+    /// [`Self::METER_DELIVERY`], which the browser turns on with its render half's ring push
+    /// (#1588b).
+    const RENDER_METER_FOLD: bool = false;
     /// Whether the session advertises the spectrum commands (#1595 R2): `SPECTRUM_CONFIGURE`,
     /// `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` with capability bit 16
     /// (`ProviderFeatures::spectrum`).

@@ -53,14 +53,6 @@ fn put(model: &SessionModel, track: usize, effect: Effect) -> SessionEdit {
     }
 }
 
-fn remove(model: &SessionModel, track: usize) -> SessionEdit {
-    SessionEdit::RemoveTrackEffect {
-        track_id: model.tracks[track].id.clone(),
-        rack_name: RackName::Inserts,
-        effect_id: id("comp"),
-    }
-}
-
 /// `UpsertSource` of `s-source`, `UpsertTrack` of track `ts` on it (a copy of the first track
 /// with no insert) and `UpsertRoute` of its route.
 fn add_source_track(model: &SessionModel) -> [SessionEdit; 3] {
@@ -78,6 +70,25 @@ fn add_source_track(model: &SessionModel) -> [SessionEdit; 3] {
     *track_id = track.id.clone();
     [
         SessionEdit::UpsertSource { source },
+        SessionEdit::UpsertTrack { track },
+        SessionEdit::UpsertRoute { route },
+    ]
+}
+
+/// `UpsertTrack` of track `name` on the fixture source (a copy of the first track with no insert)
+/// and `UpsertRoute` of its route: a structural edit that restarts no strip, so render adopts its
+/// plan at the next block, never at a duck-swap's later `S` (#1324a).
+fn add_track(model: &SessionModel, name: &str) -> Vec<SessionEdit> {
+    let mut track = model.tracks[0].clone();
+    track.id = id(name);
+    track.inserts.effects.clear();
+    let mut route = model.routes[0].clone();
+    route.id = id(&format!("{name}-main"));
+    let RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("track route")
+    };
+    *track_id = track.id.clone();
+    vec![
         SessionEdit::UpsertTrack { track },
         SessionEdit::UpsertRoute { route },
     ]
@@ -206,11 +217,12 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
     };
     let twin = render_direct(&mut pending(limits()), 1);
     assert!(twin.iter().any(|sample| *sample != 0.0), "the twin plays");
-    // T2 superseding T1 with nothing refused, the reference of the retries below.
+    // T2 superseding T1 with nothing refused, the reference of the retries below, through its
+    // adoption: T2 restarts tracks 1 and 2, a duck-swap adopted at its `S` (#1324a).
     let superseding = {
         let mut children = pending(limits());
         commit(&mut children, 2, 43, &second);
-        render_direct(&mut children, 1)
+        feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 44).0
     };
 
     let mut tight = limits();
@@ -288,13 +300,15 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
             1,
             "{phase:?}"
         );
-        let block = render_direct(&mut children, 1);
+        let (blocks, _) = feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 44);
         assert_eq!(
-            bits(&block),
-            bits(&superseding),
+            blocks.iter().map(|block| bits(block)).collect::<Vec<_>>(),
+            superseding
+                .iter()
+                .map(|block| bits(block))
+                .collect::<Vec<_>>(),
             "{phase:?}: the retry renders as a supersession nothing refused"
         );
-        children.session.service().expect("service");
         assert_eq!(revision(&children), 44, "{phase:?}");
         assert!(children.session.test_pending_providers().is_empty());
         drop(children);
@@ -331,7 +345,8 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
         if retry {
             commit(&mut children, 4, 44, &third);
         }
-        render_direct(&mut children, 1);
+        // A duck-swap: adopted at its `S` (#1324a).
+        feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 44 + u64::from(retry));
         let adopted = children.plan.queries().watermark().expect("watermark");
         let folded = if retry { 2 } else { 1 };
         assert_eq!(adopted.revision, 44 + u64::from(retry), "retry {retry}");
@@ -352,6 +367,164 @@ fn a_refused_replacement_restores_the_withdrawn_candidate() {
             control_plane::test_lifecycle_counters(),
         );
     }
+}
+
+/// #2010: a rebuild that panics after it withdrew the pending candidate restores it before the
+/// panic leaves the control plane. T1 is pending; T2 panics inside its rebuild after the withdrawal
+/// (the C ABI's `catch_result` turns the panic into `RESULT_INTERNAL`). The candidate is
+/// republished, render adopts it, T3 commits and is adopted, and a session seek reaches the
+/// running plan: every block, the seek's included, equals a run that never saw T2, and every fed
+/// block is accepted (no `source.backpressure`).
+///
+/// Test value: red if the panic drops the withdrawn candidate: T1's acked revision then never
+/// renders, T3 promotes the lost epoch as adopted, and the rings the producers feed after the seek
+/// are not the ones render reads, so they fill.
+///
+/// #2044: the same run with T2 panicking just after the rebuild publishes the primed schedule,
+/// before its commit: red if that publication (or any later step that can panic) runs after the
+/// protocol commit, because the controller then holds T2's revision and model while T1's
+/// candidate renders. Then a rebuild that withdrew nothing panics there: red if the report lock is
+/// held across that stretch, because the panic poisons it and the session never services again.
+#[test]
+fn a_rebuild_that_panics_after_the_withdrawal_restores_the_candidate() {
+    let model = stateless_session(48_000);
+    let first = add_source_track(&model);
+    let second = [put(&model, 1, compressor())];
+    let third = add_track(&model, "tc");
+    // Submits block `block` of both sources under seek generation `generation`.
+    let feed = |children: &mut CompiledChildren, generation: u64, block: u64| {
+        for (salt, id) in [FIXTURE, ADDED].into_iter().enumerate() {
+            let (left, right) = crate::runtime::tests::continuity_block(block, salt as u64);
+            let report = children
+                .session
+                .submit(
+                    id,
+                    SourceSubmission {
+                        generation,
+                        start_frame: block * 128,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: 128,
+                        end_of_region: false,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("block {block}: {:?}", error.report()));
+            assert_eq!(report.accepted_frames, 128, "block {block}");
+        }
+    };
+    let run = |panics: Option<TestStructuralFaultPhase>| {
+        control_plane::test_reset_lifecycle_observer();
+        let mut children = compile(&model, limits());
+        submit_direct(&mut children, &[FIXTURE], 0);
+        render_direct(&mut children, 0);
+        commit(&mut children, 1, 42, &first);
+        submit_direct(&mut children, &[ADDED], 0);
+        submit_direct(&mut children, &[FIXTURE, ADDED], 1);
+        if let Some(phase) = panics {
+            let epoch = children.session.test_pending_providers()[0].test_epoch();
+            let committed = children
+                .session
+                .committed_session()
+                .normalized_model()
+                .clone();
+            children
+                .session
+                .test_set_structural_faults([Some(phase), None]);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                children
+                    .session
+                    .command(&transaction(2, 43, &second), 4_096)
+            }));
+            assert!(caught.is_err(), "T2 panics");
+            let counters = children.session.test_owner_counters();
+            assert_eq!(
+                (counters.candidate_withdrawn, counters.candidate_republished),
+                (1, 1),
+                "the withdrawn candidate is republished"
+            );
+            assert_eq!(revision(&children), 43, "{phase:?}: the revision is T1's");
+            assert_eq!(
+                children.session.committed_session().normalized_model(),
+                &committed,
+                "{phase:?}: the committed model is T1's"
+            );
+            assert_eq!(
+                children.session.test_pending_providers()[0].test_epoch(),
+                epoch,
+                "{phase:?}: T1's candidate stays pending with its own epoch"
+            );
+        }
+        let (mut blocks, next) =
+            feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 43);
+        commit(&mut children, 3, 43, &third);
+        let (more, next) = feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], next, 44);
+        blocks.extend(more);
+        // A plain session seek back to the start, then more blocks than a ring holds.
+        children
+            .session
+            .session_seek(2, 0, None)
+            .unwrap_or_else(|error| panic!("seek: {error:?}"));
+        feed(&mut children, 2, 0);
+        for block in 0..16 {
+            feed(&mut children, 2, block + 1);
+            blocks.push(render_direct(&mut children, next + block));
+        }
+        children.session.service().expect("service");
+        assert!(children.session.test_pending_providers().is_empty());
+        drop(children);
+        assert_balanced(
+            &format!("{panics:?}"),
+            control_plane::test_lifecycle_counters(),
+        );
+        blocks
+    };
+    let reference = run(None);
+    assert!(
+        reference
+            .last()
+            .expect("blocks")
+            .iter()
+            .any(|sample| *sample != 0.0),
+        "the compared blocks play"
+    );
+    for phase in [
+        TestStructuralFaultPhase::PanicAfterWithdrawal,
+        TestStructuralFaultPhase::PanicAtPrimedPublication,
+    ] {
+        let panicked = run(Some(phase));
+        assert_eq!(
+            reference.len(),
+            panicked.len(),
+            "{phase:?}: the same block count"
+        );
+        for (block, (actual, expected)) in panicked.iter().zip(&reference).enumerate() {
+            assert_eq!(bits(actual), bits(expected), "{phase:?}: block {block}");
+        }
+    }
+    // A rebuild that withdrew nothing and panics before its commit leaves no lock poisoned: the
+    // session services, reports its resources and commits the same edit next.
+    control_plane::test_reset_lifecycle_observer();
+    let mut children = compile(&model, limits());
+    submit_direct(&mut children, &[FIXTURE], 0);
+    render_direct(&mut children, 0);
+    children.session.test_set_structural_faults([
+        Some(TestStructuralFaultPhase::PanicAtPrimedPublication),
+        None,
+    ]);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        children.session.command(&transaction(1, 42, &first), 4_096)
+    }));
+    assert!(caught.is_err(), "T1 panics");
+    assert_eq!(revision(&children), 42, "nothing was committed");
+    children.session.service().expect("the session services");
+    let _ = children.plan.resources();
+    commit(&mut children, 2, 42, &first);
+    submit_direct(&mut children, &[ADDED], 0);
+    submit_direct(&mut children, &[FIXTURE, ADDED], 1);
+    feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 1, 43);
+    children.session.service().expect("service");
+    drop(children);
+    assert_balanced("withdrew nothing", control_plane::test_lifecycle_counters());
 }
 
 /// A plan's graph bytes and its compiled model's bytes.
@@ -790,10 +963,11 @@ fn render_unpublished(children: &mut CompiledChildren, block: u64) -> Vec<f32> {
 #[test]
 fn edits_after_render_took_two_candidates_unretired_each_commit() {
     let model = stateless_session(48_000);
+    // Edits that restart no strip, so each candidate is taken by the next block (#1324a).
     let edits = [
         add_source_track(&model).to_vec(),
-        vec![put(&model, 1, compressor())],
-        vec![put(&model, 2, compressor())],
+        add_track(&model, "tb"),
+        add_track(&model, "tc"),
     ];
     let run = |race: bool| {
         control_plane::test_reset_lifecycle_observer();
@@ -864,10 +1038,11 @@ fn edits_after_render_took_two_candidates_unretired_each_commit() {
 #[test]
 fn two_taken_candidates_and_a_published_adoption_never_wedge_the_session() {
     let model = stateless_session(48_000);
+    // Edits that restart no strip, so each candidate is taken by the next block (#1324a).
     let edits = [
         add_source_track(&model).to_vec(),
-        vec![put(&model, 1, compressor())],
-        vec![put(&model, 2, compressor())],
+        add_track(&model, "tb"),
+        add_track(&model, "tc"),
     ];
     control_plane::test_reset_lifecycle_observer();
     let mut children = compile(&model, limits());
@@ -922,9 +1097,9 @@ fn two_taken_candidates_and_a_published_adoption_never_wedge_the_session() {
     assert_eq!(children.session.test_providers().test_epoch(), 3);
     assert!(children.session.test_pending_providers().is_empty());
     assert!(children.session.test_retired_providers().is_empty());
-    commit(&mut children, 4, 45, &[remove(&model, 1)]);
-    render_direct(&mut children, 8);
-    children.session.service().expect("service");
+    // The session takes edits again: a duck-swap, adopted at its `S` (#1324a).
+    commit(&mut children, 4, 45, &[put(&model, 1, compressor())]);
+    feed_and_render_until_direct(&mut children, &[], 8, 46);
     drop(children);
     assert_balanced("wedge", control_plane::test_lifecycle_counters());
 }
@@ -986,8 +1161,8 @@ fn a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion() {
     assert!(children.session.test_retired_providers().is_empty());
     commit(&mut children, 3, 43, &second);
     submit_direct(&mut children, &[FIXTURE, ADDED], 2);
-    render_direct(&mut children, 2);
-    children.session.service().expect("service");
+    // B restarts track 1: a duck-swap, adopted at its `S` (#1324a).
+    feed_and_render_until_direct(&mut children, &[FIXTURE, ADDED], 2, 44);
     drop(children);
     assert_balanced("parked charge", control_plane::test_lifecycle_counters());
 
@@ -1010,8 +1185,7 @@ fn a_displaced_plan_not_yet_reclaimed_is_charged_after_a_taken_promotion() {
         children.session.service().expect("service");
         let a = row(&children);
         commit(&mut children, 2, 43, &second);
-        render_direct(&mut children, 2);
-        children.session.service().expect("service");
+        feed_and_render_until_direct(&mut children, &[], 2, 44);
         [p0, a, row(&children)]
     };
     assert!(

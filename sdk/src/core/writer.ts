@@ -1,6 +1,3 @@
-import { ABI_LAYOUT } from "../generated/abi.ts";
-import type { CommandReasonName } from "../generated/catalog.ts";
-import type { CommandReport } from "./boundary.ts";
 import {
   CONTROL_TRANSACTION_HEADER_BYTES,
   controlEditBytes,
@@ -10,7 +7,6 @@ import {
 import type { ControlFrameEdit } from "./control-frame.ts";
 import type { ControlAppliedReport } from "./control-queue.ts";
 import { MisoControlRefusal, MisoEngineError, MisoUsageError } from "./errors.ts";
-import { checkLaneEdit } from "../internal/lane-edit.ts";
 
 /**
  * The live-control writer (issue #243, adopted ruling 5462139867 finding 5).
@@ -21,9 +17,7 @@ import { checkLaneEdit } from "../internal/lane-edit.ts";
  * `SET_CONTROL` edit (`ControlFrameEdit`), staged by its address and sent through the engine's one
  * transaction queue (`ControlTransactionQueue`); the core holds every live value in a latest-target
  * cell, which takes any number of writes and refuses none for room, and answers a full control queue
- * with a `backpressure` status. The other live record that rides a bounded queue is an effect's
- * observation subscription (a {@link LaneEdit}, kinds 7 and 8, still a 48-byte record), with one slot
- * per tap the effect declares. In both a submission that does not fit is refused **whole**, with
+ * with a `backpressure` status. A submission that does not fit is refused **whole**, with
  * `reason: backpressure`. That refusal is the engine working correctly: it is flow control, not
  * failure. The writer stays correct for any submission the engine may refuse that way, and the bug
  * it guards against is in the caller, and it has two shapes.
@@ -51,35 +45,13 @@ import { checkLaneEdit } from "../internal/lane-edit.ts";
  * which means the writer stays correct if the admission rule ever changes.
  */
 
-/**
- * One observation edit, in the wire's own vocabulary: the subscription or withdrawal of one tap
- * (kinds 7 and 8), the only 48-byte command records left. Every value edit is a
- * {@link ControlFrameEdit} instead.
- */
-export interface LaneEdit {
-  readonly kind: "observeSubscribe" | "observeUnsubscribe";
-  /**
-   * The record's rack byte: `1` inserts, `3` console (S1c). The SDK refuses any other code with a
-   * `MisoUsageError` before the record is written, as the browser host does.
-   */
-  readonly rack: number;
-  /** The strip's ID, a track's or a submix's. */
-  readonly stripId: string;
-  /** The console slot's ID or the insert's ID. */
-  readonly effectId: string;
-  /** The tap's ID. */
-  readonly tapId: number;
-  /** The subscription window in blocks, `0` for the default. Any `u32`. */
-  readonly windowBlocks: number;
-}
-
 export interface FlushOutcome {
   /** Records the engine admitted. A refusal admits nothing: the batch is one transaction. */
   readonly admitted: number;
   /** True when the engine refused for flow control. Never an error. */
   readonly refused: boolean;
-  /** The engine's reason name, present only on a refusal. */
-  readonly reason: CommandReasonName | undefined;
+  /** `"backpressure"` on a refusal, which is always flow control; absent otherwise. */
+  readonly reason: "backpressure" | undefined;
   /** Edits still waiting after this flush. */
   readonly pending: number;
   /** The batch size the next flush will attempt. */
@@ -94,7 +66,7 @@ export interface WriterStats {
   /**
    * Refusals that were NOT flow control.
    *
-   * This is the number that must stay zero. A malformed record or an unknown address is a caller
+   * This is the number that must stay zero. A malformed edit or an unknown address is a caller
    * bug and is surfaced by throwing, because unlike backpressure it will never succeed on retry.
    */
   readonly escalations: number;
@@ -111,115 +83,22 @@ export interface ControlSubmitter {
   readonly maximumTransactionEdits?: number | undefined;
 }
 
-interface WriterLimits {
+/** Submit value edits as `SET_CONTROL` transactions through the engine's queue. */
+export interface ControlWriterOptions {
+  readonly queue: ControlSubmitter;
   /**
-   * The largest batch to attempt. Defaults to the engine's maximum command-record count
-   * (`maximumCommandRecords`), the host's own bound on commands in flight.
+   * The largest batch to attempt, in edits. Without it a batch is bounded by the queue's
+   * `maximumTransactionEdits` and `maximumFrameBytes` alone.
    */
   readonly maximumBatch?: number;
 }
 
-/** Submit value edits as `SET_CONTROL` transactions through the engine's queue. */
-export interface ControlWriterOptions extends WriterLimits {
-  readonly queue: ControlSubmitter;
-  readonly submit?: never;
-  readonly submitEdits?: never;
-}
+const BACKPRESSURE: FlushOutcome["reason"] = "backpressure";
 
-/** Submit observation records (kinds 7 and 8) as one command batch. */
-export interface WriterOptions extends WriterLimits {
-  readonly queue?: never;
-  /**
-   * Submit one staged batch. Normally `engine.submitCommands` bound to a live engine.
-   *
-   * May answer asynchronously. In-process the engine answers immediately, but the browser host
-   * reaches it over a worklet port, where the answer is a `Promise` by construction; the writer's
-   * contract is identical either way, so the signature admits both rather than forcing a caller
-   * across that boundary to fake a synchronous report.
-   */
-  readonly submit: (records: Uint8Array, count: number) => CommandReport | Promise<CommandReport>;
-  readonly submitEdits?: never;
-}
-
-/** Submit observation edits directly through a semantic live-control transport. */
-export interface SemanticWriterOptions extends WriterLimits {
-  readonly queue?: never;
-  readonly submit?: never;
-  readonly submitEdits: (edits: readonly LaneEdit[]) => CommandReport | Promise<CommandReport>;
-}
-
-const BACKPRESSURE = ABI_LAYOUT.constants.commandReasons
-  .find((row) => row.name === "backpressure")!.value;
-const BACKPRESSURE_NAME: CommandReasonName = "backpressure";
-const RECORD_BYTES = ABI_LAYOUT.commandRecord.bytes;
-const FIELD: ReadonlyMap<string, number> = new Map(
-  ABI_LAYOUT.commandRecord.fields.map((row) => [row.name as string, row.offset] as const),
-);
-
-function offsetOf(name: string): number {
-  const offset = FIELD.get(name);
-  if (offset === undefined) {
-    throw new MisoUsageError(`the generated command record has no field ${name}`);
-  }
-  return offset;
-}
-
-function kindValue(name: LaneEdit["kind"]): number {
-  const row = ABI_LAYOUT.constants.wireCommandKinds.find((candidate) => candidate.name === name);
-  if (row === undefined) {
-    throw new MisoUsageError(`the generated ABI layout has no command kind ${name}`);
-  }
-  return row.value;
-}
-
-function isControlEdit(edit: ControlFrameEdit | LaneEdit): edit is ControlFrameEdit {
-  return typeof edit === "object" && edit !== null && "address" in edit;
-}
-
-/**
- * The address an edit coalesces on.
- *
- * Two edits collapse when they would write the same thing: for a value, the same owner, section,
- * row and lane; for an observation record, the same kind, strip, rack, effect slot and tap. The
- * ramp and the values are deliberately NOT part of the key -- they are what the newer edit replaces.
- */
-function coalescingKey(edit: ControlFrameEdit | LaneEdit): string {
-  if (isControlEdit(edit)) return controlEditKey(edit);
-  // The key is the tap's stable key; the strip and effect IDs are length-prefixed so no pair of
-  // IDs can spell another pair.
-  return [
-    edit.kind, edit.rack, edit.stripId.length, edit.stripId, edit.effectId.length, edit.effectId,
-    edit.tapId,
-  ].join("/");
-}
-
-const ID_ENCODER = new TextEncoder();
-
-export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
-  // Every edit is checked before the buffer exists: a batch with one bad edit writes nothing.
-  edits.forEach(checkLaneEdit);
-  const records = new Uint8Array(edits.length * RECORD_BYTES);
-  const view = new DataView(records.buffer);
-  edits.forEach((edit, index) => {
-    const base = index * RECORD_BYTES;
-    const strip = ID_ENCODER.encode(edit.stripId);
-    const effect = ID_ENCODER.encode(edit.effectId);
-    view.setUint8(base + offsetOf("kind"), kindValue(edit.kind));
-    view.setUint8(base + offsetOf("rack"), edit.rack);
-    view.setUint8(base + offsetOf("stripIdBytes"), strip.length);
-    view.setUint8(base + offsetOf("effectIdBytes"), effect.length);
-    view.setUint32(base + offsetOf("tapId"), edit.tapId, true);
-    view.setUint32(base + offsetOf("windowBlocks"), edit.windowBlocks, true);
-    records.set(strip, base + offsetOf("stripId"));
-    records.set(effect, base + offsetOf("effectId"));
-  });
-  return records;
-}
-
-/** What one submit of a batch came to, whichever transport carried it. */
+/** What one submit of a batch came to. */
 type Attempt =
   | { readonly kind: "admitted"; readonly admitted: number }
-  | { readonly kind: "flow"; readonly reason: CommandReasonName };
+  | { readonly kind: "flow" };
 
 /**
  * Whether a failed submit leaves its edits worth sending again. A full queue (the core's control
@@ -239,13 +118,14 @@ function isTerminal(error: unknown): boolean {
 }
 
 export class LiveControlWriter {
-  readonly #send: (edits: readonly (ControlFrameEdit | LaneEdit)[]) => Promise<Attempt>;
-  readonly #controlEdits: boolean;
+  readonly #queue: ControlSubmitter;
   readonly #maximumBatch: number;
-  #frameBytes: () => number | undefined = () => undefined;
-  #transactionEdits: () => number | undefined = () => undefined;
-  /** Insertion-ordered by key, which is what makes coalescing a map update rather than a scan. */
-  readonly #pending = new Map<string, ControlFrameEdit | LaneEdit>();
+  /**
+   * Insertion-ordered by address (the same owner, section, row and lane), which is what makes
+   * coalescing a map update rather than a scan. The ramp and the value are deliberately NOT part
+   * of the key -- they are what the newer edit replaces.
+   */
+  readonly #pending = new Map<string, ControlFrameEdit>();
   #batch: number;
   /**
    * The tail of the flush chain, which is what serializes flushes.
@@ -266,59 +146,37 @@ export class LiveControlWriter {
   #escalations = 0;
   #coalesced = 0;
 
-  /**
-   * Exactly one transport: `queue` for value edits (`stage(ControlFrameEdit)`), or `submit` /
-   * `submitEdits` for observation records (`stage(LaneEdit)`).
-   */
-  constructor(options: ControlWriterOptions | WriterOptions | SemanticWriterOptions) {
-    const { queue, submit, submitEdits } = options;
-    const given = [queue, submit, submitEdits].filter((value) => value !== undefined).length;
-    if (given !== 1) {
-      throw new MisoUsageError("LiveControlWriter requires exactly one of queue, submit or submitEdits");
+  /** `queue` is the engine's transaction queue (or anything with its `submit`). */
+  constructor(options: ControlWriterOptions) {
+    const queue = (options as { readonly queue?: unknown } | null | undefined)?.queue as
+      | ControlSubmitter
+      | null
+      | undefined;
+    if (queue === undefined || queue === null || typeof queue.submit !== "function") {
+      throw new MisoUsageError("LiveControlWriter requires a queue with a submit function");
     }
-    this.#controlEdits = queue !== undefined;
-    if (queue !== undefined) {
-      if (queue === null || typeof queue.submit !== "function") {
-        throw new MisoUsageError("LiveControlWriter queue must have a submit function");
-      }
-      this.#frameBytes = () => queue.maximumFrameBytes;
-      this.#transactionEdits = () => queue.maximumTransactionEdits;
-      this.#send = async (edits) => {
-        try {
-          await queue.submit(edits as readonly ControlFrameEdit[]);
-        } catch (error: unknown) {
-          // Flow control is typed and retryable. Anything else the core or the queue refused never
-          // succeeds on resend: `#flushOnce` drops the edits it names and surfaces the throw.
-          if (isFlowControl(error)) return { kind: "flow", reason: BACKPRESSURE_NAME };
-          throw error;
-        }
-        return { kind: "admitted", admitted: edits.length };
-      };
-    } else {
-      let records: (edits: readonly LaneEdit[]) => CommandReport | Promise<CommandReport>;
-      if (typeof submitEdits === "function") records = submitEdits;
-      else if (typeof submit === "function") {
-        records = (edits) => submit(encodeLaneEdits(edits), edits.length);
-      } else {
-        throw new MisoUsageError("LiveControlWriter submission callback must be a function");
-      }
-      this.#send = async (edits) => {
-        const report = await records(edits as readonly LaneEdit[]);
-        if (report.ok) return { kind: "admitted", admitted: report.admitted };
-        if (report.reason !== BACKPRESSURE) {
-          throw new MisoUsageError(
-            `the live controls refused a batch for ${report.reasonName} at record ${report.rejectedIndex}; `
-            + "this is a caller error, not flow control, and will not succeed on retry",
-          );
-        }
-        return { kind: "flow", reason: report.reasonName };
-      };
+    const extra = Object.keys(options).filter((key) => key !== "queue" && key !== "maximumBatch");
+    if (extra.length > 0) {
+      throw new MisoUsageError(`LiveControlWriter takes a queue and a maximumBatch, not ${extra.join(", ")}`);
     }
-    this.#maximumBatch = options.maximumBatch ?? ABI_LAYOUT.constants.maximumCommandRecords;
-    if (!Number.isInteger(this.#maximumBatch) || this.#maximumBatch < 1) {
+    this.#queue = queue;
+    this.#maximumBatch = options.maximumBatch ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(this.#maximumBatch) || this.#maximumBatch < 1) {
       throw new MisoUsageError(`maximumBatch must be a positive integer`);
     }
     this.#batch = this.#maximumBatch;
+  }
+
+  async #send(edits: readonly ControlFrameEdit[]): Promise<Attempt> {
+    try {
+      await this.#queue.submit(edits);
+    } catch (error: unknown) {
+      // Flow control is typed and retryable. Anything else the core or the queue refused never
+      // succeeds on resend: `#flushOnce` drops the edits it names and surfaces the throw.
+      if (isFlowControl(error)) return { kind: "flow" };
+      throw error;
+    }
+    return { kind: "admitted", admitted: edits.length };
   }
 
   /**
@@ -330,17 +188,9 @@ export class LiveControlWriter {
    * so it never sits in the pending map and fails every later flush. The value's domain is the
    * core's to judge, at flush.
    */
-  stage(edit: ControlFrameEdit | LaneEdit): void {
-    if (isControlEdit(edit) !== this.#controlEdits) {
-      throw new MisoUsageError(
-        this.#controlEdits
-          ? "this writer sends value edits; an observation edit needs a writer over a command submit"
-          : "this writer sends observation records; a value edit needs a writer over a queue",
-      );
-    }
-    if (isControlEdit(edit)) validateControlEdit(edit);
-    else checkLaneEdit(edit);
-    const key = coalescingKey(edit);
+  stage(edit: ControlFrameEdit): void {
+    validateControlEdit(edit);
+    const key = controlEditKey(edit);
     if (this.#pending.has(key)) this.#coalesced += 1;
     // Delete before set so a superseded edit also moves to the back of the insertion order: the
     // most recently touched control is the one most likely to still be moving.
@@ -363,19 +213,23 @@ export class LiveControlWriter {
   }
 
   /**
-   * The next batch: the oldest pending edits, as many as the batch size allows and, for value
-   * edits, as many as one frame holds. At least one, so a batch always makes progress.
+   * The next batch: the oldest pending edits, as many as the batch size and the queue's edit limit
+   * allow and as many as one frame holds. At least one, so a batch always makes progress.
    */
-  #takeStaged(): [string, ControlFrameEdit | LaneEdit][] {
+  #takeStaged(): [string, ControlFrameEdit][] {
     const rows = [...this.#pending.entries()];
-    const most = Math.min(this.#batch, rows.length, this.#transactionEdits() ?? Number.POSITIVE_INFINITY);
-    const ceiling = this.#controlEdits ? this.#frameBytes() : undefined;
+    const most = Math.min(
+      this.#batch,
+      rows.length,
+      this.#queue.maximumTransactionEdits ?? Number.POSITIVE_INFINITY,
+    );
+    const ceiling = this.#queue.maximumFrameBytes;
     if (ceiling === undefined) return rows.slice(0, most);
-    const staged: [string, ControlFrameEdit | LaneEdit][] = [];
+    const staged: [string, ControlFrameEdit][] = [];
     let bytes = CONTROL_TRANSACTION_HEADER_BYTES;
     for (const row of rows) {
       if (staged.length >= most) break;
-      bytes += controlEditBytes(row[1] as ControlFrameEdit);
+      bytes += controlEditBytes(row[1]);
       if (staged.length > 0 && bytes > ceiling) break;
       staged.push(row);
     }
@@ -388,7 +242,7 @@ export class LiveControlWriter {
    * the next flush; a refusal that names none, or a call that failed as a whole, drops the batch.
    * Edits are cleared by identity, as after an admission: a newer value staged meanwhile stays.
    */
-  #dropRefused(staged: readonly [string, ControlFrameEdit | LaneEdit][], error: unknown): void {
+  #dropRefused(staged: readonly [string, ControlFrameEdit][], error: unknown): void {
     this.#escalations += 1;
     const named = error instanceof MisoControlRefusal ? error.editIndex : undefined;
     const doomed = named !== undefined && named >= 0 && named < staged.length
@@ -488,7 +342,7 @@ export class LiveControlWriter {
     return Object.freeze({
       admitted: 0,
       refused: true,
-      reason: attempt.reason,
+      reason: BACKPRESSURE,
       pending: this.#pending.size,
       nextBatch: this.#batch,
     });

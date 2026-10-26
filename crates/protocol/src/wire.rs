@@ -133,6 +133,9 @@ pub enum MessageId {
     /// `SESSION_REPLACE` (#1386): replace the session with a document the host passes beside the
     /// frame, applied as the one transaction its diff against the committed model gives.
     SessionReplace = 0x0013,
+    /// `LOUDNESS` (#2115): start, read, reset or stop the session's output loudness meter
+    /// (BS.1770-5 loudness, EBU Tech 3342 loudness range and Annex-2 true peak of the master).
+    Loudness = 0x0014,
     /// `SESSION_COMMITTED`.
     SessionCommitted = 0x8001,
     /// `TRANSPORT_STATE`.
@@ -146,6 +149,9 @@ pub enum MessageId {
     CounterSnapshot = 0x8021,
     /// `DIAGNOSTIC`.
     Diagnostic = 0x8030,
+    /// `RESPONSE_READY` (#1578; decision 17, C13): the result of one strip `RESPONSE_GET`, named by
+    /// the tag its reply carried.
+    ResponseReady = 0x8040,
 }
 
 /// The message IDs that were allocated and are retired: `PARAMETER_METADATA_GET` (`0x0004`) and
@@ -199,12 +205,14 @@ impl MessageId {
             0x0011 => Self::SpectrumCapture,
             0x0012 => Self::SpectrumStream,
             0x0013 => Self::SessionReplace,
+            0x0014 => Self::Loudness,
             0x8001 => Self::SessionCommitted,
             0x8010 => Self::TransportState,
             0x8011 => Self::ObservationEnded,
             0x8020 => Self::MeterBatch,
             0x8021 => Self::CounterSnapshot,
             0x8030 => Self::Diagnostic,
+            0x8040 => Self::ResponseReady,
             0x6000..=0x6fff => return Err(DecodeError::PcmForbidden),
             _ => return Err(DecodeError::UnsupportedMessage),
         };

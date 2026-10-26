@@ -1,5 +1,3 @@
-import { ABI_LAYOUT } from "../generated/abi.ts";
-import { CATALOG } from "../generated/catalog.ts";
 import { CONTROLS } from "../generated/controls.ts";
 import type { ControlAddress, ControlLane, ControlOwner, ControlSection } from "../generated/controls.ts";
 import {
@@ -11,12 +9,8 @@ import {
   VcaEdits,
 } from "../generated/control-builders.ts";
 import type { StripEdits } from "../generated/control-builders.ts";
-import type {
-  EffectId,
-  EffectParameterName,
-  TapName,
-} from "../generated/catalog.ts";
-import type { CommandReport, SessionMap } from "./boundary.ts";
+import type { EffectId, EffectParameterName } from "../generated/catalog.ts";
+import type { SessionMap } from "./boundary.ts";
 import { stripEffectOf } from "./control-list.ts";
 import type { ControlStripOrder } from "./control-list.ts";
 import { validateControlEdit } from "./control-frame.ts";
@@ -26,10 +20,9 @@ import { MisoEngineError, MisoUsageError } from "./errors.ts";
 import { constantValue } from "./abi.ts";
 import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type { SessionLike, SessionModel } from "./session.ts";
-import { RACKS } from "../internal/rack.ts";
 import { requireU32 } from "../internal/ramp.ts";
 import { LiveControlWriter } from "./writer.ts";
-import type { ControlWriterOptions, LaneEdit } from "./writer.ts";
+import type { ControlWriterOptions } from "./writer.ts";
 import { NO_LAYOUT, editSet, effectControlId, id } from "./control-builder-support.ts";
 import type {
   ControlEditSet,
@@ -65,24 +58,13 @@ export { EffectControlBuilders, RouteEdits, SessionEdits, StripEdits, SubmixEdit
   from "../generated/control-builders.ts";
 export type { InputFilterValues, MatrixValues } from "../generated/control-builders.ts";
 
-/** What live controls send through: the engine's one transaction queue, and the observation records. */
+/** What live controls send through: the engine's one transaction queue. */
 export interface LiveControlTransport {
   /** Every value edit goes here, as a `SET_CONTROL` transaction. */
   readonly queue: ControlTransactionQueue;
-  /** Observation records (kinds 7 and 8): command records that name their tap by stable key (#1677). */
-  readonly observe: (edits: readonly LaneEdit[]) => CommandReport | Promise<CommandReport>;
   /** The order the transport read when it made these live controls. */
   readonly order?: ControlStripOrder;
 }
-
-/**
- * Optional owner hook used to serialize observation edits with managed subscriptions. It sees the
- * observation edits as the builders made them.
- */
-export type LiveControlBeforeSubmit = (
-  edits: readonly LaneEdit[],
-  managed?: boolean,
-) => void | Promise<void>;
 
 function modelOf(session: SessionLike): SessionModel {
   const candidate = session as { readonly toJSON?: unknown; readonly schema_version?: unknown };
@@ -216,40 +198,12 @@ function controlEdit(
 }
 
 /**
- * One observation record: the subscription or withdrawal of the tap `tapId` of the console slot or
- * insert `effectId` (its ID in the session) of strip `stripId`. The record names its tap by this
- * stable key and no position, so the core resolves it on the plan it admits the record against and
- * a rebuild cannot make it arm another effect's tap (#1677). Whether the key names a tap is the
- * core's to say, with a typed reason.
- */
-export function observationEdit(
-  armed: boolean,
-  key: {
-    readonly stripId: string;
-    readonly rack: LiveControlRack;
-    readonly effectId: string;
-    readonly tapId: number;
-  },
-  windowBlocks: number,
-): LaneEdit {
-  return Object.freeze({
-    kind: armed ? "observeSubscribe" : "observeUnsubscribe",
-    rack: RACKS[key.rack],
-    stripId: id(key.stripId, "a strip ID"),
-    effectId: id(key.effectId, "an effect ID"),
-    tapId: requireU32(key.tapId, "tapId"),
-    windowBlocks: requireU32(windowBlocks, "windowBlocks"),
-  });
-}
-
-/**
  * A semantic edit builder bound to the engine's session map.
  *
  * Builders address by stable ID and build `SET_CONTROL` edits; they check no value, no lane's
  * meaning and no index, and send nothing. An ID the engine does not have, a value outside a row's
  * domain and a lane a row does not allow come back from the core as its own `control.*` code, the
- * same on the browser and on the headless engine. An observation record names its tap by the
- * strip's ID, the effect's ID in the session and the tap's ID, and the core resolves them (#1677).
+ * same on the browser and on the headless engine.
  *
  * Given the session the SDK built for this engine, it also resolves console slot IDs and insert IDs
  * on every strip (`console()`, `insert()`) against the booted session, and an effect addressed by
@@ -271,7 +225,9 @@ export class LiveControlEdits {
     this.#order = order;
     this.#context = {
       set: (address, value, options) => this.set(address, value, options),
-      effect: <E extends EffectId>(instance: EffectInstance<E>) => new EffectEdits(
+      effect: <E extends EffectId, R extends LiveControlRack>(
+        instance: EffectInstance<E> & { readonly rack: R },
+      ) => new EffectEdits(
         instance,
         (address, value, options) => this.set(address, value, options),
       ),
@@ -462,22 +418,25 @@ export class LiveControlEdits {
 
 /**
  * Catalog-derived edits for one effect instance: the generated parameter, bypass and link-mode
- * builders over this instance's address, and the observation records.
+ * builders over this instance's address, and the observation records. `R` is its rack where the
+ * caller names it (`console()`, `insert()`), so an insert's `linkMode` refuses `slot` at compile
+ * time; `effect()` takes the rack as a value and keeps the union.
  */
-export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
+export class EffectEdits<E extends EffectId, R extends LiveControlRack = LiveControlRack>
+  extends EffectControlBuilders<E, R> {
   readonly #stripId: string;
-  protected readonly rack: LiveControlRack;
+  protected readonly rack: R;
   readonly #stableId: string | undefined;
   readonly #set: ControlSetter;
   protected readonly effectId: E;
 
   /**
-   * `instance.stableId` is the instance's console slot ID or insert ID, which a control address and
-   * an observation record name it by. It is unknown for an instance named by index without a
+   * `instance.stableId` is the instance's console slot ID or insert ID, which a control address
+   * names it by. It is unknown for an instance named by index without a
    * session to resolve the index against.
    */
   constructor(
-    instance: EffectInstance<E>,
+    instance: EffectInstance<E> & { readonly rack: R },
     set: ControlSetter,
   ) {
     super();
@@ -522,24 +481,6 @@ export class EffectEdits<E extends EffectId> extends EffectControlBuilders<E> {
       options,
     );
   }
-
-  observe(tap: TapName<E>, armed: boolean, windowBlocks = 0): LaneEdit {
-    const descriptor = CATALOG.effects.find((row) => row.id === this.effectId);
-    const observation = descriptor?.observations.find((candidate) => candidate.name === tap);
-    if (observation === undefined || !observation.subscribable) {
-      throw new MisoUsageError(`${this.effectId} has no subscribable tap '${String(tap)}'`);
-    }
-    const stable = this.#stableId;
-    if (stable === undefined) {
-      throw new MisoUsageError(
-        `an observation record names its effect by its stable ID, and this ${this.effectId} was `
-          + `addressed by index with nothing to resolve it against: ${NO_LAYOUT}`,
-      );
-    }
-    return observationEdit(armed, {
-      stripId: this.#stripId, rack: this.rack, effectId: stable, tapId: observation.id,
-    }, windowBlocks);
-  }
 }
 
 function isEditSet(candidate: unknown): candidate is ControlEditSet {
@@ -552,7 +493,6 @@ export class EngineLiveControls {
   readonly edit: LiveControlEdits;
   readonly #map: SessionMap;
   readonly #transport: LiveControlTransport;
-  readonly #beforeSubmit: LiveControlBeforeSubmit | undefined;
   readonly #booted: Uint8Array | undefined;
 
   /**
@@ -564,14 +504,12 @@ export class EngineLiveControls {
   constructor(
     map: SessionMap,
     transport: LiveControlTransport,
-    beforeSubmit?: LiveControlBeforeSubmit,
     session?: SessionLike,
     booted?: Uint8Array,
   ) {
     this.edit = new LiveControlEdits(map, session, transport.order);
     this.#map = map;
     this.#transport = transport;
-    this.#beforeSubmit = beforeSubmit;
     this.#booted = booted;
   }
 
@@ -599,7 +537,6 @@ export class EngineLiveControls {
     return new EngineLiveControls(
       this.#map,
       this.#transport,
-      this.#beforeSubmit,
       describes ? session : undefined,
       this.#booted,
     );
@@ -611,62 +548,21 @@ export class EngineLiveControls {
   }
 
   /** A writer that stages, coalesces and flushes `SET_CONTROL` edits through the engine's queue. */
-  writer(options: Omit<ControlWriterOptions, "queue" | "submit" | "submitEdits"> = {}): LiveControlWriter {
+  writer(options: Omit<ControlWriterOptions, "queue"> = {}): LiveControlWriter {
     return new LiveControlWriter({ ...options, queue: this.#transport.queue });
   }
 
   /**
-   * Send edits.
-   *
-   * Value edits (what the builders return) go in one `SET_CONTROL` transaction and resolve with the
-   * core's applied report for the transaction that carried them; the core's refusal of them rejects
-   * with `MisoControlRefusal`, whatever other callers staged beside them. Observation edits
-   * (`observe()`) go as command records and resolve with a `CommandReport`. One call sends one
-   * kind.
+   * Send edits: what the builders return, in one `SET_CONTROL` transaction. Resolves with the
+   * core's applied report for the transaction that carried them; the core's refusal of them
+   * rejects with `MisoControlRefusal`, whatever other callers staged beside them.
    */
-  submit(...edits: readonly ControlEditSet[]): Promise<ControlAppliedReport>;
-  submit(...edits: readonly LaneEdit[]): Promise<CommandReport>;
-  async submit(
-    ...edits: readonly (ControlEditSet | LaneEdit)[]
-  ): Promise<ControlAppliedReport | CommandReport> {
+  async submit(...edits: readonly ControlEditSet[]): Promise<ControlAppliedReport> {
     if (edits.length === 0) throw new MisoUsageError("a live-control submit needs at least one edit");
-    const sets = edits.filter(isEditSet);
-    if (sets.length === edits.length) {
-      return this.#transport.queue.submit(sets.flatMap((set) => set.edits));
+    if (!edits.every(isEditSet)) {
+      throw new MisoUsageError("a live-control submit sends the edit sets the builders return");
     }
-    if (sets.length !== 0) {
-      throw new MisoUsageError("one submit sends value edits or observation edits, not both");
-    }
-    return this.#submitObservation(edits as readonly LaneEdit[], false);
-  }
-
-  /** @internal Managed observation owner submission with an owner-specific guard bypass. */
-  async submitManaged(...edits: readonly LaneEdit[]): Promise<CommandReport> {
-    return this.#submitObservation(edits, true);
-  }
-
-  async #submitObservation(edits: readonly LaneEdit[], managed: boolean): Promise<CommandReport> {
-    if (edits.length === 0 || edits.length > ABI_LAYOUT.constants.maximumCommandRecords) {
-      throw new MisoUsageError(
-        `an observation submit must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
-      );
-    }
-    if (edits.some((edit) => edit.kind !== "observeSubscribe" && edit.kind !== "observeUnsubscribe")) {
-      throw new MisoUsageError("a command record carries an observation edit only; value edits are SET_CONTROL");
-    }
-    const beforeSubmit = this.#beforeSubmit?.(edits, managed);
-    if (beforeSubmit !== undefined) await beforeSubmit;
-    const report = await this.#transport.observe(edits);
-    const resultConsistent = report.ok === (report.result === 0);
-    const wholeBatch = report.ok
-      ? report.admitted === edits.length
-      : report.admitted === 0;
-    if (!resultConsistent || !wholeBatch) {
-      throw new MisoUsageError(
-        `transport violated whole-batch admission: result=${report.result}, ok=${report.ok}, admitted=${report.admitted}, requested=${edits.length}`,
-      );
-    }
-    return report;
+    return this.#transport.queue.submit(edits.flatMap((set) => set.edits));
   }
 }
 

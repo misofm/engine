@@ -11,8 +11,11 @@ import {
   WIRE_U64,
   WIRE_U8,
   WIRE_UTF8,
+  MESSAGE_SESSION_REPLACE,
   commandFrame,
   concat,
+  decodeAppliedReply,
+  decodeControlReply,
   decodeProtocolDiagnostic,
   decodeRefusalFields,
   decodeResponseEnvelope,
@@ -33,6 +36,10 @@ import type { ControlBackpressure, ControlStatusName, RawField } from "./control
 import type { ControlRequestIds } from "./control-queue.ts";
 import { MisoControlRefusal, MisoUsageError } from "./errors.ts";
 import { decodeObservationEnded } from "./observation-ended.ts";
+import { documentSha256, editOutcome, encodeSessionReplaceRequest } from "./session-edit.ts";
+import type { EditOutcome } from "./session-edit.ts";
+import { encodeSessionTransaction } from "./session-transaction.ts";
+import type { SessionTransaction } from "./session-transaction.ts";
 import type { ObservationEndedKey } from "./observation-ended.ts";
 
 /**
@@ -188,10 +195,12 @@ export interface TransportRequest {
 
 /**
  * One meter table entry (#1583 D1): the session output, or a strip by its stable ID, and the metric.
- * Its handle is its 1-based position in the table.
+ * The master strip (#1690 D3) is the strip the session's master row names; it has no strip ID and
+ * carries gain reduction only. Its handle is its 1-based position in the table.
  */
 export type MeterEntry =
   | { readonly target: "output"; readonly metric: MeterMetricName }
+  | { readonly target: "master"; readonly metric: "gainReduction" }
   | { readonly target: "strip"; readonly stripId: string; readonly metric: MeterMetricName };
 
 /** A meter table entry's metric. */
@@ -461,16 +470,20 @@ export function encodeTelemetryConfigureRequest(request: {
   ]);
 }
 
-/** One meter table entry as its repeated field 7 message: target, the strip ID of a strip, metric. */
+/**
+ * One meter table entry as its repeated field 7 message: target, the strip ID of a strip, metric.
+ * No metric check here: the engine refuses an invalid target and metric pair (`INVALID_FIELD`).
+ */
 function meterEntryField(entry: MeterEntry): Uint8Array {
   if (typeof entry !== "object" || entry === null) throw new MisoUsageError("a meter entry must be an object");
   const metric = field(3, WIRE_U8, true, u8(code(METRIC_CODES, entry.metric, "a meter metric")));
   if (entry.target === "output") return nestedField(7, false, [field(1, WIRE_U8, true, u8(1)), metric]);
+  if (entry.target === "master") return nestedField(7, false, [field(1, WIRE_U8, true, u8(3)), metric]);
   if (entry.target === "strip") {
     if (typeof entry.stripId !== "string") throw new MisoUsageError("a strip meter entry needs a stripId string");
     return nestedField(7, false, [field(1, WIRE_U8, true, u8(2)), field(2, WIRE_UTF8, false, text(entry.stripId)), metric]);
   }
-  throw new MisoUsageError(`a meter target ${String((entry as { target?: unknown }).target)} is not output or strip`);
+  throw new MisoUsageError(`a meter target ${String((entry as { target?: unknown }).target)} is not output, master or strip`);
 }
 
 /** Encode `COUNTERS_GET`: the named counters, in the order given, or every counter when `ids` is absent. */
@@ -654,6 +667,10 @@ function meterEntryOf(row: RawField): MeterEntry {
   const target = readU8(inner, 1);
   const strip = only(inner, 2, WIRE_UTF8);
   if (target === 1 && strip === undefined) return Object.freeze({ target: "output", metric });
+  if (target === 3 && strip === undefined) {
+    if (metric !== "gainReduction") throw malformed("a master meter entry's metric is not gain reduction");
+    return Object.freeze({ target: "master", metric });
+  }
   if (target === 2 && strip !== undefined) {
     let stripId: string;
     try {
@@ -788,8 +805,11 @@ export function decodeProtocolEvent(frame: Uint8Array): ProtocolEvent {
 
 /** How a `ProtocolClient` reaches one engine's core. */
 export interface ProtocolTransport {
-  /** Send one command frame and resolve with its reply frame. */
-  readonly send: (frame: Uint8Array) => Uint8Array | PromiseLike<Uint8Array>;
+  /**
+   * Send one command frame and resolve with its reply frame. `document`, when present, is the
+   * document a `SESSION_REPLACE` frame names, passed beside the frame (#1386 D7).
+   */
+  readonly send: (frame: Uint8Array, document?: Uint8Array) => Uint8Array | PromiseLike<Uint8Array>;
   /** The endpoint's one request-ID allocator: the core's replay cache refuses a reused ID. */
   readonly requestIds: ControlRequestIds;
   /** The core's committed revision, which `TRANSPORT_SET` and `TELEMETRY_CONFIGURE` must expect exactly. */
@@ -832,6 +852,48 @@ export class ProtocolClient {
 
   constructor(transport: ProtocolTransport) {
     this.#transport = transport;
+  }
+
+  /**
+   * Apply one structural transaction (`SESSION_TRANSACTION_APPLY`) at the core's committed revision
+   * and resolve with the committed revision and the path the core chose (#1389). A refusal rejects
+   * with `MisoControlRefusal`, and nothing is committed. There is no retry: the transaction was
+   * built against one session, and a conflict means the session moved under it.
+   */
+  async applyTransaction(transaction: SessionTransaction): Promise<EditOutcome> {
+    const expectedRevision = await this.#transport.committedRevision();
+    const requestId = this.#transport.requestIds.next();
+    const reply = decodeControlReply(await this.#transport.send(
+      encodeSessionTransaction(transaction, { requestId, expectedRevision }),
+    ));
+    if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+    return editOutcome(reply);
+  }
+
+  /**
+   * Replace the session with `document` (`SESSION_REPLACE`, #1386): the core diffs it against the
+   * committed model into one transaction. The frame names the document by its length and SHA-256
+   * and the transport passes the bytes beside it. Resolves with the committed revision and the path,
+   * `unchanged` when the document equals the committed model; a refusal rejects with
+   * `MisoControlRefusal`, and nothing is committed.
+   */
+  async replaceSession(document: Uint8Array<ArrayBuffer>): Promise<EditOutcome> {
+    if (!(document instanceof Uint8Array) || document.length === 0) {
+      throw new MisoUsageError("a replacement document must be non-empty bytes");
+    }
+    const digest = await documentSha256(document);
+    // Read after the digest, right before the send: the revision the frame expects is current.
+    const expectedRevision = await this.#transport.committedRevision();
+    const requestId = this.#transport.requestIds.next();
+    const frame = encodeSessionReplaceRequest({
+      requestId,
+      expectedRevision,
+      documentBytes: document.length,
+      documentSha256: digest,
+    });
+    const reply = decodeAppliedReply(await this.#transport.send(frame, document), MESSAGE_SESSION_REPLACE);
+    if (reply.requestId !== requestId) throw malformed(`the reply answers request ${reply.requestId}, not ${requestId}`);
+    return editOutcome(reply);
   }
 
   async #call<T>(encode: (requestId: bigint) => Uint8Array, decode: (bytes: Uint8Array) => ProtocolReply<T>): Promise<ProtocolReply<T>> {

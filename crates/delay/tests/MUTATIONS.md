@@ -17,7 +17,7 @@ Mutations are listed in the order the gates appear in the issue-#93 plan's eval 
 | M1 | E1 | `resources`: the ring is `2*Fs + 2` words instead of `2*Fs + 3` | `descriptor_exact_resources_caps_and_integer_mapping_are_frozen` | ring word count 88202, expected 88203 |
 | M2 | E2 | `DelayLane::copy_window`: the window starts one cell late (`cursor + r - d + 1`) | `tap_timing_is_sample_exact` | the 1 ms impulse no longer lands on sample 48: bits 0 instead of 1.0 |
 | M3 | E3 | `damping_coefficient` returns the raw control `c` instead of the designed `g` | `damped_matrix_tail_matches_reference_oracle` | worst deviation 7.6e-3 at 48 kHz against a 4e-6 bound |
-| M4 | E4 | the `min(19_845 Hz)` cutoff clamp is dropped | `damping_mapping_is_rate_invariant_and_monotone` | recovered cutoff -8919 Hz at 44.1 kHz: `tan` has gone past Nyquist |
+| M4 | E4 | the `fs / 4` term of the `min(19_845 Hz, fs / 4)` cutoff cap is dropped (#1374), so `g` exceeds `1/2` at 44.1 and 48 kHz | `damping_mapping_is_rate_invariant_and_monotone` | clamped cutoff 19,845.0 Hz at 44.1 kHz, expected 11,025 Hz |
 | M5 | E5 | `ramp_bound`: the bound is `remaining` rather than `remaining - 1`, so the D11 snap lands inside a chunk | `ramp_updates_retarget_and_partition_are_exact` | the chunked coefficient sequence stops matching `LinearRamp::next_value` |
 | M6 | E6 | `tap_sample`: update 128 blends instead of selecting the new tap | `crossfade_updates_are_exact_and_queued_retarget_completes` | sample 127 is `+0.0` instead of the new tap's `1e-8` |
 | M7a | P1 | `delay_chunk`: the damping states stay in locals and are never written back | `partition_invariance_over_1_7_64_128_512` | the left output differs from the reference at block size 1 |

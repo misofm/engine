@@ -5,3 +5,10 @@ components = ["clippy", "rustfmt"]
 targets = [
     "wasm32-unknown-unknown",
 ]
+
+# The browser AudioWorklet artifact only (decision 15, D15-10): a pinned, dated nightly, built with
+# `-Zbuild-std`. Read by scripts/build-web-audioworklet.sh (`--print-toolchain`); rustup ignores
+# this table, so every other build stays on the stable channel above. A bump needs a re-recorded
+# browser matrix (Chromium and WebKit) and green AArch64/native parity gates (docs/RELEASE.md).
+[browser-artifact]
+channel = "nightly-2026-08-20"

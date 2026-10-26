@@ -19,14 +19,11 @@ const SIMD128_PROBE = new Uint8Array([
   0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0xfd, 0x0f, 0x0b,
 ]);
 
-const HOST_ARRAY = Array;
-const HOST_ARRAY_PROTOTYPE = Array.prototype;
 const HOST_ARRAY_IS_ARRAY = Array.isArray;
 const HOST_OBJECT_PROTOTYPE = Object.prototype;
 const HOST_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
 const HOST_REFLECT_OWN_KEYS = Reflect.ownKeys;
 const HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
-const HOST_OBJECT_DEFINE_PROPERTY = Object.defineProperty;
 const HOST_HAS_OWN = Object.prototype.hasOwnProperty;
 const HOST_UINT8_ARRAY = Uint8Array;
 const HOST_UINT8_ARRAY_SET = Uint8Array.prototype.set;
@@ -70,13 +67,8 @@ const OPTION_FIELDS = [
 ];
 const BOOT_OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "reserved2", "spectrumHopFrames", "spectrum",
-  "spectrumCollection",
+  "reserved3", "reserved2",
 ];
-const NEW_NO_SPECTRUM_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.slice(0, -2);
-const SPECTRUM_BOOT_OPTION_FIELDS = BOOT_OPTION_FIELDS.filter((field) => field !== "spectrumHopFrames");
-const LEGACY_BOOT_OPTION_FIELDS = SPECTRUM_BOOT_OPTION_FIELDS.slice(0, -2);
-const SPECTRUM_HOP_FRAMES = new Set([0, 256, 512, 1024, 2048]);
 
 const SOURCE_FIELDS = [
   "sourceId",
@@ -92,229 +84,23 @@ const SEEK_FIELDS = ["sourceId", "generation", "sourceFrame"];
 // Issue #1644 D1: a session seek names its generation and frame, and optionally its anchor.
 const SESSION_SEEK_FIELDS = ["generation", "frame"];
 const ANCHORED_SESSION_SEEK_FIELDS = ["generation", "frame", "anchorSample"];
-// Issue #137 D1, #1677: the frozen 272-byte little-endian command record. It names its tap by
-// stable key: a one-byte length and a 128-byte zero-padded field for each of the strip's and the
-// effect's ID. The IDs are at most 127 UTF-8 bytes (`session::STABLE_ID_MAXIMUM_BYTES`).
-const COMMAND_RECORD_BYTES = 272;
-const RECORD_ID_FIELD_BYTES = 128;
-const RECORD_ID_MAXIMUM_BYTES = RECORD_ID_FIELD_BYTES - 1;
-const MAXIMUM_COMMAND_RECORDS = 256;
+// Issue #1297a: an anchored source seek, a seek report request, and the report's words.
+const SEEK_AT_FIELDS = ["sourceId", "generation", "sourceFrame", "anchorSample"];
+// Issue #2116: the plan latency reply's words, as the C ABI's plan resource report carries them.
+const PLAN_LATENCY_FIELDS = ["samples", "tailKind", "tailSamples"];
+const SEEK_REPORT_FIELDS = [
+  "generation", "firstSample", "sourceFrame", "cumulativeUnderrunFrames", "cumulativeHeldFrames",
+];
 // Issue #1562a D1: the control frames in flight on the port at once. The worklet answers them in
 // arrival order; a flood is refused here with `RESULT_BACKPRESSURE` before any transfer.
 const MAXIMUM_CONTROL_IN_FLIGHT = 64;
 // The engine's `maximum_control_frame_bytes` (`CONTROL_FRAME_BYTES` in the Rust host).
 const MAXIMUM_CONTROL_FRAME_BYTES = 16384;
-// Issue #143: the largest `liveControlObservationTaps` the frozen configuration accepts.
-const MAXIMUM_OBSERVATION_TAPS = 16;
-// Issue #143: the two observation command kinds, named here so `observe()` never writes a literal.
-// Not `MISO_`-prefixed: `scripts/check-env-vocabulary.sh` reserves that prefix for the engine's
-// environment vocabulary, and a `MISO_`-prefixed identifier in any tracked file is a failure.
-const OBSERVE_SUBSCRIBE_KIND = 7;
-const OBSERVE_UNSUBSCRIBE_KIND = 8;
-const SUBSCRIPTION_FIELDS = [
-  "stripId", "rack", "effectId", "tapId", "windowBlocks", "armed",
-];
-const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
-const MAXIMUM_OBSERVATION_READS = MAXIMUM_COMMAND_RECORDS;
-const OBSERVATION_CHANNELS = new Set([1, 2, 3]);
-const OBSERVATION_STATUSES = new Set([1, 2, 3]);
-const OBSERVATION_SELECTION_BYTES = 32;
-const OBSERVATION_RESULT_BYTES = 96;
-const OBSERVATION_MAP_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "effectSlotId", "nativeEffectId", "tapIds",
-];
-const OBSERVATION_ROW_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "tapId", "channels", "status", "sampleRateHz",
-  "firstSample", "endSample", "sequence", "blocks", "leftPresent", "rightPresent", "left", "right",
-];
 // Issue #207: one entry of the session map's source list. The names are the `.d.ts`'s and the
 // worklet's, spelled once here so the acknowledgement validator and the type declaration cannot
 // drift apart without `scripts/check-session-map-shape.py` seeing it.
 const SESSION_SOURCE_FIELDS = ["id", "channels", "frames"];
-const TRACK_RESPONSE_REQUEST_FIELDS = [
-  "trackId", "grid", "channels", "points", "minimumHz", "maximumHz", "maximumResultBytes",
-];
-const TRACK_RESPONSE_REPLY_FIELDS = ["tag", "requestId", "result", "snapshot"];
-const LIVE_RESPONSE_CAPTURE_GRID_LINEAR = 1;
-const LIVE_RESPONSE_CAPTURE_GRID_LOGARITHMIC = 2;
-const LIVE_RESPONSE_CAPTURE_CHANNEL_LEFT = 1;
-const LIVE_RESPONSE_CAPTURE_CHANNEL_RIGHT = 2;
-const LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH = 3;
-const LIVE_RESPONSE_MAXIMUM_POINTS = 4096;
-const LIVE_RESPONSE_MAXIMUM_ID_BYTES = 127;
-const LIVE_RESPONSE_MAXIMUM_BYTES = 1 << 20;
-const SPECTRUM_BOOT_FIELDS = ["target", "targetId", "channels", "maximumCaptureBytes"];
-const SPECTRUM_COLLECTION_ENTRY_FIELDS = ["target", "targetId", "channels"];
-const SPECTRUM_COLLECTION_FIELDS = ["entries", "maximumCaptureBytes"];
-const SPECTRUM_TARGETS = new Set(["trackPostInput", "trackPostPan", "output"]);
-const SPECTRUM_CHANNELS = new Set(["left", "right", "both"]);
-const SPECTRUM_MAXIMUM_ID_BYTES = 127;
-const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
-const SPECTRUM_STREAM_METADATA_BYTES = 120;
-const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
-const SPECTRUM_STREAM_START_REQUEST_FIELDS = ["tag", "requestId", "operation", "smoothingMs"];
-const SPECTRUM_STREAM_READ_REQUEST_FIELDS = ["tag", "requestId", "operation", "buffer"];
-const SPECTRUM_STREAM_STOP_REQUEST_FIELDS = ["tag", "requestId", "operation"];
-const SPECTRUM_SELECT_REQUEST_FIELDS = ["tag", "requestId", "operation", "target", "targetId", "channels"];
-const SPECTRUM_STREAM_SELECT_REQUEST_FIELDS = [
-  "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
-];
-const SPECTRUM_SELECT_REPLY_FIELDS = ["tag", "requestId", "result", "operation"];
-const SPECTRUM_STREAM_SELECT_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
-const SPECTRUM_STREAM_START_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
-const SPECTRUM_STREAM_STOP_REPLY_FIELDS = ["tag", "requestId", "result", "operation", "metadata"];
-const SPECTRUM_STREAM_READ_REPLY_FIELDS = [
-  "tag", "requestId", "operation", "result", "byteLength", "buffer", "metadata",
-];
 
-// Decision 12 (#1096): an effect is addressed as `1` inserts, by its index in the track's inserts,
-// or `3` console, by the slot's index in the session's slot order (`pre_insert`, then
-// `post_insert`). The retired `simd1` (`0`) and `simd2` (`2`) codes are refused and never
-// reallocated.
-const RACK_INSERTS = 1;
-const RACK_CONSOLE = 3;
-const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
-
-/// Order two IDs by their code units, which is their byte order for the ASCII IDs a session holds.
-function compareIds(left, right) {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-/// The UTF-8 bytes of a record's ID field. It runs on the caller's thread, never in `process()`.
-function idBytes(id) {
-  return new TextEncoder().encode(id);
-}
-
-/// A record's ID: a string whose UTF-8 form fits the 127 bytes of its field. Whether it names
-/// anything is the engine's to say, with a typed reason.
-function validRecordId(id) {
-  return typeof id === "string" && idBytes(id).length <= RECORD_ID_MAXIMUM_BYTES;
-}
-
-function validSubscription(subscription) {
-  return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
-    && validRecordId(subscription.stripId)
-    && effectRack(subscription.rack)
-    && validRecordId(subscription.effectId)
-    && validU32(subscription.tapId) && subscription.tapId > 0
-    && validU32(subscription.windowBlocks)
-    && typeof subscription.armed === "boolean";
-}
-
-function validObservationAddress(address) {
-  return hasExactFields(address, OBSERVATION_ADDRESS_FIELDS)
-    && validU32(address.trackIndex)
-    && effectRack(address.rack)
-    && validU32(address.effectIndex)
-    && validU32(address.tapId) && address.tapId > 0
-    && validU32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
-}
-
-function validObservationMapBinding(binding) {
-  return hasExactFields(binding, OBSERVATION_MAP_FIELDS)
-    && validU32(binding.trackIndex)
-    && effectRack(binding.rack)
-    && validU32(binding.effectIndex)
-    && typeof binding.effectSlotId === "string" && binding.effectSlotId.length > 0
-    && typeof binding.nativeEffectId === "string" && binding.nativeEffectId.length > 0
-    && Array.isArray(binding.tapIds) && binding.tapIds.length > 0
-    && binding.tapIds.every((tapId) => validU32(tapId) && tapId > 0);
-}
-
-function validObservationRow(row) {
-  return hasExactFields(row, OBSERVATION_ROW_FIELDS)
-    && validU32(row.trackIndex)
-    && effectRack(row.rack)
-    && validU32(row.effectIndex)
-    && validU32(row.tapId) && row.tapId > 0
-    && validU32(row.channels) && OBSERVATION_CHANNELS.has(row.channels)
-    && validU32(row.status) && OBSERVATION_STATUSES.has(row.status)
-    && validU32(row.sampleRateHz) && validU64(row.firstSample)
-    && validU64(row.endSample) && validU64(row.sequence)
-    && validU32(row.blocks) && validU32(row.leftPresent) && row.leftPresent <= 1
-    && validU32(row.rightPresent) && row.rightPresent <= 1
-    && typeof row.left === "number" && Number.isFinite(row.left)
-    && typeof row.right === "number" && Number.isFinite(row.right);
-}
-// Issue #143 froze reasons 10 and 11; issue #151 found that this file still wrote the bound as
-// the literal `<= 9`, so the only two reasons the observation path ever returns read as malformed
-// acknowledgements and killed the whole host with a sticky 255.
-//
-// The vocabulary is therefore a table, spelled once, in the frozen value order. The bound is
-// derived from it and never written as a literal again, and
-// `scripts/check-command-reason-vocabulary.py` holds this table equal to
-// `hosts/host-web/src/lib.rs`'s `COMMAND_REASON_*` constants, the `.d.ts`
-// `MisoCommandReason` enum, the metadata generator's `commandReasons` rows and the schema
-// gate's own list. Bump a Rust reason without the rest and that gate is red.
-//
-// Reasons 12-14 belonged to the value kinds #1565A deleted. They are retired and never
-// reallocated, so their entries are `null`: an acknowledgement that names one is malformed.
-// Issue #1676 added 15, `observationLimit`.
-const COMMAND_REASONS = Object.freeze([
-  "none",
-  "malformed",
-  "unknownTrack",
-  "unknownRack",
-  "unknownEffect",
-  "unknownParameter",
-  "domain",
-  "unsupportedKind",
-  "backpressure",
-  "wrongState",
-  "unknownTap",
-  "observationUnbound",
-  null,
-  null,
-  null,
-  "observationLimit",
-]);
-
-/// `true` for exactly the reasons this ABI version declares.
-///
-/// A reason outside the table is a genuinely malformed acknowledgement and still fails the host:
-/// the fix for #151 widened the vocabulary, it did not stop validating it.
-function validCommandReason(reason) {
-  return validU32(reason) && reason < COMMAND_REASONS.length && COMMAND_REASONS[reason] !== null;
-}
-
-const COMMAND_FIELDS = ["kind", "rack", "stripId", "effectId", "tapId", "windowBlocks"];
-// Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records. Issue #1565a
-// deleted every value kind (1-6 and 9-17): a value goes through the `control` message, and a record
-// of a deleted kind is refused here as an unknown kind is. Kind numbers are never reallocated.
-//
-// This set is the bound: `validCommand` asks it, never a hand-written range. It is one of
-// the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
-// constants, so a kind that exists on the wire and not here is red before it ships.
-const COMMAND_KINDS = new Set([7, 8]);
-
-function validCommand(command) {
-  return hasExactFields(command, COMMAND_FIELDS)
-    && COMMAND_KINDS.has(command.kind)
-    && effectRack(command.rack)
-    && validRecordId(command.stripId) && validRecordId(command.effectId)
-    && validU32(command.tapId) && validU32(command.windowBlocks);
-}
-
-/// Encode one live-control submission into the 272-byte semantic wire record (#1677).
-function encodeCommands(commands) {
-  const records = new Uint8Array(commands.length * COMMAND_RECORD_BYTES);
-  const view = new DataView(records.buffer);
-  for (let index = 0; index < commands.length; index += 1) {
-    const command = commands[index];
-    const offset = index * COMMAND_RECORD_BYTES;
-    const stripId = idBytes(command.stripId);
-    const effectId = idBytes(command.effectId);
-    records[offset] = command.kind;
-    records[offset + 1] = command.rack;
-    records[offset + 2] = stripId.length;
-    records[offset + 3] = effectId.length;
-    view.setUint32(offset + 4, command.tapId, true);
-    view.setUint32(offset + 8, command.windowBlocks, true);
-    records.set(stripId, offset + 16);
-    records.set(effectId, offset + 16 + RECORD_ID_FIELD_BYTES);
-  }
-  return records;
-}
 const RESOURCE_FIELDS = [
   "sampleRateHz", "quantumFrames", "backend", "optionsBytes", "statusBytes", "sessionDocumentBytes",
   "diagnosticBytes", "idStagingBytes", "sourcePcmStagingBytes", "outputPcmBytes",
@@ -387,143 +173,16 @@ function snapshotDocument(value) {
   }
 }
 
-function canonicalArrayIndex(key, length) {
-  if (key === "") return -1;
-  const index = Number(key);
-  return Number.isInteger(index) && index >= 0 && index <= 0xfffffffe
-      && index < length && String(index) === key
-    ? index
-    : -1;
-}
-
-function snapshotSpectrumEntry(value) {
-  const captured = capturePlainRecord(value, SPECTRUM_COLLECTION_ENTRY_FIELDS);
-  if (!captured || !hasEnumerableShape(captured, SPECTRUM_COLLECTION_ENTRY_FIELDS)) return undefined;
-  return {
-    target: captured.descriptors.get("target").value,
-    targetId: captured.descriptors.get("targetId").value,
-    channels: captured.descriptors.get("channels").value,
-  };
-}
-
-function snapshotSpectrumEntries(value) {
-  if (!HOST_ARRAY_IS_ARRAY(value)
-      || HOST_OBJECT_GET_PROTOTYPE_OF(value) !== HOST_ARRAY_PROTOTYPE) return undefined;
-  const lengthDescriptor = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, "length");
-  if (lengthDescriptor === undefined
-      || !HOST_HAS_OWN.call(lengthDescriptor, "value")
-      || !HOST_HAS_OWN.call(lengthDescriptor, "enumerable")) return undefined;
-  const length = lengthDescriptor.value;
-  if (!Number.isSafeInteger(length) || length < 0 || length > 0xffffffff) return undefined;
-  const keys = HOST_REFLECT_OWN_KEYS(value);
-  const indices = [];
-  let sawLength = false;
-  for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
-    const key = keys[keyIndex];
-    if (key === "length") {
-      sawLength = true;
-      continue;
-    }
-    const index = typeof key === "string" ? canonicalArrayIndex(key, length) : -1;
-    if (index < 0) return undefined;
-    const descriptor = HOST_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, key);
-    if (descriptor === undefined
-        || !HOST_HAS_OWN.call(descriptor, "value")
-        || !HOST_HAS_OWN.call(descriptor, "enumerable")) return undefined;
-    indices.push({ index, value: descriptor.value, enumerable: descriptor.enumerable });
-  }
-  if (!sawLength) return undefined;
-  let copy;
-  try {
-    copy = new HOST_ARRAY(length);
-    for (let index = 0; index < indices.length; index += 1) {
-      const source = indices[index];
-      const entry = snapshotSpectrumEntry(source.value);
-      if (entry === undefined) return undefined;
-      HOST_OBJECT_DEFINE_PROPERTY(copy, source.index, {
-        value: entry,
-        writable: true,
-        enumerable: source.enumerable,
-        configurable: true,
-      });
-    }
-  } catch (_) {
-    return undefined;
-  }
-  return copy;
-}
-
-function snapshotSpectrumBoot(value) {
-  if (value === null) return null;
-  const captured = capturePlainRecord(value, SPECTRUM_BOOT_FIELDS);
-  if (!captured || !hasEnumerableShape(captured, SPECTRUM_BOOT_FIELDS)) return undefined;
-  const snapshot = {
-    target: captured.descriptors.get("target").value,
-    targetId: captured.descriptors.get("targetId").value,
-    channels: captured.descriptors.get("channels").value,
-    maximumCaptureBytes: captured.descriptors.get("maximumCaptureBytes").value,
-  };
-  return validSpectrumBoot(snapshot) ? snapshot : undefined;
-}
-
-function snapshotSpectrumCollection(value) {
-  if (value === null) return null;
-  const captured = capturePlainRecord(value, SPECTRUM_COLLECTION_FIELDS);
-  if (!captured || !hasEnumerableShape(captured, SPECTRUM_COLLECTION_FIELDS)) return undefined;
-  const entries = snapshotSpectrumEntries(captured.descriptors.get("entries").value);
-  if (entries === undefined) return undefined;
-  const snapshot = {
-    entries,
-    maximumCaptureBytes: captured.descriptors.get("maximumCaptureBytes").value,
-  };
-  return validSpectrumCollectionBoot(snapshot) ? snapshot : undefined;
-}
-
 function snapshotBootOptions(value) {
   const captured = capturePlainRecord(value, BOOT_OPTION_FIELDS);
-  if (!captured || !hasRequiredEnumerableFields(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
-  const hopDescriptor = captured.descriptors.get("spectrumHopFrames");
-  const spectrumDescriptor = captured.descriptors.get("spectrum");
-  const collectionDescriptor = captured.descriptors.get("spectrumCollection");
-  if (hopDescriptor !== undefined) {
-    // The current SDK shape carries the hop as an ordinary enumerable data field. A hidden field
-    // is neither a valid new shape nor an old compatibility shape, and must not bypass validation.
-    const noSpectrumFields = spectrumDescriptor === undefined && collectionDescriptor === undefined;
-    if (!hopDescriptor.enumerable
-        || (!hasEnumerableShape(captured, BOOT_OPTION_FIELDS)
-          && !(noSpectrumFields && hasEnumerableShape(captured, NEW_NO_SPECTRUM_BOOT_OPTION_FIELDS)))) {
-      return undefined;
-    }
-  } else {
-    // Direct callers from before the hop was added remain accepted. Keep the old spectrum shape
-    // rules exactly: both spectrum fields enumerable means the eight-field shape, while hidden or
-    // absent optional fields may be normalized as before.
-    const spectrumIsEnumerable = spectrumDescriptor?.enumerable === true;
-    const collectionIsEnumerable = collectionDescriptor?.enumerable === true;
-    if (spectrumIsEnumerable || collectionIsEnumerable) {
-      if (!hasEnumerableShape(captured, SPECTRUM_BOOT_OPTION_FIELDS)) return undefined;
-    } else {
-      if (!hasEnumerableShape(captured, LEGACY_BOOT_OPTION_FIELDS)) return undefined;
-      if (spectrumDescriptor !== undefined
-          && spectrumDescriptor.value !== undefined && spectrumDescriptor.value !== null) return undefined;
-    }
-  }
-  const spectrumValue = spectrumDescriptor === undefined ? undefined : spectrumDescriptor.value;
-  const spectrum = snapshotSpectrumBoot(spectrumValue ?? null);
-  const spectrumCollection = snapshotSpectrumCollection(
-    (collectionDescriptor === undefined ? undefined : collectionDescriptor.value) ?? null,
-  );
-  if (spectrum === undefined || spectrumCollection === undefined) return undefined;
+  if (!captured || !hasEnumerableShape(captured, BOOT_OPTION_FIELDS)) return undefined;
   const snapshot = {
     sourceRingFrames: captured.descriptors.get("sourceRingFrames").value,
     maximumMemoryBytes: captured.descriptors.get("maximumMemoryBytes").value,
     reserved1: captured.descriptors.get("reserved1").value,
     liveControlMeterBlocks: captured.descriptors.get("liveControlMeterBlocks").value,
-    liveControlObservationTaps: captured.descriptors.get("liveControlObservationTaps").value,
+    reserved3: captured.descriptors.get("reserved3").value,
     reserved2: captured.descriptors.get("reserved2").value,
-    spectrumHopFrames: hopDescriptor === undefined ? 0 : hopDescriptor.value,
-    spectrum,
-    spectrumCollection,
   };
   return validBootOptions(snapshot) ? snapshot : undefined;
 }
@@ -576,75 +235,15 @@ function numericBackend(backend) {
   return backend === "scalar" ? 0 : 1;
 }
 
-function validSpectrumBoot(options) {
-  if (options === null) return true;
-  return hasExactFields(options, SPECTRUM_BOOT_FIELDS)
-    && SPECTRUM_TARGETS.has(options.target)
-    && typeof options.targetId === "string"
-    && options.targetId.length > 0
-    && new TextEncoder().encode(options.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
-    && SPECTRUM_CHANNELS.has(options.channels)
-    && Number.isSafeInteger(options.maximumCaptureBytes)
-    && options.maximumCaptureBytes > 0
-    && options.maximumCaptureBytes <= SPECTRUM_MAXIMUM_BYTES;
-}
-
-function validSpectrumCollectionBoot(options) {
-  if (options === null) return true;
-  return hasExactFields(options, SPECTRUM_COLLECTION_FIELDS)
-    && Array.isArray(options.entries)
-    && options.entries.length > 0
-    && options.entries.every((entry) => hasExactFields(entry, SPECTRUM_COLLECTION_ENTRY_FIELDS)
-      && SPECTRUM_TARGETS.has(entry.target)
-      && typeof entry.targetId === "string"
-      && entry.targetId.length > 0
-      && new TextEncoder().encode(entry.targetId).byteLength <= SPECTRUM_MAXIMUM_ID_BYTES
-      && SPECTRUM_CHANNELS.has(entry.channels))
-    && Number.isSafeInteger(options.maximumCaptureBytes)
-    && options.maximumCaptureBytes > 0;
-}
-
-function validSpectrumStreamMetadata(metadata) {
-  return hasExactFields(metadata, [
-    "structSize", "abiVersion", "result", "status", "target", "channels", "sampleRateHz",
-    "quantumFrames", "hopFrames", "sourceUnderrun", "captureEpoch", "sequence",
-    "droppedCaptures", "windows", "capturedSample", "endSample", "analysisEpoch",
-    "historyStartSample", "smoothingMs",
-  ])
-    && metadata.structSize === SPECTRUM_STREAM_METADATA_BYTES
-    && metadata.abiVersion === 0x00010000
-    && validResult(metadata.result)
-    && SPECTRUM_STREAM_STATUSES.has(metadata.status)
-    && validU32(metadata.target) && metadata.target > 0 && metadata.target <= 3
-    && validU32(metadata.channels) && metadata.channels > 0 && metadata.channels <= 3
-    && validU32(metadata.sampleRateHz) && metadata.sampleRateHz > 0
-    && validU32(metadata.quantumFrames) && metadata.quantumFrames > 0
-    && validU32(metadata.hopFrames) && metadata.hopFrames > 0
-    && validU32(metadata.sourceUnderrun) && metadata.sourceUnderrun <= 1
-    && validU64(metadata.captureEpoch) && validU64(metadata.sequence)
-    && validU64(metadata.droppedCaptures) && validU64(metadata.windows)
-    && validU64(metadata.capturedSample) && validU64(metadata.endSample)
-    && metadata.endSample >= metadata.capturedSample
-    && validU64(metadata.analysisEpoch) && validU64(metadata.historyStartSample)
-    && typeof metadata.smoothingMs === "number" && Number.isFinite(metadata.smoothingMs)
-    && metadata.smoothingMs >= 0 && metadata.smoothingMs <= 10_000;
-}
-
 function validBootOptions(options) {
   return hasExactFields(options, BOOT_OPTION_FIELDS)
-    && SPECTRUM_HOP_FRAMES.has(options.spectrumHopFrames)
     && validU32(options.sourceRingFrames)
     && validU64(options.maximumMemoryBytes)
     && options.reserved1 === 0n
     && validU64(options.liveControlMeterBlocks)
     && options.liveControlMeterBlocks <= 0xffffffffn
-    && validU64(options.liveControlObservationTaps)
-    && options.liveControlObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
-    && options.reserved2 === 0n
-    && validSpectrumBoot(options.spectrum ?? null)
-    && validSpectrumCollectionBoot(options.spectrumCollection ?? null)
-    && (options.spectrum === null || options.spectrum === undefined
-      || options.spectrumCollection === null || options.spectrumCollection === undefined);
+    && options.reserved3 === 0n
+    && options.reserved2 === 0n;
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -745,22 +344,18 @@ class MisoAudioWorkletHost {
   #inFlightSeeks = new Map();
   /// Issue #1644 D1: one session seek may be unsettled at a time.
   #inFlightSessionSeeks = 0;
+  /// Issue #1297a: the sources with a seek report request unsettled (one each).
+  #inFlightSeekReports = new Set();
   /// The one status request on the port, `{ requestId, promise }`, or null. A `status()` call joins
   /// it only while no later request was sent; otherwise it joins `#statusFollow`, the one pending
   /// read the host sends when this one settles.
   #statusRead = null;
   #statusFollow = null;
   #inFlightRenderAllocations = 0;
-  #inFlightCommands = 0;
+  /// Issue #2116: one plan latency read may be unsettled at a time.
+  #inFlightPlanLatency = 0;
   #inFlightControl = 0;
-  #inFlightObservationReads = 0;
-  #inFlightTrackResponses = 0;
-  #inFlightSpectrum = 0;
   #inFlightLease = new Set();
-  #liveControlMeterBlocks;
-  /// Issue #143: the host's own record of the taps it armed, keyed by the four addressing numbers.
-  /// It is what `trackGrDb`'s positional array structurally cannot express.
-  #observations = new Map();
   #ringBlocks;
   #onMeterFrame = null;
   #onTelemetryFrame = null;
@@ -786,7 +381,6 @@ class MisoAudioWorkletHost {
     resources,
     memoryBytes,
     ringBlocks,
-    liveControlMeterBlocks,
   ) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
@@ -798,7 +392,6 @@ class MisoAudioWorkletHost {
     this.#sampleRateHz = sampleRateHz;
     this.#quantumFrames = quantumFrames;
     this.#ringBlocks = ringBlocks;
-    this.#liveControlMeterBlocks = liveControlMeterBlocks;
     this.#port = node.port;
     this.#port.onmessage = (event) => this.#receive(event.data);
     this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
@@ -837,14 +430,6 @@ class MisoAudioWorkletHost {
     this.#serviceTick = null;
   }
 
-  #submitOrdinaryRecords(records, count) {
-    return this.#request(
-      { tag: "miso.command.v1", count, records },
-      [records.buffer],
-      "command",
-    );
-  }
-
   // Request IDs are strictly monotonic and the worklet handles messages in arrival order, so the
   // first key of the insertion-ordered map is the oldest unsettled request.
   #oldestRequestId() {
@@ -868,6 +453,8 @@ class MisoAudioWorkletHost {
       this.#inFlightSeeks.delete(pending.sourceId);
     } else if (pending.response === "sessionSeek") {
       this.#inFlightSessionSeeks -= 1;
+    } else if (pending.response === "seekReport") {
+      this.#inFlightSeekReports.delete(pending.sourceId);
     } else if (pending.response === "status") {
       if (this.#statusRead?.requestId === pending.requestId) {
         this.#statusRead = null;
@@ -875,18 +462,11 @@ class MisoAudioWorkletHost {
       }
     } else if (pending.response === "renderAllocations") {
       this.#inFlightRenderAllocations -= 1;
-    } else if (pending.response === "command") {
-      this.#inFlightCommands -= 1;
+    } else if (pending.response === "planLatency") {
+      this.#inFlightPlanLatency -= 1;
     } else if (pending.response === "control") {
       this.#inFlightControl -= 1;
-    } else if (pending.response === "observationRead") {
-      this.#inFlightObservationReads -= 1;
-    } else if (pending.response === "trackResponse") {
-      this.#inFlightTrackResponses -= 1;
-    } else if (pending.response === "spectrum") {
-      this.#inFlightSpectrum -= 1;
-    } else if (pending.response === "lease" || pending.response === "sessionMap"
-      || pending.response === "observationMap") {
+    } else if (pending.response === "lease" || pending.response === "sessionMap") {
       this.#inFlightLease.delete(pending.leaseKind);
     }
   }
@@ -1029,33 +609,10 @@ class MisoAudioWorkletHost {
     }
     const expectedFields = pending.response === "source"
       ? ["tag", "requestId", "result", "planes"]
-      : pending.response === "command"
-        ? [
-          "tag", "requestId", "result", "reason", "rejectedIndex", "admitted", "appliedAtSample",
-          "records",
-        ]
-        : pending.response === "control"
+      : pending.response === "control"
           ? ["tag", "requestId", "result", "response", "revision"]
         : pending.response === "sessionMap"
           ? ["tag", "requestId", "result", "sources", "metersAttached"]
-          : pending.response === "observationMap"
-            ? ["tag", "requestId", "result", "structureEpoch", "bindings"]
-            : pending.response === "observationRead"
-              ? ["tag", "requestId", "result", "rows"]
-              : pending.response === "trackResponse"
-                ? TRACK_RESPONSE_REPLY_FIELDS
-                : pending.response === "spectrum"
-                  ? pending.spectrumOperation === "streamRead"
-                    ? SPECTRUM_STREAM_READ_REPLY_FIELDS
-                    : pending.spectrumOperation === "streamSelect"
-                      ? SPECTRUM_STREAM_SELECT_REPLY_FIELDS
-                    : pending.spectrumOperation === "streamStart"
-                      ? SPECTRUM_STREAM_START_REPLY_FIELDS
-                      : pending.spectrumOperation === "streamStop"
-                        ? SPECTRUM_STREAM_STOP_REPLY_FIELDS
-                        : pending.spectrumOperation === "select"
-                          ? SPECTRUM_SELECT_REPLY_FIELDS
-                        : ["tag", "requestId", "result", "operation", "snapshot"]
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
@@ -1066,6 +623,10 @@ class MisoAudioWorkletHost {
           ? ["tag", "requestId", "result", "count"]
         : pending.response === "sessionSeek"
           ? ["tag", "requestId", "result", "generation"]
+        : pending.response === "seekReport"
+          ? ["tag", "requestId", "result", "report"]
+        : pending.response === "planLatency"
+          ? ["tag", "requestId", "result", "latency"]
         : ["tag", "requestId", "result"];
     const expectedTag = pending.response === "status"
       ? "miso.status.v1"
@@ -1075,28 +636,15 @@ class MisoAudioWorkletHost {
         ? "miso.control.v1"
       : pending.response === "sessionMap"
         ? "miso.sessionmap.v1"
-        : pending.response === "observationMap"
-          ? "miso.observationmap.v1"
-          : pending.response === "observationRead"
-            ? "miso.observation.v1"
-            : pending.response === "trackResponse"
-              ? "miso.trackresponse.v1"
-              : pending.response === "spectrum"
-                ? "miso.spectrum.v1"
-                : pending.response === "sessionSeek"
+              : pending.response === "sessionSeek"
                   ? "miso.session-seek.v1"
+                : pending.response === "seekReport"
+                  ? "miso.seek-report.v1"
+                : pending.response === "planLatency"
+                  ? "miso.plan-latency.v1"
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
-    const validCommandAck = pending.response !== "command" || (
-      validCommandReason(message.reason)
-      && validU32(message.rejectedIndex) && message.rejectedIndex < MAXIMUM_COMMAND_RECORDS
-      && validU32(message.admitted) && message.admitted <= pending.commandCount
-      && (message.result === RESULT_OK) === (message.admitted === pending.commandCount)
-      && validU64(message.appliedAtSample)
-      && message.records instanceof Uint8Array
-      && message.records.byteLength === pending.commandCount * COMMAND_RECORD_BYTES
-    );
     const validControl = pending.response !== "control" || (
       message.response instanceof Uint8Array
       && message.response.buffer instanceof ArrayBuffer
@@ -1114,54 +662,6 @@ class MisoAudioWorkletHost {
         && validU32(source.channels) && source.channels > 0
         && validU64(source.frames, true))
       && typeof message.metersAttached === "boolean"
-    );
-    const validObservationMap = pending.response !== "observationMap" || (
-      message.result === RESULT_OK && Array.isArray(message.bindings)
-      // Issue #1562b: the structure epoch of the control list whose strip order the bindings
-      // follow (the rendering plan's), a positive safe integer.
-      && Number.isSafeInteger(message.structureEpoch) && message.structureEpoch > 0
-      && message.bindings.every(validObservationMapBinding)
-    );
-    const validObservationRead = pending.response !== "observationRead" || (
-      Array.isArray(message.rows)
-      && (message.result !== RESULT_OK || message.rows.length === pending.observationCount)
-      && (message.result === RESULT_OK || message.rows.length === 0)
-      && message.rows.every(validObservationRow)
-    );
-    const validTrackResponse = pending.response !== "trackResponse" || (
-      message.snapshot instanceof Uint8Array
-      && message.snapshot.buffer instanceof ArrayBuffer
-      && ((message.result === RESULT_OK
-        && message.snapshot.byteLength > 0
-        && message.snapshot.byteLength <= pending.trackResponseMaximumBytes)
-        || (message.result !== RESULT_OK && message.snapshot.byteLength === 0))
-    );
-    const validSpectrum = pending.response !== "spectrum" || (
-      message.operation === pending.spectrumOperation
-      && ((pending.spectrumOperation === "streamSelect")
-        ? validSpectrumStreamMetadata(message.metadata)
-        : (pending.spectrumOperation === "streamStart" || pending.spectrumOperation === "streamStop")
-        ? validSpectrumStreamMetadata(message.metadata)
-        : pending.spectrumOperation === "streamRead"
-          ? validSpectrumStreamMetadata(message.metadata)
-            && Number.isSafeInteger(message.byteLength) && message.byteLength >= 0
-            && message.byteLength <= SPECTRUM_MAXIMUM_BYTES
-            && message.buffer instanceof ArrayBuffer
-            && message.buffer.byteLength === pending.spectrumBufferBytes
-            && (message.result === RESULT_OK
-              ? (message.metadata.status === 6
-                ? message.byteLength > 0 && message.byteLength <= message.buffer.byteLength
-                : message.byteLength === 0)
-              : message.byteLength === 0)
-          : pending.spectrumOperation === "select"
-            ? true
-            : message.snapshot instanceof Uint8Array
-            && message.snapshot.buffer instanceof ArrayBuffer
-            && (message.result === RESULT_OK
-              ? (pending.spectrumOperation === "read"
-                ? message.snapshot.byteLength > 0 && message.snapshot.byteLength <= SPECTRUM_MAXIMUM_BYTES
-                : message.snapshot.byteLength === 0)
-              : message.snapshot.byteLength === 0))
     );
     const validStatus = pending.response !== "status" || (
       message.result === RESULT_OK && validU32(message.state) && message.state <= 4
@@ -1185,11 +685,25 @@ class MisoAudioWorkletHost {
       || (message.result === RESULT_OK && validU32(message.count));
     const validSessionSeek = pending.response !== "sessionSeek"
       || message.generation === pending.generation;
+    // Issue #1297a: an OK carries every report word, a refusal none.
+    const validSeekReport = pending.response !== "seekReport"
+      || (message.result === RESULT_OK
+        ? hasExactFields(message.report, SEEK_REPORT_FIELDS)
+          && SEEK_REPORT_FIELDS.every((field) => validU64(message.report[field]))
+        : message.report === null);
+    // Issue #2116: an OK carries the latency and a tail kind of 0 (finite) or 1 (unbounded, zero
+    // samples); a refusal carries none.
+    const validPlanLatency = pending.response !== "planLatency"
+      || (message.result === RESULT_OK
+        ? hasExactFields(message.latency, PLAN_LATENCY_FIELDS)
+          && PLAN_LATENCY_FIELDS.every((field) => validU64(message.latency[field]))
+          && (message.latency.tailKind === 0n
+            || (message.latency.tailKind === 1n && message.latency.tailSamples === 0n))
+        : message.latency === null);
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
-        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validCommandAck || !validControl || !validSessionMap
-        || !validObservationMap || !validObservationRead || !validTrackResponse || !validSpectrum
-        || !validSessionSeek) {
+        || !validSourcePlanes || !validStatus || !validRenderAllocations || !validControl || !validSessionMap
+        || !validSessionSeek || !validSeekReport || !validPlanLatency) {
       this.#fail(webError(255, message.requestId));
       return;
     }
@@ -1211,14 +725,13 @@ class MisoAudioWorkletHost {
     this.#inFlightSources.clear();
     this.#inFlightSeeks.clear();
     this.#inFlightSessionSeeks = 0;
+    this.#inFlightSeekReports.clear();
     this.#statusRead = null;
     const follow = this.#statusFollow;
     this.#statusFollow = null;
     this.#inFlightRenderAllocations = 0;
+    this.#inFlightPlanLatency = 0;
     this.#inFlightControl = 0;
-    this.#inFlightObservationReads = 0;
-    this.#inFlightTrackResponses = 0;
-    this.#inFlightSpectrum = 0;
     for (const pending of unsettled) pending.reject(error);
     follow?.reject(error);
   }
@@ -1231,18 +744,11 @@ class MisoAudioWorkletHost {
     }
     if (response === "seek") return this.#inFlightSeeks.has(sourceId);
     if (response === "sessionSeek") return this.#inFlightSessionSeeks >= 1;
+    if (response === "seekReport") return this.#inFlightSeekReports.has(sourceId);
     if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
-    // Issue #137 D1: the local bound is the worklet-side queue depth, so a flood is refused here,
-    // before any transfer, and the caller keeps its record block. The engine-side bound is the
-    // authority; this one only avoids paying a message round trip to be told so.
-    if (response === "command") {
-      return this.#inFlightCommands >= MAXIMUM_COMMAND_RECORDS;
-    }
+    if (response === "planLatency") return this.#inFlightPlanLatency >= 1;
     if (response === "control") return this.#inFlightControl >= MAXIMUM_CONTROL_IN_FLIGHT;
-    if (response === "observationRead") return this.#inFlightObservationReads >= 1;
-    if (response === "trackResponse") return this.#inFlightTrackResponses >= 1;
-    if (response === "spectrum") return this.#inFlightSpectrum >= 1;
-    if (response === "lease" || response === "sessionMap" || response === "observationMap") {
+    if (response === "lease" || response === "sessionMap") {
       return this.#inFlightLease.has(sourceId);
     }
     return false; // dispose is terminal and waits for nothing
@@ -1255,19 +761,15 @@ class MisoAudioWorkletHost {
       this.#inFlightSeeks.set(sourceId, true);
     } else if (response === "sessionSeek") {
       this.#inFlightSessionSeeks += 1;
+    } else if (response === "seekReport") {
+      this.#inFlightSeekReports.add(sourceId);
     } else if (response === "renderAllocations") {
       this.#inFlightRenderAllocations += 1;
-    } else if (response === "command") {
-      this.#inFlightCommands += 1;
+    } else if (response === "planLatency") {
+      this.#inFlightPlanLatency += 1;
     } else if (response === "control") {
       this.#inFlightControl += 1;
-    } else if (response === "observationRead") {
-      this.#inFlightObservationReads += 1;
-    } else if (response === "trackResponse") {
-      this.#inFlightTrackResponses += 1;
-    } else if (response === "spectrum") {
-      this.#inFlightSpectrum += 1;
-    } else if (response === "lease" || response === "sessionMap" || response === "observationMap") {
+    } else if (response === "lease" || response === "sessionMap") {
       this.#inFlightLease.add(sourceId);
     }
   }
@@ -1295,12 +797,6 @@ class MisoAudioWorkletHost {
         requestId,
         sourceId,
         leaseKind: sourceId,
-        commandCount: stamped.count ?? 0,
-        observationCount: Array.isArray(stamped.selections) ? stamped.selections.length : 0,
-        trackResponseMaximumBytes: stamped.maximumResultBytes ?? LIVE_RESPONSE_MAXIMUM_BYTES,
-        spectrumOperation: stamped.operation,
-        spectrumBuffer: stamped.buffer,
-        spectrumBufferBytes: stamped.buffer instanceof ArrayBuffer ? stamped.buffer.byteLength : 0,
         generation: stamped.generation,
         resolve,
         reject,
@@ -1361,6 +857,53 @@ class MisoAudioWorkletHost {
       undefined,
       request.sourceId,
     );
+  }
+
+  /// @internal Seek one source so that `sourceFrame` enters the graph in the block that starts at
+  /// absolute render sample `anchorSample`, a quantum multiple (issue #1297a). The worklet's
+  /// message handler applies it, never `process()`. It resolves with the engine's result; a refusal
+  /// changes nothing. It shares the per-source bound with `seekSource`: one seek of a source may be
+  /// unsettled at a time, and a second is refused locally with `RESULT_BACKPRESSURE`.
+  seekSourceAt(request) {
+    if (!hasExactFields(request, SEEK_AT_FIELDS) || typeof request.sourceId !== "string"
+        || !validU64(request.generation, true) || !validU64(request.sourceFrame)
+        || !validU64(request.anchorSample)) {
+      return Promise.reject(webError(1));
+    }
+    return this.#request(
+      { tag: "miso.seek-at.v1", ...request },
+      [],
+      "seek",
+      false,
+      undefined,
+      request.sourceId,
+    );
+  }
+
+  /// @internal Read where one source landed after its newest seek (issue #1297a): the engine's
+  /// result and, for an OK, the record's words as the C ABI reports them; `null` otherwise. The
+  /// reserved ID `$timeline` reads the session timeline's report. One read of a source may be
+  /// unsettled at a time; a second is refused locally with `RESULT_BACKPRESSURE`.
+  seekReport(sourceId) {
+    if (typeof sourceId !== "string") return Promise.reject(webError(1));
+    return this.#request(
+      { tag: "miso.seek-report.v1", sourceId },
+      [],
+      "seekReport",
+      false,
+      undefined,
+      sourceId,
+    );
+  }
+
+  /// Read the output latency and tail of the plan that renders now (issue #2116): the engine's
+  /// result and, for an OK, the words of the C ABI's plan resource report (`latency_samples`,
+  /// `tail_kind`, `tail_samples`); `null` otherwise. A rebuild's successor shows from the first
+  /// read after the block that adopts it. One read may be unsettled at a time; a second is refused
+  /// locally with `RESULT_BACKPRESSURE`. The worklet answers in its message handler, never in
+  /// `process()`.
+  planLatency() {
+    return this.#request({ tag: "miso.plan-latency.v1" }, [], "planLatency");
   }
 
   /// @internal Seek the timeline and every source to `frame` under one new `generation`, all or
@@ -1434,28 +977,12 @@ class MisoAudioWorkletHost {
   /// Read this instance's render-locked allocator count (issue #1333 D3).
   ///
   /// The count is every allocator call the instance made inside the exports its processor calls
-  /// on the render thread after boot: render, command submission, meter polling and the
-  /// observation, response and spectrum staging reads. Decision 15 requires it to stay zero. It
+  /// on the render thread after boot: render, source submission and meter polling. Decision 15
+  /// requires it to stay zero. It
   /// is per instance, so a caller reads it on each host before that host's `dispose()`. The
   /// worklet answers in its message handler, never in `process()`.
   renderAllocationCount() {
     return this.#request({ tag: "miso.renderallocations.v1" }, [], "renderAllocations");
-  }
-
-  /// Submit one live-control command batch (issue #137 D1).
-  ///
-  /// The whole batch is one transaction: the acknowledgement's `result` is `RESULT_OK` only when
-  /// every record was admitted, and `appliedAtSample` is the exact absolute sample the batch takes
-  /// effect at. A refusal names `reason` and `rejectedIndex` and admits nothing.
-  command(request) {
-    if (!hasExactFields(request, ["commands"])
-        || !Array.isArray(request.commands)
-        || request.commands.length === 0
-        || request.commands.length > MAXIMUM_COMMAND_RECORDS
-        || !request.commands.every(validCommand)) {
-      return Promise.reject(webError(1));
-    }
-    return this.#submitOrdinaryRecords(encodeCommands(request.commands), request.commands.length);
   }
 
   /// Send one command frame to the engine's control plane and resolve with its reply (issue
@@ -1507,244 +1034,14 @@ class MisoAudioWorkletHost {
     );
   }
 
-  /// Subscribe to, or unsubscribe from, declared observation taps (issue #143).
-  ///
-  /// # Why this is not just `command()` with two more kinds
-  ///
-  /// It *is* those two kinds on the wire -- one batch, one transaction, the same
-  /// `appliedAtSample`. What it adds is the answer to the question `trackGrDb` structurally cannot
-  /// answer: **which** tracks have an observed effect at all. The frame's array is positional, so
-  /// a track with no tap and a track that is not reducing both read `0`; the map this returns is
-  /// where that distinction lives, and it is why the array can be read without null checks.
-  ///
-  /// The map is the host's own record of what it successfully armed. A batch is all-or-nothing, so
-  /// it is updated only on `result === 0`, and it is cleared whenever the plan is replaced --
-  /// subscriptions belong to the plan they were applied to (D7).
-  async observe(request) {
-    if (!hasExactFields(request, ["subscriptions"])
-        || !Array.isArray(request.subscriptions)
-        || request.subscriptions.length === 0
-        || request.subscriptions.length > MAXIMUM_COMMAND_RECORDS
-        || !request.subscriptions.every(validSubscription)) {
-      return Promise.reject(webError(1));
-    }
-    const commands = request.subscriptions.map((subscription) => ({
-      kind: subscription.armed
-        ? OBSERVE_SUBSCRIBE_KIND
-        : OBSERVE_UNSUBSCRIBE_KIND,
-      rack: subscription.rack,
-      stripId: subscription.stripId,
-      effectId: subscription.effectId,
-      tapId: subscription.tapId,
-      windowBlocks: subscription.windowBlocks,
-    }));
-    const ack = await this.command({ commands });
-    if (ack.result === 0) {
-      for (const subscription of request.subscriptions) {
-        // The tap's stable key, the one the core's `OBSERVATION_ENDED` names.
-        const key = JSON.stringify([
-          subscription.stripId, subscription.rack, subscription.effectId, subscription.tapId,
-        ]);
-        if (subscription.armed) {
-          this.#observations.set(key, {
-            stripId: subscription.stripId,
-            rack: subscription.rack,
-            effectId: subscription.effectId,
-            tapId: subscription.tapId,
-            windowBlocks: subscription.windowBlocks === 0
-              ? Number(this.#liveControlMeterBlocks)
-              : subscription.windowBlocks,
-          });
-        } else {
-          this.#observations.delete(key);
-        }
-      }
-    }
-    return Object.freeze({
-      tag: "miso.observe.v1",
-      requestId: ack.requestId,
-      result: ack.result,
-      reason: ack.reason,
-      bindings: Object.freeze([...this.#observations.values()]
-        .sort((left, right) => compareIds(left.stripId, right.stripId)
-          || left.rack - right.rack
-          || compareIds(left.effectId, right.effectId)
-          || left.tapId - right.tapId)
-        .map(Object.freeze)),
-    });
-  }
-
   /// Read the compiled session's canonical track order (issue #137 D1), its sources (issue #207)
   /// and its canonical submix order (issue #1210 D3).
   ///
-  /// This is the addressing authority for the strip positions the meter frame and the observation
-  /// map use: the app never guesses an index. A command record does not use one: it names its tap
+  /// This is the addressing authority for the strip positions the meter frame uses: the app never
+  /// guesses an index. An `Observe` edit does not use one: it names its tap
   /// by stable key (#1677).
   sessionMap() {
     return this.#request({ tag: "miso.sessionmap.v1" }, [], "sessionMap", false, undefined, "sessionMap");
-  }
-
-  /// Read the current prepared owner's stable observation bindings.
-  observationMap() {
-    return this.#request(
-      { tag: "miso.observationmap.v1" },
-      [],
-      "observationMap",
-      false,
-      undefined,
-      "observationMap",
-    );
-  }
-
-  /// Read one bounded batch of numeric addresses resolved from `observationMap()`.
-  readObservations(request) {
-    if (!hasExactFields(request, ["selections"])
-        || !Array.isArray(request.selections)
-        || request.selections.length === 0
-        || request.selections.length > MAXIMUM_OBSERVATION_READS
-        || !request.selections.every(validObservationAddress)) {
-      return Promise.reject(webError(1));
-    }
-    return this.#request(
-      { tag: "miso.observation.v1", selections: request.selections },
-      [],
-      "observationRead",
-    );
-  }
-
-  /// Capture one immutable selected-track response snapshot for the analysis Worker.
-  ///
-  /// The Worklet performs only the owner copy and returns detached bytes. Grid evaluation stays
-  /// on the existing Rust analysis path, so this request never runs curve math in `process()` or
-  /// in the Worklet message handler.
-  captureTrackResponse(request) {
-    if (!hasExactFields(request, TRACK_RESPONSE_REQUEST_FIELDS)
-        || typeof request.trackId !== "string"
-        || request.trackId.length === 0
-        || request.trackId.length > LIVE_RESPONSE_MAXIMUM_ID_BYTES
-        || !Number.isInteger(request.grid)
-        || (request.grid !== LIVE_RESPONSE_CAPTURE_GRID_LINEAR
-          && request.grid !== LIVE_RESPONSE_CAPTURE_GRID_LOGARITHMIC)
-        || !Number.isInteger(request.channels)
-        || (request.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_LEFT
-          && request.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_RIGHT
-          && request.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH)
-        || !Number.isInteger(request.points) || request.points < 2
-        || request.points > LIVE_RESPONSE_MAXIMUM_POINTS
-        || typeof request.minimumHz !== "number" || !Number.isFinite(request.minimumHz)
-        || typeof request.maximumHz !== "number" || !Number.isFinite(request.maximumHz)
-        || !Number.isInteger(request.maximumResultBytes)
-        || request.maximumResultBytes <= 0
-        || request.maximumResultBytes > LIVE_RESPONSE_MAXIMUM_BYTES) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.trackresponse.v1", ...request },
-      [],
-      "trackResponse",
-    );
-  }
-
-  /// Arm the prepared one-shot spectrum observer.
-  armSpectrum() {
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "arm", channels: "both" },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Read one completed spectrum window. A backpressure result carries an empty snapshot.
-  readSpectrum(request) {
-    if (!hasExactFields(request, ["channels"]) || !SPECTRUM_CHANNELS.has(request.channels)) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "read", channels: request.channels },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Select one exact prepared collection entry before starting its managed stream.
-  selectSpectrum(request) {
-    if (!hasExactFields(request, ["target", "targetId", "channels"])
-        || !SPECTRUM_TARGETS.has(request.target)
-        || typeof request.targetId !== "string"
-        || request.targetId.length === 0
-        || new TextEncoder().encode(request.targetId).byteLength > SPECTRUM_MAXIMUM_ID_BYTES
-        || !SPECTRUM_CHANNELS.has(request.channels)) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "select", ...request },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Atomically update the active collection entry and smoothing profile.
-  selectSpectrumStream(request) {
-    if (!hasExactFields(request, ["target", "targetId", "channels", "smoothingMs"])
-        || !SPECTRUM_TARGETS.has(request.target)
-        || typeof request.targetId !== "string"
-        || request.targetId.length === 0
-        || new TextEncoder().encode(request.targetId).byteLength > SPECTRUM_MAXIMUM_ID_BYTES
-        || !SPECTRUM_CHANNELS.has(request.channels)
-        || typeof request.smoothingMs !== "number"
-        || !Number.isFinite(request.smoothingMs)
-        || request.smoothingMs < 0 || request.smoothingMs > 10_000) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "streamSelect", ...request },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Cancel the prepared one-shot spectrum observer.
-  cancelSpectrum() {
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "cancel", channels: "both" },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Start the managed continuous spectrum stream for the prepared boundary.
-  startSpectrumStream(smoothingMs = 100) {
-    if (typeof smoothingMs !== "number" || !Number.isFinite(smoothingMs)
-        || smoothingMs < 0 || smoothingMs > 10_000) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "streamStart", smoothingMs },
-      [],
-      "spectrum",
-    );
-  }
-
-  /// Read the next scheduled managed stream window into the supplied reusable buffer.
-  readSpectrumStream(buffer) {
-    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0
-        || buffer.byteLength > SPECTRUM_MAXIMUM_BYTES) {
-      return Promise.reject(webError(RESULT_INVALID_ARGUMENT));
-    }
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "streamRead", buffer },
-      [buffer],
-      "spectrum",
-    );
-  }
-
-  /// Stop the managed continuous spectrum stream.
-  stopSpectrumStream() {
-    return this.#request(
-      { tag: "miso.spectrum.v1", operation: "streamStop" },
-      [],
-      "spectrum",
-    );
   }
 
   /// Take or release the decimated meter lease (issue #137 D2).
@@ -1819,7 +1116,6 @@ class MisoAudioWorkletHost {
     this.#stopServiceTick();
     await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
     this.#disposed = true;
-    this.#observations.clear();
     this.#onMeterFrame = null;
     this.#onTelemetryFrame = null;
     this.#controlEventListeners.clear();
@@ -1908,11 +1204,13 @@ export async function createMisoAudioWorkletHost(options) {
         const message = event.data;
         if (hasExactFields(
           message,
-          ["tag", "requestId", "result", "backend", "resources", "memoryBytes"],
+          ["tag", "requestId", "result", "backend", "resources", "memoryBytes", "sourceRingFrames"],
         )
             && message.tag === "miso.ready.v1" && message.requestId === 0
             && message.result === RESULT_OK && message.backend === selected.backend
             && Number.isSafeInteger(message.memoryBytes) && message.memoryBytes > 0
+            && validU32(message.sourceRingFrames) && message.sourceRingFrames > 0
+            && message.sourceRingFrames % quantumFrames === 0
             && validResources(
               message.resources,
               selected.backend,
@@ -1941,14 +1239,9 @@ export async function createMisoAudioWorkletHost(options) {
       quantumFrames,
       ready.resources,
       ready.memoryBytes,
-      // The per-source in-flight bound is the ring depth in quanta. A zero override selects the
-      // engine's 100 ms plus two-quanta derivation; this arithmetic mirrors that public rule.
-      (bootOptions.sourceRingFrames === 0
-        ? Math.ceil(sampleRateHz / 10 / quantumFrames) + 2
-        : bootOptions.sourceRingFrames / quantumFrames),
-      // Issue #143: the plan's default observation window is the meter window; a subscription that
-      // names `windowBlocks: 0` gets it, and the returned map says which one it got.
-      Number(bootOptions.liveControlMeterBlocks),
+      // The per-source in-flight bound is the ring depth in quanta: the ring the engine reports it
+      // resolved at boot (issue #1406b), so a zero override gives the engine's own default ring.
+      ready.sourceRingFrames / quantumFrames,
     );
   } catch (error) {
     cleanupNode(node);

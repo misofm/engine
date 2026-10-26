@@ -16,80 +16,40 @@ const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_BACKPRESSURE = 6;
 const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
-const COMMAND_REASON_UNSUPPORTED_KIND = 7;
 const RESULT_INTERNAL = 255;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
 const BUFFER_DIAGNOSTIC = 4;
 const BUFFER_OUTPUT_PCM = 5;
-const BUFFER_COMMAND = 6;
 const BUFFER_METER_FRAME = 7;
 const STATE_READY = 2;
 // Issue #1294a: the 96-byte watermark record `miso_engine_web_v1_watermark_ptr` names.
 const WATERMARK_BYTES = 96;
 // The outcome flag each of the record's three counts (exact, transition fallback, superseded) names.
 const WATERMARK_COUNT_FLAGS = [1n, 2n, 4n];
+// Issue #1297a: the 64-byte seek report record `miso_engine_web_v1_source_seek_report_ptr` names,
+// in the C ABI's order: struct size, a reserved word, then generation, first sample, source frame,
+// cumulative underrun frames and cumulative held frames at these offsets.
+const SEEK_REPORT_BYTES = 64;
+const SEEK_REPORT_WORDS = [
+  ["generation", 8], ["firstSample", 16], ["sourceFrame", 24],
+  ["cumulativeUnderrunFrames", 32], ["cumulativeHeldFrames", 40],
+];
+// Issue #2116: the 64-byte plan latency record `miso_engine_web_v1_plan_latency_ptr` names, in the
+// C ABI report's order: struct size, a reserved word, then latency, tail kind and tail samples.
+const PLAN_LATENCY_BYTES = 64;
+const PLAN_LATENCY_WORDS = [["samples", 8], ["tailKind", 16], ["tailSamples", 24]];
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
-// Issue #137 D1/D2/D3.
-const COMMAND_RECORD_BYTES = 272;
-const MAXIMUM_COMMAND_RECORDS = 256;
-const COMMAND_REPORT_BYTES = 48;
-const OBSERVATION_SELECTION_BYTES = 32;
-const OBSERVATION_RESULT_BYTES = 96;
-const MAXIMUM_OBSERVATION_READS = MAXIMUM_COMMAND_RECORDS;
-const OBSERVATION_MAP_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "effectSlotId", "nativeEffectId", "tapIds",
-];
-const OBSERVATION_ADDRESS_FIELDS = ["trackIndex", "rack", "effectIndex", "tapId", "channels"];
-const OBSERVATION_CHANNELS = new Set([1, 2, 3]);
-const OBSERVATION_STATUSES = new Set([1, 2, 3]);
-const OBSERVATION_ROW_FIELDS = [
-  "trackIndex", "rack", "effectIndex", "tapId", "channels", "status", "sampleRateHz",
-  "firstSample", "endSample", "sequence", "blocks", "leftPresent", "rightPresent", "left", "right",
-];
 // The telemetry window: 128 blocks is ~341 ms at 48 kHz with a 128-frame quantum, long enough for
 // a millisecond-resolution clock to accumulate a usable ratio and short enough to be a live meter.
 const TELEMETRY_WINDOW_BLOCKS = 128;
 
-// Live-track response capture uses one fixed raw snapshot staging area. The Worklet only fills
-// the request/identity staging and copies the completed bytes; all grid validation and numerical
-// analysis happen in the existing analysis Worker through the separate Rust export.
-const LIVE_RESPONSE_REQUEST_BYTES = 48;
-const LIVE_RESPONSE_MAXIMUM_ID_BYTES = 127;
-const LIVE_RESPONSE_MAXIMUM_POINTS = 4096;
-const LIVE_RESPONSE_CAPTURE_GRID_LINEAR = 1;
-const LIVE_RESPONSE_CAPTURE_GRID_LOGARITHMIC = 2;
-const LIVE_RESPONSE_CAPTURE_CHANNEL_LEFT = 1;
-const LIVE_RESPONSE_CAPTURE_CHANNEL_RIGHT = 2;
-const LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH = 3;
-const TRACK_RESPONSE_FIELDS = [
-  "tag", "requestId", "trackId", "grid", "channels", "points", "minimumHz", "maximumHz",
-  "maximumResultBytes",
-];
-const SPECTRUM_REQUEST_BYTES = 40;
-const SPECTRUM_COLLECTION_REQUEST_BYTES = 32;
-const SPECTRUM_COLLECTION_ENTRY_BYTES = 24;
-const SPECTRUM_MAXIMUM_ID_BYTES = 127;
-const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
-const SPECTRUM_STREAM_METADATA_BYTES = 120;
-const SPECTRUM_TARGET_TRACK_POST_INPUT = 1;
-const SPECTRUM_TARGET_TRACK_POST_PAN = 2;
-const SPECTRUM_TARGET_OUTPUT = 3;
-const SPECTRUM_CHANNEL_LEFT = 1;
-const SPECTRUM_CHANNEL_RIGHT = 2;
-const SPECTRUM_CHANNEL_BOTH = 3;
-const SPECTRUM_STREAM_STATUSES = new Set([0, 1, 2, 3, 4, 5, 6]);
-
 const INIT_FIELDS = ["module", "document", "options"];
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
-  "liveControlObservationTaps", "reserved2", "spectrumHopFrames", "spectrum",
-  "spectrumCollection",
+  "reserved3", "reserved2",
 ];
-const SPECTRUM_OPTION_FIELDS = OPTION_FIELDS.filter((field) => field !== "spectrumHopFrames");
-const LEGACY_OPTION_FIELDS = SPECTRUM_OPTION_FIELDS.slice(0, -2);
-const SPECTRUM_HOP_FRAMES = new Set([0, 256, 512, 1024, 2048]);
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
   "endOfRegion",
@@ -98,7 +58,11 @@ const SEEK_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame"
 // Issue #1644 D1 (root R1): one session seek message for both exports. `anchorSample` is always
 // present; `-1n` is a plain seek, any other value the absolute render sample of the anchored form.
 const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "anchorSample"];
-const COMMAND_FIELDS = ["tag", "requestId", "count", "records"];
+// Issue #1297a: the anchored source seek and the seek report, both control work of the handler.
+const SEEK_AT_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame", "anchorSample"];
+const SEEK_REPORT_FIELDS = ["tag", "requestId", "sourceId"];
+// Issue #2116: the plan latency read, control work of the handler.
+const PLAN_LATENCY_FIELDS = ["tag", "requestId"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
 /// Issue #1697: a `SESSION_REPLACE` frame carries its document beside it.
 const CONTROL_DOCUMENT_FIELDS = [...CONTROL_FIELDS, "document"];
@@ -108,29 +72,6 @@ const CONTROL_DOCUMENT_FIELDS = [...CONTROL_FIELDS, "document"];
 const CONTROL_EVENT_LANES = [0, 1];
 const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
 const LEASE_FIELDS = ["tag", "requestId", "enabled"];
-const SPECTRUM_FIELDS = ["tag", "requestId", "operation", "channels"];
-const SPECTRUM_STREAM_START_FIELDS = ["tag", "requestId", "operation", "smoothingMs"];
-const SPECTRUM_STREAM_READ_FIELDS = ["tag", "requestId", "operation", "buffer"];
-const SPECTRUM_STREAM_STOP_FIELDS = ["tag", "requestId", "operation"];
-const SPECTRUM_SELECT_FIELDS = ["tag", "requestId", "operation", "target", "targetId", "channels"];
-const SPECTRUM_STREAM_SELECT_FIELDS = [
-  "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
-];
-
-// Decision 12 (#1096): an effect is addressed as `1` inserts or `3` console. The retired `simd1`
-// (`0`) and `simd2` (`2`) codes are refused and never reallocated.
-const RACK_INSERTS = 1;
-const RACK_CONSOLE = 3;
-const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
-
-function validObservationAddress(address) {
-  return exactFields(address, OBSERVATION_ADDRESS_FIELDS)
-    && u32(address.trackIndex)
-    && effectRack(address.rack)
-    && u32(address.effectIndex)
-    && u32(address.tapId) && address.tapId > 0
-    && u32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
-}
 
 /// The render clock (issue #137 D3).
 ///
@@ -234,27 +175,6 @@ function writeBoundedUtf8(value, memoryBuffer, pointer, capacity) {
   return byteLength;
 }
 
-function boundedUtf8Length(value, capacity) {
-  let byteLength = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    let codePoint = value.charCodeAt(index);
-    if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
-      const low = value.charCodeAt(index + 1);
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + low - 0xdc00;
-        index += 1;
-      } else {
-        codePoint = 0xfffd;
-      }
-    } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
-      codePoint = 0xfffd;
-    }
-    byteLength += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
-    if (byteLength > capacity) return -1;
-  }
-  return byteLength;
-}
-
 class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
@@ -275,8 +195,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.telemetryBudgetMs = 0;
     this.telemetryPeakMs = 0;
     this.telemetryDeadlineMisses = 0;
-    this.observations = Object.freeze([]);
-    this.observationSelectionView = null;
     // Issue #1562 (batch 7 CI fold): every persistent view over the module's memory is registered
     // here by `bindView`, so a growth of that memory (a control allocation, counted on the control
     // side and no fault) re-cuts them all in `rebindMemoryViews`, in a message handler and never
@@ -333,33 +251,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   initialize(init) {
-    const currentOptions = exactFields(init?.options, OPTION_FIELDS);
-    const oldSpectrumOptions = exactFields(init?.options, SPECTRUM_OPTION_FIELDS);
-    const oldOptions = init?.options?.spectrum === undefined
-      && exactFields(init?.options, LEGACY_OPTION_FIELDS);
     if (!exactFields(init, INIT_FIELDS) || !(init.document instanceof Uint8Array)
-        || (!currentOptions && !oldSpectrumOptions && !oldOptions)) {
+        || !exactFields(init.options, OPTION_FIELDS)) {
       return RESULT_INVALID_ARGUMENT;
     }
-    const spectrumHopFrames = currentOptions ? init.options.spectrumHopFrames : 0;
-    if (!SPECTRUM_HOP_FRAMES.has(spectrumHopFrames)) return RESULT_INVALID_ARGUMENT;
     this.instance = new WebAssembly.Instance(init.module, {});
     this.exports = this.instance.exports;
     if (this.exports.miso_engine_web_v1_abi_version() !== ABI_VERSION) {
       return 2;
-    }
-    let spectrumHopBoot;
-    if (spectrumHopFrames !== 0) {
-      const capability = this.exports.miso_engine_web_v1_spectrum_hop_capability;
-      spectrumHopBoot = this.exports.miso_engine_web_v1_boot_with_spectrum_hop;
-      if (typeof capability !== "function" || typeof spectrumHopBoot !== "function") return 2;
-      let supported;
-      try {
-        supported = capability();
-      } catch (_) {
-        return 2;
-      }
-      if (supported !== 1) return 2;
     }
     const optionsPointer = this.exports.miso_engine_web_v1_boot_options_ptr();
     if (!u32(optionsPointer) || optionsPointer === 0) {
@@ -370,55 +269,18 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } catch (_) {
       return RESULT_INVALID_ARGUMENT;
     }
-    const hasSpectrum = init.options.spectrum !== null && init.options.spectrum !== undefined;
-    const hasSpectrumCollection = init.options.spectrumCollection !== null
-      && init.options.spectrumCollection !== undefined;
-    if (hasSpectrum && hasSpectrumCollection) {
-      return RESULT_INVALID_ARGUMENT;
-    }
-    const spectrumResult = hasSpectrumCollection
-      ? this.stageSpectrumCollectionRequest(init.options.spectrumCollection)
-      : this.stageSpectrumRequest(init.options.spectrum);
-    if (spectrumResult !== RESULT_OK) return spectrumResult;
     const documentPointer = this.exports.miso_engine_web_v1_document_ptr(init.document.byteLength);
     if (!u32(documentPointer) || documentPointer === 0) {
       return this.exports.miso_engine_web_v1_boot_result();
     }
     new Uint8Array(this.exports.memory.buffer, documentPointer, init.document.byteLength)
       .set(init.document);
-    this.handle = spectrumHopFrames === 0
-      ? this.exports.miso_engine_web_v1_boot(init.document.byteLength)
-      : spectrumHopBoot(init.document.byteLength, spectrumHopFrames);
+    this.handle = this.exports.miso_engine_web_v1_boot(init.document.byteLength);
     if (this.handle === 0) {
       return this.exports.miso_engine_web_v1_boot_result();
     }
     this.backend = "simd128";
-    // Boot allocated the observation, live-response and spectrum stagings (issue #1333 D5), so
-    // these queries allocate nothing and cannot grow linear memory. Read every one before
-    // caching any views all the same: a view taken before a growth would be detached.
-    const observationStagingPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
-    if (!u32(observationStagingPointer) || observationStagingPointer === 0) return RESULT_INTERNAL;
-    const trackResponseRequestPointer = this.exports.miso_engine_web_v1_track_response_request_ptr();
-    const trackResponseRequestBytes = this.exports.miso_engine_web_v1_track_response_request_bytes();
-    const trackResponseTrackIdPointer = this.exports.miso_engine_web_v1_track_response_track_id_ptr();
-    const trackResponseTrackIdCapacity = this.exports.miso_engine_web_v1_track_response_track_id_capacity();
-    const trackResponseSnapshotPointer = this.exports.miso_engine_web_v1_track_response_snapshot_ptr();
-    const trackResponseSnapshotCapacity = this.exports.miso_engine_web_v1_track_response_snapshot_capacity();
-    if (!u32(trackResponseRequestPointer) || trackResponseRequestPointer === 0
-        || trackResponseRequestBytes !== LIVE_RESPONSE_REQUEST_BYTES
-        || !u32(trackResponseTrackIdPointer) || trackResponseTrackIdPointer === 0
-        || trackResponseTrackIdCapacity !== LIVE_RESPONSE_MAXIMUM_ID_BYTES
-        || !u32(trackResponseSnapshotPointer) || trackResponseSnapshotPointer === 0
-        || !u32(trackResponseSnapshotCapacity) || trackResponseSnapshotCapacity === 0) {
-      return RESULT_INTERNAL;
-    }
     this.memoryBuffer = this.exports.memory.buffer;
-    this.bindView("trackResponseRequestView", DataView,
-      trackResponseRequestPointer, trackResponseRequestBytes);
-    this.bindView("trackResponseTrackIdView", Uint8Array,
-      trackResponseTrackIdPointer, trackResponseTrackIdCapacity);
-    this.trackResponseSnapshotPointer = trackResponseSnapshotPointer;
-    this.trackResponseSnapshotCapacity = trackResponseSnapshotCapacity;
     this.sourceIdPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_ID);
     this.sourceIdCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_ID);
     this.sourcePcmPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_PCM);
@@ -480,12 +342,25 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const watermarkPointer = this.exports.miso_engine_web_v1_watermark_ptr(this.handle);
     if (!u32(watermarkPointer) || watermarkPointer === 0) return RESULT_INTERNAL;
     this.bindView("watermarkView", DataView, watermarkPointer, WATERMARK_BYTES);
+    // Issue #1297a: the seek report record is at a stable address, bound once here.
+    const seekReportPointer = this.exports.miso_engine_web_v1_source_seek_report_ptr(this.handle);
+    if (!u32(seekReportPointer) || seekReportPointer === 0) return RESULT_INTERNAL;
+    this.bindView("seekReportView", DataView, seekReportPointer, SEEK_REPORT_BYTES);
+    // Issue #2116: the plan latency record is at a stable address, bound once here.
+    const planLatencyPointer = this.exports.miso_engine_web_v1_plan_latency_ptr(this.handle);
+    if (!u32(planLatencyPointer) || planLatencyPointer === 0) return RESULT_INTERNAL;
+    this.bindView("planLatencyView", DataView, planLatencyPointer, PLAN_LATENCY_BYTES);
     // The boot watermark is the baseline, not an advance: only a later change is posted.
     if (this.exports.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
       this.watermarkRevision = this.watermarkView.getBigUint64(8, true);
       this.watermarkSample = this.watermarkView.getBigUint64(16, true);
       this.watermarkCounts = [32, 40, 48].map((offset) => this.watermarkView.getBigUint64(offset, true));
     }
+    // Issue #1406b: the ring the boot resolved, which a zero override leaves to the engine. The
+    // host bounds its in-flight source chunks by it, so no JavaScript holds a copy of the rule.
+    const sourceRingFrames = this.exports.miso_engine_web_v1_resolved_source_ring_frames(this.handle);
+    if (!u32(sourceRingFrames) || sourceRingFrames === 0
+        || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
     this.memoryBytes = this.memoryBuffer.byteLength;
     this.port.postMessage({
       tag: "miso.ready.v1",
@@ -494,6 +369,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       backend: this.backend,
       resources: this.resources,
       memoryBytes: this.memoryBytes,
+      sourceRingFrames,
     });
     this.ready = true;
     return RESULT_OK;
@@ -527,77 +403,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       rows.push({ id, channels, frames });
     }
     return rows;
-  }
-
-  /// Issue #143, #1562b: the observation bindings of the plan that renders, in the prepared
-  /// owner's stable map order, or `null` for a binding the engine cannot have written. A binding
-  /// names a strip by its index in that plan's strip order (the tracks, then the submixes), which
-  /// is the control list's order at [`Self::renderingStructureEpoch`]. A rebuild changes the
-  /// bindings at the block that adopts it, so every map request reads them again: a reboot or a
-  /// swap cannot retain an old numeric owner address behind a stable SDK selection. Control side
-  /// only; allocates.
-  readObservationBindings() {
-    const count = this.exports.miso_engine_web_v1_observation_count(this.handle);
-    if (!u32(count)) return null;
-    const idPointer = this.exports.miso_engine_web_v1_observation_id_ptr();
-    const idCapacity = this.exports.miso_engine_web_v1_observation_id_capacity();
-    if (!u32(idPointer) || idPointer === 0 || !u32(idCapacity) || idCapacity === 0) return null;
-    const readId = (length) => {
-      if (!u32(length) || length === 0 || length > idCapacity) return null;
-      const bytes = new Uint8Array(this.memoryBuffer, idPointer, length);
-      let id = "";
-      for (let byte = 0; byte < length; byte += 1) {
-        if (bytes[byte] > 0x7f) return null;
-        id += String.fromCharCode(bytes[byte]);
-      }
-      return id;
-    };
-    const bindings = [];
-    for (let index = 0; index < count; index += 1) {
-      const trackIndex = this.exports.miso_engine_web_v1_observation_track_index(this.handle, index);
-      const rack = this.exports.miso_engine_web_v1_observation_rack(this.handle, index);
-      const effectIndex = this.exports.miso_engine_web_v1_observation_effect_index(this.handle, index);
-      const effectSlotId = readId(
-        this.exports.miso_engine_web_v1_observation_effect_slot_id(this.handle, index),
-      );
-      const nativeEffectId = readId(
-        this.exports.miso_engine_web_v1_observation_native_effect_id(this.handle, index),
-      );
-      const tapCount = this.exports.miso_engine_web_v1_observation_tap_count(this.handle, index);
-      if (!u32(trackIndex) || !effectRack(rack) || !u32(effectIndex)
-          || effectSlotId === null || nativeEffectId === null || !u32(tapCount)
-          || tapCount === 0 || tapCount > 32) return null;
-      const tapIds = [];
-      for (let tapIndex = 0; tapIndex < tapCount; tapIndex += 1) {
-        const tapId = this.exports.miso_engine_web_v1_observation_tap_id(
-          this.handle, index, tapIndex,
-        );
-        if (!u32(tapId) || tapId === 0) return null;
-        tapIds.push(tapId);
-      }
-      bindings.push(Object.freeze({
-        trackIndex,
-        rack,
-        effectIndex,
-        effectSlotId,
-        nativeEffectId,
-        tapIds: Object.freeze(tapIds),
-      }));
-    }
-    return Object.freeze(bindings);
-  }
-
-  /// Issue #1562b: the structure epoch of the plan that renders, read from its meter header (the
-  /// header the module publishes through `meter_header_ptr` is the rendering plan's, with or
-  /// without a meter lease). It is the number of the control list whose strip order the plan's
-  /// bindings and frames follow. `0` for a header the memory cannot hold. Control side only.
-  renderingStructureEpoch() {
-    const pointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
-    if (!u32(pointer) || pointer === 0
-        || pointer + METER_HEADER_BYTES > this.memoryBuffer.byteLength) return 0;
-    const header = new DataView(this.memoryBuffer, pointer, METER_HEADER_BYTES);
-    return header.getUint32(METER_HEADER_STRUCTURE_EPOCH, true)
-      + header.getUint32(METER_HEADER_STRUCTURE_EPOCH + 4, true) * 4294967296;
   }
 
   /// Cut one persistent view over the module's memory and remember how, so a growth of that memory
@@ -748,128 +553,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
   }
 
-  stageSpectrumRequest(options) {
-    if (options === null || options === undefined) return RESULT_OK;
-    const target = options?.target === "trackPostInput"
-      ? SPECTRUM_TARGET_TRACK_POST_INPUT
-      : options?.target === "trackPostPan"
-        ? SPECTRUM_TARGET_TRACK_POST_PAN
-        : options?.target === "output" ? SPECTRUM_TARGET_OUTPUT : 0;
-    const channels = options?.channels === "left"
-      ? SPECTRUM_CHANNEL_LEFT
-      : options?.channels === "right"
-        ? SPECTRUM_CHANNEL_RIGHT
-        : options?.channels === "both" ? SPECTRUM_CHANNEL_BOTH : 0;
-    if (!exactFields(options, ["target", "targetId", "channels", "maximumCaptureBytes"])
-        || target === 0 || channels === 0
-        || typeof options.targetId !== "string" || options.targetId.length === 0
-        || !u32(options.maximumCaptureBytes) || options.maximumCaptureBytes === 0
-        || options.maximumCaptureBytes > SPECTRUM_MAXIMUM_BYTES) {
-      return RESULT_INVALID_ARGUMENT;
-    }
-    const requestPointer = this.exports.miso_engine_web_v1_spectrum_request_ptr();
-    const requestBytes = this.exports.miso_engine_web_v1_spectrum_request_bytes();
-    const idPointer = this.exports.miso_engine_web_v1_spectrum_target_id_ptr();
-    const idCapacity = this.exports.miso_engine_web_v1_spectrum_target_id_capacity();
-    if (!u32(requestPointer) || requestPointer === 0 || requestBytes !== SPECTRUM_REQUEST_BYTES
-        || !u32(idPointer) || idPointer === 0 || idCapacity !== SPECTRUM_MAXIMUM_ID_BYTES) {
-      return RESULT_INTERNAL;
-    }
-    const idBytes = writeBoundedUtf8(options.targetId, this.exports.memory.buffer, idPointer, idCapacity);
-    if (idBytes <= 0) return RESULT_INVALID_ARGUMENT;
-    const view = new DataView(this.exports.memory.buffer, requestPointer, requestBytes);
-    view.setUint32(0, SPECTRUM_REQUEST_BYTES, true);
-    view.setUint32(4, ABI_VERSION, true);
-    view.setUint32(8, target, true);
-    view.setUint32(12, channels, true);
-    view.setUint32(16, idBytes, true);
-    view.setUint32(20, 0, true);
-    view.setBigUint64(24, BigInt(options.maximumCaptureBytes), true);
-    view.setUint32(32, 0, true);
-    view.setUint32(36, 0, true);
-    return RESULT_OK;
-  }
-
-  stageSpectrumCollectionRequest(options) {
-    if (options === null || options === undefined) return RESULT_OK;
-    if (!exactFields(options, ["entries", "maximumCaptureBytes"])
-        || !Array.isArray(options.entries) || options.entries.length === 0
-        || options.entries.length > 0xffffffff
-        || !Number.isSafeInteger(options.maximumCaptureBytes)
-        || options.maximumCaptureBytes <= 0) {
-      return RESULT_INVALID_ARGUMENT;
-    }
-    const requestPointer = this.exports.miso_engine_web_v1_spectrum_collection_request_ptr();
-    const requestBytes = this.exports.miso_engine_web_v1_spectrum_collection_request_bytes();
-    if (!u32(requestPointer) || requestPointer === 0 || requestBytes !== SPECTRUM_COLLECTION_REQUEST_BYTES) {
-      return RESULT_INTERNAL;
-    }
-    let bytes = this.exports.memory.buffer;
-    const request = new DataView(bytes, requestPointer, requestBytes);
-    request.setUint32(0, SPECTRUM_COLLECTION_REQUEST_BYTES, true);
-    request.setUint32(4, ABI_VERSION, true);
-    request.setUint32(8, options.entries.length, true);
-    request.setUint32(12, 0, true);
-    request.setBigUint64(16, BigInt(options.maximumCaptureBytes), true);
-    request.setUint32(24, 0, true);
-    request.setUint32(28, 0, true);
-
-    const entryPointer = this.exports.miso_engine_web_v1_spectrum_collection_entry_ptr();
-    const entryBytes = this.exports.miso_engine_web_v1_spectrum_collection_entry_bytes();
-    const entryCapacity = this.exports.miso_engine_web_v1_spectrum_collection_entry_capacity();
-    if (!u32(entryPointer) || entryPointer === 0 || entryBytes !== SPECTRUM_COLLECTION_ENTRY_BYTES
-        || entryCapacity !== options.entries.length) {
-      return RESULT_INTERNAL;
-    }
-    bytes = this.exports.memory.buffer;
-    const entries = new DataView(bytes, entryPointer, entryCapacity * entryBytes);
-    const encodedIds = [];
-    for (let index = 0; index < options.entries.length; index += 1) {
-      const entry = options.entries[index];
-      const target = entry?.target === "trackPostInput"
-        ? SPECTRUM_TARGET_TRACK_POST_INPUT
-        : entry?.target === "trackPostPan"
-          ? SPECTRUM_TARGET_TRACK_POST_PAN
-          : entry?.target === "output" ? SPECTRUM_TARGET_OUTPUT : 0;
-      const channels = entry?.channels === "left"
-        ? SPECTRUM_CHANNEL_LEFT
-        : entry?.channels === "right"
-          ? SPECTRUM_CHANNEL_RIGHT
-          : entry?.channels === "both" ? SPECTRUM_CHANNEL_BOTH : 0;
-      if (!exactFields(entry, ["target", "targetId", "channels"])
-          || target === 0 || channels === 0
-          || typeof entry.targetId !== "string" || entry.targetId.length === 0) {
-        return RESULT_INVALID_ARGUMENT;
-      }
-      const idBytes = boundedUtf8Length(entry.targetId, SPECTRUM_MAXIMUM_ID_BYTES);
-      if (idBytes <= 0) {
-        return RESULT_INVALID_ARGUMENT;
-      }
-      encodedIds.push({ value: entry.targetId, bytes: idBytes });
-      const offset = entryPointer + index * entryBytes;
-      entries.setUint32(offset - entryPointer, target, true);
-      entries.setUint32(offset - entryPointer + 4, channels, true);
-      entries.setUint32(offset - entryPointer + 8, idBytes, true);
-      entries.setUint32(offset - entryPointer + 12, 0, true);
-      entries.setUint32(offset - entryPointer + 16, 0, true);
-      entries.setUint32(offset - entryPointer + 20, 0, true);
-    }
-    const totalIdBytes = encodedIds.reduce((total, id) => total + id.bytes, 0);
-    const idPointer = this.exports.miso_engine_web_v1_spectrum_collection_target_ids_ptr();
-    const idCapacity = this.exports.miso_engine_web_v1_spectrum_collection_target_ids_capacity();
-    if (!u32(idPointer) || idPointer === 0 || idCapacity !== totalIdBytes) {
-      return RESULT_INTERNAL;
-    }
-    bytes = this.exports.memory.buffer;
-    let idOffset = idPointer;
-    for (const id of encodedIds) {
-      const written = writeBoundedUtf8(id.value, bytes, idOffset, id.bytes);
-      if (written !== id.bytes) return RESULT_INVALID_ARGUMENT;
-      idOffset += id.bytes;
-    }
-    return RESULT_OK;
-  }
-
   /// Bind every live-control view and preallocate every frame the render callback posts.
   ///
   /// Issue #137: nothing in `process()` may allocate, so every message body, every typed-array
@@ -878,28 +561,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// clone `postMessage` performs is the only allocation left, and it is the one the ABI cannot
   /// avoid.
   bindLiveControls(init) {
-    // Issue #1565a D4: the command staging exists exactly when observation taps are configured.
-    this.liveControlsAttached = init.options.liveControlObservationTaps !== 0n;
-    const commandPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_COMMAND);
-    const commandCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
-      this.handle,
-      BUFFER_COMMAND,
-    );
-    const reportPointer = this.exports.miso_engine_web_v1_command_report_ptr(this.handle);
-    if (!u32(reportPointer) || reportPointer === 0) return false;
-    this.bindView("commandReport", DataView, reportPointer, COMMAND_REPORT_BYTES);
-    if (this.liveControlsAttached) {
-      if (!u32(commandPointer) || commandPointer === 0
-          || commandCapacity !== MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) return false;
-      this.bindView("commandStaging", Uint8Array, commandPointer, commandCapacity);
-    } else if (commandPointer !== 0 || commandCapacity !== 0) {
-      // Released live controls must own no staging at all; a nonzero row here would mean the engine
-      // charged for a buffer the ABI says does not exist.
-      return false;
-    }
-
-    // Issue #207: source introspection and the observation bindings are control-path state, read
-    // here once at boot and again by the request handlers (a rebuild can change both, #1562b). The
+    // Issue #207: source introspection is control-path state, read here once at boot and again by
+    // the request handlers (a rebuild can change it, #1562b). The
     // construction path and the handlers are the ones that may allocate; `process()` never touches
     // them. A headless consumer of the session map cannot otherwise learn which sources a
     // compiled session declares, how many channels each carries, or which frames it is waiting
@@ -908,19 +571,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (sources === null) return false;
     this.sources = sources;
     this.sourceCount = sources.length;
-    const observations = this.readObservationBindings();
-    if (observations === null) return false;
-    this.observations = observations;
-    const observationSelectionPointer = this.exports.miso_engine_web_v1_observation_selection_ptr();
-    const observationSelectionBytes = this.exports.miso_engine_web_v1_observation_selection_bytes();
-    const observationSelectionCapacity = this.exports.miso_engine_web_v1_observation_selection_capacity();
-    if (!u32(observationSelectionPointer) || observationSelectionPointer === 0
-        || observationSelectionBytes !== OBSERVATION_SELECTION_BYTES
-        || !u32(observationSelectionCapacity)
-        || observationSelectionCapacity < 1
-        || observationSelectionCapacity > MAXIMUM_OBSERVATION_READS) return false;
-    this.bindView("observationSelectionView", DataView, observationSelectionPointer,
-      observationSelectionCapacity * observationSelectionBytes);
 
     const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
       this.handle,
@@ -931,7 +581,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       BUFFER_METER_FRAME,
     );
     this.metersAttached = init.options.liveControlMeterBlocks !== 0n;
-    this.observationAttached = init.options.liveControlObservationTaps !== 0n;
     if (this.metersAttached) {
       const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
       if (!u32(headerPointer) || headerPointer === 0) return false;
@@ -986,15 +635,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     const liveControlWords = [
       options.reserved1, options.liveControlMeterBlocks,
-      options.liveControlObservationTaps, options.reserved2,
+      options.reserved3, options.reserved2,
     ];
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // Offsets 32 and 56 are reserved and must be zero (issue #1565a D4, issue #1689 D2): a
-    // writer that still sets a retired word is refused, never ignored.
-    if (options.reserved1 !== 0n || options.reserved2 !== 0n) {
-      throw new RangeError("Invalid observation boot option");
+    // Offsets 32, 48 and 56 are reserved and must be zero (issue #1565a D4, #1590 D5, #1689 D2):
+    // a writer that still sets a retired word is refused, never ignored.
+    if (options.reserved1 !== 0n || options.reserved3 !== 0n || options.reserved2 !== 0n) {
+      throw new RangeError("Invalid reserved boot option");
     }
     const view = new DataView(this.exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);
     view.setUint32(0, BOOT_OPTIONS_BYTES, true);
@@ -1024,8 +673,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
       "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes", "graphMetadataBytes",
       "graphDelayBytes", "largestNamedAllocationBytes",
-      // Issue #143: carved from the report's first reserved word; zero for a session prepared
-      // with `liveControlObservationTaps === 0n`.
+      // Issue #143: carved from the report's first reserved word.
       "observationRetainedBytes",
     ];
     const resources = {
@@ -1203,8 +851,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else if (message?.tag === "miso.session-seek.v1"
         && exactFields(message, SESSION_SEEK_FIELDS)) {
       this.receiveSessionSeek(message);
-    } else if (message?.tag === "miso.command.v1" && exactFields(message, COMMAND_FIELDS)) {
-      this.receiveCommand(message);
+    } else if (message?.tag === "miso.seek-at.v1" && exactFields(message, SEEK_AT_FIELDS)) {
+      this.receiveSeekAt(message);
+    } else if (message?.tag === "miso.seek-report.v1"
+        && exactFields(message, SEEK_REPORT_FIELDS)) {
+      this.receiveSeekReport(message);
+    } else if (message?.tag === "miso.plan-latency.v1"
+        && exactFields(message, PLAN_LATENCY_FIELDS)) {
+      this.receivePlanLatency(message);
     } else if (message?.tag === "miso.control.v1"
         && (exactFields(message, CONTROL_FIELDS)
           || exactFields(message, CONTROL_DOCUMENT_FIELDS))) {
@@ -1234,37 +888,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         })),
         metersAttached: this.metersAttached === true,
       });
-    } else if (message?.tag === "miso.observationmap.v1"
-        && exactFields(message, ["tag", "requestId"])) {
-      // The bindings are the rendering plan's (a rebuild changes them at its adoption block), and
-      // the reply names the structure epoch of the control list whose strip order they follow.
-      const bindings = this.readObservationBindings();
-      if (bindings === null) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      this.observations = bindings;
-      this.port.postMessage({
-        tag: "miso.observationmap.v1",
-        requestId: message.requestId,
-        result: RESULT_OK,
-        structureEpoch: this.renderingStructureEpoch(),
-        bindings: this.observations,
-      });
-    } else if (message?.tag === "miso.observation.v1"
-        && exactFields(message, ["tag", "requestId", "selections"])) {
-      this.receiveObservationRead(message);
-    } else if (message?.tag === "miso.trackresponse.v1"
-        && exactFields(message, TRACK_RESPONSE_FIELDS)) {
-      this.receiveTrackResponse(message);
-    } else if (message?.tag === "miso.spectrum.v1"
-        && (exactFields(message, SPECTRUM_FIELDS)
-          || exactFields(message, SPECTRUM_SELECT_FIELDS)
-          || exactFields(message, SPECTRUM_STREAM_SELECT_FIELDS)
-          || exactFields(message, SPECTRUM_STREAM_START_FIELDS)
-          || exactFields(message, SPECTRUM_STREAM_READ_FIELDS)
-          || exactFields(message, SPECTRUM_STREAM_STOP_FIELDS))) {
-      this.receiveSpectrum(message);
     } else if (message?.tag === "miso.renderallocations.v1"
         && exactFields(message, ["tag", "requestId"])) {
       // Issue #1333 D3: the allocator calls this instance made inside render-locked windows --
@@ -1296,403 +919,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
     }
-  }
-
-  receiveObservationRead(message) {
-    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !Array.isArray(message.selections)
-        || message.selections.length === 0
-        || message.selections.length > MAXIMUM_OBSERVATION_READS
-        || !message.selections.every(validObservationAddress)
-        || this.observationSelectionView === null) {
-      if (this.observationSelectionView === null && Array.isArray(message.selections)
-          && message.selections.length > 0 && message.selections.length <= MAXIMUM_OBSERVATION_READS
-          && message.selections.every(validObservationAddress)) {
-        this.port.postMessage({
-          tag: "miso.observation.v1",
-          requestId: message.requestId,
-          result: RESULT_UNSUPPORTED,
-          rows: [],
-        });
-      } else {
-        this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-      }
-      return;
-    }
-    const view = this.observationSelectionView;
-    const count = message.selections.length;
-    for (let index = 0; index < count; index += 1) {
-      const selection = message.selections[index];
-      const offset = index * OBSERVATION_SELECTION_BYTES;
-      view.setUint32(offset, OBSERVATION_SELECTION_BYTES, true);
-      view.setUint32(offset + 4, ABI_VERSION, true);
-      view.setUint32(offset + 8, selection.trackIndex, true);
-      view.setUint32(offset + 12, selection.rack, true);
-      view.setUint32(offset + 16, selection.effectIndex, true);
-      view.setUint32(offset + 20, selection.tapId, true);
-      view.setUint32(offset + 24, selection.channels, true);
-      view.setUint32(offset + 28, 0, true);
-    }
-    const result = this.exports.miso_engine_web_v1_observation_read(this.handle, count);
-    if (result !== RESULT_OK) {
-      this.port.postMessage({
-        tag: "miso.observation.v1",
-        requestId: message.requestId,
-        result,
-        rows: [],
-      });
-      return;
-    }
-    const resultPointer = this.exports.miso_engine_web_v1_observation_result_ptr();
-    const resultBytes = this.exports.miso_engine_web_v1_observation_result_bytes();
-    if (!u32(resultPointer) || resultPointer === 0
-        || resultBytes !== count * OBSERVATION_RESULT_BYTES) {
-      this.sticky(RESULT_INTERNAL, message.requestId);
-      return;
-    }
-    const output = new DataView(this.memoryBuffer, resultPointer, resultBytes);
-    const rows = [];
-    for (let index = 0; index < count; index += 1) {
-      const offset = index * OBSERVATION_RESULT_BYTES;
-      if (output.getUint32(offset, true) !== OBSERVATION_RESULT_BYTES
-          || output.getUint32(offset + 4, true) !== ABI_VERSION
-          || output.getUint32(offset + 36, true) !== 0
-          || output.getUint32(offset + 84, true) !== 0
-          || output.getUint32(offset + 88, true) !== 0
-          || output.getUint32(offset + 92, true) !== 0) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      const row = Object.freeze({
-        trackIndex: output.getUint32(offset + 12, true),
-        rack: output.getUint32(offset + 16, true),
-        effectIndex: output.getUint32(offset + 20, true),
-        tapId: output.getUint32(offset + 24, true),
-        channels: output.getUint32(offset + 28, true),
-        status: output.getUint32(offset + 8, true),
-        sampleRateHz: output.getUint32(offset + 32, true),
-        firstSample: output.getBigUint64(offset + 40, true),
-        endSample: output.getBigUint64(offset + 48, true),
-        sequence: output.getBigUint64(offset + 56, true),
-        blocks: output.getUint32(offset + 64, true),
-        leftPresent: output.getUint32(offset + 68, true),
-        rightPresent: output.getUint32(offset + 72, true),
-        left: output.getFloat32(offset + 76, true),
-        right: output.getFloat32(offset + 80, true),
-      });
-      rows.push(row);
-    }
-    this.port.postMessage({
-      tag: "miso.observation.v1",
-      requestId: message.requestId,
-      result: RESULT_OK,
-      rows,
-    });
-  }
-
-  /// Capture one immutable selected-track response snapshot for the analysis Worker.
-  ///
-  /// This handler never constructs a response collector or evaluates a curve. Rust copies the
-  /// prepared owners into the prewarmed fixed staging area; this side makes one detached byte
-  /// copy for the Worker and returns it to the main realm. A capture refusal returns no bytes and
-  /// leaves the Worklet's render state untouched.
-  receiveTrackResponse(message) {
-    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || typeof message.trackId !== "string" || message.trackId.length === 0
-        || message.trackId.length > LIVE_RESPONSE_MAXIMUM_ID_BYTES
-        || !Number.isInteger(message.grid)
-        || (message.grid !== LIVE_RESPONSE_CAPTURE_GRID_LINEAR
-          && message.grid !== LIVE_RESPONSE_CAPTURE_GRID_LOGARITHMIC)
-        || !Number.isInteger(message.channels)
-        || (message.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_LEFT
-          && message.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_RIGHT
-          && message.channels !== LIVE_RESPONSE_CAPTURE_CHANNEL_BOTH)
-        || !Number.isInteger(message.points) || message.points < 2
-        || message.points > LIVE_RESPONSE_MAXIMUM_POINTS
-        || typeof message.minimumHz !== "number" || !Number.isFinite(message.minimumHz)
-        || typeof message.maximumHz !== "number" || !Number.isFinite(message.maximumHz)
-        || !Number.isInteger(message.maximumResultBytes) || message.maximumResultBytes <= 0
-        || message.maximumResultBytes > this.trackResponseSnapshotCapacity) {
-      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-      return;
-    }
-    const idBytes = writeBoundedUtf8(
-      message.trackId,
-      this.memoryBuffer,
-      this.trackResponseTrackIdView.byteOffset,
-      this.trackResponseTrackIdView.byteLength,
-    );
-    if (idBytes < 0) {
-      const snapshot = new Uint8Array(0);
-      this.port.postMessage({
-        tag: "miso.trackresponse.v1",
-        requestId: message.requestId,
-        result: RESULT_INVALID_ARGUMENT,
-        snapshot,
-      }, [snapshot.buffer]);
-      return;
-    }
-    const request = this.trackResponseRequestView;
-    request.setUint32(0, LIVE_RESPONSE_REQUEST_BYTES, true);
-    request.setUint32(4, ABI_VERSION, true);
-    request.setUint32(8, idBytes, true);
-    request.setUint32(12, message.grid, true);
-    request.setUint32(16, message.channels, true);
-    request.setUint32(20, message.points, true);
-    request.setFloat32(24, message.minimumHz, true);
-    request.setFloat32(28, message.maximumHz, true);
-    request.setUint32(32, message.maximumResultBytes, true);
-    request.setUint32(36, 0, true);
-    request.setUint32(40, 0, true);
-    request.setUint32(44, 0, true);
-    let result;
-    try {
-      result = this.exports.miso_engine_web_v1_track_response_capture(this.handle);
-    } catch (_) {
-      result = RESULT_INTERNAL;
-    }
-    this.rebindMemoryViews();
-    const resultPointer = this.exports.miso_engine_web_v1_track_response_result_ptr();
-    const resultBytes = this.exports.miso_engine_web_v1_track_response_result_bytes();
-    if (!u32(resultPointer) || resultPointer === 0 || !u32(resultBytes)
-        || resultBytes > this.trackResponseSnapshotCapacity) {
-      this.sticky(RESULT_INTERNAL, message.requestId);
-      return;
-    }
-    const snapshot = result === RESULT_OK
-      ? new Uint8Array(this.memoryBuffer, resultPointer, resultBytes).slice()
-      : new Uint8Array(0);
-    this.port.postMessage({
-      tag: "miso.trackresponse.v1",
-      requestId: message.requestId,
-      result,
-      snapshot,
-    }, [snapshot.buffer]);
-  }
-
-  /// Arm, read or cancel the one prepared spectrum observer. The Worklet only copies raw samples;
-  /// FFT/window/log analysis remains in the off-render SDK Worker.
-  receiveSpectrum(message) {
-    const selectionOperation = message.operation === "select"
-      || message.operation === "streamSelect";
-    if (selectionOperation) {
-      const streamSelection = message.operation === "streamSelect";
-      if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-          || !exactFields(
-            message,
-            streamSelection ? [
-              "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
-            ] : ["tag", "requestId", "operation", "target", "targetId", "channels"],
-          )
-          || (message.target !== "trackPostInput"
-            && message.target !== "trackPostPan" && message.target !== "output")
-          || typeof message.targetId !== "string" || message.targetId.length === 0
-          || (message.channels !== "left" && message.channels !== "right" && message.channels !== "both")
-          || (streamSelection
-            && (typeof message.smoothingMs !== "number" || !Number.isFinite(message.smoothingMs)
-              || message.smoothingMs < 0 || message.smoothingMs > 10_000))) {
-        this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-        return;
-      }
-      const target = message.target === "trackPostInput"
-        ? SPECTRUM_TARGET_TRACK_POST_INPUT
-        : message.target === "trackPostPan"
-          ? SPECTRUM_TARGET_TRACK_POST_PAN
-          : SPECTRUM_TARGET_OUTPUT;
-      const channels = message.channels === "left"
-        ? SPECTRUM_CHANNEL_LEFT
-        : message.channels === "right" ? SPECTRUM_CHANNEL_RIGHT : SPECTRUM_CHANNEL_BOTH;
-      const pointer = this.exports.miso_engine_web_v1_spectrum_target_id_ptr();
-      const capacity = this.exports.miso_engine_web_v1_spectrum_target_id_capacity();
-      if (!u32(pointer) || pointer === 0 || !u32(capacity) || capacity === 0) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      const idBytes = writeBoundedUtf8(message.targetId, this.memoryBuffer, pointer, capacity);
-      if (idBytes <= 0) {
-        this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
-        return;
-      }
-      let result;
-      try {
-        result = streamSelection
-          ? this.exports.miso_engine_web_v1_spectrum_stream_select(
-            this.handle, target, channels, idBytes, message.smoothingMs,
-          )
-          : this.exports.miso_engine_web_v1_spectrum_select(
-            this.handle, target, channels, idBytes,
-          );
-      } catch (_) {
-        result = RESULT_INTERNAL;
-      }
-      this.rebindMemoryViews();
-      if (!streamSelection) {
-        this.port.postMessage({
-          tag: "miso.spectrum.v1",
-          requestId: message.requestId,
-          result,
-          operation: message.operation,
-        });
-        return;
-      }
-      const metadata = this.readSpectrumStreamMetadata();
-      if (metadata === null) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      this.port.postMessage({
-        tag: "miso.spectrum.v1",
-        requestId: message.requestId,
-        result,
-        operation: message.operation,
-        metadata,
-      });
-      return;
-    }
-    const streamOperation = message.operation === "streamStart"
-      || message.operation === "streamRead" || message.operation === "streamStop";
-    if (streamOperation) {
-      if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-          || (message.operation === "streamStart"
-            && (typeof message.smoothingMs !== "number" || !Number.isFinite(message.smoothingMs)
-              || message.smoothingMs < 0 || message.smoothingMs > 10_000))
-          || (message.operation === "streamRead"
-            && (!(message.buffer instanceof ArrayBuffer)
-              || message.buffer.byteLength === 0 || message.buffer.byteLength > SPECTRUM_MAXIMUM_BYTES))) {
-        this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-        return;
-      }
-      let result;
-      try {
-        result = message.operation === "streamStart"
-          ? this.exports.miso_engine_web_v1_spectrum_stream_start(this.handle, message.smoothingMs)
-          : message.operation === "streamStop"
-            ? this.exports.miso_engine_web_v1_spectrum_stream_stop(this.handle)
-            : this.exports.miso_engine_web_v1_spectrum_stream_read(this.handle);
-      } catch (_) {
-        result = RESULT_INTERNAL;
-      }
-      this.rebindMemoryViews();
-      const metadata = this.readSpectrumStreamMetadata();
-      if (metadata === null) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      if (message.operation === "streamRead") {
-        let byteLength = 0;
-        if (result === RESULT_OK && metadata.status === 6) {
-          const pointer = this.exports.miso_engine_web_v1_spectrum_capture_ptr();
-          const bytes = this.exports.miso_engine_web_v1_spectrum_capture_bytes();
-          const capacity = this.exports.miso_engine_web_v1_spectrum_capture_capacity();
-          if (!u32(pointer) || pointer === 0 || !u32(bytes) || bytes === 0
-              || !u32(capacity) || bytes > capacity || bytes > SPECTRUM_MAXIMUM_BYTES
-              || bytes > message.buffer.byteLength) {
-            result = RESULT_INTERNAL;
-          } else {
-            new Uint8Array(message.buffer, 0, bytes)
-              .set(new Uint8Array(this.memoryBuffer, pointer, bytes));
-            byteLength = bytes;
-          }
-        }
-        this.port.postMessage({
-          tag: "miso.spectrum.v1",
-          requestId: message.requestId,
-          result,
-          operation: message.operation,
-          byteLength,
-          buffer: message.buffer,
-          metadata,
-        }, [message.buffer]);
-      } else {
-        this.port.postMessage({
-          tag: "miso.spectrum.v1",
-          requestId: message.requestId,
-          result,
-          operation: message.operation,
-          metadata,
-        });
-      }
-      return;
-    }
-    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || (message.operation !== "arm" && message.operation !== "read" && message.operation !== "cancel")
-        || (message.channels !== "left" && message.channels !== "right" && message.channels !== "both")) {
-      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-      return;
-    }
-    const channels = message.channels === "left"
-      ? SPECTRUM_CHANNEL_LEFT
-      : message.channels === "right" ? SPECTRUM_CHANNEL_RIGHT : SPECTRUM_CHANNEL_BOTH;
-    let result;
-    try {
-      result = message.operation === "arm"
-        ? this.exports.miso_engine_web_v1_spectrum_arm(this.handle)
-        : message.operation === "cancel"
-          ? this.exports.miso_engine_web_v1_spectrum_cancel(this.handle)
-          : this.exports.miso_engine_web_v1_spectrum_read(this.handle, channels);
-    } catch (_) {
-      result = RESULT_INTERNAL;
-    }
-    this.rebindMemoryViews();
-    let snapshot = new Uint8Array(0);
-    if (message.operation === "read" && result === RESULT_OK) {
-      const pointer = this.exports.miso_engine_web_v1_spectrum_capture_ptr();
-      const bytes = this.exports.miso_engine_web_v1_spectrum_capture_bytes();
-      const capacity = this.exports.miso_engine_web_v1_spectrum_capture_capacity();
-      if (!u32(pointer) || pointer === 0 || !u32(bytes) || bytes === 0
-          || !u32(capacity) || bytes > capacity || bytes > SPECTRUM_MAXIMUM_BYTES) {
-        this.sticky(RESULT_INTERNAL, message.requestId);
-        return;
-      }
-      snapshot = new Uint8Array(this.memoryBuffer, pointer, bytes).slice();
-    }
-    this.port.postMessage({
-      tag: "miso.spectrum.v1",
-      requestId: message.requestId,
-      result,
-      operation: message.operation,
-      snapshot,
-    }, [snapshot.buffer]);
-  }
-
-  readSpectrumStreamMetadata() {
-    this.rebindMemoryViews();
-    const pointer = this.exports.miso_engine_web_v1_spectrum_stream_metadata_ptr();
-    const bytes = this.exports.miso_engine_web_v1_spectrum_stream_metadata_bytes();
-    if (!u32(pointer) || pointer === 0 || bytes !== SPECTRUM_STREAM_METADATA_BYTES
-        || pointer + bytes > this.memoryBuffer.byteLength) return null;
-    const view = new DataView(this.memoryBuffer, pointer, bytes);
-    const metadata = {
-      structSize: view.getUint32(0, true),
-      abiVersion: view.getUint32(4, true),
-      result: view.getUint32(8, true),
-      status: view.getUint32(12, true),
-      target: view.getUint32(16, true),
-      channels: view.getUint32(20, true),
-      sampleRateHz: view.getUint32(24, true),
-      quantumFrames: view.getUint32(28, true),
-      hopFrames: view.getUint32(32, true),
-      sourceUnderrun: view.getUint32(36, true),
-      captureEpoch: view.getBigUint64(48, true),
-      sequence: view.getBigUint64(56, true),
-      droppedCaptures: view.getBigUint64(64, true),
-      windows: view.getBigUint64(72, true),
-      capturedSample: view.getBigUint64(80, true),
-      endSample: view.getBigUint64(88, true),
-      analysisEpoch: view.getBigUint64(96, true),
-      historyStartSample: view.getBigUint64(104, true),
-      smoothingMs: view.getFloat64(112, true),
-    };
-    if (metadata.structSize !== SPECTRUM_STREAM_METADATA_BYTES
-        || metadata.abiVersion !== ABI_VERSION
-        || !SPECTRUM_STREAM_STATUSES.has(metadata.status)
-        || metadata.target < SPECTRUM_TARGET_TRACK_POST_INPUT
-        || metadata.target > SPECTRUM_TARGET_OUTPUT
-        || ![SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT, SPECTRUM_CHANNEL_BOTH].includes(metadata.channels)
-        || metadata.sourceUnderrun > 1
-        || !Number.isFinite(metadata.smoothingMs) || metadata.smoothingMs < 0
-        || metadata.smoothingMs > 10_000) return null;
-    return Object.freeze(metadata);
   }
 
   receiveSource(message) {
@@ -1728,59 +954,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       message.frames, message.endOfRegion ? 1 : 0,
     );
     this.acknowledge(message.requestId, result, message.planes);
-  }
-
-  /// Copy one staged `miso.command.v1` submission into Wasm and admit it (issue #137 D1).
-  ///
-  /// The records arrive as one flat transferable byte block, so a whole fader gesture costs one
-  /// message and one copy rather than one message per parameter. The block is handed straight back
-  /// on the acknowledgement, exactly as source planes are, so the caller keeps its storage.
-  receiveCommand(message) {
-    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
-        || !u32(message.count) || message.count > MAXIMUM_COMMAND_RECORDS
-        || !(message.records instanceof Uint8Array)
-        || !(message.records.buffer instanceof ArrayBuffer)
-        || (typeof SharedArrayBuffer !== "undefined"
-          && message.records.buffer instanceof SharedArrayBuffer)
-        || message.records.byteLength !== message.count * COMMAND_RECORD_BYTES) {
-      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
-      return;
-    }
-    if (!this.liveControlsAttached) {
-      // A session prepared with `liveControlObservationTaps === 0n` has no control channel and
-      // no staging buffer. That is a typed refusal of a well-formed request, not a protocol error,
-      // so the batch is acknowledged and its record block goes back to the caller untouched.
-      this.port.postMessage({
-        tag: "miso.ack.v1",
-        requestId: message.requestId,
-        result: RESULT_UNSUPPORTED,
-        reason: COMMAND_REASON_UNSUPPORTED_KIND,
-        rejectedIndex: 0,
-        admitted: 0,
-        appliedAtSample: 0n,
-        records: message.records,
-      }, [message.records.buffer]);
-      return;
-    }
-    this.commandStaging.set(message.records, 0);
-    const result = this.exports.miso_engine_web_v1_command_submit(this.handle, message.count);
-    const report = this.commandReport;
-    if (report.getUint32(0, true) !== COMMAND_REPORT_BYTES
-        || report.getUint32(4, true) !== ABI_VERSION
-        || report.getBigUint64(32, true) !== 0n || report.getBigUint64(40, true) !== 0n) {
-      this.sticky(RESULT_INTERNAL, message.requestId);
-      return;
-    }
-    this.port.postMessage({
-      tag: "miso.ack.v1",
-      requestId: message.requestId,
-      result,
-      reason: report.getUint32(12, true),
-      rejectedIndex: report.getUint32(16, true),
-      admitted: report.getUint32(20, true),
-      appliedAtSample: report.getBigUint64(24, true),
-      records: message.records,
-    }, [message.records.buffer]);
   }
 
   /// Issue #1562a D1: one command frame through the control plane's `SessionState::command`, the
@@ -1960,6 +1133,101 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       result,
       generation: message.generation,
     });
+  }
+
+  /// Issue #1297a, `single` mode: one anchored source seek, applied by the message handler between
+  /// blocks and never in `process()`: `source_seek_at` runs the service step. It calls the export
+  /// once; a refusal is the reply's result and is not sticky. A malformed message calls nothing.
+  receiveSeekAt(message) {
+    if (typeof message.sourceId !== "string"
+        || typeof message.generation !== "bigint" || message.generation <= 0n
+        || message.generation > 0xffffffffffffffffn
+        || typeof message.sourceFrame !== "bigint" || message.sourceFrame < 0n
+        || message.sourceFrame > 0xffffffffffffffffn
+        || typeof message.anchorSample !== "bigint" || message.anchorSample < 0n
+        || message.anchorSample > 0xffffffffffffffffn) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
+      return;
+    }
+    const idLength = this.stageSourceId(message.sourceId);
+    if (idLength < 0) {
+      this.sticky(4, message.requestId);
+      return;
+    }
+    this.acknowledge(
+      message.requestId,
+      this.exports.miso_engine_web_v1_source_seek_at(
+        this.handle, idLength, message.generation, message.sourceFrame, message.anchorSample,
+      ),
+    );
+  }
+
+  /// Issue #1297a, `single` mode: read where one source landed after its newest seek. The handler
+  /// calls `source_seek_report` once (it runs the service step, so never in `process()`) and copies
+  /// the record's words into the reply; a refusal is the reply's result with a null report, and is
+  /// not sticky. The worklet computes nothing from the words.
+  receiveSeekReport(message) {
+    if (typeof message.sourceId !== "string") {
+      this.sticky(RESULT_INVALID_ARGUMENT, message.requestId);
+      return;
+    }
+    const idLength = this.stageSourceId(message.sourceId);
+    if (idLength < 0) {
+      this.sticky(4, message.requestId);
+      return;
+    }
+    const result = this.exports.miso_engine_web_v1_source_seek_report(this.handle, idLength);
+    let report = null;
+    if (result === RESULT_OK) {
+      this.rebindMemoryViews();
+      const view = this.seekReportView;
+      if (view.getUint32(0, true) !== SEEK_REPORT_BYTES) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      report = {};
+      for (const [field, offset] of SEEK_REPORT_WORDS) {
+        report[field] = view.getBigUint64(offset, true);
+      }
+    }
+    this.port.postMessage({
+      tag: "miso.seek-report.v1",
+      requestId: message.requestId,
+      result,
+      report,
+    });
+  }
+
+  /// Issue #2116, `single` mode: read the output latency and tail of the plan that renders now. The
+  /// handler calls `plan_latency_read` once (never in `process()`) and copies the record's words
+  /// into the reply; a refusal is the reply's result with a null latency, and is not sticky. The
+  /// worklet computes nothing from the words.
+  receivePlanLatency(message) {
+    const result = this.exports.miso_engine_web_v1_plan_latency_read(this.handle);
+    let latency = null;
+    if (result === RESULT_OK) {
+      this.rebindMemoryViews();
+      const view = this.planLatencyView;
+      if (view.getUint32(0, true) !== PLAN_LATENCY_BYTES) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      latency = {};
+      for (const [field, offset] of PLAN_LATENCY_WORDS) {
+        latency[field] = view.getBigUint64(offset, true);
+      }
+    }
+    this.port.postMessage({
+      tag: "miso.plan-latency.v1",
+      requestId: message.requestId,
+      result,
+      latency,
+    });
+  }
+
+  /// Copy one source ID into the staging; the byte count, or `-1` when it does not fit.
+  stageSourceId(sourceId) {
+    return writeBoundedUtf8(sourceId, this.memoryBuffer, this.sourceIdPointer, this.sourceIdCapacity);
   }
 
   // PROCESS_POLICY_BEGIN

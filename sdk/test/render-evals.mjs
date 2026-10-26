@@ -156,7 +156,7 @@ describe("eval 2 -- 96k/127 end to end from the boot's own answer", () => {
       // The block count is derived too: enough quanta to cover the ring the engine chose, so the
       // render exercises a full ring turnover rather than a fixed guess.
       const quanta = Math.ceil(shape.sourceRingFrames / shape.quantumFrames);
-      assert.equal(quanta, 78, "78 quanta of 127 frames is the derived ring");
+      assert.equal(quanta, 111, "111 quanta of 127 frames is the derived ring");
       assert.ok(
         BigInt(quanta * shape.quantumFrames) <= shape.sources[0].frames,
         "a full ring turnover must fit inside the source region the engine reported",

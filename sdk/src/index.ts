@@ -21,6 +21,9 @@ export type {
 export type {
   SpectrumCollection,
   SpectrumCollectionEntry,
+  SpectrumConfigureOptions,
+  SpectrumConfigured,
+  SpectrumHopFrames,
   SpectrumLimits,
   SpectrumQuery,
   SpectrumResult,
@@ -63,6 +66,13 @@ export type {
   SpectrumSubscriptionReceipt,
   SpectrumSubscriptionRequest,
 } from "./core/observation-subscriptions.ts";
+export { LOUDNESS_READ_CADENCE_MS } from "./core/loudness.ts";
+export type {
+  LoudnessReading,
+  LoudnessSubscription,
+  LoudnessSubscriptionNotification,
+  LoudnessSubscriptionRequest,
+} from "./core/loudness.ts";
 // Named, not `export *`: `core/session.ts` also exports the `@internal` normalizers the
 // transaction builder shares (#1383), which are not public API.
 export {
@@ -85,6 +95,7 @@ export type {
 } from "./core/session.ts";
 export { TransactionBuilder, transaction } from "./core/session-transaction.ts";
 export type { SessionEditSpec, SessionTransaction } from "./core/session-transaction.ts";
+export type { EditOutcome, EditPath, WatermarkSnapshot } from "./core/session-edit.ts";
 export * from "./core/writer.ts";
 export type * from "./core/types.ts";
 
@@ -139,7 +150,51 @@ export type {
   ControlTransactionRequest,
   ControlWireAddress,
 } from "./core/control-frame.ts";
-export * from "./core/control-list.ts";
+// Named, not `export *`: `core/control-list.ts` also exports the `@internal` section reader the
+// observation map shares (#1590 D3), which is not public API.
+export {
+  CONTROL_LIST_PAGE_ROWS,
+  CONTROL_LIST_RESTARTS,
+  CONTROL_LIST_STALE,
+  decodeControlListPage,
+  decodeControlStatePage,
+  encodeControlListRequest,
+  readControlList,
+  readControlState,
+  readControlStripOrder,
+  readControlStripOrderSync,
+  stripEffectOf,
+  stripOrderOf,
+} from "./core/control-list.ts";
+export type {
+  ControlChoice,
+  ControlClassName,
+  ControlFamilyName,
+  ControlHeader,
+  ControlHeaderAddress,
+  ControlList,
+  ControlListEntry,
+  ControlListFilter,
+  ControlListPage,
+  ControlListRequest,
+  ControlListTransport,
+  ControlOwnerHeader,
+  ControlOwnerHeaderKind,
+  ControlPageRefusal,
+  ControlPageResult,
+  ControlRampRowName,
+  ControlReasonName,
+  ControlRouteEnds,
+  ControlScopeName,
+  ControlSectionHeader,
+  ControlState,
+  ControlStatePage,
+  ControlStripOrder,
+  ControlTaperName,
+  ControlTapName,
+  ControlUnitName,
+  ControlValueKind,
+} from "./core/control-list.ts";
 export {
   COUNTER_IDS,
   ProtocolClient,

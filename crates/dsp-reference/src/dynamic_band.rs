@@ -14,13 +14,16 @@ pub struct ReferenceRbjBiquad {
     z: [f64; 2],
 }
 
-/// The two RBJ responses the dynamic band uses.
+/// The RBJ responses the dynamic band and its output laws use.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceBandTap {
     /// Band-pass with a constant 0 dB peak at the centre frequency.
     BandPass,
     /// Second-order high-pass at the centre frequency with damping `1/Q`.
     HighPass,
+    /// Second-order low-pass at the centre frequency with damping `1/Q` (the de-esser's high
+    /// shelf, #1984).
+    LowPass,
 }
 
 impl ReferenceRbjBiquad {
@@ -38,6 +41,7 @@ impl ReferenceRbjBiquad {
             ReferenceBandTap::HighPass => {
                 [(1.0 + cosine) * 0.5, -(1.0 + cosine), (1.0 + cosine) * 0.5]
             }
+            ReferenceBandTap::LowPass => [(1.0 - cosine) * 0.5, 1.0 - cosine, (1.0 - cosine) * 0.5],
         };
         let a0 = 1.0 + alpha;
         Some(Self {

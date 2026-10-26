@@ -1,39 +1,11 @@
-import { commandReasonName } from "../core/boundary.ts";
-import type { CommandReport, SessionMap } from "../core/boundary.ts";
-import { ABI_LAYOUT } from "../generated/abi.ts";
+import type { SessionMap } from "../core/boundary.ts";
 import { controlCallFailure, decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 import { readControlStripOrder } from "../core/control-list.ts";
 import type { ControlListTransport, ControlStripOrder } from "../core/control-list.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
-import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
-import { resultName } from "../core/errors.ts";
 import type { SessionLike } from "../core/session.ts";
-import { checkLaneEdit } from "../internal/lane-edit.ts";
-import type { LaneEdit } from "../core/writer.ts";
-import type {
-  MisoAudioWorkletHost,
-  MisoCommand,
-  MisoCommandKind,
-} from "./shipped-host.d.ts";
-
-function kindValue(name: LaneEdit["kind"]): MisoCommandKind {
-  const row = ABI_LAYOUT.constants.wireCommandKinds.find((candidate) => candidate.name === name);
-  if (row === undefined) throw new Error(`generated ABI has no command kind ${name}`);
-  return row.value as MisoCommandKind;
-}
-
-function browserCommand(edit: LaneEdit): MisoCommand {
-  checkLaneEdit(edit);
-  return {
-    kind: kindValue(edit.kind),
-    rack: edit.rack,
-    stripId: edit.stripId,
-    effectId: edit.effectId,
-    tapId: edit.tapId,
-    windowBlocks: edit.windowBlocks,
-  };
-}
+import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
 
 /** Post one command frame to the host's `control` message; a call that failed throws. */
 function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Promise<Uint8Array> {
@@ -182,7 +154,6 @@ async function openBrowserControlQueue(host: MisoAudioWorkletHost): Promise<Cont
  */
 export async function createBrowserLiveControls(
   host: MisoAudioWorkletHost,
-  beforeSubmit?: LiveControlBeforeSubmit,
   session?: SessionLike,
   booted?: Uint8Array,
 ): Promise<EngineLiveControls> {
@@ -199,21 +170,5 @@ export async function createBrowserLiveControls(
     metersAttached: remoteMap.metersAttached,
     submixes: order.submixes,
   });
-  return new EngineLiveControls(map, {
-    queue,
-    order,
-    observe: async (edits): Promise<CommandReport> => {
-      const ack = await host.command({ commands: edits.map(browserCommand) });
-      return Object.freeze({
-        ok: ack.result === 0,
-        result: ack.result,
-        code: resultName(ack.result, "call"),
-        reason: ack.reason,
-        reasonName: commandReasonName(ack.reason),
-        rejectedIndex: ack.rejectedIndex,
-        admitted: ack.admitted,
-        appliedAtSample: ack.appliedAtSample,
-      });
-    },
-  }, beforeSubmit, session, booted);
+  return new EngineLiveControls(map, { queue, order }, session, booted);
 }

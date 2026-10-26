@@ -1426,6 +1426,18 @@ impl Budget {
 /// selections decode onto the stack, so no selection table is retained). The three slices' rows
 /// are independent and add up. 334,046 fits under the 344,192 ceiling, so the ceiling is
 /// unchanged: a ceiling is raised only when a row goes over it.
+///
+/// #1587b with #1586b: `capi_retained_bytes` measured 334,702 (334,046 plus 656 B from other rows
+/// merged on `main`; before #1586b the same 656 B showed as 313,553). #1587b adds nothing here:
+/// the reference session has no observation reader, so it builds neither the readers' strip
+/// indices nor the record of the readers a swap carries. The ceiling stays.
+///
+/// #2115 raised `capi_retained_bytes`, a structural move: every session now carries the output
+/// loudness meter, preallocated at boot (its 512-hop record queue, two shared words and the
+/// analysis's ring and histograms, 75,432 bytes, charged exactly), and its render half inside the
+/// plan state the C ABI's `Plan` holds. Measured 340,878 -> 418,934 on x86-64; the ceiling is the
+/// new value plus 10 %, rounded up to 64: 460,827.4 -> 460,864, at both widths (the four-lane
+/// plan state is smaller).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1532,8 +1544,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 344_192,
-        four_lanes: 344_192,
+        eight_lanes: 460_864,
+        four_lanes: 460_864,
     },
     Budget {
         row: "largest_named_allocation_bytes",
@@ -2921,6 +2933,9 @@ struct RaceEdits {
     soloed: Option<usize>,
     /// Whether the race compressor's gain-reduction tap is subscribed (#1584).
     observed: bool,
+    /// The tag of the race compressor's tap arm the race's disarms name (#2087): the arm made before
+    /// the race, which the race's own arms join.
+    observe_tag: u64,
 }
 
 impl RaceEdits {
@@ -2939,11 +2954,12 @@ impl RaceEdits {
             extra: false,
             soloed: None,
             observed: false,
+            observe_tag: 0,
         }
     }
 
     /// An `Observe` of the race compressor's gain-reduction tap: an arm with a four-block window,
-    /// then its disarm (#1584 gate 8).
+    /// then its disarm (#1584 gate 8), which names the arm's tag.
     fn observe_edit(&mut self) -> SessionEdit {
         self.observed = !self.observed;
         SessionEdit::Observe {
@@ -2954,6 +2970,7 @@ impl RaceEdits {
             tap_id: 1,
             armed: self.observed,
             window_blocks: 4,
+            arm_tag: if self.observed { 0 } else { self.observe_tag },
         }
     }
 
@@ -3444,12 +3461,27 @@ fn race_live_edits(run: usize) -> RaceCounts {
             tap_id: 1,
             armed: true,
             window_blocks: 4,
+            arm_tag: 0,
         }],
     );
     // SAFETY: The session and the caller-owned buffers are live; no other thread uses it yet.
     let armed = unsafe { submit(session, &arm, &mut response) };
     assert_eq!(armed, RESULT_OK);
     assert_eq!(&response[18..20], &[0, 0], "the tap is armed");
+    let length = protocol::OUTER_HEADER_BYTES
+        + u32::from_le_bytes(response[20..24].try_into().expect("a length word")) as usize;
+    let mut fields = [0_u16; 64];
+    let Ok(protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::SessionTransactionApplied(applied),
+        ..
+    }) = ProtocolCodec::default().decode_typed_response(
+        &response[..length],
+        &mut protocol::DecodeScratch::new(&mut fields),
+    )
+    else {
+        panic!("the arm is applied")
+    };
+    edits.observe_tag = applied.observe_arm_tags[0];
 
     let (control, (render_observed, render_failure)) = std::thread::scope(|scope| {
         let render = scope.spawn(|| {

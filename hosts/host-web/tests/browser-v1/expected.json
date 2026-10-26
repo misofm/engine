@@ -27,7 +27,7 @@
   },
   "directOracle": {
     "schema": "miso.web.browser.direct-oracle.v1",
-    "memoryBytesCeiling": 3080192,
+    "memoryBytesCeiling": 2097152,
     "simd128": {
       "initialStatus": {
         "state": 2,
@@ -58,16 +58,16 @@
         "idStagingBytes": "127",
         "sourcePcmStagingBytes": "1024",
         "outputPcmBytes": "1024",
-        "largestBridgeAllocationBytes": "1048576",
+        "largestBridgeAllocationBytes": "16384",
         "effectScalarStateBytes": "0",
         "effectScalarScratchBytes": "0",
         "graphDelayBytes": "0",
-        "largestNamedAllocationBytes": "1048576",
+        "largestNamedAllocationBytes": "16384",
         "observationRetainedBytes": "0"
       },
       "resourceCeilings": {
-        "bridgeMetadataBytes": "1628864",
-        "bridgeRetainedBytes": "1667648",
+        "bridgeMetadataBytes": "630784",
+        "bridgeRetainedBytes": "671616",
         "sourceTotalBytes": "4352",
         "sourceOverheadBytes": "3264",
         "builtinRetainedBytes": "6720",
@@ -123,9 +123,8 @@
       "armedWindowSamples": "256",
       "disarmedTrackGrDb": 0,
       "unobservedMasterGrDb": null,
-      "subscribeReason": 0,
-      "unknownTapReason": 10,
-      "unboundReason": 7,
+      "subscribeStatus": 0,
+      "unknownTapStatus": 12,
       "pcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5"
     },
     "nativeObservationPcmF32leSha256": "4d1412f875886235dd9295ebfb109dfd54a63004eeea6615b7c8711dbc2203e5",

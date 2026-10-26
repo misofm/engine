@@ -3,8 +3,8 @@ import { hexLower } from "../web/hex-lower.js";
 const SAMPLE_RATE = 48000;
 const QUANTUM_FRAMES = 128;
 const CORPUS_FRAMES = QUANTUM_FRAMES * 3;
-const DEFAULT_RING_FRAMES = 5120;
-const STALL_FRAMES = DEFAULT_RING_FRAMES;
+const STALL_RING_FRAMES = 5120;
+const STALL_FRAMES = STALL_RING_FRAMES;
 const STALL_RENDER_FRAMES = STALL_FRAMES;
 const REQUESTED_STALL_MS = 120;
 // Issue #137: the live-control rows. 130 blocks is one full 128-block telemetry window plus slack,
@@ -17,7 +17,6 @@ const LIVE_CONTROL_METER_BLOCKS = 2n;
 // rather than a single point.
 const OBSERVATION_BLOCKS = 16;
 const OBSERVATION_FRAMES = OBSERVATION_BLOCKS * QUANTUM_FRAMES;
-const OBSERVATION_TAPS = 4n;
 const OBSERVATION_TAP_ID = 1;
 const OBSERVATION_LEVEL = 0.5;
 // Issue #1535: the real-context unsubscribe run, over its own session document
@@ -32,17 +31,18 @@ const UNSUBSCRIBE_ARMED_FRAMES = 4;
 // D4: more frames after the acknowledgement than the ring holds blocks, so a feed that stopped at
 // the acknowledgement cannot supply them from the ring alone.
 const UNSUBSCRIBE_SIGNAL_FRAMES = 48;
-const RING_BLOCKS = DEFAULT_RING_FRAMES / QUANTUM_FRAMES;
+const RING_BLOCKS = STALL_RING_FRAMES / QUANTUM_FRAMES;
 // The fed signal is a +-0.5 square wave. The lowest track peak measured after the acknowledgement
 // is 0.0815 in all three browsers (#1535 attempt 1), 1.6 times this floor; a block of zeros (an
 // underrun) peaks at 0.
 const UNSUBSCRIBE_PEAK_FLOOR = 0.05;
 const MINIMUM_STALL_MS = 100;
-// Issue #1333 D3 / Amendment 1: the staging-read rows. One 2,048-frame spectrum window is sixteen
-// blocks, the observation session's whole declared source region.
+// Issue #1333 D3: the staging-read row renders the observation session's whole declared source
+// region.
 const STAGING_READ_BLOCKS = OBSERVATION_BLOCKS;
 const STAGING_READ_FRAMES = STAGING_READ_BLOCKS * QUANTUM_FRAMES;
-const SPECTRUM_CAPTURE_BYTES = 1 << 20;
+// Issue #1580 D2: the bound on the wait for the host-level track response's `RESPONSE_READY`.
+const TRACK_RESPONSE_WAIT_MS = 10_000;
 const RESULT_OK = 0;
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 const ARTIFACT_URL = "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm";
@@ -67,11 +67,7 @@ const SIMD128_PROBE = new Uint8Array([
 // is refused as `miso.error.v1` requestId 0 result 1 before a module is even fetched. The quantum
 // now comes from the context's own `renderQuantumSize`, and the ceilings are the engine's, not the
 // caller's; `sourceRingFrames` is the one word that survived the change and it keeps its meaning.
-function bootOptions(
-  sourceRingFrames,
-  liveControlMeterBlocks = 0n,
-  liveControlObservationTaps = 0n,
-) {
+function bootOptions(sourceRingFrames, liveControlMeterBlocks = 0n) {
   return {
     sourceRingFrames,
     // Zero is "no caller-imposed memory ceiling", the same word `tests/browser-v1` sends and the
@@ -80,9 +76,9 @@ function bootOptions(
     // Issue #1565: offset 32 is reserved and must be zero.
     reserved1: 0n,
     liveControlMeterBlocks,
-    // Issue #143 D3: zero is the pre-#143 shape, which is what every row but the observation
-    // ones keeps using.
-    liveControlObservationTaps,
+    // Issue #1590 D5: offset 48 was the observation-taps word; it is reserved and must be zero.
+    // Every plan binds every declared tap.
+    reserved3: 0n,
     // Issue #1689: offset 56 was the master boot word; it is reserved and must be zero. The
     // observation row designates its master with the strip's `master` row after boot.
     reserved2: 0n,
@@ -225,10 +221,11 @@ async function runCorpusQualification(createHost, sessionDocument, source) {
       || source?.quantumFrames !== QUANTUM_FRAMES || source?.blocks?.length !== 2) {
     throw new Error("corpus fixture shape mismatch");
   }
-  // Firefox does not expose OfflineAudioContext.suspend. Prefill two bounded fresh contexts and
-  // concatenate the oracle's exact [block 0, block 0, block 1] timeline instead of coordinating
-  // submissions with a main-realm-only API. The resulting 384 frames must still match the one
-  // frozen native digest bit for bit.
+  // The run does not use OfflineAudioContext.suspend (Firefox, no longer a supported browser
+  // since #2092, lacked it; the suspend-free form stays engine-neutral). Prefill two bounded fresh
+  // contexts and concatenate the oracle's exact [block 0, block 0, block 1] timeline instead of
+  // coordinating submissions with a main-realm-only API. The resulting 384 frames must still match
+  // the one frozen native digest bit for bit.
   const first = await renderCorpusSegment(createHost, sessionDocument, [source.blocks[0]]);
   const rest = await renderCorpusSegment(createHost, sessionDocument, source.blocks);
   const pcm = [new Float32Array(CORPUS_FRAMES), new Float32Array(CORPUS_FRAMES)];
@@ -256,7 +253,7 @@ async function typedUnsupportedAttestation(createHost, sessionDocument) {
     await createHost({
       context,
       document: sessionDocument,
-      options: bootOptions(DEFAULT_RING_FRAMES),
+      options: bootOptions(STALL_RING_FRAMES),
       simd128ModuleUrl: ARTIFACT_URL,
       workletModuleUrl: WORKLET_URL,
     });
@@ -446,16 +443,28 @@ async function runLiveControlQualification(createHost, sessionDocument) {
 
 /// The delay the structural row applies, in samples (#1562b).
 const STRUCTURAL_DELAY_SAMPLES = 64;
+/// `N`, the live-control session's mute ramp: its default `mute_ms` of 10 ms (#1324a).
+const STRUCTURAL_MUTE_RAMP = Math.round((10 * SAMPLE_RATE) / 1000);
+/// The ceiling to a whole quantum.
+const ceilQuantum = (samples) => Math.ceil(samples / QUANTUM_FRAMES) * QUANTUM_FRAMES;
+/// `S = ceil_q(p + q + N + C)`: the delay edit restarts the track, a duck-swap (#1324a), committed
+/// before the first block (`p = 0`) in a session with no compensation line (`C = 0`).
+const STRUCTURAL_SWAP_SAMPLE = ceilQuantum(QUANTUM_FRAMES + STRUCTURAL_MUTE_RAMP);
+/// The first frame after the successor's fade-in: it fires at the first block at or after `S + D`,
+/// with `D` at most the edit's delay, and ramps over `N`.
+const STRUCTURAL_FADED_IN = ceilQuantum(STRUCTURAL_SWAP_SAMPLE + STRUCTURAL_DELAY_SAMPLES)
+  + STRUCTURAL_MUTE_RAMP;
 
 /// #1562b: a structural apply in a real browser. The live-control session's track gets a
 /// `delay_samples` edit, which the core classifies as a rebuild: it prepares a replacement plan and
-/// publishes it while the first plan has rendered nothing, so the very first quantum is the swap
-/// block (the offline context cannot be suspended in every engine). The row holds what the swap
-/// must keep: the reply is the rebuild path, the applied revision is not early, the output is the
-/// submitted PCM delayed by exactly the edit (computed here, not read back), the meter stream is the
-/// successor's from its first frame (the retired header's views were switched in the swap block,
-/// and the frame carries the structure epoch of the list), and no allocator call ran on the
-/// render thread.
+/// publishes it while the first plan has rendered nothing (the offline context cannot be suspended
+/// in every engine). The edit restarts the track, so the rebuild is a duck-swap (#1324a): the first
+/// plan ramps the track out over `N` from the first block, and the successor is adopted at
+/// `S = ceil_q(q + N)` and fades the track in. The row holds what the swap must keep: the reply is
+/// the rebuild path, the applied revision is not early (it moves at `S`, exactly), the duck holds
+/// exact `+0.0` from its end until `S`, the output after the fade-in is the submitted PCM delayed
+/// by exactly the edit (computed here, not read back), the meter stream is the successor's (the
+/// frame carries the structure epoch of the list), and no allocator call ran on the render thread.
 async function runStructuralApplyQualification(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, LIVE_CONTROL_FRAMES, SAMPLE_RATE);
   const host = await createHost({
@@ -520,8 +529,12 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
   const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
 
   let exact = true;
+  let duckedSilent = true;
   for (let channel = 0; channel < 2; channel += 1) {
-    for (let frame = 0; frame < LIVE_CONTROL_FRAMES; frame += 1) {
+    for (let frame = STRUCTURAL_MUTE_RAMP; frame < STRUCTURAL_SWAP_SAMPLE; frame += 1) {
+      if (!Object.is(actual[channel][frame], 0)) duckedSilent = false;
+    }
+    for (let frame = STRUCTURAL_FADED_IN; frame < LIVE_CONTROL_FRAMES; frame += 1) {
       if (!Object.is(actual[channel][frame], expected[channel][frame])) exact = false;
     }
   }
@@ -529,6 +542,7 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
   for (let index = 1; index < meterFrames.length; index += 1) {
     if (meterFrames[index].sequence <= meterFrames[index - 1].sequence) increasing = false;
   }
+  const fadedIn = (pcm) => pcm.map((channel) => channel.subarray(STRUCTURAL_FADED_IN));
   return {
     commandOk: command.ok,
     commandPath: command.path,
@@ -539,14 +553,16 @@ async function runStructuralApplyQualification(createHost, sessionDocument) {
     pendingRevision: pending.appliedRevision.toString(),
     finalRevision: after.appliedRevision.toString(),
     finalSample: after.appliedSample.toString(),
+    scheduledSample: String(STRUCTURAL_SWAP_SAMPLE),
     meterFrames: meterFrames.length,
     meterFrameWidth: meterFrames.length === 0 ? 0 : meterFrames[0].peaks,
     meterTrackCount: meterFrames.length === 0 ? 0 : meterFrames[0].trackCount,
     structureEpochs: [...new Set(meterFrames.map((frame) => frame.structureEpoch))],
     sequenceIncreasing: increasing,
+    duckedSilent,
     exactDelayedOutput: exact,
-    expectedDigest: await pcmDigest(expected, LIVE_CONTROL_FRAMES),
-    renderedDigest: await pcmDigest(actual, LIVE_CONTROL_FRAMES),
+    expectedDigest: await pcmDigest(fadedIn(expected), LIVE_CONTROL_FRAMES - STRUCTURAL_FADED_IN),
+    renderedDigest: await pcmDigest(fadedIn(actual), LIVE_CONTROL_FRAMES - STRUCTURAL_FADED_IN),
     renderAllocations,
   };
 }
@@ -713,15 +729,132 @@ async function runEmptyBootQualification(createHost, emptyDocument, frameFixture
   };
 }
 
+/// Issue #1295 D1: the structural-edit capture, the swap block and 32 quanta after it.
+const STRUCTURAL_EDIT_BLOCKS = 33;
+const STRUCTURAL_EDIT_FRAMES = STRUCTURAL_EDIT_BLOCKS * QUANTUM_FRAMES;
+/// Issue #1295 (#1697 gate 3): the quanta the 1 MiB replacement renders after its commit. It
+/// replaces the track's source, so the old track ramps out before the swap: the module under Node
+/// adopts it at sample 640 (block 5). Sixteen leaves room and gates nothing on the block.
+const STRUCTURAL_REPLACE_LARGE_BLOCKS = 16;
+
+/// Issue #1295: a structural edit by `SESSION_REPLACE` in a real browser, on this page (no
+/// cross-origin isolation, so the module runs in `single` mode and every control call runs in the
+/// worklet's message handler).
+///
+/// Two boots of the browser fixture's session A. The first gets one `miso.control.v1` with
+/// document B (A plus a track on the same source with an EQ insert and its fader at -6 dB, and its
+/// route) before the first quantum, which is then the swap block, and renders the swap block and 32
+/// quanta after it. The row records the reply (path, revision R), the applied-revision watermark
+/// `(R, S, outcome)` as the host reported it, the source underrun counter, the host status's
+/// `blockingRebuilds` and `singleModeControlAllocations` before the replace and once the watermark
+/// covers R, and the capture's digest, which `run.mjs` holds to the same replace rendered by the
+/// module under Node. The second sends the 1 MiB boot-ceiling document (#1697 gate 3) and records
+/// the module's memory growth across it, which `run.mjs` reports against the boot's projection
+/// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` and does not pin.
+async function runStructuralReplaceQualification(createHost, documentA, documentB, source, largeDocument) {
+  const { replaceSessionThroughSdk, sourceUnderrunBlocksThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const boot = async (frames) => {
+    const context = new OfflineAudioContext(2, frames, SAMPLE_RATE);
+    const host = await createHost({
+      context,
+      document: documentA,
+      options: bootOptions(STRUCTURAL_EDIT_FRAMES),
+      simd128ModuleUrl: ARTIFACT_URL,
+      workletModuleUrl: WORKLET_URL,
+    });
+    host.node.connect(context.destination);
+    return { context, host };
+  };
+  const counters = (status) => ({
+    blockingRebuilds: status.blockingRebuilds,
+    singleModeControlAllocations: status.singleModeControlAllocations,
+    memoryBytes: status.memoryBytes,
+    appliedRevision: status.appliedRevision.toString(),
+    appliedSample: status.appliedSample.toString(),
+    appliedOutcome: status.appliedOutcome.toString(),
+    nextAbsoluteSample: status.nextAbsoluteSample.toString(),
+  });
+
+  // The exact case.
+  const edit = await boot(STRUCTURAL_EDIT_FRAMES);
+  for (const description of source.blocks) {
+    const acknowledgement = await edit.host.submitSource(corpusRequest(description));
+    if (acknowledgement.result !== RESULT_OK) throw new Error("structural-edit prefill rejected");
+  }
+  const watermarks = [];
+  edit.host.onWatermark((watermark) => watermarks.push({
+    revision: watermark.revision.toString(),
+    sample: watermark.sample.toString(),
+    outcome: watermark.outcome.toString(),
+  }));
+  const before = counters(await edit.host.status());
+  const reply = await replaceSessionThroughSdk(edit.host, documentB);
+  const pending = counters(await edit.host.status());
+  const rendered = await edit.context.startRendering();
+  for (let spin = 0; spin < 8 && watermarks.at(-1)?.revision !== reply.revision; spin += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  const after = counters(await edit.host.status());
+  const underrunBlocks = await sourceUnderrunBlocksThroughSdk(edit.host);
+  const editAllocations = await renderAllocationCount(edit.host);
+  await edit.host.dispose();
+  const capture = [rendered.getChannelData(0), rendered.getChannelData(1)];
+
+  // The 1 MiB boot-ceiling document.
+  const large = await boot(STRUCTURAL_REPLACE_LARGE_BLOCKS * QUANTUM_FRAMES);
+  const largeBefore = counters(await large.host.status());
+  const largeReply = await replaceSessionThroughSdk(large.host, largeDocument);
+  const largeCommitted = counters(await large.host.status());
+  await large.context.startRendering();
+  const largeAfter = counters(await large.host.status());
+  const largeAllocations = await renderAllocationCount(large.host);
+  await large.host.dispose();
+
+  return {
+    edit: {
+      replyStatus: reply.status,
+      commandPath: reply.path,
+      commandApplied: reply.appliedOperations,
+      diagnostics: reply.diagnostics,
+      expectedRevision: reply.expectedRevision,
+      committedRevision: reply.revision,
+      frameHex: reply.frameHex,
+      sourceRingFrames: STRUCTURAL_EDIT_FRAMES,
+      blocks: STRUCTURAL_EDIT_BLOCKS,
+      before,
+      pending,
+      after,
+      watermark: watermarks.at(-1) ?? null,
+      watermarks: watermarks.length,
+      underrunBlocks,
+      renderedDigest: await pcmDigest(capture, STRUCTURAL_EDIT_FRAMES),
+      renderAllocations: editAllocations,
+    },
+    large: {
+      documentBytes: largeDocument.byteLength,
+      replyStatus: largeReply.status,
+      commandPath: largeReply.path,
+      diagnostics: largeReply.diagnostics,
+      committedRevision: largeReply.revision,
+      before: largeBefore,
+      committed: largeCommitted,
+      after: largeAfter,
+      renderAllocations: largeAllocations,
+    },
+  };
+}
+
 /// Issue #143 E12: subscribe -> nonzero `trackGrDb` in a real browser, and an unarmed tap publishes none.
 ///
 /// Two offline renders of the same sixteen blocks over the same session, differing only in whether
 /// the tap is armed when rendering starts. That is E1's leg (c) against leg (d) in a browser: the
 /// two renders must produce **identical PCM**, because arming a declared tap may not move a sample.
 ///
-/// `armed` is `true` for the first run and `false` for the second, which never subscribes. The
-/// engine admits one observation record per tap per render (#1345 D8, D2 Amendments 1 and 2), and an
-/// offline context renders only inside one `startRendering` call (Firefox has no
+/// `armed` is `true` for the first run and `false` for the second, which never subscribes. The arm
+/// is the core's `Observe` edit through the host's `control` message (#1589c), built with the SDK's
+/// codec. The engine admits one observation record per tap per render (#1345 D8, D2 Amendments 1
+/// and 2), and an
+/// offline context renders only inside one `startRendering` call (the harness does not use
 /// `OfflineAudioContext.suspend`), so a subscribe followed at once by an unsubscribe is refused with
 /// typed backpressure here. That an unsubscribe stops a tap's reading is proved on a real
 /// `AudioContext` by [`runObservationUnsubscribeRun`] (#1535).
@@ -733,7 +866,6 @@ async function runObservationRun(createHost, sessionDocument, armed) {
     options: bootOptions(
       OBSERVATION_FRAMES,
       LIVE_CONTROL_METER_BLOCKS,
-      OBSERVATION_TAPS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
@@ -768,13 +900,14 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   });
   const subscription = {
     stripId: "track",
-    rack: 1,
+    rack: "inserts",
     effectId: "comp",
     tapId: OBSERVATION_TAP_ID,
     windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
     armed: true,
   };
-  const subscribed = armed ? await host.observe({ subscriptions: [subscription] }) : null;
+  const { observeThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const subscribed = armed ? await observeThroughSdk(host, subscription) : null;
 
   const rendered = await context.startRendering();
   for (let spin = 0; spin < 8 && frames.length === 0; spin += 1) {
@@ -796,10 +929,9 @@ async function runObservationRun(createHost, sessionDocument, armed) {
   return {
     meterLeaseResult: meterLease.result,
     subscribeResult: subscribed === null ? null : subscribed.result,
-    subscribeReason: subscribed === null ? null : subscribed.reason,
-    bindings: subscribed === null ? 0 : subscribed.bindings.length,
-    stripId: subscribed?.bindings[0]?.stripId ?? null,
-    windowBlocks: subscribed?.bindings[0]?.windowBlocks ?? -1,
+    subscribeStatus: subscribed?.status ?? null,
+    subscribePath: subscribed?.path ?? null,
+    subscribeArmTag: subscribed?.armTag ?? null,
     frames: frames.length,
     trackGrDbWidth: frames.length === 0 ? -1 : frames[0].trackGrDb.length,
     peakWidth: frames.length === 0 ? -1 : frames[0].peaks,
@@ -820,13 +952,13 @@ async function runObservationRun(createHost, sessionDocument, armed) {
 /// (batch-verdict 2, B2; root 2026-10-12). The page declares this plan and nothing else may resume a
 /// real `AudioContext`: `run.mjs` clicks exactly these controls under one deadline and fails by name
 /// when the page resumed a context any other way, offered another control, or did not offer one.
-/// The two SDK controls belong to `sdk-response-entry.ts`'s collection and hop workloads, which run
-/// first and only when the SDK qualification does; the last is the unsubscribe run's one
+/// The three SDK controls belong to `sdk-response-entry.ts`'s live track-response, collection and
+/// hop workloads, which run first and only when the SDK qualification does; the last is the unsubscribe run's one
 /// [`resumeThroughClick`] button (#1535).
 export function resumeClickPlan(sdkEnabled) {
   if (!WebAssembly.validate(SIMD128_PROBE)) return [];
   return [
-    ...(sdkEnabled ? ["#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
+    ...(sdkEnabled ? ["#track-response-resume", "#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
     resumeControlSelector(UNSUBSCRIBE_RESUME),
   ];
 }
@@ -900,9 +1032,10 @@ export function requestFailure(step, kind, inFlight, cause) {
 }
 
 /// Fail with `suspend timeout at <step>` unless `context.state` is "suspended" within the bound.
-/// The first `suspend()` of a new context is not awaited (Firefox can create a later context already
-/// running, and the `suspend()` is only a request), so this poll is what keeps the run from going
-/// on with a context that is still running. Returns the state it saw, which the run records.
+/// The first `suspend()` of a new context is not awaited (an engine may create a later context
+/// already running, as Firefox did before #2092, and the `suspend()` is only a request), so this
+/// poll is what keeps the run from going on with a context that is still running. Returns the
+/// state it saw, which the run records.
 async function requireSuspended(context, step) {
   const started = performance.now();
   while (context.state !== "suspended") {
@@ -919,7 +1052,7 @@ async function requireSuspended(context, step) {
 /// Resume `context` with a trusted click on a button this function adds, the way an app must in
 /// Safari: WebKit starts or restarts an `AudioContext` only inside a user activation and otherwise
 /// leaves `resume()` pending. `run.mjs` clicks the button [`resumeClickPlan`] names, a trusted event
-/// in all three browsers. The wait for the click is bounded like every other wait here.
+/// in both supported browsers. The wait for the click is bounded like every other wait here.
 async function resumeThroughClick(context, what) {
   const button = document.createElement("button");
   button.setAttribute("data-qualification-resume", what);
@@ -1080,9 +1213,8 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     context,
     document: sessionDocument,
     options: bootOptions(
-      DEFAULT_RING_FRAMES,
+      STALL_RING_FRAMES,
       UNSUBSCRIBE_METER_BLOCKS,
-      OBSERVATION_TAPS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
@@ -1166,16 +1298,18 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   topUp();
   await bounded("await", "the first source blocks", context, () => Promise.all([...submits]));
   requireFeed();
+  // #1589b: the core's `Observe` edit, through the host's `control` message.
+  const { observeThroughSdk } = await import("/sdk/sdk-response-client.js");
   const subscription = {
     stripId: "track",
-    rack: 1,
+    rack: "inserts",
     effectId: "comp",
     tapId: OBSERVATION_TAP_ID,
     windowBlocks: Number(UNSUBSCRIBE_METER_BLOCKS),
     armed: true,
   };
   const subscribed = await request("observe (subscribe)", "observe",
-    () => host.observe({ subscriptions: [subscription] }));
+    () => observeThroughSdk(host, subscription));
   // R1: read after the subscribe resolved. The unsubscribe goes out only after a render beyond it.
   const renderedAfterSubscribe = (await status("status (R1)")).renderedQuanta;
 
@@ -1195,9 +1329,9 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   );
   const armedList = frames.slice();
 
-  const unsubscribed = await request("observe (unsubscribe)", "observe", () => host.observe({
-    subscriptions: [{ ...subscription, armed: false }],
-  }));
+  const unsubscribed = await request("observe (unsubscribe)", "observe",
+    // #2087: a disarm names its arm by the tag the subscribe's reply gave.
+    () => observeThroughSdk(host, { ...subscription, armed: false, armTag: BigInt(subscribed.armTag ?? 0) }));
   // Everything received from here on was polled after the tap was disarmed: the same port, in order.
   const acknowledgedAt = performance.now();
   const acknowledgedAtFrame = frames.length;
@@ -1239,8 +1373,9 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
     contextStateBeforeBoot: stateBeforeBoot,
     meterLeaseResult: meterLease.result,
     subscribeResult: subscribed.result,
+    subscribePath: subscribed.path,
     unsubscribeResult: unsubscribed.result,
-    unsubscribeBindings: unsubscribed.bindings.length,
+    unsubscribePath: unsubscribed.path,
     renderedAfterSubscribe: String(renderedAfterSubscribe),
     renderedBeforeUnsubscribe: String(renderedBeforeUnsubscribe),
     boundary: String(boundary),
@@ -1269,7 +1404,8 @@ export function unsubscribeFailures(run) {
   const wholeNumber = (value) => typeof value === "string" && /^[0-9]+$/.test(value);
   const failures = [];
   if (run.contextStateBeforeBoot !== "suspended") failures.push("context");
-  if (run.meterLeaseResult !== RESULT_OK || run.subscribeResult !== RESULT_OK
+  // An `Observe`-only transaction is a monitor edit: an applied one replies `monitor` (#1584 D1).
+  if (run.meterLeaseResult !== RESULT_OK || run.subscribeResult !== RESULT_OK || run.subscribePath !== "monitor"
       || !(run.armedFrames >= UNSUBSCRIBE_ARMED_FRAMES) || !(run.armedMaximumTrackGrDb > 0)) {
     failures.push("armed");
   }
@@ -1277,7 +1413,7 @@ export function unsubscribeFailures(run) {
       || BigInt(run.renderedBeforeUnsubscribe) <= BigInt(run.renderedAfterSubscribe)) {
     failures.push("render-between");
   }
-  if (run.unsubscribeResult !== RESULT_OK || run.unsubscribeBindings !== 0) failures.push("unsubscribe-ack");
+  if (run.unsubscribeResult !== RESULT_OK || run.unsubscribePath !== "monitor") failures.push("unsubscribe-ack");
   if (run.maximumTrackGrDbAfterAcknowledgement !== 0 || !(run.framesAfterAcknowledgement >= 1)) {
     failures.push("reduction");
   }
@@ -1305,7 +1441,7 @@ async function runStallQualification(createHost, sessionDocument) {
     // 100 ms fault is survived under exactly the command and metering load a mixing console
     // imposes -- and the frozen exact-output requirement is unchanged.
     options: bootOptions(
-      DEFAULT_RING_FRAMES,
+      STALL_RING_FRAMES,
       LIVE_CONTROL_METER_BLOCKS,
     ),
     simd128ModuleUrl: ARTIFACT_URL,
@@ -1371,7 +1507,7 @@ async function runStallQualification(createHost, sessionDocument) {
     requestedStallMs: REQUESTED_STALL_MS,
     minimumStallMs: MINIMUM_STALL_MS,
     measuredStallMs,
-    ringFrames: DEFAULT_RING_FRAMES,
+    ringFrames: STALL_RING_FRAMES,
     renderedFrames: STALL_FRAMES,
     nextAbsoluteSample: status.nextAbsoluteSample.toString(),
     renderedQuanta: status.renderedQuanta.toString(),
@@ -1383,35 +1519,20 @@ async function runStallQualification(createHost, sessionDocument) {
   };
 }
 
-/// Issue #1333 D3 / Amendment 1: the worklet's staging reads, each inside a render-locked window.
-///
-/// The observation session boots with a two-entry spectrum collection -- the track's post-pan
-/// boundary and the main output -- and selects the second entry, so each spectrum read resolves a
-/// collection's selected entry, the path that once cloned its target on every read. Two instances,
-/// because one offline render cannot both complete a one-shot window and stream one: `oneShot`
-/// reads a completed one-shot window, then an observation row, then a track response, then a
-/// stream read just after its start; `stream` renders with the stream already running and reads a
-/// completed stream window. Each reports its own count before its dispose.
-async function runStagingReadRun(createHost, sessionDocument, streaming) {
+/// Issue #1333 D3: a rendered session with an observation read (#1590: the core's `OBSERVATION_READ`
+/// through the control entry, since the browser's own staging read is gone). The instance reports its count before its dispose. The browser reads
+/// spectrum (#1597) and the track response (#1580) through the session's frames, on the control
+/// side: this run also sends one strip `RESPONSE_GET` before it renders (#1580 D2), so the render
+/// that answers it is inside the counted workload.
+async function runStagingReadRun(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, STAGING_READ_FRAMES, SAMPLE_RATE);
   const host = await createHost({
     context,
     document: sessionDocument,
-    options: {
-      ...bootOptions(
-        STAGING_READ_FRAMES,
-        LIVE_CONTROL_METER_BLOCKS,
-        OBSERVATION_TAPS,
-      ),
-      spectrum: null,
-      spectrumCollection: {
-        entries: [
-          { target: "trackPostPan", targetId: "track", channels: "both" },
-          { target: "output", targetId: "main-out", channels: "both" },
-        ],
-        maximumCaptureBytes: SPECTRUM_CAPTURE_BYTES * 2,
-      },
-    },
+    options: bootOptions(
+      STAGING_READ_FRAMES,
+      LIVE_CONTROL_METER_BLOCKS,
+    ),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
@@ -1428,63 +1549,44 @@ async function runStagingReadRun(createHost, sessionDocument, streaming) {
     });
     if (acknowledgement.result !== RESULT_OK) throw new Error("staging-read prefill rejected");
   }
-  const selected = await host.selectSpectrum({
-    target: "output", targetId: "main-out", channels: "both",
+  // Issue #1589c: the arm is the core's `Observe` edit through the host's `control` message.
+  const {
+    observeThroughSdk, readObservationThroughSdk, requestTrackResponseThroughSdk,
+  } = await import("/sdk/sdk-response-client.js");
+  const subscribed = await observeThroughSdk(host, {
+    stripId: "track",
+    rack: "inserts",
+    effectId: "comp",
+    tapId: OBSERVATION_TAP_ID,
+    windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
+    armed: true,
   });
-  const run = { selectResult: selected.result };
-  if (streaming) {
-    run.streamStartResult = (await host.startSpectrumStream(0)).result;
+  const run = { subscribeResult: subscribed.result, subscribeStatus: subscribed.status };
+  // Issue #1580 D2: the track response through the core's frames, as every host reads it. The
+  // capture runs in a render step, so the request goes out before the context renders.
+  const response = await requestTrackResponseThroughSdk(host, "track");
+  try {
     await context.startRendering();
-    const read = await host.readSpectrumStream(new ArrayBuffer(SPECTRUM_CAPTURE_BYTES));
-    run.streamReadResult = read.result;
-    run.streamReadBytes = read.byteLength;
-  } else {
-    const subscribed = await host.observe({
-      subscriptions: [{
-        stripId: "track",
-        rack: 1,
-        effectId: "comp",
-        tapId: OBSERVATION_TAP_ID,
-        windowBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
-        armed: true,
-      }],
-    });
-    run.subscribeResult = subscribed.result;
-    await context.startRendering();
-    const spectrum = await host.readSpectrum({ channels: "both" });
-    run.spectrumReadResult = spectrum.result;
-    run.spectrumReadBytes = spectrum.snapshot.byteLength;
-    const observation = await host.readObservations({
-      selections: [{ trackIndex: 0, rack: 1, effectIndex: 0, tapId: OBSERVATION_TAP_ID, channels: 3 }],
+    // #1590: the row reads through the core's `OBSERVATION_READ`, the browser's one read path.
+    const observation = await readObservationThroughSdk(host, {
+      stripId: "track", rack: "inserts", effectId: "comp", tapId: OBSERVATION_TAP_ID, channels: "both",
     });
     run.observationReadResult = observation.result;
-    run.observationRows = observation.rows.length;
-    const response = await host.captureTrackResponse({
-      trackId: "track",
-      grid: 1,
-      channels: 3,
-      points: 5,
-      minimumHz: 20,
-      maximumHz: 20_000,
-      maximumResultBytes: SPECTRUM_CAPTURE_BYTES,
-    });
-    run.trackResponseResult = response.result;
-    run.trackResponseBytes = response.snapshot.byteLength;
-    run.streamStartResult = (await host.startSpectrumStream(0)).result;
-    const read = await host.readSpectrumStream(new ArrayBuffer(SPECTRUM_CAPTURE_BYTES));
-    run.streamReadResult = read.result;
-    run.streamReadBytes = read.byteLength;
+    run.observationRows = observation.rows;
+    const ready = await response.ready(TRACK_RESPONSE_WAIT_MS);
+    run.trackResponse = {
+      result: response.result,
+      replyStatus: response.status,
+      events: ready.events,
+      tagged: ready.tagged,
+      status: ready.status,
+    };
+  } finally {
+    response.stop();
   }
   run.renderAllocations = await renderAllocationCount(host);
   await host.dispose();
   return run;
-}
-
-async function runStagingReadQualification(createHost, sessionDocument) {
-  return {
-    oneShot: await runStagingReadRun(createHost, sessionDocument, false),
-    stream: await runStagingReadRun(createHost, sessionDocument, true),
-  };
 }
 
 export async function runQualification() {
@@ -1492,6 +1594,7 @@ export async function runQualification() {
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
     liveControlResponse, observationResponse, emptyResponse, emptyFrameResponse, unsubscribeResponse,
+    structuralEditResponse, { worstReplaceDocument },
   ] =
     await Promise.all([
       import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
@@ -1504,10 +1607,12 @@ export async function runQualification() {
       fetch("/qualification/empty-session.json"),
       fetch("/qualification/empty-boot-frame.json"),
       fetch("/qualification/unsubscribe-session.json"),
+      fetch("/fixture/structural-edit-session.json"),
+      import("/qualification/worst-replace-document.js"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
       || !liveControlResponse.ok || !observationResponse.ok || !emptyResponse.ok
-      || !emptyFrameResponse.ok || !unsubscribeResponse.ok) {
+      || !emptyFrameResponse.ok || !unsubscribeResponse.ok || !structuralEditResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
@@ -1525,6 +1630,8 @@ export async function runQualification() {
   const emptyFrame = await emptyFrameResponse.json();
   // #1535: the real-context unsubscribe run's own session, with a 512-block source.
   const unsubscribeDocument = new TextEncoder().encode(await unsubscribeResponse.text());
+  // #1295: the browser fixture's session plus one track with an EQ insert, the replacement document.
+  const structuralEditDocument = new TextEncoder().encode(await structuralEditResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
   const sdkResponse = simd128 && new URL(import.meta.url).searchParams.get("sdk") === "1"
     ? await (await import("/sdk/sdk-response-client.js")).runSdkResponseQualification()
@@ -1547,6 +1654,7 @@ export async function runQualification() {
       liveControls: null,
       structuralApply: null,
       emptyBoot: null,
+      structuralReplace: null,
       observation: null,
       stall: null,
       stagingReads: null,
@@ -1610,6 +1718,21 @@ export async function runQualification() {
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
   }
+  let structuralReplace;
+  try {
+    structuralReplace = await runStructuralReplaceQualification(
+      createMisoAudioWorkletHost,
+      corpusDocument,
+      structuralEditDocument,
+      source,
+      worstReplaceDocument(),
+    );
+  } catch (error) {
+    const diagnostic = await diagnoseReady(corpusDocument);
+    throw new Error(`structural-replace qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error, diagnostic,
+    })}`);
+  }
   let observation;
   try {
     observation = await runObservationQualification(
@@ -1642,7 +1765,7 @@ export async function runQualification() {
   }
   let stagingReads;
   try {
-    stagingReads = await runStagingReadQualification(
+    stagingReads = await runStagingReadRun(
       createMisoAudioWorkletHost,
       observationDocument,
     );
@@ -1669,6 +1792,7 @@ export async function runQualification() {
     liveControls: live,
     structuralApply: structural,
     emptyBoot,
+    structuralReplace,
     observation,
     stall,
     stagingReads,
@@ -1682,12 +1806,13 @@ export async function runQualification() {
       { workload: "structural-apply", count: structural.renderAllocations },
       { workload: "empty-boot", count: emptyBoot.boot.renderAllocations },
       { workload: "empty-boot-first-stem", count: emptyBoot.firstStem.renderAllocations },
+      { workload: "structural-edit", count: structuralReplace.edit.renderAllocations },
+      { workload: "structural-replace-large", count: structuralReplace.large.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
       { workload: "stall", count: stall.renderAllocations },
-      { workload: "staging-reads-one-shot", count: stagingReads.oneShot.renderAllocations },
-      { workload: "staging-reads-stream", count: stagingReads.stream.renderAllocations },
+      { workload: "staging-reads", count: stagingReads.renderAllocations },
     ],
     sdkResponse,
     // Every `AudioContext.resume()` of the page, for the `resume-clicks` gate: `declared` is the click
@@ -1697,7 +1822,7 @@ export async function runQualification() {
 }
 
 export const qualificationConstants = Object.freeze({
-  defaultRingFrames: DEFAULT_RING_FRAMES,
+  stallRingFrames: STALL_RING_FRAMES,
   minimumStallMs: MINIMUM_STALL_MS,
   processorName: PROCESSOR_NAME,
   quantumFrames: QUANTUM_FRAMES,

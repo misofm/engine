@@ -31,8 +31,10 @@ they are the rules here:
   cannot come back;
 * `errorPhases` is the six-phase vocabulary, and does not contain the dead two-phase `compile`
   spelling;
-* the `sourceRing` rule carries both of its inputs, since a consumer that has only one of them
-  cannot derive the ring at all.
+* the `sourceRing` rule carries every one of its inputs (#1406 D3): the stall ring's two and the
+  warm-successor prime's three -- `primeGrowths`, `primeReserveQuanta` and one
+  `primeLatencySamples` row per launch rate -- since a consumer that lacks any of them cannot
+  derive the ring the engine picks.
 
 `--self-test` runs every rule against a valid document and against its own red mutation, so the
 validator is proved to discriminate before it is trusted.
@@ -73,40 +75,14 @@ BUFFER_KINDS = [
     (3, "sourcePcm"),
     (4, "diagnostic"),
     (5, "outputPcm"),
-    (6, "command"),
     (7, "meterFrame"),
 ]
-# Slice #1565A: the command record carries only the two observation kinds. Kinds 1-6 and 9-17 are
-# retired -- refused `malformed` and never reallocated -- so the vocabulary is explicit about its
-# values instead of positional from 1.
-COMMAND_KINDS = [(7, "observeSubscribe"), (8, "observeUnsubscribe")]
-RETIRED_COMMAND_KINDS = set(range(1, 7)) | set(range(9, 18))
-# Reasons 12-14 belonged to the deleted value kinds (#1565A) and are retired, never reallocated;
-# issue #1676 added `observationLimit` (15) after them. The values are explicit for that reason.
-COMMAND_REASONS = [
-    (0, "none"), (1, "malformed"), (2, "unknownTrack"), (3, "unknownRack"), (4, "unknownEffect"),
-    (5, "unknownParameter"), (6, "domain"), (7, "unsupportedKind"), (8, "backpressure"),
-    (9, "wrongState"), (10, "unknownTap"), (11, "observationUnbound"), (15, "observationLimit"),
-]
-RETIRED_COMMAND_REASONS = {12, 13, 14}
-RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
-RESPONSE_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
-# Decision 12 (#1096): the track targets follow the tap rename; their codes are unchanged.
-SPECTRUM_TARGETS = [(1, "trackPostInput"), (2, "trackPostPan"), (3, "output")]
-# Decision 12 (#1096): the effect racks of the command, observation, companion and configuration
-# records. `inserts` keeps the code `dynamic` had and `console` is appended. The retired `simd1`
+# Buffer kind 6 was the observation-command staging; #1589c deleted it with the command record,
+# its kinds and its reasons. The value is retired and never reallocated.
+# Decision 12 (#1096): the effect racks of the companion and configuration records. `inserts` keeps the code `dynamic` had and `console` is appended. The retired `simd1`
 # (0) and `simd2` (2) codes are absent from the vocabulary and never reallocated.
 RACKS = [(1, "inserts"), (3, "console"), (255, "notApplicable")]
 RETIRED_RACKS = {0, 2}
-# The live-response owner record's `rack`: `inserts` keeps 2, `simd1`/`simd2`'s 1 and 3 are retired,
-# and `console` is appended as 4.
-LIVE_RESPONSE_RACKS = [(0, "inputFilters"), (2, "inserts"), (4, "console")]
-RETIRED_LIVE_RESPONSE_RACKS = {1, 3}
-SPECTRUM_CHANNELS = [(1, "left"), (2, "right"), (3, "both")]
-SPECTRUM_STREAM_STATUSES = [
-    (0, "inactive"), (1, "warming"), (2, "pending"), (3, "gap"),
-    (4, "failed"), (5, "stopped"), (6, "ready"),
-]
 
 STAGING_SEQUENCE = [
     "miso_engine_web_v1_abi_version",
@@ -123,11 +99,8 @@ EXPORTS = [
     "miso_engine_web_v1_boot_diagnostic_bytes",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
-    "miso_engine_web_v1_boot_with_spectrum_hop",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
-    "miso_engine_web_v1_command_report_ptr",
-    "miso_engine_web_v1_command_submit",
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
@@ -141,27 +114,12 @@ EXPORTS = [
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
-    "miso_engine_web_v1_observation_count",
-    "miso_engine_web_v1_observation_effect_index",
-    "miso_engine_web_v1_observation_effect_slot_id",
-    "miso_engine_web_v1_observation_id_capacity",
-    "miso_engine_web_v1_observation_id_ptr",
-    "miso_engine_web_v1_observation_native_effect_id",
-    "miso_engine_web_v1_observation_rack",
-    "miso_engine_web_v1_observation_read",
-    "miso_engine_web_v1_observation_result_bytes",
-    "miso_engine_web_v1_observation_result_ptr",
-    "miso_engine_web_v1_observation_selection_bytes",
-    "miso_engine_web_v1_observation_selection_capacity",
-    "miso_engine_web_v1_observation_selection_ptr",
-    "miso_engine_web_v1_observation_tap_count",
-    "miso_engine_web_v1_observation_tap_id",
-    "miso_engine_web_v1_observation_track_index",
     "miso_engine_web_v1_plan_latency_ptr",
     "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_replace_document_ptr",
+    "miso_engine_web_v1_resolved_source_ring_frames",
     "miso_engine_web_v1_resource_ptr",
     "miso_engine_web_v1_response_frame_close",
     "miso_engine_web_v1_response_frame_ptr",
@@ -180,53 +138,7 @@ EXPORTS = [
     "miso_engine_web_v1_source_seek_report",
     "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
-    "miso_engine_web_v1_spectrum_analysis",
-    "miso_engine_web_v1_spectrum_arm",
-    "miso_engine_web_v1_spectrum_cancel",
-    "miso_engine_web_v1_spectrum_capture_bytes",
-    "miso_engine_web_v1_spectrum_capture_capacity",
-    "miso_engine_web_v1_spectrum_capture_ptr",
-    "miso_engine_web_v1_spectrum_capture_set_bytes",
-    "miso_engine_web_v1_spectrum_close",
-    "miso_engine_web_v1_spectrum_collection_entry_bytes",
-    "miso_engine_web_v1_spectrum_collection_entry_capacity",
-    "miso_engine_web_v1_spectrum_collection_entry_ptr",
-    "miso_engine_web_v1_spectrum_collection_request_bytes",
-    "miso_engine_web_v1_spectrum_collection_request_ptr",
-    "miso_engine_web_v1_spectrum_collection_target_ids_capacity",
-    "miso_engine_web_v1_spectrum_collection_target_ids_ptr",
-    "miso_engine_web_v1_spectrum_hop_capability",
-    "miso_engine_web_v1_spectrum_read",
-    "miso_engine_web_v1_spectrum_request_bytes",
-    "miso_engine_web_v1_spectrum_request_ptr",
-    "miso_engine_web_v1_spectrum_result_bytes",
-    "miso_engine_web_v1_spectrum_result_ptr",
-    "miso_engine_web_v1_spectrum_select",
-    "miso_engine_web_v1_spectrum_selection_epoch",
-    "miso_engine_web_v1_spectrum_stream_analysis",
-    "miso_engine_web_v1_spectrum_stream_analysis_configure",
-    "miso_engine_web_v1_spectrum_stream_metadata_bytes",
-    "miso_engine_web_v1_spectrum_stream_metadata_ptr",
-    "miso_engine_web_v1_spectrum_stream_read",
-    "miso_engine_web_v1_spectrum_stream_reset",
-    "miso_engine_web_v1_spectrum_stream_select",
-    "miso_engine_web_v1_spectrum_stream_start",
-    "miso_engine_web_v1_spectrum_stream_stop",
-    "miso_engine_web_v1_spectrum_target_id_capacity",
-    "miso_engine_web_v1_spectrum_target_id_ptr",
     "miso_engine_web_v1_status_ptr",
-    "miso_engine_web_v1_track_response_analysis",
-    "miso_engine_web_v1_track_response_capture",
-    "miso_engine_web_v1_track_response_close",
-    "miso_engine_web_v1_track_response_request_bytes",
-    "miso_engine_web_v1_track_response_request_ptr",
-    "miso_engine_web_v1_track_response_result_bytes",
-    "miso_engine_web_v1_track_response_result_ptr",
-    "miso_engine_web_v1_track_response_snapshot_capacity",
-    "miso_engine_web_v1_track_response_snapshot_ptr",
-    "miso_engine_web_v1_track_response_snapshot_set_bytes",
-    "miso_engine_web_v1_track_response_track_id_capacity",
-    "miso_engine_web_v1_track_response_track_id_ptr",
     "miso_engine_web_v1_watermark_ptr",
     "miso_engine_web_v1_watermark_read",
 ]
@@ -240,41 +152,24 @@ STRUCTURES = {
     "status": 80,
     "resourceReport": 224,
     "meterHeader": 88,
-    "commandReport": 48,
     "planWatermark": 96,
     "planLatency": 64,
     "seekReport": 64,
-    "observationSelection": 32,
-    "observationResult": 96,
-    "spectrumRequest": 40,
-    "spectrumCollectionRequest": 32,
-    "spectrumCollectionEntry": 24,
-    "spectrumWindow": 64,
-    "spectrumResult": 88,
-    "spectrumStreamMetadata": 120,
-    "liveResponseRequest": 48,
-    "liveResponseOwner": 64,
-    "liveResponseSection": 44,
-    "liveResponseResult": 104,
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
     "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
-    "liveControlMeterBlocks", "liveControlObservationTaps", "reserved2",
+    "liveControlMeterBlocks", "reserved3", "reserved2",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
     "sourceRingFrames", "maximumMemoryBytes",
-    "liveControlMeterBlocks", "liveControlObservationTaps",
+    "liveControlMeterBlocks",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 
-COMMAND_RECORD_FIELDS = [
-    "kind", "rack", "stripIdBytes", "effectIdBytes", "tapId", "windowBlocks", "reserved0",
-    "stripId", "effectId",
-]
 # The applied-revision watermark record (#1381a D5): the C ABI's `miso_engine_v1_watermark`, field
 # for field and in its order (#1314 D6), without a pre-roll counter.
 PLAN_WATERMARK_FIELDS = [
@@ -304,56 +199,10 @@ STATUS_WATERMARK_OFFSETS = {
     "watermarkFirstSample": 64,
     "watermarkOutcomeFlags": 72,
 }
-LIVE_RESPONSE_REQUEST_FIELDS = [
-    "structSize", "abiVersion", "trackIdBytes", "grid", "channels", "points", "minimumHz",
-    "maximumHz", "maximumResultBytes", "reserved",
-]
-LIVE_RESPONSE_OWNER_FIELDS = [
-    "trackIdOffset", "trackIdBytes", "nativeIdOffset", "nativeIdBytes", "stableIdOffset",
-    "stableIdBytes", "rack", "slot", "kind", "bypassed", "availability", "leftOffset",
-    "leftCount", "rightOffset", "rightCount", "reserved",
-]
-LIVE_RESPONSE_SECTION_FIELDS = ["id", "kind", "enabled", "wordCount", "words"]
-LIVE_RESPONSE_RESULT_FIELDS = [
-    "structSize", "abiVersion", "result", "mode", "meaning", "channels", "points", "ownerCount",
-    "excludedCount", "sampleRateHz", "reserved0", "reserved1", "capturedSample", "snapshotToken",
-    "resultBytes", "frequenciesOffset", "leftOffset", "rightOffset", "ownersOffset",
-    "ownerRecordBytes", "sectionRecordBytes", "reserved",
-]
-SPECTRUM_COLLECTION_REQUEST_FIELDS = [
-    "structSize", "abiVersion", "entryCount", "reserved0", "maximumCaptureBytes", "reserved",
-]
-SPECTRUM_COLLECTION_ENTRY_FIELDS = ["target", "channels", "targetIdBytes", "reserved"]
-SPECTRUM_REQUEST_FIELDS = [
-    "structSize", "abiVersion", "target", "channels", "targetIdBytes", "reserved0",
-    "maximumCaptureBytes", "reserved",
-]
-SPECTRUM_WINDOW_FIELDS = [
-    "structSize", "abiVersion", "target", "channels", "sampleRateHz", "frames",
-    "sourceUnderrun", "reserved0", "capturedSample", "endSample", "snapshotToken",
-    "leftOffset", "rightOffset",
-]
-SPECTRUM_RESULT_FIELDS = [
-    "structSize", "abiVersion", "result", "target", "channels", "sampleRateHz",
-    "windowFrames", "binCount", "sourceUnderrun", "floorDb", "capturedSample", "endSample",
-    "snapshotToken", "resultBytes", "frequenciesOffset", "leftOffset", "rightOffset",
-    "reserved0",
-]
-SPECTRUM_STREAM_METADATA_FIELDS = [
-    "structSize", "abiVersion", "result", "status", "target", "channels", "sampleRateHz",
-    "quantumFrames", "hopFrames", "sourceUnderrun", "reserved0", "reserved1", "captureEpoch",
-    "sequence", "droppedCaptures", "windows", "capturedSample", "endSample", "analysisEpoch",
-    "historyStartSample", "smoothingMs",
-]
-OBSERVATION_SELECTION_FIELDS = [
-    "structSize", "abiVersion", "trackIndex", "rack", "effectIndex", "tapId", "channels",
-    "reserved",
-]
-OBSERVATION_RESULT_FIELDS = [
-    "structSize", "abiVersion", "status", "trackIndex", "rack", "effectIndex", "tapId",
-    "channels", "sampleRateHz", "reserved0", "firstSample", "endSample", "sequence", "blocks",
-    "leftPresent", "rightPresent", "left", "right", "reserved",
-]
+# Issue #1590: the browser's own observation records (`observationSelection`,
+# `observationResult`), their channel and status vocabularies and their sixteen exports are
+# deleted; the observation edit and read are the core's frames. The exact structure, constant
+# and export sets above refuse them should they return.
 
 WIDTHS = {"u8": 1, "u32": 4, "u64": 8, "f64": 8}
 
@@ -412,7 +261,7 @@ def validate(document: object) -> None:
     require(isinstance(document, dict), "the document is a JSON object")
     assert isinstance(document, dict)
     require(set(document) == {"schema", "abiVersion", "stagingSequence", "errorPhases",
-                              "exports", "structures", "commandRecord", "constants"},
+                              "exports", "structures", "constants"},
             f"top-level keys are exact: {sorted(document)}")
     require(document["schema"] == SCHEMA, f"schema is {SCHEMA}")
     require(document["abiVersion"] == ABI_VERSION,
@@ -453,29 +302,6 @@ def validate(document: object) -> None:
     for word in POLICY_WORDS + ROLE_DEFINED_WORDS:
         require(word in boot, f"bootOptions names the boot word {word}")
 
-    record = document["commandRecord"]
-    require(isinstance(record, dict) and set(record) == {"bytes", "endianness", "fields"},
-            "commandRecord keys are exactly bytes/endianness/fields")
-    require(record["endianness"] == "little", "the command record is little-endian")
-    require(record["bytes"] == 272, f"the command record is 272 bytes, not {record['bytes']}")
-    check_fields("commandRecord", record["fields"], 272)
-    require([row["name"] for row in record["fields"]] == COMMAND_RECORD_FIELDS,
-            f"commandRecord names exactly {COMMAND_RECORD_FIELDS}")
-
-    for name, expected_fields in (
-        ("spectrumRequest", SPECTRUM_REQUEST_FIELDS),
-        ("spectrumCollectionRequest", SPECTRUM_COLLECTION_REQUEST_FIELDS),
-        ("spectrumCollectionEntry", SPECTRUM_COLLECTION_ENTRY_FIELDS),
-        ("spectrumWindow", SPECTRUM_WINDOW_FIELDS),
-        ("spectrumResult", SPECTRUM_RESULT_FIELDS),
-        ("spectrumStreamMetadata", SPECTRUM_STREAM_METADATA_FIELDS),
-        ("liveResponseRequest", LIVE_RESPONSE_REQUEST_FIELDS),
-        ("liveResponseOwner", LIVE_RESPONSE_OWNER_FIELDS),
-        ("liveResponseSection", LIVE_RESPONSE_SECTION_FIELDS),
-        ("liveResponseResult", LIVE_RESPONSE_RESULT_FIELDS),
-    ):
-        require([row["name"] for row in structures[name]["fields"]] == expected_fields,
-                f"{name} names exactly {expected_fields}")
     status_rows = structures["status"]["fields"]
     require([row["name"] for row in status_rows] == STATUS_FIELDS,
             f"status names exactly {STATUS_FIELDS}")
@@ -488,8 +314,6 @@ def validate(document: object) -> None:
         ("planWatermark", PLAN_WATERMARK_FIELDS),
         ("planLatency", PLAN_LATENCY_FIELDS),
         ("seekReport", SEEK_REPORT_FIELDS),
-        ("observationSelection", OBSERVATION_SELECTION_FIELDS),
-        ("observationResult", OBSERVATION_RESULT_FIELDS),
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")
@@ -497,18 +321,9 @@ def validate(document: object) -> None:
     require(isinstance(constants, dict), "constants is an object")
     require(set(constants) == {
         "resultCodes", "bootResultAliases", "states", "backends", "bufferKinds",
-        "wireCommandKinds", "commandReasons", "maximumCommandRecords", "maximumDocumentBytes", "maximumSourceChannels",
-        "diagnosticBytes", "defaultMeterBlocks",
-        "maximumObservationTaps", "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
-        "responseGrids", "responseChannels", "observationChannels",
-        "observationStatuses", "liveResponseModes", "liveResponseMeanings",
-        "maximumLiveResponseOwners", "maximumLiveResponseSections", "maximumLiveResponseIdBytes", "maximumLiveResponsePoints",
-        "liveResponseCaptureBytes", "spectrumTargets", "spectrumChannels", "spectrumCaptureBytes",
-        "spectrumCollectionRequestBytes", "spectrumCollectionEntryBytes",
-        "spectrumCollectionEntryCapacity", "spectrumCollectionTargetIdsBytes",
-        "spectrumRequestBytes", "spectrumWindowHeaderBytes", "spectrumResultHeaderBytes",
-        "spectrumWindowFrames", "spectrumBinCount", "maximumSpectrumIdBytes", "maximumPreparedSpectrumTargets",
-        "spectrumStreamStatuses", "spectrumStreamMetadataBytes", "racks", "liveResponseRacks",
+        "maximumDocumentBytes", "maximumSourceChannels", "diagnosticBytes", "defaultMeterBlocks",
+        "maximumResponsePoints", "defaultMaximumMemoryBytes", "sourceRing",
+        "racks",
     }, f"constants keys are exact: {sorted(constants)}")
 
     check_named(document, "resultCodes", RESULT_CODES)
@@ -516,31 +331,10 @@ def validate(document: object) -> None:
     check_named(document, "states", STATES)
     check_named(document, "backends", BACKENDS)
     check_named(document, "bufferKinds", BUFFER_KINDS)
-    check_named(document, "wireCommandKinds", COMMAND_KINDS)
-    require(not RETIRED_COMMAND_KINDS & {row["value"] for row in constants["wireCommandKinds"]},
-            "constants.wireCommandKinds reallocates a retired value-command number")
-    check_named(document, "commandReasons", COMMAND_REASONS)
-    reason_values = [row["value"] for row in constants["commandReasons"]]
-    require(reason_values == [value for value in range(max(reason_values, default=-1) + 1)
-                              if value not in RETIRED_COMMAND_REASONS],
-            "constants.commandReasons is not dense from 0 except the retired 12-14")
-    check_named(document, "responseGrids", RESPONSE_GRIDS)
-    check_named(document, "responseChannels", RESPONSE_CHANNELS)
-    check_named(document, "spectrumTargets", SPECTRUM_TARGETS)
     check_named(document, "racks", RACKS)
-    check_named(document, "liveResponseRacks", LIVE_RESPONSE_RACKS)
-    # Spelled twice on purpose: a retired code must never be reallocated, whatever it is named.
+    # Spelled out on purpose: a retired code must never be reallocated, whatever it is named.
     require(not RETIRED_RACKS & {row["value"] for row in constants["racks"]},
             "constants.racks reallocates a retired simd1/simd2 code")
-    owner_racks = {row["value"] for row in constants["liveResponseRacks"]}
-    require(not RETIRED_LIVE_RESPONSE_RACKS & owner_racks,
-            "constants.liveResponseRacks reallocates a retired simd1/simd2 code")
-    check_named(document, "spectrumChannels", SPECTRUM_CHANNELS)
-    check_named(document, "spectrumStreamStatuses", SPECTRUM_STREAM_STATUSES)
-    check_named(document, "liveResponseModes", [(1, "target")])
-    check_named(document, "liveResponseMeanings", [(1, "eqFilterSubtotal")])
-    check_named(document, "observationChannels", [(1, "left"), (2, "right"), (3, "both")])
-    check_named(document, "observationStatuses", [(1, "pending"), (2, "unarmed"), (3, "ready")])
 
     # The alias table is an alias table: every row re-uses a value `resultCodes` already names,
     # under a different name. A row naming a value `resultCodes` does not carry would be a
@@ -556,41 +350,32 @@ def validate(document: object) -> None:
     require(len({row["name"] for row in aliases}) == 3, "alias names are distinct")
 
     for name, expected in (
-        ("maximumCommandRecords", 256),
         ("maximumDocumentBytes", 1 << 20),
         ("maximumSourceChannels", 2),
         ("diagnosticBytes", 1 << 14),
         ("defaultMeterBlocks", 12),
-        ("maximumObservationTaps", 16),
         ("maximumResponsePoints", 4096),
-        ("maximumLiveResponseOwners", 256),
-        ("maximumLiveResponseSections", 6),
-        ("maximumLiveResponseIdBytes", 127),
-        ("maximumLiveResponsePoints", 4096),
-        ("liveResponseCaptureBytes", 1 << 20),
-        ("spectrumCaptureBytes", 1 << 20),
-        ("maximumPreparedSpectrumTargets", 0),
-        ("spectrumCollectionRequestBytes", 32),
-        ("spectrumCollectionEntryBytes", 24),
-        ("spectrumCollectionEntryCapacity", 0),
-        ("spectrumCollectionTargetIdsBytes", 0),
-        ("spectrumRequestBytes", 40),
-        ("spectrumWindowHeaderBytes", 64),
-        ("spectrumResultHeaderBytes", 88),
-        ("spectrumStreamMetadataBytes", 120),
-        ("spectrumWindowFrames", 2048),
-        ("spectrumBinCount", 1025),
-        ("maximumSpectrumIdBytes", 127),
         ("defaultMaximumMemoryBytes", 512 << 20),
     ):
         require(constants[name] == expected,
                 f"constants.{name} is {constants[name]}, expected {expected}")
 
     ring = constants["sourceRing"]
-    require(isinstance(ring, dict) and set(ring) == {"stallToleranceMs", "reserveQuanta"},
-            "sourceRing carries exactly its two inputs")
+    require(isinstance(ring, dict) and set(ring) == {
+        "stallToleranceMs", "reserveQuanta", "primeGrowths", "primeReserveQuanta",
+        "primeLatencySamples",
+    }, "sourceRing carries exactly its five inputs")
     require(ring["stallToleranceMs"] == 100, "the stall tolerance is 100 ms")
     require(ring["reserveQuanta"] == 2, "the ring reserves two quanta")
+    require(ring["primeGrowths"] == 4, "the ring holds a prime for four growths")
+    require(ring["primeReserveQuanta"] == 1, "the ring reserves one quantum past the prime")
+    # `L_max(fs) = fs / 100 + 6`, the true-peak limiter's latency, at each launch rate in order.
+    require(ring["primeLatencySamples"] == [
+        {"sampleRateHz": 44100, "samples": 447},
+        {"sampleRateHz": 48000, "samples": 486},
+        {"sampleRateHz": 88200, "samples": 888},
+        {"sampleRateHz": 96000, "samples": 966},
+    ], "primeLatencySamples is L_max at each launch rate")
 
 
 def self_test() -> int:
@@ -621,7 +406,7 @@ def self_test() -> int:
         document["structures"]["status"]["fields"][0]["type"] = "u64"
 
     def hole_in_layout(document: dict) -> None:
-        document["structures"]["commandReport"]["fields"][3]["offset"] = 16
+        document["structures"]["seekReport"]["fields"][3]["offset"] = 20
 
     def drop_export(document: dict) -> None:
         document["exports"].pop()
@@ -664,15 +449,6 @@ def self_test() -> int:
     def drop_status_watermark_word(document: dict) -> None:
         document["structures"]["status"]["fields"].pop()
 
-    def drop_spectrum_hop_capability_export(document: dict) -> None:
-        export = "miso_engine_web_v1_spectrum_hop_capability"
-        try:
-            document["exports"].remove(export)
-        except ValueError as error:
-            raise AssertionError(
-                "the spectrum-hop capability export exists in the valid fixture"
-            ) from error
-
     def unsorted_exports(document: dict) -> None:
         document["exports"].reverse()
 
@@ -682,11 +458,14 @@ def self_test() -> int:
     def retired_phase(document: dict) -> None:
         document["errorPhases"] = ["asset", "compile", "source", "render", "output", "lifecycle"]
 
-    def move_record_field(document: dict) -> None:
-        document["commandRecord"]["fields"][6]["offset"] = 16
+    def command_record_returns(document: dict) -> None:
+        document["commandRecord"] = {"bytes": 272, "endianness": "little", "fields": []}
 
-    def retired_command_kind_returns(document: dict) -> None:
-        document["constants"]["wireCommandKinds"].insert(0, {"value": 4, "name": "mute"})
+    def command_kinds_return(document: dict) -> None:
+        document["constants"]["wireCommandKinds"] = [{"value": 7, "name": "observeSubscribe"}]
+
+    def command_buffer_returns(document: dict) -> None:
+        document["constants"]["bufferKinds"].insert(4, {"value": 6, "name": "command"})
 
     def retired_queue_word_returns(document: dict) -> None:
         document["structures"]["bootOptions"]["fields"][7]["name"] = (
@@ -701,6 +480,17 @@ def self_test() -> int:
 
     def wrong_ring_reserve(document: dict) -> None:
         document["constants"]["sourceRing"]["reserveQuanta"] = 1
+
+    def drop_ring_key(key: str):
+        def drop(document: dict) -> None:
+            del document["constants"]["sourceRing"][key]
+        return drop
+
+    def private_prime_reserve(document: dict) -> None:
+        document["constants"]["sourceRing"]["primeReserveQuanta"] = 0
+
+    def wrong_prime_latency(document: dict) -> None:
+        document["constants"]["sourceRing"]["primeLatencySamples"][3]["samples"] = 960
 
     def prepare_config_returns(document: dict) -> None:
         document["structures"]["prepareConfig"] = {"bytes": 192, "fields": []}
@@ -718,19 +508,13 @@ def self_test() -> int:
                 return
         raise AssertionError("the console rack row exists in the valid fixture")
 
-    def retired_owner_rack_returns(document: dict) -> None:
-        document["constants"]["liveResponseRacks"].append({"value": 1, "name": "simd1"})
-
-    def stale_spectrum_target(document: dict) -> None:
-        document["constants"]["spectrumTargets"][1]["name"] = "trackPostMatrix"
-
     def boolean_named_value(document: dict) -> None:
-        rows = document["constants"]["observationChannels"]
+        rows = document["constants"]["racks"]
         for row in rows:
-            if row["name"] == "left":
+            if row["name"] == "inserts":
                 row["value"] = True
                 return
-        raise AssertionError("the observation left-channel row exists in the valid fixture")
+        raise AssertionError("the inserts rack row exists in the valid fixture")
 
     mutations = [
         ("an alias row is dropped", drop_alias),
@@ -753,28 +537,37 @@ def self_test() -> int:
         ("the anchored session seek export is dropped",
          drop_seek_export("miso_engine_web_v1_session_seek_at")),
         ("the status omits a watermark word", drop_status_watermark_word),
-        ("the spectrum-hop capability export is dropped", drop_spectrum_hop_capability_export),
         ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),
         ("a retired lifecycle phase returns", retired_phase),
-        ("a command-record field moves", move_record_field),
-        ("a retired value-command kind returns", retired_command_kind_returns),
+        # Issue #1589c: the observation command record, its kinds, its staging and its export.
+        ("the deleted command record returns", command_record_returns),
+        ("the deleted command-kind table returns", command_kinds_return),
+        ("the deleted command-staging buffer kind returns", command_buffer_returns),
+        ("the deleted command-submit export returns",
+         lambda d: d["exports"].insert(7, "miso_engine_web_v1_command_submit")),
         ("the retired command-queue boot word returns", retired_queue_word_returns),
         ("a retired prepared-command export returns", retired_export_returns),
+        # Issue #1590 gate 4: the browser's own observation records, vocabularies and exports.
+        ("the deleted observation selection record returns",
+         lambda d: d["structures"].__setitem__("observationSelection", d["structures"]["seekReport"])),
+        ("the deleted observation status vocabulary returns",
+         lambda d: d["constants"].__setitem__("observationStatuses", [{"value": 1, "name": "pending"}])),
+        ("the deleted observation read export returns",
+         lambda d: d["exports"].insert(19, "miso_engine_web_v1_observation_read")),
+        ("the retired observation-taps boot word returns",
+         lambda d: d["structures"]["bootOptions"]["fields"][9].__setitem__("name", "liveControlObservationTaps")),
         ("a source-ring input is dropped", drop_ring_input),
         ("the source-ring reserve is wrong", wrong_ring_reserve),
+        ("the prime growth count is dropped", drop_ring_key("primeGrowths")),
+        ("the prime reserve quantum is dropped", drop_ring_key("primeReserveQuanta")),
+        ("the prime reserve quantum is kept private", private_prime_reserve),
+        ("a launch rate's prime latency is wrong", wrong_prime_latency),
         ("the 192-byte prepare config returns", prepare_config_returns),
         ("the ABI version goes stale", stale_abi_version),
         ("a retired result name returns", duplicate_result_name),
         ("a named numeric value becomes boolean", boolean_named_value),
         ("a retired rack code is reallocated to console", reallocate_retired_rack),
-        ("a retired owner-record rack code returns", retired_owner_rack_returns),
-        ("a spectrum target keeps its pre-rename spelling", stale_spectrum_target),
-        # Issue #1676: `observationLimit` is 15, after the retired 12-14.
-        ("observationLimit reallocates a retired reason number",
-         lambda d: d["constants"]["commandReasons"][-1].update(value=12)),
-        ("the reason vocabulary drops observationLimit",
-         lambda d: d["constants"]["commandReasons"].pop()),
     ]
     for name, mutate in mutations:
         broken = copy.deepcopy(sample)

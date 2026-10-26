@@ -3,16 +3,20 @@
 
 Owner decision 5 (`docs/rulings/engine-footprint-2026-09-28.md`): every PR builds the shipped
 module and runs every artifact gate against those bytes, and reports whether the module changed;
-only a release change must match the recorded fingerprint and carry a fresh three-browser
+only a release change must match the recorded fingerprint and carry a fresh two-browser
 qualification.
 
 The record: on a push to `main`, `qualification.yml`'s `artifact-record` job (a push-only job that
 checks out nothing and is the only one holding a write token) posts the module that commit's own
 CI run built as the commit status ``audioworklet-sha256`` on that commit, described
-``<sha256> rustc <release>``. It is what later changes compare against, and it does not expire.
+``<sha256> rustc <toolchain>``: since #1334 the toolchain is the browser artifact's dated nightly
+channel (`rust-toolchain.toml`'s ``[browser-artifact]``), which names one compiler where every
+nightly's rustc release (``1.100.0-nightly``) does not; a record from before, naming a stable
+release, still parses and reads as a toolchain change. It is what later changes compare against,
+and it does not expire.
 This script reads it:
 
-* ``report --event E [--before SHA] --repository R --built D --rustc V --twin MODULE`` (the
+* ``report --event E [--before SHA] --repository R --built D --toolchain T --twin MODULE`` (the
   `artifact-identity` job) prints the Markdown report for the job summary. Its headline compares
   this run's module with **the digest its base's own CI run recorded**, never with a rebuild of the
   base: a base rebuilt inside this run's workflow is built in whatever environment the change
@@ -31,13 +35,18 @@ This script reads it:
   push.
 
   The report fails (exit 1) when
-  - the twin module, built in the same run from another checkout path and ``CARGO_HOME``, differs
-    from the bytes the `artifact` job built: the build is not a function of the source alone; or
+  - the twin module, built in the same run from another checkout path, ``CARGO_HOME`` and
+    ``RUSTUP_HOME`` (a fresh install of the toolchain, #2045), differs from the bytes the
+    `artifact` job built: the build is not a function of the source alone; or
   - the change is a release change (relative to its base it edits the committed pin, or
     `npm-publish.yml`'s ``PACKAGE_VERSION`` or ``EXPECTED_WORKLET_SHA256``) and the pin,
-    ``EXPECTED_WORKLET_SHA256``, `npm-publish.yml`'s ``RUSTUP_TOOLCHAIN`` (against the rustc
-    release the `artifact` job built with) or the recorded browser qualification (`results.json`'s
-    ``wasmSha256``, with a canonical ``candidateCommit``) does not describe the built bytes.
+    ``EXPECTED_WORKLET_SHA256``, `npm-publish.yml`'s ``BROWSER_ARTIFACT_TOOLCHAIN`` (against the
+    toolchain the `artifact` job built with) or the recorded browser qualification
+    (`results.json`'s ``wasmSha256``, with a canonical ``candidateCommit``) does not describe the
+    built bytes; or
+  - the change moves `rust-toolchain.toml`'s ``[browser-artifact] channel`` (#1334 D5) and the
+    recorded browser qualification does not describe the built bytes: a toolchain bump needs a
+    re-recorded two-browser matrix, as a release does.
     `docs/RELEASE.md` is the procedure.
 
   A failed status lookup (the API, or ``gh`` itself) is an error (exit 2), not CANNOT TELL: it means
@@ -63,6 +72,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PIN = "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
@@ -72,12 +82,14 @@ RELEASE_DOC = "docs/RELEASE.md"
 CONTEXT = "audioworklet-sha256"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
-RUSTC_RELEASE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?")
+# The browser artifact toolchain: a dated nightly, the only channel the builder accepts (#1334).
+TOOLCHAIN = re.compile(r"nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}")
+RUST_TOOLCHAIN = "rust-toolchain.toml"
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 RECORD = re.compile(r"([0-9a-f]{64}) rustc (\S+)")
 RELEASE_LINE = re.compile(r'^  (PACKAGE_VERSION|EXPECTED_WORKLET_SHA256): ".*"$', re.MULTILINE)
 EXPECTED_WORKLET = re.compile(r'^  EXPECTED_WORKLET_SHA256: "([^"]*)"$', re.MULTILINE)
-NPM_TOOLCHAIN = re.compile(r'^  RUSTUP_TOOLCHAIN: "([^"]*)"$', re.MULTILINE)
+NPM_TOOLCHAIN = re.compile(r'^  BROWSER_ARTIFACT_TOOLCHAIN: "([^"]*)"$', re.MULTILINE)
 # How far back a base with no record may look for a recorded ancestor it differs from only in
 # documentation. A longer documentation-only stretch of `main` reports CANNOT TELL.
 ANCESTOR_LIMIT = 20
@@ -158,7 +170,7 @@ def recorded(repository: str, commit: str) -> tuple[dict | None, str]:
     match = RECORD.fullmatch(str(row.get("description", "")))
     if match is None:
         return None, f"`{commit}`'s `{CONTEXT}` status is malformed: {row.get('description')!r}"
-    return {"commit": commit, "sha256": match.group(1), "rustc": match.group(2),
+    return {"commit": commit, "sha256": match.group(1), "toolchain": match.group(2),
             "url": row.get("target_url") or ""}, ""
 
 
@@ -222,7 +234,24 @@ def release_change(root: pathlib.Path, base: str) -> list[str]:
     return edited
 
 
-def release_checks(root: pathlib.Path, built: str, rustc: str) -> tuple[list[str], bool]:
+def browser_channel(text: str | None) -> str | None:
+    """`rust-toolchain.toml`'s `[browser-artifact] channel`, or None."""
+    try:
+        table = tomllib.loads(text or "").get("browser-artifact")
+    except tomllib.TOMLDecodeError:
+        return None
+    channel = table.get("channel") if isinstance(table, dict) else None
+    return channel if isinstance(channel, str) else None
+
+
+def toolchain_change(root: pathlib.Path, base: str) -> tuple[str | None, str | None] | None:
+    """The browser artifact channel at the base and at HEAD, when this change moves it (D5)."""
+    old = browser_channel(show(root, base, RUST_TOOLCHAIN))
+    new = browser_channel(show(root, "HEAD", RUST_TOOLCHAIN))
+    return None if old == new else (old, new)
+
+
+def release_checks(root: pathlib.Path, built: str, toolchain: str) -> tuple[list[str], bool]:
     lines, ok = [], True
     pin = (show(root, "HEAD", PIN) or "").strip()
     if pin == built:
@@ -241,17 +270,25 @@ def release_checks(root: pathlib.Path, built: str, rustc: str) -> tuple[list[str
                      f"`{expected or 'missing'}`, not the pin `{pin or 'missing'}`")
     # `npm-publish.yml` rebuilds the module and refuses any other bytes, so any difference in its
     # build environment can only fail `qualify`, never publish unreviewed bytes. The toolchain is
-    # the difference a release is most likely to carry, so it is caught here, in the release PR.
+    # the difference a release is most likely to carry, so it is caught here, in the release PR:
+    # `qualify` refuses a `BROWSER_ARTIFACT_TOOLCHAIN` other than the builder's channel.
     match = NPM_TOOLCHAIN.search(publish)
-    toolchain = match.group(1) if match else None
-    if toolchain == rustc:
-        lines.append(f"  - `{NPM_PUBLISH}` builds with `RUSTUP_TOOLCHAIN` `{toolchain}`, the rustc "
-                     "the `artifact` job built with")
+    declared = match.group(1) if match else None
+    if declared == toolchain:
+        lines.append(f"  - `{NPM_PUBLISH}` builds with `BROWSER_ARTIFACT_TOOLCHAIN` `{declared}`, "
+                     "the toolchain the `artifact` job built with")
     else:
         ok = False
-        lines.append(f"  - **FAIL** `{NPM_PUBLISH}`'s `RUSTUP_TOOLCHAIN` is "
-                     f"`{toolchain or 'missing'}`, but the `artifact` job built with rustc "
-                     f"`{rustc}`: `qualify` would build other bytes")
+        lines.append(f"  - **FAIL** `{NPM_PUBLISH}`'s `BROWSER_ARTIFACT_TOOLCHAIN` is "
+                     f"`{declared or 'missing'}`, but the `artifact` job built with "
+                     f"`{toolchain}`: `qualify` would refuse or build other bytes")
+    checked, qualified_ok = qualification_checks(root, built)
+    return lines + checked, ok and qualified_ok
+
+
+def qualification_checks(root: pathlib.Path, built: str) -> tuple[list[str], bool]:
+    """`results.json` records a two-browser qualification of the built bytes."""
+    lines, ok = [], True
     try:
         results = json.loads(show(root, "HEAD", RESULTS) or "null")
     except json.JSONDecodeError:
@@ -260,7 +297,7 @@ def release_checks(root: pathlib.Path, built: str, rustc: str) -> tuple[list[str
     qualified = results.get("wasmSha256")
     candidate = results.get("candidateCommit")
     if qualified == built:
-        lines.append(f"  - `{RESULTS}` records the three-browser qualification of the built bytes")
+        lines.append(f"  - `{RESULTS}` records the two-browser qualification of the built bytes")
     else:
         ok = False
         lines.append(f"  - **FAIL** artifact-lineage: `{RESULTS}` records a qualification of "
@@ -279,12 +316,12 @@ def release_checks(root: pathlib.Path, built: str, rustc: str) -> tuple[list[str
 # The report.
 
 
-def report(root: pathlib.Path, event: str, before: str, repository: str, built: str, rustc: str,
-           twin_module: pathlib.Path) -> tuple[list[str], bool]:
+def report(root: pathlib.Path, event: str, before: str, repository: str, built: str,
+           toolchain: str, twin_module: pathlib.Path) -> tuple[list[str], bool]:
     if SHA256.fullmatch(built) is None:
         raise Usage(f"--built is not a lowercase sha256: {built!r}")
-    if RUSTC_RELEASE.fullmatch(rustc) is None:
-        raise Usage(f"--rustc is not a rustc release: {rustc!r}")
+    if TOOLCHAIN.fullmatch(toolchain) is None:
+        raise Usage(f"--toolchain is not a dated nightly-YYYY-MM-DD: {toolchain!r}")
     if REPOSITORY.fullmatch(repository) is None:
         raise Usage(f"--repository is not owner/name: {repository!r}")
     if not twin_module.is_file():
@@ -311,21 +348,22 @@ def report(root: pathlib.Path, event: str, before: str, repository: str, built: 
     lines += ["", f"- Every artifact gate in this run read `{built}`: the `artifact` job built it, "
               "and each job that reads it checks its download against that digest."]
     if record is None:
-        lines.append(f"- Built with rustc `{rustc}`.")
+        lines.append(f"- Built with `{toolchain}`.")
     else:
-        moved = "" if record["rustc"] == rustc else " (a toolchain change)"
-        lines.append(f"- Built with rustc `{rustc}`; the recorded base module with rustc "
-                     f"`{record['rustc']}`{moved}. Record: {record['url'] or 'no run link'}.")
+        moved = "" if record["toolchain"] == toolchain else " (a toolchain change)"
+        lines.append(f"- Built with `{toolchain}`; the recorded base module with "
+                     f"`{record['toolchain']}`{moved}. Record: {record['url'] or 'no run link'}.")
     twin = digest(twin_module)
     if twin == built:
-        lines.append("- Reproducible: a second build from another checkout path and `CARGO_HOME` "
-                     "produced the same bytes.")
+        lines.append("- Reproducible: a second build from another checkout path, `CARGO_HOME` "
+                     "and `RUSTUP_HOME` produced the same bytes.")
     else:
         ok = False
-        lines.append(f"- **FAIL** NOT REPRODUCIBLE: a second build from another checkout path and "
-                     f"`CARGO_HOME` produced `{twin}`. The module is not a function of the source "
-                     "alone; an absolute path is the usual cause (`build-web-audioworklet.sh` "
-                     "remaps `CARGO_HOME` and the repository root, not `env!` values).")
+        lines.append(f"- **FAIL** NOT REPRODUCIBLE: a second build from another checkout path, "
+                     f"`CARGO_HOME` and `RUSTUP_HOME` produced `{twin}`. The module is not a "
+                     "function of the source alone; an absolute path is the usual cause "
+                     "(`build-web-audioworklet.sh` remaps `CARGO_HOME`, the repository root and "
+                     "the toolchain sysroot, not `env!` values).")
     pin = (show(root, "HEAD", PIN) or "").strip()
     state = "are" if pin == built else "are not"
     edited = release_change(root, base) if base is not None else []
@@ -337,7 +375,7 @@ def report(root: pathlib.Path, event: str, before: str, repository: str, built: 
     elif edited:
         lines.append(f"- RELEASE: this change edits {' and '.join(edited)}, so the release "
                      f"fingerprint must describe the built bytes ({RELEASE_DOC}):")
-        checked, release_ok = release_checks(root, built, rustc)
+        checked, release_ok = release_checks(root, built, toolchain)
         lines += checked
         ok = ok and release_ok
     else:
@@ -345,6 +383,14 @@ def report(root: pathlib.Path, event: str, before: str, repository: str, built: 
                      f"`{NPM_PUBLISH}`'s release identity. The committed pin is "
                      f"`{pin or 'missing'}`; the built bytes {state} the pinned module "
                      f"({RELEASE_DOC}).")
+    moved = toolchain_change(root, base) if base is not None else None
+    if moved is not None:
+        lines.append(f"- TOOLCHAIN: this change moves `{RUST_TOOLCHAIN}`'s `[browser-artifact] "
+                     f"channel` from `{moved[0]}` to `{moved[1]}`, so `{RESULTS}` must record a "
+                     f"two-browser qualification of the built bytes ({RELEASE_DOC}):")
+        checked, qualified_ok = qualification_checks(root, built)
+        lines += checked
+        ok = ok and qualified_ok
     return lines, ok
 
 
@@ -373,6 +419,8 @@ sys.stdout.write(answer if isinstance(answer, str) else json.dumps(answer))
 AUTHOR = ("-c", "user.name=identity-self-test", "-c", "user.email=identity-self-test@invalid",
           "-c", "commit.gpgsign=false")
 REPO_NAME = "owner/engine"
+# The fixture's browser artifact toolchain, and the one a bump moves it to.
+N1, N2 = "nightly-2026-08-20", "nightly-2026-09-17"
 
 
 def self_test() -> None:
@@ -414,13 +462,16 @@ def run_self_test(scratch: pathlib.Path) -> None:
 
     def commit(message: str, pin: str = a, version: str = "1.0.0", expected: str = a,
                qualified: str = a, candidate: str = "1" * 40, path: str = "src/lib.rs",
-               toolchain: str = "1.97.1") -> str:
+               toolchain: str = N1, channel: str = N1) -> str:
         for name in (PIN, NPM_PUBLISH, RESULTS, path):
             (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / PIN).write_text(f"{pin}\n")
         (repo / NPM_PUBLISH).write_text(
             f'env:\n  PACKAGE_NAME: "@misofm/engine"\n  PACKAGE_VERSION: "{version}"\n'
-            f'  EXPECTED_WORKLET_SHA256: "{expected}"\n  RUSTUP_TOOLCHAIN: "{toolchain}"\n')
+            f'  EXPECTED_WORKLET_SHA256: "{expected}"\n  RUSTUP_TOOLCHAIN: "1.99.1"\n'
+            f'  BROWSER_ARTIFACT_TOOLCHAIN: "{toolchain}"\n')
+        (repo / RUST_TOOLCHAIN).write_text(
+            f'[toolchain]\nchannel = "1.99.1"\n\n[browser-artifact]\nchannel = "{channel}"\n')
         (repo / RESULTS).write_text(json.dumps(
             {"candidateCommit": candidate, "wasmSha256": qualified}, indent=2) + "\n")
         with (repo / path).open("a") as handle:
@@ -450,10 +501,11 @@ def run_self_test(scratch: pathlib.Path) -> None:
         table_path.write_text(json.dumps(table))
 
     def case(label: str, ok: bool, needles: tuple[str, ...], event: str = "pull_request",
-             before: str = "", built: str = b, twin: str = "b", rustc: str = "1.97.1",
+             before: str = "", built: str = b, twin: str = "b", toolchain: str = N1,
              absent: tuple[str, ...] = ()) -> None:
         try:
-            lines, observed = report(repo, event, before, REPO_NAME, built, rustc, modules[twin][0])
+            lines, observed = report(repo, event, before, REPO_NAME, built, toolchain,
+                                     modules[twin][0])
         except (Usage, LookupFailed) as error:
             failures.append(f"{label}: {type(error).__name__} {error}")
             return
@@ -474,7 +526,7 @@ def run_self_test(scratch: pathlib.Path) -> None:
     docs = commit("docs only", path="docs/note.md")
     change = commit("a change")
     pr = merge(base, change)
-    record_a = f"{a} rustc 1.97.1"
+    record_a = f"{a} rustc {N1}"
     # The base's own record decides: matching, different, missing, malformed, refused.
     statuses({base: record_a})
     case("unchanged", True, ("ARTIFACT UNCHANGED", f"is the digest base `{base}`'s own CI run",
@@ -482,23 +534,25 @@ def run_self_test(scratch: pathlib.Path) -> None:
     case("changed", True, ("ARTIFACT CHANGED", f"`{a}` -> `{b}`", "are not the pinned module"))
     case("not reproducible", False, ("NOT REPRODUCIBLE", f"produced `{a}`"), twin="a")
     # Attempts 1 and 2: whatever the change does to the build environment, the base's digest is the
-    # one the base's own run recorded, so a toolchain-only change reports CHANGED.
-    case("toolchain change", True, ("ARTIFACT CHANGED", "rustc `1.97.1` (a toolchain change)"),
-         rustc="1.98.1")
+    # one the base's own run recorded, so a toolchain-only change reports CHANGED. #1334: a record
+    # from before the nightly pin names a rustc release; it still parses and reads as a change.
+    statuses({base: f"{a} rustc 1.99.1"})
+    case("toolchain change", True, ("ARTIFACT CHANGED", "`1.99.1` (a toolchain change)"))
+    statuses({base: record_a})
     statuses({base: None})
     case("missing record", True, ("ARTIFACT CANNOT TELL", f"`{base}` has no `{CONTEXT}` status",
                                   "rerun this job"), absent=("UNCHANGED", "ARTIFACT CHANGED"))
-    statuses({base: "deadbeef rustc 1.97.1"})
+    statuses({base: f"deadbeef rustc {N1}"})
     case("malformed record", True, ("ARTIFACT CANNOT TELL", "is malformed"))
     # A well-formed record in any state but success (a forged `failure`, a `pending`) is not
     # trusted, even when its digest is the built one.
     for state in ("failure", "error", "pending"):
-        statuses({base: f"{b} rustc 1.97.1"}, state=state)
+        statuses({base: f"{b} rustc {N1}"}, state=state)
         case(f"{state} record", True, ("ARTIFACT CANNOT TELL", f"in state `{state}`", "not trusted"),
              absent=("UNCHANGED", "ARTIFACT CHANGED"))
     table_path.write_text("{}")
     try:
-        report(repo, "pull_request", "", REPO_NAME, b, "1.97.1", modules["b"][0])
+        report(repo, "pull_request", "", REPO_NAME, b, N1, modules["b"][0])
         failures.append("a refused status lookup reported instead of failing")
     except LookupFailed:
         pass
@@ -524,12 +578,15 @@ def run_self_test(scratch: pathlib.Path) -> None:
     at(base)
     release_pr = merge(base, commit("release b", pin=b, version="1.1.0", expected=b, qualified=b))
     case("release", True, ("RELEASE: this change edits", "the built bytes", "is the pin",
-                           "`RUSTUP_TOOLCHAIN` `1.97.1`", "records the three"))
+                           f"`BROWSER_ARTIFACT_TOOLCHAIN` `{N1}`", "records the two"),
+         absent=("TOOLCHAIN: this change moves",))
     case("release built other bytes", False, ("**FAIL** the pin", "**FAIL** artifact-lineage"),
          built=c, twin="c")
-    case("release, npm-publish toolchain differs", False,
-         ("**FAIL** `.github/workflows/npm-publish.yml`'s `RUSTUP_TOOLCHAIN` is `1.97.1`",),
-         rustc="1.98.1")
+    # #1334 D4: every nightly reports rustc `1.100.0-nightly`, so the release check compares the
+    # dated channel the `artifact` job built with against the one npm-publish.yml declares.
+    case("release, npm-publish toolchain differs from the artifact's channel", False,
+         (f"**FAIL** `.github/workflows/npm-publish.yml`'s `BROWSER_ARTIFACT_TOOLCHAIN` is `{N1}`",),
+         toolchain=N2)
     case("release, manual run", True, ("with no base, this run cannot tell",),
          event="workflow_dispatch", absent=("does not edit", "RELEASE:"))
     for label, fields, needle in (
@@ -544,16 +601,29 @@ def run_self_test(scratch: pathlib.Path) -> None:
         at(base)
         merge(base, commit(label, **fields))
         case(label, False, (needle,))
+    # #1334 D5: a change that moves the browser artifact channel, and is no release, must carry a
+    # two-browser record of the bytes it built; with one it passes.
+    at(base)
+    merge(base, commit("toolchain bump without a record", channel=N2, toolchain=N2))
+    case("channel changed without a two-browser record of the built digest", False,
+         (f"TOOLCHAIN: this change moves `rust-toolchain.toml`'s `[browser-artifact] channel` from "
+          f"`{N1}` to `{N2}`", "**FAIL** artifact-lineage"), toolchain=N2,
+         absent=("RELEASE:",))
+    at(base)
+    merge(base, commit("toolchain bump recorded", channel=N2, toolchain=N2, qualified=b))
+    case("channel changed with a two-browser record", True,
+         ("TOOLCHAIN: this change moves", "records the two-browser qualification of the built"),
+         toolchain=N2)
     for bad in ("A" * 64, "0" * 63, ""):
         try:
-            report(repo, "pull_request", "", REPO_NAME, bad, "1.97.1", modules["a"][0])
+            report(repo, "pull_request", "", REPO_NAME, bad, N1, modules["a"][0])
             failures.append(f"malformed --built {bad!r} was accepted")
         except Usage:
             pass
-    for bad in ("1.97", "stable", "1.97.1; rm"):
+    for bad in ("1.99.1", "nightly", "nightly-2026-8-20", f"{N1}; rm"):
         try:
             report(repo, "pull_request", "", REPO_NAME, a, bad, modules["a"][0])
-            failures.append(f"malformed --rustc {bad!r} was accepted")
+            failures.append(f"malformed --toolchain {bad!r} was accepted")
         except Usage:
             pass
 
@@ -576,7 +646,7 @@ def run_self_test(scratch: pathlib.Path) -> None:
     at(pr)
     statuses({base: record_a})
     script = str(pathlib.Path(__file__).resolve())
-    common = ["--event", "pull_request", "--repository", REPO_NAME, "--rustc", "1.97.1"]
+    common = ["--event", "pull_request", "--repository", REPO_NAME, "--toolchain", N1]
     log_path.write_text("")
 
     def cli(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -615,7 +685,7 @@ def main() -> int:
     check.add_argument("--before", default="")
     check.add_argument("--repository", required=True)
     check.add_argument("--built", required=True)
-    check.add_argument("--rustc", required=True)
+    check.add_argument("--toolchain", required=True)
     check.add_argument("--twin", required=True, type=pathlib.Path)
     args = parser.parse_args()
 
@@ -625,12 +695,13 @@ def main() -> int:
         self_test()
         print("web AudioWorklet identity self-test passed: the base's recorded digest (matching, "
               "different, missing, malformed, not success, refused, across documentation), "
-              "reproducibility, a toolchain change, and seven release mutations")
+              "reproducibility, a toolchain change, seven release mutations and a toolchain "
+              "bump with and without its two-browser record")
         return 0
     try:
         if args.command == "report":
             lines, ok = report(args.root, args.event, args.before, args.repository, args.built,
-                               args.rustc, args.twin)
+                               args.toolchain, args.twin)
             print("\n".join(lines))
             if not ok:
                 print("web-audioworklet-identity: FAIL (see the report above)", file=sys.stderr)

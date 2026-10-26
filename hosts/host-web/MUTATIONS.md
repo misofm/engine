@@ -4,8 +4,8 @@
 | `check-web-audioworklet-callgraph.py --self-test` (a)-(f) | synthetic disassembly per case | each case is the red mutation of one rule; the runner fails if any escapes |
 | `test-web-audioworklet.mjs` trap-containment test (F5) | remove the `try` around `miso_engine_web_v1_render` in `process()` | the `process()` call throws instead of returning `true` |
 | `tests::facade_source_rules_reach_the_browser_host` (F1) | delete the `end_of_region != (end == region_end)` check from `host_core::SourceControlSet::submit` | the region-end submission returns `RESULT_BACKPRESSURE` (6) instead of `RESULT_INVALID_ARGUMENT` (1) |
-| `tests::default_ring_covers_stall_tolerance` (deleted by TA4) (F3) | `+ 2` -> `+ 1` in `default_source_ring_frames` | 48 000/128 yields 4 992 where 5 120 is required |
-| `tests::ring_prefill_survives_stall` (F3) | `SOURCE_STALL_TOLERANCE_MS = 50` (a 21-quantum ring) | the ring runs dry mid-stall and a starved quantum renders zeros instead of the ramp |
+| `host-core` `tests/prepare.rs::default_ring_adds_the_largest_prime_and_a_quantum_to_the_stall_ring` (F3; `tests::default_ring_covers_stall_tolerance` was deleted by TA4; re-run for #1406b) | `+ 2` -> `+ 1` in `stall_ring_frames` | 48 000/128 yields 7 168 where 7 296 is required (the four rates give `[6784, 7168, 12672, 13952]`, not `[6912, 7296, 12800, 14080]`); `parameter-metadata`'s `the_published_source_ring_rule_reproduces_the_engine_derivation` also fails, one quantum off |
+| `tests::ring_prefill_survives_stall` (F3; re-run for #1406b) | `SOURCE_STALL_TOLERANCE_MS = 50` (a 19-quantum stall and a 38-quantum default ring: a 21-quantum stall ring, plus the 16-quantum prime and one quantum, #1406 D2) | the `stall_quanta == 38` assertion fails (`left: 19`, `right: 38`) |
 | `test-web-audioworklet.mjs` pipelining test (F3) | make `#saturated` return `true` at one unsettled source request | the second of four in-flight chunks is refused and its planes are never transferred |
 | `tests::native_identity_session_digest_pins_the_wasm_parity` + `direct-oracle.mjs` parity assertion (F4/E4) | flip one hex digit of `directOracle.nativePcmF32leSha256` in `expected.json` | both legs fail against the pin, and they fail with the same value |
 | `qualification/run.mjs --self-test-mutations` attestation gate (#74) | change the supported result's attestation outcome to `miso.unsupported.v1` | `<browser>: attestation` fails because the probe and typed outcome disagree |
@@ -18,19 +18,17 @@
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
 | `tests::native_set_control_timeline_digest_pins_the_wasm_parity` + `direct-oracle.mjs::runSetControlTimeline` (#1565A D6) | have `control_command` stage the committed frame's cells one block later (move the service step's publication after the render) | the native digest and the shipped module's digest move together and stop matching the pin |
 | `tests::set_control_frames_are_the_committed_fixtures` (#1565A D6) | change one byte of the encoder's request ID in `set_control_timeline_frames` | the committed frame fixture differs from the encoded frame |
-| `tests::every_deleted_kind_is_refused_malformed_at_its_index_and_changes_no_cell` (#1565A gate 1) | add one of kinds 1-6 or 9-17 back to the whitelist in `CommandRecord::decode` | the record is admitted (or refused as another reason) instead of `MALFORMED` at its index, or a valid observation record before it is armed |
-| `tests::the_boot_word_is_reserved_and_observation_staging_follows_the_taps` (#1565A gate 2) | drop the `reserved1 != 0` refusal in `validate_options`, or allocate the command staging for `live_control_observation_taps == 0` | the nonzero word boots, or the host with no taps accepts a record |
+| `tests::the_retired_boot_words_are_reserved` (#1565A gate 2, #1590 gate 4; renamed from `the_boot_words_at_offsets_32_and_56_are_reserved` by #1590; the staging half deleted by #1589c) | drop the `reserved1 != 0` refusal in `validate_options` | the nonzero word boots |
 | `tests::meter_frames_equal_an_offline_fold_and_cost_the_render_nothing` (#137 E5) | make `live_control_request` use `blocks` frames instead of `blocks * quantum_frames` for the meter period | a window closes mid-block, `poll_meters` reports more windows than blocks rendered, and the cadence assertion fails |
 | `tests/matrix.rs::explicit_window_retarget_ramps_over_the_requested_window_and_is_adopted` (#137 D1) | drop `self.smoothing_samples[lane] = samples;` from `MatrixStage::set_target_over` | the second retarget runs over the prepared window of `0` instead of the requested `4` and settles on the first frame |
 | `builtins-compiler::live_control_requests_are_validated_sealed_and_charged_per_track` (#137 D1) | delete the `control_tracks.insert` / `known_tracks.contains` legs in `prepare_session_builtins_with_live_controls` | the duplicate and unknown-track requests are accepted instead of producing `builtin.control.duplicate` / `builtin.control.unknown_track` |
 | `host-core::live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_order` (#137 D1/D2) | drop the `bound.track_controls.len() != control_requests.len()` leg of the live-control arity check | a silently skipped channel leaves nine tracks with eight producers and the per-track walk panics |
 | `check-web-audioworklet.sh --source-policy` pinned-post rule (#137 D2/D3) | rename one pinned post, drop the telemetry post, or remove the meter lease guard at its call site | the occurrence count or the pinned line no longer matches and the frozen render-callback policy fails; `test-web-audioworklet.sh` runs all three |
 | `check-web-audioworklet.sh --source-policy` pinned-clock rule (#137 D3) | read `Date.now()` anywhere outside `renderClock()`, including inside `process()` | the pinned-site count disagrees, or `process_policy_re` catches it in the frozen body |
-| `check-web-audioworklet-callgraph.py --self-test` (b1)/(b1b) (#137) | `--trap-owner` naming a different symbol, or `--allocation-only` over a closure that reaches a free | each case fails; neither new mode can admit an allocator |
+| `check-web-audioworklet-callgraph.py --self-test` (b1) (#137; (b1b) and `--allocation-only` deleted by #1589c) | `--trap-owner` naming a different symbol | the case fails; the mode cannot admit an allocator |
 | `check-parameter-metadata-v1.py --self-test` (#137 D4) | fourteen document mutations, including "a prepared-only builtin claims to be live" and "an effect parameter claims to be live" | every one is refused by the schema gate |
 | `parameter_metadata -- --check` (#137 D4) | hand-edit one `liveUpdatable` in the shipped document | byte equality against a freshly generated document fails |
-| `tools/parameter-metadata/tests/round_trip.rs` (#137 E7) | delete the `effect_index >= rack_effects[rack]` leg in `CommandRecord::into_matrix` | an out-of-range effect index is refused as `UNSUPPORTED_KIND`, so the test stops distinguishing "resolved" from "did not resolve" and its negative case fails |
-| `qualification/run.mjs --self-test-mutations` control-path gates (#137 E8) | `exactRetargetedOutput = false`, `masterPeak = 0`, or `commandAdmitted = 0` | `<browser>: control-path` fails on the applied change, on the meter frame, and on the admission |
+| `qualification/run.mjs --self-test-mutations` control-path gates (#137 E8) | `exactRetargetedOutput = false`, `masterPeak = 0`, or `commandApplied = 0` | `<browser>: control-path` fails on the applied change, on the meter frame, and on the application |
 | `qualification/run.mjs --self-test-mutations` `stall-live-controls-load` (#137 E6) | `stall.liveControlMeterFrames = 0` | `<browser>: main-thread-stall` fails because the stall no longer carried a live command and meter load |
 
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
@@ -52,10 +50,8 @@ restored. Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), `-C target-feature=+avx2,+f
 | gate | mutation | observed red |
 |---|---|---|
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4) | publish the negative decibels raw instead of the declared `PeakMagnitude` fold | the app's `Math.max(0, -6)` is `0` and the frame reads dead; the "positive magnitude, not a negative decibel" assertion fires |
-| `tests::observation_misuse_is_typed_and_all_or_nothing` (E8) | drop the all-or-nothing free-room pre-check for the observe kinds | the oversized batch reaches a queue and returns `255` where `6` (backpressure) was required |
-| `tests::native_observation_timeline_digest_pins_the_wasm_parity` (E8) | an unknown tap answers `UnknownParameter` (5) instead of `UnknownTap` (10) | three tests fail; a caller could no longer tell which namespace it got wrong |
-| `tests::a_computed_tap_is_refused_with_unsupported_kind` (E9) | bind the computed tap instead of refusing it | `None` where `Some(7)` was required — a bound computed tap is a lane that never publishes |
-| `round_trip::every_metadata_observation_tap_resolves_through_a_command_acknowledgement` (E9) | offset the tap id by one in the lowering (equivalent to a hand-edited id in the document) | `miso.compressor tap 1 did not resolve`, reason `10` |
+| control-plane `observation_bindings::a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown` (E9; renamed by #1589c, moved from host-web `tests` by #1590) | bind the computed tap instead of refusing it | `Ok` where `Err(ComputedTap)` was required — a bound computed tap is a lane that never publishes |
+| `round_trip::every_metadata_observation_tap_resolves_through_an_observe_edit` (E9; through the core's `Observe` edit since #1589c) | offset the tap id by one in the lowering (equivalent to a hand-edited id in the document) | `miso.compressor tap 1 resolves and binds`: `Err(["observation.tap.unknown"])` |
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D6) | `master_gr_present = 1` unconditionally | `no designation means absent, never zero`: `Some(0.0)` where `None` was required |
 | `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D5) | keep the pre-#143 `2T + 2` frame shape | the frame is 8 words where `3T + 3 = 12` was required |
 | `tests::native_observation_timeline_digest_pins_the_wasm_parity` (E8) | never clear an armed bit, so an unsubscribed tap keeps publishing its last window | `an unsubscribed tap publishes nothing`: `8.437999` where `0.0` was required |
@@ -266,25 +262,9 @@ Reverted in the same session; the recorded `results.json` and matrix are from th
 
 ## Issue #151 — the command-reason cap and the `observe()` typing gap
 
-The field defect, found in `misofm/app` PR #32: `#receive` bounded a command acknowledgement's
-`reason` at the literal `<= 9`, but #143 froze `UNKNOWN_TAP = 10` and `OBSERVATION_UNBOUND = 11`
-and those are the **only** two reasons the observation path ever returns. Either one therefore read
-as a malformed acknowledgement and tripped the host-wide sticky 255, so a single refused
-subscription failed every unsettled request and every later one. That is what kept the app's
-gain-reduction meters dead. The shipped metadata JSON's `commandReasons` vocabulary stopped at `9`
-for the same reason, and the `.d.ts` declared neither `observe()` nor the request-side subscription
-type at all.
-
-Every row below was applied, the named gate run, the red observed, and the tree restored. Host:
-`x86_64`, `-C target-feature=+avx2,+fma`, toolchain 1.97.1.
-
-| gate | mutation | observed red |
-|---|---|---|
-| `test-web-audioworklet.mjs` observation-refusal tests (the shipped defect) | restore `validU32(message.reason) && message.reason <= 9` in `#receive` | `{ tag: 'miso.error.v1', requestId: 250, result: 255 }` — the sticky signature, thrown out of the *first* refused `observe()` instead of settling as a typed `miso.observe.v1` ack. `test-web-audioworklet.sh` runs this mutation on disk and requires the suite red |
-| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 16;` after reason 11 (`OBSERVATION_UNBOUND`; reasons 12 to 14, `NOT_SOLOABLE`, `UNKNOWN_ROUTE` and `UNKNOWN_VCA`, were deleted with their value kinds in #1565 and their numbers are not reused; #1676 added 15, `OBSERVATION_LIMIT`) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
-| `check-command-reason-vocabulary.py --self-test` | thirty-one in-memory mutations in all (the typing mutations of the next row among them) across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 14`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself; and (#1676) the JS bound accepting a retired `null` entry, the JS table losing or gaining a hole, `observationLimit` moved onto a retired 12 or past a non-retired gap at 16, dropped from the `.d.ts`, the generator or the schema gate's list, or the schema gate's retired set losing 14; plus eight direct cases of the dense-except-retired rule | every one refused |
-| `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `windowBlocks` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
-| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 11 to `16` (to `12` before #1676 retired 12 to 14 in the gate; reason 14 to `15` before #1565 deleted reasons 12 to 14; reason 13 to `14` under issue #1222, reason 12 to `13` under issue #1212); and (#1676) `observationLimit` on a retired 12, a gap at 16, reason 15 missing, reason 11 missing | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
+Its gates (`check-command-reason-vocabulary.py`, the reason-cap mutation, `observe()`'s typing) were
+deleted with the command record, its reasons and `observe()` by #1589c: an observation tap is armed
+by the core's `Observe` edit and its refusal is a control reply, not an acknowledgement reason.
 
 ## Issue #241 — source introspection follows the declaration
 
@@ -471,12 +451,10 @@ and the mutation was reverted.
 | `test-web-audioworklet.mjs` worklet construction (#1210 D3) | drop the header `submix_count` == enumerated count check | `a submix count the meter header disagrees with must fail initialization` |
 | `check-session-map-shape.py --self-test` (#1210) | the host list or the worklet reply without `submixes` | both new self-test mutations are caught (17 in all) |
 | `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word`, `tests::a_bus_limiter_can_be_the_designated_master` (#1213 gates 5, 6) | restore #1207's GR-fold skip of strip indices `>= T` | the bus word stays `0` and `master_gr_present` is `0` |
-| `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word` (#1213, K2 verdict (a)) | `observation_selection_for_address` looks up `ready.tracks` only | the selected read at the bus's strip index is `InvalidSelection` |
-| `capability-evals.mjs` bus selected read (#1213, K2 verdict (a), `check-sdk-headless.sh`) | the same tracks-only lookup, artifact rebuilt | `readObservations` fails with `invalidArgument` |
+| (retired by #1590: `observation_selection_for_address` and the numeric read are deleted; the bus test and `capability-evals.mjs` read the bus tap by its stable key through `OBSERVATION_READ`) | | |
 | `capability-evals.mjs` bus refusal classifier (#1213 D5a, `check-sdk-headless.sh`) | the SDK classifier compares against the track count | the bus's missing insert reports `unknownTrack` |
 | `capability-evals.mjs` bus solo refusal (#1213 D4, #1212 NIT-2, `check-sdk-headless.sh`) | delete the `solo_safe` check before `set_solo`, artifact rebuilt | the shipped admission reports reason 2, not 12 |
 | `test-web-audioworklet.mjs` worklet eq-config classifier (#1213 D5a; attempt 2 MINOR-3) | compare `message.trackIndex >= this.trackCount` | the bus's missing insert reports `2` (`unknownTrack`), not `4` |
-| `test-web-audioworklet.mjs` bus `observe()` binding (#1213, attempt 2 MAJOR-1; #1677) | the host drops the submix's ID from the binding, or adds a position of a plan to it | the binding is not exactly `{ stripId, rack, effectId, tapId, windowBlocks }` |
 
 ## Issue #1333 — the render-locked allocation counter and the render-thread static rules
 
@@ -491,14 +469,7 @@ Chromium leg of `qualification/run.mjs`.
 | same | `dealloc` (or `realloc`) skips `count_if_locked` | the in-window count of 5 fails |
 | same | `render_locked` never clears the flag | `the window clears the flag when it returns` |
 | `const _: () = assert!(!needs_drop::<..>())` in `ffi.rs` | add a `Vec<u8>` field to `BootStaging` | `error[E0080]`: `assertion failed: !needs_drop::<RefCell<BootStaging>>()` |
-| `tests/render_locked_staging.rs` phase 1 (gate 8) | drop `response_staging()` from `reserve_stagings` | `a staging accessor allocated inside its render-locked window`: 7 |
-| same | drop `observation_staging()` from `reserve_stagings` | the same assertion: 6 |
-| same | drop the `reserve_stagings()` call from `boot_staged`'s success path, which both boot exports share | the same assertion: 13 |
-| `tests/render_locked_staging.rs` phase 2 (Amendment 1, A1; mutation rewritten by #1479, which removed `selected_entry`) | `PreparedSpectrumCaptures::channels`'s collection arm runs `let _ = capture.selected_target().cloned();` before `capture.selected_channels()` | `a collection capture's spectrum read allocated`: 6 (re-measured by #1492: #1488 wrapped `spectrum_stream_start`, which also reads the channel mask, so its 2 calls now count too) |
-| `tests/render_locked_staging.rs` phase 2 select legs (#1492) | `SpectrumCaptureCollection::select` runs `let _ = self.entry(index).map(\|(t, c)\| (t.clone(), c));` after it finds the entry | `the first select allocated`: 2 |
-| same | `select_spectrum_with_smoothing` runs `let _ = spectrum_target(target, id);` before it borrows the target | `the first select allocated`: 2 |
-| same, control | the first mutation kept, and both select exports unwrapped from `render_locked` | green: the count sees a select's allocation only through the wrap |
-| same, smoothing-only stream select leg (#1492 attempt 1 follow-ups) | `select_spectrum_with_smoothing`'s smoothing-only restart branch (before `restart_spectrum_stream`) runs `std::hint::black_box(vec![0_u8; 16]);` | `the smoothing-only stream select allocated`: 2 |
+| (retired by #1590: `tests/render_locked_staging.rs`, `reserve_stagings` and the observation staging are deleted; no staging is left for a booted instance to allocate in a render-locked window) | | |
 | `host-core::spectrum::tests::selected_channels_reports_the_selected_entrys_mask` | `selected_channels` returns `Some(self.captures[self.selected.unwrap_or(0)].channels())` (a mask while nothing is selected) | `Some(Left)` where `None` is expected; no other host-core or host-web test goes red |
 | `check-web-audioworklet-callgraph.py --self-test` (h2) | the destructor-registration test is `False` | both (h2) cases |
 | same, (h3) | the atomic-wait test is `False` | (h3) `wait32` and `wait64` |
@@ -506,9 +477,11 @@ Chromium leg of `qualification/run.mjs`.
 | same, (h1d) | `unhashed` keeps the mangling hash | both (h1d) schemes |
 | same, (h4) | `closure` takes no exact-name root | (h4): `miso_engine_web_v1_render` is ambiguous with `_render_allocation_count` |
 | `qualification/run.mjs` `render-allocations` | a `Vec::with_capacity(1)` planted in `render_next` (rebuilt module) | every instance reads more than 0 (corpus 2 and 4, live control 260, stall 80, ...) and the gate fails |
-| same | `PreparedSpectrumCaptures::channels` back to the clone (rebuilt module, no `--sdk-root`) | `staging-reads-one-shot` reads 4 and `staging-reads-stream` reads 2; every other instance reads 0 |
 | `qualification/run.mjs --self-test-mutations` `render-allocations` | one instance's count set to 1 | `<browser>: render-allocations` fails |
-| `qualification/run.mjs --self-test-mutations` `staging-reads` | the one-shot spectrum read's result set to backpressure (6) | `<browser>: staging-reads` fails |
+| `qualification/run.mjs --self-test-mutations` `staging-reads` | the observation read's result set to backpressure (6) (#1597, #1580: the staging reads have no spectrum or track-response read) | `<browser>: staging-reads` fails |
+| `qualification/run.mjs --self-test-mutations` `track-response-host-outcome` (#1580 D2) | the host-level `RESPONSE_READY`'s status set to `unavailable` | `<browser>: track-response-host` fails |
+| `qualification/run.mjs --self-test-mutations` `track-response-host-tag` (#1580 D2) | no `RESPONSE_READY` carries the reply's tag | `<browser>: track-response-host` fails |
+| `qualification/run.mjs --self-test-mutations` `observation-arm-refused` (#1589c) | the observation run's `Observe` arm reply status set to `not_found` | `<browser>: observation` fails |
 | `qualification/run.mjs` `sdk-render-allocations` (#1476) | `drop(Vec::<u8>::with_capacity(1))` planted in `EffectControlLane::stage`'s `EffectControlRecord::Bypass` arm (rebuilt module); no raw workload submits a bypass record | the four live-bypass SDK instances that submit one read 2 each and the gate fails naming them; `render-allocations` stays green (all ten raw rows 0) |
 | same | one SDK instance (`spectrum-query-closed`) closed with `browser.close()` instead of `closeSdkEngine` | `<browser>: sdk-render-allocations` fails: 16 rows for 17 instances |
 | `qualification/run.mjs --self-test-mutations` `sdk-render-allocations` (#1476) | one SDK instance's count set to 1 | `<browser>: sdk-render-allocations` fails naming `resident-observation=1` |
@@ -516,15 +489,6 @@ Chromium leg of `qualification/run.mjs`.
 | `qualification/run.mjs` `sdk-spectrum-continuous` `gap` (#1480) | `nativeMissedWindows: 0n` and `skippedPublications: 0n` in the spectrum notification (`sdk/src/core/observation-subscriptions.ts`, `#notifySpectrum`) | `<browser>: sdk-spectrum-continuous` fails with `false: gap` on 5 of 5 runs in each of Chromium, Firefox and WebKit; `renderLoss` stays true (the native loss happened, the SDK hid it) |
 | `qualification/run.mjs` `sdk-spectrum-continuous` `renderLoss` (#1480 D2) | delete the read hold in `runContinuousSpectrumQualification` (the `await readsHeld` and the `Promise.allSettled` of the in-flight reads), so reads race the offline render as before | Firefox: red on 23 of 25 runs, 22 naming `renderLoss` (a mid-render read left 0-8 drops instead of 16) and 1 naming `gap, renderLoss` (the #1480 D1 race); the 2 green runs had no read execute during the render |
 | `test-web-audioworklet.mjs` qualification boot contract, staging-read caller (#1477 D1) | remove `runStagingReadRun` from `qualificationBootContract` | the suite fails at the caller (`hooks.runStagingReadRun is not a function`) before its witness counts |
-| `test-web-audioworklet.mjs` qualification boot contract, staging-read shape (#1477 D2) | boot `runStagingReadRun`'s `spectrumCollection` with only the `output` entry | `staging-read spectrum collection changed`: one entry where two are held |
-| `test-web-audioworklet.mjs` qualification boot contract, staged collection (#1491 D1/D2) | replace the collection branch of `spectrumResult` in the worklet's boot with `this.stageSpectrumRequest(init.options.spectrum)` (verifier probe p7) | `staging-read staged collection differs from its options`: the staging witness is `null` where the two-entry collection is held; green on the suite before #1491 |
-| same | the worklet's collection channel map writes `SPECTRUM_CHANNEL_LEFT` for `both` | the same assertion: channel code 1 where 3 is held, in both entries; green on the suite before #1491 |
-| same | `request.setBigUint64(16, BigInt(options.maximumCaptureBytes / 2), true)` in `stageSpectrumCollectionRequest` | the same assertion: `maximumCaptureBytes` 1048576 where 2097152 is held; green on the suite before #1491 |
-| same | `request.setUint32(28, 1, true)` in `stageSpectrumCollectionRequest` (a nonzero reserved word, which the bridge refuses) | the same assertion: the request's `reserved` reads `[0, 1]` where `[0, 0]` is held; green on the suite before #1491 |
-| same, generated-layout drift (#1491 attempt 2) | in `sdk/assets/miso-engine-v1-abi-layout.json`, `spectrumChannels` `both` = 4 (the worklet keeps 3) | the same assertion: channel code 3 where 4 is held; green on #1491 attempt 1's hand-typed suite |
-| same | in the generated layout, the request's `maximumCaptureBytes` at offset 24 and `reserved` at 16 | the same assertion: `maximumCaptureBytes` reads 0 where 2097152 is held; green on #1491 attempt 1's suite |
-| same | in the generated layout, a 28-byte collection entry (`reserved` `u32[4]`) | the worklet's entry-size check refuses the fake's 28: `runStagingReadRun real host guard rejected (miso.error.v1 result=255)`; green on #1491 attempt 1's suite |
-| `test-web-audioworklet.mjs` qualification boot contract, other callers stage none (#1491 D3) | in `qualification.js` `bootOptions`, add `spectrum: null` and a one-entry `spectrumCollection` (`output`/`main-out`/`both`, 1048576 bytes) | `renderCorpusSegment stages a spectrum collection; only runStagingReadRun boots one`; green on the suite before #1491 |
 | `test-web-audioworklet.mjs` render allocation reply check (#1477 D3) | drop `message.result === RESULT_OK` from `validRenderAllocations` | the host accepts `result 6` |
 | same | `validU32(message.count)` -> `Number.isInteger(message.count)` | the host accepts `count -1` and `count 4294967296` |
 | same | drop `validU32(message.count)` | the host accepts `count -1`, `4294967296`, `1.5`, `"0"` and `0n` |
@@ -653,3 +617,8 @@ The seven result-field mutations and `requestFailureProofs()` of the spec are re
 proof above. Page mutations (d) `skip-unsubscribe` and (e) `feed-ends-at-boundary`, and source
 mutations M1-M3 (spec gate 6), are not run in this slice; they move to "Post-sprint qualification
 of decision 15's heavy gates" (#1605) with the loaded acceptance (gate 8).
+
+## Issue #2092 — Firefox is no longer run
+
+Owner ruling 2026-10-25: the browser qualification runs Chromium and WebKit only. The Firefox rows
+above are dated evidence of runs made before that ruling; no later run repeats them.

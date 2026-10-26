@@ -2,8 +2,9 @@
 """The browser identity fixture's resource budgets and PCM digests (issues #217 and #1060).
 
 `hosts/host-web/tests/browser-v1/expected.json` records the shipped `wasm32-unknown-unknown`
-simd128 worklet module's resource report beside its PCM digests. This gate builds the module (or
-takes a built artifact directory), runs the fixture's own `direct-oracle.mjs` under Node in
+simd128 worklet module's resource report beside its PCM digests. This gate builds the module with
+the shipped builder, `scripts/build-web-audioworklet.sh --module-only` (or takes a built artifact
+directory, as CI does), runs the fixture's own `direct-oracle.mjs` under Node in
 `MISO_ENGINE_WEB_ORACLE_PRINT=1` mode -- no browser, no WebDriver, no audio device -- and checks
 the printed document against `expected.json`.
 
@@ -17,13 +18,13 @@ an unintended change (#1060) -- and the native witness cost about 60 s of every 
 resource row belongs to exactly one class:
 
 * `EXACT_ROWS` are contract facts, not layout: the boot options and status structures, the staged
-  document, the configured diagnostic, ID and PCM staging capacities, the fixed 1 MiB largest
-  allocation, the four rows this identity fixture drives to zero (no delay, no scalar effect, no
-  observation capacity), and the compile's shape and backend. They must equal `expected.json`.
+  document, the configured diagnostic, ID and PCM staging capacities, the two largest-allocation
+  rows (16,384 bytes, the control frame, since #1590 deleted the 24,576-byte observation staging), the four rows this identity fixture drives to zero (no delay, no scalar effect, no
+  tap-declaring effect), and the compile's shape and backend. They must equal `expected.json`.
 * `CEILING_ROWS` are retained production memory: `size_of` sums over pointer-bearing structures
   and AoSoA bank payloads. Each must be positive and at most its ceiling in `expected.json`'s
-  `directOracle.simd128.resourceCeilings`. A ceiling is the row's value plus 10 % (beyond the
-  fixed 1 MiB live-response capture for the two bridge rows), rounded up to 64 bytes; growth past
+  `directOracle.simd128.resourceCeilings`. A ceiling is the row's value plus 10 %, rounded up to
+  64 bytes; growth past
   it is red and raises the budget with its reason. The gate prints each row's headroom as a live
   report. A zero row is red too, because a row that stops being charged is a decrease a ceiling
   cannot see; that the rows charge every allocation is capi's allocator oracle
@@ -71,21 +72,13 @@ WORKLET_JS = REPO / "hosts/host-web/web/miso-engine-v1-audio-worklet.js"
 FIXTURE_RUNNER_JS = FIXTURE / "browser-correctness.js"
 
 MODULE_NAME = "miso-engine-v1-audio-worklet.simd128.wasm"
-# Shared with every other `target/ci/*` gate: a persistent directory, so a sweep does not pay a
-# cold Wasm build of the whole workspace on every run.
-WASM_TARGET_DIR = REPO / "target/ci/browser-expected-resources"
-WASM_TARGET = "wasm32-unknown-unknown"
-# The one flag that changes an answer in this report: it selects `Lane::LANES == 4` and
-# `BACKEND_SIMD128`. `-C strip=debuginfo` is a delivery-size decision and moves no row, so this
-# gate does not carry it.
-SIMD128_FLAG = "-C target-feature=+simd128"
 
 DIRECT_ORACLE_SCHEMA = "miso.web.browser.direct-oracle.v1"
 BACKEND_SIMD128 = 1
 
 # Contract facts, not layout: the boot options and status structure sizes, the staged document,
-# the configured diagnostic, ID and PCM staging capacities, the fixed 1 MiB live-response capture
-# that is both largest-allocation rows, the four rows this identity fixture drives to zero, and the
+# the configured diagnostic, ID and PCM staging capacities, the two largest-allocation rows, the
+# four rows this identity fixture drives to zero, and the
 # compile's shape and backend. Each must equal `expected.json` exactly.
 EXACT_ROWS = frozenset(
     {
@@ -404,8 +397,8 @@ def check_limits_vocabulary(worklet: str, fixture: str) -> None:
     """The fixture's boot `options` object and the worklet's guard are one vocabulary.
 
     The same staleness class as the resource rows, on the other half of the fixture, and it had
-    already bitten: issue #143 carved `liveControlObservationTaps` and the master word (now
-    `reserved2`, issue #1689) out of the configuration's last two reserved words and added
+    already bitten: issue #143 carved the observation-taps word (now `reserved3`, issue #1590)
+    and the master word (now `reserved2`, issue #1689) out of the configuration's last two reserved words and added
     both to the old guard, and the fixture's policy object was never extended. The field list is
     checked with `exactFields`, so the browser leg refused the fixture at boot with
     `RESULT_INVALID_ARGUMENT` from #143 until #217.
@@ -451,32 +444,20 @@ def validate(
 
 
 def build_module(destination: pathlib.Path) -> None:
-    """Build the shipped simd128 module and place it under the name the oracle expects."""
-    text = DELIVERY_SCRIPT.read_text()
-    require(
-        "target-feature=+simd128" in text,
-        f"{DELIVERY_SCRIPT.name} no longer builds the shipped module with +simd128, so this "
-        "gate's module would not be the shipped one",
-    )
-    require(
-        "-p host-web" in text and WASM_TARGET in text,
-        f"{DELIVERY_SCRIPT.name} no longer builds host-web for {WASM_TARGET}",
-    )
-    environment = dict(os.environ)
-    environment["CARGO_TARGET_DIR"] = str(WASM_TARGET_DIR)
-    environment["RUSTFLAGS"] = SIMD128_FLAG
+    """Build the shipped simd128 module into the empty `destination` with the shipped builder.
+
+    `build-web-audioworklet.sh --module-only` is the module's one cargo line (the pinned nightly
+    with `-Zbuild-std`, #1334) and owns its target directory, so this gate reads the bytes the
+    delivery build ships, under the name the oracle expects (#2046).
+    """
     subprocess.run(
-        [
-            "cargo", "build", "--locked", "--release",
-            "--target", WASM_TARGET, "-p", "host-web",
-        ],
+        ["bash", str(DELIVERY_SCRIPT), "--module-only", str(destination)],
         cwd=REPO,
-        env=environment,
         check=True,
     )
-    shutil.copyfile(
-        WASM_TARGET_DIR / WASM_TARGET / "release" / "host_web.wasm",
-        destination / MODULE_NAME,
+    require(
+        (destination / MODULE_NAME).is_file(),
+        f"{DELIVERY_SCRIPT.name} --module-only did not write {MODULE_NAME}",
     )
 
 
@@ -620,7 +601,7 @@ def self_test() -> int:
     def add_worklet_limit(name: str):
         def apply(pair: tuple) -> tuple:
             actual, expected, worklet, fixture = pair
-            anchor = '"liveControlObservationTaps", "reserved2",'
+            anchor = '"reserved3", "reserved2",'
             require(anchor in worklet, "self-test mutation matched nothing")
             return actual, expected, worklet.replace(
                 anchor, f'{anchor} "{name}",', 1
@@ -748,8 +729,8 @@ def self_test() -> int:
         ("the oracle prints a different schema", with_schema("miso.web.browser.v1"), None),
         # The boot-options vocabulary, and the exact #143 regression this fixture shipped with.
         (
-            "the fixture's bootOptions() drops the #143 observation-taps word again",
-            drop_fixture_limit("liveControlObservationTaps"),
+            "the fixture's bootOptions() drops the #1590 reserved3 word (the #143 regression)",
+            drop_fixture_limit("reserved3"),
             None,
         ),
         (

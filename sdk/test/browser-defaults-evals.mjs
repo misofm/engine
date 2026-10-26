@@ -72,19 +72,6 @@ test("default context + host preserve exact context, URLs and mapped policy", as
   } finally { if (previous === undefined) delete globalThis.AudioContext; else globalThis.AudioContext = previous; delete globalThis.__sdkBootRequests; }
 });
 
-for (const hop of [256, 1_024]) {
-  test(`browser policy carries explicit spectrum H${hop} to both boots and the shipped host`, () => {
-    const policy = { spectrumHopFrames: hop };
-    assert.equal(scratchBootOptions(policy).spectrumHopFrames, hop);
-    assert.equal(workletBootOptions(policy, shape).spectrumHopFrames, hop);
-    assert.equal(toWebBootOptions(workletBootOptions(policy, shape)).spectrumHopFrames, hop);
-  });
-}
-
-test("omitted browser spectrum hop maps to the shipped host default sentinel", () => {
-  assert.equal(toWebBootOptions(workletBootOptions({}, shape)).spectrumHopFrames, 0);
-});
-
 for (const hop of [0, "1024", 1_024.5]) {
   test(`invalid browser spectrum H${String(hop)} refuses before any boot dependency is called`, async () => {
     let scratchCalls = 0;
@@ -101,34 +88,6 @@ for (const hop of [0, "1024", 1_024.5]) {
     assert.deepEqual([scratchCalls, contextCalls, hostCalls], [0, 0, 0]);
   });
 }
-
-test("createEngine snapshots browser spectrum hop before asynchronous scratch work", async () => {
-  const policy = { spectrumHopFrames: 256 };
-  let release;
-  const gate = new Promise(resolve => { release = resolve; });
-  let scratchHop;
-  let hostHop;
-  const pending = createEngine({
-    document: "opaque",
-    policy,
-    scratchBoot: async request => {
-      scratchHop = request.options.spectrumHopFrames;
-      await gate;
-      return shape;
-    },
-    createContext: () => context(),
-    createHost: async request => {
-      hostHop = request.options.spectrumHopFrames;
-      return { async dispose() {} };
-    },
-  });
-  policy.spectrumHopFrames = 1_024;
-  release();
-  const engine = await pending;
-  assert.equal(scratchHop, 256);
-  assert.equal(hostHop, 256);
-  await engine.close();
-});
 
 test("injected context and host independently retain default scratch worker", async () => {
   const worker = new FakeWorker(); const candidate = context(); let request;
@@ -313,7 +272,7 @@ test("preparation compiles once, disposes scratch, and yields fresh stateful liv
   });
   const bytes = await moduleBytes();
   const document = new TextEncoder().encode(sessionDocument({ effects: { preInsert: effects.slice(0, 2), inserts: effects.slice(2) }, frames: 16384 }));
-  const options = { liveControls: { meterBlocks: 2, observationTaps: 1 } };
+  const options = { liveControls: { meterBlocks: 2 } };
   let compiles = 0, disposals = 0; const compile = WebAssembly.compile; const dispose = WasmBoundary.prototype.dispose;
   WebAssembly.compile = async (...args) => { compiles++; return compile(...args); };
   WasmBoundary.prototype.dispose = function () { disposals++; return dispose.call(this); };
@@ -420,25 +379,26 @@ test("preparation admits several independent mono and stereo sources", async () 
 });
 
 
-for (const initialLiveControls of [undefined, {}, { observationTaps: 0 }, { observationTaps: 4 }]) {
-  test(`observation attachment uses captured boot policy: ${JSON.stringify(initialLiveControls)}`, async () => {
-    // The value controls need no boot word (every edit is a SET_CONTROL transaction); only the
-    // observation records need taps, and that word is read from the policy captured before the
-    // scratch boot, not from the caller's object as it is when the host boots.
-    const attached = (initialLiveControls?.observationTaps ?? 0) > 0;
+for (const initialLiveControls of [undefined, {}, { meterBlocks: 0 }, { meterBlocks: 4 }]) {
+  test(`the live-control word uses captured boot policy: ${JSON.stringify(initialLiveControls)}`, async () => {
+    // The value controls need no boot word (every edit is a SET_CONTROL transaction), and every
+    // plan binds every declared observation tap (#1590 D5); the meter word is read from the
+    // policy captured before the scratch boot, not from the caller's object as it is when the
+    // host boots.
+    const captured = initialLiveControls?.meterBlocks;
     const policy = initialLiveControls === undefined ? {} : { liveControls: { ...initialLiveControls } };
     let maps = 0; const frames = []; const closed = [];
     const engine = await createEngine({
       document: new Uint8Array([1]), policy,
       scratchBoot: async () => {
         policy.liveControls ??= {};
-        policy.liveControls.observationTaps = attached ? 0 : 4;
+        policy.liveControls.meterBlocks = (captured ?? 0) + 7;
         return shape;
       },
       createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
         audioWorklet: { async addModule() {} }, async close() { closed.push("context"); } }),
       createHost: async request => {
-        assert.equal((request.options.liveControls?.observationTaps ?? 0) > 0, attached);
+        assert.equal(request.options.liveControls?.meterBlocks, captured);
         return {
           async sessionMap() { maps++; return { sources: [], metersAttached: false }; },
           control: scriptedControl({ frames }),
@@ -488,15 +448,6 @@ test("a browser engine's live controls address a submix by its strip index", asy
     assert.ok(ids[0].includes("bus"), "the transaction names the bus by its stable ID");
     assert.equal((await controls.submit(controls.edit.submix("aaa").mute(true))).ok, true);
     assert.ok(new TextDecoder().decode(frames[4]).includes("aaa"));
-    // Observation records name their tap by stable key: the strip's ID, the insert's ID and the tap.
-    const record = controls.edit.submix("bus").insert("comp", "miso.compressor")
-      .observe("Gain Reduction", true, 1);
-    assert.deepEqual(
-      { stripId: record.stripId, effectId: record.effectId, rack: record.rack, windowBlocks: record.windowBlocks },
-      { stripId: "bus", effectId: "comp", rack: 1, windowBlocks: 1 },
-    );
-    assert.equal(controls.edit.submix("aaa").insert("comp", "miso.compressor")
-      .observe("Gain Reduction", true, 1).stripId, "aaa", "no position of any plan is in the record");
   } finally {
     await engine.close();
   }

@@ -32,6 +32,7 @@ export type {
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
 export { DEFAULT_SPECTRUM_SUBSCRIPTION_LIMITS } from "../core/observation-subscriptions.ts";
+export type { LoudnessReading, LoudnessSubscription, LoudnessSubscriptionNotification, LoudnessSubscriptionRequest } from "../core/loudness.ts";
 export type {
   TrackResponseGrid,
   TrackResponseLimits,
@@ -42,6 +43,9 @@ export type {
 export type {
   SpectrumCollection,
   SpectrumCollectionEntry,
+  SpectrumConfigureOptions,
+  SpectrumConfigured,
+  SpectrumHopFrames,
   SpectrumLimits,
   SpectrumQuery,
   SpectrumResult,
@@ -165,7 +169,6 @@ export type {
 } from "../core/protocol-messages.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type {
-  CommandReport,
   ControlEvent,
   EngineCallResult,
   EngineStatus,
@@ -188,3 +191,4 @@ export { assertSameSession, effect, session, SessionBuilder } from "../core/sess
 export type { SessionLike, SessionModel, SessionOptions } from "../core/session.ts";
 export { TransactionBuilder, transaction } from "../core/session-transaction.ts";
 export type { SessionEditSpec, SessionTransaction } from "../core/session-transaction.ts";
+export type { EditOutcome, EditPath, WatermarkSnapshot } from "../core/session-edit.ts";

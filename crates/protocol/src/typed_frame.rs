@@ -9,10 +9,11 @@ use crate::{
     Capabilities, CommandHeader, ControlListPage, ControlListRequest, ControlStatePage,
     CounterSnapshot, CounterSnapshotRef, CountersRequest, DecodeError, DecodeScratch,
     DecodedCapabilities, DecodedMeterBatch, Diagnostic, DiagnosticEvent, DiagnosticsPage,
-    DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId, MeterBatch, NonOkResponse,
-    OUTER_HEADER_BYTES, ObservationEnded, ObservationReadPage, ObservationReadRequest,
-    ProtocolCodec, RequestId, ResponseGetRequest, ResponseHeader, ResponseResult, SessionCommitted,
-    SessionEdit, SessionReplaceRequest, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
+    DiagnosticsRequest, EncodeError, EventHeader, FrameKind, LoudnessReply, LoudnessRequest,
+    MessageId, MeterBatch, NonOkResponse, OUTER_HEADER_BYTES, ObservationEnded,
+    ObservationReadPage, ObservationReadRequest, ProtocolCodec, RequestId, ResponseGetRequest,
+    ResponseHeader, ResponseReady, ResponseResult, SessionCommitted, SessionEdit,
+    SessionReplaceRequest, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
     SpectrumCaptureReply, SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured,
     SpectrumStreamReply, SpectrumStreamRequest, StatusCode, TelemetryConfiguration,
     TransactionApplied, TransportSetRequest, TransportSnapshot, TransportStateEvent,
@@ -56,6 +57,8 @@ pub enum CommandPayload<'a> {
     SpectrumConfigure(&'a SpectrumConfigureRequest),
     SpectrumCapture(&'a SpectrumCaptureRequest),
     SpectrumStream(&'a SpectrumStreamRequest),
+    /// `LOUDNESS` (#2115).
+    Loudness(LoudnessRequest),
     ObservationRead(&'a ObservationReadRequest),
 }
 
@@ -86,6 +89,8 @@ pub enum SuccessResponsePayload<'a> {
     SpectrumConfigured(SpectrumConfigured),
     SpectrumCaptured(SpectrumCaptureReply<'a>),
     SpectrumStreamed(SpectrumStreamReply<'a>),
+    /// The `LOUDNESS` reply (#2115).
+    Loudness(LoudnessReply),
     ObservationRead(ObservationReadPage<'a>),
 }
 
@@ -116,6 +121,7 @@ pub enum EventPayload<'a> {
     MeterBatch(MeterBatch<'a>),
     CounterSnapshot(CounterSnapshotRef<'a>),
     Diagnostic(&'a Diagnostic),
+    ResponseReady(&'a ResponseReady),
 }
 
 /// One typed unsolicited event frame. The payload selects and fixes the event message ID.
@@ -143,6 +149,8 @@ pub enum DecodedCommandPayload {
     SpectrumConfigure(SpectrumConfigureRequest),
     SpectrumCapture(SpectrumCaptureRequest),
     SpectrumStream(SpectrumStreamRequest),
+    /// `LOUDNESS` (#2115).
+    Loudness(LoudnessRequest),
     ObservationRead(ObservationReadRequest),
 }
 
@@ -171,6 +179,8 @@ pub enum DecodedSuccessResponsePayload<'a> {
     SpectrumConfigured(SpectrumConfigured),
     SpectrumCaptured(SpectrumCaptureReply<'static>),
     SpectrumStreamed(SpectrumStreamReply<'static>),
+    /// The `LOUDNESS` reply (#2115).
+    Loudness(LoudnessReply),
     ObservationRead(ObservationReadPage<'static>),
 }
 
@@ -196,6 +206,7 @@ pub enum DecodedEventPayload<'a> {
     MeterBatch(DecodedMeterBatch<'a>),
     CounterSnapshot(CounterSnapshot),
     Diagnostic(DiagnosticEvent),
+    ResponseReady(ResponseReady),
 }
 
 /// A strictly decoded event header and its exact registered event payload.
@@ -223,6 +234,7 @@ impl<'a> CommandPayload<'a> {
             Self::SpectrumConfigure(_) => MessageId::SpectrumConfigure,
             Self::SpectrumCapture(_) => MessageId::SpectrumCapture,
             Self::SpectrumStream(_) => MessageId::SpectrumStream,
+            Self::Loudness(_) => MessageId::Loudness,
             Self::ObservationRead(_) => MessageId::ObservationRead,
         }
     }
@@ -246,6 +258,7 @@ impl<'a> SuccessResponsePayload<'a> {
             Self::SpectrumConfigured(_) => MessageId::SpectrumConfigure,
             Self::SpectrumCaptured(_) => MessageId::SpectrumCapture,
             Self::SpectrumStreamed(_) => MessageId::SpectrumStream,
+            Self::Loudness(_) => MessageId::Loudness,
             Self::ObservationRead(_) => MessageId::ObservationRead,
         }
     }
@@ -260,6 +273,7 @@ impl<'a> EventPayload<'a> {
             Self::MeterBatch(_) => MessageId::MeterBatch,
             Self::CounterSnapshot(_) => MessageId::CounterSnapshot,
             Self::Diagnostic(_) => MessageId::Diagnostic,
+            Self::ResponseReady(_) => MessageId::ResponseReady,
         }
     }
 }
@@ -493,6 +507,9 @@ impl ProtocolCodec {
             MessageId::SpectrumStream => DecodedCommandPayload::SpectrumStream(
                 self.decode_spectrum_stream_request(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::Loudness => DecodedCommandPayload::Loudness(
+                self.decode_loudness_request(decoded.payload, header.tlv_count)?,
+            ),
             MessageId::ObservationRead => DecodedCommandPayload::ObservationRead(
                 self.decode_observation_read_request(decoded.payload, header.tlv_count)?,
             ),
@@ -568,6 +585,9 @@ impl ProtocolCodec {
             MessageId::SpectrumStream => DecodedSuccessResponsePayload::SpectrumStreamed(
                 self.decode_spectrum_stream_reply(decoded.payload, header.tlv_count)?,
             ),
+            MessageId::Loudness => DecodedSuccessResponsePayload::Loudness(
+                self.decode_loudness_reply(decoded.payload, header.tlv_count)?,
+            ),
             MessageId::ObservationRead => DecodedSuccessResponsePayload::ObservationRead(
                 self.decode_observation_read_page(decoded.payload, header.tlv_count)?,
             ),
@@ -606,6 +626,9 @@ impl ProtocolCodec {
             ),
             MessageId::Diagnostic => DecodedEventPayload::Diagnostic(
                 self.decode_diagnostic_event(decoded.payload, header.tlv_count)?,
+            ),
+            MessageId::ResponseReady => DecodedEventPayload::ResponseReady(
+                self.decode_response_ready(decoded.payload, header.tlv_count)?,
             ),
             _ => return Err(DecodeError::MessageKindMismatch),
         };
@@ -749,6 +772,9 @@ fn write_command_payload(
         CommandPayload::SpectrumStream(value) => {
             crate::message_wire::write_spectrum_stream_request(sink, value)
         }
+        CommandPayload::Loudness(value) => {
+            crate::message_wire::write_loudness_request(sink, *value)
+        }
         CommandPayload::ObservationRead(value) => {
             crate::message_wire::write_observation_read_request(sink, value)
         }
@@ -808,6 +834,9 @@ fn write_success_payload(
         SuccessResponsePayload::SpectrumStreamed(value) => {
             crate::message_wire::write_spectrum_stream_reply(sink, value)
         }
+        SuccessResponsePayload::Loudness(value) => {
+            crate::message_wire::write_loudness_reply(sink, value)
+        }
         SuccessResponsePayload::ObservationRead(value) => {
             crate::message_wire::write_observation_read_page(sink, value)
         }
@@ -835,6 +864,9 @@ fn write_event_payload(
         }
         EventPayload::Diagnostic(value) => {
             crate::message_wire::write_diagnostic_event(codec, sink, value)
+        }
+        EventPayload::ResponseReady(value) => {
+            crate::message_wire::write_response_ready(sink, value)
         }
     }
 }
@@ -868,7 +900,7 @@ mod tests {
             maximum_telemetry_handles: 256,
             maximum_transaction_edits: 1,
             supported_commands: &[1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14],
-            supported_events: &[0x8001, 0x8010, 0x8020, 0x8021, 0x8030],
+            supported_events: &[0x8001, 0x8010, 0x8020, 0x8021, 0x8030, 0x8040],
             flags: crate::CapabilityFlags::B4_BASE,
         }
     }

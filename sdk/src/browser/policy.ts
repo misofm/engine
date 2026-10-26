@@ -8,7 +8,6 @@ import type { BootOptions } from "../core/abi.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { SourceSpec } from "../core/types.ts";
-import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
 
 /**
  * The browser choreography's decidable half (issue #243 S3, #240 S5).
@@ -37,7 +36,10 @@ import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
 export interface BrowserBootPolicy {
   readonly sourceRingFrames?: number;
   readonly maximumMemoryBytes?: bigint;
-  /** Optional native continuous-spectrum hop selected during browser preparation. */
+  /**
+   * The continuous-spectrum hop of the boot's taps, sent in the boot's `SPECTRUM_CONFIGURE`
+   * (#1596 D2); `configureSpectrum` sets the hop of a later configuration.
+   */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   readonly liveControls?: BootOptions["liveControls"];
 }
@@ -77,8 +79,6 @@ function withRequiredShape(
   policy: BrowserBootPolicy,
   requireSampleRateHz: number,
   requireQuantumFrames: number,
-  spectrum?: SpectrumQuery,
-  spectrumCollection?: SpectrumCollection,
 ): BootOptions {
   const options: {
     -readonly [Key in keyof BootOptions]?: BootOptions[Key];
@@ -87,11 +87,10 @@ function withRequiredShape(
   if (policy.maximumMemoryBytes !== undefined) {
     options.maximumMemoryBytes = policy.maximumMemoryBytes;
   }
-  const spectrumHopFrames = validateBrowserSpectrumHopFrames(policy.spectrumHopFrames);
-  if (spectrumHopFrames !== undefined) options.spectrumHopFrames = spectrumHopFrames;
+  // The boot's spectrum taps and the policy's hop are not boot words: the browser engine sends
+  // them in its boot `SPECTRUM_CONFIGURE` (#1596 D2), which the engine adopts in place before the
+  // first block (#1597).
   if (policy.liveControls !== undefined) options.liveControls = policy.liveControls;
-  if (spectrum !== undefined) options.spectrum = spectrum;
-  if (spectrumCollection !== undefined) options.spectrumCollection = spectrumCollection;
   return options;
 }
 
@@ -106,16 +105,8 @@ function withRequiredShape(
 export function workletBootOptions(
   policy: BrowserBootPolicy,
   physical: { readonly sampleRateHz: number; readonly quantumFrames: number },
-  spectrum?: SpectrumQuery,
-  spectrumCollection?: SpectrumCollection,
 ): BootOptions {
-  return withRequiredShape(
-    policy,
-    physical.sampleRateHz,
-    physical.quantumFrames,
-    spectrum,
-    spectrumCollection,
-  );
+  return withRequiredShape(policy, physical.sampleRateHz, physical.quantumFrames);
 }
 
 /**

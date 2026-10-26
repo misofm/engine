@@ -296,7 +296,7 @@ describe("the most important eval -- what the builder writes, the engine boots",
       oneTrack({ id: "rate.96k", sampleRateHz: 96_000, quantumFrames: 127, frames: 9_600 }),
       { sampleRateHz: 96_000, quantumFrames: 127, tracks: ["t"] },
     );
-    assert.equal(shape.sourceRingFrames, 9_906);
+    assert.equal(shape.sourceRingFrames, 14_097);
     assert.equal(shape.sourceRingFrames % shape.quantumFrames, 0);
   });
 
@@ -843,7 +843,8 @@ describe("validation refusals name the offending path", () => {
     const refusedByTheEngine = [
       ["delay", builtinRow("delay_samples", "left"), 0, 1, "control.automation.target"],
       ["lookahead", insertRow("lookahead_ms", "both", "limiter"), 1, 1, "control.automation.target"],
-      ["matrix-lane", builtinRow("matrix_ll", "left"), 0, 1, "control.inactive"],
+      // `t` has no `pan`, so it is the identity matrix (#2101) and its pan row is the inactive one.
+      ["pan-lane", builtinRow("pan", "left"), 0, 1, "control.inactive"],
     ];
     for (const [id, target, startValue, endValue, expected] of refusedByTheEngine) {
       const built = base.automation(ride(id, target, startValue, endValue));
@@ -1698,5 +1699,55 @@ describe("issue #1650 -- the builder authors an automation entry's offset", () =
       await outcome(base().automation(trim)),
       ["control.automation.offset", "$.automation[id=trim].offset.left_db"],
     );
+  });
+});
+
+describe("issue #2101 -- a strip built without pan is the identity matrix", () => {
+  test("a track and a submix without pan serialize matrix {1, 0, 0, 1}, and still take a live pan", async () => {
+    // Red mutation: let an absent `pan` take the `pan` builtin's catalog default (0 on each lane)
+    // again in `normalizeMatrixOrPan` -> both strips write `pan` {0, 0}, which folds a stereo
+    // source to the centre and plays a mono source 3.01 dB hot.
+    const built = session({ id: "identity.default", sampleRateHz: 48_000, revision: 1 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 4_800, content: CONTENT_A })
+      .track("t", { source: "stem" })
+      .submix("bus", { fader: { leftDb: -1 } })
+      .output("out")
+      .route({
+        id: "in",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "submix_input", submixId: "bus" },
+      })
+      .route({
+        id: "main",
+        source: { kind: "submix", submixId: "bus", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+    const identity = { ll: 1, lr: 0, rl: 0, rr: 1, smoothing_samples: 0 };
+    const model = built.toJSON();
+    for (const strip of [model.tracks[0], model.submixes[0]]) {
+      assert.equal("pan" in strip, false, strip.id);
+      assert.deepEqual({ ...strip.matrix }, identity, strip.id);
+    }
+    if (asset === undefined) return;
+
+    // A strip declared with `matrix` takes a live `pan(l, r)` once `matrixMode("pan")` switches it,
+    // in the same transaction; `pan` alone is refused as inactive, as the core says.
+    const engine = await createOfflineEngine(built, { asset });
+    try {
+      const controls = engine.liveControls();
+      const alone = await controls.submit(controls.edit.track("t").pan(-0.25, 0.75)).catch((error) => error);
+      assert.equal(alone.code, "control.inactive");
+      for (const strip of [controls.edit.track("t"), controls.edit.submix("bus")]) {
+        const report = await controls.submit(strip.matrixMode("pan"), strip.pan(-0.25, 0.75));
+        assert.equal(report.ok, true);
+      }
+      const committed = JSON.parse((await engine.committedDocument()).document);
+      for (const strip of [committed.tracks[0], committed.submixes[0]]) {
+        assert.equal("matrix" in strip, false, strip.id);
+        assert.deepEqual([strip.pan.left, strip.pan.right], [-0.25, 0.75], strip.id);
+      }
+    } finally {
+      engine.dispose();
+    }
   });
 });

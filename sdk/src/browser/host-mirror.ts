@@ -1,9 +1,7 @@
-import { ABI_LAYOUT } from "../generated/abi.ts";
+import { refuseRetiredObservationTaps } from "../internal/retired-options.ts";
 import type { BootOptions } from "../core/abi.ts";
 import { MisoUsageError } from "./../core/errors.ts";
 import type { MisoWebBootOptions } from "./shipped-host.d.ts";
-import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
-import { validateBrowserSpectrumHopFrames } from "./policy.ts";
 
 /**
  * The bridge from the SDK's `BootOptions` to the shipped host factory's `MisoWebBootOptions`.
@@ -47,96 +45,15 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
       "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
     );
   }
-  const observationTaps = word("liveControls.observationTaps", liveControls?.observationTaps);
-  const spectrumHopFrames = validateBrowserSpectrumHopFrames(options.spectrumHopFrames) ?? 0;
-
-  // The engine refuses this at boot with `web.options.live_controls`. Catching it here turns a
-  // boot-time refusal into a caller-time message, without duplicating the engine's authority: the
-  // engine still refuses if this check is wrong.
-  if (observationTaps > BigInt(ABI_LAYOUT.constants.maximumObservationTaps)) {
-    throw new MisoUsageError(
-      `liveControlObservationTaps is capped at ${ABI_LAYOUT.constants.maximumObservationTaps}`,
-    );
-  }
-
-  let spectrum: MisoWebBootOptions["spectrum"] = null;
-  if (options.spectrum !== undefined) {
-    spectrum = toWebSpectrumOptions(options.spectrum);
-  }
-  let spectrumCollection: MisoWebBootOptions["spectrumCollection"] = null;
-  if (options.spectrumCollection !== undefined) {
-    spectrumCollection = toWebSpectrumCollectionOptions(options.spectrumCollection);
-  }
+  refuseRetiredObservationTaps(liveControls);
 
   return {
     sourceRingFrames: nonNegative("sourceRingFrames", options.sourceRingFrames ?? 0),
     maximumMemoryBytes: options.maximumMemoryBytes ?? 0n,
     reserved1: 0n,
     liveControlMeterBlocks: word("liveControls.meterBlocks", liveControls?.meterBlocks),
-    liveControlObservationTaps: observationTaps,
+    reserved3: 0n,
     reserved2: 0n,
-    spectrumHopFrames,
-    spectrum,
-    spectrumCollection,
   };
 }
 
-function toWebSpectrumOptions(query: SpectrumQuery): NonNullable<MisoWebBootOptions["spectrum"]> {
-  const id = query.target.kind === "output" ? query.target.outputId : query.target.trackId;
-  if (typeof id !== "string" || id.length === 0) {
-    throw new MisoUsageError("spectrum target identity must be a nonempty string");
-  }
-  const idBytes = new TextEncoder().encode(id).byteLength;
-  const maximumIdBytes = ABI_LAYOUT.constants.maximumSpectrumIdBytes;
-  if (idBytes > maximumIdBytes) {
-    throw new MisoUsageError("spectrum target identity exceeds its bound");
-  }
-  const channels = query.channels ?? "both";
-  if (channels !== "left" && channels !== "right" && channels !== "both") {
-    throw new MisoUsageError("spectrum channels must be left, right, or both");
-  }
-  const maximumCaptureBytes = query.spectrumLimits?.maximumCaptureBytes
-    ?? ABI_LAYOUT.constants.spectrumCaptureBytes;
-  if (!Number.isSafeInteger(maximumCaptureBytes) || maximumCaptureBytes < 1
-      || maximumCaptureBytes > ABI_LAYOUT.constants.spectrumCaptureBytes) {
-    throw new MisoUsageError(
-      `maximumCaptureBytes must be an integer in 1..=${ABI_LAYOUT.constants.spectrumCaptureBytes}`,
-    );
-  }
-  return {
-    target: query.target.kind,
-    targetId: id,
-    channels,
-    maximumCaptureBytes,
-  };
-}
-
-function toWebSpectrumCollectionOptions(
-  collection: SpectrumCollection,
-): NonNullable<MisoWebBootOptions["spectrumCollection"]> {
-  if (!Number.isSafeInteger(collection.maximumCaptureBytes) || collection.maximumCaptureBytes < 1) {
-    throw new MisoUsageError("spectrum collection maximumCaptureBytes must be a positive safe integer");
-  }
-  if (!Array.isArray(collection.entries) || collection.entries.length === 0) {
-    throw new MisoUsageError("spectrum collection entries must be a nonempty array");
-  }
-  const entries = collection.entries.map((entry, index) => {
-    const id = entry.target.kind === "output" ? entry.target.outputId : entry.target.trackId;
-    if (typeof id !== "string" || id.length === 0) {
-      throw new MisoUsageError(`spectrum collection entry ${index} has an empty target identity`);
-    }
-    if (new TextEncoder().encode(id).byteLength > ABI_LAYOUT.constants.maximumSpectrumIdBytes) {
-      throw new MisoUsageError(`spectrum collection entry ${index} target identity exceeds its bound`);
-    }
-    const channels = entry.channels ?? "both";
-    if (channels !== "left" && channels !== "right" && channels !== "both") {
-      throw new MisoUsageError(`spectrum collection entry ${index} has invalid channels`);
-    }
-    return {
-      target: entry.target.kind,
-      targetId: id,
-      channels,
-    };
-  });
-  return { entries, maximumCaptureBytes: collection.maximumCaptureBytes };
-}

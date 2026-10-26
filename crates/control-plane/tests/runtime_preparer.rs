@@ -10,6 +10,9 @@
 //! strips each plan render adopts lists as restarted, and nothing for a plan render never adopts.
 #![cfg(feature = "test-support")]
 
+#[path = "support/adoption.rs"]
+mod adoption;
+
 use std::sync::{Arc, Mutex};
 
 use control_plane::{
@@ -176,7 +179,6 @@ fn the_session_prepares_through_its_preparer_at_boot_and_for_a_structural_edit()
         SESSION,
         limits(1_024),
         Box::new(CountingPreparer(Arc::clone(&calls))),
-        None,
     )
     .expect("boot compile");
     {
@@ -217,7 +219,6 @@ fn a_refused_shape_never_reaches_the_preparer() {
         SESSION,
         limits(1_000),
         Box::new(CountingPreparer(Arc::clone(&calls))),
-        None,
     );
     assert!(
         refused.is_err(),
@@ -310,6 +311,27 @@ fn render(plan: &mut PlanState<Adapter>, block: u64) {
     plan.render(block * 128, output).expect("a rendered block");
 }
 
+/// Renders blocks from `block` on until `plan` applies `session`'s committed revision: a rebuild
+/// that restarts a strip is a duck-swap, adopted at its `S` (#1324a). The next block to render.
+fn render_until_applied(
+    session: &SessionState<Adapter>,
+    plan: &mut PlanState<Adapter>,
+    block: u64,
+) -> u64 {
+    let revision = session.test_controller().session().revision().0;
+    let mut state = (plan, block);
+    adoption::render_until_applied(
+        &mut state,
+        revision,
+        |(plan, _)| plan.queries().watermark().expect("a watermark").revision,
+        |(plan, block)| {
+            render(plan, *block);
+            *block += 1;
+        },
+    );
+    state.1
+}
+
 /// A default `miso.compressor` insert at the head of `track`'s inserts: a changed effect chain,
 /// so the strip starts at rest on the swap.
 fn put_compressor(track: &str) -> SessionEdit {
@@ -358,7 +380,6 @@ fn strips_restarted_counts_the_restarts_of_every_adopted_plan_and_of_no_other() 
         SESSION,
         limits(1_024),
         Box::new(CountingPreparer(Arc::clone(&calls))),
-        None,
     )
     .expect("boot compile");
     render(&mut plan, 0);
@@ -379,7 +400,7 @@ fn strips_restarted_counts_the_restarts_of_every_adopted_plan_and_of_no_other() 
         0,
         "the candidate waits: render has not adopted it"
     );
-    render(&mut plan, 1);
+    let block = render_until_applied(&session, &mut plan, 1);
     assert_eq!(strips_restarted(&mut session, 5), 2, "render adopted it");
 
     // Candidate A (eq3) is withdrawn unadopted by B (eq4), prepared against the running plan.
@@ -387,7 +408,7 @@ fn strips_restarted_counts_the_restarts_of_every_adopted_plan_and_of_no_other() 
     rebuild(&mut session, 7, &[put_compressor("eq4")]);
     assert_eq!(listed(&calls, 2), ["eq3"]);
     assert_eq!(listed(&calls, 3), ["eq3", "eq4"]);
-    render(&mut plan, 2);
+    let block = render_until_applied(&session, &mut plan, block);
     assert_eq!(
         strips_restarted(&mut session, 8),
         4,
@@ -409,7 +430,7 @@ fn strips_restarted_counts_the_restarts_of_every_adopted_plan_and_of_no_other() 
         }],
     );
     assert!(listed(&calls, 4).is_empty());
-    render(&mut plan, 3);
+    render_until_applied(&session, &mut plan, block);
     assert_eq!(strips_restarted(&mut session, 10), 4, "no strip restarted");
 }
 
@@ -429,7 +450,6 @@ fn a_kept_base_keeps_nothing_of_owners_removed_while_a_successor_waits() {
         SESSION,
         limits(1_024),
         Box::new(CountingPreparer(Arc::new(Mutex::new(Calls::default())))),
-        None,
     )
     .expect("boot compile");
     render(&mut plan, 0);

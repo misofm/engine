@@ -655,6 +655,73 @@ pub(crate) mod response_result {
     };
 }
 
+/// One owner a `RESPONSE_READY` event names (#1578 D2): its section (builtins 4, console 5,
+/// inserts 2), its slot ID (present exactly for console and inserts), its native effect ID, its
+/// provider kind (parametric EQ 1, input filters 2, unavailable 3), its bypass, its two enabled
+/// masks and the number of valid mask bits.
+pub(crate) mod response_member {
+    use super::*;
+    pub(crate) const SECTION: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) const SLOT_ID: FieldSpec = FieldSpec::opt(2, Wire::Utf8);
+    pub(crate) const EFFECT: FieldSpec = FieldSpec::req(3, Wire::Utf8);
+    pub(crate) const KIND: FieldSpec = FieldSpec::req(4, Wire::U8);
+    pub(crate) const BYPASSED: FieldSpec = FieldSpec::req(5, Wire::Bool);
+    pub(crate) const ENABLED_LEFT: FieldSpec = FieldSpec::req(6, Wire::U32);
+    pub(crate) const ENABLED_RIGHT: FieldSpec = FieldSpec::req(7, Wire::U32);
+    pub(crate) const SECTION_COUNT: FieldSpec = FieldSpec::req(8, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ResponseMember",
+        fields: &[
+            SECTION,
+            SLOT_ID,
+            EFFECT,
+            KIND,
+            BYPASSED,
+            ENABLED_LEFT,
+            ENABLED_RIGHT,
+            SECTION_COUNT,
+        ],
+    };
+}
+
+/// `RESPONSE_READY` (`0x8040`, #1578 D2): the result of one strip `RESPONSE_GET`, by its tag. The
+/// diagnostic is present exactly when `outcome` is not `OK`; the capture's fields (6 to 9, 12, the
+/// curves and the members) only when it is.
+pub(crate) mod response_ready {
+    use super::*;
+    pub(crate) const SEQUENCE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const REQUEST_TAG: FieldSpec = FieldSpec::req(2, Wire::U64);
+    pub(crate) const STRIP_ID: FieldSpec = FieldSpec::req(3, Wire::Utf8);
+    pub(crate) const OUTCOME: FieldSpec = FieldSpec::req(4, Wire::U16);
+    pub(crate) const DIAGNOSTIC: FieldSpec = FieldSpec::opt(5, Wire::Utf8);
+    pub(crate) const CAPTURED_SAMPLE: FieldSpec = FieldSpec::opt(6, Wire::U64);
+    pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::opt(7, Wire::U32);
+    pub(crate) const FLOOR_DB: FieldSpec = FieldSpec::opt(8, Wire::F32);
+    pub(crate) const FREQUENCIES_HZ: FieldSpec = FieldSpec::opt(9, Wire::PackedF32);
+    pub(crate) const LEFT_DB: FieldSpec = FieldSpec::opt(10, Wire::PackedF32);
+    pub(crate) const RIGHT_DB: FieldSpec = FieldSpec::opt(11, Wire::PackedF32);
+    pub(crate) const EXCLUDED_COUNT: FieldSpec = FieldSpec::opt(12, Wire::U32);
+    pub(crate) const MEMBER: FieldSpec = FieldSpec::msg(13, false, true, &response_member::SPEC);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "ResponseReady",
+        fields: &[
+            SEQUENCE,
+            REQUEST_TAG,
+            STRIP_ID,
+            OUTCOME,
+            DIAGNOSTIC,
+            CAPTURED_SAMPLE,
+            SAMPLE_RATE_HZ,
+            FLOOR_DB,
+            FREQUENCIES_HZ,
+            LEFT_DB,
+            RIGHT_DB,
+            EXCLUDED_COUNT,
+            MEMBER,
+        ],
+    };
+}
+
 /// One selection of an `OBSERVATION_READ` request (#1586 D1): a tap by its stable address (the
 /// `Observe` edit's address shape: a strip owner, a console or inserts section with its slot ID,
 /// no `control` and no `lane`), its effect-local tap ID and the lanes to return.
@@ -944,6 +1011,73 @@ pub(crate) mod spectrum_stream_reply {
     };
 }
 
+/// `LOUDNESS` (`0x0014`, #2115): one operation on the session's output loudness meter.
+pub(crate) mod loudness_request {
+    use super::*;
+    /// Start `1`, read `2`, reset `3`, stop `4`.
+    pub(crate) const OP: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "LoudnessRequest",
+        fields: &[OP],
+    };
+}
+
+/// The `LOUDNESS` reply (#2115): the meter's state after the operation. Every level is optional,
+/// absent until it is defined, and finite at or above the -120 floor.
+pub(crate) mod loudness_reply {
+    use super::*;
+    pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const ARMED: FieldSpec = FieldSpec::req(2, Wire::Bool);
+    pub(crate) const INTEGRATING_SINCE: FieldSpec = FieldSpec::opt(3, Wire::U64);
+    pub(crate) const HOPS_DROPPED: FieldSpec = FieldSpec::req(4, Wire::U64);
+    pub(crate) const SANITIZED_SAMPLES: FieldSpec = FieldSpec::req(5, Wire::U64);
+    pub(crate) const GATED_BLOCK_COUNT: FieldSpec = FieldSpec::req(6, Wire::U64);
+    pub(crate) const MOMENTARY_LUFS: FieldSpec = FieldSpec::opt(7, Wire::F32);
+    pub(crate) const SHORT_TERM_LUFS: FieldSpec = FieldSpec::opt(8, Wire::F32);
+    pub(crate) const INTEGRATED_LUFS: FieldSpec = FieldSpec::opt(9, Wire::F32);
+    pub(crate) const LOUDNESS_RANGE_LU: FieldSpec = FieldSpec::opt(10, Wire::F32);
+    pub(crate) const MOMENTARY_MAX_LUFS: FieldSpec = FieldSpec::opt(11, Wire::F32);
+    pub(crate) const SHORT_TERM_MAX_LUFS: FieldSpec = FieldSpec::opt(12, Wire::F32);
+    pub(crate) const TRUE_PEAK_LEFT_DBTP: FieldSpec = FieldSpec::opt(13, Wire::F32);
+    pub(crate) const TRUE_PEAK_RIGHT_DBTP: FieldSpec = FieldSpec::opt(14, Wire::F32);
+    pub(crate) const HOP_TRUE_PEAK_LEFT_DBTP: FieldSpec = FieldSpec::opt(15, Wire::F32);
+    pub(crate) const HOP_TRUE_PEAK_RIGHT_DBTP: FieldSpec = FieldSpec::opt(16, Wire::F32);
+    /// The optional levels, in tag order.
+    pub(crate) const LEVELS: [FieldSpec; 10] = [
+        MOMENTARY_LUFS,
+        SHORT_TERM_LUFS,
+        INTEGRATED_LUFS,
+        LOUDNESS_RANGE_LU,
+        MOMENTARY_MAX_LUFS,
+        SHORT_TERM_MAX_LUFS,
+        TRUE_PEAK_LEFT_DBTP,
+        TRUE_PEAK_RIGHT_DBTP,
+        HOP_TRUE_PEAK_LEFT_DBTP,
+        HOP_TRUE_PEAK_RIGHT_DBTP,
+    ];
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "LoudnessReply",
+        fields: &[
+            OBSERVED_SAMPLE,
+            ARMED,
+            INTEGRATING_SINCE,
+            HOPS_DROPPED,
+            SANITIZED_SAMPLES,
+            GATED_BLOCK_COUNT,
+            MOMENTARY_LUFS,
+            SHORT_TERM_LUFS,
+            INTEGRATED_LUFS,
+            LOUDNESS_RANGE_LU,
+            MOMENTARY_MAX_LUFS,
+            SHORT_TERM_MAX_LUFS,
+            TRUE_PEAK_LEFT_DBTP,
+            TRUE_PEAK_RIGHT_DBTP,
+            HOP_TRUE_PEAK_LEFT_DBTP,
+            HOP_TRUE_PEAK_RIGHT_DBTP,
+        ],
+    };
+}
+
 pub(crate) mod transport_get {
     use super::MessageSpec;
     pub(crate) static SPEC: MessageSpec = MessageSpec {
@@ -1054,7 +1188,7 @@ pub(crate) mod meter_batch {
 /// One meter table entry of `TELEMETRY_CONFIGURE` (#1583 D1): its 1-based position is its handle.
 pub(crate) mod meter_entry {
     use super::*;
-    /// Output `1`, strip `2`.
+    /// Output `1`, strip `2`, master `3` (#1690 D3).
     pub(crate) const TARGET: FieldSpec = FieldSpec::req(1, Wire::U8);
     /// The strip's stable ID: present exactly when `target` is a strip.
     pub(crate) const STRIP_ID: FieldSpec = FieldSpec::opt(2, Wire::Utf8);
@@ -2043,9 +2177,11 @@ pub(crate) mod session {
         pub(crate) const TAP_ID: FieldSpec = FieldSpec::req(2, Wire::U32);
         pub(crate) const ARMED: FieldSpec = FieldSpec::req(3, Wire::Bool);
         pub(crate) const WINDOW_BLOCKS: FieldSpec = FieldSpec::req(4, Wire::U32);
+        /// #2087: the tag the disarmed arm's reply gave, present exactly on a disarm.
+        pub(crate) const ARM_TAG: FieldSpec = FieldSpec::opt(5, Wire::U64);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "Observe",
-            fields: &[ADDRESS, TAP_ID, ARMED, WINDOW_BLOCKS],
+            fields: &[ADDRESS, TAP_ID, ARMED, WINDOW_BLOCKS, ARM_TAG],
         };
     }
 
@@ -2243,6 +2379,8 @@ mod tests {
             &response_override::SPEC,
             &response_request::SPEC,
             &response_result::SPEC,
+            &response_member::SPEC,
+            &response_ready::SPEC,
             &observation_selection::SPEC,
             &observation_read_request::SPEC,
             &observation_row::SPEC,
@@ -2254,6 +2392,8 @@ mod tests {
             &spectrum_capture_reply::SPEC,
             &spectrum_stream_request::SPEC,
             &spectrum_stream_reply::SPEC,
+            &loudness_request::SPEC,
+            &loudness_reply::SPEC,
             &transport_get::SPEC,
             &transport_set::SPEC,
             &transport_set::RETIRED,

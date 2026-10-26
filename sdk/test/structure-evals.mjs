@@ -14,14 +14,11 @@ import { readFileSync } from "node:fs";
 import { before, describe, test } from "node:test";
 
 import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
-import { observationEdit } from "../src/core/live-controls.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { decodeControlReply } from "../src/core/control-frame.ts";
-import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
+import { ObservationSubscriptionOwner, observationFrameTransport } from "../src/core/observation-subscriptions.ts";
 import { decodeObservationEnded } from "../src/core/observation-ended.ts";
 import { MisoControlRefusal } from "../src/core/errors.ts";
-import { encodeLaneEdits } from "../src/core/writer.ts";
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { structuralFrame } from "./control-support.mjs";
 import { engineHost, moduleBytes, ramp } from "./support.mjs";
@@ -30,13 +27,58 @@ const FIXTURE = JSON.parse(readFileSync(
   new URL("../../hosts/host-web/tests/fixtures/control-list.json", import.meta.url),
   "utf8",
 ));
-const OPTIONS = { liveControls: { meterBlocks: 1, observationTaps: 8 } };
+const OPTIONS = { liveControls: { meterBlocks: 1 } };
 const STRIP = (id) => ({ kind: "strip", id });
 
 let asset;
+/**
+ * The blocks a rebuild that restarts a strip may take before its successor is adopted and fades
+ * in (a duck-swap, #1324a), plus one: `S` waits `q + N + C` after the commit, rounded up to a
+ * block, and the fade fires `D` after `S`. `N` is the session's mute ramp; `C` (a route line) and
+ * `D` (a strip's latency before its fader) are at most the plan's latency `L`, which the boot plan
+ * delays an impulse by: PDC aligns every path to the output.
+ */
+let duckBlocks;
+
+/** The plan latency `L`: the first output sample an impulse on every source at frame 0 reaches. */
+async function measuredLatency() {
+  const engine = await boot();
+  try {
+    const shape = engine.shape();
+    const q = shape.quantumFrames;
+    for (let block = 0; block < 64; block += 1) {
+      for (const source of shape.sources) {
+        engine.submitSource({
+          sourceId: source.id,
+          generation: 1n,
+          startFrame: BigInt(block * q),
+          planes: Array.from({ length: source.channels }, () => {
+            const plane = new Float32Array(q);
+            if (block === 0) plane[0] = 1;
+            return plane;
+          }),
+          endOfRegion: false,
+        });
+      }
+      const { left, right } = engine.render();
+      const first = [...left].findIndex((sample, index) => sample !== 0 || right[index] !== 0);
+      if (first >= 0) return block * q + first;
+    }
+    throw new Error("the impulse reaches the output within 64 blocks");
+  } finally {
+    engine.dispose();
+  }
+}
 
 before(async () => {
   asset = await MisoEngineAsset.load(await moduleBytes());
+  const session = JSON.parse(FIXTURE.session);
+  const smoothing = session.control_smoothing;
+  const muteMs = smoothing?.kind === "default" || smoothing === undefined ? 10 : smoothing.mute_ms;
+  const n = Math.round((muteMs * session.sample_rate_hz) / 1000);
+  const q = session.quantum_frames;
+  const latency = await measuredLatency();
+  duckBlocks = Math.ceil((q + n + latency) / q) + Math.ceil(latency / q) + 1;
 });
 
 const boot = () => createOfflineEngine(FIXTURE.session, { asset, ...OPTIONS });
@@ -65,6 +107,19 @@ function run(engine, from, count) {
     if (frame !== undefined) frames.push(frame);
   }
   return frames;
+}
+
+/**
+ * Blocks from `from`, as `run` renders them, until `reached()` holds after one: a rebuild that
+ * restarts a strip is adopted at its duck-swap's `S`, not at a fixed block (#1324a). Holds within
+ * `duckBlocks + extra` blocks or fails; the next block to render.
+ */
+async function runUntil(engine, from, extra, reached, what) {
+  for (let block = from; block < from + duckBlocks + extra; block += 1) {
+    run(engine, block, 1);
+    if (await reached()) return block + 1;
+  }
+  assert.fail(`${what} within ${duckBlocks + extra} blocks`);
 }
 
 /** Send a structural frame and require the core to take it as a rebuild. */
@@ -355,7 +410,21 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
       });
       run(engine, 0, 4);
       rebuild(engine, "remove_comp");
-      run(engine, 4, 2);
+      // The removal restarts t1: the plan without `comp` renders from the duck-swap's `S`.
+      await runUntil(
+        engine,
+        4,
+        0,
+        () => {
+          try {
+            engine.readObservations([tap("t1", "inserts", "comp")]);
+            return false;
+          } catch (error) {
+            return /unavailable/.test(error.message);
+          }
+        },
+        "the plan without comp renders",
+      );
       assert.equal(ends.length, 1);
       assert.deepEqual(handle.ended.map((selection) => selection.effectSlotId), ["comp"]);
       // The subscription is ended; asking for the tap again is the core's unavailable.
@@ -399,58 +468,20 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
         windowBlocks: 2,
       });
       run(engine, 0, 4);
-      assert.equal(engine.observationMap().bindings.find((b) => b.effectSlotId === "comp" && b.trackId === "t1").effectIndex, 1);
+      // `remove_eq` moves `comp` from insert 1 to insert 0 of t1. The removal restarts t1: a
+      // duck-swap, adopted at its `S` (#1324a), within `duckBlocks` blocks.
       rebuild(engine, "remove_eq");
-      run(engine, 4, 4);
-      assert.equal(engine.observationMap().bindings.find((b) => b.effectSlotId === "comp" && b.trackId === "t1").effectIndex, 0);
-      await handle.pump();
+      run(engine, 4, duckBlocks);
+      // The restarted strip's effects start at rest (#1324 D2): the tap opens a fresh window.
+      const next = await runUntil(engine, 4 + duckBlocks, 2, async () => {
+        await handle.pump();
+        return handle.readLatest()[0].status === "ready";
+      }, "the moved effect's tap is ready");
       assert.equal(handle.readLatest()[0].status, "ready", "the tap is carried to the moved effect");
       assert.equal(handle.ended.length, 0);
       await handle.close();
-      run(engine, 8, 2);
+      run(engine, next, 2);
       assert.equal(engine.readObservations([tap("t1", "inserts", "comp")])[0].status, "unarmed");
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("through the browser transport, whose live controls were made before the rebuild", async () => {
-    const engine = await boot();
-    try {
-      const host = engineHost(engine);
-      const controls = await createBrowserLiveControls(host);
-      const owner = new ObservationSubscriptionOwner({
-        observationMap: () => engine.observationMap(),
-        readObservations: (selections) => engine.readObservations(selections),
-        liveControls: () => controls,
-        observationEnded: (listener) => host.onControlEvent((event) => {
-          const ended = event.lane === 0 ? decodeObservationEnded(event.frame) : undefined;
-          if (ended !== undefined) listener(ended);
-        }),
-      });
-      run(engine, 0, 2);
-      // The strips move before the subscription is made: t1 is strip 1 and the controls still say 0.
-      rebuild(engine, "add_first_strip");
-      run(engine, 2, 4);
-      const ends = [];
-      const { handle } = await owner.subscribe({
-        selections: [tap("t1", "inserts", "comp"), tap("t2", "inserts", "gate")],
-        windowBlocks: 2,
-        onEnd: (end) => ends.push(end),
-      });
-      run(engine, 6, 4);
-      await handle.pump();
-      assert.deepEqual(handle.readLatest().map((rowRead) => rowRead.status), ["ready", "ready"]);
-      assert.equal(engine.readObservations([tap("a0", "inserts", "comp")])[0].status, "unarmed");
-
-      rebuild(engine, "swap_comp_for_soft_clip");
-      run(engine, 10, 2);
-      assert.equal(ends.length, 1);
-      assert.deepEqual(ends[0].ended.map((selection) => selection.effectSlotId), ["comp"]);
-      await handle.close();
-      run(engine, 12, 2);
-      assert.equal(engine.readObservations([tap("t2", "inserts", "gate")])[0].status, "unarmed");
-      owner.invalidate(true);
     } finally {
       engine.dispose();
     }
@@ -459,12 +490,12 @@ describe("#1562b-K -- a managed observation subscription follows a rebuild", () 
 
 // #1677 (the successor of batch 12b review M1). A rebuild's commit moves the control list at once,
 // and the plan that renders keeps its own positions until the block that adopts the replacement. An
-// observation record names its tap by stable key (the strip, the effect and the tap) and the core
-// resolves it on the newest committed plan, so a record sent in that window arms the tap it names
+// `Observe` edit names its tap by stable key (the strip, the effect and the tap) and the core
+// resolves it on the newest committed plan, so an edit sent in that window arms the tap it names
 // and no client keeps an index space to get wrong. `swap_t3_multi_and_limiter` puts two effects with
 // the same tap (`Gain Reduction`, ID 1) at each other's index: a record that named `multi` by the
 // rendering plan's index 0 would arm `limiter`, which is index 0 in the newest plan.
-describe("#1677 -- an observation record names its tap by stable key", () => {
+describe("#1677 -- an Observe edit names its tap by stable key", () => {
   const armed = (engine, effectSlotId) => engine.readObservations([tap("t3", "inserts", effectSlotId)])[0].status;
 
   /** An engine whose rebuild is committed and not yet adopted. */
@@ -475,22 +506,13 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
     return engine;
   }
 
-  /** The same subscriptions through the headless engine and through the browser transport. */
+  /**
+   * The subscriptions through the headless engine. Both engines send the same `Observe` frames to
+   * the same core entry since #1589b (no index of either plan is on the wire), so a hand-built
+   * browser transport would test only itself.
+   */
   const transports = [
     ["headless", (engine) => engine],
-    ["browser", (engine) => {
-      const host = engineHost(engine);
-      let controls;
-      const owner = new ObservationSubscriptionOwner({
-        observationMap: () => engine.observationMap(),
-        readObservations: (selections) => engine.readObservations(selections),
-        liveControls: async () => (controls ??= await createBrowserLiveControls(host)),
-      });
-      return {
-        subscribeObservations: async (request) => (await owner.subscribe(request)).handle,
-        readObservations: (selections) => engine.readObservations(selections),
-      };
-    }],
   ];
 
   for (const [transport, open] of transports) {
@@ -502,8 +524,11 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
           windowBlocks: 2,
         });
         assert.equal(armed(engine, "limiter"), "unarmed", "the other effect's tap is not armed in its place");
-        run(engine, 4, 6);
-        await handle.pump();
+        // The swap restarts t3: a duck-swap, adopted at its `S` (#1324a).
+        await runUntil(engine, 4, 2, async () => {
+          await handle.pump();
+          return handle.readLatest()[0].status === "ready";
+        }, "multi's tap is ready");
         assert.equal(handle.readLatest()[0].status, "ready");
         assert.notEqual(armed(engine, "multi"), "unarmed", "multi's own tap is armed");
         assert.equal(armed(engine, "limiter"), "unarmed", "limiter's tap is not");
@@ -541,8 +566,11 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
         run(engine, 0, 4);
         rebuild(engine, "swap_t3_multi_and_limiter");
         await handle.update({ selections: [tap("t3", "inserts", "multi")], windowBlocks: 2 });
-        run(engine, 4, 6);
-        await handle.pump();
+        // The swap restarts t3: a duck-swap, adopted at its `S` (#1324a).
+        await runUntil(engine, 4, 2, async () => {
+          await handle.pump();
+          return handle.readLatest()[0].status === "ready";
+        }, "multi's tap is ready");
         assert.equal(handle.readLatest()[0].status, "ready");
         assert.notEqual(armed(engine, "multi"), "unarmed");
         assert.equal(armed(engine, "limiter"), "unarmed", "limiter was released where it is now");
@@ -552,67 +580,6 @@ describe("#1677 -- an observation record names its tap by stable key", () => {
       }
     });
   }
-
-  test("a key the plan does not have is refused with its typed reason, and nothing changes", async () => {
-    const engine = await boot();
-    try {
-      run(engine, 0, 4);
-      const controls = engine.liveControls();
-      const edits = controls.edit.track("t3");
-      const known = edits.insert("multi", "miso.multiband-compressor").observe("Gain Reduction", true, 2);
-      const refusals = [
-        ["unknownEffect", edits.insert("no-such-insert", "miso.compressor").observe("Gain Reduction", true, 2)],
-        ["unknownTrack", controls.edit.track("no-such-strip").insert("multi", "miso.multiband-compressor")
-          .observe("Gain Reduction", true, 2)],
-        ["unknownTap", observationEdit(true, { stripId: "t3", rack: "inserts", effectId: "multi", tapId: 99 }, 2)],
-      ];
-      // The SDK refuses a rack it cannot spell before submission (#1542), so the core's own
-      // `unknownRack` is reached the way a C ABI caller reaches it: a raw record, rack byte 0.
-      const rawRack = encodeLaneEdits([known, known]);
-      rawRack[ABI_LAYOUT.commandRecord.bytes
-        + ABI_LAYOUT.commandRecord.fields.find((row) => row.name === "rack").offset] = 0;
-      const submits = [
-        ...refusals.map(([reasonName, bad]) => [reasonName, () => controls.submit(known, bad)]),
-        ["unknownRack", () => engine.submitCommands(rawRack, 2)],
-      ];
-      for (const [reasonName, submit] of submits) {
-        // The valid record rides in front of the refused one: the batch is one transaction.
-        const report = await submit();
-        assert.equal(report.ok, false, reasonName);
-        assert.equal(report.reasonName, reasonName);
-        assert.equal(report.rejectedIndex, 1, `${reasonName} names the record that broke the rule`);
-        assert.equal(report.admitted, 0);
-        run(engine, 4, 3);
-        assert.equal(armed(engine, "multi"), "unarmed", `${reasonName}: the valid record in front was not armed`);
-        assert.equal(armed(engine, "limiter"), "unarmed");
-      }
-      // The same key, alone, is admitted: the refusals changed no state.
-      assert.equal((await controls.submit(known)).ok, true);
-    } finally {
-      engine.dispose();
-    }
-  });
-
-  test("a key is resolved on the newest plan: a tap the replacement no longer has is refused", async () => {
-    // `swap_comp_for_soft_clip` makes the insert `comp` of `t1` a soft clipper in the replacement.
-    // Between its commit and its adoption the rendering plan still runs the compressor, whose map
-    // lists the tap; the core refuses the key against the newest plan.
-    const engine = await boot();
-    try {
-      run(engine, 0, 4);
-      rebuild(engine, "swap_comp_for_soft_clip");
-      assert.equal(engine.observationMap().bindings.some((b) => b.trackId === "t1" && b.effectSlotId === "comp"), true);
-      const controls = engine.liveControls();
-      const report = await controls.submit(
-        controls.edit.track("t1").insert("comp", "miso.compressor").observe("Gain Reduction", true, 2),
-      );
-      assert.equal(report.ok, false);
-      assert.equal(report.reasonName, "unknownTap");
-      assert.equal(report.admitted, 0);
-    } finally {
-      engine.dispose();
-    }
-  });
 });
 
 // Batch 12b review, m3. A deferred `OBSERVATION_ENDED` event of an earlier commit names a tap by its
@@ -624,8 +591,13 @@ describe("batch 12b review m3 -- an ended event older than the arm is ignored", 
     let deliver;
     const owner = new ObservationSubscriptionOwner({
       observationMap: () => engine.observationMap(),
-      readObservations: (selections) => engine.readObservations(selections),
-      liveControls: () => engine.liveControls(),
+      ...observationFrameTransport({
+        send: (frame) => engine.controlFrame(frame),
+        requestIds: engine.controlTransactions().requestIds,
+        committedRevision: () => engine.controlRevision(),
+        maximumFrameBytes: () => undefined,
+      }),
+      sampleRateHz: () => engine.shape().sampleRateHz,
       observationEnded: (listener) => { deliver = listener; return () => {}; },
     });
     try {
@@ -647,6 +619,61 @@ describe("batch 12b review m3 -- an ended event older than the arm is ignored", 
       deliver({ sequence: 3n, revision: armedAt + 1n, keys: [key] });
       assert.equal(ends.length, 1, "a commit after the arm ended it");
       assert.deepEqual(ends[0].ended.map((selection) => selection.effectSlotId), ["comp"]);
+    } finally {
+      owner.invalidate(true);
+      engine.dispose();
+    }
+  });
+
+  // #2087: the browser order. A's arm ends with `comp` and the event is late: `comp` comes back, B
+  // arms the tap (a fresh arm), and A closes before the event arrives. A's disarm names A's ended
+  // arm by its tag, so the core keeps B's.
+  // Red if A's close disarms B's arm (B's rows stop), or if it is refused as a misuse.
+  test("a close behind a late end event does not silence a later subscriber of the tap", async () => {
+    const engine = await boot();
+    let deliver;
+    const owner = new ObservationSubscriptionOwner({
+      observationMap: () => engine.observationMap(),
+      ...observationFrameTransport({
+        send: (frame) => engine.controlFrame(frame),
+        requestIds: engine.controlTransactions().requestIds,
+        committedRevision: () => engine.controlRevision(),
+        maximumFrameBytes: () => undefined,
+      }),
+      sampleRateHz: () => engine.shape().sampleRateHz,
+      observationEnded: (listener) => { deliver = listener; return () => {}; },
+    });
+    const selection = tap("t1", "inserts", "comp");
+    const unavailable = () => {
+      try {
+        engine.readObservations([selection]);
+        return false;
+      } catch (error) {
+        return /unavailable/.test(error.message);
+      }
+    };
+    try {
+      run(engine, 0, 2);
+      const a = await owner.subscribe({ selections: [selection], windowBlocks: 2 });
+      const removedAt = rebuild(engine, "remove_comp");
+      let block = await runUntil(engine, 2, 0, unavailable, "the plan without comp renders");
+      // `remove_eq` upserts t1 as booted without `eq`: `comp` comes back under its ID.
+      rebuild(engine, "remove_eq");
+      block = await runUntil(engine, block, 0, () => !unavailable(), "the plan with comp renders");
+      const b = await owner.subscribe({ selections: [selection], windowBlocks: 2 });
+      block = await runUntil(engine, block, 4, async () => {
+        await b.handle.pump();
+        return b.handle.readLatest()[0].status === "ready";
+      }, "B's tap is ready");
+      await a.handle.close();
+      // The end event of the removal arrives now, behind the close.
+      deliver({ sequence: 1n, revision: removedAt, keys: [{ stripId: "t1", rack: "inserts", effectSlotId: "comp", tapId: 1 }] });
+      const before = b.handle.readLatest()[0].window.sequence;
+      run(engine, block, 4);
+      await b.handle.pump();
+      const row = b.handle.readLatest()[0];
+      assert.equal(row.status, "ready", "B's tap is still armed");
+      assert.ok(row.window.sequence > before, "B's tap keeps publishing");
     } finally {
       owner.invalidate(true);
       engine.dispose();

@@ -41,59 +41,33 @@
 //!
 //! # `sourceRing`: the default ring is a rule, not a number
 //!
-//! `default_source_ring_frames` covers `SOURCE_STALL_TOLERANCE_MS` of audio, rounded up to a whole
-//! number of quanta, plus one quantum held by the consumer and one in the recycle path. A consumer
-//! that wants the ring the engine will actually pick — for sizing its own producer — needs the two
-//! inputs to that rule, not a rate-specific answer. Both are transcribed, so the SDK derives the
-//! ring from the shape the boot itself reported instead of holding a private copy of `100`.
+//! `default_source_ring_frames` (#1406 D2) is the stall ring -- `SOURCE_STALL_TOLERANCE_MS` of
+//! audio rounded up to a whole number of quanta, plus one quantum held by the consumer and one in
+//! the recycle path -- plus the largest warm-successor prime, `primeGrowths` times the largest
+//! launch latency at the rate rounded up to whole quanta, plus one more quantum. A consumer that
+//! wants the ring the engine will actually pick -- for sizing its own producer -- needs the
+//! inputs to that rule, not a rate-specific answer. All of them are transcribed, so the SDK
+//! derives the ring from the shape the boot itself reported instead of holding a private copy of
+//! `100`, of `+ 2` or of `+ 1`.
 
 use core::mem::offset_of;
 
 use serde::Serialize;
 
 use crate::json::{self, Entries};
-use host_core::RESPONSE_MAXIMUM_POINTS;
+use host_core::{LAUNCH_SAMPLE_RATES, RESPONSE_MAXIMUM_POINTS};
 use host_web::{
-    ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
-    BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
-    COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_REASON_BACKPRESSURE,
-    COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE,
-    COMMAND_REASON_OBSERVATION_LIMIT, COMMAND_REASON_OBSERVATION_UNBOUND,
-    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
-    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, COMMAND_REPORT_BYTES,
-    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES,
-    LIVE_RESPONSE_CAPTURE_BYTES, LIVE_RESPONSE_MAXIMUM_ID_BYTES, LIVE_RESPONSE_MAXIMUM_OWNERS,
-    LIVE_RESPONSE_MAXIMUM_POINTS, LIVE_RESPONSE_MAXIMUM_SECTIONS,
-    LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL, LIVE_RESPONSE_MODE_TARGET, LIVE_RESPONSE_OWNER_BYTES,
-    LIVE_RESPONSE_RACK_CONSOLE, LIVE_RESPONSE_RACK_INPUT_FILTERS, LIVE_RESPONSE_RACK_INSERTS,
-    LIVE_RESPONSE_REQUEST_BYTES, LIVE_RESPONSE_RESULT_BYTES, LIVE_RESPONSE_SECTION_BYTES,
-    MAXIMUM_COMMAND_RECORDS, MAXIMUM_DOCUMENT_BYTES, MAXIMUM_OBSERVATION_TAPS, METER_HEADER_BYTES,
-    OBSERVATION_CHANNEL_BOTH, OBSERVATION_CHANNEL_LEFT, OBSERVATION_CHANNEL_RIGHT,
-    OBSERVATION_RESULT_BYTES, OBSERVATION_SELECTION_BYTES, OBSERVATION_STATUS_PENDING,
-    OBSERVATION_STATUS_READY, OBSERVATION_STATUS_UNARMED, PLAN_LATENCY_BYTES, RACK_CONSOLE,
-    RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESPONSE_CHANNEL_BOTH,
-    RESPONSE_CHANNEL_LEFT, RESPONSE_CHANNEL_RIGHT, RESPONSE_GRID_LINEAR, RESPONSE_GRID_LOGARITHMIC,
-    RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED,
-    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
-    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS,
-    RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE,
-    SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, SPECTRUM_BIN_COUNT, SPECTRUM_CAPTURE_BYTES,
-    SPECTRUM_CHANNEL_BOTH, SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT,
-    SPECTRUM_COLLECTION_ENTRY_BYTES, SPECTRUM_COLLECTION_ENTRY_CAPACITY,
-    SPECTRUM_COLLECTION_REQUEST_BYTES, SPECTRUM_COLLECTION_TARGET_IDS_BYTES,
-    SPECTRUM_MAXIMUM_ID_BYTES, SPECTRUM_MAXIMUM_PREPARED_TARGETS, SPECTRUM_REQUEST_BYTES,
-    SPECTRUM_RESULT_HEADER_BYTES, SPECTRUM_STREAM_METADATA_BYTES, SPECTRUM_STREAM_STATUS_FAILED,
-    SPECTRUM_STREAM_STATUS_GAP, SPECTRUM_STREAM_STATUS_INACTIVE, SPECTRUM_STREAM_STATUS_PENDING,
-    SPECTRUM_STREAM_STATUS_READY, SPECTRUM_STREAM_STATUS_STOPPED, SPECTRUM_STREAM_STATUS_WARMING,
-    SPECTRUM_TARGET_OUTPUT, SPECTRUM_TARGET_TRACK_POST_INPUT, SPECTRUM_TARGET_TRACK_POST_PAN,
-    SPECTRUM_WINDOW_FRAMES, SPECTRUM_WINDOW_HEADER_BYTES, STATE_DISPOSED, STATE_FAILED,
-    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebCommandReport,
-    WebLiveResponseOwner, WebLiveResponseRequest, WebLiveResponseResult, WebLiveResponseSection,
-    WebMeterHeader, WebObservationResult, WebObservationSelection, WebPlanLatency,
-    WebPlanWatermark, WebResourceReport, WebSeekReport, WebSpectrumCollectionEntry,
-    WebSpectrumCollectionRequest, WebSpectrumRequest, WebSpectrumResult, WebSpectrumStreamMetadata,
-    WebSpectrumWindow, WebStatus,
+    ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_DIAGNOSTIC,
+    BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
+    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES, MAXIMUM_DOCUMENT_BYTES,
+    METER_HEADER_BYTES, PLAN_LATENCY_BYTES, RACK_CONSOLE, RACK_INSERTS, RACK_NOT_APPLICABLE,
+    RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL,
+    RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
+    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
+    RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
+    RESULT_WRONG_STATE, SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED,
+    STATE_READY, STATUS_BYTES, WATERMARK_BYTES, WebBootOptions, WebMeterHeader, WebPlanLatency,
+    WebPlanWatermark, WebResourceReport, WebSeekReport, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -108,6 +82,23 @@ pub const SCHEMA: &str = "miso.web.abi-layout.v1";
 /// a consumer deriving the ring from a reported shape needs the whole rule, and `+ 2` inside
 /// `default_source_ring_frames` is otherwise a number the SDK would have to know privately.
 pub const SOURCE_RING_RESERVE_QUANTA: u32 = 2;
+
+/// The growths the default source ring holds a prime for (#1406 D3): `p_max_samples` is this many
+/// times the largest launch latency, rounded up to whole quanta (#1286 D3 item 1).
+pub const SOURCE_RING_PRIME_GROWTHS: u32 = 4;
+
+/// The quantum the default source ring holds beyond the largest prime (#1406 D2): readiness asks
+/// for `k + 1` blocks queued past the consumer for a lead of `k` quanta. Published, so no consumer
+/// holds a private `+ 1`.
+pub const SOURCE_RING_PRIME_RESERVE_QUANTA: u32 = 1;
+
+/// The largest latency a launch effect declares at `sample_rate_hz`, in samples: the true-peak
+/// limiter's `N + 6` with `N = fs / 100` (`crates/true-peak-limiter`), the `L_max(fs)` of
+/// `p_max_samples` (#1286 D3 item 1).
+#[must_use]
+pub const fn source_ring_prime_latency_samples(sample_rate_hz: u32) -> u32 {
+    sample_rate_hz / 100 + 6
+}
 
 /// The lifecycle stages a typed SDK error can be raised at, in the order a session passes through
 /// them.
@@ -127,17 +118,14 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 111] = [
+pub const EXPORTS: [&str; 47] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
-    "miso_engine_web_v1_boot_with_spectrum_hop",
     "miso_engine_web_v1_buffer_capacity",
     "miso_engine_web_v1_buffer_ptr",
-    "miso_engine_web_v1_command_report_ptr",
-    "miso_engine_web_v1_command_submit",
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
@@ -151,27 +139,12 @@ pub const EXPORTS: [&str; 111] = [
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
-    "miso_engine_web_v1_observation_count",
-    "miso_engine_web_v1_observation_effect_index",
-    "miso_engine_web_v1_observation_effect_slot_id",
-    "miso_engine_web_v1_observation_id_capacity",
-    "miso_engine_web_v1_observation_id_ptr",
-    "miso_engine_web_v1_observation_native_effect_id",
-    "miso_engine_web_v1_observation_rack",
-    "miso_engine_web_v1_observation_read",
-    "miso_engine_web_v1_observation_result_bytes",
-    "miso_engine_web_v1_observation_result_ptr",
-    "miso_engine_web_v1_observation_selection_bytes",
-    "miso_engine_web_v1_observation_selection_capacity",
-    "miso_engine_web_v1_observation_selection_ptr",
-    "miso_engine_web_v1_observation_tap_count",
-    "miso_engine_web_v1_observation_tap_id",
-    "miso_engine_web_v1_observation_track_index",
     "miso_engine_web_v1_plan_latency_ptr",
     "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
     "miso_engine_web_v1_replace_document_ptr",
+    "miso_engine_web_v1_resolved_source_ring_frames",
     "miso_engine_web_v1_resource_ptr",
     "miso_engine_web_v1_response_frame_close",
     "miso_engine_web_v1_response_frame_ptr",
@@ -190,53 +163,7 @@ pub const EXPORTS: [&str; 111] = [
     "miso_engine_web_v1_source_seek_report",
     "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
-    "miso_engine_web_v1_spectrum_analysis",
-    "miso_engine_web_v1_spectrum_arm",
-    "miso_engine_web_v1_spectrum_cancel",
-    "miso_engine_web_v1_spectrum_capture_bytes",
-    "miso_engine_web_v1_spectrum_capture_capacity",
-    "miso_engine_web_v1_spectrum_capture_ptr",
-    "miso_engine_web_v1_spectrum_capture_set_bytes",
-    "miso_engine_web_v1_spectrum_close",
-    "miso_engine_web_v1_spectrum_collection_entry_bytes",
-    "miso_engine_web_v1_spectrum_collection_entry_capacity",
-    "miso_engine_web_v1_spectrum_collection_entry_ptr",
-    "miso_engine_web_v1_spectrum_collection_request_bytes",
-    "miso_engine_web_v1_spectrum_collection_request_ptr",
-    "miso_engine_web_v1_spectrum_collection_target_ids_capacity",
-    "miso_engine_web_v1_spectrum_collection_target_ids_ptr",
-    "miso_engine_web_v1_spectrum_hop_capability",
-    "miso_engine_web_v1_spectrum_read",
-    "miso_engine_web_v1_spectrum_request_bytes",
-    "miso_engine_web_v1_spectrum_request_ptr",
-    "miso_engine_web_v1_spectrum_result_bytes",
-    "miso_engine_web_v1_spectrum_result_ptr",
-    "miso_engine_web_v1_spectrum_select",
-    "miso_engine_web_v1_spectrum_selection_epoch",
-    "miso_engine_web_v1_spectrum_stream_analysis",
-    "miso_engine_web_v1_spectrum_stream_analysis_configure",
-    "miso_engine_web_v1_spectrum_stream_metadata_bytes",
-    "miso_engine_web_v1_spectrum_stream_metadata_ptr",
-    "miso_engine_web_v1_spectrum_stream_read",
-    "miso_engine_web_v1_spectrum_stream_reset",
-    "miso_engine_web_v1_spectrum_stream_select",
-    "miso_engine_web_v1_spectrum_stream_start",
-    "miso_engine_web_v1_spectrum_stream_stop",
-    "miso_engine_web_v1_spectrum_target_id_capacity",
-    "miso_engine_web_v1_spectrum_target_id_ptr",
     "miso_engine_web_v1_status_ptr",
-    "miso_engine_web_v1_track_response_analysis",
-    "miso_engine_web_v1_track_response_capture",
-    "miso_engine_web_v1_track_response_close",
-    "miso_engine_web_v1_track_response_request_bytes",
-    "miso_engine_web_v1_track_response_request_ptr",
-    "miso_engine_web_v1_track_response_result_bytes",
-    "miso_engine_web_v1_track_response_result_ptr",
-    "miso_engine_web_v1_track_response_snapshot_capacity",
-    "miso_engine_web_v1_track_response_snapshot_ptr",
-    "miso_engine_web_v1_track_response_snapshot_set_bytes",
-    "miso_engine_web_v1_track_response_track_id_capacity",
-    "miso_engine_web_v1_track_response_track_id_ptr",
     "miso_engine_web_v1_watermark_ptr",
     "miso_engine_web_v1_watermark_read",
 ];
@@ -282,11 +209,7 @@ fn boot_options_fields() -> [Field; 11] {
             offset_of!(WebBootOptions, live_control_meter_blocks),
             "u64",
         ),
-        (
-            "liveControlObservationTaps",
-            offset_of!(WebBootOptions, live_control_observation_taps),
-            "u64",
-        ),
+        ("reserved3", offset_of!(WebBootOptions, reserved3), "u64"),
         ("reserved2", offset_of!(WebBootOptions, reserved2), "u64"),
     ]
 }
@@ -620,738 +543,6 @@ fn seek_report_fields() -> [Field; 8] {
     ]
 }
 
-fn command_report_fields() -> [Field; 8] {
-    [
-        (
-            "structSize",
-            offset_of!(WebCommandReport, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebCommandReport, abi_version),
-            "u32",
-        ),
-        ("result", offset_of!(WebCommandReport, result), "u32"),
-        ("reason", offset_of!(WebCommandReport, reason), "u32"),
-        (
-            "rejectedIndex",
-            offset_of!(WebCommandReport, rejected_index),
-            "u32",
-        ),
-        ("admitted", offset_of!(WebCommandReport, admitted), "u32"),
-        (
-            "appliedAtSample",
-            offset_of!(WebCommandReport, applied_at_sample),
-            "u64",
-        ),
-        ("reserved", offset_of!(WebCommandReport, reserved), "u64[2]"),
-    ]
-}
-
-fn observation_selection_fields() -> [Field; 8] {
-    [
-        (
-            "structSize",
-            offset_of!(WebObservationSelection, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebObservationSelection, abi_version),
-            "u32",
-        ),
-        (
-            "trackIndex",
-            offset_of!(WebObservationSelection, track_index),
-            "u32",
-        ),
-        ("rack", offset_of!(WebObservationSelection, rack), "u32"),
-        (
-            "effectIndex",
-            offset_of!(WebObservationSelection, effect_index),
-            "u32",
-        ),
-        ("tapId", offset_of!(WebObservationSelection, tap_id), "u32"),
-        (
-            "channels",
-            offset_of!(WebObservationSelection, channels),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebObservationSelection, reserved),
-            "u32",
-        ),
-    ]
-}
-
-fn observation_result_fields() -> [Field; 19] {
-    [
-        (
-            "structSize",
-            offset_of!(WebObservationResult, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebObservationResult, abi_version),
-            "u32",
-        ),
-        ("status", offset_of!(WebObservationResult, status), "u32"),
-        (
-            "trackIndex",
-            offset_of!(WebObservationResult, track_index),
-            "u32",
-        ),
-        ("rack", offset_of!(WebObservationResult, rack), "u32"),
-        (
-            "effectIndex",
-            offset_of!(WebObservationResult, effect_index),
-            "u32",
-        ),
-        ("tapId", offset_of!(WebObservationResult, tap_id), "u32"),
-        (
-            "channels",
-            offset_of!(WebObservationResult, channels),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebObservationResult, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "reserved0",
-            offset_of!(WebObservationResult, reserved0),
-            "u32",
-        ),
-        (
-            "firstSample",
-            offset_of!(WebObservationResult, first_sample),
-            "u64",
-        ),
-        (
-            "endSample",
-            offset_of!(WebObservationResult, end_sample),
-            "u64",
-        ),
-        (
-            "sequence",
-            offset_of!(WebObservationResult, sequence),
-            "u64",
-        ),
-        ("blocks", offset_of!(WebObservationResult, blocks), "u32"),
-        (
-            "leftPresent",
-            offset_of!(WebObservationResult, left_present),
-            "u32",
-        ),
-        (
-            "rightPresent",
-            offset_of!(WebObservationResult, right_present),
-            "u32",
-        ),
-        ("left", offset_of!(WebObservationResult, left), "f32"),
-        ("right", offset_of!(WebObservationResult, right), "f32"),
-        (
-            "reserved",
-            offset_of!(WebObservationResult, reserved),
-            "u32[3]",
-        ),
-    ]
-}
-
-/// The staged `miso.command.v1` record, whose offsets are a decode rule rather than a `#[repr(C)]`
-/// structure.
-///
-/// `CommandRecord::decode` reads these byte positions out of the staging buffer directly — there
-/// is no Rust type to take `offset_of!` of — so the rows are transcribed from that function and
-/// pinned against it by `tests/abi_layout.rs`, which encodes a record at these offsets and
-/// requires the engine to decode exactly the values written.
-fn command_record_fields() -> [Field; 9] {
-    [
-        ("kind", 0, "u8"),
-        ("rack", 1, "u8"),
-        ("stripIdBytes", 2, "u8"),
-        ("effectIdBytes", 3, "u8"),
-        ("tapId", 4, "u32"),
-        ("windowBlocks", 8, "u32"),
-        ("reserved0", 12, "u32"),
-        ("stripId", 16, "u8[128]"),
-        ("effectId", 144, "u8[128]"),
-    ]
-}
-
-fn live_response_request_fields() -> [Field; 10] {
-    [
-        (
-            "structSize",
-            offset_of!(WebLiveResponseRequest, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebLiveResponseRequest, abi_version),
-            "u32",
-        ),
-        (
-            "trackIdBytes",
-            offset_of!(WebLiveResponseRequest, track_id_bytes),
-            "u32",
-        ),
-        ("grid", offset_of!(WebLiveResponseRequest, grid), "u32"),
-        (
-            "channels",
-            offset_of!(WebLiveResponseRequest, channels),
-            "u32",
-        ),
-        ("points", offset_of!(WebLiveResponseRequest, points), "u32"),
-        (
-            "minimumHz",
-            offset_of!(WebLiveResponseRequest, minimum_hz),
-            "f32",
-        ),
-        (
-            "maximumHz",
-            offset_of!(WebLiveResponseRequest, maximum_hz),
-            "f32",
-        ),
-        (
-            "maximumResultBytes",
-            offset_of!(WebLiveResponseRequest, maximum_result_bytes),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebLiveResponseRequest, reserved),
-            "u32[3]",
-        ),
-    ]
-}
-
-fn spectrum_request_fields() -> [Field; 8] {
-    [
-        (
-            "structSize",
-            offset_of!(WebSpectrumRequest, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebSpectrumRequest, abi_version),
-            "u32",
-        ),
-        ("target", offset_of!(WebSpectrumRequest, target), "u32"),
-        ("channels", offset_of!(WebSpectrumRequest, channels), "u32"),
-        (
-            "targetIdBytes",
-            offset_of!(WebSpectrumRequest, target_id_bytes),
-            "u32",
-        ),
-        (
-            "reserved0",
-            offset_of!(WebSpectrumRequest, reserved0),
-            "u32",
-        ),
-        (
-            "maximumCaptureBytes",
-            offset_of!(WebSpectrumRequest, maximum_capture_bytes),
-            "u64",
-        ),
-        (
-            "reserved",
-            offset_of!(WebSpectrumRequest, reserved),
-            "u32[2]",
-        ),
-    ]
-}
-
-fn spectrum_collection_request_fields() -> [Field; 6] {
-    [
-        (
-            "structSize",
-            offset_of!(WebSpectrumCollectionRequest, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebSpectrumCollectionRequest, abi_version),
-            "u32",
-        ),
-        (
-            "entryCount",
-            offset_of!(WebSpectrumCollectionRequest, entry_count),
-            "u32",
-        ),
-        (
-            "reserved0",
-            offset_of!(WebSpectrumCollectionRequest, reserved0),
-            "u32",
-        ),
-        (
-            "maximumCaptureBytes",
-            offset_of!(WebSpectrumCollectionRequest, maximum_capture_bytes),
-            "u64",
-        ),
-        (
-            "reserved",
-            offset_of!(WebSpectrumCollectionRequest, reserved),
-            "u32[2]",
-        ),
-    ]
-}
-
-fn spectrum_collection_entry_fields() -> [Field; 4] {
-    [
-        (
-            "target",
-            offset_of!(WebSpectrumCollectionEntry, target),
-            "u32",
-        ),
-        (
-            "channels",
-            offset_of!(WebSpectrumCollectionEntry, channels),
-            "u32",
-        ),
-        (
-            "targetIdBytes",
-            offset_of!(WebSpectrumCollectionEntry, target_id_bytes),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebSpectrumCollectionEntry, reserved),
-            "u32[3]",
-        ),
-    ]
-}
-
-fn spectrum_window_fields() -> [Field; 13] {
-    [
-        (
-            "structSize",
-            offset_of!(WebSpectrumWindow, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebSpectrumWindow, abi_version),
-            "u32",
-        ),
-        ("target", offset_of!(WebSpectrumWindow, target), "u32"),
-        ("channels", offset_of!(WebSpectrumWindow, channels), "u32"),
-        (
-            "sampleRateHz",
-            offset_of!(WebSpectrumWindow, sample_rate_hz),
-            "u32",
-        ),
-        ("frames", offset_of!(WebSpectrumWindow, frames), "u32"),
-        (
-            "sourceUnderrun",
-            offset_of!(WebSpectrumWindow, source_underrun),
-            "u32",
-        ),
-        ("reserved0", offset_of!(WebSpectrumWindow, reserved0), "u32"),
-        (
-            "capturedSample",
-            offset_of!(WebSpectrumWindow, captured_sample),
-            "u64",
-        ),
-        (
-            "endSample",
-            offset_of!(WebSpectrumWindow, end_sample),
-            "u64",
-        ),
-        (
-            "snapshotToken",
-            offset_of!(WebSpectrumWindow, snapshot_token),
-            "u64",
-        ),
-        (
-            "leftOffset",
-            offset_of!(WebSpectrumWindow, left_offset),
-            "u32",
-        ),
-        (
-            "rightOffset",
-            offset_of!(WebSpectrumWindow, right_offset),
-            "u32",
-        ),
-    ]
-}
-
-fn spectrum_result_fields() -> [Field; 18] {
-    [
-        (
-            "structSize",
-            offset_of!(WebSpectrumResult, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebSpectrumResult, abi_version),
-            "u32",
-        ),
-        ("result", offset_of!(WebSpectrumResult, result), "u32"),
-        ("target", offset_of!(WebSpectrumResult, target), "u32"),
-        ("channels", offset_of!(WebSpectrumResult, channels), "u32"),
-        (
-            "sampleRateHz",
-            offset_of!(WebSpectrumResult, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "windowFrames",
-            offset_of!(WebSpectrumResult, window_frames),
-            "u32",
-        ),
-        ("binCount", offset_of!(WebSpectrumResult, bin_count), "u32"),
-        (
-            "sourceUnderrun",
-            offset_of!(WebSpectrumResult, source_underrun),
-            "u32",
-        ),
-        ("floorDb", offset_of!(WebSpectrumResult, floor_db), "f32"),
-        (
-            "capturedSample",
-            offset_of!(WebSpectrumResult, captured_sample),
-            "u64",
-        ),
-        (
-            "endSample",
-            offset_of!(WebSpectrumResult, end_sample),
-            "u64",
-        ),
-        (
-            "snapshotToken",
-            offset_of!(WebSpectrumResult, snapshot_token),
-            "u64",
-        ),
-        (
-            "resultBytes",
-            offset_of!(WebSpectrumResult, result_bytes),
-            "u64",
-        ),
-        (
-            "frequenciesOffset",
-            offset_of!(WebSpectrumResult, frequencies_offset),
-            "u32",
-        ),
-        (
-            "leftOffset",
-            offset_of!(WebSpectrumResult, left_offset),
-            "u32",
-        ),
-        (
-            "rightOffset",
-            offset_of!(WebSpectrumResult, right_offset),
-            "u32",
-        ),
-        ("reserved0", offset_of!(WebSpectrumResult, reserved0), "u32"),
-    ]
-}
-
-fn spectrum_stream_metadata_fields() -> [Field; 21] {
-    [
-        (
-            "structSize",
-            offset_of!(WebSpectrumStreamMetadata, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebSpectrumStreamMetadata, abi_version),
-            "u32",
-        ),
-        (
-            "result",
-            offset_of!(WebSpectrumStreamMetadata, result),
-            "u32",
-        ),
-        (
-            "status",
-            offset_of!(WebSpectrumStreamMetadata, status),
-            "u32",
-        ),
-        (
-            "target",
-            offset_of!(WebSpectrumStreamMetadata, target),
-            "u32",
-        ),
-        (
-            "channels",
-            offset_of!(WebSpectrumStreamMetadata, channels),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebSpectrumStreamMetadata, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "quantumFrames",
-            offset_of!(WebSpectrumStreamMetadata, quantum_frames),
-            "u32",
-        ),
-        (
-            "hopFrames",
-            offset_of!(WebSpectrumStreamMetadata, hop_frames),
-            "u32",
-        ),
-        (
-            "sourceUnderrun",
-            offset_of!(WebSpectrumStreamMetadata, source_underrun),
-            "u32",
-        ),
-        (
-            "reserved0",
-            offset_of!(WebSpectrumStreamMetadata, reserved0),
-            "u32",
-        ),
-        (
-            "reserved1",
-            offset_of!(WebSpectrumStreamMetadata, reserved1),
-            "u32",
-        ),
-        (
-            "captureEpoch",
-            offset_of!(WebSpectrumStreamMetadata, capture_epoch),
-            "u64",
-        ),
-        (
-            "sequence",
-            offset_of!(WebSpectrumStreamMetadata, sequence),
-            "u64",
-        ),
-        (
-            "droppedCaptures",
-            offset_of!(WebSpectrumStreamMetadata, dropped_captures),
-            "u64",
-        ),
-        (
-            "windows",
-            offset_of!(WebSpectrumStreamMetadata, windows),
-            "u64",
-        ),
-        (
-            "capturedSample",
-            offset_of!(WebSpectrumStreamMetadata, captured_sample),
-            "u64",
-        ),
-        (
-            "endSample",
-            offset_of!(WebSpectrumStreamMetadata, end_sample),
-            "u64",
-        ),
-        (
-            "analysisEpoch",
-            offset_of!(WebSpectrumStreamMetadata, analysis_epoch),
-            "u64",
-        ),
-        (
-            "historyStartSample",
-            offset_of!(WebSpectrumStreamMetadata, history_start_sample),
-            "u64",
-        ),
-        (
-            "smoothingMs",
-            offset_of!(WebSpectrumStreamMetadata, smoothing_ms),
-            "f64",
-        ),
-    ]
-}
-
-fn live_response_owner_fields() -> [Field; 16] {
-    [
-        (
-            "trackIdOffset",
-            offset_of!(WebLiveResponseOwner, track_id_offset),
-            "u32",
-        ),
-        (
-            "trackIdBytes",
-            offset_of!(WebLiveResponseOwner, track_id_bytes),
-            "u32",
-        ),
-        (
-            "nativeIdOffset",
-            offset_of!(WebLiveResponseOwner, native_id_offset),
-            "u32",
-        ),
-        (
-            "nativeIdBytes",
-            offset_of!(WebLiveResponseOwner, native_id_bytes),
-            "u32",
-        ),
-        (
-            "stableIdOffset",
-            offset_of!(WebLiveResponseOwner, stable_id_offset),
-            "u32",
-        ),
-        (
-            "stableIdBytes",
-            offset_of!(WebLiveResponseOwner, stable_id_bytes),
-            "u32",
-        ),
-        ("rack", offset_of!(WebLiveResponseOwner, rack), "u32"),
-        ("slot", offset_of!(WebLiveResponseOwner, slot), "u32"),
-        ("kind", offset_of!(WebLiveResponseOwner, kind), "u32"),
-        (
-            "bypassed",
-            offset_of!(WebLiveResponseOwner, bypassed),
-            "u32",
-        ),
-        (
-            "availability",
-            offset_of!(WebLiveResponseOwner, availability),
-            "u32",
-        ),
-        (
-            "leftOffset",
-            offset_of!(WebLiveResponseOwner, left_offset),
-            "u32",
-        ),
-        (
-            "leftCount",
-            offset_of!(WebLiveResponseOwner, left_count),
-            "u32",
-        ),
-        (
-            "rightOffset",
-            offset_of!(WebLiveResponseOwner, right_offset),
-            "u32",
-        ),
-        (
-            "rightCount",
-            offset_of!(WebLiveResponseOwner, right_count),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebLiveResponseOwner, reserved),
-            "u32[1]",
-        ),
-    ]
-}
-
-fn live_response_section_fields() -> [Field; 5] {
-    [
-        ("id", offset_of!(WebLiveResponseSection, id), "u32"),
-        ("kind", offset_of!(WebLiveResponseSection, kind), "u32"),
-        (
-            "enabled",
-            offset_of!(WebLiveResponseSection, enabled),
-            "u32",
-        ),
-        (
-            "wordCount",
-            offset_of!(WebLiveResponseSection, word_count),
-            "u32",
-        ),
-        ("words", offset_of!(WebLiveResponseSection, words), "u32[7]"),
-    ]
-}
-
-fn live_response_result_fields() -> [Field; 22] {
-    [
-        (
-            "structSize",
-            offset_of!(WebLiveResponseResult, struct_size),
-            "u32",
-        ),
-        (
-            "abiVersion",
-            offset_of!(WebLiveResponseResult, abi_version),
-            "u32",
-        ),
-        ("result", offset_of!(WebLiveResponseResult, result), "u32"),
-        ("mode", offset_of!(WebLiveResponseResult, mode), "u32"),
-        ("meaning", offset_of!(WebLiveResponseResult, meaning), "u32"),
-        (
-            "channels",
-            offset_of!(WebLiveResponseResult, channels),
-            "u32",
-        ),
-        ("points", offset_of!(WebLiveResponseResult, points), "u32"),
-        (
-            "ownerCount",
-            offset_of!(WebLiveResponseResult, owner_count),
-            "u32",
-        ),
-        (
-            "excludedCount",
-            offset_of!(WebLiveResponseResult, excluded_count),
-            "u32",
-        ),
-        (
-            "sampleRateHz",
-            offset_of!(WebLiveResponseResult, sample_rate_hz),
-            "u32",
-        ),
-        (
-            "reserved0",
-            offset_of!(WebLiveResponseResult, reserved0),
-            "u32",
-        ),
-        (
-            "reserved1",
-            offset_of!(WebLiveResponseResult, reserved1),
-            "u32",
-        ),
-        (
-            "capturedSample",
-            offset_of!(WebLiveResponseResult, captured_sample),
-            "u64",
-        ),
-        (
-            "snapshotToken",
-            offset_of!(WebLiveResponseResult, snapshot_token),
-            "u64",
-        ),
-        (
-            "resultBytes",
-            offset_of!(WebLiveResponseResult, result_bytes),
-            "u64",
-        ),
-        (
-            "frequenciesOffset",
-            offset_of!(WebLiveResponseResult, frequencies_offset),
-            "u32",
-        ),
-        (
-            "leftOffset",
-            offset_of!(WebLiveResponseResult, left_offset),
-            "u32",
-        ),
-        (
-            "rightOffset",
-            offset_of!(WebLiveResponseResult, right_offset),
-            "u32",
-        ),
-        (
-            "ownersOffset",
-            offset_of!(WebLiveResponseResult, owners_offset),
-            "u32",
-        ),
-        (
-            "ownerRecordBytes",
-            offset_of!(WebLiveResponseResult, owner_record_bytes),
-            "u32",
-        ),
-        (
-            "sectionRecordBytes",
-            offset_of!(WebLiveResponseResult, section_record_bytes),
-            "u32",
-        ),
-        (
-            "reserved",
-            offset_of!(WebLiveResponseResult, reserved),
-            "u32[2]",
-        ),
-    ]
-}
-
 /// Render the whole document. Deterministic: every table below is a fixed array.
 #[must_use]
 pub fn render() -> String {
@@ -1387,28 +578,7 @@ pub fn render() -> String {
         (BUFFER_SOURCE_PCM, "sourcePcm"),
         (BUFFER_DIAGNOSTIC, "diagnostic"),
         (BUFFER_OUTPUT_PCM, "outputPcm"),
-        (BUFFER_COMMAND, "command"),
         (BUFFER_METER_FRAME, "meterFrame"),
-    ];
-    let wire_command_kinds = [
-        (COMMAND_OBSERVE_SUBSCRIBE, "observeSubscribe"),
-        (COMMAND_OBSERVE_UNSUBSCRIBE, "observeUnsubscribe"),
-    ];
-    let command_reasons = [
-        (COMMAND_REASON_NONE, "none"),
-        (COMMAND_REASON_MALFORMED, "malformed"),
-        (COMMAND_REASON_UNKNOWN_TRACK, "unknownTrack"),
-        (COMMAND_REASON_UNKNOWN_RACK, "unknownRack"),
-        (COMMAND_REASON_UNKNOWN_EFFECT, "unknownEffect"),
-        (COMMAND_REASON_UNKNOWN_PARAMETER, "unknownParameter"),
-        (COMMAND_REASON_DOMAIN, "domain"),
-        (COMMAND_REASON_UNSUPPORTED_KIND, "unsupportedKind"),
-        (COMMAND_REASON_BACKPRESSURE, "backpressure"),
-        (COMMAND_REASON_WRONG_STATE, "wrongState"),
-        (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
-        (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
-        // 12-14 are retired with the value kinds (#1565A) and never reallocated; #1676 added 15.
-        (COMMAND_REASON_OBSERVATION_LIMIT, "observationLimit"),
     ];
 
     let named = |values: &[(u32, &'static str)]| {
@@ -1443,10 +613,6 @@ pub fn render() -> String {
                     structure(METER_HEADER_BYTES, &meter_header_fields()),
                 ),
                 (
-                    "commandReport",
-                    structure(COMMAND_REPORT_BYTES, &command_report_fields()),
-                ),
-                (
                     "planWatermark",
                     structure(WATERMARK_BYTES, &plan_watermark_fields()),
                 ),
@@ -1458,167 +624,42 @@ pub fn render() -> String {
                     "seekReport",
                     structure(SEEK_REPORT_BYTES, &seek_report_fields()),
                 ),
-                (
-                    "observationSelection",
-                    structure(OBSERVATION_SELECTION_BYTES, &observation_selection_fields()),
-                ),
-                (
-                    "observationResult",
-                    structure(OBSERVATION_RESULT_BYTES, &observation_result_fields()),
-                ),
-                (
-                    "liveResponseRequest",
-                    structure(LIVE_RESPONSE_REQUEST_BYTES, &live_response_request_fields()),
-                ),
-                (
-                    "spectrumRequest",
-                    structure(SPECTRUM_REQUEST_BYTES, &spectrum_request_fields()),
-                ),
-                (
-                    "spectrumCollectionRequest",
-                    structure(
-                        SPECTRUM_COLLECTION_REQUEST_BYTES,
-                        &spectrum_collection_request_fields(),
-                    ),
-                ),
-                (
-                    "spectrumCollectionEntry",
-                    structure(
-                        SPECTRUM_COLLECTION_ENTRY_BYTES,
-                        &spectrum_collection_entry_fields(),
-                    ),
-                ),
-                (
-                    "spectrumWindow",
-                    structure(SPECTRUM_WINDOW_HEADER_BYTES, &spectrum_window_fields()),
-                ),
-                (
-                    "spectrumResult",
-                    structure(SPECTRUM_RESULT_HEADER_BYTES, &spectrum_result_fields()),
-                ),
-                (
-                    "spectrumStreamMetadata",
-                    structure(
-                        SPECTRUM_STREAM_METADATA_BYTES,
-                        &spectrum_stream_metadata_fields(),
-                    ),
-                ),
-                (
-                    "liveResponseOwner",
-                    structure(LIVE_RESPONSE_OWNER_BYTES, &live_response_owner_fields()),
-                ),
-                (
-                    "liveResponseSection",
-                    structure(LIVE_RESPONSE_SECTION_BYTES, &live_response_section_fields()),
-                ),
-                (
-                    "liveResponseResult",
-                    structure(LIVE_RESPONSE_RESULT_BYTES, &live_response_result_fields()),
-                ),
             ]
             .into_iter()
             .map(|(name, structure)| (name.to_owned(), structure))
             .collect(),
         ),
-        command_record: CommandRecord {
-            bytes: COMMAND_RECORD_BYTES,
-            endianness: "little",
-            fields: field_rows(&command_record_fields()),
-        },
         constants: Constants {
             result_codes: named(&results),
             boot_result_aliases: named(&boot_aliases),
             states: named(&states),
             backends: named(&backends),
             buffer_kinds: named(&buffers),
-            wire_command_kinds: named(&wire_command_kinds),
-            command_reasons: named(&command_reasons),
-            // Decision 12 (#1096): the `rack` of the command, observation, companion and
-            // configuration records. The retired `simd1` (0) and `simd2` (2) codes are absent,
+            // Decision 12 (#1096): the `rack` of the companion and configuration records. The retired `simd1` (0) and `simd2` (2) codes are absent,
             // never reallocated.
             racks: named(&[
                 (u32::from(RACK_INSERTS), "inserts"),
                 (u32::from(RACK_CONSOLE), "console"),
                 (u32::from(RACK_NOT_APPLICABLE), "notApplicable"),
             ]),
-            // The live-response owner record's `rack`; the retired `1` and `3` are absent.
-            live_response_racks: named(&[
-                (LIVE_RESPONSE_RACK_INPUT_FILTERS, "inputFilters"),
-                (LIVE_RESPONSE_RACK_INSERTS, "inserts"),
-                (LIVE_RESPONSE_RACK_CONSOLE, "console"),
-            ]),
-            observation_channels: named(&[
-                (OBSERVATION_CHANNEL_LEFT, "left"),
-                (OBSERVATION_CHANNEL_RIGHT, "right"),
-                (OBSERVATION_CHANNEL_BOTH, "both"),
-            ]),
-            observation_statuses: named(&[
-                (OBSERVATION_STATUS_PENDING, "pending"),
-                (OBSERVATION_STATUS_UNARMED, "unarmed"),
-                (OBSERVATION_STATUS_READY, "ready"),
-            ]),
-            response_grids: named(&[
-                (RESPONSE_GRID_LINEAR, "linear"),
-                (RESPONSE_GRID_LOGARITHMIC, "logarithmic"),
-            ]),
-            response_channels: named(&[
-                (RESPONSE_CHANNEL_LEFT, "left"),
-                (RESPONSE_CHANNEL_RIGHT, "right"),
-                (RESPONSE_CHANNEL_BOTH, "both"),
-            ]),
-            live_response_modes: named(&[(LIVE_RESPONSE_MODE_TARGET, "target")]),
-            live_response_meanings: named(&[(
-                LIVE_RESPONSE_MEANING_EQ_FILTER_SUBTOTAL,
-                "eqFilterSubtotal",
-            )]),
-            spectrum_targets: named(&[
-                (SPECTRUM_TARGET_TRACK_POST_INPUT, "trackPostInput"),
-                (SPECTRUM_TARGET_TRACK_POST_PAN, "trackPostPan"),
-                (SPECTRUM_TARGET_OUTPUT, "output"),
-            ]),
-            spectrum_channels: named(&[
-                (SPECTRUM_CHANNEL_LEFT, "left"),
-                (SPECTRUM_CHANNEL_RIGHT, "right"),
-                (SPECTRUM_CHANNEL_BOTH, "both"),
-            ]),
-            spectrum_stream_statuses: named(&[
-                (SPECTRUM_STREAM_STATUS_INACTIVE, "inactive"),
-                (SPECTRUM_STREAM_STATUS_WARMING, "warming"),
-                (SPECTRUM_STREAM_STATUS_PENDING, "pending"),
-                (SPECTRUM_STREAM_STATUS_GAP, "gap"),
-                (SPECTRUM_STREAM_STATUS_FAILED, "failed"),
-                (SPECTRUM_STREAM_STATUS_STOPPED, "stopped"),
-                (SPECTRUM_STREAM_STATUS_READY, "ready"),
-            ]),
-            maximum_command_records: MAXIMUM_COMMAND_RECORDS,
             maximum_document_bytes: MAXIMUM_DOCUMENT_BYTES,
             maximum_source_channels: session::SOURCE_CHANNELS_LAUNCH_MAXIMUM,
             diagnostic_bytes: DIAGNOSTIC_BYTES,
             default_meter_blocks: DEFAULT_METER_BLOCKS,
-            maximum_observation_taps: MAXIMUM_OBSERVATION_TAPS,
             maximum_response_points: RESPONSE_MAXIMUM_POINTS,
-            maximum_live_response_owners: LIVE_RESPONSE_MAXIMUM_OWNERS,
-            maximum_live_response_sections: LIVE_RESPONSE_MAXIMUM_SECTIONS,
-            maximum_live_response_id_bytes: LIVE_RESPONSE_MAXIMUM_ID_BYTES,
-            maximum_live_response_points: LIVE_RESPONSE_MAXIMUM_POINTS,
-            live_response_capture_bytes: LIVE_RESPONSE_CAPTURE_BYTES,
-            spectrum_capture_bytes: SPECTRUM_CAPTURE_BYTES,
-            maximum_prepared_spectrum_targets: SPECTRUM_MAXIMUM_PREPARED_TARGETS,
-            spectrum_collection_request_bytes: SPECTRUM_COLLECTION_REQUEST_BYTES,
-            spectrum_collection_entry_bytes: SPECTRUM_COLLECTION_ENTRY_BYTES,
-            spectrum_collection_entry_capacity: SPECTRUM_COLLECTION_ENTRY_CAPACITY,
-            spectrum_collection_target_ids_bytes: SPECTRUM_COLLECTION_TARGET_IDS_BYTES,
-            spectrum_request_bytes: SPECTRUM_REQUEST_BYTES,
-            spectrum_window_header_bytes: SPECTRUM_WINDOW_HEADER_BYTES,
-            spectrum_result_header_bytes: SPECTRUM_RESULT_HEADER_BYTES,
-            spectrum_stream_metadata_bytes: SPECTRUM_STREAM_METADATA_BYTES,
-            spectrum_window_frames: SPECTRUM_WINDOW_FRAMES,
-            spectrum_bin_count: SPECTRUM_BIN_COUNT,
-            maximum_spectrum_id_bytes: SPECTRUM_MAXIMUM_ID_BYTES,
             default_maximum_memory_bytes: DEFAULT_MAXIMUM_MEMORY_BYTES,
             source_ring: SourceRing {
                 stall_tolerance_ms: SOURCE_STALL_TOLERANCE_MS,
                 reserve_quanta: SOURCE_RING_RESERVE_QUANTA,
+                prime_growths: SOURCE_RING_PRIME_GROWTHS,
+                prime_reserve_quanta: SOURCE_RING_PRIME_RESERVE_QUANTA,
+                prime_latency_samples: LAUNCH_SAMPLE_RATES
+                    .iter()
+                    .map(|rate| PrimeLatency {
+                        sample_rate_hz: rate.0,
+                        samples: source_ring_prime_latency_samples(rate.0),
+                    })
+                    .collect(),
             },
         },
     };
@@ -1634,20 +675,12 @@ struct Document<'a> {
     error_phases: &'a [&'a str],
     exports: &'a [&'a str],
     structures: Entries<Structure<'a>>,
-    command_record: CommandRecord<'a>,
     constants: Constants<'a>,
 }
 
 #[derive(Serialize)]
 struct Structure<'a> {
     bytes: u32,
-    fields: Vec<FieldRow<'a>>,
-}
-
-#[derive(Serialize)]
-struct CommandRecord<'a> {
-    bytes: u32,
-    endianness: &'a str,
     fields: Vec<FieldRow<'a>>,
 }
 
@@ -1670,6 +703,18 @@ struct NamedValue<'a> {
 struct SourceRing {
     stall_tolerance_ms: u32,
     reserve_quanta: u32,
+    prime_growths: u32,
+    prime_reserve_quanta: u32,
+    /// One row per launch rate, in [`LAUNCH_SAMPLE_RATES`] order.
+    prime_latency_samples: Vec<PrimeLatency>,
+}
+
+/// One `sourceRing.primeLatencySamples` row: `L_max(fs)` at one launch rate.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrimeLatency {
+    sample_rate_hz: u32,
+    samples: u32,
 }
 
 /// The `constants` object: the named code tables, then the scalar bounds, then `sourceRing`.
@@ -1681,44 +726,12 @@ struct Constants<'a> {
     states: Vec<NamedValue<'a>>,
     backends: Vec<NamedValue<'a>>,
     buffer_kinds: Vec<NamedValue<'a>>,
-    wire_command_kinds: Vec<NamedValue<'a>>,
-    command_reasons: Vec<NamedValue<'a>>,
     racks: Vec<NamedValue<'a>>,
-    live_response_racks: Vec<NamedValue<'a>>,
-    observation_channels: Vec<NamedValue<'a>>,
-    observation_statuses: Vec<NamedValue<'a>>,
-    response_grids: Vec<NamedValue<'a>>,
-    response_channels: Vec<NamedValue<'a>>,
-    live_response_modes: Vec<NamedValue<'a>>,
-    live_response_meanings: Vec<NamedValue<'a>>,
-    spectrum_targets: Vec<NamedValue<'a>>,
-    spectrum_channels: Vec<NamedValue<'a>>,
-    spectrum_stream_statuses: Vec<NamedValue<'a>>,
-    maximum_command_records: u32,
     maximum_document_bytes: u32,
     maximum_source_channels: u32,
     diagnostic_bytes: u32,
     default_meter_blocks: u32,
-    maximum_observation_taps: u32,
     maximum_response_points: usize,
-    maximum_live_response_owners: usize,
-    maximum_live_response_sections: usize,
-    maximum_live_response_id_bytes: usize,
-    maximum_live_response_points: usize,
-    live_response_capture_bytes: usize,
-    spectrum_capture_bytes: usize,
-    maximum_prepared_spectrum_targets: u32,
-    spectrum_collection_request_bytes: u32,
-    spectrum_collection_entry_bytes: u32,
-    spectrum_collection_entry_capacity: u32,
-    spectrum_collection_target_ids_bytes: u32,
-    spectrum_request_bytes: u32,
-    spectrum_window_header_bytes: u32,
-    spectrum_result_header_bytes: u32,
-    spectrum_stream_metadata_bytes: u32,
-    spectrum_window_frames: u32,
-    spectrum_bin_count: u32,
-    maximum_spectrum_id_bytes: usize,
     default_maximum_memory_bytes: u64,
     source_ring: SourceRing,
 }

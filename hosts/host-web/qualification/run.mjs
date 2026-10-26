@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { chromium, firefox, webkit } from "playwright";
+import { chromium, webkit } from "playwright";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
 import {
@@ -13,9 +13,11 @@ import {
 } from "./qualification.js";
 import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
 import { PROTOCOL_BLOCKS, protocolCalls } from "./protocol-calls.mjs";
+import { structuralEditReference } from "./structural-edit-reference.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_WEB = path.dirname(HERE);
+const FIXTURE = path.join(HOST_WEB, "tests", "browser-v1");
 const RESULTS_PATH = path.join(HERE, "results.json");
 const MATRIX_PATH = path.join(HOST_WEB, "BROWSER_DEPLOYMENT_MATRIX.md");
 const WASM_ARTIFACT = "miso-engine-v1-audio-worklet.simd128.wasm";
@@ -23,58 +25,108 @@ const CANONICAL_COMMIT = /^[0-9a-f]{40}$/;
 const PLAYWRIGHT_VERSION = JSON.parse(
   await readFile(path.join(HERE, "node_modules", "playwright", "package.json"), "utf8"),
 ).version;
-const ENGINES = { chromium, firefox, webkit };
-const MUTATIONS = [
-  "attestation", "boot", "native-corpus-digest", "main-thread-stall",
+// Owner ruling 2026-10-25 (#2092): Chrome and Safari are the supported browsers; Firefox is not
+// qualified, and `--browser firefox` is refused as an unknown browser.
+const ENGINES = { chromium, webkit };
+// Issue #2040: each red mutation and the one gate that must catch it. `mutationProofs` holds the
+// thrown message to `${browserName}: ${gate}:`, so a gate that stops firing turns red even while
+// another gate still throws on the same record. A mutation whose name names a gate names the gate
+// it reaches.
+const caughtBy = (gate, ...mutations) => mutations.map((mutation) => ({ mutation, gate }));
+const MUTATIONS = Object.freeze([
+  ...caughtBy("attestation", "attestation"),
+  ...caughtBy("AudioWorklet-boot", "boot"),
+  ...caughtBy("native-corpus-digest", "native-corpus-digest"),
   // Issue #137 E8/E6: the live-control row and the live-control load carried across the stall.
-  "control-path-applied", "control-path-meter", "control-path-command", "stall-live-controls-load",
+  ...caughtBy("main-thread-stall", "main-thread-stall", "stall-live-controls-load"),
+  ...caughtBy("control-path", "control-path-applied", "control-path-meter", "control-path-command"),
   // Issue #1562b: a structural apply that was not the rebuild path, that was applied early, that
   // moved the output off the declared delay, or whose meter stream was not the successor's.
-  "structural-apply-path", "structural-apply-early", "structural-apply-output",
-  "structural-apply-meter",
+  ...caughtBy("structural-apply-path", "structural-apply-path"),
+  ...caughtBy("structural-apply-early", "structural-apply-early"),
+  ...caughtBy("structural-apply-output", "structural-apply-output"),
+  ...caughtBy("structural-apply-meter", "structural-apply-meter"),
   // #1682: an empty session that did not boot silent and empty, one whose first stem was not a
   // rebuild heard unchanged, and one whose meter stream did not follow the strip count.
-  "empty-boot-silence", "empty-boot-shape", "empty-boot-first-stem", "empty-boot-meter",
+  ...caughtBy("empty-boot-silence", "empty-boot-silence"),
+  ...caughtBy("empty-boot-shape", "empty-boot-shape"),
+  ...caughtBy("empty-boot-first-stem", "empty-boot-first-stem"),
+  ...caughtBy("empty-boot-meter", "empty-boot-meter"),
+  // Issue #1295: a `SESSION_REPLACE` on this (non-isolated) page. A replacement never sent, a Node
+  // reference that applies it one block late, a commit off the rebuild path or applied early, an
+  // outcome other than exact, a source underrun, a blocking rebuild left uncounted, a handler
+  // allocation left unreported, and a 1 MiB replacement the core refused.
+  ...caughtBy("structural-edit-output", "structural-edit-skipped", "structural-edit-adoption-shifted"),
+  ...caughtBy("structural-edit-path", "structural-edit-path"),
+  ...caughtBy("structural-edit-early", "structural-edit-early"),
+  ...caughtBy("structural-edit-outcome", "structural-edit-outcome"),
+  ...caughtBy("structural-edit-underruns", "structural-edit-underruns"),
+  ...caughtBy("structural-edit-blocking", "structural-edit-blocking-uncounted"),
+  ...caughtBy("structural-edit-control-allocations", "structural-edit-control-allocations-uncounted"),
+  ...caughtBy("structural-replace-large", "structural-replace-large"),
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
-  "observation-armed", "observation-disarmed", "observation-identity", "observation-window",
+  ...caughtBy("observation-armed", "observation-armed"),
+  // Issue #1589c: an `Observe` arm the core refused.
+  ...caughtBy("observation", "observation-arm-refused"),
   // Issue #1535 D9: a never-armed run that received no frame proves nothing.
-  "observation-disarmed-empty",
-  "sdk-observation-window-reversed", "sdk-observation-window-malformed",
-  "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
-  "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
+  ...caughtBy("observation-disarmed", "observation-disarmed", "observation-disarmed-empty"),
+  ...caughtBy("observation-identity", "observation-identity"),
+  ...caughtBy("observation-window", "observation-window"),
+  ...caughtBy("sdk-observation-subscription", "sdk-observation-subscription-window-reversed",
+    "sdk-observation-subscription-window-malformed"),
+  ...caughtBy("sdk-response", "sdk-response"),
+  ...caughtBy("sdk-observation", "sdk-observation"),
+  ...caughtBy("sdk-spectrum", "sdk-spectrum"),
+  ...caughtBy("sdk-spectrum-control-allocations", "sdk-spectrum-control-allocations"),
+  ...caughtBy("sdk-spectrum-hop", "sdk-spectrum-hop-missing"),
+  ...caughtBy("sdk-spectrum-continuous", "sdk-spectrum-continuous-hop-wrong"),
+  ...caughtBy("sdk-spectrum-recovery", "sdk-spectrum-recovery-loss", "sdk-spectrum-recovery-unavailable",
+    "sdk-spectrum-recovery-identity"),
   // Issue #1106: a hop probe whose audio start was not delayed, one that never waited, one that
   // spun, and a never-publishing wait that outlived its deadline.
-  "sdk-spectrum-hop-wait-fast-start", "sdk-spectrum-hop-wait-early", "sdk-spectrum-hop-wait-spin",
-  "sdk-spectrum-hop-wait-never-unbounded",
-  "sdk-spectrum-recovery-unavailable", "sdk-spectrum-recovery-identity",
-  // Issue #1097 gate 4: a live bypass that reached no instance, or the wrong one.
-  "sdk-live-bypass-console", "sdk-live-bypass-insert", "sdk-live-bypass-address",
-  // Issues #1341a1 and #1341a2: a live bypass is a ramp over the session's mute length, so a step,
-  // a ramp that never settles and a lift that never lands are red too.
-  "sdk-live-bypass-step", "sdk-live-bypass-unsettled", "sdk-live-bypass-lift",
+  ...caughtBy("sdk-spectrum-hop-wait", "sdk-spectrum-hop-wait-fast-start", "sdk-spectrum-hop-wait-early",
+    "sdk-spectrum-hop-wait-spin", "sdk-spectrum-hop-wait-never-unbounded"),
+  // Issue #1579b: the browser's track responses through the core's frames, on a live context.
+  ...caughtBy("sdk-track-response-subscription", "sdk-track-response-worker",
+    "sdk-track-response-unchanged", "sdk-track-response-once", "sdk-track-response-early"),
+  ...caughtBy("sdk-live-response", "sdk-live-response-serialized", "sdk-live-response-sections"),
+  // Issue #1097 gate 4: a live bypass that reached no instance, or the wrong one. Issues #1341a1
+  // and #1341a2: a live bypass is a ramp over the session's mute length, so a step, a ramp that
+  // never settles and a lift that never lands are red too.
+  ...caughtBy("sdk-live-bypass", "sdk-live-bypass-console", "sdk-live-bypass-insert",
+    "sdk-live-bypass-address", "sdk-live-bypass-step", "sdk-live-bypass-unsettled", "sdk-live-bypass-lift"),
   // Issue #1333 D3: one render-locked allocator call on one instance, and a staging-read workload
-  // whose spectrum read never completed a window.
-  "render-allocations", "staging-reads",
+  // whose observation read was refused.
+  ...caughtBy("render-allocations", "render-allocations"),
+  ...caughtBy("staging-reads", "staging-reads"),
+  // Issue #1580 D2: the host-level track response through the core's frames: a `RESPONSE_READY`
+  // whose outcome is not 0, and a run whose one event does not carry the reply's tag.
+  ...caughtBy("track-response-host", "track-response-host-outcome", "track-response-host-tag"),
   // Issue #1476 D5: one SDK instance's allocator call, and one SDK instance closed without its read.
-  "sdk-render-allocations", "sdk-render-allocations-missing",
+  ...caughtBy("sdk-render-allocations", "sdk-render-allocations", "sdk-render-allocations-missing"),
   // Batch-verdict 2, B2 (root 2026-10-12): a real AudioContext resumed outside a trusted click, and
   // a harness that clicked fewer or more controls than the page declared.
-  "resume-clicks-direct", "resume-clicks-missing", "resume-clicks-extra",
+  ...caughtBy("resume-clicks", "resume-clicks-direct", "resume-clicks-missing", "resume-clicks-extra"),
   // Issue #1530 gate 4: the browser observation wait, one predicate each.
-  "sdk-observation-wait-unbounded", "sdk-observation-wait-late", "sdk-observation-wait-early",
-  "sdk-observation-wait-untyped", "sdk-observation-wait-rendered",
-  "sdk-observation-wait-after-render", "sdk-observation-wait-resend",
+  ...caughtBy("sdk-observation-wait", "sdk-observation-wait-unbounded", "sdk-observation-wait-late",
+    "sdk-observation-wait-early", "sdk-observation-wait-untyped", "sdk-observation-wait-rendered",
+    "sdk-observation-wait-after-render", "sdk-observation-wait-resend"),
+  // Issue #1589 D4 (R4): an `armed()` that never settled, or settled after a window it gave.
+  ...caughtBy("sdk-observation-armed", "sdk-observation-armed"),
   // Issue #1533: a Playwright page error, a page-side unhandled rejection, and a result that
   // `qualifyBrowser` never gave its page-error lists.
-  "page-errors", "page-errors-window", "page-errors-missing",
+  ...caughtBy("page-errors", "page-errors", "page-errors-window", "page-errors-missing"),
   // Issue #1571b: a browser answer that is not the headless engine's, a reliable event lost or out
   // of order, a lossy event that is not the headless engine's event of its block, and a refusal that
   // is not the core's.
-  "sdk-protocol-answers", "sdk-protocol-reliable", "sdk-protocol-lossy", "sdk-protocol-lossy-none",
-  "sdk-protocol-lossy-first-block", "sdk-protocol-refusal",
-];
+  ...caughtBy("sdk-protocol-answers", "sdk-protocol-answers"),
+  ...caughtBy("sdk-protocol-reliable", "sdk-protocol-reliable"),
+  ...caughtBy("sdk-protocol-lossy", "sdk-protocol-lossy", "sdk-protocol-lossy-none",
+    "sdk-protocol-lossy-first-block"),
+  ...caughtBy("sdk-protocol-refusal", "sdk-protocol-refusal"),
+]);
 
 // The total time the page may take, from the first evaluate to the result, clicks included. A page
 // that is stuck (WebKit can wedge a page whose context stalls under full CPU load) fails by name here
@@ -87,7 +139,8 @@ const SDK_RENDER_ALLOCATION_WORKLOADS = Object.freeze([
   "resident-observation",
   "observation-wait-deadline",
   "observation-wait-render",
-  "track-response-subscription",
+  "track-response-live",
+  "live-eq-cuts",
   "sdk-observation",
   "spectrum-query:trackPostInput:track",
   "spectrum-query:trackPostPan:track",
@@ -285,9 +338,10 @@ function validate(browserName, result) {
     "no render-telemetry frame arrived over a full window");
 
   // Issue #1562b: a structural apply in a real browser. The core classifies a `delay_samples` edit
-  // as a rebuild and the browser prepares and publishes the replacement plan; the first quantum
-  // is the swap block, so what comes out is the declared delay of the input, exactly, the applied
-  // revision was not early, and the meter stream is the successor's from its first frame.
+  // as a rebuild and the browser prepares and publishes the replacement plan. The edit restarts the
+  // track, so it is a duck-swap (#1324a): the applied revision moves at the scheduled `S` and not
+  // one block earlier, the duck is exact silence until `S`, what comes out after the fade-in is the
+  // declared delay of the input, exactly, and the meter stream is the successor's.
   const structural = result.structuralApply;
   gate(browserName, "structural-apply-path", structural?.commandOk === true
     && structural?.commandPath === "rebuild" && structural?.commandApplied === 1
@@ -296,11 +350,13 @@ function validate(browserName, result) {
   gate(browserName, "structural-apply-early", structural?.pendingRevision === structural?.initialRevision
     && structural?.finalRevision === structural?.committedRevision
     && BigInt(structural?.finalRevision ?? "0") > BigInt(structural?.initialRevision ?? "0")
-    && BigInt(structural?.finalSample ?? "-1") === 0n,
+    && /^[0-9]+$/.test(structural?.scheduledSample ?? "")
+    && BigInt(structural?.finalSample ?? "-1") === BigInt(structural.scheduledSample),
   `the applied revision moved before the swap block or did not reach the committed one: ${JSON.stringify(structural)}`);
   gate(browserName, "structural-apply-output", structural?.exactDelayedOutput === true
+    && structural?.duckedSilent === true
     && structural?.renderedDigest === structural?.expectedDigest,
-  "the swapped plan did not render the input delayed by exactly the edit");
+  "the duck was not silent until the swap, or the swapped plan did not render the input delayed by exactly the edit");
   gate(browserName, "structural-apply-meter", structural?.meterLeaseResult === 0
     && structural?.meterFrames >= 1 && structural?.meterFrameWidth === 4
     && structural?.meterTrackCount === 1 && structural?.sequenceIncreasing === true
@@ -349,15 +405,56 @@ function validate(browserName, result) {
     && Number.isSafeInteger(first.structureEpochs[0]) && first.structureEpochs[0] >= 1,
   `the meter stream after the first stem was not the strip's with one structure epoch: ${JSON.stringify(first)}`);
 
+  // Issue #1295: one `SESSION_REPLACE` of document B before the first quantum, on this page without
+  // cross-origin isolation (the module's `single` mode). The core commits it on the rebuild path,
+  // the watermark reports R in effect from sample 0 (the swap block) with the outcome exact, no
+  // source block underran, the capture is the module's own render of the same replace under Node,
+  // and the host counted one blocking rebuild and the handler's allocations (D15-10).
+  const edit = result.structuralReplace?.edit;
+  gate(browserName, "structural-edit-path", edit?.replyStatus === "ok" && edit?.commandPath === "rebuild"
+    && /^[0-9]+$/.test(edit?.committedRevision ?? "")
+    && BigInt(edit.committedRevision) > BigInt(edit?.expectedRevision ?? "-1")
+    && edit?.before?.appliedRevision === edit?.expectedRevision,
+  `the replacement was not committed on the rebuild path: ${JSON.stringify({ status: edit?.replyStatus, path: edit?.commandPath, diagnostics: edit?.diagnostics })}`);
+  gate(browserName, "structural-edit-early", edit?.pending?.appliedRevision === edit?.before?.appliedRevision
+    && edit?.after?.appliedRevision === edit?.committedRevision
+    && edit?.after?.appliedSample === "0"
+    && edit?.watermark?.revision === edit?.committedRevision && edit?.watermark?.sample === "0",
+  `the watermark did not report R in effect from the swap block, or moved before it: ${JSON.stringify({ before: edit?.before, pending: edit?.pending, after: edit?.after, watermark: edit?.watermark })}`);
+  gate(browserName, "structural-edit-outcome", edit?.after?.appliedOutcome === "1" && edit?.watermark?.outcome === "1",
+    `the replacement's outcome was not exact: status outcome ${edit?.after?.appliedOutcome}, watermark outcome ${edit?.watermark?.outcome}`);
+  gate(browserName, "structural-edit-underruns", edit?.underrunBlocks === "0",
+    `a source block underran over the capture: ${edit?.underrunBlocks}`);
+  gate(browserName, "structural-edit-output", typeof edit?.renderedDigest === "string"
+    && edit?.reference?.exact?.revision === edit?.committedRevision
+    && edit.renderedDigest === edit.reference.exact.digest,
+  `the capture is not the module's render of the same replace under Node: ${JSON.stringify({ browser: edit?.renderedDigest, reference: edit?.reference })}`);
+  gate(browserName, "structural-edit-blocking", edit?.before?.blockingRebuilds === 0 && edit?.after?.blockingRebuilds === 1,
+    `the single-mode replacement was not counted as exactly one blocking rebuild: ${edit?.before?.blockingRebuilds} -> ${edit?.after?.blockingRebuilds}`);
+  gate(browserName, "structural-edit-control-allocations", Number.isSafeInteger(edit?.before?.singleModeControlAllocations)
+    && edit?.after?.singleModeControlAllocations > edit.before.singleModeControlAllocations,
+  `the handler's allocations under the replacement were not counted: ${edit?.before?.singleModeControlAllocations} -> ${edit?.after?.singleModeControlAllocations}`);
+  // #1697 gate 3: the 1 MiB boot-ceiling document is committed, counted and adopted; its memory
+  // growth is reported (below, against the boot's projection), never pinned.
+  const large = result.structuralReplace?.large;
+  gate(browserName, "structural-replace-large", large?.documentBytes === 1 << 20
+    && large?.replyStatus === "ok" && large?.commandPath === "rebuild"
+    && large?.after?.appliedRevision === large?.committedRevision
+    && large?.before?.blockingRebuilds === 0 && large?.after?.blockingRebuilds === 1
+    && large?.after?.singleModeControlAllocations > large?.before?.singleModeControlAllocations
+    && Number.isSafeInteger(large?.before?.memoryBytes) && Number.isSafeInteger(large?.after?.memoryBytes),
+  `the 1 MiB replacement was not committed, counted and adopted: ${JSON.stringify(large)}`);
+
   // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
   // audio must be identical: arming a declared tap may not move a sample.
   const observation = result.observation;
+  // The arm is the core's `Observe` edit (#1589c): an ok monitor reply that names the arm's tag.
   gate(browserName, "observation", observation?.armed?.meterLeaseResult === 0
-    && observation?.armed?.subscribeResult === 0 && observation?.armed?.subscribeReason === 0
-    && observation?.armed?.bindings === 1 && observation?.armed?.stripId === "track"
-    && observation?.armed?.windowBlocks === 2,
-  "the subscription was not acknowledged with a usable map");
+    && observation?.armed?.subscribeResult === 0 && observation?.armed?.subscribeStatus === "ok"
+    && observation?.armed?.subscribePath === "monitor"
+    && typeof observation?.armed?.subscribeArmTag === "string",
+  `the Observe arm was not applied as a monitor edit with an arm tag: ${JSON.stringify(observation?.armed)}`);
   gate(browserName, "observation", observation?.armed?.frames >= 1
     && observation?.armed?.trackGrDbWidth === 1
     && observation?.armed?.peakWidth === 4
@@ -391,11 +488,11 @@ function validate(browserName, result) {
   const resumes = result.resumes;
   gate(browserName, "resume-clicks", resumes?.direct === 0
     && Number.isInteger(resumes?.declared)
-    && resumes.declared === (result.sdkResponse === null ? 1 : 3)
+    && resumes.declared === (result.sdkResponse === null ? 1 : 4)
     && resumes.inClick === resumes.declared
     && resumes.planned === resumes.declared
     && resumes.clicksPerformed === resumes.declared,
-  `a real AudioContext was resumed outside a trusted click, the page did not declare its one unsubscribe click (plus the two SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
+  `a real AudioContext was resumed outside a trusted click, the page did not declare its one unsubscribe click (plus the three SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
 
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
@@ -414,29 +511,27 @@ function validate(browserName, result) {
     && stall?.noDesync === true
     && stall?.renderedDigest === stall?.expectedDigest,
     "100 ms fault did not preserve exact 5,120-frame output");
-  // Issue #1333 D3 / Amendment 1: the staging reads ran over real data -- a completed one-shot
-  // window and a completed stream window from a collection's selected entry, an observation row
-  // and a track response -- so the render-allocation gate below covers each of them.
-  const oneShot = result.stagingReads?.oneShot;
-  const streamRun = result.stagingReads?.stream;
-  gate(browserName, "staging-reads", oneShot?.selectResult === 0
-    && oneShot?.subscribeResult === 0
-    && oneShot?.spectrumReadResult === 0 && oneShot?.spectrumReadBytes > 0
-    && oneShot?.observationReadResult === 0 && oneShot?.observationRows === 1
-    && oneShot?.trackResponseResult === 0 && oneShot?.trackResponseBytes > 0
-    && oneShot?.streamStartResult === 0
-    && (oneShot?.streamReadResult === 0 || oneShot?.streamReadResult === 6),
-  `the one-shot staging reads did not all complete: ${JSON.stringify(oneShot)}`);
-  gate(browserName, "staging-reads", streamRun?.selectResult === 0
-    && streamRun?.streamStartResult === 0
-    && streamRun?.streamReadResult === 0 && streamRun?.streamReadBytes > 0,
-  `the stream staging read did not return a completed window: ${JSON.stringify(streamRun)}`);
+  // Issue #1333 D3: the staging read ran over real data -- an observation row -- so the
+  // render-allocation gate below covers it.
+  const stagingReads = result.stagingReads;
+  gate(browserName, "staging-reads", stagingReads?.subscribeResult === 0
+    && stagingReads?.subscribeStatus === "ok"
+    && stagingReads?.observationReadResult === 0 && stagingReads?.observationRows === 1,
+  `the staging reads did not all complete: ${JSON.stringify(stagingReads)}`);
+  // Issue #1580 D2: the same run's strip `RESPONSE_GET`, sent through the host's `control` message,
+  // was answered by exactly one `RESPONSE_READY`, which carries the reply's tag and outcome 0. The
+  // render that answered it is inside the run's render-allocation count.
+  const hostResponse = stagingReads?.trackResponse;
+  gate(browserName, "track-response-host", hostResponse?.result === 0
+    && hostResponse?.replyStatus === "ok" && hostResponse?.events === 1
+    && hostResponse?.tagged === 1 && hostResponse?.status === "ok",
+  `the host-level track response was not one tagged RESPONSE_READY with outcome 0: ${JSON.stringify(hostResponse)}`);
   // Issue #1333 D3: every booted instance, read before its dispose, made no allocator call in any
   // export its processor calls on the render thread after boot -- including everything the plan
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === 14
+    && allocations.length === 15
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
   if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
@@ -513,15 +608,16 @@ function validateSdkLiveBypass(browserName, live) {
 
 /**
  * Issue #1530 gates 1-3: the browser SDK's wait on observation backpressure, against the shipped
- * worklet. `ok` is command result 0; `bp` is result 6 with reason 8.
+ * worklet. Each entry is one `Observe` transaction (#1589b): `ok` is call result 0 with an `ok`
+ * reply; `bp` is the failed call of result 6 (backpressure), which carries no reply frame.
  */
 function validateSdkObservationWait(browserName, wait) {
   const deadline = wait?.deadline;
   const render = wait?.render;
   const log = (entries) => JSON.stringify(Array.isArray(entries)
-    ? entries.map((entry) => [entry?.result, entry?.reason]) : null);
-  const OK = [0, 0];
-  const BP = [6, 8];
+    ? entries.map((entry) => [entry?.result, entry?.status]) : null);
+  const OK = [0, "ok"];
+  const BP = [6, null];
   const expected = (...entries) => JSON.stringify(entries);
   gate(browserName, "sdk-observation-wait", deadline?.settled === true
     && deadline.typed === true
@@ -607,9 +703,9 @@ function validateSdkProtocol(browserName, protocol) {
   `the browser's answers are not the headless engine's: ${json({ browser: browser?.answers, headless: headless?.answers })}`);
   const refusal = browser?.answers?.refusal;
   gate(browserName, "sdk-protocol-refusal", refusal?.name === "MisoControlRefusal"
-    && typeof refusal.status === "string" && typeof refusal.code === "string"
-    && json(refusal) === json(headless?.answers?.refusal),
-  `diagnostics({ limit: 0 }) is not the core's refusal on both engines: ${json({ browser: refusal, headless: headless?.answers?.refusal })}`);
+    && typeof refusal.status === "string" && typeof refusal.code === "string",
+  // #2040: the browser-versus-headless equality is the answers gate's, which compares this object.
+  `diagnostics({ limit: 0 }) is not the core's refusal: ${json({ browser: refusal, headless: headless?.answers?.refusal })}`);
   const events = Array.isArray(browser.events) ? browser.events : [];
   const reference = Array.isArray(headless.events) ? headless.events : [];
   // The request that caused an event is an endpoint's own ID: the browser reads the committed
@@ -711,11 +807,12 @@ function validateSdkResponse(browserName, response) {
     && Array.isArray(live.right) && live.right.length === 5
     && live.finite === true && liveU64(live.capturedSample) && liveU64(live.snapshotToken)
     && liveU64(live.resultBytes) && live.ownedAfterSecondQuery === true
-    && live.pendingRefused === true && live.closedRefused === true
+    && live.serialized === true && live.closedRefused === true
+    && JSON.stringify(liveMembers.map((member) => member.rackValue)) === JSON.stringify([4, 5, 2, 5])
     && liveInputFilters !== undefined && liveCompressor !== undefined
     && JSON.stringify(liveMemberOrder) === JSON.stringify(expectedLiveMemberOrder)
     && live.excludedMemberCount === 1,
-  "browser live response did not return the target subtotal, owned channels, membership, boundary identity, or lifecycle refusals");
+  "browser live response did not return the target subtotal, owned channels, membership, section codes, boundary identity, one capture at a time, or the closed refusal");
   const managedResponse = observations?.managedResponse;
   const managedInitial = managedResponse?.initial;
   const managedAfterRender = managedResponse?.afterRender;
@@ -738,13 +835,18 @@ function validateSdkResponse(browserName, response) {
     && finiteArray(managedInitial?.left) && finiteArray(managedInitial?.right)
     && managedInitial.frequencies.length === 5
     && managedInitial.left.length === 5 && managedInitial.right.length === 5
-    && managedInitial.capturedSample === "0"
     && liveU64(managedInitial.snapshotToken),
   "managed track-response subscription did not match the one-shot owner membership and values");
-  gate(browserName, "sdk-track-response-subscription", managedResponse?.unchangedBeforeRender === true
+  // #1579b gate 4: renders with no edit publish nothing; after an edit, one publication whose
+  // capture is after the edit's applied sample (the clause `sdk-live-eq-cuts` carried). A capture
+  // is stamped with its block's exclusive end, so equality would be a committed-model read.
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.unchangedOverRenders === true
     && managedResponse.unchangedNotificationCount === 0
     && managedResponse.changedPublication === true
-    && managedResponse.callbackCount >= 1
+    && liveU64(managedResponse.appliedAtSample)
+    && BigInt(managedAfterRender?.capturedSample ?? -1) > BigInt(managedResponse.appliedAtSample)
+    && managedResponse.publishedOnce === true
+    && managedResponse.callbackCount === 1
     && managedResponse.callbackOwner === managedResponse.owner
     && managedResponse.callbackEpoch === managedResponse.epoch
     && managedResponse.callbackJob === managedResponse.job
@@ -754,16 +856,15 @@ function validateSdkResponse(browserName, response) {
     && managedAfterRender?.points === 5
     && finiteArray(managedAfterRender?.left)
     && finiteArray(managedAfterRender?.right),
-  "managed track-response subscription did not suppress unchanged captures or publish the captured edit");
-  gate(browserName, "sdk-live-eq-cuts", managedResponse?.liveEq !== undefined
-    && BigInt(managedResponse.liveEq.capturedSample) > BigInt(managedResponse.liveEq.appliedAtSample)
-    && managedResponse.liveEq.postRampComparedFrames >= 128
-    && Number.isFinite(managedResponse.liveEq.postRampMaximumDifference)
-    && managedResponse.liveEq.postRampMaximumDifference <= 1e-6,
-  "packed browser EQ cuts did not produce fresh target response and settled headless PCM parity");
-  gate(browserName, "sdk-track-response-subscription", managedResponse?.workerInitializations === 1
-    && managedResponse.workerQueries === 4
-    && managedResponse.unchangedPollSuppressed === true
+  "managed track-response subscription published over renders with no edit, missed the edit, or published it more than once");
+  const liveEq = observations?.liveEq;
+  gate(browserName, "sdk-live-eq-cuts", liveEq !== undefined
+    && liveEq.postRampComparedFrames >= 128
+    && Number.isFinite(liveEq.postRampMaximumDifference)
+    && liveEq.postRampMaximumDifference <= 1e-6,
+  "packed browser EQ cuts did not reach settled headless PCM parity");
+  // #1579b gate 4: the subscription reads the core's frames; no response Worker is created.
+  gate(browserName, "sdk-track-response-subscription", managedResponse?.responseWorkersCreated === 0
     && managedResponse.sharedJob === true
     && managedResponse.arraysIsolated === true
     && managedResponse.firstCloseKeepsJob === true
@@ -794,6 +895,7 @@ function validateSdkResponse(browserName, response) {
   "managed track-response subscription did not expose updated grids, channel ownership, or bounds");
   gate(browserName, "sdk-observation", Array.isArray(observations?.mapBindings)
     && observations.mapBindings.includes("comp") && observations.subscribeResult === 0
+    && observations.subscribeStatus === "ok"
     && observations.pendingBeforeArm?.every((status) => status === "unarmed")
     && observations.pendingAfterArm?.every((status) => status === "pending"),
   "SDK observation map or availability statuses were not current-owner answers");
@@ -830,13 +932,18 @@ function validateSdkResponse(browserName, response) {
   "browser resident observation subscription did not deliver an automatic ready notification");
   gate(browserName, "sdk-observation-subscription", liveU64(resident.subscriptionId)
     && liveU64(resident.owner) && liveU64(resident.epoch)
-    && typeof resident.appliedAtSample === "string"
     && resident.bounds?.maximumHandles > 0
-    && resident.bounds?.maximumBindings > 0
     && resident.bounds?.maximumSelections > 0
-    && resident.bounds?.maximumWindowBlocks > 0
     && resident.bounds?.maximumCadenceMs > 0,
   "resident observation subscription did not publish bounded owner identity and limits");
+  // #1589 D4 (R4): `armed()` settled with the arm sample render applied, and no window it was given
+  // opened before it.
+  gate(browserName, "sdk-observation-armed", typeof resident.armedSample === "string"
+    && /^[0-9]+$/.test(resident.armedSample)
+    && Array.isArray(resident.windows) && resident.windows.length === 2
+    && resident.windows.every((window) => window !== null
+      && BigInt(window.firstSample) >= BigInt(resident.armedSample)),
+  `armed() did not settle with the arm sample before the subscription's windows: ${JSON.stringify(resident.armedSample)}`);
   gate(browserName, "sdk-observation-subscription", resident.sharedBinding === true
     && resident.firstCloseKeepsLive === true
     && resident.invalidUpdateRefused === true
@@ -870,7 +977,13 @@ function validateSdkResponse(browserName, response) {
     && row.finite === true && Array.isArray(row.frequencies) && row.frequencies.length === 1_025
     && Array.isArray(row.left) && row.left.length === 1_025
     && Array.isArray(row.right) && row.right.length === 1_025),
-  "SDK spectrum Worker result did not preserve the complete bounded L/R window and sample span");
+  "SDK spectrum result did not preserve the complete bounded L/R window and sample span");
+  // #1596 gate 5: the core analyzes in the worklet's message handler on this page, and the handler's
+  // allocations are counted, never hidden.
+  gate(browserName, "sdk-spectrum-control-allocations", spectrumRows.every((row) => Array.isArray(row.controlAllocations)
+    && row.controlAllocations.every((value) => /^[0-9]+$/.test(value))
+    && BigInt(row.controlAllocations[1]) > BigInt(row.controlAllocations[0])),
+  `the spectrum reads' handler allocations were not counted: ${JSON.stringify(spectrumRows.map((row) => row.controlAllocations))}`);
   gate(browserName, "sdk-spectrum", spectrum?.allFinite === true
     && spectrum?.ownedArrays === true && spectrum?.postChainDiffers === true
     && spectrum?.busyRefused === true && spectrum?.closedRefused === true,
@@ -894,9 +1007,9 @@ function validateSdkResponse(browserName, response) {
     ["gap", continuous?.gap === true],
     // Issue #1480 D2: no read runs during the render, so all 17 windows of 6,144 frames at hop 256
     // meet the one-record native queue: one is queued, 16 are dropped, and the first read after
-    // the render reports that gap (status 3).
+    // the render reports that gap.
     [`renderLoss (status=${continuous?.renderLoss?.status}, dropped=${continuous?.renderLoss?.droppedCaptures})`,
-      continuous?.renderLoss?.status === 3 && continuous?.renderLoss?.droppedCaptures === "16"],
+      continuous?.renderLoss?.status === "gap" && continuous?.renderLoss?.droppedCaptures === "16"],
     ["ownedArrays", continuous?.ownedArrays === true],
     ["sharedAfterFirstClose", continuous?.sharedAfterFirstClose === true],
     ["staleReadRefused", continuous?.staleReadRefused === true],
@@ -1038,7 +1151,7 @@ function validateSdkResponse(browserName, response) {
   const listSummary = (list) => (Array.isArray(list)
     ? { length: list.length, distinct: [...new Set(list)] } : list);
   gate(browserName, "sdk-spectrum-hop", failedHopConditions.length === 0,
-    "actual browser H1024 did not preserve Worklet metadata, Worker results, overlap, smoothing, and ownership: "
+    "actual browser H1024 did not preserve the core's stream metadata, results, overlap, smoothing, and ownership: "
       + `failed ${JSON.stringify(failedHopConditions)} in ${JSON.stringify(configuredHop === undefined ? undefined : {
         ...configuredHop,
         notificationHops: listSummary(configuredHop?.notificationHops),
@@ -1085,29 +1198,56 @@ function mutate(result, mutation) {
   if (mutation === "empty-boot-shape") copy.emptyBoot.boot.tracks = 1;
   if (mutation === "empty-boot-first-stem") copy.emptyBoot.firstStem.exactInputOutput = false;
   if (mutation === "empty-boot-meter") copy.emptyBoot.firstStem.meterWidths = [2];
+  const edit = copy.structuralReplace?.edit;
+  // The capture of a page that never sent the replacement: the module's render of A alone.
+  if (mutation === "structural-edit-skipped") edit.renderedDigest = edit.reference.skipped.digest;
+  if (mutation === "structural-edit-adoption-shifted") edit.reference.exact = edit.reference.shifted;
+  if (mutation === "structural-edit-path") edit.commandPath = "live";
+  if (mutation === "structural-edit-early") edit.pending.appliedRevision = edit.committedRevision;
+  if (mutation === "structural-edit-outcome") edit.after.appliedOutcome = "2";
+  if (mutation === "structural-edit-underruns") edit.underrunBlocks = "1";
+  if (mutation === "structural-edit-blocking-uncounted") edit.after.blockingRebuilds = 0;
+  if (mutation === "structural-edit-control-allocations-uncounted") {
+    edit.after.singleModeControlAllocations = edit.before.singleModeControlAllocations;
+  }
+  if (mutation === "structural-replace-large") copy.structuralReplace.large.replyStatus = "limit_exceeded";
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
+  if (mutation === "observation-arm-refused") copy.observation.armed.subscribeStatus = "not_found";
   if (mutation === "observation-disarmed") copy.observation.disarmed.maximumTrackGrDb = 1;
   if (mutation === "observation-disarmed-empty") copy.observation.disarmed.frames = 0;
   if (mutation === "observation-identity") copy.observation.identicalAudio = false;
   if (mutation === "resume-clicks-direct") copy.resumes.direct = 1;
+  if (mutation === "sdk-track-response-worker") copy.sdkResponse.observations.managedResponse.responseWorkersCreated = 1;
+  if (mutation === "sdk-track-response-unchanged") copy.sdkResponse.observations.managedResponse.unchangedOverRenders = false;
+  if (mutation === "sdk-track-response-once") copy.sdkResponse.observations.managedResponse.publishedOnce = false;
+  if (mutation === "sdk-track-response-early") {
+    copy.sdkResponse.observations.managedResponse.appliedAtSample =
+      copy.sdkResponse.observations.managedResponse.afterRender.capturedSample;
+  }
+  if (mutation === "sdk-live-response-serialized") copy.sdkResponse.observations.liveResponse.serialized = false;
+  if (mutation === "sdk-live-response-sections") copy.sdkResponse.observations.liveResponse.members[0].rackValue = 0;
   if (mutation === "resume-clicks-missing") copy.resumes.clicksPerformed -= 1;
   if (mutation === "resume-clicks-extra") copy.resumes.clicksPerformed += 1;
   if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
-  if (mutation === "sdk-observation-window-reversed") {
+  if (mutation === "sdk-observation-subscription-window-reversed") {
     const window = copy.sdkResponse.observations.resident.windows[0];
     window.endSample = window.firstSample;
   }
-  if (mutation === "sdk-observation-window-malformed") {
+  if (mutation === "sdk-observation-subscription-window-malformed") {
     copy.sdkResponse.observations.resident.windows[0].endSample = "1024x";
   }
   if (mutation === "sdk-response") copy.sdkResponse.eq.points = 0;
   if (mutation === "sdk-observation") copy.sdkResponse.observations.readyStatuses[0] = "pending";
   if (mutation === "sdk-spectrum") copy.sdkResponse.spectrum.targets[0].finite = false;
+  if (mutation === "sdk-spectrum-control-allocations") {
+    const counts = copy.sdkResponse.spectrum.targets[0].controlAllocations;
+    counts[1] = counts[0];
+  }
   if (mutation === "sdk-spectrum-hop-missing") {
     delete copy.sdkResponse.spectrum.configuredHop.nativeStart.hopFrames;
   }
-  if (mutation === "sdk-spectrum-hop-wrong") {
+  if (mutation === "sdk-spectrum-continuous-hop-wrong") {
     copy.sdkResponse.spectrum.continuous.first.hopFrames = 2_048;
   }
   if (mutation === "sdk-spectrum-hop-wait-fast-start") {
@@ -1175,9 +1315,15 @@ function mutate(result, mutation) {
       ...protocol.browser.events.filter((event) => PROTOCOL_RELIABLE_KINDS.has(event.kind)), ...first,
     ];
   }
-  if (mutation === "sdk-protocol-refusal") copy.sdkResponse.protocol.browser.answers.refusal.code = "usage";
+  if (mutation === "sdk-protocol-refusal") {
+    // Both engines give the same non-refusal, so the answers gate (which compares the two) holds
+    // and only the refusal gate's own predicate sees it.
+    for (const side of ["browser", "headless"]) copy.sdkResponse.protocol[side].answers.refusal.name = "Error";
+  }
   if (mutation === "render-allocations") copy.renderAllocations[0].count = 1;
-  if (mutation === "staging-reads") copy.stagingReads.oneShot.spectrumReadResult = 6;
+  if (mutation === "staging-reads") copy.stagingReads.observationReadResult = 6;
+  if (mutation === "track-response-host-outcome") copy.stagingReads.trackResponse.status = "unavailable";
+  if (mutation === "track-response-host-tag") copy.stagingReads.trackResponse.tagged = 0;
   const wait = copy.sdkResponse?.observations?.wait;
   if (mutation === "sdk-observation-wait-unbounded") wait.deadline.settled = false;
   if (mutation === "sdk-observation-wait-late") wait.deadline.elapsedMs = 5_000;
@@ -1187,8 +1333,9 @@ function mutate(result, mutation) {
   if (mutation === "sdk-observation-wait-after-render") wait.deadline.closeAfterRender.resolved = false;
   if (mutation === "sdk-observation-wait-resend") {
     wait.render.commands.splice(wait.render.commands.length - 1, 0,
-      { result: 6, reason: 8, records: wait.render.commands[1].records });
+      { result: 6, status: null, records: wait.render.commands[1].records });
   }
+  if (mutation === "sdk-observation-armed") copy.sdkResponse.observations.resident.armedSample = null;
   if (mutation === "sdk-render-allocations") copy.sdkResponse.renderAllocations[0].count = 1;
   if (mutation === "sdk-render-allocations-missing") copy.sdkResponse.renderAllocations.splice(1, 1);
   if (mutation === "page-errors") copy.pageErrors.playwright.push("pageerror: Error: planted");
@@ -1206,12 +1353,13 @@ function unsubscribeFailureProofs() {
     contextStateBeforeBoot: "suspended",
     meterLeaseResult: 0,
     subscribeResult: 0,
+    subscribePath: "monitor",
     armedFrames: 4,
     armedMaximumTrackGrDb: 5.2,
     renderedAfterSubscribe: "3",
     renderedBeforeUnsubscribe: "4",
     unsubscribeResult: 0,
-    unsubscribeBindings: 0,
+    unsubscribePath: "monitor",
     framesAfterAcknowledgement: 60,
     maximumTrackGrDbAfterAcknowledgement: 0,
     signalShortfall: false,
@@ -1228,8 +1376,9 @@ function unsubscribeFailureProofs() {
     ["context", { contextStateBeforeBoot: "running" }, ["context"]],
     ["armed frames", { armedFrames: 3 }, ["armed"]],
     ["armed reduction", { armedMaximumTrackGrDb: 0 }, ["armed"]],
+    ["armed path", { subscribePath: null }, ["armed"]],
     ["render-between", { renderedBeforeUnsubscribe: "3" }, ["render-between"]],
-    ["unsubscribe-ack", { unsubscribeBindings: 1 }, ["unsubscribe-ack"]],
+    ["unsubscribe-ack", { unsubscribePath: null }, ["unsubscribe-ack"]],
     ["reduction", { maximumTrackGrDbAfterAcknowledgement: 1 }, ["reduction"]],
     ["reduction, no frame (D9)", { framesAfterAcknowledgement: 0 }, ["reduction"]],
     ["shortfall frames", { signalFramesAfterAcknowledgement: 47 }, ["shortfall"]],
@@ -1291,19 +1440,13 @@ function stallSignatureProofs() {
 
 function mutationProofs(browserName, result) {
   const mutations = result.sdkResponse === null
-    ? MUTATIONS.filter((mutation) => !mutation.startsWith("sdk-"))
+    ? MUTATIONS.filter(({ mutation }) => !mutation.startsWith("sdk-"))
     : MUTATIONS;
-  for (const mutation of mutations) {
+  for (const { mutation, gate: expected } of mutations) {
     assert.throws(
       () => validate(browserName, mutate(result, mutation)),
-      (error) => error instanceof Error && error.message.startsWith(
-        mutation.startsWith("resume-clicks-") ? `${browserName}: resume-clicks:`
-          : mutation.startsWith("sdk-observation-wait-") ? `${browserName}: sdk-observation-wait:`
-            : mutation.startsWith("sdk-spectrum-hop-wait-") ? `${browserName}: sdk-spectrum-hop-wait:`
-            : mutation.startsWith("page-errors") ? `${browserName}: page-errors:`
-            : `${browserName}:`,
-      ),
-      `${browserName}: ${mutation}: red mutation escaped its gate`,
+      (error) => error instanceof Error && error.message.startsWith(`${browserName}: ${expected}:`),
+      `${browserName}: ${mutation}: red mutation escaped its gate ${expected}`,
     );
   }
   if (result.sdkResponse === null) return;
@@ -1332,7 +1475,7 @@ function mutationProofs(browserName, result) {
   };
   assert.doesNotThrow(
     () => validate(browserName, widthCrossing),
-    `${browserName}: sdk-observation-window-width: valid decimal-width-crossing span was refused`,
+    `${browserName}: sdk-observation-subscription-window-width: valid decimal-width-crossing span was refused`,
   );
 }
 
@@ -1418,7 +1561,32 @@ function normalizedRow(browserName, browserVersion, outcome) {
   };
 }
 
-async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled, protocolReference) {
+/**
+ * Issue #1295 D2: the structural-edit row's references, rendered by the served module under Node
+ * from the page's own frame: the replace before block 0 (the swap block the page's capture
+ * starts at), the same replace one block late, and no replace at all (the two mutations' captures).
+ */
+async function structuralEditReferences(artifacts, edit) {
+  const [documentA, documentB, source] = await Promise.all([
+    readFile(path.join(FIXTURE, "session.json")),
+    readFile(path.join(FIXTURE, "structural-edit-session.json")),
+    readFile(path.join(FIXTURE, "source.json"), "utf8").then(JSON.parse),
+  ]);
+  const frame = Uint8Array.from(edit.frameHex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
+  const render = (replaceBlock) => structuralEditReference({
+    modulePath: path.join(path.resolve(artifacts), WASM_ARTIFACT),
+    documentA,
+    documentB,
+    source,
+    frame,
+    sourceRingFrames: edit.sourceRingFrames,
+    blocks: edit.blocks,
+    replaceBlock,
+  });
+  return { exact: await render(0), shifted: await render(1), skipped: await render(null) };
+}
+
+async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled, protocolReference, structuralReference) {
   const launchOptions = { headless: true };
   if (browserName === "chromium") {
     launchOptions.channel = "chromium";
@@ -1552,12 +1720,43 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       // #1571: the headless half of the protocol row runs here, in Node, on the page's document.
       result.sdkResponse.protocol.headless = await protocolReference(result.sdkResponse.protocol);
     }
+    if (result.structuralReplace?.edit?.frameHex !== undefined) {
+      result.structuralReplace.edit.reference = await structuralReference(result.structuralReplace.edit);
+    }
     const outcome = validate(browserName, result);
     if (proveMutations) mutationProofs(browserName, result);
     if (Array.isArray(result.renderAllocations)) {
       // Issue #1333 D3: the per-instance counts the render-allocations gate just held to zero.
       process.stdout.write(`${browserName}: render-allocations: ${result.renderAllocations
         .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
+    }
+    const replace = result.structuralReplace;
+    if (replace?.large !== undefined) {
+      // #1295 (#1697 gate 3): the module's memory growth across the 1 MiB replacement, against the
+      // boot's projection `document_bytes * PARSE_TRANSIENT_MULTIPLIER` (20); reported, not pinned.
+      const growth = replace.large.after.memoryBytes - replace.large.before.memoryBytes;
+      const projection = replace.large.documentBytes * 20;
+      process.stdout.write(`${browserName}: structural-replace-large: ${JSON.stringify({
+        documentBytes: replace.large.documentBytes,
+        memoryBytesBefore: replace.large.before.memoryBytes,
+        memoryBytesCommitted: replace.large.committed.memoryBytes,
+        memoryBytesAfter: replace.large.after.memoryBytes,
+        appliedSample: replace.large.after.appliedSample,
+        growth,
+        projection,
+        aboveProjection: growth > projection,
+        controlAllocations: replace.large.after.singleModeControlAllocations - replace.large.before.singleModeControlAllocations,
+      })}\n`);
+      // The commit-to-adoption delay of the exact case, recorded, not gated (D6 non-goal).
+      process.stdout.write(`${browserName}: structural-edit: ${JSON.stringify({
+        committedRevision: replace.edit.committedRevision,
+        commitSample: replace.edit.pending.nextAbsoluteSample,
+        appliedSample: replace.edit.after.appliedSample,
+        outcome: replace.edit.after.appliedOutcome,
+        blockingRebuilds: replace.edit.after.blockingRebuilds,
+        controlAllocations: replace.edit.after.singleModeControlAllocations - replace.edit.before.singleModeControlAllocations,
+        digest: replace.edit.renderedDigest,
+      })}\n`);
     }
     const unsubscribe = result.observation?.unsubscribe;
     if (unsubscribe !== undefined) {
@@ -1669,7 +1868,8 @@ async function main() {
     const rows = [];
     for (const browserName of browserNames) {
       const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, proveMutations, sdkRoot !== null,
-        (protocol) => headlessProtocolReference(headlessEntry, artifacts, protocol));
+        (protocol) => headlessProtocolReference(headlessEntry, artifacts, protocol),
+        (edit) => structuralEditReferences(artifacts, edit));
       rows.push(row);
       if (checked !== null) validateCheckedRow(browserName, row, checked);
     }
@@ -1687,7 +1887,7 @@ async function main() {
         playwrightVersion: PLAYWRIGHT_VERSION,
         platform: "linux-headless",
         artifact: "single shipped simd128 AudioWorklet artifact",
-        defaultRingFrames: 5120,
+        stallRingFrames: 5120,
         minimumStallMs: 100,
         browsers: rows,
       };

@@ -173,7 +173,6 @@ fn run(tracks: usize) -> (Heap, Heap) {
     let (text, revision) = document(tracks);
     let options = WebBootOptions {
         source_ring_frames: 2_048,
-        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     };
     let length = native_staging::boot(options, text.as_bytes()).expect("the session stages");

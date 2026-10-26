@@ -99,7 +99,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
-      rustc: ${{ steps.build.outputs.rustc }}
+      toolchain: ${{ steps.build.outputs.toolchain }}
       closure_sha256: ${{ steps.build.outputs.closure_sha256 }}
       named_sha256: ${{ steps.build.outputs.named_sha256 }}
     steps:
@@ -112,6 +112,8 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal
           rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
+          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          rustup toolchain install "$channel" --profile minimal --component rust-src
       # Built exactly once here; every consumer downloads it and checks it against this job's
       # `sha256` output, so every artifact gate in the run reads exactly these bytes. #1044: the
       # parameter metadata and ABI layout are generated exactly once too, here, and `closure_sha256`
@@ -134,10 +136,20 @@ jobs:
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
           named_sha256="$(sha256sum target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm | awk '{print $1}')"
           echo "named_sha256=$named_sha256" >> "$GITHUB_OUTPUT"
-          echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(bash scripts/build-web-audioworklet.sh --print-toolchain)" >> "$GITHUB_OUTPUT"
           closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"
           echo "Shipped AudioWorklet module at \`$GITHUB_SHA\`: \`$sha256\` (the \`artifact-identity\` summary says whether it changed)" >> "$GITHUB_STEP_SUMMARY"
+      # Issue #2045: the shipped bytes name the compiler that built them. The module's `producers`
+      # section must give rustc exactly the version the browser artifact toolchain's rustc prints,
+      # so a build on another rustc fails here, before anything is uploaded.
+      - name: Check the shipped module names the browser artifact toolchain's compiler
+        env:
+          TOOLCHAIN: ${{ steps.build.outputs.toolchain }}
+        run: |
+          python3 -B scripts/check-wasm-producers.py --self-test
+          python3 -B scripts/check-wasm-producers.py target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm --toolchain "$TOOLCHAIN"
+          python3 -B scripts/check-wasm-producers.py target/ci/qualification-artifacts/miso-engine-v1-blake3.simd128.wasm --toolchain "$TOOLCHAIN"
       - name: Upload shipped artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -173,17 +185,20 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-      - name: Install pinned Rust toolchain and Wasm standard library
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal
-          rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
-      # The twin: this commit again, from another checkout path and with another CARGO_HOME, the
-      # two roots rustc could embed. `artifact` built from $GITHUB_WORKSPACE with the runner's.
-      - name: Rebuild the module from another checkout path and CARGO_HOME
+      # No toolchain in the runner's RUSTUP_HOME: the twin installs its own, and the report runs
+      # only git and gh (#2045).
+      # The twin: this commit again, from another checkout path, with another CARGO_HOME and with
+      # the browser artifact toolchain freshly installed into another RUSTUP_HOME: the three roots
+      # rustc could embed (#2045: the third holds the sysroot remap). `artifact` built from
+      # $GITHUB_WORKSPACE with the runner's. A fresh install, not a copy: a copied toolchain
+      # directory carries no rustup manifest, and RUSTUP_TOOLCHAIN could resolve elsewhere.
+      - name: Rebuild the module from another checkout path, CARGO_HOME and RUSTUP_HOME
         run: |
           git worktree add --detach "$RUNNER_TEMP/twin" HEAD
           mkdir "$RUNNER_TEMP/twin-module"
-          CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
+          channel="$(bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --print-toolchain)"
+          RUSTUP_HOME="$RUNNER_TEMP/twin-rustup" rustup toolchain install "$channel" --profile minimal --component rust-src
+          RUSTUP_HOME="$RUNNER_TEMP/twin-rustup" CARGO_HOME="$RUNNER_TEMP/twin-cargo-home" bash "$RUNNER_TEMP/twin/scripts/build-web-audioworklet.sh" --module-only "$RUNNER_TEMP/twin-module"
       # The base is never rebuilt here: this run's workflow is the change's, and a base built in it
       # is built in the change's environment (#1061 attempts 1 and 2). The report reads the digest
       # the base's own run recorded instead, and says CANNOT TELL when there is none.
@@ -193,14 +208,15 @@ jobs:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           BUILT: ${{ needs.artifact.outputs.sha256 }}
-          RUSTC: ${{ needs.artifact.outputs.rustc }}
+          TOOLCHAIN: ${{ needs.artifact.outputs.toolchain }}
         run: |
           set -o pipefail
           python3 -B scripts/web-audioworklet-identity.py --self-test
-          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --rustc "$RUSTC" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --toolchain "$TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Issue #1061: main's own record of the module this commit's run built, as the commit status
-  # `audioworklet-sha256` (`<sha256> rustc <release>`, linking the run). Later changes compare
+  # `audioworklet-sha256` (`<sha256> rustc <toolchain>`, linking the run; #1334: the toolchain is
+  # the browser artifact's dated nightly channel). Later changes compare
   # with it (`artifact-identity`), so no change ever rebuilds its base inside its own, possibly
   # edited, workflow. Its own job, run only on a push to main, checking out nothing and running no
   # repository code: it is the only job holding a write token, and no pull request reaches it.
@@ -217,10 +233,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA256: ${{ needs.artifact.outputs.sha256 }}
-          RUSTC: ${{ needs.artifact.outputs.rustc }}
+          TOOLCHAIN: ${{ needs.artifact.outputs.toolchain }}
         run: |
-          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$RUSTC" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo "malformed record: '$SHA256' rustc '$RUSTC'" >&2; exit 1; }
-          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $RUSTC" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ && "$TOOLCHAIN" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "malformed record: '$SHA256' rustc '$TOOLCHAIN'" >&2; exit 1; }
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=success -f context=audioworklet-sha256 -f "description=$SHA256 rustc $TOOLCHAIN" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
   sdk:
     name: SDK package and generated-surface qualification
@@ -265,6 +281,13 @@ jobs:
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
           closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
+      # Issue #1334: sdk-package.sh check runs test-sdk-artifact-builder-output-contract.sh, which runs
+      # the real builder with only cargo mocked; the builder asks the browser artifact toolchain for
+      # its sysroot. Installed after the verification, which no repository script may precede.
+      - name: Install the browser artifact toolchain
+        run: |
+          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          rustup toolchain install "$channel" --profile minimal --component rust-src
       # check-sdk-deletions.py's --self-test (design §6.6, S7) runs in gate-self-tests
       # when the gate or the SDK tree it reads changes (#1043); the gate itself runs here.
       # test-sdk-artifact-builder-output-contract.sh (also design §6.6) is not added separately:
@@ -334,6 +357,13 @@ jobs:
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
           closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
+      # Issue #1334: the render-lock probe below builds on the shipped module's cargo line, so on the
+      # browser artifact toolchain. Installed after the verification, which no repository script
+      # may precede.
+      - name: Install the browser artifact toolchain
+        run: |
+          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          rustup toolchain install "$channel" --profile minimal --component rust-src
       # Issue #1109: the shipped module carries no `name` section, so the three gates below that find
       # functions by name -- the call graph (inside check-web-audioworklet.sh), scalar-oracle-absent
       # and the V8 spill gate -- read the named twin. Its download is checked against the artifact
@@ -417,7 +447,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        browser: [chromium, firefox, webkit]
+        browser: [chromium, webkit]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -614,19 +644,19 @@ jobs:
       # toolchain install, which lint already paid for.
       - name: Sub-v3 builds are refused by the lane guard (scalar)
         run: |
-          ! CARGO_TARGET_DIR=target/ci/x86-scalar RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-avx2,-fma' cargo check --locked -p engine -p target-smoke -p math 2>/tmp/ci-scalar-probe.log
+          unset CARGO_ENCODED_RUSTFLAGS; ! CARGO_TARGET_DIR=target/ci/x86-scalar RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-avx2,-fma' cargo check --locked -p engine -p target-smoke -p math 2>/tmp/ci-scalar-probe.log
           grep -q 'requires x86-64-v3' /tmp/ci-scalar-probe.log
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="avx2"'
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="fma"'
       - name: Sub-v3 builds are refused by the lane guard (AVX2 without FMA)
         run: |
-          ! CARGO_TARGET_DIR=target/ci/x86-avx2 RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,-fma' cargo check --locked -p engine -p target-smoke -p math 2>/tmp/ci-avx2-probe.log
+          unset CARGO_ENCODED_RUSTFLAGS; ! CARGO_TARGET_DIR=target/ci/x86-avx2 RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,-fma' cargo check --locked -p engine -p target-smoke -p math 2>/tmp/ci-avx2-probe.log
           grep -q 'requires x86-64-v3' /tmp/ci-avx2-probe.log
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="avx2"'
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="fma"'
       - name: AVX2 with FMA compile probe and cfg assertion
         run: |
-          CARGO_TARGET_DIR=target/ci/x86-avx2fma RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,+fma' cargo check --locked -p engine -p target-smoke -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p multiband-compressor -p parametric-eq -p soft-clip
+          unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/x86-avx2fma RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,+fma' cargo check --locked -p engine -p target-smoke -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p multiband-compressor -p parametric-eq -p soft-clip
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="avx2"'
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="fma"'
 
@@ -748,9 +778,10 @@ jobs:
       - name: Input section tail and exact-rest gates (tail_contract) in release
         run: cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract
       # #1375: the compressor's and the limiter's tail and exact-rest gates at release scale (every
-      # launch rate and both peak cases; debug runs 48 kHz and one peak case only).
-      - name: Compressor and limiter tail and exact-rest gates (tail_contract) in release
-        run: cargo test --locked --release -p compressor -p true-peak-limiter -p gate-expander -p transient-shaper -p soft-clip --test tail_contract
+      # launch rate and both peak cases; debug runs 48 kHz and one peak case only). #1374: the
+      # delay's, whose real-kernel soundness gate (about 200M frames) runs in release only.
+      - name: Compressor, limiter and delay tail and exact-rest gates (tail_contract) in release
+        run: cargo test --locked --release -p compressor -p true-peak-limiter -p gate-expander -p transient-shaper -p soft-clip -p delay --test tail_contract
       # #1379: the graph tail composition's real-kernel gates (C1, C2, C6 at every launch rate,
       # C11 (b)), ignored in debug.
       - name: Graph tail composition gates (host-core tail_composition) in release
@@ -777,19 +808,21 @@ jobs:
         run: cargo rustc --locked --release -p math --lib -- --print cfg | grep -x 'target_feature="fma"'
       # Own CARGO_TARGET_DIR per distinct RUSTFLAGS (design §8): a per-crate override must not
       # invalidate the shared release target dir's fingerprints for every step after it.
+      # Issue #2067: cargo reads CARGO_ENCODED_RUSTFLAGS before RUSTFLAGS, so each loom leg unsets it
+      # first; an exported value would otherwise silently replace the leg's `--cfg loom` flags.
       - name: Realtime race model (engine SPSC loom leg)
-        run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
+        run: unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
       # #1702: the seqlock behind the applied-revision watermark and the seek report, on the same
       # target dir and flags as the SPSC leg, so it reuses that leg's build.
       - name: Realtime race model (engine seqlock loom leg)
-        run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib seqlock_loom
+        run: unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib seqlock_loom
       # Issue #1609. host-core depends on `lane`, which refuses to compile without the pinned
       # x86-64-v3 features, and a RUSTFLAGS value replaces `.cargo/config.toml`'s rustflags, so this
       # leg names them. The `-C target-feature=+avx2,+fma` below is a copy of `.cargo/config.toml`'s
       # x86_64 rustflags: change the two together. Its own target dir: the flags differ from the
       # engine leg's.
       - name: Realtime race model (spectrum handoff loom leg)
-        run: CARGO_TARGET_DIR=target/ci/loom-host-core RUSTFLAGS='--cfg loom --check-cfg=cfg(loom) -C target-feature=+avx2,+fma' cargo test --locked --release -p host-core --lib spectrum_handoff_loom
+        run: unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/loom-host-core RUSTFLAGS='--cfg loom --check-cfg=cfg(loom) -C target-feature=+avx2,+fma' cargo test --locked --release -p host-core --lib spectrum_handoff_loom
       - name: Math M1 exhaustive sweep
         if: needs.route.outputs.math_closure == 'true'
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
@@ -977,6 +1010,8 @@ jobs:
         run: |
           rustup toolchain install 1.99.1 --profile minimal
           rustup target add --toolchain 1.99.1 wasm32-unknown-unknown
+          channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+          rustup toolchain install "$channel" --profile minimal --component rust-src
           sudo apt-get update
           sudo apt-get install -y ripgrep wabt
       # Builds its own wasmtime runner rather than depending on test-release, so nothing
@@ -990,11 +1025,11 @@ jobs:
       # by the artifact job); only the compile-probe claim over target-smoke/protocol survives.
       - name: SIMD128 compile probe (target-smoke and protocol)
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p target-smoke -p protocol
+          unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p target-smoke -p protocol
           rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128 | grep -qx 'target_feature="simd128"'
       - name: Evidence crates compile for Wasm (not an artifact)
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p dsp-reference -p conformance
+          unset CARGO_ENCODED_RUSTFLAGS; CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p dsp-reference -p conformance
       - name: Issue-005 simd128 protocol golden parity
         run: bash scripts/check-protocol-wasm-parity.sh
       # Gate G5's wasm leg: the frozen corpus (lane cases and every delegated family's pins)

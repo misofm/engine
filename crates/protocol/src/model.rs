@@ -375,6 +375,12 @@ pub enum SessionEdit {
         /// [`controls::MAXIMUM_OBSERVATION_WINDOW_BLOCKS`]. A disarm names the window it subscribed
         /// with.
         window_blocks: u32,
+        /// A disarm's tag of the arm it ends (#2087): the tag its arm's reply gave
+        /// (`observe_arm_tags`). The host disarms only when it names the bound arm; a tag the
+        /// host issued that names an arm the host already ended (an effect removed and added
+        /// back, and another subscriber armed since) changes nothing. `0` on an arm, and on the
+        /// wire it is present exactly on a disarm.
+        arm_tag: u64,
     },
 }
 
@@ -1627,6 +1633,7 @@ impl SessionStore {
                 tap_id,
                 armed,
                 window_blocks,
+                arm_tag,
             } = edit
             {
                 let observe_refused = |error| refused(SessionEditError::Observe(error));
@@ -1638,12 +1645,18 @@ impl SessionStore {
                     section: section.clone(),
                     tap_id: *tap_id,
                 };
-                controls::observe_target(&candidate, &key, *window_blocks)
-                    .map_err(observe_refused)?;
                 let (bindings, touched, kept) = observation
                     .get_or_insert_with(|| (observe.bindings.clone(), Vec::new(), Vec::new()));
+                // #2087: a disarm of an arm the host already ended changes nothing, whether or not
+                // its target is still there; it is decided before the target is resolved.
+                let ended_arm =
+                    !*armed && bindings.names_ended_arm(&key, *arm_tag, observe.next_arm_tag);
+                if !ended_arm {
+                    controls::observe_target(&candidate, &key, *window_blocks)
+                        .map_err(observe_refused)?;
+                }
                 bindings
-                    .observe(&key, *armed, *window_blocks)
+                    .observe(&key, *armed, *window_blocks, *arm_tag, observe.next_arm_tag)
                     .map_err(observe_refused)?;
                 kept.push(
                     bindings
@@ -2100,10 +2113,10 @@ mod tests {
     }
 
     /// #1584 D7a: an `Observe` edit needs a host that serves it. The one-call preparation, a
-    /// monitor preparation with no binding table and one whose host does not serve the edit (the
-    /// browser until #1589) each refuse it `observation.unavailable` at its own index, before its
-    /// target is looked up; a host that serves it gets the target check (the canonical fixture's
-    /// track has no insert `eq1`).
+    /// monitor preparation with no binding table and one whose host's adapter does not serve the
+    /// edit each refuse it `observation.unavailable` at its own index, before its target is looked
+    /// up; a host that serves it gets the target check (the canonical fixture's track has no insert
+    /// `eq1`).
     ///
     /// Red if a host without the edit acknowledges a subscription nobody queues, or if a second
     /// writer of a browser observation queue could arm through the core.
@@ -2122,6 +2135,7 @@ mod tests {
                 tap_id: 1,
                 armed: true,
                 window_blocks: 4,
+                arm_tag: 0,
             },
         ];
         let refusal = |error| {

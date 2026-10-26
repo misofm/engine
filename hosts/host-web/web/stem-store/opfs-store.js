@@ -1,4 +1,4 @@
-import { IncrementalBlake3 } from "./incremental-blake3.js"
+import { IncrementalBlake3, prepareBlake3 } from "./incremental-blake3.js"
 import { StemResolverError, stemDigest, stemFileName } from "./identity.js"
 
 export const DEFAULT_STEM_STORE_FOLDER = "miso-stems-blake3-v1"
@@ -106,6 +106,9 @@ export class OpfsStemStore {
         "Origin-private stem storage is unavailable"
       )
     }
+    // Issue #2111: every ingest and verify-on-open hash after this takes the WebAssembly SIMD
+    // BLAKE3 when it loads; a load failure resolves to the JavaScript hash and never throws.
+    await prepareBlake3()
     try {
       const root = await this.#storage.getDirectory()
       this.#directory = await root.getDirectoryHandle(this.#folderName, {
@@ -1285,10 +1288,11 @@ export class StemSessionLease {
 }
 
 /**
- * Chromium exposes a real shared-reader mode through `handle.mode`. Firefox
- * accepts the option but omits that property, and WebKit ignores the option;
- * both remain exclusive. Existing-file contention errors have engine-specific
- * names, so every rejection declines this mode and leaves reads on `getFile()`.
+ * Chromium exposes a real shared-reader mode through `handle.mode`. WebKit
+ * ignores the option and remains exclusive; so does any engine that accepts
+ * the option but omits that property (Firefox, not a supported browser).
+ * Existing-file contention errors have engine-specific names, so every
+ * rejection declines this mode and leaves reads on `getFile()`.
  */
 export async function detectSharedReadOnlyMode(fileHandle) {
   if (typeof fileHandle?.createSyncAccessHandle !== "function") return false
@@ -1297,7 +1301,7 @@ export async function detectSharedReadOnlyMode(fileHandle) {
     access = await fileHandle.createSyncAccessHandle({ mode: "read-only" })
     return access?.mode === "read-only"
   } catch {
-    // Do not inspect the error name: WebKit and Blink/Gecko disagree on it.
+    // Do not inspect the error name: WebKit and Blink disagree on it.
     return false
   } finally {
     await access?.close?.()

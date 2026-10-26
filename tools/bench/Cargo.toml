@@ -15,6 +15,9 @@ bench-support.workspace = true
 builtins.workspace = true
 builtins-compiler.workspace = true
 conformance.workspace = true
+# The swap subject (#1286): sessions prepared, successors prepared warm and published through
+# host-core, as the C ABI prepares them.
+controls.workspace = true
 # The console subject itself. It lives in its own crate so the wasm console arm's guest can link
 # the identical code (#163 phase 2 step 1); this crate holds the clock, the percentiles and the
 # records, which is everything the guest cannot have.
@@ -24,7 +27,9 @@ effect-compiler.workspace = true
 effect-contract.workspace = true
 graph.workspace = true
 graph-compiler.workspace = true
+host-core.workspace = true
 lane.workspace = true
+session.workspace = true
 sha2.workspace = true
 
 # Issue #938: the bench pins its render thread and the live row's producer thread. Linux-only, as

@@ -33,11 +33,14 @@ fn lane_values(lane: usize) -> Values {
 }
 
 /// Block `step`'s spans for one lane: a band move, then the arms, then the threshold, each
-/// starting a 64-sample ramp; the listen switch flips back mid-run.
+/// starting a 64-sample ramp; the listen switch flips back mid-run. At block 4 split lane 2 switches
+/// its band detector to the high-pass one (#1984) while lane 1 (split, high-pass) is already live
+/// on the shelf path, so lane 2's shelf must start cold in the bank as in its scalar instance.
 fn lane_spans(step: usize, lane: usize) -> Vec<PreparedAutomationSpan> {
     let sample = (step * FRAMES) as u64;
     let points: &[(u32, f32)] = match step {
         3 => &[(0, 9_000.0 - 500.0 * lane as f32), (1, 6.0)],
+        4 if lane == 2 => &[(8, 2.0)],
         6 => &[
             (7, if lane.is_multiple_of(2) { 2.0 } else { 1.0 }),
             (9, 1.0),

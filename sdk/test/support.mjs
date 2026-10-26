@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
+import { decodeControlReply, encodeObserveTransaction } from "../src/core/control-frame.ts";
 import { onEndpointIds } from "./control-support.mjs";
 
 const ARTIFACT_DIRECTORY_ENV = "MISO_ENGINE_SDK_ARTIFACTS_HEX";
@@ -177,30 +177,29 @@ export function engineHost(engine, { frames = [] } = {}) {
       }
       return { tag: "miso.control.v1", requestId, result, response, revision: engine.controlRevision() };
     },
-    async command(value) {
-      const requestId = (next += 1);
-      const bytes = new Uint8Array(value.commands.length * ABI_LAYOUT.commandRecord.bytes);
-      const view = new DataView(bytes.buffer);
-      const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
-      value.commands.forEach((command, index) => {
-        const base = index * ABI_LAYOUT.commandRecord.bytes;
-        view.setUint8(base + at("kind"), command.kind);
-        view.setUint8(base + at("rack"), command.rack);
-        const strip = new TextEncoder().encode(command.stripId);
-        const effect = new TextEncoder().encode(command.effectId);
-        view.setUint8(base + at("stripIdBytes"), strip.length);
-        view.setUint8(base + at("effectIdBytes"), effect.length);
-        view.setUint32(base + at("tapId"), command.tapId, true);
-        view.setUint32(base + at("windowBlocks"), command.windowBlocks, true);
-        bytes.set(strip, base + at("stripId"));
-        bytes.set(effect, base + at("effectId"));
-      });
-      const report = engine.submitCommands(bytes, value.commands.length);
-      return {
-        tag: "miso.ack.v1", requestId, result: report.result, reason: report.reason,
-        rejectedIndex: report.rejectedIndex, admitted: report.admitted,
-        appliedAtSample: report.appliedAtSample, records: bytes,
-      };
-    },
   };
+}
+
+/**
+ * Arm or disarm taps on a headless engine as an app does since #1589c: one `Observe` transaction
+ * at the committed revision, with the endpoint's one request-ID allocator. Each edit is
+ * `{ stripId, rack, effectId, tapId, armed, windowBlocks }`; resolves with the decoded reply.
+ */
+export function observeTaps(engine, edits) {
+  const frame = encodeObserveTransaction({
+    requestId: engine.controlTransactions().requestIds.next(),
+    expectedRevision: engine.controlRevision(),
+    edits,
+  });
+  return decodeControlReply(engine.controlFrame(frame));
+}
+
+/**
+ * One insert tap's `Observe` edit for {@link observeTaps}: tap 1 of insert `effectId` of `stripId`.
+ * A disarm names the arm it ends by `armTag`, the tag its arm's reply gave (#2087).
+ */
+export function insertTap(stripId, effectId, armed, windowBlocks, tapId = 1, armTag = undefined) {
+  return armed
+    ? { stripId, rack: "inserts", effectId, tapId, armed, windowBlocks }
+    : { stripId, rack: "inserts", effectId, tapId, armed, windowBlocks, armTag };
 }

@@ -42,10 +42,10 @@ use core::ptr;
 
 use capi::{
     ABI_VERSION as C_ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits,
-    ENGINE_CONFIG_SIZE, EVENT_LANE_RELIABLE, EngineConfig, PLAN_RESOURCE_REPORT_SIZE,
-    PLANAR_OUTPUT_SIZE, Plan, PlanResourceReport, PlanarOutput, RESULT_OK as C_RESULT_OK,
-    SOURCE_CHUNK_SIZE, SOURCE_SEEK_REPORT_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk,
-    SourceSeekReport, SubmitReport,
+    ENGINE_CONFIG_SIZE, EVENT_LANE_LOSSY, EVENT_LANE_RELIABLE, EngineConfig,
+    PLAN_RESOURCE_REPORT_SIZE, PLANAR_OUTPUT_SIZE, Plan, PlanResourceReport, PlanarOutput,
+    RESULT_OK as C_RESULT_OK, SOURCE_CHUNK_SIZE, SOURCE_SEEK_REPORT_SIZE, SUBMIT_REPORT_SIZE,
+    Session, SourceChunk, SourceSeekReport, SubmitReport,
 };
 use controls::{ControlAddress, Lane, Owner, Section};
 use protocol::{
@@ -1916,12 +1916,8 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
         );
         assert_eq!(c_abi.watermark(), initial);
 
-        let _ = (browser.step(3), c_abi.step(3));
-        assert_eq!(
-            status_watermark(&browser),
-            c_abi.watermark(),
-            "{rate} Hz: the swap block"
-        );
+        // The delay restarts T1: a duck-swap, adopted at its `S` (#1324a).
+        let swap = step_both_until_applied(&mut browser, &mut c_abi, 3, model.revision + 2);
         let (revision, first_sample, flags) = status_watermark(&browser);
         assert_eq!(
             revision,
@@ -1930,7 +1926,7 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
         );
         assert_eq!(
             first_sample,
-            3 * u64::from(QUANTUM),
+            swap * u64::from(QUANTUM),
             "{rate} Hz: the swap block"
         );
         let _ = flags;
@@ -1941,7 +1937,7 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
             c_abi.watermark(),
             "{rate} Hz: the control-side record"
         );
-        for block in 4..8 {
+        for block in swap + 1..swap + 5 {
             let _ = (browser.step(block), c_abi.step(block));
             assert_eq!(
                 status_watermark(&browser),
@@ -1957,6 +1953,21 @@ fn the_status_words_carry_a_rebuilds_watermark_the_c_abi_reports() {
 fn without_request_id(mut reply: Vec<u8>) -> Vec<u8> {
     reply[24..32].fill(0);
     reply
+}
+
+/// Blocks from `block` on, on both hosts, equal bit for bit and with one status watermark, until
+/// each applies `revision`: a rebuild that restarts a strip is a duck-swap, adopted at its `S`,
+/// not at the next block (#1324a). The adoption block.
+fn step_both_until_applied(browser: &mut Rig, c_abi: &mut CAbi, block: u64, revision: u64) -> u64 {
+    for at in block..block + 64 {
+        let (b, c) = (browser.step(at), c_abi.step(at));
+        assert_eq!(b, c, "block {at}");
+        assert_eq!(status_watermark(browser), c_abi.watermark(), "block {at}");
+        if c_abi.watermark().0 >= revision {
+            return at;
+        }
+    }
+    panic!("revision {revision} is applied within 64 blocks of block {block}");
 }
 
 /// Blocks `range` on both hosts, equal bit for bit.
@@ -3440,11 +3451,11 @@ fn a_composed_stored_mute_renders_alike_on_both_hosts() {
                         generation += 1;
                         timeline = 2_600;
                         assert_eq!(
-                            browser.host.session_seek(None, generation, timeline, None),
+                            browser.host.session_seek(generation, timeline, None),
                             host_web::RESULT_OK
                         );
                         assert_eq!(
-                            twin.host.session_seek(None, generation, timeline, None),
+                            twin.host.session_seek(generation, timeline, None),
                             host_web::RESULT_OK
                         );
                         c_abi.session_seek(generation, timeline, None);
@@ -3711,9 +3722,19 @@ fn both_hosts_boot_an_empty_session_and_add_the_first_stem_alike() {
 /// master with `SET_CONTROL`, and refuse a strip neither has: each transaction's verdict, the
 /// control list and state pages (the row's value) and the snapshot (which never holds it) agree.
 ///
+/// #1690b gate 1: after the rebuild both arm `t1`'s compressor tap and play the same loud PCM; the
+/// C ABI configures `[{master, gain reduction}]`, one batch per meter window. After each later
+/// step both play [`MASTER_PLAY_BLOCKS`] blocks, a whole number of either host's meter windows,
+/// and the browser's `masterGrDb` (its lease frame's master word, present with
+/// `master_gr_present`) and the C ABI's last master record (`VALID` or not) are the same bits and
+/// present together: the compressor's reduction, nonzero, while `t1` is the master; absent once the
+/// master moves to `bus` (no armed tap) and once it is cleared.
+///
 /// Test value: red if one host lacks the row, refuses a designation the other takes, spends a
 /// revision on it, lists another master, holds two masters at once, saves the designation into
-/// the snapshot, or admits a strip the session does not have.
+/// the snapshot, or admits a strip the session does not have; or if either host computes the
+/// master's reading its own way, reads another window, or reports `0` where the other reports
+/// absent (#1690b).
 #[test]
 fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
     let rate = RATES[0];
@@ -3728,6 +3749,8 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
     model.routes.clear();
     model.vcas.clear();
     source.id = id("stem");
+    // #1690b: long enough for every step's play.
+    source.frames = 1 << 20;
     track.id = id("t1");
     track.source_id = source.id.clone();
     route.id = id("t1-main");
@@ -3757,7 +3780,24 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
     ];
 
     let mut browser = Rig::new(&model);
+    // #1690b: the browser leg boots with a meter window and observation capacity, so it grants
+    // the meter lease and arms the tap.
+    browser.host = host_web::AudioWorkletEngineHost::boot(
+        canonical_session_json(&model)
+            .expect("canonical session")
+            .as_bytes(),
+        host_web::WebBootOptions {
+            require_sample_rate_hz: rate,
+            require_quantum_frames: QUANTUM,
+            source_ring_frames: QUANTUM * 2,
+            live_control_meter_blocks: host_web::DEFAULT_METER_BLOCKS.into(),
+            ..host_web::WebBootOptions::explicit_defaults()
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{}", String::from_utf8_lossy(failure.diagnostic())));
     let mut c_abi = CAbi::new(&model);
+    let mut block = 0;
+
     for (step, edits) in transactions.iter().enumerate() {
         let before = c_abi.revision;
         let (b, _) = browser.transaction_reply(edits);
@@ -3785,7 +3825,8 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
             ),
         }
         assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
-        let _ = c_abi.render(step as u64);
+        let _ = c_abi.render(block);
+        block += 1;
         let (b_rows, b_snapshot) = dump(|payload, expected| browser.command(payload, expected));
         let (c_rows, c_snapshot) = dump(|payload, expected| c_abi.send(payload, expected));
         assert_eq!(b_rows, c_rows, "step {step}: the control pages agree");
@@ -3807,6 +3848,173 @@ fn both_hosts_designate_the_master_strip_after_an_empty_boot_alike() {
             expected,
             "step {step}: the C ABI's listed master"
         );
+        // #1690b gate 1: the master's gain reduction, on each host.
+        if step == 0 {
+            arm_master_reading(&mut browser, &mut c_abi);
+            continue;
+        }
+        // Each step plays the stem from its frame 0, in a new generation, from the next block.
+        let generation = step as u64 + 1;
+        assert_eq!(
+            browser.host.seek_source(b"stem", generation, 0),
+            host_web::RESULT_OK
+        );
+        // SAFETY: The session is live and used by this thread alone; the name outlives the call.
+        let code = unsafe {
+            capi::miso_engine_v1_source_seek(c_abi.session, b"stem".as_ptr(), 4, generation, 0)
+        };
+        assert_eq!(code, C_RESULT_OK, "C ABI seek");
+        let mut readings = None;
+        for fed in 0..MASTER_PLAY_BLOCKS {
+            let [left, right] = planes(0, block);
+            assert_eq!(
+                browser.host.submit_source(
+                    b"stem",
+                    generation,
+                    fed * u64::from(QUANTUM),
+                    rate,
+                    &[&left, &right],
+                    QUANTUM,
+                    false,
+                ),
+                host_web::RESULT_OK,
+                "step {step}: the browser takes the stem's PCM: {}",
+                String::from_utf8_lossy(browser.host.diagnostic())
+            );
+            c_abi.submit_from("stem", 0, block, fed, generation);
+            assert_eq!(browser.host.render_next(), host_web::RESULT_OK);
+            let b = bits(browser.host.output_pcm().expect("browser output"));
+            assert_eq!(b, c_abi.render(block), "step {step}: block {block} alike");
+            block += 1;
+            while browser.host.poll_meters() != 0 {}
+            if let Some(records) = c_abi.meter_batches().pop() {
+                let [record] = records.as_slice() else {
+                    panic!("one master record: {records:?}")
+                };
+                readings = Some(*record);
+            }
+        }
+        let c_record = readings.expect("a C ABI batch");
+        assert_eq!(
+            (c_record.handle, c_record.component),
+            (1, protocol::MeterComponent::Aggregate)
+        );
+        let c_reading = (c_record.flags == 1).then_some(c_record.value.to_bits());
+        if c_record.flags != 1 {
+            assert_eq!(
+                c_record.value.to_bits(),
+                0,
+                "step {step}: an absent record is 0.0"
+            );
+        }
+        let frame = browser.host.meter_frame();
+        let strips = (frame.len() - 3) / 3;
+        let b_reading = (browser.host.meter_header().master_gr_present == 1)
+            .then(|| frame[3 * strips + 2].to_bits());
+        assert_eq!(
+            b_reading, c_reading,
+            "step {step}: the master's reading alike"
+        );
+        match step {
+            1 => assert!(
+                c_reading.is_some_and(|db| f32::from_bits(db) > 0.0),
+                "step 1: the compressor reduces: {c_reading:?}"
+            ),
+            _ => assert_eq!(c_reading, None, "step {step}: no master reading"),
+        }
+    }
+}
+
+/// The blocks #1690b's parity row plays per step: a whole number of the browser's meter windows
+/// (12 blocks) and of the C ABI's at 44.1 kHz (11 blocks), and of the tap's window.
+const MASTER_PLAY_BLOCKS: u64 = 132;
+
+/// #1690b gate 1's set-up after the rebuild: both hosts arm `t1`'s compressor tap with a
+/// four-block window, and the C ABI configures `[{master, gain reduction}]` with one batch per
+/// meter window; the browser takes its meter lease.
+fn arm_master_reading(browser: &mut Rig, c_abi: &mut CAbi) {
+    // Both hosts arm by the same `Observe` transaction.
+    let arm = [SessionEdit::Observe {
+        strip_id: id("t1"),
+        section: controls::TapSection::Inserts(id(COMPRESSOR.id)),
+        tap_id: 1,
+        armed: true,
+        window_blocks: 4,
+        arm_tag: 0,
+    }];
+    let (b, _) = browser.transaction_reply(&arm);
+    assert!(
+        matches!(b, Verdict::Applied { .. }),
+        "the browser arm: {b:?}"
+    );
+    let (c, _) = c_abi.transaction(&arm);
+    assert!(matches!(c, Verdict::Applied { .. }), "the C ABI arm: {c:?}");
+    let window = host_core::default_meter_window_blocks(c_abi.rate, QUANTUM).get();
+    assert_eq!(
+        MASTER_PLAY_BLOCKS % u64::from(window),
+        0,
+        "whole C ABI windows"
+    );
+    let telemetry = protocol::TelemetryConfiguration {
+        meters: vec![protocol::MeterEntry {
+            target: protocol::MeterTarget::Master,
+            metric: protocol::MeterMetric::GainReduction,
+        }],
+        meter_period_blocks: window,
+        meter_window_blocks: None,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+    };
+    let revision = c_abi.revision;
+    c_abi.send(
+        CommandPayload::TelemetryConfigure(&telemetry),
+        ExpectedRevision::Exact(SessionRevision(revision)),
+    );
+    assert_eq!(browser.host.set_meter_lease(true), host_web::RESULT_OK);
+}
+
+impl CAbi {
+    /// Every `METER_BATCH` on the lossy lane, in order, as its records; other lossy events are
+    /// dropped.
+    fn meter_batches(&mut self) -> Vec<Vec<protocol::MeterRecord>> {
+        let mut batches = Vec::new();
+        loop {
+            let mut event = [0_u8; 4_096];
+            let mut out = BytesOut {
+                struct_size: BYTES_OUT_SIZE,
+                reserved0: 0,
+                data: event.as_mut_ptr(),
+                capacity_bytes: event.len() as u64,
+                required_bytes: 0,
+            };
+            // SAFETY: The session is live and used by this thread alone; the buffer is owned.
+            let code = unsafe {
+                capi::miso_engine_v1_dequeue_event(self.session, EVENT_LANE_LOSSY, &mut out)
+            };
+            assert_eq!(code, C_RESULT_OK);
+            if out.required_bytes == 0 {
+                return batches;
+            }
+            let mut fields = [0_u16; 64];
+            if let protocol::DecodedTypedEventFrame {
+                payload: protocol::DecodedEventPayload::MeterBatch(batch),
+                ..
+            } = ProtocolCodec::default()
+                .decode_typed_event(
+                    &event[..out.required_bytes as usize],
+                    &mut DecodeScratch::new(&mut fields),
+                )
+                .expect("lossy event")
+            {
+                batches.push(
+                    (0..usize::from(batch.count))
+                        .map(|index| batch.record(index).expect("meter record"))
+                        .collect(),
+                );
+            }
+        }
     }
 }
 
@@ -4238,8 +4446,9 @@ fn a_rebuild_that_adds_latency_moves_the_plan_latency_alike_on_both_hosts() {
             "{rate} Hz: pending"
         );
         assert_eq!(c_abi.plan_latency(), boot, "{rate} Hz: pending");
-        browser.step(4);
-        c_abi.step(4);
+        // The limiters restart T1: a duck-swap, adopted at its `S` (#1324a).
+        let revision = c_abi.watermark().0 + 1;
+        step_both_until_applied(&mut browser, &mut c_abi, 4, revision);
         let moved = c_abi.plan_latency();
         assert!(
             moved.0 > boot.0,
@@ -4699,14 +4908,14 @@ fn a_refused_source_call_reports_the_same_result_and_diagnostic_on_both_hosts() 
         (
             "session seek, stale generation",
             (invalid, b"source.generation.stale"),
-            Box::new(|rig| rig.host.session_seek(None, 1, 0, None)),
+            Box::new(|rig| rig.host.session_seek(1, 0, None)),
             // SAFETY: As above.
             Box::new(|session| unsafe { capi::miso_engine_v1_session_seek(session, 1, 0) }),
         ),
         (
             "session seek_at, unaligned anchor",
             (invalid, b"source.seek.anchor_unaligned"),
-            Box::new(|rig| rig.host.session_seek(None, 2, 0, Some(1))),
+            Box::new(|rig| rig.host.session_seek(2, 0, Some(1))),
             // SAFETY: As above.
             Box::new(|session| unsafe { capi::miso_engine_v1_session_seek_at(session, 2, 0, 1) }),
         ),
@@ -4868,7 +5077,7 @@ fn the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks() {
         let call_block = 4_u64;
         let frame = 40 * quantum;
         assert_eq!(
-            browser.host.session_seek(None, 2, frame, None),
+            browser.host.session_seek(2, frame, None),
             host_web::RESULT_OK
         );
         c_abi.session_seek(2, frame, None);
@@ -4919,7 +5128,7 @@ fn the_session_seek_is_alike_on_both_hosts_for_plain_and_late_seeks() {
         let late_frame = 30 * quantum;
         let anchor = 3 * quantum;
         assert_eq!(
-            browser.host.session_seek(None, 3, late_frame, Some(anchor)),
+            browser.host.session_seek(3, late_frame, Some(anchor)),
             host_web::RESULT_OK
         );
         c_abi.session_seek(3, late_frame, Some(anchor));
@@ -5015,7 +5224,7 @@ fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_host
         // 3. An anchored seek at block 10: nothing is declared, the floors stay.
         let anchor = 10 * quantum;
         assert_eq!(
-            browser.host.session_seek(None, 2, 0, Some(anchor)),
+            browser.host.session_seek(2, 0, Some(anchor)),
             host_web::RESULT_OK
         );
         c_abi.session_seek(2, 0, Some(anchor));
@@ -5037,7 +5246,7 @@ fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_host
 
         // 1. A refused plain seek (generation 2 is stale): nothing is declared.
         assert_eq!(
-            browser.host.session_seek(None, 2, 0, None),
+            browser.host.session_seek(2, 0, None),
             host_web::RESULT_INVALID_ARGUMENT
         );
         assert_eq!(
@@ -5062,10 +5271,7 @@ fn a_plain_session_seek_declares_and_an_anchored_one_does_not_alike_on_both_host
         // 2. An accepted plain seek: it declares, the floors reset and the seek applies at the
         // next block.
         let call = 14_u64;
-        assert_eq!(
-            browser.host.session_seek(None, 3, 0, None),
-            host_web::RESULT_OK
-        );
+        assert_eq!(browser.host.session_seek(3, 0, None), host_web::RESULT_OK);
         c_abi.session_seek(3, 0, None);
         for block in call..call + 4 {
             session_block(
@@ -7257,7 +7463,7 @@ fn the_automation_fixture_renders_alike_on_both_hosts_across_one_session_seek() 
     for block in 0..BLOCKS {
         if block == SEEK_BLOCK {
             assert_eq!(
-                browser.host.session_seek(None, 2, SEEK_TIMELINE, None),
+                browser.host.session_seek(2, SEEK_TIMELINE, None),
                 host_web::RESULT_OK,
                 "browser session seek"
             );
@@ -7382,9 +7588,7 @@ fn a_session_replace_answers_and_renders_alike_on_both_hosts() {
                 .control_request_mut(length)
                 .expect("the control request staging")[..frame.len()]
                 .copy_from_slice(&frame);
-            let b_code = browser
-                .host
-                .control_command_with_document(length, document, None);
+            let b_code = browser.host.control_command_with_document(length, document);
             let b_reply = browser.host.control_response().to_vec();
             drain_events(&mut browser.host);
             let (c_code, c_reply) = c_abi.send_document_raw(&frame, document);

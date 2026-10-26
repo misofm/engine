@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { ObservationSubscriptionOwner } from "../src/core/observation-subscriptions.ts";
 import { digestPlanes, effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+
+// The core's largest spectrum capture budget (`host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES`).
+const SPECTRUM_MAXIMUM_CAPTURE_BYTES = 1 << 20;
 
 const WINDOW_FRAMES = 2_048;
 const CHANNELS = "both";
@@ -31,9 +33,9 @@ function eqParameters() {
     });
 }
 
-function spectrumDocument() {
+function spectrumDocument(frames = 4_800) {
   return sessionDocument({
-    frames: 4_800,
+    frames,
     effects: {
       preInsert: [effectEntry("eq", "miso.parametric-eq", eqParameters())],
       inserts: [],
@@ -46,7 +48,7 @@ function queryFor(target, channels = CHANNELS) {
   return {
     target,
     channels,
-    spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+    spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
   };
 }
 
@@ -102,8 +104,9 @@ function queuedManagedSpectrumOwner(query, queued) {
   let stopped = false;
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
-    readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); },
+    apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000,
     spectrumPrepared: () => query,
     spectrumStart: async () => ({
       ok: true,
@@ -259,6 +262,52 @@ test("candidate Wasm spectrum query captures all graph targets through explicit 
     "the post-input and post-matrix taps must observe the EQ in the prepared graph");
 });
 
+// #1596 gate 3 and #1597: the boot's tap is in the plan of the first block, so a capture armed
+// before any block covers sample 0; then a stream and a reconfiguration, all through the frames.
+test("candidate Wasm headless spectrum: a boot tap armed before the first block, a stream and a reconfiguration", {
+  skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
+}, async () => {
+  const output = queryFor({ kind: "output", outputId: "out" });
+  const track = queryFor({ kind: "trackPostPan", trackId: "t" });
+  const engine = await createOfflineEngine(spectrumDocument(4 * WINDOW_FRAMES), {
+    asset: await candidateAsset(), spectrum: output,
+  });
+  let subscription;
+  try {
+    const blocksPerWindow = WINDOW_FRAMES / engine.shape().quantumFrames;
+    let block = 0;
+    const renderWindow = () => {
+      for (let index = 0; index < blocksPerWindow; index += 1) feedAndRender(engine, block++);
+    };
+
+    // A one-shot query.
+    assert.equal(engine.armSpectrum().ok, true);
+    renderWindow();
+    assertSpectrumResult(engine.readSpectrum(), output, 0);
+
+    // A stream subscription.
+    subscription = await engine.subscribeSpectrum({ ...output, smoothingMs: 0, cadenceMs: 1 });
+    renderWindow();
+    const notification = await subscription.pump();
+    assert.equal(notification?.status, "ready");
+    await subscription.close();
+    subscription = undefined;
+
+    // A reconfiguration to the track's tap: a rebuild the next render adopts.
+    const configured = await engine.configureSpectrum(track);
+    assert.equal(configured.rebuild, true);
+    assert.ok(configured.configuredEpoch > configured.adoptedEpoch);
+    feedAndRender(engine, block++);
+    assert.equal(engine.armSpectrum().ok, true);
+    const armedAt = block * engine.shape().quantumFrames;
+    renderWindow();
+    assertSpectrumResult(engine.readSpectrum(), track, armedAt);
+  } finally {
+    await subscription?.close();
+    engine.dispose();
+  }
+});
+
 test("candidate Wasm spectrum arm, cancel, and dispose preserve lifecycle refusals", {
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
@@ -375,7 +424,7 @@ test("candidate Wasm managed spectrum honors exact H256 and H1024 spans, bounds,
       assert.deepEqual(subscription.configuration, {
         target: query.target,
         channels: "both",
-        spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
+        spectrumLimits: { maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES },
         smoothingMs,
         cadenceMs: 1,
       });
@@ -384,8 +433,8 @@ test("candidate Wasm managed spectrum honors exact H256 and H1024 spans, bounds,
         maximumRetainedBytes: 16 * 1024 * 1024,
         maximumDeliveredBytesPerSecond: 16 * 1024 * 1024,
         maximumCadenceMs: 60_000,
-        maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
-        maximumResultBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+        maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES,
+        maximumResultBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES,
         hopFrames,
       });
 
@@ -571,12 +620,9 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
     };
     const observationMap = {
       bindings: [{
-        trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
+        trackId: "t", rack: "inserts", effectSlotId: "comp",
         nativeEffectId: "miso.compressor", tapIds: [1],
       }],
-    };
-    const observationDescriptor = {
-      id: 1, name: "Gain Reduction", displayUnit: "dB", unitName: "dB", subscribable: true,
     };
     const nativeCadenceMs = WINDOW_FRAMES * 1_000 / sampleRateHz;
     const timerCadenceMs = sharedTimer ? 1 : Math.ceil(nativeCadenceMs);
@@ -617,32 +663,22 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
     });
     const owner = new ObservationSubscriptionOwner({
       observationMap: () => observationMap,
-      readObservations: (selections) => selections.map((selection) => ({
-        ...selection,
-        nativeEffectId: "miso.compressor",
-        descriptor: observationDescriptor,
-        sampleRateHz,
-        status: observationArmed ? "ready" : "unarmed",
-        ...(observationArmed ? {
-          left: 1, right: 1,
-          window: { firstSample: 0n, endSample: 128n, sequence: 1n, blocks: 1 },
-        } : {}),
-      })),
-      liveControls: () => ({
-        async syncStructure() {},
-        edit: {
-          strip: () => ({
-            effect: () => ({ observe: (_tap, armed) => ({ kind: armed ? "observeSubscribe" : "observeUnsubscribe" }) }),
-          }),
-        },
-        async submit(...edits) {
-          observationArmed = edits.at(-1)?.kind === "observeSubscribe";
-          return {
-            ok: true, result: 0, code: "ok", reason: 0, reasonName: "none", rejectedIndex: 0,
-            admitted: edits.length, appliedAtSample: 0n,
-          };
-        },
+      // #1589b: the observation half on the core's frames.
+      apply: async (edits) => {
+        observationArmed = edits.at(-1)?.armed === true;
+        return { revision: 1n, observeArmTags: edits.map(() => 1n), removedArmTags: [] };
+      },
+      read: async (selections) => ({
+        observedSample: 128n,
+        rows: selections.map(() => (observationArmed ? {
+          status: "ready", armed: true, armSample: 0n, armTag: 1n,
+          window: { firstSample: 0n, endSample: 128n, sequence: 1n, blocks: 1 }, left: 1, right: 1, unit: 1,
+        } : {
+          status: "unarmed", armed: false, armSample: 0n, armTag: 0n,
+          window: undefined, left: undefined, right: undefined, unit: 1,
+        })),
       }),
+      sampleRateHz: () => sampleRateHz,
       spectrumPrepared: () => query,
       spectrumStart: async () => ({
         ok: true, result: 0, code: "ok", metadata: metadata("warming"),
@@ -726,7 +762,7 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
       { target: firstQuery.target, channels: "both" },
       { target: secondQuery.target, channels: "both" },
     ],
-    maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes,
+    maximumCaptureBytes: SPECTRUM_MAXIMUM_CAPTURE_BYTES,
   };
   let activeQuery = firstQuery;
   let activeSmoothing = 0;
@@ -772,8 +808,9 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
   });
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
-    readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); },
+    apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000,
     spectrumPreparedCollection: () => collection,
     spectrumSelect: async () => ({ ok: true, result: 0, code: "ok" }),
     spectrumStreamSelect: async (query, smoothingMs) => {
@@ -907,8 +944,9 @@ test("managed spectrum loss baselines stay monotonic within an epoch and reset o
   ];
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
-    readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); },
+    apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000,
     spectrumPrepared: () => prepared,
     spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
     spectrumRead: async () => reads.shift() ?? { metadata: metadata("pending", 1, 0n), result: undefined },
@@ -961,8 +999,9 @@ test("automatic spectrum drains once after a gap and preserves coalesced losses"
   let calls = 0;
   let stopped = false;
   const owner = new ObservationSubscriptionOwner({
-    observationMap: () => ({ bindings: [] }), readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); }, spectrumPrepared: () => prepared,
+    observationMap: () => ({ bindings: [] }), apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000, spectrumPrepared: () => prepared,
     spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
     spectrumRead: async () => { calls++; return await queued.shift(); },
     spectrumStop: async () => { stopped = true; return { ok: true, result: 0, code: "ok" }; },
@@ -1136,7 +1175,7 @@ test("managed spectrum recovery rejection publishes a cadence-gated gap and pres
 test("managed spectrum fulfilled-invalid recovery rejects without a fallback publication", async () => {
   const query = queryFor({ kind: "output", outputId: "out" });
   const invalidRecovery = managedRead(query, "ready", 1, 1n);
-  invalidRecovery.result.resultBytes = BigInt(ABI_LAYOUT.constants.spectrumCaptureBytes) + 1n;
+  invalidRecovery.result.resultBytes = BigInt(SPECTRUM_MAXIMUM_CAPTURE_BYTES) + 1n;
   const queued = [
     managedRead(query, "gap", 0, 1n),
     invalidRecovery,
@@ -1248,8 +1287,9 @@ test("managed spectrum publication metadata survives pending and lifecycle reads
   let timer;
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
-    readObservations: () => [],
-    liveControls: () => { throw new Error("unused"); },
+    apply: () => { throw new Error("unused"); },
+    read: () => { throw new Error("unused"); },
+    sampleRateHz: () => 48_000,
     spectrumPrepared: () => prepared,
     spectrumStart: async () => ({
       ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n),
@@ -1373,8 +1413,9 @@ test("managed spectrum admission refuses before start and preserves a working st
     let reads = 0;
     const owner = new ObservationSubscriptionOwner({
       observationMap: () => ({ bindings: [] }),
-      readObservations: () => [],
-      liveControls: () => { throw new Error("unused"); },
+      apply: () => { throw new Error("unused"); },
+      read: () => { throw new Error("unused"); },
+      sampleRateHz: () => 48_000,
       spectrumPrepared: () => prepared,
       spectrumStart: async () => {
         starts += 1;

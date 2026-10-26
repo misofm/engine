@@ -21,7 +21,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::TryReserveError;
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use builtins::{MeterMetricSet, MeterSnapshot, MeterTap};
@@ -29,7 +29,7 @@ use builtins_compiler::MeterConsumer;
 use effect_contract::{BankWidth, ObservationDescriptor, ObservationKind, ParameterUnit};
 use engine::realtime::{
     Consumer, ObservationReader, ObservationWindow, Producer, QueueGeneration, SpscRetainedPayload,
-    bounded_spsc, bounded_spsc_retained_payload,
+    bounded_spsc, bounded_spsc_move, bounded_spsc_retained_payload,
 };
 use lane::{Backend, Lane, kernels::builtins::meter_sample_peak_block};
 use session::SessionModel;
@@ -146,6 +146,25 @@ impl OutputPeakReader {
     #[must_use]
     pub fn dropped_windows(&self) -> u64 {
         self.dropped.load(Ordering::Acquire)
+    }
+
+    /// A second reader of [`Self::dropped_windows`] (#1588 R4), for a control half that hands the
+    /// reader to a render-half delivery and still reports the windows a full queue dropped.
+    #[must_use]
+    pub fn drop_count(&self) -> OutputPeakDrops {
+        OutputPeakDrops(Arc::clone(&self.dropped))
+    }
+}
+
+/// A reader of the output meter's dropped-window count ([`OutputPeakReader::drop_count`]).
+#[derive(Clone, Debug)]
+pub struct OutputPeakDrops(Arc<AtomicU64>);
+
+impl OutputPeakDrops {
+    /// How many closed windows render dropped because the queue was full: monotone, never reset.
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -433,6 +452,12 @@ pub struct MeterFrame {
     pub sequence: u64,
     /// The delivery generation: a level transition or a producer reset advances it.
     pub generation: u64,
+    /// The provider epoch of the plan whose strips the frame covers (#1588 D3): its
+    /// [`MeterTables`]' epoch ([`MeterTables::set_plan_epoch`]), `0` for the boot plan. A reader
+    /// that holds the strip list of one epoch resolves its strips again when a frame names another.
+    /// Both hosts fill it at each adoption; the browser's render half also checks it against the
+    /// epoch of the plan ring it pushes the frame into (#1588b).
+    pub plan_epoch: u64,
     /// The frame's validity bits.
     pub validity: MeterValidity,
     /// The losses counted since the previous frame of the delivery generation, saturating.
@@ -460,6 +485,7 @@ impl MeterFrame {
             windows: 0,
             sequence: 0,
             generation: 0,
+            plan_epoch: 0,
             validity: MeterValidity::NONE,
             loss_count: 0,
             strip_peaks: filled(strip_count, [0.0; 2])?,
@@ -472,7 +498,9 @@ impl MeterFrame {
     /// The master strip's gain reduction (#1690 D1): strip `master`'s word when that strip is in
     /// the frame and an armed tap's window folded into it, else `None` -- absent, not zero, when
     /// no strip is the master or the master published nothing (zero reads as "not reducing").
-    /// Every host reads the master's reading through this one function, from the same frame.
+    /// The browser's lease frame reads it through this function; every `METER_BATCH`, on both
+    /// hosts, reads the shared gain row of [`MeterBatchFold::push_with_strips`], with the same
+    /// predicate.
     #[must_use]
     #[inline]
     pub fn master_gain_reduction(&self, master: Option<u32>) -> Option<f32> {
@@ -503,7 +531,8 @@ fn filled<T: Clone>(count: usize, value: T) -> Result<Box<[T]>, TryReserveError>
 /// One observation tap a host shows [`fold_gain_reduction`] (#1582 D3).
 #[derive(Clone, Copy)]
 pub struct TapView<'a> {
-    /// The strip the tap's effect sits on, in [`SessionModel::strips`] order.
+    /// The frame's strip index of the strip the tap's effect sits on: its position in
+    /// [`MeterFrame::strip_peaks`]. An index outside the frame is skipped.
     pub strip: u32,
     /// The tap's declaration.
     pub descriptor: &'static ObservationDescriptor,
@@ -530,7 +559,8 @@ pub trait GainReductionTaps {
 /// Clears every strip's word and presence, then, for each armed tap whose latest window opened at
 /// or after its arm sample ([`window_since_arm`]), acknowledges the window and folds its
 /// [`strip_reduction_db`] into the tap's strip word by maximum (from `0.0`). A strip outside the
-/// frame is skipped. [`MeterValidity::GAIN_REDUCTION`] is set exactly when some tap folded; the
+/// frame is skipped. [`MeterValidity::GAIN_REDUCTION`] is set exactly when some armed tap had a
+/// window since its arm, including a tap whose strip is outside the frame, which marks no strip; the
 /// master's reading is [`MeterFrame::master_gain_reduction`] of the folded frame.
 /// Allocation-free, no runtime-checked index, bounded by the visited taps.
 #[inline]
@@ -717,6 +747,7 @@ impl MeterTables {
                 windows: 0,
                 sequence: 0,
                 generation: 0,
+                plan_epoch: 0,
                 validity: MeterValidity::NONE,
                 loss_count: 0,
                 strip_peaks: Box::default(),
@@ -725,6 +756,15 @@ impl MeterTables {
                 strip_gain_reduction_present: Box::default(),
             },
         }
+    }
+
+    /// Name the plan the tables serve by its provider epoch (#1588 D3): every frame published
+    /// from them carries it in [`MeterFrame::plan_epoch`]. Set before or at the adoption: the C
+    /// ABI sets it on its control thread before the tables reach [`MeterDelivery::adopt`], the
+    /// browser on its render thread at the adoption block, just before. An adoption keeps the
+    /// successor's epoch. A scalar store; allocation-free.
+    pub fn set_plan_epoch(&mut self, epoch: u64) {
+        self.frame.plan_epoch = epoch;
     }
 
     /// The strip meters the tables serve.
@@ -933,6 +973,27 @@ impl MeterDelivery {
             return false;
         }
         self.level = on;
+        self.begin_generation(next_sample);
+        true
+    }
+
+    /// Restart the delivery epoch at `next_sample` while the level stays on (#1588 D1, R3): one
+    /// client of a shared [`MeterLevel`] changed while another kept the level on. The same as
+    /// [`Self::set_level`] off and on again at `next_sample`, with one gate move: the generation
+    /// advances, the pending state and the publication clear, the output windows queued under the
+    /// old generation pop unread, and the output gate opens at the grid's first boundary at or
+    /// after `next_sample`. A level that is off changes nothing and returns `false`.
+    /// Allocation-free.
+    pub fn restart(&mut self, next_sample: u64) -> bool {
+        if !self.level {
+            return false;
+        }
+        self.begin_generation(next_sample);
+        true
+    }
+
+    /// The new generation of a level transition or a restart, from `next_sample`.
+    fn begin_generation(&mut self, next_sample: u64) {
         self.activation = next_sample;
         self.generation = self.generation.saturating_add(1);
         self.reset(true);
@@ -940,9 +1001,231 @@ impl MeterDelivery {
         self.pop_output_windows(discard);
         self.tables.frame.generation = self.generation;
         self.align(next_sample);
+    }
+}
+
+/// The one meter level word of a session whose meter delivery serves two clients (#1588 D1): the
+/// low-latency meter lease ([`Self::LEASE`]) and the protocol's meter table ([`Self::TELEMETRY`]).
+/// Each client sets or clears its own bit from its own thread; only the delivery's owner reads
+/// the word, once per poll, and the level is on while any bit is set. A clone shares the word.
+#[derive(Clone, Debug, Default)]
+pub struct MeterLevel(Arc<AtomicU32>);
+
+impl MeterLevel {
+    /// The bit of the low-latency meter lease.
+    pub const LEASE: u32 = 1;
+    /// The bit of a nonempty protocol meter table.
+    pub const TELEMETRY: u32 = 1 << 1;
+
+    /// A word with no client on. Allocates the shared word; call it on a control thread.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set `client`'s bit (`on`) or clear it, leaving the other client's bit as it is.
+    pub fn set(&self, client: u32, on: bool) {
+        if on {
+            self.0.fetch_or(client, Ordering::Release);
+        } else {
+            self.0.fetch_and(!client, Ordering::Release);
+        }
+    }
+
+    /// The clients that are on.
+    #[must_use]
+    pub fn load(&self) -> u32 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// The frames a [`MeterFrameRing`] holds (#1588 D2).
+pub const METER_FRAME_RING_DEPTH: usize = 8;
+
+/// A [`MeterFrameRing`] could not be built: a frame's tables or a queue could not be allocated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeterFrameRingSetupError;
+
+/// The ring that carries a render-half meter delivery's published frames to a control half that
+/// stages them (#1588 D2): [`METER_FRAME_RING_DEPTH`] preallocated frames that circulate between
+/// two bounded SPSC queues, the free frames (control to render) and the published ones (render to
+/// control), so a push copies a frame's elements into a free frame and nothing allocates or frees
+/// after [`Self::new`]. A push that finds no free frame drops the frame and counts it.
+pub struct MeterFrameRing {
+    /// The render half, which the delivery's owner pushes each published frame into.
+    pub producer: MeterFrameProducer,
+    /// The control half, which stages the frames in order.
+    pub consumer: MeterFrameConsumer,
+}
+
+/// The render half of a [`MeterFrameRing`].
+pub struct MeterFrameProducer {
+    /// The strips of every ring frame.
+    strips: usize,
+    free: Consumer<Box<MeterFrame>>,
+    published: Producer<Box<MeterFrame>>,
+    dropped: Arc<AtomicU64>,
+}
+
+/// The control half of a [`MeterFrameRing`].
+pub struct MeterFrameConsumer {
+    published: Consumer<Box<MeterFrame>>,
+    free: Producer<Box<MeterFrame>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl MeterFrameRing {
+    /// A ring of frames of `strip_count` strips: the most strips a plan of the delivery can have,
+    /// so no swap reallocates it. Allocates; call it on a control thread.
+    ///
+    /// # Errors
+    ///
+    /// [`MeterFrameRingSetupError`] when a frame or a queue cannot be allocated.
+    pub fn new(strip_count: usize) -> Result<Self, MeterFrameRingSetupError> {
+        let depth = NonZeroUsize::new(METER_FRAME_RING_DEPTH).unwrap_or(NonZeroUsize::MIN);
+        let (mut free_producer, free_consumer) =
+            bounded_spsc_move(depth, QueueGeneration(0)).map_err(|_| MeterFrameRingSetupError)?;
+        let (published_producer, published_consumer) =
+            bounded_spsc_move(depth, QueueGeneration(0)).map_err(|_| MeterFrameRingSetupError)?;
+        for _ in 0..METER_FRAME_RING_DEPTH {
+            let frame = MeterFrame::new(strip_count).map_err(|_| MeterFrameRingSetupError)?;
+            free_producer
+                .try_push(Box::new(frame))
+                .map_err(|_| MeterFrameRingSetupError)?;
+        }
+        let dropped = Arc::new(AtomicU64::new(0));
+        Ok(Self {
+            producer: MeterFrameProducer {
+                strips: strip_count,
+                free: free_consumer,
+                published: published_producer,
+                dropped: Arc::clone(&dropped),
+            },
+            consumer: MeterFrameConsumer {
+                published: published_consumer,
+                free: free_producer,
+                dropped,
+            },
+        })
+    }
+
+    /// The heap bytes [`Self::new`] allocates for `strip_count` strips, so an owner charges them:
+    /// the frames and their tables, the two queues' headers and slots, and the shared drop count.
+    /// `None` on overflow.
+    #[must_use]
+    pub fn heap_bytes(strip_count: usize) -> Option<usize> {
+        let depth = NonZeroUsize::new(METER_FRAME_RING_DEPTH)?;
+        let queue = bounded_spsc_retained_payload::<Box<MeterFrame>>(depth).ok()?;
+        let queue_bytes = queue
+            .ring_header_bytes
+            .checked_add(queue.slot_payload_bytes)?;
+        let strip_bytes = size_of::<[f32; 2]>() + size_of::<f32>() + size_of::<bool>();
+        let frame_bytes = strip_count
+            .checked_mul(strip_bytes)?
+            .checked_add(size_of::<MeterFrame>())?;
+        frame_bytes
+            .checked_mul(METER_FRAME_RING_DEPTH)?
+            .checked_add(queue_bytes.checked_mul(2)?)?
+            .checked_add(3 * size_of::<u64>())
+    }
+
+    /// The largest single allocation of [`Self::heap_bytes`]: a frame's strip peak table, or a
+    /// queue's slots or header. `None` on overflow.
+    #[must_use]
+    pub fn largest_allocation_bytes(strip_count: usize) -> Option<usize> {
+        let depth = NonZeroUsize::new(METER_FRAME_RING_DEPTH)?;
+        let queue = bounded_spsc_retained_payload::<Box<MeterFrame>>(depth).ok()?;
+        Some(
+            strip_count
+                .checked_mul(size_of::<[f32; 2]>())?
+                .max(size_of::<MeterFrame>())
+                .max(queue.slot_payload_bytes)
+                .max(queue.ring_header_bytes),
+        )
+    }
+}
+
+// REALTIME_POLICY_BEGIN: #1588 D2, the meter frame ring's two halves.
+impl MeterFrameConsumer {
+    /// The published frames the control half has not released, as one acquire load sees them:
+    /// a later push only adds to it.
+    #[must_use]
+    pub fn available(&self) -> usize {
+        self.published.available_at_entry()
+    }
+
+    /// The oldest published frame the control half has not released, if any.
+    #[must_use]
+    pub fn peek(&self) -> Option<&MeterFrame> {
+        self.published.peek(0).map(|frame| &**frame)
+    }
+
+    /// Release the oldest published frame back to the render half. Does nothing on an empty
+    /// ring. Allocation-free.
+    pub fn release_frame(&mut self) {
+        if let Ok(frame) = self.published.try_pop() {
+            // The free queue holds every frame the published queue does not, so it has room.
+            let _ = self.free.try_push(frame);
+        }
+    }
+
+    /// The meter windows of the frames a push dropped (each frame's [`MeterFrame::windows`], at
+    /// least one): monotone, never reset.
+    #[must_use]
+    pub fn dropped_windows(&self) -> u64 {
+        self.dropped.load(Ordering::Acquire)
+    }
+}
+
+impl MeterFrameProducer {
+    /// Copy `frame` into a free frame and publish it (#1588 D2): every field and every strip
+    /// table element, by element. A ring frame has the ring's strip count; strips past `frame`'s
+    /// read as absent (zero peaks, no gain reduction). A frame with more strips than the ring's,
+    /// or a ring with no free frame, drops `frame` and counts its windows ([`MeterFrameConsumer::
+    /// dropped_windows`]); returns whether `frame` was published. Allocation-free, bounded by the
+    /// ring's strip count.
+    pub fn publish_frame(&mut self, frame: &MeterFrame) -> bool {
+        let fits = frame.strip_peaks.len() <= self.strips;
+        let slot = if fits { self.free.try_pop().ok() } else { None };
+        let Some(mut slot) = slot else {
+            self.dropped
+                .fetch_add(u64::from(frame.windows.max(1)), Ordering::Release);
+            return false;
+        };
+        copy_frame(&mut slot, frame);
+        // The published queue holds every frame the free queue does not, so it has room. The
+        // unreachable refusal is forgotten, not dropped: no free joins the render thread's code.
+        if let Err(full) = self.published.try_push(slot) {
+            core::mem::forget(full);
+        }
         true
     }
 }
+
+fn copy_frame(into: &mut MeterFrame, from: &MeterFrame) {
+    into.first_sample = from.first_sample;
+    into.end_sample = from.end_sample;
+    into.windows = from.windows;
+    into.sequence = from.sequence;
+    into.generation = from.generation;
+    into.plan_epoch = from.plan_epoch;
+    into.validity = from.validity;
+    into.loss_count = from.loss_count;
+    into.output_peak = from.output_peak;
+    let mut peaks = from.strip_peaks.iter();
+    for slot in &mut into.strip_peaks {
+        *slot = peaks.next().copied().unwrap_or([0.0; 2]);
+    }
+    let mut reductions = from.strip_gain_reduction_db.iter();
+    for slot in &mut into.strip_gain_reduction_db {
+        *slot = reductions.next().copied().unwrap_or(0.0);
+    }
+    let mut present = from.strip_gain_reduction_present.iter();
+    for slot in &mut into.strip_gain_reduction_present {
+        *slot = present.next().copied().unwrap_or(false);
+    }
+}
+// REALTIME_POLICY_END
 
 /// The rendering plan's strip meter consumers, as [`MeterDelivery::poll`] borrows them. A field
 /// place, because the realtime policy's per-queue drain form names its queue collection as one.
@@ -1479,14 +1762,19 @@ pub struct MeterBatchWindow {
     pub output_valid: bool,
 }
 
-/// One meter table entry's strip peak over a batch's frames (#1587a), as
-/// [`MeterBatchFold::push_with_strips`] folds it.
+/// One meter table entry's strip readings over a batch's frames, its peak (#1587a) and its gain
+/// reduction (#1587b), as [`MeterBatchFold::push_with_strips`] folds them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StripPeakFold {
     /// The strip's left and right peaks: the frames' maxima.
     pub peak: [f32; 2],
     /// Whether every frame of the batch was complete and had the strip.
     pub present: bool,
+    /// The strip's gain reduction in decibels: the last frame's reading that is present, `0.0`
+    /// when none is.
+    pub gain_reduction_db: f32,
+    /// Whether any frame of the batch had a gain-reduction reading for the strip.
+    pub gain_reduction_present: bool,
 }
 
 impl StripPeakFold {
@@ -1494,6 +1782,8 @@ impl StripPeakFold {
     pub const START: Self = Self {
         peak: [0.0; 2],
         present: true,
+        gain_reduction_db: 0.0,
+        gain_reduction_present: false,
     };
 }
 
@@ -1558,14 +1848,15 @@ impl MeterBatchFold {
         self.push_with_strips(frame, &[], &mut [])
     }
 
-    /// Fold one published `frame`, and into `folds` the strip peaks the meter table's entries
-    /// read (#1587a). `strips[i]` is entry `i`'s strip in `frame` (its index in
+    /// Fold one published `frame`, and into `folds` the strip readings the meter table's entries
+    /// read (#1587a, #1587b). `strips[i]` is entry `i`'s strip in `frame` (its index in
     /// [`MeterFrame::strip_peaks`]), or `None` when the plan that published `frame` has no such
-    /// strip or the entry reads no strip peak; `folds[i]` is that entry's fold, which the caller
+    /// strip or the entry reads no strip; `folds[i]` is that entry's fold, which the caller
     /// reads when the call returns a batch. A batch's first frame resets every fold. An entry's
-    /// peaks are the maxima of its strip's peaks over the batch's frames, and it is present only
+    /// peaks are the maxima of its strip's peaks over the batch's frames, and they are present only
     /// when every frame of the batch is complete ([`MeterValidity::COMPLETE`]) and has its strip.
-    /// Allocates nothing.
+    /// Its gain reduction is the last frame's reading for its strip that is present, and it is
+    /// present when any frame's is. Allocates nothing.
     pub fn push_with_strips(
         &mut self,
         frame: &MeterFrame,
@@ -1594,6 +1885,16 @@ impl MeterBatchFold {
                 fold.peak = [fold.peak[0].max(peak[0]), fold.peak[1].max(peak[1])];
             } else {
                 fold.present = false;
+            }
+            // #1587b D3: the gain reduction's timing is its taps' own, so a frame's reading
+            // counts whether or not the frame is complete.
+            let index = strip.and_then(|strip| usize::try_from(strip).ok());
+            if let Some(index) = index
+                && frame.strip_gain_reduction_present.get(index) == Some(&true)
+                && let Some(&value) = frame.strip_gain_reduction_db.get(index)
+            {
+                fold.gain_reduction_db = value;
+                fold.gain_reduction_present = true;
             }
         }
         self.output_peak = [
@@ -1663,7 +1964,56 @@ pub fn default_meter_window_blocks(rate_hz: u32, quantum_frames: u32) -> NonZero
 
 #[cfg(test)]
 mod tests {
-    use super::{default_meter_window_blocks, output_peak_gate_relay, output_peak_meter};
+    use super::{
+        MeterBatchFold, MeterFrame, MeterValidity, StripPeakFold, default_meter_window_blocks,
+        output_peak_gate_relay, output_peak_meter,
+    };
+
+    /// #1587b D3: in a batch of three frames, an entry's gain reduction is the last frame's
+    /// reading for its strip that is present, `VALID` when any is. Strip 0 reads 3 dB, then 2 dB,
+    /// then nothing: the batch reports 2 dB. Strip 1 reads nothing: absent. In the next batch strip
+    /// 0 reads nothing and strip 1 only in its first frame: strip 0 is absent again, strip 1 reads
+    /// that frame's 1 dB. An entry with no strip reads nothing.
+    ///
+    /// Test value: red if the fold takes the batch's maximum (3 dB), its first or last frame's
+    /// reading (3 dB, or absent), or keeps a previous batch's reading past the batch's first frame.
+    #[test]
+    fn a_batch_reports_each_strips_last_present_gain_reduction() {
+        let mut fold = MeterBatchFold::new(core::num::NonZeroU32::new(3).expect("three"));
+        let strips = [Some(0), Some(1), None];
+        let mut folds = [StripPeakFold::START; 3];
+        let mut frame = MeterFrame::new(2).expect("frame");
+        let readings: [[Option<f32>; 2]; 6] = [
+            [Some(3.0), None],
+            [Some(2.0), None],
+            [None, None],
+            [None, Some(1.0)],
+            [None, None],
+            [None, None],
+        ];
+        let mut batches = Vec::new();
+        for (index, reading) in (0_u64..).zip(readings) {
+            frame.first_sample = index * 256;
+            frame.end_sample = (index + 1) * 256;
+            frame.windows = 1;
+            frame.validity = MeterValidity::COMPLETE.union(MeterValidity::OUTPUT);
+            for (strip, value) in reading.into_iter().enumerate() {
+                frame.strip_gain_reduction_db[strip] = value.unwrap_or(0.0);
+                frame.strip_gain_reduction_present[strip] = value.is_some();
+            }
+            if fold.push_with_strips(&frame, &strips, &mut folds).is_some() {
+                batches
+                    .push(folds.map(|fold| (fold.gain_reduction_present, fold.gain_reduction_db)));
+            }
+        }
+        assert_eq!(
+            batches,
+            [
+                [(true, 2.0), (false, 0.0), (false, 0.0)],
+                [(false, 0.0), (true, 1.0), (false, 0.0)],
+            ]
+        );
+    }
 
     /// #1587a, root ruling 3: a request whose boundary is behind the block render applies it in
     /// (the control thread read the render clock blocks earlier) opens the gate at the grid's

@@ -11879,10 +11879,18 @@ mod tests {
         let mut direct = prepare_native_session_effects(&session, registry, effect_caps)
             .expect("prepared direct scalar delays");
         assert_eq!(effects.entries.len(), 10);
+        // #1374: the delay states a finite tail, its descriptor's at the session rate.
+        let delay_tail = (registry
+            .get_ascii("miso.delay")
+            .expect("the launch delay")
+            .descriptor()
+            .tail_and_rest)(48_000, effect_contract::EffectQuality::Normal)
+        .tail;
+        assert!(matches!(delay_tail, TailSamples::Finite(_)));
         assert!(effects.entries.iter().all(|entry| {
             entry.rack == effect_compiler::EffectRack::Dynamic
                 && entry.metadata.latency == LatencySamples(0)
-                && entry.metadata.tail == TailSamples::Infinite
+                && entry.metadata.tail == delay_tail
                 && entry.metadata.state_sizes.total() == Some(768_196)
                 && entry.metadata.scratch_bytes == 36
                 && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
@@ -11946,7 +11954,14 @@ mod tests {
         assert_eq!(artifact.report().estimate.effects, 10);
         assert_eq!(artifact.report().estimate.declared_effect_bytes, 7_682_320);
         assert_eq!(artifact.report().output_latency, LatencySamples(0));
-        assert_eq!(artifact.report().output_tail, TailSamples::Infinite);
+        // The output's tail composes the ten delays' finite tails (#1379), so it is finite and at
+        // least one delay's own.
+        assert!(
+            matches!(artifact.report().output_tail, TailSamples::Finite(_))
+                && artifact.report().output_tail >= delay_tail,
+            "output tail {:?}, delay tail {delay_tail:?}",
+            artifact.report().output_tail
+        );
         let effect_nodes = artifact
             .graph()
             .spec
@@ -11957,7 +11972,7 @@ mod tests {
         assert_eq!(effect_nodes.len(), 10);
         assert!(effect_nodes.iter().all(|node| {
             node.latency == LatencySamples(0)
-                && node.bound.tail == TailSamples::Infinite
+                && node.bound.tail == delay_tail
                 && matches!(&node.id, GraphNodeId::Effect(id) if id.rack == RackId::Dynamic)
         }));
         assert!(artifact.graph().route_timings.iter().all(|route| {

@@ -10,13 +10,14 @@ section and nothing else: `check-web-audioworklet.sh` runs that check before thi
 
 Modes
 -----
-`--callgraph EXPORT [--trap-owner SUBSTRING[=SITES] ...]`
+`--callgraph EXPORT [--trap-owner SUBSTRING=SITES ...]`
     Walk the direct-call closure of `EXPORT` and fail if any member's name matches `FORBIDDEN`
     (allocator, deallocator or drop glue). Then list the closure members that contain an
-    `unreachable` instruction and fail unless that set equals `TRAP_ALLOW_LIST` plus any
-    `--trap-owner` substrings the caller named. An owner given as `SUBSTRING=SITES` is pinned:
-    its matching members together must hold exactly `SITES` `unreachable` instructions, so a new
-    checked index inlined into it is red rather than admitted with the old one (issue #1581).
+    `unreachable` instruction and fail unless every one of them matches a `--trap-owner`
+    substring the caller named; there is no built-in allow list (issue #2068). Every owner is
+    pinned, `SUBSTRING=SITES`, and a bare `SUBSTRING` is refused (#2068): its matching members
+    together must hold exactly `SITES` `unreachable` instructions, so a new checked index inlined
+    into it is red rather than admitted with the old one (issue #1581).
 
     A C allocator name (any name containing `free`, `alloc`, `memalign` or `sbrk`) fails anywhere
     in an *unmangled* member name and never in a mangled Rust name (issues #1234 and #1417). A
@@ -41,16 +42,10 @@ Modes
     refuses a module with any import before this gate runs. `scripts/test-web-audioworklet.sh`
     runs `--self-test`, which pins these cases.
 
-    `--allocation-only` runs the forbidden-name half alone. Use it for an export that runs on the
-    control path (`port.onmessage`), where the engine's rule is "never allocate on the render
-    thread" and a checked index inside a pure-math helper is not an allocation. It is refused
-    together with `--trap-owner`, so a caller states one intent or the other.
-
     `--trap-owner` never relaxes the allocation half of the gate, which is the half that matters:
     an allocator, a deallocator or drop glue in the closure is a failure no matter what. It exists
-    because issue #137 put two more exports on the render thread -- `miso_engine_web_v1_meter_poll`
-    and `miso_engine_web_v1_command_submit` -- whose bodies inline the bounded SPSC endpoints'
-    own checked slot indexing. Naming the export's own symbol keeps the strong statement "nothing
+    because issue #137 put more exports on the render thread -- `miso_engine_web_v1_meter_poll`
+    among them -- whose bodies inline the bounded SPSC endpoints' own checked slot indexing. Naming the export's own symbol keeps the strong statement "nothing
     this export *calls* may trap" while admitting the one checked index the queue primitive emits.
 
 `--callgraph EXPORT --render-thread`
@@ -167,13 +162,6 @@ FORBIDDEN = re.compile(
     r"|dealloc|dlmalloc|drop_glue|drop_in_place|drop_slow|unlink_chunk"
     r"|insert_large_chunk|memory_grow|__rust_alloc|__rust_realloc"
 )
-# The one non-entry trap owner that may remain, with the reason it is unreachable in production:
-# `PreparedRenderPlan::render_inner` inlines `PlanarBufferMut::plane_mut`, whose `&mut
-# self.storage[start..end]` is a checked slice index, in the executor-less silence branch. Every
-# web plan carries an executor (both graph binding paths end in `prepare_with_executor`), so the
-# branch is dead. It is core-owned (#84) and is not fixed from this job.
-TRAP_ALLOW_LIST = frozenset({"18PreparedRenderPlan12render_inner"})
-
 # Issue #1333 D4.1: std's thread-local destructor registration path, as substrings that must all
 # appear in one member name. `std::sys::thread_local::destructors::list::register` registers a
 # destructor; `std::sys::thread_local::guard::*::enable` arms the per-thread run of them.
@@ -198,11 +186,13 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
         # what the swap block's attachment hook paired, which it reads from the active plan's
         # companions.
         "_RNvMs0_Cs_8host_webNtB5_22AudioWorkletEngineHost11render_next": (
-            2,
+            4,
             "`PlanState::active_attachment_mut::<RenderCompanions>()` at the adoption block "
             "(#1381b): the active plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the "
             "downcast asks its `type_id`, one `call_indirect` each, neither of which allocates or "
-            "drops",
+            "drops; and the same pair in the meter fold that runs after the block while the "
+            "protocol's meter table is on without the lease (#1588b, `poll_meter_delivery`, "
+            "inlined)",
         ),
         # Issue #1381a D4: the browser renders through the plan owner, so the block boundary's
         # swap decision is in the closure. The plan's own `render` entry is not: the owner calls
@@ -240,10 +230,6 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
             "`type_id`, one `call_indirect` each, neither of which allocates or drops",
         ),
     },
-    # `command_submit` had two rows here (the prepared owner's factory calls inlined from
-    # `publish` and `preflight_publication`); #1565A deleted the prepared owners, so the
-    # observation-only admission has no indirect call site left, and the empty table pins that.
-    "miso_engine_web_v1_command_submit": {},
 }
 
 VECTOR = re.compile(r"^(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.")
@@ -537,18 +523,22 @@ def check_callgraph(
     functions: dict[int, Function],
     export: str,
     trap_owners: tuple[str, ...] = (),
-    allocation_only: bool = False,
 ) -> int:
+    failures = 0
     pinned: dict[str, int] = {}
-    names: set[str] = set()
     for owner in trap_owners:
         name, separator, sites = owner.partition("=")
-        names.add(name)
-        if separator:
-            pinned[name] = int(sites)
-    allowed_owners = frozenset(TRAP_ALLOW_LIST | names)
+        if not separator or not name or not sites.isdigit():
+            failures += 1
+            print(
+                f"FAIL {export}: --trap-owner {owner!r} is not SUBSTRING=SITES; "
+                "an owner is admitted only at a pinned site count (#2068)",
+                file=sys.stderr,
+            )
+            continue
+        pinned[name] = int(sites)
+    allowed_owners = frozenset(pinned)
     members = closure(functions, export)
-    failures = 0
     forbidden = [function.name for function in members if FORBIDDEN.search(function.name)]
     if forbidden:
         failures += 1
@@ -567,7 +557,7 @@ def check_callgraph(
         for function in trap_owners
         if not any(allowed in function.name for allowed in allowed_owners)
     ]
-    if unexpected and not allocation_only:
+    if unexpected:
         failures += 1
         print(f"FAIL {export}: unexpected trap owner in the render closure:", file=sys.stderr)
         for name in sorted(unexpected):
@@ -578,7 +568,7 @@ def check_callgraph(
             for function in trap_owners
             if name in function.name
         )
-        if found != sites and not allocation_only:
+        if found != sites:
             failures += 1
             print(
                 f"FAIL {export}: trap owner {name} holds {found} trap sites, pinned at {sites}",
@@ -1226,7 +1216,7 @@ def self_test() -> int:
             check_callgraph(reaching(rust_name), "miso_engine_web_v1_render") == 1,
         )
 
-    # (b) an `unreachable` in a function that is neither a panic entry nor allow-listed fails.
+    # (b) an `unreachable` in a function that is neither a panic entry nor a named trap owner fails.
     trapping = VALID_SHAPE.replace(
         " 000024: 0b                         | end",
         " 000024: 00                         | unreachable\n"
@@ -1235,14 +1225,15 @@ def self_test() -> int:
     expect("(b) trap owner", check_callgraph(parse(trapping), "miso_engine_web_v1_render") == 1)
 
     # (b1) issue #137: `--trap-owner` admits the named owner and nothing else, and it never
-    # relaxes the allocation half of the gate.
+    # relaxes the allocation half of the gate. Issue #2068: a bare name, with no pinned site
+    # count, admits nothing.
     expect(
-        "(b1) trap-owner admits the named owner",
-        check_callgraph(parse(trapping), "miso_engine_web_v1_render", ("render_next",)) == 0,
+        "(b1) trap-owner refuses a bare name",
+        check_callgraph(parse(VALID_SHAPE), "miso_engine_web_v1_render", ("render_next",)) == 1,
     )
     expect(
         "(b1) trap-owner does not admit a different owner",
-        check_callgraph(parse(trapping), "miso_engine_web_v1_render", ("some_other_name",)) == 1,
+        check_callgraph(parse(trapping), "miso_engine_web_v1_render", ("some_other_name=0",)) == 1,
     )
     # (b1a) issue #1581: a pinned owner admits exactly its pinned number of trap sites.
     expect(
@@ -1260,26 +1251,7 @@ def self_test() -> int:
     )
     expect(
         "(b1) trap-owner never admits a free",
-        check_callgraph(parse(freeing), "miso_engine_web_v1_render", ("render_next",)) == 1,
-    )
-
-    # (b1b) `--allocation-only` drops the trap half and keeps the allocation half.
-    expect(
-        "(b1b) allocation-only ignores a trap owner",
-        check_callgraph(parse(trapping), "miso_engine_web_v1_render", (), True) == 0,
-    )
-    expect(
-        "(b1b) allocation-only still fails a free",
-        check_callgraph(parse(freeing), "miso_engine_web_v1_render", (), True) == 1,
-    )
-
-    # (b2) the same `unreachable` inside the allow-listed core function passes.
-    allowed = trapping.replace("<render_next>", "<_ZN18PreparedRenderPlan12render_innerE>").replace(
-        "call 1 <render_next>", "call 1 <_ZN18PreparedRenderPlan12render_innerE>"
-    )
-    expect(
-        "(b2) allow-listed trap owner",
-        check_callgraph(parse(allowed), "miso_engine_web_v1_render") == 0,
+        check_callgraph(parse(freeing), "miso_engine_web_v1_render", ("render_next=0",)) == 1,
     )
 
     # (b3) a panic entry is a member but never a reported trap owner, and its callees are not
@@ -1654,8 +1626,7 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--callgraph", metavar="EXPORT")
-    parser.add_argument("--trap-owner", action="append", default=[], metavar="SUBSTRING")
-    parser.add_argument("--allocation-only", action="store_true")
+    parser.add_argument("--trap-owner", action="append", default=[], metavar="SUBSTRING=SITES")
     parser.add_argument("--render-thread", action="store_true")
     parser.add_argument("--kernel-shape", action="store_true")
     parser.add_argument("--kernel-pattern")
@@ -1673,11 +1644,7 @@ def main() -> int:
     functions = parse(sys.stdin.read())
     failures = 0
     if args.callgraph is not None:
-        if args.allocation_only and args.trap_owner:
-            parser.error("--allocation-only and --trap-owner state opposite intents")
-        failures += check_callgraph(
-            functions, args.callgraph, tuple(args.trap_owner), args.allocation_only
-        )
+        failures += check_callgraph(functions, args.callgraph, tuple(args.trap_owner))
         if args.render_thread:
             failures += check_render_thread(functions, args.callgraph)
     if args.kernel_shape:

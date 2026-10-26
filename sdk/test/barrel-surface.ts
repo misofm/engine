@@ -38,6 +38,7 @@ import * as hostMirror from "../src/browser/host-mirror.ts";
 import * as lattice from "../src/core/lattice.ts";
 import * as writer from "../src/core/writer.ts";
 import * as sessionTransaction from "../src/core/session-transaction.ts";
+import * as sessionEdit from "../src/core/session-edit.ts";
 
 /** Declaration identity, not assignability: `Exact<A, B>` is false when either side is wider. */
 type Exact<A, B> =
@@ -57,10 +58,9 @@ type AgentSetAck = Assert<Exact<barrel.SetAck, agent.SetAck>>;
 
 type WriterClass = Assert<Exact<typeof barrel.LiveControlWriter, typeof writer.LiveControlWriter>>;
 type WriterInstance = Assert<Exact<barrel.LiveControlWriter, writer.LiveControlWriter>>;
-type WriterLaneEdit = Assert<Exact<barrel.LaneEdit, writer.LaneEdit>>;
 type WriterFlushOutcome = Assert<Exact<barrel.FlushOutcome, writer.FlushOutcome>>;
 type WriterStatsType = Assert<Exact<barrel.WriterStats, writer.WriterStats>>;
-type WriterOptionsType = Assert<Exact<barrel.WriterOptions, writer.WriterOptions>>;
+type WriterOptionsType = Assert<Exact<barrel.ControlWriterOptions, writer.ControlWriterOptions>>;
 
 // --- core/live-controls.ts: the semantic path is on the root barrel ----------------------------
 
@@ -118,16 +118,6 @@ type BrowserResponsePreviewClass =
 type BrowserResponsePreviewCreate =
   Assert<Exact<typeof browserBarrel.createResponsePreview, typeof browserResponse.createResponsePreview>>;
 
-// Raw snapshot bytes and evaluator/Worker transports stay internal to the engine entry points.
-// @ts-expect-error TrackResponseModule is not a public root evaluator
-type NoRootTrackResponseModule = typeof barrel.TrackResponseModule;
-// @ts-expect-error BrowserTrackResponse is not a public browser transport
-type NoBrowserTrackResponse = typeof browserBarrel.BrowserTrackResponse;
-// @ts-expect-error createTrackResponse is not a public browser transport
-type NoBrowserCreateTrackResponse = typeof browserBarrel.createTrackResponse;
-// @ts-expect-error TrackResponseModule is not a public headless evaluator
-type NoHeadlessTrackResponseModule = typeof headlessBarrel.TrackResponseModule;
-
 // --- the barrels the deep imports already had ---------------------------------------------------
 //
 // The three entry points `sdk/package.json` names must each keep their pre-#278 surface. Naming a
@@ -148,6 +138,12 @@ type NoRootCanonicalSessionJson = typeof barrel.canonicalSessionJson;
 type NoHeadlessCanonicalSessionJson = typeof headlessBarrel.canonicalSessionJson;
 // @ts-expect-error canonicalSessionJson is intentionally not a public browser declaration
 type NoBrowserCanonicalSessionJson = typeof browserBarrel.canonicalSessionJson;
+
+// The PCM feed's engine link is `createEngine`'s seam (#1297b), never a browser declaration.
+// @ts-expect-error linkFeedEngine is not a public browser declaration
+type NoBrowserLinkFeedEngine = typeof browserBarrel.linkFeedEngine;
+// @ts-expect-error FeedRetirement is not a public browser type
+type NoBrowserFeedRetirement = browserBarrel.FeedRetirement;
 
 // --- core/session-transaction.ts: the transaction builder on every entry (#1383 D5) ----------
 //
@@ -170,6 +166,27 @@ type HeadlessSessionEditSpec =
   Assert<Exact<headlessBarrel.SessionEditSpec, sessionTransaction.SessionEditSpec>>;
 // @ts-expect-error the transaction encoder is stamped at send and is not public
 type NoRootEncodeSessionTransaction = typeof barrel.encodeSessionTransaction;
+
+// --- core/session-edit.ts (#1389): the outcome types are public, the encoder and ledger are not --
+
+type RootEditOutcome = Assert<Exact<barrel.EditOutcome, sessionEdit.EditOutcome>>;
+type RootEditPath = Assert<Exact<barrel.EditPath, sessionEdit.EditPath>>;
+type RootWatermarkSnapshot = Assert<Exact<barrel.WatermarkSnapshot, sessionEdit.WatermarkSnapshot>>;
+type HeadlessEditOutcome = Assert<Exact<headlessBarrel.EditOutcome, sessionEdit.EditOutcome>>;
+type HeadlessEditPath = Assert<Exact<headlessBarrel.EditPath, sessionEdit.EditPath>>;
+type HeadlessWatermarkSnapshot =
+  Assert<Exact<headlessBarrel.WatermarkSnapshot, sessionEdit.WatermarkSnapshot>>;
+// #1296: the browser engine resolves with the same types.
+type BrowserEditOutcome = Assert<Exact<browserBarrel.EditOutcome, sessionEdit.EditOutcome>>;
+type BrowserEditPath = Assert<Exact<browserBarrel.EditPath, sessionEdit.EditPath>>;
+type BrowserWatermarkSnapshot =
+  Assert<Exact<browserBarrel.WatermarkSnapshot, sessionEdit.WatermarkSnapshot>>;
+// @ts-expect-error the applied ledger is each engine's own
+type NoBrowserAppliedLedger = typeof browserBarrel.AppliedLedger;
+// @ts-expect-error the replace encoder is stamped at send and is not public
+type NoRootEncodeSessionReplace = typeof barrel.encodeSessionReplaceRequest;
+// @ts-expect-error the applied ledger is each engine's own
+type NoHeadlessAppliedLedger = typeof headlessBarrel.AppliedLedger;
 // @ts-expect-error the session normalizers are internal to the two builders
 type NoRootNormalizeTrack = typeof barrel.normalizeTrack;
 // @ts-expect-error the session normalizers are internal to the two builders
@@ -184,7 +201,6 @@ export type BarrelSurfacePins = [
   AgentSetAck,
   WriterClass,
   WriterInstance,
-  WriterLaneEdit,
   WriterFlushOutcome,
   WriterStatsType,
   WriterOptionsType,
@@ -212,10 +228,6 @@ export type BarrelSurfacePins = [
   BrowserTrackResponseResult,
   BrowserResponsePreviewClass,
   BrowserResponsePreviewCreate,
-  NoRootTrackResponseModule,
-  NoBrowserTrackResponse,
-  NoBrowserCreateTrackResponse,
-  NoHeadlessTrackResponseModule,
   RootSessionBuilder,
   HeadlessAsset,
   BrowserPolicy,
@@ -236,31 +248,12 @@ export type BarrelSurfacePins = [
 ];
 
 
-// Both constructor modes share the writer; legacy annotated/extended options remain valid.
-type SemanticWriterOptionsType = Assert<Exact<barrel.SemanticWriterOptions, writer.SemanticWriterOptions>>;
-interface ExistingWriterOptions extends barrel.WriterOptions { readonly label?: string }
-function writerSubmissionTypes(report: barrel.CommandReport) {
-  const encoded: ExistingWriterOptions = { submit: (_records, _count) => report };
-  const legacyCallback: barrel.WriterOptions["submit"] = encoded.submit;
-  const semantic: barrel.SemanticWriterOptions = { maximumBatch: 4, submitEdits: async edits => {
-    // @ts-expect-error the selected batch is readonly
-    edits.push({});
-    if (edits[0] !== undefined) {
-      // @ts-expect-error addressed edits are readonly
-      edits[0].trackIndex = 2;
-      // @ts-expect-error values are readonly
-      edits[0].values[0] = 1;
-    }
-    return report;
-  } };
-  new barrel.LiveControlWriter(encoded);
-  new barrel.LiveControlWriter(semantic);
-  // @ts-expect-error both callbacks are ambiguous
-  new barrel.LiveControlWriter({ submit: legacyCallback, submitEdits: semantic.submitEdits });
-  // @ts-expect-error one callback is required
+// The writer takes the engine's queue; an annotated or extended options type stays valid.
+interface ExistingWriterOptions extends barrel.ControlWriterOptions { readonly label?: string }
+function writerSubmissionTypes(queue: barrel.ControlSubmitter) {
+  const options: ExistingWriterOptions = { queue, maximumBatch: 4 };
+  new barrel.LiveControlWriter(options);
+  // @ts-expect-error a queue is required
   new barrel.LiveControlWriter({ maximumBatch: 4 });
-  // @ts-expect-error actual CommandReport is required
-  new barrel.LiveControlWriter({ submitEdits: async () => undefined });
 }
 void writerSubmissionTypes;
-export type _SemanticWriterOptionsType = SemanticWriterOptionsType;

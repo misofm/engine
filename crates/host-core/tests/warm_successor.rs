@@ -10,7 +10,7 @@
 //! prepared plan.
 //!
 //! Gates 5, 6 and the second case of gate 7 (the sidechain closure and the submix `input`-tap
-//! rule) are #1354b's.
+//! rule, #1354b) close `R` over sidechain edges before the floors are derived.
 //!
 //! The second half (#1355) streams the warm successor through the plan exchange: render's
 //! readiness check, the adoption and its prime, on both bank widths, and the growth chain at
@@ -22,7 +22,7 @@
 mod successor;
 
 use engine::realtime::{PlanAdoption, SwapOutcome};
-use graph::{GraphNodeId, StableGraphId, TrackStage};
+use graph::{GraphEdgeId, GraphNodeId, StableGraphId, TrackStage};
 use graph_compiler::Backend;
 use host_core::{
     HostLiveControlRequest, HostPrepareCaps, PrepareDiagnostics, PreparedHost, SuccessorBase,
@@ -525,13 +525,22 @@ fn a_send_into_a_bus_from_a_latent_track_restarts_the_track() {
         assert_eq!(restarted(&w), ["x"], "bus limiter {bus_limiter}");
         // Scope R6: the warm program moves none of X's pre-fader owners (its input section and
         // its limiter) and not its fader; everything else the ordinary successor carries, it
-        // carries.
+        // carries. Of the compensation lines, X's are all new, and the one line A and the warm
+        // successor share, `s-main`'s (without the bus limiter), carries: the whole-strip restart
+        // filter (#1324a) drops no line of a strip it does not restart.
         let mut ordinary = edit.prepare(edit.base()).expect("ordinary");
         assert!(ordinary.restarted_strips().is_empty());
-        let [sources, inputs, strips, effects] = graph::test_only_carry_counts(&mut ordinary.plan);
+        let [sources, inputs, strips, effects, _] =
+            graph::test_only_carry_counts(&mut ordinary.plan);
         assert_eq!(
             graph::test_only_carry_counts(&mut w.plan),
-            [sources, inputs - 1, strips - 1, effects - 1],
+            [
+                sources,
+                inputs - 1,
+                strips - 1,
+                effects - 1,
+                usize::from(!bus_limiter)
+            ],
             "bus limiter {bus_limiter}"
         );
         let mut carried = stages("s", TrackStage::Input);
@@ -680,8 +689,9 @@ fn the_prime_counts_the_words_its_fill_writes() {
     assert_eq!((lead.prime_bytes(), w.prime_bytes()), (expected, expected));
 
     // A track that reads another source in the edit takes no prime: gate 1's growth with track
-    // 2 re-pointed to an added source counts track 1's source alone. (Its warm preparation is
-    // refused today, `host.successor.warm_invariant`: #1354a's `R` misses the re-pointed track.)
+    // 2 re-pointed to an added source counts track 1's source alone. The lead's strip delay join
+    // restarts the re-pointed track (its claim line grows on a source that does not carry), so
+    // it is in `R` (#1354b), and the warm successor restarts it.
     let mut b = two_tracks();
     *inserts(&mut b, "t1") = vec![limiter()];
     let mut other = b.sources[0].clone();
@@ -694,41 +704,231 @@ fn the_prime_counts_the_words_its_fill_writes() {
         .find(|track| track.id.as_str() == "t2")
         .expect("track 2");
     t2.source_id = sid("other-source");
-    let lead = warm(Edit::new(two_tracks(), b).decide(&CONFIG));
+    let edit = Edit::new(two_tracks(), b);
+    let lead = warm(edit.decide(&CONFIG));
     assert_eq!(lead.prime_bytes(), 4 * (LEAD * 2));
+    let w = edit.warm(&lead);
+    assert_eq!(restarted(&w), ["t1", "t2"]);
+    assert_eq!(w.prime_bytes(), lead.prime_bytes());
+}
+
+/// The length of `host`'s compensation line on the edge `edge` matches, 0 when it has none.
+fn line_samples(host: &PreparedHost, edge: impl Fn(&GraphEdgeId) -> bool) -> u64 {
+    host.inventory
+        .delay_lines()
+        .iter()
+        .find(|line| edge(&line.edge))
+        .map_or(0, |line| line.samples)
+}
+
+/// Whether `edge` is the sidechain edge into strip `strip`'s compressor (`comp`).
+fn sidechain_into(strip: &'static str) -> impl Fn(&GraphEdgeId) -> bool {
+    move |edge| {
+        matches!(edge, GraphEdgeId::EffectSidechain { effect, .. }
+            if effect.track_id.as_str() == strip && effect.effect_id.as_str() == "comp")
+    }
+}
+
+/// Gate 5 (#1354b, D2 step 2): a strip keyed from a strip that step 6 restarts whole. Gate 2's
+/// edit (the send restarts X whole) with track Y, routed to the output, holding a compressor keyed
+/// from a tap of X. From X's `pre_fader` tap Y joins `R` before the floors are derived, so its
+/// nodes before the fader and its fader keep `a(n)`. From X's `input` tap and from its
+/// `post_fader` tap Y stays carried and leads by `P`. From the `input` tap the prime fills Y's
+/// sidechain line (L3), and D3 counts it: `P` words a channel, and, with a limiter before Y's
+/// compressor in A (so A already holds the edge's line, `e = L`), the line's whole length `L + P`.
+#[test]
+fn a_strip_keyed_from_a_strip_restarted_whole() {
+    for (tap, y_limiter) in [
+        (SendTap::PreFader, false),
+        (SendTap::Input, false),
+        (SendTap::Input, true),
+        (SendTap::PostFader, false),
+    ] {
+        let a = || {
+            let mut model = empty();
+            track(&mut model, "x", vec![limiter()]);
+            to_output(&mut model, "x");
+            submix(&mut model, "s", Vec::new());
+            to_output(&mut model, "s");
+            track(&mut model, "t", Vec::new());
+            to_submix(&mut model, "t", "s");
+            let mut chain: Vec<Effect> = y_limiter.then(limiter).into_iter().collect();
+            chain.push(keyed_compressor(from_track("x", tap)));
+            track(&mut model, "y", chain);
+            to_output(&mut model, "y");
+            model
+        };
+        let mut b = a();
+        to_submix(&mut b, "x", "s");
+        let edit = Edit::new(a(), b);
+        let lead = warm(edit.decide(&CONFIG));
+        assert_eq!(
+            (lead.lead_samples, &*lead.restart_whole),
+            (LEAD, &names(&["x"])[..]),
+            "key tap {tap:?}"
+        );
+        let w = edit.warm(&lead);
+        let mut leading = stages("t", TrackStage::Input);
+        leading.extend([route_node("y-main"), output()]);
+        let y = stages("y", TrackStage::Input);
+        if tap == SendTap::PreFader {
+            assert_eq!(restarted(&w), ["x", "y"], "key tap {tap:?}");
+            edit.assert_leads(&w, &y[..6], 0);
+            leading.push(y[6].clone());
+        } else {
+            assert_eq!(restarted(&w), ["x"], "key tap {tap:?}");
+            leading.extend(y);
+        }
+        edit.assert_leads(&w, &leading, LEAD);
+        // D3 (gate 4's count): every track's claim line grew from none and is written whole on
+        // both lanes, and one stereo source replays; the `input` tap adds Y's L3 line, written
+        // whole on both channels.
+        let lines: u64 = edit
+            .b
+            .model
+            .tracks
+            .iter()
+            .map(|track| arrival(&w, &stages(track.id.as_str(), TrackStage::Input)[0]))
+            .sum();
+        let l3 = if tap == SendTap::Input {
+            let line = line_samples(&w, sidechain_into("y"));
+            assert_eq!(
+                line_samples(&edit.host_a, sidechain_into("y")) != 0,
+                y_limiter,
+                "A holds the edge's line only behind Y's limiter"
+            );
+            assert_eq!(
+                line - line_samples(&edit.host_a, sidechain_into("y")),
+                LEAD,
+                "the edge grows by P"
+            );
+            2 * line
+        } else {
+            0
+        };
+        let expected = 4 * (LEAD * 2 + 2 * lines + l3);
+        assert_eq!(
+            (lead.prime_bytes(), w.prime_bytes()),
+            (expected, expected),
+            "key tap {tap:?}, Y limiter {y_limiter}"
+        );
+    }
+}
+
+/// Gate 6 (#1354b, D2 step 6 M1): T1 and T2 route to submix B, B and T3 to the output, and T3
+/// holds a compressor keyed from B's `input` tap. The edit adds a limiter to T1 and a compressor
+/// (latency 0) to B, so T1 and B restart. With `g = P` (T1 has no insert in A) B's `Input` stage
+/// arrives at `a + P`, held by carried T2, and T3 stays carried with its sidechain line and T2's
+/// line into B at A's lengths. With `g < P` (T1 has a limiter in A and routes into B from its
+/// `pre_fader` tap) B's `Input` stage arrives at `a + 486`, so T3 joins `R` before the floors are
+/// derived: its `Input` stage keeps `a(n)`.
+#[test]
+fn a_strip_keyed_from_a_restarted_submixs_input_tap() {
+    for g_is_p in [true, false] {
+        let a = || {
+            let mut model = empty();
+            submix(&mut model, "b", Vec::new());
+            to_output(&mut model, "b");
+            track(
+                &mut model,
+                "t1",
+                if g_is_p { Vec::new() } else { vec![limiter()] },
+            );
+            let tap = if g_is_p {
+                SendTap::PostFader
+            } else {
+                SendTap::PreFader
+            };
+            route(&mut model, "t1-b", from_track("t1", tap), Some("b"));
+            track(&mut model, "t2", Vec::new());
+            to_submix(&mut model, "t2", "b");
+            track(
+                &mut model,
+                "t3",
+                vec![keyed_compressor(from_submix("b", SendTap::Input))],
+            );
+            to_output(&mut model, "t3");
+            model
+        };
+        let mut b = a();
+        let mut second = limiter();
+        second.id = sid("limiter-2");
+        inserts(&mut b, "t1").push(second);
+        *inserts(&mut b, "b") = vec![effect(
+            "bus-comp",
+            "miso.compressor",
+            SidechainDeclaration::None,
+        )];
+        let edit = Edit::new(a(), b);
+        let lead = warm(edit.decide(&CONFIG));
+        assert_eq!(
+            (lead.lead_samples, &*lead.restart_whole),
+            (LEAD, &[][..]),
+            "g = P: {g_is_p}"
+        );
+        let w = edit.warm(&lead);
+        let t3 = stages("t3", TrackStage::Input);
+        let mut leading = vec![route_node("t3-main"), route_node("b-main"), output()];
+        if g_is_p {
+            assert_eq!(restarted(&w), ["b", "t1"]);
+            leading.extend(t3);
+            let into_b = |edge: &GraphEdgeId| {
+                matches!(edge, GraphEdgeId::RouteDestination { route_id }
+                    if route_id.as_str() == "t2-b")
+            };
+            for edge in [
+                &sidechain_into("t3") as &dyn Fn(&GraphEdgeId) -> bool,
+                &into_b,
+            ] {
+                assert_eq!(line_samples(&w, edge), line_samples(&edit.host_a, edge));
+            }
+        } else {
+            assert_eq!(restarted(&w), ["b", "t1", "t3"]);
+            // Its floor is `a(n)`; its compressor waits for B's `Input` stage, as in A.
+            edit.assert_leads(&w, &t3[..1], 0);
+            leading.push(t3[6].clone());
+        }
+        edit.assert_leads(&w, &leading, LEAD);
+    }
 }
 
 /// Gate 7: a limiter on a bus restarts the bus's carried feeders whole, and the bus after its
-/// fader, T3 and the output lead by `P`, with T3's claim line exactly `P`.
+/// fader, T3 and the output lead by `P`, with T3's claim line exactly `P`. With T3 also keyed
+/// from B's `input` tap (#1354b), T3 stays carried: every line into B's `Input` stage comes from
+/// a strip restarted whole (D2 step 2's exemption).
 #[test]
 fn a_limiter_on_a_bus_restarts_its_feeders() {
-    let a = || {
-        let mut model = empty();
-        submix(&mut model, "b", Vec::new());
-        to_output(&mut model, "b");
-        for id in ["t1", "t2"] {
-            track(&mut model, id, Vec::new());
-            to_submix(&mut model, id, "b");
-        }
-        track(&mut model, "t3", Vec::new());
-        to_output(&mut model, "t3");
-        model
-    };
-    let mut b = a();
-    *inserts(&mut b, "b") = vec![limiter()];
-    let edit = Edit::new(a(), b);
-    let lead = warm(edit.decide(&CONFIG));
-    assert_eq!(
-        (lead.lead_samples, &*lead.restart_whole),
-        (LEAD, &names(&["t1", "t2"])[..])
-    );
-    let w = edit.warm(&lead);
-    assert_eq!(restarted(&w), ["b", "t1", "t2"]);
-    let mut carried = stages("t3", TrackStage::Input);
-    carried.extend(stages("b", TrackStage::PostMatrix));
-    carried.extend([route_node("b-main"), route_node("t3-main"), output()]);
-    edit.assert_leads(&w, &carried, LEAD);
-    assert_eq!(arrival(&w, &stages("t3", TrackStage::Input)[0]), LEAD);
+    for keyed in [false, true] {
+        let a = || {
+            let mut model = empty();
+            submix(&mut model, "b", Vec::new());
+            to_output(&mut model, "b");
+            for id in ["t1", "t2"] {
+                track(&mut model, id, Vec::new());
+                to_submix(&mut model, id, "b");
+            }
+            let key = keyed.then(|| keyed_compressor(from_submix("b", SendTap::Input)));
+            track(&mut model, "t3", key.into_iter().collect());
+            to_output(&mut model, "t3");
+            model
+        };
+        let mut b = a();
+        *inserts(&mut b, "b") = vec![limiter()];
+        let edit = Edit::new(a(), b);
+        let lead = warm(edit.decide(&CONFIG));
+        assert_eq!(
+            (lead.lead_samples, &*lead.restart_whole),
+            (LEAD, &names(&["t1", "t2"])[..]),
+            "keyed {keyed}"
+        );
+        let w = edit.warm(&lead);
+        assert_eq!(restarted(&w), ["b", "t1", "t2"], "keyed {keyed}");
+        let mut carried = stages("t3", TrackStage::Input);
+        carried.extend(stages("b", TrackStage::PostMatrix));
+        carried.extend([route_node("b-main"), route_node("t3-main"), output()]);
+        edit.assert_leads(&w, &carried, LEAD);
+        assert_eq!(arrival(&w, &stages("t3", TrackStage::Input)[0]), LEAD);
+    }
 }
 
 /// Gate 8: a carried key or feeder that holds a restarted chain late is restarted whole: the
@@ -835,6 +1035,24 @@ fn a_parallel_bus_restarts_only_the_feeder_holding_it_late() {
     let mut carried = stages("t0", TrackStage::Input);
     carried.extend([route_node("t0-bu"), output()]);
     edit.assert_leads(&w, &carried, LEAD);
+
+    // Misaligned (D2 step 6): with one track T2 in A, the parallel bus fed from its `post_fader`
+    // tap holds the output late through T2's carried fader, so the walk restarts T2 whole, and
+    // every predecessor strip that reaches the output is restarted whole.
+    let a = || {
+        let mut model = empty();
+        track(&mut model, "t2", Vec::new());
+        to_output(&mut model, "t2");
+        model
+    };
+    let mut b = a();
+    submix(&mut b, "nb", vec![limiter()]);
+    to_output(&mut b, "nb");
+    to_submix(&mut b, "t2", "nb");
+    assert_eq!(
+        Edit::new(a(), b).decide(&CONFIG),
+        WarmDecision::Unavailable(WarmUnavailable::Misaligned)
+    );
 }
 
 /// The invariant error a warm preparation returns.
@@ -942,6 +1160,30 @@ impl Feeder {
                 )
                 .unwrap_or_else(|error| panic!("submit at {}: {error:?}", self.next));
             self.next += QUANTUM;
+        }
+    }
+
+    /// Submit whole blocks until the ring refuses one as full (#1406 gate 1).
+    fn fill(&mut self, sources: &mut host_core::SourceControlSet) {
+        loop {
+            let range = self.next as usize..(self.next + QUANTUM) as usize;
+            match sources.submit(
+                SOURCE.as_bytes(),
+                host_core::SourceSubmission {
+                    generation: self.generation,
+                    start_frame: self.next,
+                    sample_rate_hz: self.rate,
+                    planes: &[&self.planes[0][range.clone()], &self.planes[1][range]],
+                    frames: QUANTUM as u32,
+                    end_of_region: false,
+                },
+            ) {
+                Ok(_) => self.next += QUANTUM,
+                Err(host_core::SourceControlError::Chunk(source::HostChunkError::Full {
+                    ..
+                })) => return,
+                Err(error) => panic!("submit at {}: {error:?}", self.next),
+            }
         }
     }
 
@@ -1309,6 +1551,278 @@ fn a_primed_warm_successor_continues_its_predecessor_bit_for_bit() {
     }
 }
 
+/// A fresh W' of `twin`, compiled with `inventory`'s floors and fed from frame 0, whose live
+/// route `route` (a `pre_fader` twin of a fading copy) is muted over the session mute ramp before
+/// block `mute_block` renders, rendered for `blocks` blocks.
+fn muted_twin(
+    twin: &Session,
+    inventory: &host_core::PlanStateInventory,
+    route: &str,
+    mute_block: usize,
+    blocks: usize,
+    backend: Backend,
+) -> Stream {
+    let caps = gate_caps();
+    let floors = inventory.test_only_floors_only();
+    let (mut reference, mut handles) =
+        host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+            &twin.compiled,
+            &caps,
+            &HostLiveControlRequest::default(),
+            SuccessorBase::new(&floors, &twin.model, 2),
+            backend,
+        )
+        .unwrap_or_else(|failure| panic!("the fresh W': {failure:?}"));
+    assert_eq!(reference.inventory.source_read_offset(), 0);
+    let mut gate = reference
+        .plan
+        .take_revision_gate()
+        .expect("the fresh W's gate");
+    let _ = gate.stamp(2).expect("the open revision stamps again");
+    gate.publish(2);
+    let position = host_core::route_producer_position(&handles.route_controls, route)
+        .expect("the pre_fader route is a live send");
+    let values = twin
+        .model
+        .routes
+        .iter()
+        .find(|candidate| candidate.id.as_str() == route)
+        .expect("the route");
+    let matrix = &values.channel_matrix;
+    let mute = host_core::route_record(
+        values.gain_db,
+        [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
+        true,
+        [false; 2],
+        host_core::LiveRamps::for_session(&twin.model).mute_samples,
+    )
+    .expect("a send record");
+    let mut reference = Stream::start(reference, &twin.model, &caps, backend, AHEAD);
+    reference.render(mute_block);
+    let stamp = gate.stamp(3).expect("a legal revision");
+    handles.route_controls[position].write(stamp, mute);
+    gate.publish(3);
+    reference.render(blocks - mute_block);
+    reference
+}
+
+/// The input arrival of `node` in `inventory`.
+fn arrival_in(inventory: &host_core::PlanStateInventory, node: &GraphNodeId) -> u64 {
+    inventory
+        .input_floors()
+        .iter()
+        .find(|(row, _)| row == node)
+        .map_or(0, |(_, arrival)| *arrival)
+}
+
+/// The input arrival of route `id` in `floors`.
+fn route_floor(floors: &[(GraphNodeId, u64)], id: &str) -> u64 {
+    floors
+        .iter()
+        .find(|(node, _)| *node == route_node(id))
+        .map_or(0, |(_, arrival)| *arrival)
+}
+
+/// #2078: a warm successor that also removes a lane-less route. B is gate 1's growth (a muted
+/// limiter track `t3`) without `t2-main` (`post_fader` into the output, which has no lane), so W
+/// compiles the route's fading copy `t2-main-` (#1953b), at its alias's warm floor `a(n) + P`,
+/// fading out from W's first block. `grow` leads by `P` and restarts nothing, and W's block `j`
+/// is block `j + k` of a fresh W' compiled with W's floors and fed from frame 0, in which the
+/// copy is a `pre_fader` route (a unity fader moves no bit, and that route has a lane) given a
+/// live mute over the session mute ramp before block `BEFORE + k`. Both bank widths.
+#[test]
+fn a_warm_successor_fades_a_removed_lane_less_route_out_through_its_copy() {
+    let without = |mut model: SessionModel| {
+        model.routes.retain(|route| route.id.as_str() != "t2-main");
+        model
+    };
+    // `t2-main` from `post_fader`: lane-less too, and its `pre_fader` twin moves no bit (the
+    // fader is unity), where a `post_pan` route's would miss the strip's pan.
+    let base = || {
+        let mut model = two_tracks();
+        model
+            .routes
+            .iter_mut()
+            .find(|route| route.id.as_str() == "t2-main")
+            .expect("t2's route")
+            .source = from_track("t2", SendTap::PostFader);
+        model
+    };
+    let mut grown = base();
+    muted_track(&mut grown, "t3", vec![limiter()]);
+    to_output(&mut grown, "t3");
+    let a = Session::compile(finish(base()));
+    let b = Session::compile(finish(without(grown.clone())));
+    // W': B with the copy as a lane-ful route under the copy's ID.
+    let mut twin = without(grown);
+    route(
+        &mut twin,
+        "t2-main-",
+        from_track("t2", SendTap::PreFader),
+        None,
+    );
+    let twin = Session::compile(finish(twin));
+    for &backend in Backend::VECTOR {
+        let caps = gate_caps();
+        let mut swapped = alone(&a, &caps, backend, AHEAD);
+        let before = route_floor(swapped.inventory.input_floors(), "t2-main");
+        swapped.render(BEFORE);
+        let lead = swapped.grow(&b, &CONFIG);
+        assert_eq!(lead, LEAD, "{backend:?}");
+        assert!(
+            restarted_ids(&swapped.inventory).is_empty(),
+            "{backend:?}: nothing restarted"
+        );
+        assert_eq!(
+            route_floor(swapped.inventory.input_floors(), "t2-main-"),
+            before + LEAD,
+            "{backend:?}: the copy arrives at its alias's warm floor"
+        );
+        let k = (lead / QUANTUM) as usize;
+        swapped.render(AFTER);
+        assert_eq!(
+            swapped.swap_blocks(),
+            [BEFORE],
+            "{backend:?}: adopted at once"
+        );
+        let reference = muted_twin(
+            &twin,
+            &swapped.inventory,
+            "t2-main-",
+            BEFORE + k,
+            BEFORE + k + AFTER,
+            backend,
+        );
+        for j in 0..AFTER {
+            assert_eq!(
+                swapped.blocks[BEFORE + j].bits,
+                reference.blocks[BEFORE + j + k].bits,
+                "{backend:?}: block {j} after the swap"
+            );
+        }
+    }
+}
+
+/// #2078: a fading copy whose alias's floor sits above its tap keeps that floor, under a lead and
+/// without one. A0 routes `t2-main` from the limited `t1`'s `post_fader` tap into the output; A1
+/// (ordinary) re-points it to `t2`'s `post_fader` tap under its ID, so the route keeps its floor
+/// `L` (PDC takes the maximum of the floor and the arrival) above its tap's arrival `0`, and A1's
+/// own copy of the old half settles. B removes `t2-main`: its copy `t2-main-` arrives at the
+/// alias's floor, `L` for an ordinary successor and `L + P` for a warm one (B also adds a muted
+/// track with two limiters, `2L` over the output's `L`), not at its tap's arrival. Every block
+/// after the swap equals the fresh W' of [`muted_twin`] (offset by `k` when warm). Both bank widths.
+#[test]
+fn a_copy_whose_alias_floor_sits_above_its_tap_keeps_that_floor() {
+    let a0 = || {
+        let mut model = empty();
+        track(&mut model, "t1", vec![limiter()]);
+        to_output(&mut model, "t1");
+        track(&mut model, "t2", Vec::new());
+        route(
+            &mut model,
+            "t2-main",
+            from_track("t1", SendTap::PostFader),
+            None,
+        );
+        model
+    };
+    let a1 = || {
+        let mut model = a0();
+        model
+            .routes
+            .iter_mut()
+            .find(|route| route.id.as_str() == "t2-main")
+            .expect("the route")
+            .source = from_track("t2", SendTap::PostFader);
+        model
+    };
+    let removed = |grow: bool| {
+        let mut model = a1();
+        model.routes.retain(|route| route.id.as_str() != "t2-main");
+        if grow {
+            let mut second = limiter();
+            second.id = sid("limiter-2");
+            muted_track(&mut model, "t3", vec![limiter(), second]);
+            to_output(&mut model, "t3");
+        }
+        model
+    };
+    let twin = |grow: bool| {
+        let mut model = removed(grow);
+        route(
+            &mut model,
+            "t2-main-",
+            from_track("t2", SendTap::PreFader),
+            None,
+        );
+        Session::compile(finish(model))
+    };
+    let (a0, a1) = (
+        Session::compile(finish(a0())),
+        Session::compile(finish(a1())),
+    );
+    for &backend in Backend::VECTOR {
+        for warm in [false, true] {
+            let caps = gate_caps();
+            let mut swapped = alone(&a0, &caps, backend, AHEAD);
+            swapped.render(BEFORE);
+            swapped.rebuild(&a1);
+            // A1's copy of the old half settles, and A1 again (A2) drops it with its node: B's
+            // copy, under the same ID, inherits no floor of its own.
+            swapped.render(2 * AFTER);
+            swapped.rebuild(&a1);
+            swapped.render(AFTER);
+            assert_eq!(
+                route_floor(swapped.inventory.input_floors(), "t2-main-"),
+                0,
+                "{backend:?}: A2 holds no copy"
+            );
+            let held = route_floor(swapped.inventory.input_floors(), "t2-main");
+            let tap = arrival_in(&swapped.inventory, &stages("t2", TrackStage::PostFader)[0]);
+            assert!(
+                held > tap,
+                "{backend:?}: the floor {held} sits above the tap's {tap}"
+            );
+            let b = Session::compile(finish(removed(warm)));
+            let swap = swapped.blocks.len();
+            let lead = if warm {
+                swapped.grow(&b, &CONFIG)
+            } else {
+                swapped.rebuild(&b);
+                0
+            };
+            assert_eq!(lead, if warm { LEAD } else { 0 }, "{backend:?}");
+            let floors = swapped.inventory.input_floors();
+            assert_eq!(
+                (
+                    route_floor(floors, "t2-main-"),
+                    route_floor(floors, "t2-main--")
+                ),
+                (held + lead, 0),
+                "{backend:?}, warm {warm}: one copy, at its alias's floor"
+            );
+            let k = (lead / QUANTUM) as usize;
+            swapped.render(AFTER);
+            assert_eq!(swapped.swap_blocks().last(), Some(&swap), "{backend:?}");
+            let reference = muted_twin(
+                &twin(warm),
+                &swapped.inventory,
+                "t2-main-",
+                swap + k,
+                swap + k + AFTER,
+                backend,
+            );
+            for j in 0..AFTER {
+                assert_eq!(
+                    swapped.blocks[swap + j].bits,
+                    reference.blocks[swap + j + k].bits,
+                    "{backend:?}, warm {warm}: block {j} after the swap"
+                );
+            }
+        }
+    }
+}
+
 /// Gate 2: a growth, an ordinary rebuild that adds another muted track, and a second growth
 /// (offset `2P`): the output equals A continued throughout. Both bank widths.
 #[test]
@@ -1639,5 +2153,71 @@ fn the_growth_chain_primes_without_allocating() {
                 "{rate} Hz: block {index} (adoptions at {swaps:?})"
             );
         }
+    }
+}
+
+/// Gate 1 (#1406): the default ring holds a warm successor's largest prime through one stall.
+/// On [`host_core::default_source_ring_frames`]`(fs, 128)`, at every launch rate, the producer
+/// fills the ring and then submits nothing for `stall_ring_frames(fs, 128) / q` blocks, the
+/// silent blocks a full stall ring renders with no underrun (the stall tolerance's
+/// `ceil(fs · 100 ms / q)` and its two reserve quanta: since #917 the played block sits outside
+/// both queues, so a full ring queues every one of its blocks at a block boundary). Then gate 6's
+/// four growths are published as one, `P = p_max_samples(fs, 128)` with `ΣP = 0`, so readiness
+/// asks for its largest window, `P / q + 1` blocks; it is adopted at the next block, the producer
+/// still silent. The queue only shrinks while the producer is silent, so readiness held at every
+/// earlier block of the stall too, and the ring never underran.
+#[test]
+fn the_default_ring_holds_the_largest_prime_through_a_stall() {
+    for (rate, clippers) in [(44_100, 2), (48_000, 0), (88_200, 0), (96_000, 1)] {
+        let model = |growths: usize| {
+            let mut model = two_tracks();
+            model.sample_rate_hz = rate;
+            let chain = inserts(&mut model, "t1");
+            for growth in 0..growths {
+                let mut stage = limiter();
+                stage.id = sid(&format!("limiter-{growth}"));
+                chain.push(stage);
+                for clipper in 0..clippers {
+                    let mut clip = effect(
+                        &format!("clip-{growth}-{clipper}"),
+                        "miso.soft-clip",
+                        SidechainDeclaration::None,
+                    );
+                    clip.link_mode = LinkMode::DualMono;
+                    chain.push(clip);
+                }
+            }
+            Session::compile(finish(model))
+        };
+        let p_max = u64::from(host_core::p_max_samples(rate, 128));
+        let caps = ring_caps(host_core::default_source_ring_frames(rate, 128));
+        let config = WarmConfig { p_max, ..CONFIG };
+        let mut stream = alone(&model(0), &caps, backend(), 1);
+        stream.feeder.rate = rate;
+        stream.render(BEFORE);
+        stream.feeder.fill(&mut stream.sources);
+        stream.feeder.ahead = 0;
+        let stall = u64::from(stall_ring_frames(rate, 128)) / QUANTUM;
+        stream.render(usize::try_from(stall).expect("blocks"));
+        let at = stream.blocks.len();
+        assert_eq!(
+            stream.grow(&model(4), &config),
+            p_max,
+            "{rate} Hz: P is p_max_samples"
+        );
+        stream.render(1);
+        assert_eq!(
+            stream.swap_blocks(),
+            [at],
+            "{rate} Hz: ready at the block after the stall"
+        );
+        let report = stream
+            .sources
+            .seek_report(SOURCE.as_bytes())
+            .expect("the source's report");
+        assert_eq!(
+            report.cumulative_underrun_frames, 0,
+            "{rate} Hz: no underrun"
+        );
     }
 }

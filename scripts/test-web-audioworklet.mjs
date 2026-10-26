@@ -5,7 +5,6 @@ const root = new URL("../", import.meta.url);
 const commandArguments = process.argv.slice(2);
 const bootDataModeFlags = [
   ["--boot-data-document", "document"],
-  ["--boot-data-nested", "nested"],
 ].filter(([flag]) => commandArguments.includes(flag));
 if (bootDataModeFlags.length > 1) throw new TypeError("only one boot-data test mode is allowed");
 const bootDataTestMode = bootDataModeFlags[0]?.[1] ?? null;
@@ -56,12 +55,13 @@ const qualificationUrl = qualificationModuleIndex === -1
 const limits = Object.freeze({
   sourceRingFrames: 256,
   maximumMemoryBytes: 0n,
-  // Issue #137 D1/D2 and #143 D3: the live-control words. `reserved1` (offset 32, issue #1565)
-  // and `reserved2` (offset 56, the master boot word until issue #1689) must be zero. All zero is
-  // "no meter observers, no observation capacity"; the live-control tests below override them.
+  // Issue #137 D1/D2: the live-control meter word. `reserved1` (offset 32, issue #1565),
+  // `reserved3` (offset 48, the observation-taps word until issue #1590) and `reserved2` (offset
+  // 56, the master boot word until issue #1689) must be zero; the live-control tests below
+  // override the meter word.
   reserved1: 0n,
   liveControlMeterBlocks: 2n,
-  liveControlObservationTaps: 2n,
+  reserved3: 0n,
   reserved2: 0n,
 });
 
@@ -145,13 +145,15 @@ async function testMainRealm() {
   let lastControlDocument;
   let sessionMapMutation = null;
   let planeMutation = null;
-  let commandResult = 0;
   // Issue #1644: every session seek message the fake port received, and the result it answers.
   const sessionSeekMessages = [];
   let sessionSeekResult = 0;
   let sessionSeekGenerationOffset = 0n;
+  // Issue #1297a: every seek-at and seek report message the fake port received, and the reply a
+  // seek report gets (a function of the received message).
+  const sourceSeekMessages = [];
+  let seekReportReply = null;
   let mixedSuccess = false;
-  let commandMutation = null;
   let compileGate = null;
   let addModuleGate = null;
   let readyGate = null;
@@ -217,19 +219,6 @@ async function testMainRealm() {
           };
           if (controlMutation !== null) response = controlMutation(response);
           responseTransfer = response.response instanceof Uint8Array ? [response.response.buffer] : [];
-        } else if (received.tag === "miso.command.v1") {
-          response = {
-            tag: "miso.ack.v1",
-            requestId: received.requestId,
-            result: commandResult,
-            reason: commandResult === 0 ? 0 : 8,
-            rejectedIndex: 0,
-            admitted: commandResult === 0 ? received.count : 0,
-            appliedAtSample: 512n,
-            records: received.records,
-          };
-          if (commandMutation !== null) response = commandMutation(response);
-          responseTransfer = [received.records.buffer];
         } else if (received.tag === "miso.sessionmap.v1") {
           response = {
             tag: "miso.sessionmap.v1",
@@ -248,7 +237,11 @@ async function testMainRealm() {
             tag: "miso.session-seek.v1", requestId: received.requestId,
             result: sessionSeekResult, generation: received.generation + sessionSeekGenerationOffset,
           };
+        } else if (received.tag === "miso.seek-report.v1") {
+          sourceSeekMessages.push(received);
+          response = { tag: "miso.seek-report.v1", ...seekReportReply(received) };
         } else {
+          if (received.tag === "miso.seek-at.v1") sourceSeekMessages.push(received);
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
         }
         if (received.tag === "miso.source.v1" && planeMutation !== null) {
@@ -297,6 +290,10 @@ async function testMainRealm() {
           backend: "simd128",
           resources: resourceReport(1, this.constructionQuantumFrames),
           memoryBytes: 65536,
+          // Issue #1406b: the ring the engine resolved. The fake engine reports an override as
+          // given and, for a zero override, 110 quanta: the engine's default ring at 48 kHz / 64.
+          sourceRingFrames: options.processorOptions.options.sourceRingFrames
+            || 110 * this.constructionQuantumFrames,
         };
         if (readyGate !== null) {
           const gate = readyGate;
@@ -421,87 +418,8 @@ async function testMainRealm() {
       }
     };
 
-    const runBootDataNested = async () => {
-      const gate = snapshotGate();
-      addModuleGate = gate;
-      const firstEntry = { target: "output", targetId: "first", channels: "both" };
-      const thirdEntry = { target: "trackPostPan", targetId: "third", channels: "left" };
-      const entries = [firstEntry, , thirdEntry];
-      const collection = { entries, maximumCaptureBytes: 4096 };
-      const factory = bootDataFactory({
-        document: new Uint8Array(),
-        includePreparedModule: true,
-        workletModuleUrl: "boot-data-nested-processor.js",
-        options: { ...limits, spectrum: null, spectrumCollection: collection },
-      });
-      const expected = {
-        ...limits,
-        spectrumHopFrames: 0,
-        spectrum: null,
-        spectrumCollection: {
-          entries: [
-            { target: "output", targetId: "first", channels: "both" },
-            ,
-            { target: "trackPostPan", targetId: "third", channels: "left" },
-          ],
-          maximumCaptureBytes: 4096,
-        },
-      };
-      const eventsBefore = events.length;
-      let hostValue;
-      try {
-        const boot = createMisoAudioWorkletHost(factory);
-        await gate.started;
-        firstEntry.targetId = "mutated-first";
-        thirdEntry.channels = "right";
-        entries[0] = { target: "output", targetId: "replaced-entry", channels: "right" };
-        factory.options.spectrumCollection = {
-          entries: [{ target: "output", targetId: "replaced-collection", channels: "both" }],
-          maximumCaptureBytes: 8192,
-        };
-        gate.release();
-        hostValue = await boot;
-        const node = FakeNode.latest;
-        assert.deepEqual(
-          node.constructionSnapshot.options,
-          expected,
-          "boot-data.nested.before-construction",
-        );
-        const capturedCollection = node.constructionSnapshot.options.spectrumCollection;
-        assert.equal(
-          Object.hasOwn(capturedCollection.entries, 1),
-          false,
-          "boot-data.nested.sparse-hole",
-        );
-        assert.notEqual(
-          node.options.processorOptions.options.spectrumCollection,
-          collection,
-          "boot-data.nested.private-collection",
-        );
-        assert.notEqual(
-          node.options.processorOptions.options.spectrumCollection.entries,
-          entries,
-          "boot-data.nested.private-entries",
-        );
-        assert.equal(node.constructionModule, unsupportedPreparationModule, "boot-data.nested.module");
-        assert.deepEqual(
-          events.slice(eventsBefore),
-          [["addModule", "boot-data-nested-processor.js"]],
-          "boot-data.nested.supplied-module-loading",
-        );
-      } finally {
-        gate.release();
-        if (addModuleGate === gate) addModuleGate = null;
-        if (hostValue !== undefined) await hostValue.dispose().catch(() => undefined);
-      }
-    };
-
     if (bootDataTestMode === "document") {
       await runBootDataDocument();
-      return;
-    }
-    if (bootDataTestMode === "nested") {
-      await runBootDataNested();
       return;
     }
 
@@ -509,13 +427,6 @@ async function testMainRealm() {
       const makeFactory = (overrides = {}) => ({
         context, document: new Uint8Array(), options: limits,
         simd128ModuleUrl: "simd.wasm", workletModuleUrl: "processor.js", ...overrides,
-      });
-      const makeEntry = () => ({ target: "output", targetId: "main-out", channels: "both" });
-      const makeSpectrum = () => ({
-        target: "trackPostPan", targetId: "eq0", channels: "both", maximumCaptureBytes: 4096,
-      });
-      const makeCollectionOptions = (entries) => ({
-        ...limits, spectrum: null, spectrumCollection: { entries, maximumCaptureBytes: 4096 },
       });
       const addWitness = (object, key, setterOnly = false, enumerable = true) => {
         let calls = 0;
@@ -553,22 +464,6 @@ async function testMainRealm() {
       const descriptorCases = [
         ["factory", () => { const f = makeFactory(); return [f, f, "context"]; }],
         ["boot", () => { const o = { ...limits }; return [makeFactory({ options: o }), o, "sourceRingFrames"]; }],
-        ["spectrum", () => {
-          const s = makeSpectrum(); const o = { ...limits, spectrum: s, spectrumCollection: null };
-          return [makeFactory({ options: o }), s, "target"];
-        }],
-        ["collection", () => {
-          const e = [makeEntry()]; const o = makeCollectionOptions(e);
-          return [makeFactory({ options: o }), o.spectrumCollection, "entries"];
-        }],
-        ["array-index", () => {
-          const e = [makeEntry()]; const o = makeCollectionOptions(e);
-          return [makeFactory({ options: o }), e, "0"];
-        }],
-        ["entry", () => {
-          const e = makeEntry(); const o = makeCollectionOptions([e]);
-          return [makeFactory({ options: o }), e, "targetId"];
-        }],
       ];
       for (const setterOnly of [false, true]) {
         for (const [label, makeCase] of descriptorCases) {
@@ -583,33 +478,6 @@ async function testMainRealm() {
           addWitness(factory, "context", setterOnly, false));
       }
 
-      const decoratedEntries = [
-        ["every=false", "every", false],
-        ["every=undefined", "every", undefined, false],
-        ["every callback", "every", "callback"],
-        ["map", "map", "callback"],
-        ["constructor", "constructor", "callback"],
-        ["Symbol.iterator", Symbol.iterator, "callback"],
-        ["Symbol.species", Symbol.species, "callback"],
-      ];
-      for (const [label, key, value, enumerable = true] of decoratedEntries) {
-        let calls = 0;
-        let retained = null;
-        const entries = [makeEntry()];
-        const decoration = value === "callback" ? (...args) => {
-          calls += 1;
-          retained = args[0] ?? null;
-          return true;
-        } : value;
-        Object.defineProperty(entries, key, {
-          configurable: true, enumerable, value: decoration, writable: true,
-        });
-        await assertRefusal(`decorated entries ${label}`, makeFactory({
-          options: makeCollectionOptions(entries),
-        }), () => calls);
-        assert.equal(retained, null, `decorated entries ${label}: callback escaped`);
-      }
-
       const refusalCases = [
         ["unknown enumerable", () => Object.assign(makeFactory(), { unknown: undefined })],
         ["unknown hidden", () => {
@@ -621,19 +489,6 @@ async function testMainRealm() {
           const factory = makeFactory();
           Object.defineProperty(factory, Symbol("unknown"), { value: undefined });
           return factory;
-        }],
-        ["custom-prototype entries", () => {
-          const entries = [makeEntry()]; Object.setPrototypeOf(entries, { custom: true });
-          return makeFactory({ options: makeCollectionOptions(entries) });
-        }],
-        ["subclass entries", () => {
-          class EntriesSubclass extends Array {}
-          const entries = new EntriesSubclass(makeEntry());
-          return makeFactory({ options: makeCollectionOptions(entries) });
-        }],
-        ["noncanonical array index", () => {
-          const entries = [makeEntry()]; Object.defineProperty(entries, "01", { value: makeEntry() });
-          return makeFactory({ options: makeCollectionOptions(entries) });
         }],
       ];
       for (const [label, makeCase] of refusalCases) {
@@ -648,180 +503,8 @@ async function testMainRealm() {
         await assertAccepted("null-prototype records", factory);
       }
       {
-        const spectrum = Object.assign(Object.create(null), makeSpectrum());
-        const spectrumOptions = Object.assign(Object.create(null), limits, {
-          spectrum, spectrumCollection: null,
-        });
-        await assertAccepted(
-          "null-prototype spectrum record",
-          makeFactory({ options: spectrumOptions }),
-        );
-        const entry = Object.assign(Object.create(null), makeEntry());
-        const collection = Object.assign(Object.create(null), {
-          entries: [entry], maximumCaptureBytes: 4096,
-        });
-        const collectionOptions = Object.assign(Object.create(null), limits, {
-          spectrum: null, spectrumCollection: collection,
-        });
-        await assertAccepted(
-          "null-prototype collection and entry records",
-          makeFactory({ options: collectionOptions }),
-        );
-      }
-      {
         const options = Object.freeze({ ...limits });
         await assertAccepted("frozen records", Object.freeze(makeFactory({ options })));
-      }
-      await assertAccepted(
-        "legacy six-field shape",
-        makeFactory({ options: { ...limits } }),
-        (_host, options) => {
-          assert.equal(options.spectrum, null, "legacy spectrum normalizes to null");
-          assert.equal(options.spectrumCollection, null,
-            "legacy spectrum collection normalizes to null");
-        },
-      );
-      await assertAccepted(
-        "extended eight-field shape and null normalization",
-        makeFactory({ options: { ...limits, spectrum: null, spectrumCollection: null } }),
-        (_host, options) => {
-          assert.equal(options.spectrum, null, "explicit spectrum null is preserved");
-          assert.equal(options.spectrumCollection, null, "explicit collection null is preserved");
-        },
-      );
-      await assertAccepted(
-        "extended undefined spectrum normalizes to null",
-        makeFactory({ options: { ...limits, spectrum: undefined, spectrumCollection: null } }),
-        (_host, options) => {
-          assert.equal(options.spectrum, null, "enumerable undefined spectrum normalizes to null");
-          assert.equal(options.spectrumCollection, null, "enumerable null collection is preserved");
-        },
-      );
-      await assertAccepted(
-        "extended undefined spectrum keeps collection",
-        makeFactory({
-          options: {
-            ...limits,
-            spectrum: undefined,
-            spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
-          },
-        }),
-        (_host, options) => {
-          assert.equal(options.spectrum, null, "undefined spectrum normalizes to null");
-          assert.equal(options.spectrumCollection.entries.length, 1,
-            "nonnull collection remains effective");
-          assert.equal(options.spectrumCollection.entries[0].target, "output",
-            "nonnull collection entry remains effective");
-        },
-      );
-      for (const hop of [256, 1024]) {
-        await assertAccepted(
-          `explicit spectrum hop ${hop}`,
-          makeFactory({
-            options: {
-              ...limits,
-              spectrumHopFrames: hop,
-              spectrum: null,
-              spectrumCollection: null,
-            },
-          }),
-          (_host, options) => {
-            assert.equal(options.spectrumHopFrames, hop, "explicit hop is forwarded");
-            assert.equal(options.spectrum, null);
-            assert.equal(options.spectrumCollection, null);
-          },
-        );
-      }
-      for (const hop of [256, 1024]) {
-        await assertAccepted(
-          `explicit spectrum hop ${hop} without optional fields`,
-          makeFactory({ options: { ...limits, spectrumHopFrames: hop } }),
-          (_host, options) => {
-            assert.equal(options.spectrumHopFrames, hop, "explicit hop is forwarded");
-            assert.equal(options.spectrum, null, "omitted spectrum normalizes to null");
-            assert.equal(options.spectrumCollection, null,
-              "omitted spectrum collection normalizes to null");
-          },
-        );
-      }
-      {
-        const first = Object.freeze(makeEntry());
-        const second = Object.freeze(makeEntry());
-        const entries = new Array(3);
-        Object.defineProperty(entries, "0", {
-          value: first, writable: false, enumerable: false, configurable: false,
-        });
-        entries[2] = second;
-        Object.freeze(entries);
-        const collection = Object.freeze({ entries, maximumCaptureBytes: 4096 });
-        const options = Object.freeze({
-          ...limits, spectrum: null, spectrumCollection: collection,
-        });
-        await assertAccepted(
-          "frozen sparse exact entries",
-          Object.freeze(makeFactory({ options })),
-          (_host, captured) => {
-            const copiedCollection = captured.spectrumCollection;
-            const copiedEntries = copiedCollection.entries;
-            assert.equal(copiedEntries.length, 3, "sparse entries length captured");
-            assert.equal(Object.hasOwn(copiedEntries, 0), true, "sparse index is present");
-            assert.equal(Object.hasOwn(copiedEntries, 1), false, "sparse hole is retained");
-            assert.equal(
-              Object.getOwnPropertyDescriptor(copiedEntries, "0").enumerable,
-              false,
-              "hidden index enumerability is retained",
-            );
-            assert.equal(
-              Object.getOwnPropertyDescriptor(copiedEntries, "2").enumerable,
-              true,
-              "visible index enumerability is retained",
-            );
-            assert.notEqual(copiedCollection, collection, "collection snapshot is fresh");
-            assert.notEqual(copiedEntries, entries, "entries snapshot is fresh");
-            assert.notEqual(copiedEntries[0], first, "nested entry snapshot is fresh");
-            assert.notEqual(copiedEntries[2], second, "second nested snapshot is fresh");
-          },
-        );
-      }
-      {
-        const options = { ...limits };
-        Object.defineProperty(options, "spectrumCollection", {
-          value: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
-          enumerable: false,
-        });
-        await assertAccepted(
-          "hidden collection remains effective",
-          makeFactory({ options }),
-          (_host, captured) => {
-            assert.equal(captured.spectrumCollection.entries.length, 1);
-            assert.equal(captured.spectrumCollection.entries[0].target, "output");
-          },
-        );
-      }
-      {
-        const options = { ...limits };
-        Object.defineProperty(options, "spectrum", { value: null, enumerable: false });
-        await assertAccepted(
-          "hidden null spectrum normalizes to null",
-          makeFactory({ options }),
-          (_host, captured) => assert.equal(captured.spectrum, null),
-        );
-      }
-
-      await assertRefusal(
-        "exact seven-field shape",
-        makeFactory({ options: { ...limits, spectrum: null } }),
-      );
-      await assertRefusal(
-        "enumerable undefined spectrum shape",
-        makeFactory({ options: { ...limits, spectrum: undefined } }),
-      );
-      {
-        const options = { ...limits };
-        Object.defineProperty(options, "spectrum", {
-          value: makeSpectrum(), enumerable: false,
-        });
-        await assertRefusal("hidden nonnull spectrum", makeFactory({ options }));
       }
       {
         const enumerableUndefined = makeFactory();
@@ -839,36 +522,7 @@ async function testMainRealm() {
         });
         await assertRefusal("hidden defined prepared module", hiddenDefined);
       }
-      {
-        const collection = { maximumCaptureBytes: 4096 };
-        Object.defineProperty(collection, "entries", {
-          value: [makeEntry()], enumerable: false,
-        });
-        await assertRefusal(
-          "hidden required collection entries",
-          makeFactory({ options: { ...limits, spectrum: null, spectrumCollection: collection } }),
-        );
-      }
-      await assertRefusal(
-        "mutually exclusive spectrum settings",
-        makeFactory({
-          options: {
-            ...limits,
-            spectrum: makeSpectrum(),
-            spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096 },
-          },
-        }),
-      );
-
       const plainOptions = (overrides = {}) => ({ ...limits, ...overrides });
-      const singleSpectrumOptions = (overrides = {}) => ({
-        ...limits, spectrum: { ...makeSpectrum(), ...overrides }, spectrumCollection: null,
-      });
-      const collectionDomainOptions = (overrides = {}) => ({
-        ...limits,
-        spectrum: null,
-        spectrumCollection: { entries: [makeEntry()], maximumCaptureBytes: 4096, ...overrides },
-      });
       const domainRefusals = [
         ["u32 type", plainOptions({ sourceRingFrames: "256" })],
         ["u32 bound", plainOptions({ sourceRingFrames: 0x1_0000_0000 })],
@@ -876,28 +530,15 @@ async function testMainRealm() {
         ["u64 bound", plainOptions({ maximumMemoryBytes: 0x1_0000_0000_0000_0000n })],
         ["reserved1 nonzero", plainOptions({ reserved1: 1n })],
         ["reserved1 type", plainOptions({ reserved1: 0 })],
-        ["observation taps bound", plainOptions({ liveControlObservationTaps: 17n })],
+        // Issue #1590 gate 4: the retired observation-taps word is refused.
+        ["reserved3 nonzero", plainOptions({ reserved3: 4n })],
         // Issue #1689 gate 2: the retired master word is refused at both ends of its range.
         ["reserved2 one", plainOptions({ reserved2: 1n })],
         ["reserved2 all ones", plainOptions({ reserved2: 0xffff_ffff_ffff_ffffn })],
-        ["spectrum hop unsupported", plainOptions({
-          spectrumHopFrames: 300, spectrum: null, spectrumCollection: null,
-        })],
-        ["invalid spectrum target", singleSpectrumOptions({ target: "unknown" })],
-        ["invalid spectrum channel", singleSpectrumOptions({ channels: "center" })],
-        ["empty spectrum ID", singleSpectrumOptions({ targetId: "" })],
-        ["oversize UTF-8 spectrum ID", singleSpectrumOptions({ targetId: "é".repeat(64) })],
-        ["single capture zero", singleSpectrumOptions({ maximumCaptureBytes: 0 })],
-        ["single capture bound", singleSpectrumOptions({ maximumCaptureBytes: 1_048_577 })],
-        ["collection capture zero", collectionDomainOptions({ maximumCaptureBytes: 0 })],
       ];
       for (const [label, options] of domainRefusals) {
         await assertRefusal(label, makeFactory({ options }));
       }
-      await assertAccepted(
-        "collection capture above single limit",
-        makeFactory({ options: collectionDomainOptions({ maximumCaptureBytes: 1_048_577 }) }),
-      );
       {
         const savedQuantum = context.renderQuantumSize;
         try {
@@ -1045,22 +686,16 @@ async function testMainRealm() {
       {
         const addGate = snapshotGate();
         const readyPause = snapshotGate();
-        const spectrum = {
-          target: "trackPostPan", targetId: "single", channels: "left", maximumCaptureBytes: 4096,
-        };
         const options = {
           sourceRingFrames: 0,
           maximumMemoryBytes: 0n,
           reserved1: 0n,
           liveControlMeterBlocks: 7n,
-          liveControlObservationTaps: 0n,
+          reserved3: 0n,
           reserved2: 0n,
-          spectrumHopFrames: 256,
-          spectrum,
-          spectrumCollection: null,
         };
-        const expectedOptions = { ...options, spectrum: { ...spectrum } };
-        const factory = makeFactory({ options, workletModuleUrl: "single-spectrum.js" });
+        const expectedOptions = { ...options };
+        const factory = makeFactory({ options, workletModuleUrl: "single-boot.js" });
         const originalFactory = {
           context: factory.context,
           options: factory.options,
@@ -1087,11 +722,9 @@ async function testMainRealm() {
           readyGate = readyPause;
           boot = createMisoAudioWorkletHost(factory);
           await addGate.started;
-          spectrum.targetId = "mutated-spectrum-before-construction";
-          options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 128;
           options.liveControlMeterBlocks = 99n;
-          factory.options = { ...options, spectrum: { ...spectrum, target: "output" } };
+          factory.options = { ...options, reserved3: 4n };
           factory.context = replacementContext;
           factory.preparedModule = replacementModule;
           factory.simd128ModuleUrl = "mutated-simd.wasm";
@@ -1101,25 +734,21 @@ async function testMainRealm() {
           context.state = "running";
           context.sampleRate = 44100;
           context.renderQuantumSize = 128;
-          spectrum.targetId = "mutated-spectrum-while-ready";
-          options.spectrumHopFrames = 1024;
           options.sourceRingFrames = 256;
           options.liveControlMeterBlocks = 101n;
-          factory.options = { ...options, spectrum: { ...spectrum, target: "input" } };
+          factory.options = { ...options, reserved3: 8n };
           readyPause.release();
           hostValue = await boot;
           const node = FakeNode.latest;
           const captured = node.options.processorOptions.options;
           assert.equal(hostValue.resources.sampleRateHz, 48000);
           assert.equal(hostValue.resources.quantumFrames, 64);
-          assert.deepEqual(captured, expectedOptions, "single spectrum boot values are captured");
-          assert.equal(captured.spectrumCollection, null);
-          assert.notEqual(captured, options, "single spectrum boot snapshot is fresh");
-          assert.notEqual(captured.spectrum, spectrum, "single spectrum snapshot is fresh");
+          assert.deepEqual(captured, expectedOptions, "boot values are captured");
+          assert.notEqual(captured, options, "boot snapshot is fresh");
           assert.deepEqual(
             events.slice(-2),
-            [["compile", "simd.wasm"], ["addModule", "single-spectrum.js"]],
-            "single spectrum loading inputs are captured",
+            [["compile", "simd.wasm"], ["addModule", "single-boot.js"]],
+            "loading inputs are captured",
           );
           const status = await hostValue.status();
           assert.equal(status.sampleRateHz, 48000, "status keeps captured sample rate");
@@ -1132,7 +761,9 @@ async function testMainRealm() {
 
           mixedSuccess = true;
           holdAll = true;
-          const heldSources = Array.from({ length: 77 }, (_value, index) => {
+          // Issue #1406b: with a zero override the bound is the ring the engine reports at boot,
+          // 110 quanta at 48 kHz / 64 (the old host rule gave 77).
+          const heldSources = Array.from({ length: 110 }, (_value, index) => {
             const buffer = new ArrayBuffer(4);
             const request = hostValue.submitSource({
               sourceId: "single-source", generation: 1n, startFrame: BigInt(index),
@@ -1145,7 +776,7 @@ async function testMainRealm() {
           const beforeSourceOverflow = events.length;
           const overflowBuffer = new ArrayBuffer(4);
           await localErrorResult(hostValue.submitSource({
-            sourceId: "single-source", generation: 1n, startFrame: 77n,
+            sourceId: "single-source", generation: 1n, startFrame: 110n,
             sampleRateHz: 48000, planes: [new Float32Array(overflowBuffer)], frames: 1,
             endOfRegion: false,
           }), 6);
@@ -1157,7 +788,7 @@ async function testMainRealm() {
           assert(sourceAcks.every((ack) => ack.result === 0), "all default-depth sources accepted");
           const nextSourceBuffer = new ArrayBuffer(4);
           const nextSource = hostValue.submitSource({
-            sourceId: "single-source", generation: 1n, startFrame: 78n,
+            sourceId: "single-source", generation: 1n, startFrame: 111n,
             sampleRateHz: 48000, planes: [new Float32Array(nextSourceBuffer)], frames: 1,
             endOfRegion: false,
           });
@@ -1165,31 +796,6 @@ async function testMainRealm() {
           assert.equal(nextSourceAck.requestId, sourceAcks.at(-1).requestId + 1,
             "source capacity refusal did not burn an ID");
 
-          // Issue #1565: the in-flight bound is the fixed `maximumCommandRecords` (256), not a boot
-          // word, so 256 commands hold and the 257th is refused locally.
-          const localCommand = {
-            kind: 7, rack: 1, stripId: "track-0", effectId: "comp", tapId: 1, windowBlocks: 0,
-          };
-          holdAll = true;
-          const heldCommands = Array.from({ length: 256 }, () =>
-            hostValue.command({ commands: [localCommand] }));
-          const beforeCommandOverflow = events.length;
-          await localErrorResult(hostValue.command({ commands: [localCommand] }), 6);
-          assert.equal(events.length, beforeCommandOverflow, "command capacity refusal posted no event");
-          holdAll = false;
-          for (const respond of heldAll.splice(0)) respond();
-          const commandAcks = await Promise.all(heldCommands);
-          const nextCommand = await hostValue.command({ commands: [localCommand] });
-          assert.equal(nextCommand.requestId, commandAcks.at(-1).requestId + 1,
-            "command capacity refusal did not burn an ID");
-          const observeAck = await hostValue.observe({
-            subscriptions: [{
-              stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true,
-            }],
-          });
-          assert.equal(observeAck.result, 0, "captured observation default command accepted");
-          assert.equal(observeAck.bindings[0].windowBlocks, 7,
-            "windowBlocks: 0 uses captured liveControlMeterBlocks");
         } finally {
           addGate.release();
           readyPause.release();
@@ -1932,6 +1538,84 @@ async function testMainRealm() {
     ]);
     await pipelineHost.dispose();
 
+    {
+      // Issue #1297a, the host half: `seekSourceAt` posts one exact message and shares the
+      // per-source seek bound with `seekSource`; `seekReport` resolves with the record's words
+      // or, for a refusal, a null report; a reply whose report disagrees with its result fails
+      // the host.
+      const seekHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const words = {
+        generation: 5n, firstSample: 1024n, sourceFrame: 48000n,
+        cumulativeUnderrunFrames: 7n, cumulativeHeldFrames: 9n,
+      };
+      holdAll = true;
+      const firstSeekAt = seekHost.seekSourceAt({
+        sourceId: "drums", generation: 2n, sourceFrame: 480n, anchorSample: 128n,
+      });
+      const beforeSeekAtOverflow = events.length;
+      await localErrorResult(seekHost.seekSource({
+        sourceId: "drums", generation: 3n, sourceFrame: 0n,
+      }), 6);
+      assert.equal(events.length, beforeSeekAtOverflow, "a second seek of a source posts nothing");
+      holdAll = false;
+      for (const respond of heldAll) respond();
+      heldAll.length = 0;
+      assert.equal((await firstSeekAt).result, 0);
+      seekReportReply = (received) => ({
+        requestId: received.requestId, result: 0, report: words,
+      });
+      holdAll = true;
+      const firstReport = seekHost.seekReport("drums");
+      const beforeReportOverflow = events.length;
+      await localErrorResult(seekHost.seekReport("drums"), 6);
+      assert.equal(events.length, beforeReportOverflow, "a second report of a source posts nothing");
+      holdAll = false;
+      for (const respond of heldAll) respond();
+      heldAll.length = 0;
+      assert.equal((await firstReport).result, 0);
+      await localErrorResult(seekHost.seekSourceAt({
+        sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: -1n,
+      }), 1);
+      seekReportReply = (received) => ({
+        requestId: received.requestId, result: 0, report: words,
+      });
+      assert.deepEqual(await seekHost.seekReport("$timeline"), {
+        tag: "miso.seek-report.v1", requestId: 3, result: 0, report: words,
+      });
+      seekReportReply = (received) => ({ requestId: received.requestId, result: 6, report: null });
+      assert.deepEqual((await seekHost.seekReport("drums")).report, null);
+      seekReportReply = (received) => ({ requestId: received.requestId, result: 6, report: words });
+      await errorResult(seekHost.seekReport("drums"), 255);
+      assert.deepEqual(sourceSeekMessages, [
+        { tag: "miso.seek-at.v1", sourceId: "drums", generation: 2n, sourceFrame: 480n,
+          anchorSample: 128n, requestId: 1 },
+        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 2 },
+        { tag: "miso.seek-report.v1", sourceId: "$timeline", requestId: 3 },
+        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 4 },
+        { tag: "miso.seek-report.v1", sourceId: "drums", requestId: 5 },
+      ]);
+      await seekHost.dispose();
+      // An OK reply whose word is a number, not a `bigint`, fails a fresh host.
+      const wordHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      seekReportReply = (received) => ({
+        requestId: received.requestId, result: 0, report: { ...words, generation: 5 },
+      });
+      await errorResult(wordHost.seekReport("drums"), 255);
+      await wordHost.dispose();
+    }
+
     // W4-D1: a browser that cannot validate simd128 is refused with the typed record, before any
     // network request. Red mutation: delete the `WebAssembly.validate(SIMD128_PROBE)` guard in
     // `createMisoAudioWorkletHost` -> the rejection becomes a generic 255 and `compileCount` grows.
@@ -1985,21 +1669,12 @@ async function testMainRealm() {
     assert.equal(Object.hasOwn(map, "routes"), false, "issue #1565: the route list is deleted");
     assert.equal(Object.hasOwn(map, "vcas"), false, "issue #1565: the VCA list is deleted");
 
-    // Issue #1565: the only kinds `command()` carries are the two observation kinds.
-    const sub = {
-      kind: 7, rack: 1, stripId: "track-1", effectId: "comp", tapId: 1, windowBlocks: 64,
-    };
     // Issue #393: one real host fixture owns every request ID across interleaved request classes.
-    // Twenty-five rounds cover 250 successful calls, including both lease orderings around a
-    // command and direct source/seek traffic. No caller-side ID is supplied anywhere in this loop.
+    // Twenty-five rounds cover 200 successful calls, including both lease orderings and direct
+    // source/seek traffic. No caller-side ID is supplied anywhere in this loop.
     const mixedAcks = [];
     const mixedSendStart = events.length;
-    const mixedSubscription = {
-      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 1, armed: true,
-    };
     for (let round = 0; round < 25; round += 1) {
-      mixedAcks.push((await liveControlHost.command({ commands: [sub] })).requestId);
-      mixedAcks.push((await liveControlHost.observe({ subscriptions: [mixedSubscription] })).requestId);
       mixedAcks.push((await liveControlHost.meters({ enabled: true, onFrame: null })).requestId);
       mixedAcks.push((await liveControlHost.meters({ enabled: false, onFrame: null })).requestId);
       mixedAcks.push((await liveControlHost.telemetry({ enabled: true, onFrame: null })).requestId);
@@ -2031,20 +1706,17 @@ async function testMainRealm() {
       mixedAcks.push((await liveControlHost.status()).requestId);
       mixedAcks.push((await liveControlHost.sessionMap()).requestId);
     }
-    assert.equal(mixedAcks.length, 250, "mixed host regression covers 250 successful calls");
+    assert.equal(mixedAcks.length, 200, "mixed host regression covers 200 successful calls");
     const mixedSendIds = events.slice(mixedSendStart).map((event) => event[2]);
     assert.deepEqual(mixedAcks, mixedSendIds, "acknowledgements match actual outbound send order");
     assert.equal(mixedAcks[0], 2, "sessionMap consumes the first host allocation");
-    assert.equal(mixedAcks.at(-1), 251, "250 mixed calls occupy IDs 2 through 251");
+    assert.equal(mixedAcks.at(-1), 201, "200 mixed calls occupy IDs 2 through 201");
     assert(mixedAcks.every((id, index) => index === 0 || id === mixedAcks[index - 1] + 1),
       "mixed acknowledgements have adjacent IDs");
-    assert(mixedAcks.every((_id, index) => index % 10 !== 1 || mixedAcks[index] === mixedAcks[index - 1] + 1),
-      "observe delegates with exactly one allocation");
     assert.equal(new Set(mixedAcks).size, mixedAcks.length, "mixed acknowledgements are unique");
-    console.log("Issue393 mixed calls: 250 result-zero, send IDs 2..251, adjacent, observe single allocation");
-    // The shipped SDK consumer uses the same real host: sessionMap -> direct meter lease ->
-    // semantic live-control submit. This is the collision reproducer that the host-owned ledger
-    // fixes.
+    console.log("Issue393 mixed calls: 200 result-zero, send IDs 2..201, adjacent");
+    // The shipped SDK consumer uses the same real host: sessionMap -> direct meter lease -> the
+    // SDK's live controls. This is the collision reproducer that the host-owned ledger fixes.
     const { createBrowserLiveControls } = await import(new URL("./sdk/src/browser/live-controls.ts", root));
     // The strip order is the core's control list (#1564 D5): the fake worklet does not run a core,
     // so the list is scripted; every other call still goes through the real host.
@@ -2053,17 +1725,11 @@ async function testMainRealm() {
       ...liveControlHost,
       sessionMap: () => liveControlHost.sessionMap(),
       meters: (request) => liveControlHost.meters(request),
-      command: (request) => liveControlHost.command(request),
       control: scriptedControl({ strips: { tracks: ["kick", "snare"], submixes: ["aaa-bus", "zzz-bus"] } }),
     });
     await liveControlHost.meters({ enabled: true, onFrame: null });
-    // Issue #1565: the host's own command path carries observation records only, so the SDK edit
-    // that rides it is an observation subscription; a value edit goes through `control()`.
-    const sdkReport = await browserLiveControls.submit(
-      browserLiveControls.edit.track("kick").console("comp", "miso.compressor")
-        .observe("Gain Reduction", true, 1),
-    );
-    assert.equal(sdkReport.ok, true, "SDK live controls submit through the real host after direct meters");
+    assert.ok(browserLiveControls.edit.track("kick"),
+      "the SDK live controls resolve through the real host after direct meters");
     // Every bounded response class refuses locally with requestId 0 and leaves the next accepted
     // request exactly one ID later. Hold each class independently so the fake port cannot answer.
     const assertBoundedNoBurn = async (label, heldCall, refusedCall, nextCall) => {
@@ -2093,64 +1759,8 @@ async function testMainRealm() {
       () => liveControlHost.telemetry({ enabled: true, onFrame: null }),
       () => liveControlHost.telemetry({ enabled: false, onFrame: null }),
     );
-    const commandAck = await liveControlHost.command({ commands: [sub] });
-    assert.equal(commandAck.tag, "miso.ack.v1");
-    assert.equal(commandAck.result, 0);
-    assert.equal(commandAck.admitted, 1);
-    assert.equal(commandAck.appliedAtSample, 512n, "the ack names the exact application sample");
-    const staged = events.findLast((event) => event[1] === "miso.command.v1");
-    assert.equal(staged[3], 1, "the record block is transferred, never copied");
-    assert.equal(commandAck.records.byteLength, 272, "the block comes straight back to the caller");
-    const decoded = new DataView(
-      commandAck.records.buffer,
-      commandAck.records.byteOffset,
-      commandAck.records.byteLength,
-    );
-    assert.equal(decoded.getUint8(0), 7, "kind");
-    assert.equal(decoded.getUint8(1), 1, "rack");
-    assert.equal(decoded.getUint8(2), 7, "strip ID length");
-    assert.equal(decoded.getUint8(3), 4, "effect ID length");
-    assert.equal(decoded.getUint32(4, true), 1, "tap id");
-    assert.equal(decoded.getUint32(8, true), 64, "window blocks");
-    const idText = (offset, length) => new TextDecoder().decode(
-      new Uint8Array(commandAck.records.buffer, commandAck.records.byteOffset + offset, length));
-    assert.equal(idText(16, 7), "track-1", "strip ID");
-    assert.equal(idText(16 + 128, 4), "comp", "effect ID");
-    assert.equal(decoded.getUint8(16 + 7), 0, "the strip ID field is zero padded");
-
-    // A malformed command never reaches the port.
+    // A malformed request never reaches the port.
     const beforeMalformed = events.length;
-    await errorResult(
-      liveControlHost.command({ commands: [{ ...sub, kind: 99 }] }),
-      1,
-    );
-    // Issue #1565: every deleted value kind is an unknown kind to the host's own gate.
-    for (const kind of [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17]) {
-      await errorResult(liveControlHost.command({ commands: [{ ...sub, kind }] }), 1);
-    }
-    // An ID that does not fit its 127-byte field, or is not a string, never reaches the port.
-    for (const broken of [
-      { stripId: "x".repeat(128) }, { effectId: "é".repeat(64) }, { stripId: 3 }, { effectId: null },
-      { tapId: -1 }, { windowBlocks: 1.5 }, { channel: 255 }, { trackIndex: 0 },
-    ]) {
-      await errorResult(liveControlHost.command({ commands: [{ ...sub, ...broken }] }), 1);
-    }
-    await errorResult(
-      liveControlHost.command({ commands: [{ kind: 7, rack: 1, stripId: "a", effectId: "b", tapId: 1 }] }),
-      1,
-    );
-    await errorResult(liveControlHost.command({ commands: [] }), 1);
-    // The retired `simd1`/`simd2` rack codes and an unallocated one never reach the port (#1096).
-    for (const rack of [0, 2, 4, 255]) {
-      await errorResult(
-        liveControlHost.command({ commands: [{ ...sub, rack }] }),
-        1,
-      );
-    }
-    await localErrorResult(liveControlHost.command({ requestId: 999, commands: [sub] }), 1);
-    await localErrorResult(liveControlHost.observe({ requestId: 999, subscriptions: [{
-      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 1, armed: true,
-    }] }), 1);
     const oldShapeBuffer = new ArrayBuffer(256);
     await localErrorResult(liveControlHost.submitSource({
       requestId: 999, sourceId: "extra", generation: 1n, startFrame: 0n,
@@ -2163,33 +1773,6 @@ async function testMainRealm() {
     await localErrorResult(liveControlHost.meters({ requestId: 999, enabled: true, onFrame: null }), 1);
     await localErrorResult(liveControlHost.telemetry({ requestId: 999, enabled: true, onFrame: null }), 1);
     assert.equal(events.length, beforeMalformed, "a malformed batch costs no message");
-
-    // Engine backpressure is a resolved acknowledgement that admits nothing.
-    commandResult = 6;
-    const refused = await liveControlHost.command({ commands: [sub] });
-    assert.equal(refused.result, 6);
-    assert.equal(refused.admitted, 0);
-    assert.equal(refused.reason, 8);
-    commandResult = 0;
-
-    // Local backpressure: the in-flight bound is `maximumCommandRecords` (256, issue #1565), so a
-    // 257th unsettled batch is refused here, before any transfer, and the caller keeps its records.
-    holdAll = true;
-    const commandEventsBefore = events.length;
-    const held4 = Array.from({ length: 256 }, () => liveControlHost.command({ commands: [sub] }));
-    await localErrorResult(liveControlHost.command({ commands: [sub] }), 6);
-    await localErrorResult(liveControlHost.observe({ subscriptions: [mixedSubscription] }), 6);
-    assert.equal(events.length, commandEventsBefore + 256, "command/observe saturation posts no refusal");
-    holdAll = false;
-    for (const respond of heldAll) respond();
-    heldAll.length = 0;
-    const heldCommandAcks = await Promise.all(held4);
-    const commandAfterBound = await liveControlHost.command({ commands: [sub] });
-    assert.equal(
-      commandAfterBound.requestId,
-      Math.max(...heldCommandAcks.map((ack) => ack.requestId)) + 1,
-      "command saturation does not burn an ID",
-    );
 
     // Leases and their unsolicited frames.
     const meterFrames = [];
@@ -2316,182 +1899,6 @@ async function testMainRealm() {
     assert.equal(telemetryFrames.length, 1);
     assert.equal(telemetryFrames[0].cpuPercent, 4.5);
 
-    // Issue #143: the `miso.observe.v1` acknowledgement's subscription map.
-    //
-    // The map is the answer to what `trackGrDb` cannot say -- which tracks have an observed effect
-    // at all -- so it is checked as carefully as the frame: the exact wire kinds go out, the map
-    // is canonically ordered, `windowBlocks: 0` resolves to the plan default, and an unsubscribe
-    // removes exactly one entry.
-    const observeAck = await liveControlHost.observe({
-      subscriptions: [
-        { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true },
-        { stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 8, armed: true },
-      ],
-    });
-    assert.equal(observeAck.tag, "miso.observe.v1");
-    assert.equal(observeAck.result, 0);
-    assert.deepEqual(observeAck.bindings.map((binding) => binding.stripId), ["track-0", "track-1"],
-      "the map is canonically ordered by (stripId, rack, effectId, tapId)");
-    assert.deepEqual(observeAck.bindings[0], {
-      stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 8,
-    });
-    assert.equal(observeAck.bindings[1].windowBlocks, Number(limits.liveControlMeterBlocks),
-      "`windowBlocks: 0` resolves to the plan default, and the map says which one it got");
-    assert.equal(Object.isFrozen(observeAck.bindings), true);
-    const unsubscribed = await liveControlHost.observe({
-      subscriptions: [
-        { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: false },
-      ],
-    });
-    assert.equal(unsubscribed.bindings.length, 1, "an unsubscribe removes exactly one entry");
-    assert.equal(unsubscribed.bindings[0].stripId, "track-0");
-    // Issue #1213 (attempt 2, verdict MAJOR-1), as #1677 leaves it: a bus tap is named by its
-    // submix's ID like a track's, and the binding carries no position of any plan.
-    {
-      const busSubscription = {
-        stripId: "bus-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0,
-      };
-      const busAck = await liveControlHost.observe({
-        subscriptions: [{ ...busSubscription, armed: true }],
-      });
-      assert.equal(busAck.result, 0);
-      const busBinding = busAck.bindings.find((binding) => binding.stripId === "bus-0");
-      assert.deepEqual(busBinding, { ...busSubscription, windowBlocks: Number(limits.liveControlMeterBlocks) });
-      assert.deepEqual(Object.keys(busBinding).sort(), ["effectId", "rack", "stripId", "tapId", "windowBlocks"]);
-      const busOff = await liveControlHost.observe({
-        subscriptions: [{ ...busSubscription, armed: false }],
-      });
-      assert.deepEqual(busOff.bindings, unsubscribed.bindings, "the bus binding disarms");
-    }
-    for (const broken of [
-      // The retired `simd1`/`simd2` codes (`0`, `2`) and an unallocated one are refused (#1096).
-      { stripId: 0 }, { stripId: "x".repeat(128) }, { effectId: "x".repeat(128) }, { rack: 0 },
-      { rack: 2 }, { rack: 4 }, { tapId: 0 }, { armed: "yes" }, { windowBlocks: -1 },
-      { trackIndex: 0 }, { effectIndex: 0 },
-    ]) {
-      await errorResult(liveControlHost.observe({
-        subscriptions: [{
-          stripId: "track-0", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 0, armed: true,
-          ...broken,
-        }],
-      }), 1);
-    }
-    await errorResult(liveControlHost.observe({ subscriptions: [] }), 1);
-
-    // Issue #143's two reasons, and the #151 defect they exposed: a refused subscription is a
-    // typed *per-request* rejection and costs the host nothing.
-    //
-    // Reasons 10 (`unknownTap`) and 11 (`observationUnbound`) are the only two the observation
-    // path ever returns, and `#receive` used to bound `reason` at the literal `<= 9`. Either one
-    // therefore read as a malformed acknowledgement and tripped the sticky 255 that fails every
-    // unsettled request and every later one -- so one refused subscription cost the whole
-    // session. That is what kept the app's gain-reduction meters dead: the app arms its taps
-    // once at startup, and a single refusal took the live controls with it.
-    //
-    // Red mutation: restore `validU32(message.reason) && message.reason <= 9` in `#receive` ->
-    // every assertion below fails with the sticky signature, starting with `refused.tag` because
-    // the promise rejects with `{tag: "miso.error.v1", result: 255}` instead of settling.
-    // `scripts/test-web-audioworklet.sh` runs exactly that mutation and requires this file red.
-    const mapBeforeRefusal = unsubscribed.bindings;
-    for (const { reason, result, what } of [
-      // The address resolves and the tap id does not. A bad address, like every other unknown, so
-      // `RESULT_INVALID_ARGUMENT`.
-      { reason: 10, result: 1, what: "an undeclared tap" },
-      // The tap is declared and correctly addressed; this preparation bound no observation
-      // capacity, which is what `RESULT_UNSUPPORTED` means. Retrying will never help.
-      { reason: 11, result: 7, what: "a session that bound no observation capacity" },
-      // Issue #1676 (#1685: by exact bytes): past what one ended event holds. The value follows the retired 12-14, so a table
-      // bound that stopped at 12 or accepted a retired hole would read it as malformed.
-      { reason: 15, result: 7, what: "a subscription past what one ended event holds" },
-    ]) {
-      commandResult = result;
-      commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
-      const refused = await liveControlHost.observe({
-        subscriptions: [
-          { stripId: "track-0", rack: 1, effectId: "comp", tapId: 9, windowBlocks: 0, armed: true },
-        ],
-      });
-      commandMutation = null;
-      commandResult = 0;
-      assert.equal(refused.tag, "miso.observe.v1", `${what} settles as a typed observation ack`);
-      assert.equal(refused.result, result, `${what} carries its own result code`);
-      assert.equal(refused.reason, reason, "the ack names which namespace the caller got wrong");
-      assert.equal(Object.isFrozen(refused), true);
-      assert.deepEqual(
-        refused.bindings,
-        mapBeforeRefusal,
-        "a batch is all-or-nothing: a refused batch arms nothing and leaves the map untouched",
-      );
-
-      // The host is fully healthy afterwards. Each of these is a request the sticky error would
-      // have failed with `{tag: "miso.error.v1", result: 255}`.
-      assert.equal((await liveControlHost.status()).result, 0, `${what}: status still answers`);
-      const laterCommand = await liveControlHost.command({
-        commands: [sub],
-      });
-      assert.equal(laterCommand.result, 0, `${what}: the command path still admits a batch`);
-      assert.equal(laterCommand.admitted, 1);
-      assert.deepEqual(
-        (await liveControlHost.sessionMap()).sources.map((source) => source.id),
-        ["bass", "drums"],
-        `${what}: the session map still answers`,
-      );
-      const framesBefore = meterFrames.length;
-      node.port.onmessage({
-        data: {
-          tag: "miso.meter.v1", sequence: 10 + reason, generation: 1n, validity: 0xb,
-          lossCount: 0, windows: 1, trackCount: 2, structureEpoch: 1,
-          peaks: new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
-          trackGrDb: new Float32Array([3.25, 0]), masterGrDb: 3.25,
-          firstSample: 1024n, endSample: 1280n,
-          submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
-        },
-      });
-      assert.equal(
-        meterFrames.length,
-        framesBefore + 1,
-        `${what}: the meter lease still delivers -- this is the dead-GR-meter regression`,
-      );
-      assert.equal(meterFrames.at(-1).trackGrDb[0], 3.25);
-
-      // And a *correct* subscription still arms, so nothing about the map machinery was poisoned.
-      const recovered = await liveControlHost.observe({
-        subscriptions: [
-          { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 4, armed: true },
-        ],
-      });
-      assert.equal(recovered.result, 0, `${what}: a correct subscription still arms after it`);
-      assert.equal(recovered.reason, 0);
-      assert.deepEqual(recovered.bindings.map((binding) => binding.stripId), ["track-0", "track-1"]);
-      const undo = await liveControlHost.observe({
-        subscriptions: [
-          { stripId: "track-1", rack: 1, effectId: "comp", tapId: 1, windowBlocks: 4, armed: false },
-        ],
-      });
-      assert.deepEqual(undo.bindings, mapBeforeRefusal, "the map returns to where it started");
-    }
-
-    // Issue #1565: reasons 12-14 (`notSoloable`, `unknownRoute`, `unknownVca`) left the
-    // vocabulary with the value kinds. An acknowledgement that still carries one is a malformed
-    // reply and fails the whole host, as any reason outside the table does.
-    for (const reason of [12, 13, 14]) {
-      const reasonHost = await createMisoAudioWorkletHost({
-        context,
-        document: new Uint8Array(),
-        options: limits,
-        simd128ModuleUrl: "simd.wasm",
-        workletModuleUrl: "processor.js",
-      });
-      commandResult = 1;
-      commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
-      await errorResult(reasonHost.command({ commands: [sub] }), 255).catch((error) => {
-        throw new Error(`the host accepted deleted command reason ${reason}`, { cause: error });
-      });
-      commandMutation = null;
-      commandResult = 0;
-      await reasonHost.dispose();
-    }
-
     // A released lease detaches the callback: a late frame is delivered nowhere.
     const framesAtRelease = meterFrames.length;
     await liveControlHost.meters({ enabled: false, onFrame: null });
@@ -2523,8 +1930,6 @@ async function testMainRealm() {
     await liveControlHost.dispose();
     const disposedEvents = events.length;
     await localErrorResult(liveControlHost.status(), 3);
-    await localErrorResult(liveControlHost.command({ commands: [sub] }), 3);
-    await localErrorResult(liveControlHost.observe({ subscriptions: [mixedSubscription] }), 3);
     await localErrorResult(liveControlHost.sessionMap(), 3);
     await localErrorResult(liveControlHost.meters({ enabled: false, onFrame: null }), 3);
     await localErrorResult(liveControlHost.telemetry({ enabled: false, onFrame: null }), 3);
@@ -2537,84 +1942,6 @@ async function testMainRealm() {
     }), 3);
     assert.equal(events.length, disposedEvents, "disposed refusals post no messages or consume IDs");
 
-    // Issue #143 D7 / #151: recompile and re-subscribe, the way the app re-arms after the plan is
-    // replaced.
-    //
-    // A structural session edit produces a replacement plan, and in the browser that is a new host
-    // over the new session JSON. Subscriptions belong to the plan they were applied to: the
-    // replacement's lanes exist and are unarmed, nothing carries over, and the app re-arms from
-    // scratch against the new addressing. This is also the moment the #151 defect was most likely
-    // to fire in the field, because a replacement moves effect indices -- a stale tap address
-    // comes back as reason 10, and before the fix that killed the freshly prepared host on its
-    // first gesture.
-    const prepare = (sessionDocument) => createMisoAudioWorkletHost({
-      context,
-      document: new TextEncoder().encode(sessionDocument),
-      options: limits,
-      simd128ModuleUrl: "simd.wasm",
-      workletModuleUrl: "processor.js",
-    });
-    const tap = (stripId, effectId, armed) => ({
-      stripId, rack: 1, effectId, tapId: 1, windowBlocks: 0, armed,
-    });
-
-    const beforeEdit = await prepare("{\"schema_version\":0}");
-    const armedBefore = await beforeEdit.observe({
-      subscriptions: [tap("track-0", "comp", true), tap("track-1", "comp", true)],
-    });
-    assert.equal(armedBefore.result, 0);
-    assert.deepEqual(armedBefore.bindings.map((binding) => binding.stripId), ["track-0", "track-1"]);
-    await beforeEdit.dispose();
-
-    const afterEdit = await prepare("format_version = 0 # one effect inserted");
-    // The replacement's map starts empty: request ids restart at 1 and nothing carried over.
-    // The app's first re-arm names the *old* effect, which the replacement no longer has.
-    commandResult = 1;
-    commandMutation = (response) => ({ ...response, reason: 10, rejectedIndex: 0, admitted: 0 });
-    const staleRearm = await afterEdit.observe({
-      subscriptions: [tap("track-0", "comp", true), tap("track-1", "comp", true)],
-    });
-    commandMutation = null;
-    commandResult = 0;
-    assert.equal(staleRearm.tag, "miso.observe.v1");
-    assert.equal(staleRearm.reason, 10, "a stale tap key is refused, per request");
-    assert.deepEqual(staleRearm.bindings, [], "the replacement plan's map is still empty");
-
-    // The app names the replacement's effects and re-arms. The host was never sticky, so this is a
-    // plain second call rather than a rebuild.
-    assert.equal((await afterEdit.sessionMap()).result, 0, "the session map still answers");
-    const rearmed = await afterEdit.observe({
-      subscriptions: [tap("track-0", "comp-2", true), tap("track-1", "comp-2", true)],
-    });
-    assert.equal(rearmed.result, 0, "the replacement plan re-arms after the refusal");
-    assert.deepEqual(rearmed.bindings.map((binding) => binding.effectId), ["comp-2", "comp-2"],
-      "the map holds the replacement's keys, not the retired plan's");
-    assert.deepEqual(rearmed.bindings.map((binding) => binding.windowBlocks),
-      [Number(limits.liveControlMeterBlocks), Number(limits.liveControlMeterBlocks)],
-      "`windowBlocks: 0` resolves against the replacement's own default");
-
-    // The rest of the live-control surface is live on the replacement.
-    const rearmedFrames = [];
-    assert.equal(
-      (await afterEdit.meters({
-        enabled: true, onFrame: (frame) => rearmedFrames.push(frame),
-      })).result,
-      0,
-    );
-    FakeNode.latest.port.onmessage({
-      data: {
-        tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
-        windows: 1, trackCount: 2, structureEpoch: 1,
-        peaks: new Float32Array(6), trackGrDb: new Float32Array([1.5, 2.5]), masterGrDb: 2.5,
-        firstSample: 0n, endSample: 256n,
-        submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
-      },
-    });
-    assert.equal(rearmedFrames.length, 1, "the replacement's meter sequence restarts at 1");
-    assert.deepEqual([...rearmedFrames[0].trackGrDb], [1.5, 2.5]);
-    assert.equal((await afterEdit.command({ commands: [sub] })).result, 0);
-    assert.equal((await afterEdit.status()).result, 0);
-    await afterEdit.dispose();
     // Issue #1381a D6, gate 6: the host's one timer is the single-mode service tick. It starts
     // with the host, once per quantum, and each tick is the bare `miso.service.v1` message: no
     // request ID, so the tick takes no place in the request sequence and never makes a status read
@@ -2658,8 +1985,8 @@ async function testMainRealm() {
 // `submixIds` (#1209 MINOR-2, #1210 MINOR-1): the session's submix IDs in canonical order; the
 // meter header's `submix_count` and the frame layout follow it, so a caller can run the worklet
 // with no submix (the production case before K2) or with several (their order is observable).
-function createFakeExports(quantum, backend = 1, liveControlsAttached = true, submixIds = ["drums-bus"]) {
-  // Three pages: the 272-byte command records stage 69,632 bytes, beyond the first page.
+function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
+  // Three pages, so the staged document at 150,000 lies beyond the first two.
   const memory = { buffer: new ArrayBuffer(196608) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
@@ -2682,8 +2009,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const calls = {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
     sessionSeek: [], sessionSeekResult: 0,
-    sourceResult: 0, bootResult: 0, boot: [], bootWithSpectrumHop: [], spectrumHopCapability: 0,
-    spectrumHopCapabilityResult: 1,
+    sourceResult: 0, bootResult: 0, boot: [],
     // Issue #1381a: the service step's handles and result, and the control counter's value.
     service: [], serviceResult: 0, controlAllocations: 5,
     // Issue #1562a D1: the control frames the fake received, the result it answers with, the
@@ -2703,8 +2029,14 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       supersededCount: 0n,
     },
     watermarkResult: 0, watermarkReads: 0, watermarkBytes: 96,
+    // Issue #1297a: the anchored seek and seek report calls in order, the results they return,
+    // the words a successful read writes, and the record's struct size word.
+    seekAt: [], seekAtResult: 0, seekReport: [], seekReportResult: 0, seekReportBytes: 64,
+    seekReportGrowsMemory: false,
+    seekReportWords: [5n, 1024n, 48000n, 7n, 9n],
   };
   const watermarkPointer = 66000;
+  const seekReportPointer = 66200;
   // What `control_response_*` reads now: the last control command's response, or the event frame
   // the last `control_event` dequeued (empty for an empty lane), as the real exports share their
   // staging (issue #1570b D1).
@@ -2712,10 +2044,8 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const controlRequestPointer = 50000;
   const controlResponsePointer = 56000;
   const documentPointer = 150000;
-  // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
-  const commandPointer = 70000;
+  // Issue #137: the meter frame (kind 7). Kind 6 was the command staging (#1589c).
   const meterFramePointer = 40000;
-  const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
   // Issue #1210 D3: `submixIds` (a parameter) are the submix IDs in canonical order, as many as
@@ -2768,34 +2098,14 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     }
     meterAdopted = true;
   };
-  let report = new DataView(memory.buffer, reportPointer, 48);
-  report.setUint32(0, 48, true);
-  report.setUint32(4, 0x00010000, true);
   const pointers = {
-    2: 4096, 3: 5000, 4: 150000, 5: 8192, 6: liveControlsAttached ? commandPointer : 0,
+    2: 4096, 3: 5000, 4: 150000, 5: 8192,
     7: meterFramePointer,
   };
   const capacities = {
     2: 64, 3: 2 * quantum * 4, 4: 256, 5: 2 * quantum * 4,
-    6: liveControlsAttached ? 256 * 272 : 0,
     7: meterFrameFloats * 4,
   };
-  // Issue #143: the additive observation ABI is present even in this hermetic processor fake.
-  // This fixture does not model a compiled observation row, but the worklet still prewarms and
-  // discovers the fixed staging views before it can publish `miso.ready.v1`.
-  const observationIdPointer = 17500;
-  const observationSelectionPointer = 18000;
-  const observationResultPointer = 19000;
-  const observationSelectionCapacity = 4;
-  // Issue #779: prewarmed fixed live-response request, identity and raw-snapshot staging. The
-  // fake refuses capture because it has no prepared graph, but it must expose the complete ABI so
-  // construction tests exercise the same prewarm path as the shipped Worklet.
-  const trackResponseRequestPointer = 20000;
-  const trackResponseTrackIdPointer = 20100;
-  const trackResponseSnapshotPointer = 22000;
-  const trackResponseSnapshotCapacity = 30000;
-  calls.commands = [];
-  calls.commandResult = 0;
   calls.meterLease = [];
   calls.meterWindows = 0;
   const boot = () => {
@@ -2815,7 +2125,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     new Uint8Array(grown).set(new Uint8Array(memory.buffer));
     memory.buffer = grown;
     status = new DataView(grown, statusPointer, 80);
-    report = new DataView(grown, reportPointer, 48);
     calls.growths += 1;
   };
   const exports = {
@@ -2824,14 +2133,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     miso_engine_web_v1_boot_options_ptr: () => 512,
     miso_engine_web_v1_document_ptr: () => 2048,
     miso_engine_web_v1_boot: (...args) => { calls.boot.push(args); return boot(); },
-    miso_engine_web_v1_spectrum_hop_capability: () => {
-      calls.spectrumHopCapability += 1;
-      return calls.spectrumHopCapabilityResult;
-    },
-    miso_engine_web_v1_boot_with_spectrum_hop: (...args) => {
-      calls.bootWithSpectrumHop.push(args);
-      return boot();
-    },
     miso_engine_web_v1_boot_result: () => calls.bootResult,
     miso_engine_web_v1_boot_diagnostic_bytes: () => 0,
     miso_engine_web_v1_buffer_ptr: (_handle, kind) => pointers[kind] ?? 0,
@@ -2870,20 +2171,28 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       calls.sessionSeek.push(["declare_discontinuity", ...args]);
       return 0;
     },
+    miso_engine_web_v1_source_seek_at: (...args) => {
+      calls.seekAt.push([...args, new TextDecoder().decode(
+        new Uint8Array(memory.buffer, pointers[2], args[1]).slice())]);
+      return calls.seekAtResult;
+    },
+    miso_engine_web_v1_source_seek_report_ptr: () => seekReportPointer,
+    miso_engine_web_v1_plan_latency_ptr: () => 66300,
+    miso_engine_web_v1_source_seek_report: (...args) => {
+      calls.seekReport.push([...args, new TextDecoder().decode(
+        new Uint8Array(memory.buffer, pointers[2], args[1]).slice())]);
+      if (calls.seekReportResult !== 0) return calls.seekReportResult;
+      // The service step the real export runs first may grow the memory.
+      if (calls.seekReportGrowsMemory) growMemory();
+      const record = new DataView(memory.buffer, seekReportPointer, 64);
+      record.setUint32(0, calls.seekReportBytes, true);
+      calls.seekReportWords.forEach((word, index) => record.setBigUint64(8 + index * 8, word, true));
+      return 0;
+    },
     miso_engine_web_v1_source_seek: (...args) => {
       calls.seek.push(args);
       calls.seekIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return 0;
-    },
-    miso_engine_web_v1_command_report_ptr: () => reportPointer,
-    miso_engine_web_v1_command_submit: (_handle, count) => {
-      calls.commands.push(new Uint8Array(memory.buffer, commandPointer, count * 272).slice());
-      report.setUint32(8, calls.commandResult, true);
-      report.setUint32(12, calls.commandResult === 0 ? 0 : 8, true);
-      report.setUint32(16, 0, true);
-      report.setUint32(20, calls.commandResult === 0 ? count : 0, true);
-      report.setBigUint64(24, status.getBigUint64(32, true), true);
-      return calls.commandResult;
     },
     miso_engine_web_v1_meter_lease: (_handle, enabled) => {
       calls.meterLease.push(enabled);
@@ -2915,6 +2224,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       return 1;
     },
     miso_engine_web_v1_source_count: () => sourceRows.length,
+    miso_engine_web_v1_resolved_source_ring_frames: () => 40 * quantum,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
       if (id === undefined) return 0;
@@ -2924,36 +2234,6 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
     },
     miso_engine_web_v1_source_channels: (_handle, index) => sourceRows[index]?.channels ?? 0,
     miso_engine_web_v1_source_frames: (_handle, index) => sourceRows[index]?.frames ?? 0n,
-    miso_engine_web_v1_observation_count: () => 0,
-    miso_engine_web_v1_observation_id_ptr: () => observationIdPointer,
-    miso_engine_web_v1_observation_id_capacity: () => 128,
-    miso_engine_web_v1_observation_track_index: () => 0,
-    miso_engine_web_v1_observation_rack: () => 1,
-    miso_engine_web_v1_observation_effect_index: () => 0,
-    miso_engine_web_v1_observation_effect_slot_id: () => 0,
-    miso_engine_web_v1_observation_native_effect_id: () => 0,
-    miso_engine_web_v1_observation_tap_count: () => 0,
-    miso_engine_web_v1_observation_tap_id: () => 0,
-    miso_engine_web_v1_observation_selection_ptr: () => observationSelectionPointer,
-    miso_engine_web_v1_observation_selection_bytes: () => 32,
-    miso_engine_web_v1_observation_selection_capacity: () => observationSelectionCapacity,
-    miso_engine_web_v1_observation_read: () => 0,
-    miso_engine_web_v1_observation_result_ptr: () => observationResultPointer,
-    miso_engine_web_v1_observation_result_bytes: (_handle, count = 0) => count * 96,
-    miso_engine_web_v1_track_response_request_ptr: () => trackResponseRequestPointer,
-    miso_engine_web_v1_track_response_request_bytes: () => 48,
-    miso_engine_web_v1_track_response_track_id_ptr: () => trackResponseTrackIdPointer,
-    miso_engine_web_v1_track_response_track_id_capacity: () => 127,
-    miso_engine_web_v1_track_response_snapshot_ptr: () => trackResponseSnapshotPointer,
-    miso_engine_web_v1_track_response_snapshot_capacity: () => trackResponseSnapshotCapacity,
-    miso_engine_web_v1_track_response_snapshot_set_bytes: (bytes) => (
-      bytes >= 104 && bytes <= trackResponseSnapshotCapacity ? 0 : 1
-    ),
-    miso_engine_web_v1_track_response_capture: () => 7,
-    miso_engine_web_v1_track_response_analysis: () => 7,
-    miso_engine_web_v1_track_response_result_ptr: () => trackResponseSnapshotPointer,
-    miso_engine_web_v1_track_response_result_bytes: () => 0,
-    miso_engine_web_v1_track_response_close: () => 0,
     miso_engine_web_v1_service: (handle) => {
       calls.service.push(handle);
       return calls.serviceResult;
@@ -3140,106 +2420,6 @@ async function testQualificationBoot({
 
   }
 
-  // Issue #1477 D1: the staging-read caller boots a spectrum collection, so the fake carries the
-  // pre-boot collection staging exports with the bridge's sizing rules (`hosts/host-web/src/ffi.rs`):
-  // the entry capacity is the request header's entry count, and the identity capacity is the sum
-  // of the staged entries' identity byte lengths.
-  //
-  // Issue #1491 D1: the fake's boot exports read the staged collection back the way the bridge
-  // lays it out (`staged_spectrum_request`) and record it as the boot's staging witness, so a
-  // worklet that skips the staging, or stages bytes that differ from its options, is visible
-  // before boot. The witness is `null` when the request pointer was never asked for or the
-  // request header's entry count is 0; the boot result is unchanged.
-  //
-  // Every offset, size, field type, entry stride and wire code here comes from the generated
-  // layout (`sdk/assets/miso-engine-v1-abi-layout.json`, made from the Rust structs by
-  // `parameter-metadata`), never from the worklet's hand-typed copy, so a bridge layout change
-  // the worklet misses is red here. The identity decoder keeps a leading U+FEFF, as the bridge's
-  // `core::str::from_utf8` does.
-  const identityDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  const collectionRequestLayout = abiLayout.structures.spectrumCollectionRequest;
-  const collectionEntryLayout = abiLayout.structures.spectrumCollectionEntry;
-  const layoutField = (layout, name) => {
-    const field = layout.fields.find((candidate) => candidate.name === name);
-    assert.ok(field, `qualification boot contract: the generated layout has no field ${name}`);
-    return field;
-  };
-  const readLayoutField = (bytes, base, { type }, offset) => {
-    if (type === "u32") return bytes.getUint32(base + offset, true);
-    if (type === "u64") return bytes.getBigUint64(base + offset, true);
-    const array = /^u32\[(\d+)\]$/.exec(type);
-    assert.ok(array, `qualification boot contract: unknown generated field type ${type}`);
-    return Array.from({ length: Number(array[1]) },
-      (_, index) => bytes.getUint32(base + offset + 4 * index, true));
-  };
-  // Decodes every field of one generated structure at `base`, keyed by its generated name.
-  const readLayoutStruct = (bytes, base, layout) => Object.fromEntries(
-    layout.fields.map((field) => [field.name, readLayoutField(bytes, base, field, field.offset)]));
-  const requestEntryCountOffset = layoutField(collectionRequestLayout, "entryCount").offset;
-  const entryTargetIdBytesOffset = layoutField(collectionEntryLayout, "targetIdBytes").offset;
-  const withSpectrumCollectionStaging = (fake) => {
-    const requestPointer = 42000;
-    const entryPointer = 42100;
-    const idPointer = 42600;
-    let requested = false;
-    let entryCapacity = 0;
-    let idCapacity = 0;
-    const view = () => new DataView(fake.exports.memory.buffer);
-    const decodeStagedCollection = () => {
-      if (!requested) return null;
-      const bytes = view();
-      const request = readLayoutStruct(bytes, requestPointer, collectionRequestLayout);
-      if (request.entryCount === 0) return null;
-      const entries = [];
-      let idOffset = idPointer;
-      for (let index = 0; index < request.entryCount; index += 1) {
-        const entry = readLayoutStruct(
-          bytes, entryPointer + index * collectionEntryLayout.bytes, collectionEntryLayout);
-        entry.targetId = identityDecoder.decode(
-          new Uint8Array(fake.exports.memory.buffer, idOffset, entry.targetIdBytes).slice(),
-        );
-        entries.push(entry);
-        idOffset += entry.targetIdBytes;
-      }
-      return { request, entries };
-    };
-    fake.spectrumStagingWitnesses = [];
-    for (const name of ["miso_engine_web_v1_boot", "miso_engine_web_v1_boot_with_spectrum_hop"]) {
-      const boot = fake.exports[name];
-      if (typeof boot !== "function") continue;
-      fake.exports[name] = (...args) => {
-        fake.spectrumStagingWitnesses.push(decodeStagedCollection());
-        return boot(...args);
-      };
-    }
-    Object.assign(fake.exports, {
-      miso_engine_web_v1_spectrum_collection_request_ptr: () => {
-        requested = true;
-        entryCapacity = 0;
-        idCapacity = 0;
-        return requestPointer;
-      },
-      miso_engine_web_v1_spectrum_collection_request_bytes: () => collectionRequestLayout.bytes,
-      miso_engine_web_v1_spectrum_collection_entry_ptr: () => {
-        entryCapacity = view().getUint32(requestPointer + requestEntryCountOffset, true);
-        return entryCapacity * collectionEntryLayout.bytes <= idPointer - entryPointer
-          ? entryPointer : 0;
-      },
-      miso_engine_web_v1_spectrum_collection_entry_capacity: () => entryCapacity,
-      miso_engine_web_v1_spectrum_collection_entry_bytes: () => collectionEntryLayout.bytes,
-      miso_engine_web_v1_spectrum_collection_target_ids_ptr: () => {
-        idCapacity = 0;
-        for (let index = 0; index < entryCapacity; index += 1) {
-          idCapacity += view().getUint32(
-            entryPointer + index * collectionEntryLayout.bytes + entryTargetIdBytesOffset, true);
-        }
-        return idPointer;
-      },
-      miso_engine_web_v1_spectrum_collection_target_ids_capacity: () => idCapacity,
-    });
-    return fake;
-  };
-
   class QualificationNode {
     static latest = null;
 
@@ -3252,12 +2432,7 @@ async function testQualificationBoot({
       this.options = options;
       this.onprocessorerror = null;
       this.disconnectCount = 0;
-      const processorOptions = options.processorOptions?.options;
-      this.fake = withSpectrumCollectionStaging(makeFake(
-        context.renderQuantumSize,
-        1,
-        processorOptions?.liveControlObservationTaps !== 0n,
-      ));
+      this.fake = makeFake(context.renderQuantumSize, 1);
       setNextFake(this.fake);
       setProcessorPortFactory(() => processorPort);
       try {
@@ -3303,9 +2478,9 @@ async function testQualificationBoot({
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   };
   // Issue #1477 D1: the host runs in the main realm, which has `TextEncoder`; the processor scope
-  // this suite models has none. The host's option guards (a spectrum identity's UTF-8 length
-  // among them) run synchronously before its first await, so the encoder is present for exactly
-  // that span and absent again before any worklet code runs.
+  // this suite models has none. The host's option guards run synchronously before its first
+  // await, so the encoder is present for exactly that span and absent again before any worklet
+  // code runs.
   const createInMainRealm = (factory) => {
     const processorScopeEncoder = globalThis.TextEncoder;
     globalThis.TextEncoder = mainRealmTextEncoder;
@@ -3345,12 +2520,9 @@ async function testQualificationBoot({
       );
     }
     assert.equal(host.backend, "simd128", `qualification boot contract: ${label} backend`);
-    // Issue #1491 D1: exactly one boot per caller, and its staging witness is kept with the
-    // caller's witnessed options.
-    const stagingWitnesses = QualificationNode.latest.fake.spectrumStagingWitnesses;
-    assert.equal(stagingWitnesses.length, 1,
+    // Issue #1491 D1: exactly one boot per caller.
+    assert.equal(QualificationNode.latest.fake.calls.boot.length, 1,
       `qualification boot contract: ${label} must boot exactly once`);
-    observed.at(-1).stagedSpectrumCollection = stagingWitnesses[0];
     realReady += 1;
     try {
       await bounded(host.dispose(), `${label} real dispose`);
@@ -3425,79 +2597,26 @@ async function testQualificationBoot({
       label === "renderCorpusSegment" || label === "typedUnsupportedAttestation");
     assert(plain.every(({ options }) => options.options.reserved1 === 0n
       && options.options.liveControlMeterBlocks === 0n
-      && options.options.liveControlObservationTaps === 0n
+      && options.options.reserved3 === 0n
       && options.options.reserved2 === 0n),
     "qualification boot contract: plain option variant changed");
     const liveControlOptions = observed
       .find(({ label }) => label === "runLiveControlQualification").options.options;
     assert.equal(liveControlOptions.reserved1, 0n);
     assert.equal(liveControlOptions.liveControlMeterBlocks, 2n);
-    assert.equal(liveControlOptions.liveControlObservationTaps, 0n);
+    assert.equal(liveControlOptions.reserved3, 0n);
     assert.equal(liveControlOptions.reserved2, 0n);
     const observationOptions = observed.find(({ label }) => label === "runObservationRun").options.options;
     assert.equal(observationOptions.reserved1, 0n);
     assert.equal(observationOptions.liveControlMeterBlocks, 2n);
-    assert.equal(observationOptions.liveControlObservationTaps, 4n);
+    assert.equal(observationOptions.reserved3, 0n);
     assert.equal(observationOptions.reserved2, 0n);
-    // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields with
-    // no fixed spectrum target and the two-entry collection, in order.
+    // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields.
     const stagingReadOptions = observed.find(({ label }) => label === "runStagingReadRun").options.options;
     assert.equal(stagingReadOptions.reserved1, 0n);
     assert.equal(stagingReadOptions.liveControlMeterBlocks, 2n);
-    assert.equal(stagingReadOptions.liveControlObservationTaps, 4n);
+    assert.equal(stagingReadOptions.reserved3, 0n);
     assert.equal(stagingReadOptions.reserved2, 0n);
-    assert.equal(stagingReadOptions.spectrum, null,
-      "qualification boot contract: staging-read run must boot no fixed spectrum target");
-    assert.deepEqual(
-      stagingReadOptions.spectrumCollection.entries,
-      [
-        { target: "trackPostPan", targetId: "track", channels: "both" },
-        { target: "output", targetId: "main-out", channels: "both" },
-      ],
-      "qualification boot contract: staging-read spectrum collection changed",
-    );
-    // Issue #1491 D2: the collection the worklet staged before boot is the caller's witnessed
-    // collection, entry for entry. The header, the wire codes and the reserved words (which the
-    // bridge refuses unless zero) come from the generated layout; the entries and the budget come
-    // from the witnessed options.
-    const wireCodes = (table) => Object.fromEntries(
-      abiLayout.constants[table].map(({ name, value }) => [name, value]));
-    const spectrumTargetCodes = wireCodes("spectrumTargets");
-    const spectrumChannelCodes = wireCodes("spectrumChannels");
-    const zeroReserved = (layout) => Object.fromEntries(layout.fields
-      .filter(({ name }) => name.startsWith("reserved"))
-      .map(({ name, type }) => {
-        const array = /^u32\[(\d+)\]$/.exec(type);
-        return [name, array ? Array(Number(array[1])).fill(0) : type === "u64" ? 0n : 0];
-      }));
-    const stagingReadCollection = stagingReadOptions.spectrumCollection;
-    assert.deepEqual(
-      observed.find(({ label }) => label === "runStagingReadRun").stagedSpectrumCollection,
-      {
-        request: {
-          ...zeroReserved(collectionRequestLayout),
-          structSize: collectionRequestLayout.bytes,
-          abiVersion: abiLayout.abiVersion,
-          entryCount: stagingReadCollection.entries.length,
-          maximumCaptureBytes: BigInt(stagingReadCollection.maximumCaptureBytes),
-        },
-        entries: stagingReadCollection.entries.map(({ target, targetId, channels }) => ({
-          ...zeroReserved(collectionEntryLayout),
-          target: spectrumTargetCodes[target],
-          channels: spectrumChannelCodes[channels],
-          targetIdBytes: new mainRealmTextEncoder().encode(targetId).length,
-          targetId,
-        })),
-      },
-      "qualification boot contract: staging-read staged collection differs from its options",
-    );
-    // Issue #1491 D3: the five callers with no collection stage none.
-    for (const { label, stagedSpectrumCollection } of observed) {
-      if (label === "runStagingReadRun") continue;
-      assert.equal(stagedSpectrumCollection, null,
-        `qualification boot contract: ${label} stages a spectrum collection; `
-        + "only runStagingReadRun boots one");
-    }
 
     const diagnosis = await bounded(hooks.diagnoseReady(documentBytes), "diagnoseReady");
     assert.equal(diagnosis.kind, "message", "qualification boot contract: diagnoseReady did not reach node message");
@@ -3632,35 +2751,14 @@ async function testProcessor() {
       });
     };
     const makeProcessor = (submixIds = undefined) => {
-      const fake = createFakeExports(64, 1, true, submixIds);
+      const fake = createFakeExports(64, 1, submixIds);
       const processor = construct(fake);
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
-        resources: processor.resources, memoryBytes: 196608,
+        resources: processor.resources, memoryBytes: 196608, sourceRingFrames: 40 * 64,
       });
       return { processor, fake };
     };
-
-    const explicitHopOptions = (spectrumHopFrames) => ({
-      ...limits,
-      spectrumHopFrames,
-      spectrum: null,
-      spectrumCollection: null,
-    });
-
-    for (const hop of [256, 1024]) {
-      const fake = createFakeExports(64);
-      const processor = construct(fake, explicitHopOptions(hop));
-      assert.equal(processor.port.posts[0].message.result, 0,
-        `H${hop} additive boot is ready`);
-      assert.deepEqual(fake.calls.boot, [], `H${hop} never calls legacy boot`);
-      assert.deepEqual(
-        fake.calls.bootWithSpectrumHop,
-        [[processorSessionDocument.byteLength, hop]],
-        `H${hop} additive boot arguments`,
-      );
-      assert.equal(fake.calls.spectrumHopCapability, 1, `H${hop} probes capability once`);
-    }
 
     // Issue #1689 gate 2: the processor's `writeBootOptions` refuses the retired master word before
     // the module sees it, at both ends of its range; zero (every `limits` boot here) is accepted.
@@ -3674,60 +2772,26 @@ async function testProcessor() {
     {
       const fake = createFakeExports(64);
       const processor = construct(fake);
-      assert.equal(processor.port.posts[0].message.result, 0, "omitted hop uses legacy boot");
+      assert.equal(processor.port.posts[0].message.result, 0, "the boot is ready");
       assert.deepEqual(fake.calls.boot, [[processorSessionDocument.byteLength]],
-        "omitted hop legacy boot arguments");
-      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], "omitted hop skips additive boot");
-      assert.equal(fake.calls.spectrumHopCapability, 0, "omitted hop skips capability probe");
+        "the boot export's arguments");
     }
 
+    // #1597: the processor's boot options lost their spectrum fields; one that comes back is
+    // refused before the module is instantiated.
     {
       const fake = createFakeExports(64);
-      const oldSpectrumOptions = {
-        ...limits, spectrum: null, spectrumCollection: null,
-      };
-      const processor = construct(fake, oldSpectrumOptions);
-      assert.equal(processor.port.posts[0].message.result, 0, "old spectrum shape remains accepted");
-      assert.deepEqual(fake.calls.boot, [[processorSessionDocument.byteLength]],
-        "old spectrum shape uses legacy boot");
-      assert.equal(fake.calls.spectrumHopCapability, 0, "old spectrum shape skips capability probe");
-    }
-
-    for (const [label, mutate] of [
-      ["missing capability", (fake) => { delete fake.exports.miso_engine_web_v1_spectrum_hop_capability; }],
-      ["wrong capability", (fake) => {
-        fake.calls.spectrumHopCapabilityResult = 0;
-      }],
-      ["throwing capability", (fake) => {
-        fake.exports.miso_engine_web_v1_spectrum_hop_capability = () => {
-          fake.calls.spectrumHopCapability += 1;
-          throw new Error("synthetic capability failure");
-        };
-      }],
-      ["missing additive boot", (fake) => {
-        delete fake.exports.miso_engine_web_v1_boot_with_spectrum_hop;
-      }],
-    ]) {
-      const fake = createFakeExports(64);
-      mutate(fake);
-      const processor = construct(fake, explicitHopOptions(256));
-      assert.equal(processor.port.posts[0].message.result, 2, `${label} is typed ABI refusal`);
-      assert.deepEqual(fake.calls.boot, [], `${label} never calls legacy boot`);
-      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], `${label} never calls additive boot`);
-      assert.equal(fake.calls.dispose, 0, `${label} publishes no handle to dispose`);
+      const processor = construct(fake, { ...limits, spectrum: null, spectrumCollection: null });
+      assert.equal(processor.port.posts[0].message.result, 1, "a retired spectrum field is refused");
+      assert.deepEqual(fake.calls.boot, [], "a retired spectrum field never reaches the module");
     }
 
     {
       const fake = createFakeExports(64);
       fake.exports.miso_engine_web_v1_abi_version = () => 0x00020000;
-      fake.exports.miso_engine_web_v1_spectrum_hop_capability = () => {
-        throw new Error("ABI check must win");
-      };
-      const processor = construct(fake, explicitHopOptions(256));
-      assert.equal(processor.port.posts[0].message.result, 2, "ABI mismatch wins before capability");
-      assert.equal(fake.calls.spectrumHopCapability, 0, "ABI mismatch does not probe capability");
-      assert.deepEqual(fake.calls.boot, [], "ABI mismatch never calls legacy boot");
-      assert.deepEqual(fake.calls.bootWithSpectrumHop, [], "ABI mismatch never calls additive boot");
+      const processor = construct(fake);
+      assert.equal(processor.port.posts[0].message.result, 2, "ABI mismatch is a typed refusal");
+      assert.deepEqual(fake.calls.boot, [], "ABI mismatch never calls boot");
     }
 
     {
@@ -4416,6 +3480,64 @@ async function testProcessor() {
     }
 
     {
+      // Issue #1297a, the worklet half: an anchored source seek calls `source_seek_at` once in the
+      // handler with the staged ID, and `process()` adds no call; a seek report copies the
+      // record's words; a refusal is the reply's result (a null report) and is not sticky; a
+      // malformed message calls no export; a record with the wrong size word is sticky.
+      const { processor, fake } = makeProcessor();
+      const handle = processor.handle;
+      const last = () => processor.port.posts.at(-1).message;
+      processor.receive({
+        tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n,
+        sourceFrame: 480n, anchorSample: 128n,
+      });
+      assert.deepEqual(last(), { tag: "miso.ack.v1", requestId: 1, result: 0 });
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      fake.calls.seekAtResult = 1;
+      processor.receive({
+        tag: "miso.seek-at.v1", requestId: 2, sourceId: "drums", generation: 3n,
+        sourceFrame: 0n, anchorSample: 100n,
+      });
+      assert.deepEqual(last(), { tag: "miso.ack.v1", requestId: 2, result: 1 });
+      assert.deepEqual(fake.calls.seekAt, [
+        [handle, 5, 2n, 480n, 128n, "drums"],
+        [handle, 5, 3n, 0n, 100n, "drums"],
+      ]);
+      fake.calls.seekReportGrowsMemory = true;
+      processor.receive({ tag: "miso.seek-report.v1", requestId: 3, sourceId: "$timeline" });
+      fake.calls.seekReportGrowsMemory = false;
+      assert.deepEqual(last(), {
+        tag: "miso.seek-report.v1", requestId: 3, result: 0,
+        report: {
+          generation: 5n, firstSample: 1024n, sourceFrame: 48000n,
+          cumulativeUnderrunFrames: 7n, cumulativeHeldFrames: 9n,
+        },
+      });
+      fake.calls.seekReportResult = 6;
+      processor.receive({ tag: "miso.seek-report.v1", requestId: 4, sourceId: "drums" });
+      assert.deepEqual(last(), { tag: "miso.seek-report.v1", requestId: 4, result: 6, report: null });
+      assert.deepEqual(fake.calls.seekReport, [[handle, 9, "$timeline"], [handle, 5, "drums"]]);
+      assert.equal(processor.stickyResult, 0, "a refused seek-at or seek report is not sticky");
+      fake.calls.seekReportResult = 0;
+      fake.calls.seekReportBytes = 48;
+      processor.receive({ tag: "miso.seek-report.v1", requestId: 5, sourceId: "drums" });
+      assert.deepEqual(last(), { tag: "miso.error.v1", requestId: 5, result: 255 });
+      for (const message of [
+        { tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n,
+          sourceFrame: 0n, anchorSample: -1n },
+        { tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 0n,
+          sourceFrame: 0n, anchorSample: 0n },
+        { tag: "miso.seek-report.v1", requestId: 1, sourceId: 7 },
+      ]) {
+        const { processor: malformed, fake: untouched } = makeProcessor();
+        malformed.receive(message);
+        assert.equal(malformed.port.posts.at(-1).message.tag, "miso.error.v1");
+        assert.deepEqual([untouched.calls.seekAt, untouched.calls.seekReport], [[], []],
+          "a malformed seek-at or seek report calls no export");
+      }
+    }
+
+    {
       // #106 F5: `panic = abort` means a Rust panic reaches JavaScript as a throw from the render
       // export. `process()` is the only place that can contain it. Red mutation: remove the `try`
       // around `miso_engine_web_v1_render` in `process()` -> this `process()` call throws.
@@ -4450,46 +3572,6 @@ async function testProcessor() {
       assert.equal(response.message.result, 1);
       assert.equal(response.transferCount, 1);
       assert.equal(response.message.planes[0].byteLength, 16);
-    }
-
-    {
-      // Issue #137 D1: the worklet copies a staged batch into Wasm, admits it, and hands the
-      // record block straight back with the typed report.
-      const { processor, fake } = makeProcessor();
-      const records = new Uint8Array(2 * 272);
-      const view = new DataView(records.buffer);
-      records[0] = 7; // subscribe
-      records[1] = 1;
-      records[2] = 5;
-      records[3] = 4;
-      view.setUint32(4, 1, true);
-      records.set(Buffer.from("track"), 16);
-      records.set(Buffer.from("comp0"), 16 + 128);
-      records[272] = 8; // unsubscribe
-      records[273] = 1;
-      records[274] = 5;
-      records[275] = 4;
-      view.setUint32(272 + 4, 1, true);
-      processor.receive(structuredClone(
-        { tag: "miso.command.v1", requestId: 1, count: 2, records },
-        { transfer: [records.buffer] },
-      ));
-      const ack = processor.port.posts.at(-1);
-      assert.equal(ack.message.tag, "miso.ack.v1");
-      assert.equal(ack.message.result, 0);
-      assert.equal(ack.message.admitted, 2);
-      assert.equal(ack.message.reason, 0);
-      assert.equal(ack.transferCount, 1, "the record block goes back to the caller");
-      assert.equal(fake.calls.commands.length, 1);
-      assert.equal(fake.calls.commands[0].length, 544, "exactly the staged bytes are submitted");
-      assert.equal(fake.calls.commands[0][0], 7);
-      assert.equal(fake.calls.commands[0][272], 8);
-
-      // A record block whose length disagrees with `count` is sticky-invalid, never truncated.
-      const short = new Uint8Array(272);
-      processor.receive({ tag: "miso.command.v1", requestId: 2, count: 2, records: short });
-      assert.equal(processor.port.posts.at(-1).message.tag, "miso.error.v1");
-      assert.equal(processor.port.posts.at(-1).message.result, 1);
     }
 
     {
@@ -4753,39 +3835,16 @@ async function testProcessor() {
     }
 
     {
-      // Issue #1562b: a rebuild can change the committed sources and, at its adoption block, the
-      // observation bindings, so both maps are read from the engine at each request. Red if the
-      // worklet answers from the boot's rows (a source added by a rebuild would never be listed),
-      // or if the observation map does not name the structure epoch of the plan that renders.
+      // Issue #1562b: a rebuild can change the committed sources, so the session map is read from
+      // the engine at each request. Red if the worklet answers from the boot's rows (a source
+      // added by a rebuild would never be listed). (#1590 deleted the observation map.)
       const { processor, fake } = makeProcessor();
-      const left = new Float32Array(64);
-      const right = new Float32Array(64);
       fake.sourceRows.push({ id: "zz-added", channels: 1, frames: 480n });
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 1 });
       assert.deepEqual(
         processor.port.posts.at(-1).message.sources.map((source) => source.id),
         ["bass", "drums", "zz-added"],
         "the session map lists a source a rebuild added",
-      );
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 2 });
-      const before = processor.port.posts.at(-1).message;
-      assert.equal(before.tag, "miso.observationmap.v1");
-      assert.equal(before.structureEpoch, 1, "the boot plan's list");
-      assert.deepEqual([...before.bindings], []);
-
-      // A replacement plan waits: the rendering plan's epoch is still the boot's.
-      fake.commitMeterSuccessor();
-      processor.port.onmessage({ data: { tag: "miso.service.v1" } });
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 3 });
-      assert.equal(processor.port.posts.at(-1).message.structureEpoch, 1, "not adopted yet");
-      // The adopting block: the successor's header is the rendering plan's now.
-      fake.calls.adoptOnNextRender = true;
-      assert.equal(processor.process([], [[left, right]]), true);
-      processor.receive({ tag: "miso.observationmap.v1", requestId: 4 });
-      assert.equal(
-        processor.port.posts.at(-1).message.structureEpoch,
-        2,
-        "the adopted plan's list",
       );
     }
 
@@ -4828,11 +3887,11 @@ async function testProcessor() {
       mainRealmTextEncoder: originalTextEncoder,
     });
 
-    // Issue #1496 D3. The cases above reach the engine worklet's render, command, source, seek and
-    // meter paths, so the recording is not empty; an empty one would mean the proxy lost its hook.
+    // Issue #1496 D3. The cases above reach the engine worklet's render, source, seek and meter
+    // paths, so the recording is not empty; an empty one would mean the proxy lost its hook.
     // A call that the table does not list for the engine worklet is a post-construction export
     // that no `render_locked` rule has been asked to prove.
-    for (const name of ["render", "command_submit", "source_submit", "meter_poll"]) {
+    for (const name of ["render", "source_submit", "meter_poll"]) {
       assert.ok(recordedPostConstructionCalls.has(name),
         `the recording proxy saw the engine worklet call ${name} after construction`);
     }

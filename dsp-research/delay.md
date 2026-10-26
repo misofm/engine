@@ -18,7 +18,7 @@ Delay frames are bounded by prepared capacity; feedback gain has a finite declar
 
 ## Latency and tail
 
-The signal-path latency is declared from the selected read path; feedback tail is state-dependent and must have an explicit energy-threshold/maximum-duration reporting policy. Bypass preserves graph PDC.
+The signal-path latency is declared from the selected read path (0 for the launch delay). Bypass preserves graph PDC. The feedback tail is stated as a certified bound (#1374, `docs/derivations/1374-delay-tail-and-rest.md`): every loop element is non-expansive in the sample maximum once the damping coefficient is at most `1/2` (the cutoff is capped at `min(19,845 Hz, fs / 4)`, owner ruling of 2026-10-25), so ring words stay below `P / (1 - 0.95)`, and after the controls settle a positive linear majorant of the loop decays by a certified `r` per sample. The tail to -144 dB is 35.1M / 38.2M / 70.4M / 76.7M samples at 44.1 / 48 / 88.2 / 96 kHz (about 13 minutes), and the ring and damping state rest exactly at `+0.0` after the stated `RestSamples`.
 
 ## Units, mappings, automation and smoothing
 

@@ -6,7 +6,8 @@
 # Two legs, one corpus (tools/wasm-gate-corpus):
 #   native   -- run in this process at Scalar, Simd4 and Simd8.
 #   wasm+simd128 -- the same crate built for wasm32-unknown-unknown with simd128 (backend simd4),
-#                   the one wasm build that ships (W4-D1), at every width it has: Scalar and
+#                   the one wasm build that ships (W4-D1), on the browser artifact's own pinned
+#                   nightly and `-Zbuild-std` (#1334), at every width it has: Scalar and
 #                   Simd4. The browser runs four lanes only, and since #1110 the wasm build has no
 #                   eight-lane type, so the host holds the guest's widths to exactly those two
 #                   lane counts, [1, 4].
@@ -38,6 +39,10 @@ readonly TARGET="wasm32-unknown-unknown"
 readonly GUEST="wasm_gate_guest.wasm"
 
 cd "$repository_root"
+# Issue #2067: cargo reads CARGO_ENCODED_RUSTFLAGS before RUSTFLAGS and `.cargo/config.toml`, so a
+# caller's exported value would silently replace the guest's `RUSTFLAGS` feature and the host
+# runner's pinned x86-64-v3 flags. Every cargo line here takes its flags from those two sources.
+unset CARGO_ENCODED_RUSTFLAGS
 
 v8_spill=1
 native=1
@@ -67,10 +72,14 @@ run_guest() {
     local name="$1"
     local feature="$2"
     local expected="$3"
-    local target_directory="target/ci/wasm-gates-$name"
+    local target_directory="target/ci/wasm-gates-$name" channel
 
-    CARGO_TARGET_DIR="$target_directory" RUSTFLAGS="-C target-feature=$feature" \
-        cargo build --locked --release --target "$TARGET" -p wasm-gate-guest
+    # Issue #1334: the guest builds on the shipped module's own toolchain, the dated nightly with
+    # `-Zbuild-std`, so G5 compares the compiler that ships. The host runner stays on stable.
+    channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"
+    RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$target_directory" \
+        RUSTFLAGS="-C target-feature=$feature" \
+        cargo build --locked --release -Zbuild-std=std,panic_abort --target "$TARGET" -p wasm-gate-guest
     cargo run --locked --release -q -p wasm-gates -- \
         "$target_directory/$TARGET/release/$GUEST" --expect-backend "$expected" | tee -a "$evidence"
 }

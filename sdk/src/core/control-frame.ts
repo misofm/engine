@@ -32,6 +32,8 @@ const KIND_RESPONSE = 2;
 const MESSAGE_CAPABILITIES_GET = 0x0001;
 /** @internal */
 export const MESSAGE_SESSION_TRANSACTION_APPLY = 0x0003;
+/** `SESSION_REPLACE` (#1386): replace the session with a document passed beside the frame. @internal */
+export const MESSAGE_SESSION_REPLACE = 0x0013;
 /** Header flag byte: the command takes any session revision (`CAPABILITIES_GET` requires it). */
 /** @internal */
 export const FLAG_REVISION_ANY = 1;
@@ -383,6 +385,254 @@ export function commandFrame(
   return out;
 }
 
+// ----------------------------------------------------------------------------------------------
+// Observation frames (#1589b; decision 17, C9 and C13): the `Observe` edit of a
+// `SESSION_TRANSACTION_APPLY` (`session::edit::observe`, #1584 D1) and `OBSERVATION_READ` (`0x000f`,
+// #1586 D1). `crates/protocol/tests/fixtures/observation-frames.json` holds the Rust codec's bytes
+// for a fixed list of both and of the read's replies; `sdk/test/control-frame-evals.mjs` compares
+// this codec to it.
+
+const EDIT_OBSERVE = 0x0801;
+/** `OBSERVATION_READ` (#1586 D1). @internal */
+export const MESSAGE_OBSERVATION_READ = 0x000f;
+/** The most selections one `OBSERVATION_READ` carries (#1586 D1). @internal */
+export const OBSERVATION_READ_MAXIMUM_SELECTIONS = 256;
+/** The widest reply one selection adds to an `OBSERVATION_READ` (#1586 D4: `64 + 192 n`). @internal */
+export const OBSERVATION_READ_ROW_BYTES = 192;
+/** The fixed bytes of the widest `OBSERVATION_READ` reply (#1586 D4). @internal */
+export const OBSERVATION_READ_BASE_BYTES = 64;
+
+/** Where an observed effect lives: a session console slot or one of the strip's inserts. */
+export type ObservationFrameRack = "console" | "inserts";
+
+/** One `Observe` edit (#1584 D1): arm or disarm one tap of the effect at a stable address. @internal */
+export interface ObserveEdit {
+  /** The track or submix, by its ID. */
+  readonly stripId: string;
+  readonly rack: ObservationFrameRack;
+  /** The console slot's or the insert's ID. */
+  readonly effectId: string;
+  /** The effect-local tap ID. */
+  readonly tapId: number;
+  /** `true` subscribes, `false` ends one subscription. */
+  readonly armed: boolean;
+  /** Render blocks per window; `0` is the plan's meter window. A disarm names the window it armed. */
+  readonly windowBlocks: number;
+  /**
+   * A disarm's tag of the arm it ends, as the arm's reply gave it (`observeArmTags`, #2087); an arm
+   * has none. The core disarms only the arm bound with this tag: a disarm that names an arm the core
+   * already ended changes nothing.
+   */
+  readonly armTag?: bigint;
+}
+
+/** One `OBSERVATION_READ` selection: a tap by its stable address and the lanes to return. @internal */
+export interface ObservationFrameSelection {
+  readonly stripId: string;
+  readonly rack: ObservationFrameRack;
+  readonly effectId: string;
+  readonly tapId: number;
+  readonly channels: ControlLane;
+}
+
+const OBSERVATION_CHANNEL_CODES: ReadonlyMap<string, number> = new Map([["left", 1], ["right", 2], ["both", 3]]);
+
+/** The address message of an `Observe` edit or a read selection: a strip, a section and its slot. */
+function observeAddress(stripId: unknown, rack: unknown, effectId: unknown): Uint8Array {
+  if (rack !== "console" && rack !== "inserts") {
+    throw new MisoUsageError(`an observation rack ${String(rack)} is not console or inserts`);
+  }
+  return messageBody([
+    field(1, WIRE_U8, true, u8(lookup(OWNER_CODES, "strip", "an owner kind"))),
+    field(2, WIRE_UTF8, false, text(requireId(stripId, "a strip ID"))),
+    field(3, WIRE_U8, true, u8(lookup(SECTION_CODES, rack, "a section kind"))),
+    field(4, WIRE_UTF8, false, text(requireId(effectId, rack === "console" ? "a console slot ID" : "an insert ID"))),
+  ]);
+}
+
+function observeEditField(edit: ObserveEdit): Uint8Array {
+  if (edit === null || typeof edit !== "object" || typeof edit.armed !== "boolean") {
+    throw new MisoUsageError("an Observe edit needs a boolean armed");
+  }
+  // #2087: field 5, the arm tag, is present exactly on a disarm.
+  if (edit.armed && edit.armTag !== undefined) {
+    throw new MisoUsageError("an Observe arm carries no armTag");
+  }
+  const fields = [
+    field(1, WIRE_MESSAGE, true, observeAddress(edit.stripId, edit.rack, edit.effectId)),
+    field(2, WIRE_U32, true, u32(requireU32(edit.tapId, "tapId"))),
+    field(3, WIRE_BOOL, true, u8(edit.armed ? 1 : 0)),
+    field(4, WIRE_U32, true, u32(requireU32(edit.windowBlocks, "windowBlocks"))),
+  ];
+  if (!edit.armed) {
+    const tag = new Uint8Array(8);
+    new DataView(tag.buffer).setBigUint64(0, requireU64(edit.armTag, "a disarm's armTag"), true);
+    fields.push(field(5, WIRE_U64, false, tag));
+  }
+  return nested(1, true, [
+    field(1, WIRE_U16, true, u16(EDIT_OBSERVE)),
+    nested(2, true, fields),
+  ]);
+}
+
+/**
+ * Encode one `SESSION_TRANSACTION_APPLY` command frame of `Observe` edits, in order. It checks only
+ * what makes the frame unencodable; the core checks the address, the tap and the window. @internal
+ */
+export function encodeObserveTransaction(request: {
+  readonly requestId: bigint;
+  readonly expectedRevision: bigint;
+  readonly edits: readonly ObserveEdit[];
+}): Uint8Array {
+  const requestId = requireU64(request.requestId, "requestId");
+  if (requestId === 0n) throw new MisoUsageError("requestId must not be zero");
+  const expectedRevision = requireU64(request.expectedRevision, "expectedRevision");
+  if (!Array.isArray(request.edits) || request.edits.length === 0) {
+    throw new MisoUsageError("an Observe transaction needs at least one edit");
+  }
+  const payload = concat(request.edits.map(observeEditField));
+  return commandFrame(MESSAGE_SESSION_TRANSACTION_APPLY, 0, requestId, expectedRevision, request.edits.length, payload);
+}
+
+/** Encode one `OBSERVATION_READ` command frame (any revision) of 1 to 256 selections. @internal */
+export function encodeObservationRead(requestId: bigint, selections: readonly ObservationFrameSelection[]): Uint8Array {
+  const id = requireU64(requestId, "requestId");
+  if (id === 0n) throw new MisoUsageError("requestId must not be zero");
+  if (!Array.isArray(selections) || selections.length === 0
+      || selections.length > OBSERVATION_READ_MAXIMUM_SELECTIONS) {
+    throw new MisoUsageError(`an observation read holds 1 to ${OBSERVATION_READ_MAXIMUM_SELECTIONS} selections`);
+  }
+  const payload = concat(selections.map((selection) => nested(1, true, [
+    field(1, WIRE_MESSAGE, true, observeAddress(selection.stripId, selection.rack, selection.effectId)),
+    field(2, WIRE_U32, true, u32(requireU32(selection.tapId, "tapId"))),
+    field(3, WIRE_U8, true, u8(lookup(OBSERVATION_CHANNEL_CODES, selection.channels, "observation channels"))),
+  ])));
+  return commandFrame(MESSAGE_OBSERVATION_READ, FLAG_REVISION_ANY, id, 0n, selections.length, payload);
+}
+
+/** The status of one `OBSERVATION_READ` row (#1586 D2, under #1585's status contract). */
+export type ObservationFrameStatus = "pending" | "unarmed" | "ready";
+
+/** The window of a ready row. @internal */
+export interface ObservationFrameWindow {
+  readonly firstSample: bigint;
+  readonly endSample: bigint;
+  readonly sequence: bigint;
+  readonly blocks: number;
+}
+
+/**
+ * One row of an `OBSERVATION_READ` reply. `armed`, `armSample` and `armTag` are the arm state render
+ * applied (`false`/`0`/`0` while render has not applied the tap's last record). @internal
+ */
+export interface ObservationFrameRow {
+  readonly status: ObservationFrameStatus;
+  readonly armed: boolean;
+  readonly armSample: bigint;
+  readonly armTag: bigint;
+  /** Present exactly when `status` is `ready`. */
+  readonly window: ObservationFrameWindow | undefined;
+  /** Present exactly when ready and asked for. */
+  readonly left: number | undefined;
+  readonly right: number | undefined;
+  /** The tap's native `ParameterUnit` code. */
+  readonly unit: number;
+}
+
+/** The success payload of an `OBSERVATION_READ`: one row per selection, in selection order. @internal */
+export interface ObservationReadPage {
+  /** The render sample at the read: the end of the last block render completed. */
+  readonly observedSample: bigint;
+  readonly rows: readonly ObservationFrameRow[];
+}
+
+/** A decoded `OBSERVATION_READ` reply. @internal */
+export type ObservationReadReply =
+  | { readonly ok: true; readonly requestId: bigint; readonly revision: bigint; readonly value: ObservationReadPage }
+  | {
+    readonly ok: false;
+    readonly requestId: bigint;
+    readonly revision: bigint;
+    readonly status: Exclude<ControlStatusName, "ok">;
+    readonly diagnostics: readonly ProtocolDiagnostic[];
+    readonly omittedDiagnostics: number;
+    readonly backpressure: ControlBackpressure | undefined;
+  };
+
+/** The highest `ParameterUnit` code (`ratio`) and the last field of an `ObservationRow` (#1586 D1). */
+const OBSERVATION_UNIT_MAXIMUM = 6;
+const OBSERVATION_ROW_FIELDS = 11;
+
+const ROW_STATUS: readonly (ObservationFrameStatus | undefined)[] = [undefined, "pending", "unarmed", "ready"];
+
+function u64Of(fields: readonly RawField[], id: number): bigint | undefined {
+  return scalar(fields, id, WIRE_U64, 8)?.getBigUint64(0, true);
+}
+
+function decodeObservationRow(row: RawField): ObservationFrameRow {
+  if (row.wire !== WIRE_MESSAGE) throw malformed("an observation row is not a message");
+  const fields = nestedFields(row.value);
+  const status = ROW_STATUS[scalar(fields, 1, WIRE_U8, 1)?.getUint8(0) ?? 0];
+  const armedByte = scalar(fields, 2, WIRE_BOOL, 1)?.getUint8(0);
+  const armSample = u64Of(fields, 3);
+  const armTag = u64Of(fields, 4);
+  const unit = scalar(fields, 11, WIRE_U8, 1)?.getUint8(0);
+  if (status === undefined || (armedByte !== 0 && armedByte !== 1) || armSample === undefined
+      || armTag === undefined || unit === undefined || unit === 0 || unit > OBSERVATION_UNIT_MAXIMUM) {
+    throw malformed("an observation row is incomplete or names an unknown unit");
+  }
+  if (fields.some((row) => row.id > OBSERVATION_ROW_FIELDS)) {
+    throw malformed("an observation row holds an unknown field");
+  }
+  const armed = armedByte === 1;
+  const first = u64Of(fields, 5);
+  const end = u64Of(fields, 6);
+  const sequence = u64Of(fields, 7);
+  const blocks = scalar(fields, 8, WIRE_U32, 4)?.getUint32(0, true);
+  const left = scalar(fields, 9, WIRE_F32, 4)?.getFloat32(0, true);
+  const right = scalar(fields, 10, WIRE_F32, 4)?.getFloat32(0, true);
+  const anyWindow = first !== undefined || end !== undefined || sequence !== undefined || blocks !== undefined;
+  let window: ObservationFrameWindow | undefined;
+  if (status === "ready") {
+    // The core's own presence rule (#1586 D1): a ready row is armed, tagged, and carries a
+    // non-empty window that opened at or after the arm, and at least one lane.
+    if (first === undefined || end === undefined || sequence === undefined || blocks === undefined
+        || !armed || armTag === 0n || first < armSample || end <= first || blocks === 0
+        || (left === undefined && right === undefined)) {
+      throw malformed("a ready observation row breaks the presence rule");
+    }
+    window = Object.freeze({ firstSample: first, endSample: end, sequence, blocks });
+  } else if (anyWindow || left !== undefined || right !== undefined) {
+    throw malformed("an observation row that is not ready carries a window or a lane");
+  }
+  return Object.freeze({ status, armed, armSample, armTag, window, left, right, unit });
+}
+
+/**
+ * Decode the reply to an `OBSERVATION_READ`. A refusal is a value; bytes that are not a valid reply
+ * raise `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`). @internal
+ */
+export function decodeObservationReadReply(bytes: Uint8Array): ObservationReadReply {
+  const { requestId, status, revision, fields } = decodeResponseEnvelope(bytes, MESSAGE_OBSERVATION_READ);
+  if (status !== "ok") {
+    const refusal = decodeRefusalFields(fields);
+    return Object.freeze({ ok: false, requestId, revision, status, ...refusal });
+  }
+  const observedSample = u64Of(fields, 1);
+  if (observedSample === undefined) throw malformed("an observation page has no observed sample");
+  const rows = fields.filter((row) => row.id === 2).map(decodeObservationRow);
+  if (rows.length === 0 || rows.length > OBSERVATION_READ_MAXIMUM_SELECTIONS
+      || fields.some((row) => row.id !== 1 && row.id !== 2)) {
+    throw malformed("an observation page holds no rows, too many, or an unknown field");
+  }
+  return Object.freeze({
+    ok: true,
+    requestId,
+    revision,
+    value: Object.freeze({ observedSample, rows: Object.freeze(rows) }),
+  });
+}
+
 /**
  * Encode a `CAPABILITIES_GET` command: a header and no fields, which takes any revision. The reply
  * to it reports the core's committed revision, which is how an endpoint that cannot read the
@@ -433,8 +683,12 @@ export function decodeControlLimits(bytes: Uint8Array): ControlLimits | undefine
   });
 }
 
-/** How the core applied a committed transaction (`TransactionApplied.edit_path`). */
-export type ControlEditPath = "live" | "model_only" | "rebuild" | "monitor";
+/**
+ * How the core applied a committed transaction (`TransactionApplied.edit_path`). `"unchanged"` is
+ * only a `SESSION_REPLACE` reply's: the document equals the committed model, nothing committed and
+ * the revision did not advance (#1386).
+ */
+export type ControlEditPath = "live" | "model_only" | "rebuild" | "monitor" | "unchanged";
 
 const EDIT_PATHS: ReadonlyMap<number, ControlEditPath> = new Map([
   [1, "live"],
@@ -443,6 +697,7 @@ const EDIT_PATHS: ReadonlyMap<number, ControlEditPath> = new Map([
   // The monitor overlay (solo) lands with #1559; its code is accepted here so the decoder needs no
   // change when the core starts to send it.
   [4, "monitor"],
+  [5, "unchanged"],
 ]);
 
 /** The protocol's response status registry, by name. */
@@ -777,10 +1032,16 @@ export function decodeRefusalBody(fields: readonly RawField[]): ControlRefusalBo
  * reply to this command raise `MisoEngineError` (`phase: "lifecycle"`, `code: "internal"`).
  */
 export function decodeControlReply(bytes: Uint8Array): ControlReply {
-  const { requestId, status, revision, fields } = decodeResponseEnvelope(
-    bytes,
-    MESSAGE_SESSION_TRANSACTION_APPLY,
-  );
+  return decodeAppliedReply(bytes, MESSAGE_SESSION_TRANSACTION_APPLY);
+}
+
+/**
+ * Decode the reply to `message`, a command whose success payload is `TransactionApplied`:
+ * `SESSION_TRANSACTION_APPLY` or `SESSION_REPLACE` (#1386).
+ * @internal
+ */
+export function decodeAppliedReply(bytes: Uint8Array, message: number): ControlReply {
+  const { requestId, status, revision, fields } = decodeResponseEnvelope(bytes, message);
 
   if (status === "ok") {
     const appliedOperations = scalar(fields, 1, WIRE_U32, 4)?.getUint32(0, true);

@@ -2,6 +2,7 @@ import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { AbiStructureName } from "../generated/abi.ts";
 import { MisoUsageError } from "./errors.ts";
 import type { SpectrumCollection, SpectrumQuery } from "./spectrum.ts";
+import { refuseRetiredObservationTaps } from "../internal/retired-options.ts";
 
 /**
  * Structure access by field *name*, resolved through the generated layout.
@@ -112,19 +113,22 @@ export interface BootOptions {
   readonly sourceRingFrames?: number;
   /** Total boot memory budget. Absent selects the engine's default ceiling. */
   readonly maximumMemoryBytes?: bigint;
-  /** Optional prepared continuous-spectrum hop, selected outside the packed boot options block. */
+  /** The stream hop of the boot's spectrum taps, sent in the boot's `SPECTRUM_CONFIGURE`. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   /**
-   * The two live-control words. Absent attaches no live controls at all. The master strip is not a
-   * boot option (issue #1689): designate it after boot with `strip.master(enabled)`.
+   * The live-control meter word. The master strip is not a boot option (issue #1689): designate
+   * it after boot with `strip.master(enabled)`. Observation capacity is not one either (#1590
+   * D5): every plan binds every declared tap of every effect.
    */
   readonly liveControls?: {
     readonly meterBlocks?: number;
-    readonly observationTaps?: number;
   };
-  /** One optional prepared graph boundary for the bounded spectrum query. */
+  /**
+   * One spectrum tap for the session, set by the boot's one `SPECTRUM_CONFIGURE` before the first
+   * block, so it is in the plan that renders sample 0 (#1597).
+   */
   readonly spectrum?: SpectrumQuery;
-  /** Several exact graph boundaries for one atomically selectable managed spectrum owner. */
+  /** Several spectrum taps, set as `spectrum` is, for one atomically selectable managed owner. */
   readonly spectrumCollection?: SpectrumCollection;
 }
 
@@ -140,7 +144,6 @@ export const POLICY_WORDS = Object.freeze([
   "sourceRingFrames",
   "maximumMemoryBytes",
   "liveControlMeterBlocks",
-  "liveControlObservationTaps",
 ] as const);
 
 /** The two words whose values are defined by the boot's role rather than shared. */
@@ -168,6 +171,7 @@ export function writeBootOptions(
       "liveControls.masterTrackPlusOne was retired (issue #1689): designate the master after boot with strip.master(true)",
     );
   }
+  refuseRetiredObservationTaps(options.liveControls);
   const bytes = structBytes("bootOptions");
   if (pointer === 0) {
     throw new MisoUsageError("the engine returned a null boot options pointer");
@@ -190,7 +194,7 @@ export function writeBootOptions(
   u64("maximumMemoryBytes", options.maximumMemoryBytes ?? 0n);
   u64("reserved1", 0n);
   u64("liveControlMeterBlocks", BigInt(options.liveControls?.meterBlocks ?? 0));
-  u64("liveControlObservationTaps", BigInt(options.liveControls?.observationTaps ?? 0));
+  u64("reserved3", 0n);
   u64("reserved2", 0n);
 
   // A detached copy, so a caller can compare two boots' option blocks after the fact without
@@ -202,21 +206,33 @@ export function writeBootOptions(
  * Derive the per-source ring the engine will pick for a shape, from the *published rule*.
  *
  * The effective ring is not readable back across the ABI -- it is an input word and no export
- * reports it -- so a producer that must size itself applies the rule. Both of its inputs come from
- * the generated document, so this function holds no private copy of `100` or of `2`.
+ * reports it -- so a producer that must size itself applies the rule (#1406 D3): the stall ring
+ * (`ceil(stall / q) + reserveQuanta` quanta) plus the largest warm-successor prime
+ * (`primeGrowths * ceil(L_max / q)` quanta, `L_max` the rate's `primeLatencySamples`) plus
+ * `primeReserveQuanta`. Every input comes from the generated document, so this function holds no
+ * private copy of `100`, `2`, `4`, `+ 1` or a latency. A zero quantum, or a rate the document has
+ * no latency row for (one the engine refuses to boot), returns zero.
  */
 export function defaultSourceRingFrames(sampleRateHz: number, quantumFrames: number): number {
   if (quantumFrames === 0) return 0;
-  const { stallToleranceMs, reserveQuanta } = ABI_LAYOUT.constants.sourceRing;
+  const {
+    stallToleranceMs,
+    reserveQuanta,
+    primeGrowths,
+    primeReserveQuanta,
+    primeLatencySamples,
+  } = ABI_LAYOUT.constants.sourceRing;
+  const latency = primeLatencySamples.find((row) => row.sampleRateHz === sampleRateHz);
+  if (latency === undefined) return 0;
   const stallFrames = Math.floor((sampleRateHz * stallToleranceMs) / 1000);
-  const quanta = Math.ceil(stallFrames / quantumFrames) + reserveQuanta;
+  const quanta = Math.ceil(stallFrames / quantumFrames) + reserveQuanta
+    + primeGrowths * Math.ceil(latency.samples / quantumFrames) + primeReserveQuanta;
   return quanta * quantumFrames;
 }
 
-/** Numeric value of a named constant group row, e.g. `constantValue("bufferKinds", "command")`. */
+/** Numeric value of a named constant group row, e.g. `constantValue("bufferKinds", "meterFrame")`. */
 export function constantValue(
-  group: "resultCodes" | "bootResultAliases" | "states" | "backends" | "bufferKinds"
-    | "wireCommandKinds" | "commandReasons" | "racks" | "liveResponseRacks",
+  group: "resultCodes" | "bootResultAliases" | "states" | "backends" | "bufferKinds" | "racks",
   name: string,
 ): number {
   const row = ABI_LAYOUT.constants[group].find((entry) => entry.name === name);

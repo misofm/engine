@@ -1511,11 +1511,18 @@ export type EffectConsoleLinkModeLabel<E extends EffectId> =
 /**
  * The edits of one effect instance: each parameter, its bypass and its link mode, as `edit.set`
  * over the row of the instance's own control table. The parameter keys are the catalog's names.
+ *
+ * `R` is the instance's rack when the caller knows it (`console()`, `insert()`), so an insert's
+ * `linkMode` refuses `slot` at compile time; the union, for an instance addressed by a rack
+ * the caller passes (`effect()`), takes either rack's labels and leaves the refusal to run time.
  */
-export abstract class EffectControlBuilders<E extends EffectId> {
+export abstract class EffectControlBuilders<
+  E extends EffectId,
+  R extends "console" | "inserts" = "console" | "inserts",
+> {
   protected abstract readonly effectId: E;
   /** Whether this instance is a console entry or an insert: their link-mode rows differ. */
-  protected abstract readonly rack: "console" | "inserts";
+  protected abstract readonly rack: R;
 
   /** `edit.set` over this instance's address: the row's machine name, the lane and the ramp. */
   protected abstract setRow(
@@ -1562,9 +1569,12 @@ export abstract class EffectControlBuilders<E extends EffectId> {
 
   /**
    * The link mode of an instance of an effect that has a choice of it. A console entry also
-   * takes `slot`, the slot's declared mode; an insert refuses it.
+   * takes `slot`, the slot's declared mode; an insert refuses it, at compile time when its rack
+   * is known and at run time otherwise.
    */
-  linkMode(mode: EffectLinkModeLabel<E> | EffectConsoleLinkModeLabel<E>): ControlEditSet {
+  linkMode(
+    mode: R extends "console" ? EffectConsoleLinkModeLabel<E> : EffectLinkModeLabel<E>,
+  ): ControlEditSet {
     const row = (this.rack === "console" ? EFFECT_CONSOLE_LINK_MODE_ROWS : EFFECT_LINK_MODE_ROWS)[this.effectId];
     if (row === undefined) throw new MisoUsageError(`${this.effectId} has no link mode`);
     return this.setRow(row.control, enumValue(row.choices, mode, `${this.effectId} link mode`), "both");

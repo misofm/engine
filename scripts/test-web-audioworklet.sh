@@ -230,90 +230,6 @@ if python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" \
 fi
 echo "web AudioWorklet parameter-metadata gates passed"
 
-# Issues #143/#151: one command-reason vocabulary across six spellings, and the `.d.ts`'s
-# `observe()` declaration held to the shipped implementation. The gate's own red mutations run
-# first -- including a Rust reason bumped without the other five.
-python3 -B "$repo_root/scripts/check-command-reason-vocabulary.py" --self-test
-python3 -B "$repo_root/scripts/check-command-reason-vocabulary.py"
-# The same mutation performed on disk rather than in memory, so the gate is proved against the
-# real files it is pointed at in CI and not only against its own in-process copies.
-vocabulary_dir="$mutation_dir/vocabulary"
-mkdir -p "$vocabulary_dir/scripts" "$vocabulary_dir/hosts/host-web/src" \
-  "$vocabulary_dir/hosts/host-web/web" \
-  "$vocabulary_dir/tools/parameter-metadata/src"
-cp "$repo_root/scripts/check-command-reason-vocabulary.py" \
-  "$repo_root/scripts/check-parameter-metadata-v1.py" "$vocabulary_dir/scripts/"
-cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
-  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
-  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" \
-  "$vocabulary_dir/hosts/host-web/web/"
-cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
-  "$vocabulary_dir/tools/parameter-metadata/src/"
-sed 's/^pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;/&\npub const COMMAND_REASON_FUTURE_TAP: u32 = 16;/' \
-  "$repo_root/hosts/host-web/src/lib.rs" \
-  >"$vocabulary_dir/hosts/host-web/src/lib.rs"
-if diff -q "$repo_root/hosts/host-web/src/lib.rs" \
-  "$vocabulary_dir/hosts/host-web/src/lib.rs" >/dev/null; then
-  echo "the Rust reason-bump mutation matched nothing" >&2
-  exit 1
-fi
-if python3 -B "$vocabulary_dir/scripts/check-command-reason-vocabulary.py" >/dev/null 2>&1; then
-  echo "a Rust reason bumped without the other five spellings escaped the vocabulary gate" >&2
-  exit 1
-fi
-echo "web AudioWorklet command-reason vocabulary gates passed"
-
-# Issue #210 phase 0: the same discipline for the command-KIND vocabulary. Its own red mutations
-# run first -- 26 of them, one per rule -- then the shipped drift class is performed on disk: a
-# kind the command-record wire decodes that the host JS `COMMAND_KINDS` set does not admit. That is the
-# defect shape the metadata JSON shipped for two releases (six kinds declared, eight decoded).
-python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py" --self-test
-python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py"
-kind_dir="$mutation_dir/kinds"
-mkdir -p "$kind_dir/scripts" "$kind_dir/hosts/host-web/src" \
-  "$kind_dir/hosts/host-web/web" \
-  "$kind_dir/tools/parameter-metadata/src"
-cp "$repo_root/scripts/check-command-kind-vocabulary.py" \
-  "$repo_root/scripts/check-parameter-metadata-v1.py" "$kind_dir/scripts/"
-cp "$repo_root/hosts/host-web/src/lib.rs" \
-  "$kind_dir/hosts/host-web/src/"
-cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
-  "$kind_dir/hosts/host-web/web/"
-cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
-  "$kind_dir/tools/parameter-metadata/src/"
-sed 's/^const COMMAND_KINDS = new Set(\[7, 8\]);$/const COMMAND_KINDS = new Set([7]);/' \
-  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
-  >"$kind_dir/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js"
-if diff -q "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
-  "$kind_dir/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" >/dev/null; then
-  echo "the host JS kind-set mutation matched nothing" >&2
-  exit 1
-fi
-if python3 -B "$kind_dir/scripts/check-command-kind-vocabulary.py" >/dev/null 2>&1; then
-  echo "a wire kind missing from the host JS COMMAND_KINDS set escaped the kind gate" >&2
-  exit 1
-fi
-# The class every later kind risks, on disk: a kind added to the Rust authority alone, after the
-# last kind that ships. Kinds 7 and 8 ship (issue #1565 deleted the value kinds 1-6 and 9-17 and
-# their numbers are never reallocated), so the mutation names a value no kind ever held, 18: it
-# stays red because the other six spellings lack it. Every real new kind has to land in all seven
-# spellings or fail here.
-cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
-  "$kind_dir/hosts/host-web/web/"
-sed 's/^pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;/&\npub const COMMAND_SOLO_MODE: u32 = 18;/' \
-  "$repo_root/hosts/host-web/src/lib.rs" \
-  >"$kind_dir/hosts/host-web/src/lib.rs"
-if diff -q "$repo_root/hosts/host-web/src/lib.rs" \
-  "$kind_dir/hosts/host-web/src/lib.rs" >/dev/null; then
-  echo "the Rust kind-bump mutation matched nothing" >&2
-  exit 1
-fi
-if python3 -B "$kind_dir/scripts/check-command-kind-vocabulary.py" >/dev/null 2>&1; then
-  echo "a Rust kind bumped without the other six spellings escaped the kind gate" >&2
-  exit 1
-fi
-echo "web AudioWorklet command-kind vocabulary gates passed"
-
 # Issue #207: one session-map shape across the Rust FFI, the frozen export list, the worklet, the
 # host's acknowledgement validator and the `.d.ts`. Its own red mutations run first, then the two
 # drift classes that matter are performed on disk: the host validator losing the source list (the
@@ -352,24 +268,6 @@ for entry in "${session_map_mutations[@]}"; do
 done
 echo "web AudioWorklet session-map shape gates passed"
 
-# Issue #151: the shipped defect itself. Restoring the literal `<= 9` bound on the acknowledgement
-# must take the whole hermetic suite red -- the refused subscription stops being a typed
-# per-request rejection and becomes the host-wide sticky 255 that kept the app's GR meters dead.
-mutated_host="$mutation_dir/host-reason-cap.js"
-sed 's/validCommandReason(message\.reason)/validU32(message.reason) \&\& message.reason <= 9/' \
-  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
-  >"$mutated_host"
-if diff -q "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
-  "$mutated_host" >/dev/null; then
-  echo "the reason-cap mutation matched nothing" >&2
-  exit 1
-fi
-if MISO_ENGINE_WEB_HOST_TEST_MODULE="$mutated_host" \
-  node "$repo_root/scripts/test-web-audioworklet.mjs" >/dev/null 2>&1; then
-  echo "the <= 9 command-reason cap escaped the observation refusal tests" >&2
-  exit 1
-fi
-echo "web AudioWorklet reason-cap mutation passed"
 mutated_utf8="$mutation_dir/worklet-utf8.js"
 sed 's/(codePoint >>> 18) | 0xf0/(codePoint >>> 18) | 0xe0/' "$worklet" >"$mutated_utf8"
 if MISO_ENGINE_WEB_WORKLET_TEST_MODULE="$mutated_utf8" \

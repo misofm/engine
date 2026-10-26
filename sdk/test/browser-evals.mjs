@@ -10,10 +10,17 @@
 
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
+import { readFile } from "node:fs/promises";
+import vm from "node:vm";
 
+import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { StructView } from "../src/core/abi.ts";
+import { WasmBoundary } from "../src/core/boundary.ts";
+import { ControlTransactionQueue } from "../src/core/control-queue.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
+import { effect, session } from "../src/core/session.ts";
+import { transaction } from "../src/core/session-transaction.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import {
   POLICY_WORDS,
@@ -21,13 +28,16 @@ import {
   SessionSeekProducerError,
   assertQuantumMatch,
   assertWebDeliverableSources,
+  attachEngineFeed,
   bootOptionsAgree,
   createEngine,
   scratchBootInWorker,
   scratchBootOptions,
   workletBootOptions,
 } from "../src/browser/index.ts";
-import { moduleBytes, sessionDocument } from "./support.mjs";
+import { toWebBootOptions } from "../src/browser/host-mirror.ts";
+import { onEndpointIds } from "./control-support.mjs";
+import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
 
 /** A policy with every shared word set to something distinctive, so a dropped word shows. */
 const POLICY = Object.freeze({
@@ -35,7 +45,6 @@ const POLICY = Object.freeze({
   maximumMemoryBytes: 64n << 20n,
   liveControls: Object.freeze({
     meterBlocks: 6,
-    observationTaps: 2,
   }),
 });
 
@@ -50,14 +59,11 @@ function wordAt(block, name) {
 test("generated u64 offsets preserve BigInt", () => {
   const memory = new WebAssembly.Memory({ initial: 1 });
   const leaves = [
-    { structure: "spectrumStreamMetadata", name: "captureEpoch", value: 0x0020_0000_0000_0001n },
-    { structure: "spectrumStreamMetadata", name: "analysisEpoch", value: 0x0040_0000_0000_0003n },
-    { structure: "spectrumStreamMetadata", name: "historyStartSample", value: 0x0080_0000_0000_0005n },
-    { structure: "liveResponseResult", name: "snapshotToken", value: 0x0100_0000_0000_0007n },
-    { structure: "liveResponseResult", name: "capturedSample", value: 0x0200_0000_0000_0009n },
-    { structure: "observationResult", name: "firstSample", value: 0x0400_0000_0000_000bn },
-    { structure: "observationResult", name: "sequence", value: 0xffff_ffff_ffff_ffd1n },
-    { structure: "observationResult", name: "endSample", value: 0xffff_ffff_ffff_fff1n },
+    { structure: "planWatermark", name: "revision", value: 0x0100_0000_0000_0007n },
+    { structure: "planWatermark", name: "firstSample", value: 0x0200_0000_0000_0009n },
+    { structure: "seekReport", name: "firstSample", value: 0x0400_0000_0000_000bn },
+    { structure: "seekReport", name: "generation", value: 0xffff_ffff_ffff_ffd1n },
+    { structure: "seekReport", name: "sourceFrame", value: 0xffff_ffff_ffff_fff1n },
   ];
   const structures = [...new Set(leaves.map(({ structure }) => structure))];
   const pointers = new Map();
@@ -137,7 +143,6 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
       sourceRingFrames: 512,
       maximumMemoryBytes: 64n << 20n,
       liveControlMeterBlocks: 6n,
-      liveControlObservationTaps: 2n,
     };
     assert.deepEqual(
       [...POLICY_WORDS].sort(),
@@ -163,12 +168,12 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
     // red, which is A-1's actual hazard: the scratch instance would size a different plan and
     // answer a question about a session nobody is going to run.
     const divergent = bootOptionsAgree(
-      { ...POLICY, liveControls: { ...POLICY.liveControls, observationTaps: 0 } },
+      { ...POLICY, liveControls: { ...POLICY.liveControls, meterBlocks: 0 } },
       PHYSICAL,
     );
     assert.notEqual(
-      wordAt(divergent.scratch, "liveControlObservationTaps"),
-      wordAt(scratch, "liveControlObservationTaps"),
+      wordAt(divergent.scratch, "liveControlMeterBlocks"),
+      wordAt(scratch, "liveControlMeterBlocks"),
       "the mutation must actually change a shared word",
     );
   });
@@ -182,28 +187,36 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
       assert.equal(wordAt(block, "abiVersion"), ABI_LAYOUT.abiVersion);
       assert.equal(wordAt(block, "reserved0"), 0, "the reserved word must be zero or boot refuses");
       assert.equal(wordAt(block, "reserved1"), 0n, "reserved1 must be zero or boot refuses web.options.reserved1");
+      assert.equal(wordAt(block, "reserved3"), 0n, "reserved3 must be zero or boot refuses web.options.reserved3");
       assert.equal(wordAt(block, "reserved2"), 0n, "reserved2 must be zero or boot refuses web.options.reserved2");
     }
     assert.equal(bootOptionsAgree({}, PHYSICAL).maskedEqual, true);
   });
 
-  test("reserved1 and reserved2 stay zero whatever live controls the caller sets", () => {
-    // Offset 32 was the live-command queue size and offset 56 the master boot word (#1689); the
-    // host now refuses a nonzero word. Red if the writer ever puts a policy value back into either.
+  test("reserved1, reserved3 and reserved2 stay zero whatever live controls the caller sets", () => {
+    // Offset 32 was the live-command queue size, offset 48 the observation-taps word (#1590) and
+    // offset 56 the master boot word (#1689); the host now refuses a nonzero word. Red if the
+    // writer ever puts a policy value back into any of them.
     const { scratch, worklet } = bootOptionsAgree(POLICY, PHYSICAL);
-    for (const word of ["reserved1", "reserved2"]) {
+    for (const word of ["reserved1", "reserved3", "reserved2"]) {
       assert.equal(wordAt(scratch, word), 0n, `scratch ${word}`);
       assert.equal(wordAt(worklet, word), 0n, `worklet ${word}`);
     }
   });
 
-  test("a caller's retired masterTrackPlusOne is refused and points to strip.master", () => {
-    // Issue #1689, root decision: refused, never ignored. Red if an untyped caller's leftover word
-    // is silently dropped (its app would boot with no master and never be told).
+  test("a caller's retired masterTrackPlusOne or observationTaps is refused and says why", () => {
+    // Issue #1689, root decision, and #1590 D5: refused, never ignored. Red if an untyped caller's
+    // leftover word is silently dropped (its app would boot with no master and never be told, or
+    // believe it had sized the observation capacity).
     const stale = { ...POLICY, liveControls: { ...POLICY.liveControls, masterTrackPlusOne: 1 } };
     assert.throws(
       () => bootOptionsAgree(stale, PHYSICAL),
       (error) => error instanceof MisoUsageError && /strip\.master\(true\)/.test(error.message),
+    );
+    const taps = { ...POLICY, liveControls: { ...POLICY.liveControls, observationTaps: 4 } };
+    assert.throws(
+      () => bootOptionsAgree(taps, PHYSICAL),
+      (error) => error instanceof MisoUsageError && /observationTaps was retired \(issue #1590\)/.test(error.message),
     );
   });
 });
@@ -292,7 +305,7 @@ describe("the browser open sequence", () => {
     });
     assert.equal(shape.sampleRateHz, 96_000);
     assert.equal(shape.quantumFrames, 127);
-    assert.equal(shape.sourceRingFrames, 9_906);
+    assert.equal(shape.sourceRingFrames, 14_097);
   });
 
   test("a context that comes back at the wrong rate is closed and retried", async () => {
@@ -421,6 +434,173 @@ describe("the browser open sequence", () => {
     );
   });
 
+  test("#2100 gate 1: pcmFeed loads the feed prelude before the engine worklet, and is off by default", async () => {
+    // Red if the prelude loads after the engine worklet (the worklet then registers the unwrapped
+    // engine processor and no ring ever attaches), if `{ moduleUrl }` is ignored, or if a boot
+    // without `pcmFeed` loads the prelude.
+    const loads = async (pcmFeed) => {
+      const loaded = [];
+      const engine = await createEngine({
+        document: sessionDocument(),
+        simd128ModuleUrl: "/wasm",
+        workletModuleUrl: "/worklet",
+        scratchBoot,
+        ...(pcmFeed === undefined ? {} : { pcmFeed }),
+        createContext: (request) => ({
+          sampleRate: request.sampleRate,
+          renderQuantumSize: 128,
+          state: "suspended",
+          close: async () => {},
+          audioWorklet: { addModule: async (url) => { loaded.push(url); } },
+        }),
+        // As the shipped host does: its first step on the context loads the engine worklet.
+        createHost: async ({ context, workletModuleUrl }) => {
+          await context.audioWorklet.addModule(workletModuleUrl);
+          return { dispose: async () => {} };
+        },
+      });
+      await engine.close();
+      return loaded;
+    };
+    assert.deepEqual(await loads(true), [BUNDLED_ENGINE_ASSETS.pcmFeedWorklet.href, "/worklet"]);
+    assert.deepEqual(await loads({ moduleUrl: "/feed" }), ["/feed", "/worklet"]);
+    assert.deepEqual(await loads(undefined), ["/worklet"]);
+  });
+
+  test("#2100 gate 2: position() is the seek's frame plus the frames rendered since", async () => {
+    // Red if the frame is built from the wrong anchor (the render sample alone, or the report
+    // without its first sample), if a seek no block rendered yet reports the old timeline, or if
+    // the report is read before the status, so that a block rendered between them mixes an old
+    // anchor with a new sample.
+    const quantum = 128n;
+    let next = 0n;
+    let report = { generation: 1n, firstSample: 0n, sourceFrame: 0n, cumulativeUnderrunFrames: 0n, cumulativeHeldFrames: 0n };
+    let pending;
+    let renderAtStatus = false;
+    /** One rendered block, as the host's timeline does: an accepted seek starts at the next block. */
+    const tick = () => {
+      if (pending !== undefined) {
+        report = { ...report, generation: pending.generation, firstSample: next, sourceFrame: pending.frame };
+        pending = undefined;
+      }
+      next += quantum;
+    };
+    const engine = await createEngine({
+      document: sessionDocument(),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "running",
+        close: async () => {},
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => ({
+        seekSession: async ({ generation, frame }) => {
+          pending = { generation, frame };
+          return { tag: "miso.session-seek.v1", requestId: 1, result: 0, generation };
+        },
+        status: async () => {
+          if (renderAtStatus) { renderAtStatus = false; tick(); }
+          return { nextAbsoluteSample: next };
+        },
+        seekReport: async (sourceId) => {
+          assert.equal(sourceId, "$timeline");
+          return { tag: "miso.seek-report.v1", requestId: 1, result: 0, report: { ...report } };
+        },
+        dispose: async () => {},
+      }),
+    });
+    try {
+      tick();
+      tick();
+      assert.deepEqual(await engine.position(), { frame: 256n, generation: 1n, atSample: 256n });
+      assert.deepEqual(await engine.seek(480n), { generation: 2n });
+      assert.deepEqual(await engine.position(), { frame: 480n, generation: 2n, atSample: 256n },
+        "a seek no block rendered yet plays at the next block");
+      for (let block = 0; block < 3; block += 1) tick();
+      assert.deepEqual(await engine.position(), { frame: 480n + 3n * quantum, generation: 2n, atSample: 640n });
+      await engine.seek(96n);
+      renderAtStatus = true;
+      assert.deepEqual(await engine.position(), { frame: 96n + quantum, generation: 3n, atSample: 768n },
+        "a block that renders the seek during the reads is counted once");
+    } finally {
+      await engine.close();
+    }
+    await assert.rejects(engine.position(), MisoUsageError);
+  });
+
+  test("#2116: planLatency() reads the real worklet's plan latency, 486 samples for a limiter at 48 kHz", async () => {
+    // Red if the worklet reads the wrong record word or skips the read, if the host drops or
+    // misvalidates the reply, or if the SDK decodes it differently from the headless engine. The
+    // shipped host and worklet run for real over the real module; only the port is a stand-in.
+    const workletSource = await readFile(new URL("../../hosts/host-web/web/miso-engine-v1-audio-worklet.js", import.meta.url), "utf8");
+    const { createMisoAudioWorkletHost } = await import("../../hosts/host-web/web/miso-engine-v1-audio-worklet-host.js");
+    const deliver = (target, data, transfer = []) => {
+      const cloned = structuredClone(data, { transfer });
+      queueMicrotask(() => target.onmessage?.({ data: cloned }));
+    };
+    let processorPort;
+    class AudioWorkletProcessor {
+      constructor() { this.port = processorPort; }
+    }
+    const registrations = new Map();
+    const sandbox = vm.createContext({
+      // The main realm's constructors, so the worklet's `instanceof` checks see the posted views.
+      AudioWorkletProcessor, WebAssembly, TextEncoder, TextDecoder, ArrayBuffer, DataView,
+      Uint8Array, Uint32Array, Int32Array, Float32Array, BigInt64Array, BigUint64Array,
+      sampleRate: 48_000, renderQuantumSize: 128,
+      registerProcessor: (name, constructor) => { registrations.set(name, constructor); },
+    });
+    vm.runInContext(workletSource, sandbox);
+    class AudioWorkletNode {
+      constructor(_context, name, options) {
+        const nodePort = { onmessage: null, postMessage: (data, transfer) => deliver(processorPort, data, transfer) };
+        processorPort = { onmessage: null, postMessage: (data, transfer) => deliver(nodePort, data, transfer) };
+        this.port = nodePort;
+        this.onprocessorerror = null;
+        new (registrations.get(name))(structuredClone(options));
+      }
+      disconnect() {}
+    }
+    const module = new WebAssembly.Module(bytes);
+    const engine = await createEngine({
+      document: sessionDocument({ effects: { inserts: [effectEntry("limit", "miso.true-peak-limiter")] } }),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "suspended",
+        close: async () => {},
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async (request) => {
+        const previous = globalThis.AudioWorkletNode;
+        globalThis.AudioWorkletNode = AudioWorkletNode;
+        try {
+          return await createMisoAudioWorkletHost({
+            ...request, options: toWebBootOptions(request.options), preparedModule: module,
+          });
+        } finally {
+          globalThis.AudioWorkletNode = previous;
+        }
+      },
+    });
+    try {
+      const [latency, again] = await Promise.all([engine.planLatency(), engine.planLatency()]);
+      assert.equal(latency.samples, 486);
+      assert.deepEqual(again, latency, "a second read waits for the first instead of being refused");
+      assert.ok(latency.tailSamples === null || latency.tailSamples >= latency.samples, "the tail includes the latency");
+    } finally {
+      await engine.close();
+    }
+    await assert.rejects(engine.planLatency(), MisoUsageError);
+  });
+
   test("close disposes the worklet before its context and is idempotent", async () => {
     const events = [];
     const engine = await createEngine({
@@ -440,6 +620,9 @@ describe("the browser open sequence", () => {
       }),
     });
 
+    // #1296: a host stand-in that posts no watermark cannot report completion, so applied()
+    // refuses typed instead of waiting forever.
+    await assert.rejects(engine.applied(0n), (error) => error instanceof MisoEngineError && error.code === "unsupported");
     await Promise.all([engine.close(), engine.close()]);
     assert.deepEqual(events, ["host", "context"]);
     await engine.close();
@@ -740,5 +923,345 @@ describe("the browser open sequence", () => {
       },
     );
     assert.equal(constructed, 0, "the refusal costs no AudioContext at all");
+  });
+});
+
+/**
+ * #1296: the browser engine's session edits over #1389's shared core. The host stand-in's control
+ * plane is a real core (a `WasmBoundary` on the shipped module): `control(frame, document)` runs the
+ * frame through the entry the worklet's message handler calls and answers `{ result, response,
+ * revision }` as the host does, and `tick()` renders one block and posts the watermark when its
+ * `(revision, sample)` pair moved, as the worklet does. Real bits in a browser are #1295's.
+ */
+describe("browser session edits", () => {
+  const QUANTUM = 128;
+  const SOURCE = { channels: 2, bitDepth: 24, frames: 48_000, content: `blake3:${"a".repeat(64)}` };
+  const EQ = () => effect("miso.parametric-eq", { "band-1-gain": { left: 6, right: -4 } });
+  /** `tracks` tracks on one source, each with an EQ insert and a route to the output. */
+  const declare = (tracks, sampleRateHz = 48_000) => {
+    let builder = session({ id: "browser.apply", sampleRateHz, quantumFrames: QUANTUM }).source("a", SOURCE);
+    for (const id of tracks) builder = builder.track(id, { source: "a", inserts: [EQ()] });
+    builder = builder.output("out");
+    for (const id of tracks) {
+      builder = builder.route({
+        id: `${id}.main`,
+        source: { kind: "track", trackId: id, tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+    }
+    return builder;
+  };
+  const base = () => declare(["t1", "t2", "t3", "t4"]);
+  const withFifth = () => declare(["t1", "t2", "t3", "t4", "t5"]);
+  let asset;
+  let bytes;
+
+  before(async () => {
+    bytes = await moduleBytes();
+    asset = await MisoEngineAsset.load(bytes);
+  });
+
+  async function boot(document) {
+    const core = await WasmBoundary.boot(asset, new TextEncoder().encode(document.toJson()));
+    const posts = new Set();
+    const sent = [];
+    let next = 0;
+    let posted = core.readWatermark();
+    // The core's own strip-order reads (its session map) draw from its allocator: the page's
+    // frames go onto it, held strictly ascending.
+    let pageReplacement;
+    const forwardFrame = onEndpointIds(core.controlRequestIds, (frame) => core.controlFrame(frame, pageReplacement));
+    const forward = (frame, replacement) => {
+      pageReplacement = replacement;
+      try { return forwardFrame(frame); } finally { pageReplacement = undefined; }
+    };
+    const host = {
+      async sessionMap() {
+        const map = core.sessionMap();
+        return { tag: "miso.sessionmap.v1", requestId: (next += 1), result: 0, sources: map.sources, metersAttached: map.metersAttached };
+      },
+      async control(frame, replacement) {
+        sent.push({ frame: frame.slice(), document: replacement?.slice() });
+        let result = 0;
+        let response;
+        try {
+          response = forward(frame, replacement);
+        } catch (error) {
+          if (typeof error?.result !== "number") throw error;
+          result = error.result;
+          response = new TextEncoder().encode(error.diagnostics.map((row) => `${row.code}\t${row.path}\n`).join(""));
+        }
+        return { tag: "miso.control.v1", requestId: (next += 1), result, response, revision: core.controlRevision() };
+      },
+      onControlEvent: (listener) => core.onControlEvent(listener),
+      onWatermark(listener) {
+        posts.add(listener);
+        return () => posts.delete(listener);
+      },
+      async dispose() { core.dispose(); },
+    };
+    const post = (record) => { for (const listener of [...posts]) listener(record); };
+    const tick = () => {
+      core.render(QUANTUM);
+      const now = core.readWatermark();
+      if (now.revision === posted.revision && now.sample === posted.sample) return;
+      posted = now;
+      const outcome = (now.outcome.exact ? 1n : 0n) | (now.outcome.transitionFallback ? 2n : 0n) | (now.outcome.superseded ? 4n : 0n);
+      post({ revision: now.revision, sample: now.sample, outcome, exactCount: 0n, transitionFallbackCount: 0n, supersededCount: 0n });
+    };
+    const engine = await createEngine({
+      document,
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot: ({ document: staged, options }) => scratchBootInWorker({ moduleBytes: bytes, document: staged, options }),
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: QUANTUM,
+        state: "running",
+        close: async () => {},
+        // `holdResume` stands for a browser that holds `resume()` until a user gesture.
+        holdResume: false,
+        resume() {
+          if (this.holdResume) return new Promise(() => {});
+          this.state = "running";
+          return Promise.resolve();
+        },
+        async suspend() { this.state = "suspended"; },
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => host,
+    });
+    return { engine, host, sent, tick, post };
+  }
+
+  /** Whether `promise` has settled, after every queued reaction ran. */
+  async function settled(promise) {
+    let done = false;
+    promise.then(() => { done = true; }, () => { done = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    return done;
+  }
+
+  test("gate 1: a replace sends its document beside one frame, commits a rebuild and rebinds live controls", async () => {
+    // Red if the browser transport drops the document (the core refuses the replace), if
+    // `revision` does not follow the reply, if `liveControls()` stays bound to the booted document
+    // after a committed replace, or if a refused replace rebinds it.
+    const { engine, sent } = await boot(base());
+    try {
+      await engine.liveControls();
+      sent.length = 0;
+      const outcome = await engine.replaceSession(withFifth());
+      assert.deepEqual(outcome, { revision: 1n, path: "rebuild" });
+      assert.equal(engine.revision, 1n);
+      const replaces = sent.filter((row) => row.document !== undefined);
+      assert.equal(replaces.length, 1, "one frame carries the document");
+      assert.equal(new TextDecoder().decode(replaces[0].document), withFifth().toJson());
+      const rebound = await engine.liveControls();
+      assert.doesNotThrow(() => rebound.withSession(withFifth()));
+      // A refused replace (a new rate needs a new engine) commits nothing and rebinds nothing.
+      const refused = declare(["t1", "t2", "t3", "t4", "t5"], 96_000);
+      await assert.rejects(engine.replaceSession(refused));
+      assert.equal(engine.revision, 1n);
+      const controls = await engine.liveControls();
+      assert.throws(() => controls.withSession(refused), MisoUsageError);
+      assert.doesNotThrow(() => controls.withSession(withFifth()));
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("gate 2: a live apply settles at the watermark post that covers it, and close rejects it", async () => {
+    // Red if `revision` misses a live edit's commit, if applied() resolves at the commit or on a
+    // post for an older revision, if the engine does not settle it from the host's watermark posts,
+    // if close() leaves it pending, or if the engine does not tell its live controls' queue the
+    // revision an apply committed beside it (the queue's next submit is then refused
+    // `revision_conflict`).
+    const { engine, tick, post } = await boot(base());
+    try {
+      const earlier = await engine.liveControls();
+      await earlier.submit(earlier.edit.track("t2").faderDb(-1));
+      assert.equal(engine.revision, 1n, "a live edit's revision is seen");
+      tick();
+      const fader = transaction(base()).upsertTrack("t1", { source: "a", inserts: [EQ()], fader: { leftDb: -12, rightDb: -12 } });
+      const outcome = await engine.apply(fader.build());
+      assert.deepEqual(outcome, { revision: 2n, path: "live" });
+      const applied = engine.applied(outcome.revision);
+      assert.equal(await settled(applied), false, "pending at the commit");
+      post({ revision: 0n, sample: 64n, outcome: 1n, exactCount: 0n, transitionFallbackCount: 0n, supersededCount: 0n });
+      assert.equal(await settled(applied), false, "an older revision's post does not settle it");
+      tick();
+      const snapshot = await applied;
+      assert.deepEqual(snapshot, { revision: 2n, sample: BigInt(QUANTUM), outcome: { exact: true, transitionFallback: false, superseded: false } });
+      assert.deepEqual(engine.watermark(), snapshot);
+      assert.deepEqual(await earlier.submit(earlier.edit.track("t2").faderDb(-3)),
+        { ok: true, revision: 3n, path: "live", appliedOperations: 1 });
+      const pending = engine.applied(3n);
+      await engine.close();
+      await assert.rejects(pending, MisoUsageError);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("another sender's commit is seen through a decoded event and the watermark", async () => {
+    // Red if `revision` ignores the `sessionCommitted` events the engine decodes for `onEvent`, or
+    // the watermark's revision: a commit another sender made on the same host is then never seen.
+    // Red too if applied() refuses such a commit as uncommitted without asking the core.
+    const { engine, host, tick } = await boot(base());
+    try {
+      // The other sender shares the host's one request-ID allocator, as every sender must.
+      const { requestIds } = (await engine.liveControls()).queue;
+      const other = new ControlTransactionQueue(async (frame) => (await host.control(frame)).response, { initialRevision: 0n, requestIds });
+      const row = (await engine.controls()).controls.find((entry) => entry.address.owner.kind === "strip"
+        && entry.address.owner.id === "t1" && entry.name === "fader_db" && entry.address.lane === "left");
+      const fader = (value) => [{ address: row.address, value }];
+      const stop = engine.onEvent(() => {});
+      await other.submit(fader(-1));
+      assert.equal(engine.revision, 1n, "seen through the event");
+      stop();
+      await other.submit(fader(-2));
+      assert.equal(engine.revision, 1n, "no listener: no event read");
+      tick();
+      assert.equal(engine.revision, 2n, "seen through the watermark");
+      // Committed unseen (no listener, no render): applied() asks the core, and waits.
+      await other.submit(fader(-3));
+      const unseen = engine.applied(3n);
+      assert.equal(await settled(unseen), false, "pending, not refused as uncommitted");
+      tick();
+      assert.equal((await unseen).revision, 3n);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("#1297b D6: a removed fed source drains until applied(revision) resolves, then its ring is detached", async () => {
+    // Red if the SDK detaches at the commit (the strip's ramp-out plays silence), never detaches (a
+    // ring leaks per removed stem), detaches a source the edit kept, or misses a removal that a
+    // replace made (the committed session map no longer lists it).
+    const fed = (ids) => {
+      let builder = session({ id: "browser.feed", sampleRateHz: 48_000, quantumFrames: QUANTUM });
+      for (const id of ids) builder = builder.source(id, { ...SOURCE, content: `blake3:${id.repeat(64)}` });
+      for (const id of ids) builder = builder.track(`t${id}`, { source: id });
+      builder = builder.output("out");
+      for (const id of ids) {
+        builder = builder.route({ id: `t${id}.main`, source: { kind: "track", trackId: `t${id}`, tap: "post_pan" }, destination: { kind: "output_input", outputId: "out" } });
+      }
+      return builder;
+    };
+    const { engine, tick } = await boot(fed(["a", "b", "c"]));
+    const detached = [];
+    const node = {
+      port: {
+        onmessage: null,
+        postMessage(data) {
+          // Cloned as a browser port does; the ring is named by its index in the attach list.
+          const message = structuredClone(data);
+          if (message.op !== "detach-source") return;
+          detached.push(message.index);
+          node.port.onmessage?.({ data: structuredClone({ op: "source-detached", requestId: message.requestId, detached: true }) });
+        },
+      },
+      disconnect() {},
+    };
+    const feed = attachEngineFeed({
+      context: { audioWorklet: { addModule: async () => {} } },
+      sources: ["a", "b", "c"].map((sourceId) => ({ sourceId, channels: 2 })),
+      quantumFrames: QUANTUM,
+      engine,
+      createNode: () => node,
+    });
+    const [a, b, c] = feed.rings;
+    const untilApplied = async (revision) => {
+      const applied = engine.applied(revision);
+      for (let block = 0; !(await settled(applied)); block += 1) {
+        assert.deepEqual(detached, [], `nothing is detached before revision ${revision} is applied (block ${block})`);
+        assert.ok(block < 1_000, "the removal is applied");
+        tick();
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+    try {
+      const removal = await engine.apply(transaction(fed(["a", "b", "c"])).removeRoute("tb.main").removeTrack("tb").removeSource("b").build());
+      await untilApplied(removal.revision);
+      assert.deepEqual(detached.splice(0), [1]);
+      assert.deepEqual(feed.rings, [a, c]);
+      const replaced = await engine.replaceSession(fed(["a"]));
+      await untilApplied(replaced.revision);
+      assert.deepEqual(detached.splice(0), [2]);
+      assert.deepEqual(feed.rings, [a]);
+    } finally {
+      feed.close();
+      await engine.close();
+    }
+  });
+
+  test("#2100 gate 3: play() and stop() move the context and the transport together", async () => {
+    // Red if `stop()` only suspends the context or only stops the transport (the two halves
+    // drift apart), if `play()` leaves the transport stopped or the context suspended, if a
+    // `resume()` the browser holds blocks a later `stop()`, if a refused play leaves the context
+    // running when it was suspended or suspends it when it was running, if a refused play that a
+    // newer play overtook restores the context, or if `close()` leaves a waiting call pending.
+    const { engine, host } = await boot(base());
+    const within = (promise) => Promise.race([promise, new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("the call did not settle")), 2_000).unref();
+    })]);
+    try {
+      const expected = { play: ["playing", "running"], stop: ["stopped", "suspended"] };
+      for (const call of ["play", "stop", "play", "stop"]) {
+        const [transport, context] = expected[call];
+        assert.equal((await engine[call]()).state, transport, call);
+        assert.equal(engine.context.state, context, `${call} moves the context`);
+        assert.equal((await engine.transport()).state, transport, `${call} moves the transport`);
+      }
+      // A play outside a gesture: its resume stays pending, and a later stop still settles.
+      engine.context.holdResume = true;
+      const held = engine.play();
+      assert.equal((await within(engine.stop())).state, "stopped", "a held resume does not block stop()");
+      await assert.rejects(within(held), MisoUsageError);
+      assert.equal((await engine.transport()).state, "stopped");
+      engine.context.holdResume = false;
+      // A refused play restores the context state from before the call.
+      const control = host.control;
+      const refusal = new Error("transport refused");
+      host.control = async () => { throw refusal; };
+      await assert.rejects(engine.play(), (error) => error === refusal);
+      assert.equal(engine.context.state, "suspended", "a refused play from suspended suspends again");
+      host.control = control;
+      // Only the newest call restores: a refused play that a newer play overtook leaves it running.
+      let release;
+      const slow = new Promise((resolve) => { release = resolve; });
+      host.control = async () => { host.control = control; await slow; throw refusal; };
+      const overtaken = engine.play();
+      const newest = engine.play();
+      release();
+      await assert.rejects(overtaken, (error) => error === refusal);
+      assert.equal((await newest).state, "playing");
+      assert.equal(engine.context.state, "running", "an overtaken refusal does not suspend the newest play");
+      assert.equal((await engine.transport()).state, "playing");
+      assert.equal((await engine.play()).state, "playing");
+      host.control = async () => { throw refusal; };
+      await assert.rejects(engine.play(), (error) => error === refusal);
+      assert.equal(engine.context.state, "running", "a refused play from running keeps it running");
+      host.control = control;
+      // A call that waits when close() runs rejects as a usage error.
+      engine.context.holdResume = true;
+      const waiting = engine.play();
+      await engine.close();
+      await assert.rejects(within(waiting), MisoUsageError);
+    } finally {
+      await engine.close();
+    }
+  });
+
+  test("gate 3: a refused apply leaves the revision", async () => {
+    // Red if a refusal advances `revision`.
+    const { engine } = await boot(base());
+    try {
+      await assert.rejects(engine.apply(transaction(base()).setSampleRateHz(96_000).build()), (error) =>
+        error instanceof MisoEngineError && error.code === "reprepareRequired");
+      assert.equal(engine.revision, 0n);
+    } finally {
+      await engine.close();
+    }
   });
 });

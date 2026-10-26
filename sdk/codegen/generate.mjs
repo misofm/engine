@@ -52,6 +52,9 @@ const ARTIFACT_SET = [
   "miso-engine-v1-audio-worklet-host.js",
   "miso-engine-v1-audio-worklet.js",
   "miso-engine-v1-audio-worklet.simd128.wasm",
+  // Issue #2111: the stem identities' WebAssembly SIMD BLAKE3, which
+  // `browser/stems/incremental-blake3.js` loads from `assets/`.
+  "miso-engine-v1-blake3.simd128.wasm",
   "miso-engine-v1-parameter-metadata.json",
 ];
 
@@ -92,8 +95,6 @@ function moduleTypes(kind, symbol) {
       + `export type EffectObservation<E extends EffectId> =\n`
       + `  Extract<EffectDescriptor, { readonly id: E }>["observations"][number];\n`
       + `export type TapName<E extends EffectId> = EffectObservation<E>["name"];\n`
-      + `export type CommandKindName = Catalog["commandKinds"][number]["name"];\n`
-      + `export type CommandReasonName = Catalog["commandReasons"][number]["name"];\n`
       + `/** The lattice declaration every parameter row carries (issue #242). */\n`
       + `export type StepDeclaration = EffectParameter<EffectId>["step"];\n`
       + `export type StepSizeName = keyof StepDeclaration["ladder"];\n`;
@@ -103,7 +104,6 @@ function moduleTypes(kind, symbol) {
     + `export type AbiStructure = AbiLayout["structures"][AbiStructureName];\n`
     + `export type AbiField = AbiStructure["fields"][number];\n`
     + `export type AbiConstantName = keyof AbiLayout["constants"];\n`
-    + `export type AbiCommandField = AbiLayout["commandRecord"]["fields"][number];\n`
     + `/** Where a typed SDK refusal was raised. Replaces the dead two-phase "compile". */\n`
     + `export type ErrorPhase = AbiLayout["errorPhases"][number];\n`
     + `export type ResultCodeName = AbiLayout["constants"]["resultCodes"][number]["name"];\n`
@@ -819,11 +819,18 @@ function renderControlBuilders(catalog) {
     + `/**\n`
     + ` * The edits of one effect instance: each parameter, its bypass and its link mode, as \`edit.set\`\n`
     + ` * over the row of the instance's own control table. The parameter keys are the catalog's names.\n`
+    + ` *\n`
+    + ` * \`R\` is the instance's rack when the caller knows it (\`console()\`, \`insert()\`), so an insert's\n`
+    + ` * \`linkMode\` refuses \`slot\` at compile time; the union, for an instance addressed by a rack\n`
+    + ` * the caller passes (\`effect()\`), takes either rack's labels and leaves the refusal to run time.\n`
     + ` */\n`
-    + `export abstract class EffectControlBuilders<E extends EffectId> {\n`
+    + `export abstract class EffectControlBuilders<\n`
+    + `  E extends EffectId,\n`
+    + `  R extends "console" | "inserts" = "console" | "inserts",\n`
+    + `> {\n`
     + `  protected abstract readonly effectId: E;\n`
     + `  /** Whether this instance is a console entry or an insert: their link-mode rows differ. */\n`
-    + `  protected abstract readonly rack: "console" | "inserts";\n\n`
+    + `  protected abstract readonly rack: R;\n\n`
     + `  /** \`edit.set\` over this instance's address: the row's machine name, the lane and the ramp. */\n`
     + `  protected abstract setRow(\n`
     + `    control: string,\n`
@@ -866,9 +873,12 @@ function renderControlBuilders(catalog) {
     + `  }\n\n`
     + `  /**\n`
     + `   * The link mode of an instance of an effect that has a choice of it. A console entry also\n`
-    + `   * takes \`slot\`, the slot's declared mode; an insert refuses it.\n`
+    + `   * takes \`slot\`, the slot's declared mode; an insert refuses it, at compile time when its rack\n`
+    + `   * is known and at run time otherwise.\n`
     + `   */\n`
-    + `  linkMode(mode: EffectLinkModeLabel<E> | EffectConsoleLinkModeLabel<E>): ControlEditSet {\n`
+    + `  linkMode(\n`
+    + `    mode: R extends "console" ? EffectConsoleLinkModeLabel<E> : EffectLinkModeLabel<E>,\n`
+    + `  ): ControlEditSet {\n`
     + `    const row = (this.rack === "console" ? EFFECT_CONSOLE_LINK_MODE_ROWS : EFFECT_LINK_MODE_ROWS)[this.effectId];\n`
     + `    if (row === undefined) throw new MisoUsageError(\`\${this.effectId} has no link mode\`);\n`
     + `    return this.setRow(row.control, enumValue(row.choices, mode, \`\${this.effectId} link mode\`), "both");\n`

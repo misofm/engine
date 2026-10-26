@@ -14,10 +14,12 @@ mkdir "$mock_bin"
 cat >"$mock_bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'RUSTFLAGS=%s %s\n' "${RUSTFLAGS-}" "$*" >>"$(dirname "$0")/cargo.log"
+printf 'RUSTUP_TOOLCHAIN=%s RUSTFLAGS=%s %s\n' "${RUSTUP_TOOLCHAIN-}" "${RUSTFLAGS-}" "$*" \
+  >>"$(dirname "$0")/cargo.log"
 if [[ $1 == build ]]; then
   case " $* " in
     *" -p host-web "*) artifact=host_web ;;
+    *" -p blake3-web "*) artifact=blake3_web ;;
     *) echo "unexpected cargo build invocation" >&2; exit 1 ;;
   esac
   output="$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/$artifact.wasm"
@@ -130,6 +132,7 @@ check_builder() {
   case "$builder" in
     build-web-audioworklet.sh)
       grep -aqx 'host_web fixture' "$output/miso-engine-v1-audio-worklet.simd128.wasm"
+      grep -aqx 'blake3_web fixture' "$output/miso-engine-v1-blake3.simd128.wasm"
       cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" \
         "$output/miso-engine-v1-audio-worklet.js"
       cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
@@ -207,7 +210,7 @@ cmp -s "$full/$module_name" "$module/$module_name" || {
   exit 1
 }
 [[ $(grep -c . "$scratch/module-only.log") == 1 ]] &&
-  cmp -s "$scratch/module-only.log" <(grep ' build ' "$scratch/module-full.log") || {
+  cmp -s "$scratch/module-only.log" <(grep ' build .* -p host-web$' "$scratch/module-full.log") || {
   echo "--module-only did not run exactly the delivery build's cargo line, and only it" >&2
   exit 1
 }
@@ -272,11 +275,12 @@ run_module_only "$repo_root" "$refused" "$scratch/module-refused.log" 2>/dev/nul
 }
 # A flag changed in the script reaches the module. The copy keeps one root, so the path remap in
 # RUSTFLAGS is the same for both builds and the flag is the only difference. The copy carries no
-# pin file: --module-only never reads it.
+# pin file: --module-only never reads it. It carries the toolchain file the build reads (#1334).
 copy="$scratch/flag-copy"
 mkdir -p "$copy/scripts" "$scratch/flag-before" "$scratch/flag-after"
 cp "$repo_root/scripts/build-web-audioworklet.sh" "$repo_root/scripts/strip-wasm-names.py" \
   "$copy/scripts/"
+cp "$repo_root/rust-toolchain.toml" "$copy/"
 run_module_only "$copy" "$scratch/flag-before" "$scratch/flag-before.log"
 sed -i 's/-C target-feature=+simd128 /-C target-feature=+simd128 -C opt-level=s /' \
   "$copy/scripts/build-web-audioworklet.sh"
@@ -322,6 +326,53 @@ for refused_twin in non-empty same-as-output; do
     exit 1
   }
 done
+# Issue #1334: the module builds on rust-toolchain.toml's `[browser-artifact] channel`, a dated
+# nightly. --print-toolchain prints it (read here by a TOML parser, not by the script's own awk) and
+# builds nothing; a missing table or a floating or undated channel is refused, by --print-toolchain
+# and by a build, before anything is built or written.
+channel=$(python3 -B -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["browser-artifact"]["channel"])' \
+  "$repo_root/rust-toolchain.toml")
+rm -f "$mock_bin/cargo.log"
+[[ $channel =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ &&
+  $(PATH="$mock_bin:$PATH" bash "$repo_root/scripts/build-web-audioworklet.sh" --print-toolchain) == "$channel" &&
+  ! -e $mock_bin/cargo.log ]] || {
+  echo "--print-toolchain did not print the [browser-artifact] dated nightly, or built" >&2
+  exit 1
+}
+# The delivery build's cargo lines (logged by the mock above) -- the worklet module's and, since
+# #2111, the BLAKE3 module's -- run on that channel, with std rebuilt and simd128 on.
+[[ $(grep -c ' build ' "$scratch/module-full.log") == 2 &&
+  $(grep ' build ' "$scratch/module-full.log" | grep -c -- \
+    "^RUSTUP_TOOLCHAIN=$channel RUSTFLAGS=-C target-feature=+simd128 .* build --locked --release -Zbuild-std=std,panic_abort .*--target wasm32-unknown-unknown -p \(host-web\|blake3-web\)$") == 2 ]] || {
+  echo "a shipped cargo line does not run on the [browser-artifact] channel with -Zbuild-std and simd128" >&2
+  exit 1
+}
+toolchain_copy="$scratch/toolchain-copy"
+mkdir -p "$toolchain_copy/scripts"
+cp "$repo_root/scripts/build-web-audioworklet.sh" "$repo_root/scripts/strip-wasm-names.py" \
+  "$toolchain_copy/scripts/"
+stable_table=$(sed -n '1,/^\[browser-artifact\]/{/^\[browser-artifact\]/!p}' "$repo_root/rust-toolchain.toml")
+for refused_toolchain in missing-table floating undated in-another-table; do
+  case $refused_toolchain in
+    missing-table) printf '%s\n' "$stable_table" ;;
+    floating) printf '%s\n[browser-artifact]\nchannel = "nightly"\n' "$stable_table" ;;
+    undated) printf '%s\n[browser-artifact]\nchannel = "nightly-2026-8-20"\n' "$stable_table" ;;
+    in-another-table) printf '%s\n[browser-artifact]\n[other]\nchannel = "%s"\n' "$stable_table" "$channel" ;;
+  esac >"$toolchain_copy/rust-toolchain.toml"
+  output_dir="$scratch/toolchain-$refused_toolchain"
+  mkdir "$output_dir"
+  rm -f "$mock_bin/cargo.log"
+  printed_status=0 build_status=0
+  PATH="$mock_bin:$PATH" bash "$toolchain_copy/scripts/build-web-audioworklet.sh" --print-toolchain \
+    >/dev/null 2>&1 || printed_status=$?
+  PATH="$mock_bin:$PATH" bash "$toolchain_copy/scripts/build-web-audioworklet.sh" --module-only \
+    "$output_dir" >/dev/null 2>&1 || build_status=$?
+  [[ $printed_status != 0 && $build_status != 0 && ! -e $mock_bin/cargo.log &&
+    -z $(find "$output_dir" -mindepth 1 -print -quit) ]] || {
+    echo "the builder accepted a $refused_toolchain browser artifact toolchain, or built" >&2
+    exit 1
+  }
+done
 # And the V8 spill leg of run-wasm-gates.sh takes its module from that mode and builds none itself.
 wasm_gates="$repo_root/scripts/run-wasm-gates.sh"
 grep -q 'bash scripts/build-web-audioworklet.sh --module-only' "$wasm_gates" &&
@@ -337,4 +388,4 @@ if node "$repo_root/sdk/codegen/stage-package.mjs" first second >/dev/null 2>&1;
   echo "package staging accepted a retired second codec artifact directory" >&2
   exit 1
 fi
-echo "SDK artifact builder output-directory, single-directory, --module-only and --check-pin contract passed"
+echo "SDK artifact builder output-directory, single-directory, --module-only, --check-pin and --print-toolchain contract passed"

@@ -70,7 +70,6 @@ fn document() -> String {
 fn options() -> WebBootOptions {
     WebBootOptions {
         live_control_meter_blocks: 2,
-        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     }
 }
@@ -514,7 +513,7 @@ fn a_structural_edit_inside_the_swap_window_is_admitted_on_the_browser_path() {
             host.control_request_mut(length)
                 .expect("a control frame fits the staging")[..request.len()]
                 .copy_from_slice(request);
-            let result = host.control_command(length, None);
+            let result = host.control_command(length);
             (result, host.control_response().to_vec())
         };
 
@@ -550,7 +549,7 @@ fn a_structural_edit_inside_the_swap_window_is_admitted_on_the_browser_path() {
             Some(2),
             "the window's plan renders"
         );
-        assert_eq!(host.service(None), RESULT_OK);
+        assert_eq!(host.service(), RESULT_OK);
         assert_eq!(host.dispose(), RESULT_OK);
     })
     .join()

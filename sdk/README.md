@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.4.3
+npm install @misofm/engine@0.6.0
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -96,6 +96,34 @@ the document says `{ "kind": "default" }` and the engine uses its default table 
 governs solo, send mutes and VCA mutes, and twice it governs polarity invert; the fader length
 governs input trim, send gain and VCA offsets; the pan length governs the matrix.
 
+### Placement and mono sources
+
+A track or submix built without `pan` gets the identity matrix (`ll = rr = 1`, `lr = rl = 0`), the
+catalog defaults of the `matrix_*` rows. It passes each lane through unchanged, so a stereo source
+keeps its image. Give `pan: { left, right }` only when you want the per-lane pan: that law is equal
+power on each lane, so `{ left: 0, right: 0 }` puts both lanes in the centre and folds a stereo
+source to mono.
+
+A mono source reads its channel 0 on both lanes. When both lanes carry the same settings the
+engine may render it as one plane and copy it at the fader/matrix seam; the output is the same
+either way. With the identity matrix, a mono source plays at exactly the level of its stereo
+dual-mono twin (the same signal on both channels): a mono file is a smaller copy of that twin, not
+a different sound.
+
+The recommended placement law (apply it with `matrix(...)`) is a balance, not a -3 dB equal-power
+mono pan (root ruling, #2101). At the centre both sides are at 0 dB. At position `p` in `[-1, 1]`,
+the far side is `cos(p * pi / 2)` and the near side stays at 0 dB: for `p > 0` the matrix is
+`{ ll: cos(p * pi / 2), lr: 0, rl: 0, rr: 1 }`, and for `p < 0` it is `{ ll: 1, lr: 0, rl: 0,
+rr: cos(p * pi / 2) }`. With no crossfeed
+(`lr = rl = 0`), a coefficient of at most 1 cannot lift the near side above 0 dB, so a
+constant-power law with 0 dB at the centre needs crossfeed, which would mix the lanes of a stereo
+source and lift a mono source up to +3 dB at the sides. The balance keeps the lanes separate and
+never boosts, so a mono source stays at its stereo twin's level at every position.
+
+A strip has `pan` or `matrix`, not both. To give a matrix strip a live `pan(left, right)`, put
+`matrixMode("pan")` in the same transaction: `controls.submit(strip.matrixMode("pan"),
+strip.pan(left, right))`. A `pan` edit alone on a matrix strip is refused with `control.inactive`.
+
 ## Render offline
 
 Node 20+ and Bun use the packaged Wasm runtime. Supply a Session V1 document as JSON text, bytes,
@@ -141,6 +169,52 @@ producer. `seekSource()` changes the source generation; stale chunks cannot sati
 subscriptions. Use `loadBundledEngineAsset()` and the `asset` option to share one compiled module
 across engines.
 
+### Edit a headless session
+
+`engine.apply(tx)` sends one structural transaction built with `transaction(base)...build()`.
+`engine.replaceSession(document)` sends a full document, and the engine compares it with the
+committed session to make one transaction. Each call resolves with `{ revision, path }`:
+
+- `live`: the running plan ramps to the new values from the next block.
+- `model_only`: the committed session changed, but render has nothing different to do.
+- `rebuild`: a new plan replaces the running plan at the next `render()`. Sources keep playing,
+  and unchanged nodes keep their state.
+- `unchanged` (`replaceSession` only): the document is the committed session. Nothing is
+  committed, and the revision stays the same.
+
+A refusal rejects, and nothing is committed. `engine.revision` is the committed revision.
+`engine.applied(revision)` resolves with the watermark `{ revision, sample, outcome }` when that
+revision is audible. `sample` is the first sample of the block where the revision took effect. The
+engine reads the watermark after each `render()`, so `applied` stays pending until you call
+`render()`. `engine.watermark()` reads the watermark immediately.
+
+```ts
+import { transaction } from "@misofm/engine/headless";
+import type { OfflineEngine, SessionBuilder, TransactionBuilder } from "@misofm/engine/headless";
+
+type TrackSpec = Parameters<TransactionBuilder["upsertTrack"]>[1];
+
+// `upsertTrack` writes the whole track record. Pass the track's full spec from `base` and change
+// only its fader, so that the edit stays a live fader move.
+export async function lowerTrack(
+  engine: OfflineEngine,
+  base: SessionBuilder,
+  trackId: string,
+  spec: TrackSpec,
+) {
+  const edit = transaction(base)
+    .upsertTrack(trackId, { ...spec, fader: { ...spec.fader, leftDb: -6, rightDb: -6 } })
+    .build();
+  const { revision, path } = await engine.apply(edit);
+  const audible = engine.applied(revision);
+  engine.render(); // Submit the source PCM for this block first, as for every block.
+  return { path, firstSample: (await audible).sample };
+}
+```
+
+`replaceSession()` is an edit. `loadSession()` is a reboot: every source starts again from its first
+frame, `revision` goes back to `0`, and each pending `applied` rejects.
+
 ## Play in the browser
 
 `createEngine()` scratch-boots in a Worker, learns the session's shape, verifies the `AudioContext`
@@ -179,6 +253,47 @@ For shared-ring delivery, the browser entry exposes `prepareEngineFeed`, `attach
 decode media. The shared-ring path requires `SharedArrayBuffer` and a cross-origin-isolated page.
 The host also exposes bounded source submission. Source underruns produce silence and counters.
 
+Pass `engine` to `attachEngineFeed` to feed the sources that an edit adds or removes while audio
+plays:
+
+- **Add a stem.** After `engine.apply(tx)` (or `replaceSession`) resolves, attach a feed for the new
+  source with `start: { frameAt, prime }`. `feed.ready()` reads the engine's next render sample
+  once and sets the anchor `A` to that sample plus the ring's capacity in frames, rounded up to a
+  quantum. It calls `frameAt(A)` once (`frameAt` is your mapping from anchor to source frame;
+  `engine.position()` gives the timeline frame now), publishes the anchored seek in the ring,
+  awaits `prime({ generation, frame, anchorSample })`, and then sends the seek to the engine. Write the stem's PCM from `frame` at
+  `generation` in `prime`, and do not seek the ring there. The drain reads none of that ring's
+  chunks until the engine applied the seek. If the audio reaches `A` before that, the engine
+  starts the stem at the frame plus the lateness and reports it in the source's seek report; the
+  stem stays in time. The margin in `A` is one ring of audio, so write at most one ring's worth
+  in `prime` (the ring holds no more), and keep writing after `ready()` resolves. A refused seek
+  rejects `ready()` with a `MisoEngineError` and closes the feed. Do not publish an anchored seek
+  with `Msb1RingWriter.seek` yourself: without the SDK's message to the engine, that ring stalls.
+  To start in time with a playing stem instead of your own mapping, give `start: { alignTo:
+  sourceId, prime }` (or `alignTo: "$timeline"`): the SDK reads that source's seek report before
+  and after the anchor is computed and uses `sourceFrame + (A - firstSample)`. To add
+  several stems together, start one with `frameAt` and align the others to it: if the reference's
+  own anchored start is published but not rendered yet, the SDK uses that start's frame at `A`. In
+  one feed the SDK starts a source after the source it aligns to, whatever the list order; a
+  self-alignment or an `alignTo` cycle throws at attach. Across feeds the SDK does not wait: a
+  reference whose feed has not published its start yet refuses (`feed.align.unstarted`), so align
+  after that feed's `ready()` resolved. If the engine later refuses the reference's own seek, the
+  aligned stem stays at the frame the reference's `frameAt` mapping gave. A reference that has not
+  rendered yet, whose report stays busy, that seeked or held frames between the two reads, or
+  whose ring publishes another seek the engine has not rendered rejects `ready()` with a
+  `MisoUsageError` whose `diagnosticCode` names the cause (`feed.align.*`), publishes nothing and
+  closes the feed; use `frameAt` then.
+- **Remove a stem.** When a committed edit removes a source of the feed, keep feeding its ring. The
+  SDK detaches it with `feed.detachSource(sourceId)` after `engine.applied(revision)` resolves
+  (the strip's ramp-out has then played), and releases its writer.
+- `feed.detachSource(sourceId)` resolves after the worklet's drain stopped reading that ring; the
+  other rings keep draining. If the worklet withdrew no ring, it rejects with `detachRefused` and
+  closes the feed.
+
+The MSB1 ring keeps version 1 with an anchor word: the control block is 144 bytes (the anchor
+`i64` at 128, `-1` for a plain seek), the ID is at 144 and the slot headers at 272. The drain
+refuses a ring with another header offset.
+
 Browser execution requires WebAssembly SIMD, Workers, and AudioWorklet in a secure context; there
 is no shipped scalar fallback. Supported session rates are exactly **44.1, 48, 88.2, and 96 kHz**.
 The device/context must accept the session rate and quantum (normally 128 frames); mismatches are
@@ -189,6 +304,170 @@ must enforce that restriction at their ingest boundary.
 The npm hosts both execute Wasm. Native and mobile applications must integrate the separate
 Rust/C-ABI host layer and platform audio callbacks; this package supplies no native binaries or
 mobile audio-device adapter.
+
+### Boot with a PCM feed, read the playhead, play and stop
+
+Set `pcmFeed: true` (or `pcmFeed: { moduleUrl }`) in `createEngine` to use shared-ring delivery.
+The feed's worklet prelude must load before the engine worklet, because it wraps
+`registerProcessor`. With `pcmFeed`, `createEngine` loads the prelude after it verifies the
+context and before it creates the host, so you do not wrap `createHost`. `pcmFeed` is off by
+default. If the prelude does not load, `createEngine` rejects with `PcmFeedError` (`moduleLoad`)
+and closes the context.
+
+The engine has one timeline playhead. `engine.position()` resolves with `{ frame, generation,
+atSample }`: `frame` is the timeline frame that the next rendered block starts at, and `atSample`
+is the absolute render sample of that block. The SDK reads the timeline's seek report and the
+host's next render sample, and calculates `frame = sourceFrame + (atSample - firstSample)`. After
+`engine.seek(f)`, `position()` gives `f` until the first block renders, and then `f` plus the
+frames rendered since. The frame does not move while the context is suspended. You do not need
+the meters to calculate a position.
+
+`engine.planLatency()` resolves with `{ samples, tailSamples }` on both engines: the output latency
+and tail of the plan that renders now, in samples, as the C ABI's plan resource report gives them
+(`tailSamples` is `null` for an unbounded tail). Use it to align meters, the playhead and visuals
+with the audio. After a rebuild, it changes at the block that adopts the new plan.
+
+`engine.play()` resumes the context and then sets the transport to `playing`. `engine.stop()`
+suspends the context and then sets the transport to `stopped`. Each call starts the context step
+at once, and sets the transport after that step settles, in call order. Each resolves with the
+new transport state. `engine.setTransport()` alone does not start or stop the audio: the
+transport state is a label that the core keeps (#1635). In the browser, the context is what
+renders. A browser holds `resume()` until a user gesture: a later `play()` or `stop()` does not
+wait for it, and the earlier `play()` rejects with `MisoUsageError`. A call that a newer call
+supersedes before its context step settles rejects with `MisoUsageError`. If the core refuses the
+transport, `play()` rejects and, if it is the newest call and the context was suspended before
+it, suspends the context again. If the core refuses the transport for `stop()`, `stop()` rejects
+and the context stays suspended, but the transport label still says `playing`.
+
+The session has no master strip. The master is an ordinary submix that you designate after boot
+with `controls.edit.submix(id).master(true)` (#1683). Its meter row carries gain reduction only
+(#1690 D3).
+
+```ts
+import { createEngine } from "@misofm/engine/browser";
+import type { BrowserEngine, SessionSeekProducer } from "@misofm/engine/browser";
+
+export async function openFedMix(
+  document: string,
+  attachSources: (engine: BrowserEngine) => Promise<SessionSeekProducer>,
+) {
+  const engine = await createEngine({ document, pcmFeed: true });
+  engine.host.node.connect(engine.context.destination);
+  // Attach the feed with attachEngineFeed({ engine, ... }) and prefill its rings here.
+  const producer = await attachSources(engine);
+  await engine.seek(0n, { producers: [producer] });
+  return engine;
+}
+
+// Call play() from a user gesture, so that the browser lets the context resume.
+export const play = (engine: BrowserEngine) => engine.play();
+export const stop = (engine: BrowserEngine) => engine.stop();
+export const playhead = async (engine: BrowserEngine) => (await engine.position()).frame;
+```
+
+### Edit a playing session
+
+The browser engine edits a playing session with the same calls as the headless engine.
+`engine.apply(tx)` sends one structural transaction built with `transaction(base)...build()`.
+`engine.replaceSession(document)` is a convenience: it sends a full document, and the engine
+compares it with the committed session to make one transaction. Each call resolves with
+`{ revision, path }` when the control plane commits:
+
+- `live`: the running plan ramps to the new values from the next block.
+- `model_only`: the committed session changed, but render has nothing different to do.
+- `rebuild`: a new plan replaces the running plan at a later block boundary.
+- `unchanged` (`replaceSession` only): the document is the committed session. Nothing is
+  committed, and the revision stays the same.
+
+A refusal rejects, and nothing is committed. The SDK does not send a refused edit again: if
+another commit came first, the core refuses the edit with `revision_conflict`, and you build the
+edit again on the new session. `engine.revision` is the newest committed revision that the engine
+saw.
+
+A committed revision is pending until the audio has it. `engine.applied(revision)` resolves with
+the watermark `{ revision, sample, outcome }` that the worklet posts when the revision is in
+effect. `sample` is the first render sample of that block. `outcome.exact` is set when the
+revisions completed as committed, `outcome.transitionFallback` when a new plan could not start
+warm and the swap used the transition, and `outcome.superseded` when a newer commit replaced a
+plan before render adopted it. `applied` stays pending while the context does not render (for
+example, while it is suspended), and it rejects at `engine.close()`. `engine.watermark()` returns
+the newest watermark immediately.
+
+Across a `rebuild`, every source keeps playing and every unchanged node keeps its state. A node
+that the edit adds or changes starts from rest; `engine.counters(["stripsRestarted"])` counts each
+strip that a swap started at rest. After a committed `replaceSession`, `engine.liveControls()`
+binds to the new document.
+
+On a page without cross-origin isolation, the worklet's message handler prepares a `rebuild` on
+the audio thread. The audio thread is blocked while it prepares, and
+`(await engine.host.status()).blockingRebuilds` counts each blocking rebuild.
+
+```ts
+import { transaction } from "@misofm/engine/browser";
+import type { BrowserEngine, TransactionBuilder } from "@misofm/engine/browser";
+import type { SessionBuilder } from "@misofm/engine";
+
+type TrackSpec = Parameters<TransactionBuilder["upsertTrack"]>[1];
+
+// Pass the track's full spec from `base` and change only its fader, so that the edit stays live.
+export async function lowerTrack(
+  engine: BrowserEngine,
+  base: SessionBuilder,
+  trackId: string,
+  spec: TrackSpec,
+) {
+  const edit = transaction(base)
+    .upsertTrack(trackId, { ...spec, fader: { ...spec.fader, leftDb: -6, rightDb: -6 } })
+    .build();
+  const { revision, path } = await engine.apply(edit);
+  const { sample } = await engine.applied(revision);
+  return { path, firstSample: sample };
+}
+```
+
+## Load local WAV stems
+
+The browser entry reads a stem from a local file without a decoder of your own. `readWavHeader`
+reads a 16- or 24-bit integer PCM WAV's header (RIFF, or RF64/BW64 with the data size from
+`ds64`; plain or `WAVE_FORMAT_EXTENSIBLE` fmt) with small reads, and returns where its samples are. For such a WAV the `data` chunk is exactly the stem's
+canonical PCM (`docs/STEM_IDENTITY_V1.md`), so one slice of the file is both the input of
+`blake3Stream`, which gives the session's `content` identity, and what `CanonicalPcmPump` writes
+into the source's `Msb1RingWriter` ring as planar `f32`.
+
+```ts
+import { CanonicalPcmPump, Msb1RingWriter, blake3Stream, readWavHeader } from "@misofm/engine/browser";
+
+export async function localStem(file: File) {
+  const wav = await readWavHeader(file); // sampleRateHz, channels, bitDepth, frames, dataOffset, canonicalBytes
+  const pcm = file.slice(wav.dataOffset, wav.dataOffset + wav.canonicalBytes);
+  const identity = `blake3:${(await blake3Stream(pcm.stream())).hex}` as const;
+  // Declare the source with { channels, bitDepth, frames, content: identity } and the session at
+  // wav.sampleRateHz. When the engine is up, pump into the ring of that source's feed:
+  const pump = (ring: SharedArrayBuffer, sourceId: string) => new CanonicalPcmPump({
+    lease: { read: async () => pcm },
+    sources: [{ sourceId, identity, channels: wav.channels, bitDepth: wav.bitDepth, frames: wav.frames, ring: new Msb1RingWriter(ring) }],
+  });
+  return { wav, identity, pump };
+}
+```
+
+Call `pump.pumpUntilFull()` before `context.resume()` and again as the ring drains, and pass the
+pump to `engine.seek(frame, { producers: [pump] })`: it repositions every ring it writes after
+the engine accepted the seek. The pump holds at most two windows per source, the resident one and
+the next one read ahead (`windowFrames`, 4096 by default), never the whole stem; it reads the
+sources' windows concurrently, at most eight at a time. `readWavHeader` refuses with a `WavFormatError`, whose
+`code` names the cause: a float WAV (`wav.float_unsupported`: export 16- or 24-bit PCM), more than
+two channels (`wav.channels`), and a rate other than 44.1, 48, 88.2 or 96 kHz (`wav.sample_rate`).
+A `data` size larger than the file is read to the file's end. The pump and the hash are the
+engine's own code, copied into the package unchanged; `IncrementalBlake3` is the same hash for
+bytes you already hold.
+
+The hash runs in a WebAssembly SIMD module, `dist/assets/miso-engine-v1-blake3.simd128.wasm` (about 1.5 GB/s per core in Chromium, against about 65 MB/s for the JavaScript fallback).
+`blake3Stream` loads it itself; call `await prepareBlake3()` once before `new IncrementalBlake3()`
+to hash in it, and pass `prepareBlake3({ url })` if your bundler moves the file. It resolves
+`"simd128"`, or `"javascript"` when the module cannot load (no WebAssembly SIMD, a failed fetch);
+it never rejects, and the digests are the same either way. To hash many stems at once, run one
+`blake3Stream` per Worker: each Worker loads its own copy of the module.
 
 ## Change a mix and read the core's answer
 
@@ -270,14 +549,14 @@ batches through the queue, for gesture loops; the core's `backpressure` status i
 never an error. The root entry's `parameter()` helper provides exact decimal/lattice edits for
 agent-facing controls.
 
-Observation subscriptions (`console(...)` or `insert(...)` then `.observe(...)`) are the one edit that
-is still a command record: it names its tap by stable key (the strip's ID, the console slot's or
+Observation subscriptions (`engine.subscribeObservations(...)`) send the core's `Observe` edit
+through the same control queue, naming each tap by stable key (the strip's ID, the console slot's or
 insert's ID, the tap's ID), which the core resolves on the newest committed plan and refuses with a
-typed reason when it has no such tap. They resolve with a `CommandReport` and need
-`liveControls.observationTaps` at boot, passed to `createOfflineEngine` directly or under
-`policy` to `createEngine`. The cap must be at least the largest tap count of any effect in the
-session (4 for `miso.dynamic-eq`, one tap per band): a lower positive cap refuses the boot with
-`effect.observation.taps`, even with no subscription. Value edits are `SET_CONTROL` transactions and need no boot word.
+typed `MisoEngineError` when it has no such tap. A subscription's `armed()` resolves with the sample
+at which render applied every arm, from the core's `OBSERVATION_READ` rows. They need no boot
+option: every plan binds every declared tap of every effect, on both hosts (issue #1590), and the
+retired `liveControls.observationTaps` is refused with `MisoUsageError`. Value edits are
+`SET_CONTROL` transactions and need no boot word either.
 
 ### List every control, read their values, and set any of them
 
@@ -347,31 +626,39 @@ rows in one transaction.
 Choose observation capacity and spectrum targets when preparing the engine. Analysis and delivery
 are bounded; notifications can arrive later than the samples they describe.
 
-Set the prepared continuous-spectrum hop with `BootOptions.spectrumHopFrames` when calling
-`createOfflineEngine`, or with `BrowserBootPolicy.spectrumHopFrames` under `policy` for
-`createEngine`. The allowed values are `256`, `512`, `1024`, and `2048` frames. This is a
-preparation-time structural setting passed as a validated boot number: it is outside canonical
-session JSON and is not a Wasm environment variable. Omit it to retain the rate/quantum-derived
-default (`48 kHz` with a `128`-frame quantum derives `2048`). Headless and browser preparation
-have the same semantics. For an explicit browser hop, the asset must expose
-`miso_engine_web_v1_spectrum_hop_capability` returning exactly `1` and the additive
-`miso_engine_web_v1_boot_with_spectrum_hop`; an old or incompatible asset is refused without
-falling back to the default path.
+Set the boot's spectrum taps with `spectrum` (one tap) or `spectrumCollection` (several, one
+selected at a time) when calling `createOfflineEngine` or `createEngine`. Set their continuous-spectrum
+hop with `BootOptions.spectrumHopFrames` for `createOfflineEngine`, or with
+`BrowserBootPolicy.spectrumHopFrames` under `policy` for `createEngine`. The allowed values are `256`,
+`512`, `1024`, and `2048` frames; omit it to keep the rate/quantum-derived default (`48 kHz` with a
+`128`-frame quantum derives `2048`). Both engines send the taps and the hop to the core in one
+`SPECTRUM_CONFIGURE` before the engine is returned, and refuse an engine whose `CAPABILITIES_GET` lacks
+capability flag bit 16 (`sdk.asset.capability`).
 
-Every spectrum result uses a fixed `2,048`-frame analysis window. The prepared hop controls the
+Change the taps or the hop of a running session with `configureSpectrum(query | collection, {
+hopFrames })` on either engine; an empty collection with `maximumCaptureBytes: 0` removes them. A
+change of taps prepares a replacement plan: the reply reports `rebuild` and the epochs, and the new
+taps are in effect once a spectrum reply reports `adoptedEpoch === configuredEpoch`. A stream on an
+entry that a collection keeps runs on; a change between the single form and a collection ends it. The
+core checks every tap, channel mask and budget, and a refusal rejects with `MisoEngineError` whose
+`diagnosticCode` is the core's code (`spectrum.target.unknown`, `spectrum.budget`, `spectrum.busy`,
+...).
+
+Every spectrum result uses a fixed `2,048`-frame analysis window. The configured hop controls the
 window start spacing, so hops below `2048` overlap successive windows. Runtime `cadenceMs` controls
-subscription delivery and `smoothingMs` controls power smoothing; neither changes the prepared
-native hop. Halving the hop approximately doubles analysis and publication frequency and their CPU work.
+subscription delivery and `smoothingMs` controls power smoothing; neither changes the configured
+hop. Halving the hop approximately doubles analysis and publication frequency and their CPU work.
 Native capture storage and the SDK's bounded buffers and retained result storage keep memory bounded
 instead of growing with stem duration.
 
 | Observation | API and meaning of its time |
 | --- | --- |
 | Track/master peaks | Browser `subscribeMeters()`; headless `meters(true)` then `pollMeters()`. Linear peak magnitudes cover `[firstSample, endSample)`. This span timestamps peaks only, not an exact gain-reduction join. A headless frame names its own strips (`trackIds`, `submixIds`) by the control list of the `structureEpoch` it carries, so it stays right across a rebuild, including one that keeps the strip count. |
-| Resident effect values | `observationMap()`, `readObservations()`, or `subscribeObservations()`. Select stable track/rack/effect-slot/tap IDs. Ready values retain the effect owner's own window and native unit. A managed subscription follows a rebuild (the core keeps the tap armed on the effect that carries on). When a commit removes the effect, the core ends the tap with `OBSERVATION_ENDED`: pass `onEnd` to `subscribeObservations()` to be told which selections ended and which remain, once for each commit; `handle.ended` lists them, and a subscription left with no selection is closed. |
+| Resident effect values | `observationMap()`, `readObservations()`, or `subscribeObservations()`. Select stable track/rack/effect-slot/tap IDs. The map is the core's control list (each console slot's and insert's effect) with the generated catalog's taps; a read is one `OBSERVATION_READ`. Ready values retain the effect owner's own window and native unit. A managed subscription follows a rebuild (the core keeps the tap armed on the effect that carries on). When a commit removes the effect, the core ends the tap with `OBSERVATION_ENDED`: pass `onEnd` to `subscribeObservations()` to be told which selections ended and which remain, once for each commit; `handle.ended` lists them, and a subscription left with no selection is closed. |
 | Live EQ/filter response | `queryTrackResponse()` or `subscribeTrackResponse()`. `capturedSample` marks capture of applied target state at a block boundary. The curve is a stationary EQ/input-filter subtotal; fader, pan, routing, and unsupported processors are excluded. |
 | Spectrum | Browser `querySpectrum()`; headless `armSpectrum()`, explicit renders, then `readSpectrum()`. Each result covers 2,048 captured PCM samples, `[capturedSample, endSample)`, with dBFS bins and a graph-wide source-underrun flag. |
 | Continuous spectrum | `subscribeSpectrum()` retains one managed stream. Metadata carries the capture span, hop, epochs, drops, and smoothing history. The default 100 ms power smoothing includes earlier windows; set `smoothingMs: 0` for unsmoothed analysis. |
+| Master loudness | `subscribeLoudness()` starts the session's one output loudness meter and returns a handle with `readLatest()`, `pump()`, `reset()` and `close()`. A `LoudnessReading` gives BS.1770-5 momentary, short-term and integrated LUFS, the EBU Tech 3342 range in LU, their maxima, and the Annex-2 true peak in dBTP of the rendered master pair; `observedSample` ends the last 10 ms hop it covers. |
 | Render telemetry | Browser `subscribeTelemetry()` reports CPU/deadline measurements. It has no audio sample span. |
 
 For spectrum, pass either `spectrum` for one boundary or `spectrumCollection` for several
@@ -390,13 +677,28 @@ Managed observation, response, and spectrum handles expose `readLatest()`, `upda
 explicit renders. Pumping never renders audio. Identical subscriptions share work; refused updates
 preserve the prior configuration. Two managed operations (subscribe, update, close) that each send a record for the same
 effect tap need a render between them: the second is refused with typed `backpressure` until a
-render has drained the first. An identical second subscribe, and a close of a binding that other
-handles still share, send no record and need no render. In a headless engine the refused
+render has drained the first. Each handle sends its own `Observe` edits (one arm per selection, one
+disarm per selection at close) and the core shares one arm between the subscribers of a tap and
+window (issue #1590): an identical second subscribe, and a close that leaves another subscriber on
+the tap, queue no record and need no render. Another window on a tap a subscriber holds is refused
+with `MisoUsageError` (`observation.window_conflict`). In a headless engine the refused
 operation rejects at once: render, then retry. In a browser engine it waits for a render and sends
 again, up to `requestDeadlineMs` and at most 8 resends (one render drains the tap, so more means
-another writer keeps refilling it), and then ends in typed `backpressure`. Prepare `liveControls.observationTaps` for resident effect taps: at least the largest tap
-count of any effect in the session (4 for `miso.dynamic-eq`): a lower positive cap refuses the
-boot with `effect.observation.taps`, even with no subscription.
+another writer keeps refilling it), and then ends in typed `backpressure`. Resident effect taps
+need no boot option: every plan binds every declared tap (issue #1590).
+
+`subscribeLoudness()` measures the rendered master pair. Momentary loudness (M) is the last 400 ms,
+short-term (S) the last 3 s, integrated (I) the gated mean since the last start or reset, and the
+loudness range (LRA) the spread of the short-term values since then; true peak (TP) is the 4x
+oversampled peak per channel. The engine updates the meter every 10 ms hop; the handle reads it about
+every 100 ms (the browser on a timer, the headless engine at each `pump()` between your renders).
+A level is absent until its window holds enough audio, and silence reads -120. `reset()` restarts
+I, LRA, the maxima and TP from the next hop boundary (`integratingSince`); M and S run on.
+`hopsDropped` counts the hops the engine lost over the session's whole life: subtract two readings
+to see a loss between them. The meter is one per session: a second `subscribeLoudness()` while a
+handle is open is refused with `MisoEngineError` (`diagnosticCode` `loudness.active`). After
+`close()` the handle keeps its last reading and refuses `pump()` and `reset()`. A timed read that
+fails goes to the request's `onError`; the readings stop advancing until a read lands.
 
 Use the recorded sample spans to compare observations with the first block after a transaction. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling
@@ -425,8 +727,9 @@ resolution, transport-byte verification, decoding, and seek coordination belong 
 There is no implicit sample-rate conversion. The control protocol carries commands, never PCM.
 
 `BUNDLED_ENGINE_ASSETS` locates the installed release's assets. Its
-`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the six engine
-artifacts, including Wasm, host, processor, host declaration, metadata, and ABI layout.
+`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the seven engine
+artifacts: the engine Wasm, host, processor, host declaration, metadata, ABI layout, and the BLAKE3
+Wasm.
 `loadBundledEngineAsset()` verifies the Wasm length and digest before compilation; boot checks
 the exported ABI version. Browser package-relative URLs bind deployment locations but do not
 constitute runtime digest verification. Custom delivery must preserve the matching artifact set;
@@ -434,7 +737,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.4.3 release record](https://github.com/misofm/engine/issues/865) contains the accepted artifact
+[0.6.0 release record](https://github.com/misofm/engine/issues/2121) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -460,6 +763,106 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.5.0
+
+0.6.0 adds to the 0.5.0 API and removes nothing.
+
+- New: `prepareBlake3()` (`./browser`) loads the WebAssembly SIMD BLAKE3 module before
+  `new IncrementalBlake3()`; it resolves `"simd128"` or `"javascript"` and never rejects.
+- New: `engine.planLatency()` resolves `{ samples, tailSamples }` on both engines.
+- Changed: `blake3Stream` and `IncrementalBlake3` hash in WebAssembly SIMD when the module loads;
+  the JavaScript fallback allocates nothing per chunk. The digests do not change.
+- Changed: `CanonicalPcmPump` reads windows concurrently (at most eight in flight) and reads one
+  window ahead per source.
+- Fixed: a seek during a window read no longer commits the pre-seek window at the post-seek frame.
+- Unchanged: a window read shorter than its declared range is refused, as before, with
+  `RangeError("PCM window is truncated")`, and the pump calls `onError` once.
+- The delivery closure has a seventh file, `miso-engine-v1-blake3.simd128.wasm` (in `dist/assets`).
+  Custom delivery must serve it, or pass `prepareBlake3({ url })`; without it the hash falls back
+  to JavaScript.
+
+## Upgrading from 0.4.3
+
+0.5.0 breaks the 0.4.3 API. Each line is one change; the sections above give the details.
+
+### Removed exports
+
+- Root (`./headless` too for `EngineConsole` and `CommandReport`): `EngineConsole`, `ConsoleWriter`, `CommandReport`, `CommandKindName`,
+  `CommandReasonName`, `commandReasonName`, `AbiCommandField`, `encodeLaneEdits`, `LaneEdit`,
+  `WriterOptions`, `SemanticWriterOptions`, `ConsoleRack`, `ConsoleChannel`, `ConsoleSubmit`,
+  `ConsoleBeforeSubmit`, `ConsoleEdits` and `AutomationRack` are removed.
+- `./browser`: `createBrowserConsole` is removed; use `createBrowserLiveControls`.
+- Every entry: the observation-record helpers `decodeObservationRows`, `enrichObservationMap`,
+  `resolveObservationAddressesWithTracks`, `observationRackValue`, `observationChannelsValue`,
+  `ObservationAddress`, `RawObservationRow` and `RawObservationBinding` are removed.
+- `Catalog` loses `commandRecordBytes`, `maximumCommandRecords`, `commandKinds` and
+  `commandReasons`; `AbiLayout` loses `commandRecord`.
+
+### Live values: console -> liveControls
+
+- `engine.console()` becomes `engine.liveControls()` (`EngineLiveControls`); `ConsoleWriter`
+  becomes `LiveControlWriter` (`controls.writer`).
+- A report is `ControlReport` (`{ ok, revision, path, appliedOperations }`), not
+  `{ appliedAtSample }`; a refusal rejects with `MisoControlRefusal`.
+- An effect is addressed by its slot ID: `track.console(slot, effectId)` or
+  `track.insert(slot, effectId)`, not `track.effect("simd1", index, effectId)`.
+- `submitCommands()` is removed. Send value edits as `SET_CONTROL` transactions
+  (`liveControls().submit`, or headless `controlFrame` and `controlTransactions()`), and structural
+  edits with `engine.apply(transaction(base)...build())` or `engine.replaceSession(document)`.
+- `EffectEdits.observe` is removed; use `subscribeObservations()`.
+
+### Observation: records -> handles and callbacks
+
+- A `subscribeObservations()` handle and its receipt report `armed`, not `appliedAtSample`.
+- Pass `onEnd` to learn which selections a commit ended (`handle.ended`); a subscription with no
+  selection left closes.
+- The subscription bounds lose `maximumCommandRecords`, and bounds and limits lose
+  `maximumBindings` and `maximumWindowBlocks`.
+
+### Session types
+
+- `TrackSpec` `simd1`, `dynamic` and `simd2` become `console` entries (one for each session slot)
+  and `inserts`; the session declares its slots with `console({ preInsert, postInsert })`.
+- `Rack` and `ObservationRack` are `"console" | "inserts"`, not `"simd1" | "dynamic" | "simd2"`.
+- A console slot declares its `linkMode` (`dual_mono`, `maximum` or `average`); a strip entry can
+  override it, and `slot` (the default) takes the slot's mode.
+- Send taps: `post_input_builtins` -> `post_input`, `post_simd1` -> `insert_send`,
+  `post_dynamic` -> `insert_return`, `post_simd2_pre_fader` -> `pre_fader`,
+  `post_matrix` -> `post_pan`.
+- The route source `{ kind: "submix_output", submixId }` becomes `{ kind: "submix", submixId, tap }`.
+- `AutomationTarget` is a control address (`owner`, `section`, `control`, `lane`), not
+  `{ trackId, rack, slotId, parameter, channel }`.
+- Spectrum targets: `trackPostInputBuiltins` -> `trackPostInput`, `trackPostMatrix` -> `trackPostPan`.
+
+### Boot options
+
+- `console: { commandQueueRecords, meterBlocks, observationTaps, masterTrackPlusOne }` becomes
+  `liveControls: { meterBlocks }` (in `BootOptions`, `OfflineEngineOptions` and the browser
+  `policy`).
+- The command-queue, master-track and observation-taps boot words are retired: `reserved1`,
+  `reserved2` and `reserved3`, always zero. Every plan binds every declared observation tap.
+- `liveControls.observationTaps` is refused with `MisoUsageError`, never ignored.
+
+### Behaviour and license
+
+- A track or submix built without `pan` now gets the identity matrix, not pan 0 on each lane, so a
+  stereo source keeps its image. A live `pan(...)` on such a strip needs `matrixMode("pan")` in the
+  same transaction.
+- The license changes from Apache-2.0 to FSL-1.1-ALv2.
+
+### New APIs
+
+- Live controls and transactions: `engine.liveControls()`, `engine.controls()`,
+  `engine.controlState()`, `transaction()`, `engine.apply()`, `engine.replaceSession()`,
+  `engine.watermark()`, `engine.applied()`, and the generated `CONTROLS` catalog.
+- Session: submix strips, `vcas`, `controlSmoothing`, route `mute` and `followsMute`, automation
+  `offset`.
+- Browser playback: `createEngine({ pcmFeed })`, `engine.position()`, `engine.play()`,
+  `engine.stop()` and `engine.seek()`.
+- Local WAV stems (`./browser`): `readWavHeader`, `CanonicalPcmPump` and `blake3Stream`.
+- Protocol reads: `capabilities()`, `committedDocument()`, `transport()`, `setTransport()`,
+  `counters()`, `diagnostics()`, `configureTelemetry()` and `onEvent()`.
 
 ## Boundaries and contributing
 

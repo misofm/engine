@@ -104,6 +104,27 @@ back in over `N` from `S`, and a restored source declared as before carries the 
 and producer, with every frame accepted for it in phase 1 (#1325 D6).
 `crates/capi/tests/strip_transitions.rs` holds the gates.
 
+A transaction whose replacement restarts a strip it keeps is a duck-swap (#1324, decision 15
+D15-7, D15-9): the strips are the replacement's `restarted_strips()`, every strip with an owner the
+carry joins cannot continue (an insert added, removed or reordered, `delay_samples`, a value the
+plan keeps prepared, such as the true-peak limiter's `lookahead_ms`). Phase 1 ducks them as it
+ducks a removed strip, with their routes whose tap precedes the fader, in the same transaction and
+under one `S`; `C` covers every route out of a ducked strip. The replacement restarts each such
+strip's owners before its fader (its input section, its effects, the compensation lines on its
+chain and on those routes, and their live lanes) and its fader, keeps its matrix and its
+post-fader routes carrying the ducked tail, and arms the fader and those routes (#1288, #1363 D1
+(c)) to fade in over `N` from the first block at or after `S + D`, `D` the strip's latency before
+its fader. A strip whose insert is keyed from a restarted strip's `post_input`, `insert_send`,
+`insert_return` or `pre_fader` tap, or from its `input` tap when its delay line restarts, is
+restarted and duck-swapped with it, repeated until no strip joins; a track's other `input` tap, a
+`post_fader` or `post_pan` tap, and a submix's `input` tap whose sidechain line keeps its length or
+whose every incoming line comes from a ducked or an added strip add nothing. `C` also counts each sidechain line a
+replacement can shorten: from a ducked strip's `post_fader` or `post_pan` tap into a carried strip,
+and from a ducked submix's `input` tap kept by the last rule, plus the longest route line into that
+submix. A planned duck-swap completes as `EXACT`, never as the transition fallback. A revert before `S` inherits `S` and fades the strip
+back in from it. A pre-fader route that follows its source's automated mute is armed too, and its
+fire composes with the curve it hears then, so a column the curve silences stays silent (#2011).
+
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
 structural, compiling and swapping a replacement plan, except the live values of a strip (#1554,
@@ -170,8 +191,24 @@ given a live unmute at that block (`an_added_route_fades_in_after_its_line_fills
 `an_added_strips_pre_fader_send_fades_with_it_on_every_width`). An added `post_fader` or `post_pan`
 route into the output, which has no lane, binds live for that plan only so it can ramp, and loses
 the fold there. A muted route, a route whose destination strip is added, a following route with
-an automated source mute and a declared discontinuity arm nothing; a removed or re-pointed route
-still steps (#1953). The frozen exported set is now 15
+an automated source mute and a declared discontinuity arm nothing. A route the transaction
+removes or re-points (another source, tap or destination) between two strips it keeps ramps out
+first when it has a lane, that is when it goes into a submix or leaves before the fader (#1953a,
+D15-9): phase 1 mutes it on the running plan over the session mute ramp, `C` counts its lines, and
+the successor is adopted at `S`; a re-pointed route is a removal plus an addition and fades in at
+its new destination from `S`, while its source strip plays on
+(`capi`'s `a_removed_or_repointed_send_ramps_out_then_in_at_s`, `host-core`'s
+`a_repointed_send_fades_in_at_its_new_destination_on_every_width`). A removed or re-pointed
+`post_fader` or `post_pan` route into the output keeps the fold, so phase 1 cannot ramp it
+(#1953b): the successor compiles a fading copy of the old route, a transition route at the
+predecessor's coefficients that fades out from the adoption block over the session mute ramp
+through the old route's own compensation line, and later successors keep the copy, carrying its
+ramp and its line, until its fade has settled; a route re-pointed from one fades in at its new
+destination as an added route does (`capi`'s `a_removed_output_route_fades_out_through_its_line`,
+`host-core`'s `a_removed_or_repointed_lane_less_route_fades_out_through_its_line_on_every_width`). A later structural transaction adopted before an added route's fade has run
+keeps it as #1392 keeps a strip's (#1877): the successor re-arms the route with its own target and
+ramp, a waiting fade keeps waiting, a scheduled one keeps its render sample, and a fired one never
+runs again (`a_pending_route_fade_survives_a_second_swap_on_every_width`). The frozen exported set is now 15
 `miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
 where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
 defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops
@@ -454,9 +491,10 @@ counters `TELEMETRY_COALESCED` 5 and `TELEMETRY_DROPPED` 6, `LIVE_VALUES_SUPERSE
 the frame-derived telemetry configuration capacity is smaller. Canceled automation (counter 12) retired with the automation
 queue (#1629).
 
-**Meter batches (#1583, #1587a, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
-table of stable targets: entry `i` (handle `i + 1`) is the output or a strip by its ID, with a
-metric (peak or gain reduction). A handle is the table's, so a structural commit never moves it.
+**Meter batches (#1583, #1587a, #1587b, #1690b, decision 17 C1/C9/C13).** `TELEMETRY_CONFIGURE` takes a meter
+table of stable targets: entry `i` (handle `i + 1`) is the output, a strip by its ID or the master
+(#1690b), with a metric (peak or gain reduction; the output takes peak only and the master gain
+reduction only, any other pair `INVALID_FIELD` at the codec). A handle is the table's, so a structural commit never moves it.
 The C ABI session owns one meter delivery from boot over the session's output meter and the
 running plan's strip meters, one post-matrix meter per strip whose queue is as deep as the output
 meter's (eight), and its echo carries the meter window in blocks (`meter_window_blocks`,
@@ -468,19 +506,37 @@ computed from an older render clock, or on a grid render has since restarted, is
 so the gate moves only between blocks and the render call stays allocation-, lock- and
 syscall-free. The configure is all or nothing: an unknown strip is `NOT_FOUND`
 `meter.strip.unknown` (`meters[i]`); a period that is not a positive multiple of the window is
-`INVALID_FIELD` `meter.period`; until #1587b a gain-reduction entry is `UNAVAILABLE`
-`meter.gain_reduction.unavailable`; and a table whose peak entries need more than one batch's 256
-records is `INVALID_FIELD` `meter.records` at its 129th entry. Each `METER_BATCH` is
+`INVALID_FIELD` `meter.period`; and a table of more than 128 entries is `INVALID_FIELD`
+`meter.records` at its 129th entry, so a batch never needs more than its 256 records. Each `METER_BATCH` is
 `meter_period_blocks / meter_window_blocks` consecutive windows: `first_sample` is the first
 window's start, `observed_sample` the last one's end, `window_sequence` counts batches from 1
 after each accepted configure, and each peak entry, in table order, gives a left and a right
 record: the output's planes' maxima over the batch, or its strip's post-matrix maxima. A record is
 `VALID`, and `CLIPPED` above 1.0; an entry whose strip the plan that rendered the batch does not
 have has flags 0 and value 0.0, and is `VALID` again under its handle once a commit brings the
-strip back. Entries resolve to strips at each configure and each adoption, against the plan whose
+strip back. A strip's gain-reduction entry gives one `AGGREGATE` record in non-negative decibels
+(#1587b): the strip's reading from the batch's last window that has one, `VALID` when any window
+has one, else flags 0 and value 0.0. A strip's reading is the deepest reduction among its
+observation taps that an `Observe` edit armed (#1584), each from its newest window that opened at
+or after the tap's arm sample, which render publishes in the tap's slot (#1585); a tap never armed,
+or disarmed, gives none, and a window from before a re-arm is none. Entries resolve to strips at each configure and each adoption, against the plan whose
 frames the delivery folds, so a pending rebuild never relabels a record. Readings continue across
 a swap that carries the strip meters; a swap that carries none restarts the grid at its adoption
 block, where render restarts the gate and the control thread's adoption asks for the same value.
+A tap's reading and arm continue across a swap that carries its effect: the swap block copies its
+record's observation entries into the plan's attachment, and the promotion pairs the readers
+from them (#1674's observation half, #1587b), never from a list made at preparation. A swap that
+does not carry the effect restarts its taps: an armed tap is prepared armed (#1584), and the
+strip's gain reduction is absent until the tap's first window in the new plan closes.
+The master's gain-reduction entry (#1690b) is the same record for the strip the core's `master`
+row names (`SessionState::master_strip`), resolved by ID in the one meter staging both hosts share:
+at each adopted plan, and again after a live or monitor commit that moves or clears the row, so
+it follows the row with no reconfigure (a rebuild's successor resolves it at its own first
+frame, and the plan still rendering keeps its master until then, as the browser does). With no
+master, or a master without a reading, the record has flags 0 and value 0.0; the entry stays in
+the table, and a configure with no master is accepted. The browser's `masterGrDb` reads the same
+strip's reading through `MeterFrame::master_gain_reduction` (#1690a), and the master parity row
+holds the two equal bit for bit, and absent together.
 The control thread adopts each swap when it reclaims the displaced plan, whose clock gives the
 adoption sample. The lossy meter lane holds one batch whole (256 slots; the counter-snapshot lane keeps
 two). `METER_WINDOWS_LOST` counts every closed window that reached no batch: the windows render
@@ -1316,10 +1372,9 @@ nine-track session has no tapped effect, so its rows are unchanged. The parity r
 `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` arms and disarms a
 bypassed compressor's tap every sixteenth edit with zero render-thread allocations; the core claims
 are `crates/control-plane/tests/observation_bindings.rs`. A carried tap keeps its publisher across a
-swap (#1327 D2), so its windows go on in the reader of the epoch it was armed on. The read command
-(#1586) reads the running epoch's readers; pairing carried readers across a swap, as the browser
-does (`pair_carried_observations`), is #1674's observation half (see the stated limit under "Issue
-1586 observation read" below).
+swap (#1327 D2), and the promotion of the new epoch pairs its reader from the swap block's record
+(`pair_carried_observations`, #1674's observation half, #1587b; see "Meter batches"), so the read
+command (#1586), which reads the running epoch's readers, follows the carried tap.
 
 ## Issue 1586 observation read (slice b)
 
@@ -1341,7 +1396,30 @@ re-pin for `000f` and bit 15. The gates are `runtime::live_tests::an_observation
 for a 1-row and a 256-row read), the race of
 `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` with a read
 after every edit and zero render-thread allocations, `runtime::live_tests::an_observation_read_refuses_a_bad_batch_whole`
-and the parity row `protocol_cross_host::both_hosts_read_one_observation_tap_alike`. Stated limit:
-the C ABI does not pair carried observation readers yet (#1674's observation half), so after a
-rebuild that carries a tapped effect the read reads the successor's own slot, which the carried tap
-does not publish to: the row carries no window, never one the tap did not publish.
+and the parity row `protocol_cross_host::both_hosts_read_one_observation_tap_alike`. After a
+rebuild that carries a tapped effect the read follows the carried tap: the promotion pairs the
+carried readers from the swap block's record (#1674's observation half, #1587b).
+
+## Issue 1578 track response
+
+A strip `RESPONSE_GET` (`000e`, target 3) crosses `miso_engine_v1_submit_command` to the session
+provider, which checks it (the core's checks, `response.rate.session`, the strip, the bound of its
+event at the strip's owner count against the control frame limit and `maximum_reply_bytes`), arms
+the session's one response capture (#1577) and answers its tag; the capture's result arrives as
+one reliable `RESPONSE_READY` (`8040`) through `miso_engine_v1_dequeue_event`. No C symbol or
+struct changes; the capability report lists `8040` with `000e` under flag bit 14, and the
+capability vectors pinned in `crates/capi/src/runtime/tests.rs` re-pin for it. `SessionState::service`
+turns the delivered result into the event (`host_core::response_ready_event`, #1578 D5) and moves
+it into the protocol controller's one cell; a full reliable queue, a held cell or an outstanding
+structural transaction keeps it for the next `service`, an event the frame limit cannot carry
+becomes its `LIMIT_EXCEEDED` `response.reply_too_large` refusal, and the capture is released once
+its event's frame has reached the host. The response capture's charge
+(`host_core::response_capture_ceiling`) adds the event's member table, which is allocated while
+the result's is still held. The gates are `crates/capi/tests/response_strip.rs`:
+`end_to_end_then_removed_strip` (no event before a render; one event after one render whose curves
+and owners are bit-equal to `compose_track_response` over a `PreparedHost` of the same document;
+one event across a rebuild; `NOT_FOUND` `response.strip.removed` for a strip a superseding removal
+took), `one_in_flight_none_lost_and_replay` (`BACKPRESSURE` `response.capture.pending` with queue
+kind 8 while one is in flight; held, not lost, behind a full reliable queue; a replay returns the
+same tag and arms nothing; released after delivery) and
+`a_capture_grown_past_the_frame_limit_is_answered_by_its_refusal`.

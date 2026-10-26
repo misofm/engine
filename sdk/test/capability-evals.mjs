@@ -6,12 +6,11 @@ import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoControlRefusal, MisoUsageError } from "../src/core/errors.ts";
-import { LiveControlWriter } from "../src/core/writer.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { decodeControlReply } from "../src/core/control-frame.ts";
 import { structuralFrame } from "./control-support.mjs";
-import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
+import { effectEntry, moduleBytes, observeTaps, ramp, sessionDocument } from "./support.mjs";
 
 /** The parity session: three tracks, t3 behind a multiband compressor, a true-peak limiter and a delay. */
 const PARITY = JSON.parse(readFileSync(
@@ -172,7 +171,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // cannot read the count that the browser host and the C ABI report (#1399 verdict m1).
     const engine = await createOfflineEngine(sessionDocument(), {
       asset,
-      liveControls: { meterBlocks: 0, observationTaps: 0 },
+      liveControls: { meterBlocks: 0 },
     });
     try {
       assert.equal(engine.status().liveValuesSuperseded, 0n);
@@ -333,7 +332,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     try {
       engine = await createOfflineEngine(PARITY.session, {
         asset,
-        liveControls: { meterBlocks: 1, observationTaps: 8 },
+        liveControls: { meterBlocks: 1 },
       });
     } finally {
       delete asset.instantiate;
@@ -382,7 +381,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       asset,
       liveControls: {
         meterBlocks,
-        observationTaps: 1,
       },
     });
     try {
@@ -392,18 +390,15 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       assert.equal(engine.sessionMap().metersAttached, true);
       assert.deepEqual(engine.meters(true), { ok: true, result: 0, code: "ok" });
 
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-      });
-      writer.stage({
-        kind: "observeSubscribe",
-        rack: 3, // console slot "compressor"
+      const arm = observeTaps(engine, [{
         stripId: engine.sessionMap().tracks[0],
+        rack: "console",
         effectId: "compressor",
         tapId: 1,
+        armed: true,
         windowBlocks: meterBlocks,
-      });
-      assert.equal((await writer.flush()).admitted, 1);
+      }]);
+      assert.equal(arm.status, "ok");
 
       for (let block = 0; block < meterBlocks; block += 1) {
         feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 31 + block);
@@ -447,7 +442,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       asset,
       liveControls: {
         meterBlocks,
-        observationTaps: 0,
       },
     });
     try {
@@ -498,7 +492,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       asset,
       liveControls: {
         meterBlocks,
-        observationTaps: 0,
       },
     });
     try {
@@ -534,7 +527,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // `sdk.observation.map` and every read, the track's own included, fails with it.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: { observationTaps: 2 },
     });
     try {
       const map = engine.observationMap();
@@ -564,7 +556,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // The arm is kind 7 at the bus's strip index through the shipped module.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: { observationTaps: 2 },
     });
     try {
       const map = engine.sessionMap();
@@ -581,18 +572,15 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       assert.equal(unarmed.effectSlotId, "bus-comp");
       assert.equal(unarmed.status, "unarmed");
 
-      const writer = new LiveControlWriter({
-        submit: (records, count) => engine.submitCommands(records, count),
-      });
-      writer.stage({
-        kind: "observeSubscribe",
-        rack: binding.rack === "console" ? 3 : 1,
+      const arm = observeTaps(engine, [{
         stripId: "bus",
+        rack: binding.rack,
         effectId: "bus-comp",
         tapId: binding.tapIds[0],
+        armed: true,
         windowBlocks: 1,
-      });
-      assert.equal((await writer.flush()).admitted, 1);
+      }]);
+      assert.equal(arm.status, "ok");
       for (let block = 0; block < 4; block += 1) {
         feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 41 + block);
         engine.render();
@@ -611,7 +599,6 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     // "no track 'bus'" before anything is submitted.
     const engine = await createOfflineEngine(busObservationDocument(), {
       asset,
-      liveControls: { observationTaps: 2 },
     });
     try {
       const binding = engine.observationMap().bindings.find((row) => row.trackId === "bus");

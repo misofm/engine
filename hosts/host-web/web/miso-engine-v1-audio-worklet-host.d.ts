@@ -6,60 +6,25 @@
 // 137 adds the three things a live mixing console needs on top, additively -- no existing message,
 // field or live result code changed meaning, and the resource report keeps its 224-byte layout.
 //
-//   1. `miso.command.v1`, a control path from the main realm into the engine, acknowledged with
-//      the exact absolute sample the batch took effect at.
+//   1. `control()`, the engine's one command entry from the main realm (issue 1562a), which every
+//      live value and every observation subscription goes through.
 //   2. `miso.meters.v1` / `miso.meter.v1`, a decimated peak stream on a lease.
 //   3. `miso.telemetry.v1`, windowed render-time telemetry on a lease, measured in JavaScript
 //      around the render export.
 //
-// ## What the command path carries, and what it does not
+// ## One command entry
 //
 // **This is the most important thing to know before writing an app against it.** The browser has
-// no value command of its own (issue #1565). Every live value -- a fader, a mute, a pan or matrix,
-// an input trim, polarity or filter, a send, a VCA, a solo, an effect parameter or bypass -- moves
-// through `control()`: a `SESSION_TRANSACTION_APPLY` carrying `SET_CONTROL` edits, the same command
-// frame the C ABI's `miso_engine_v1_submit_command` takes, decoded and classified once by the
-// engine's control plane. `command()` carries exactly two kinds, `MisoCommandKind.ObserveSubscribe`
-// and `.ObserveUnsubscribe` (issue 143), on the observation plane rather than the render one: they
-// move the `miso.observe.v1` subscription map, not anything rendered. A record of any other kind --
-// including the deleted kinds 1-6 and 9-17, whose numbers are never reallocated -- is refused
-// `MisoCommandReason.Malformed` at its index.
-//
-// `MisoCommandReason.UnsupportedKind` (`result: 7`) means the target is real and the value is
-// legal, and *this session* has no path for it. A host booted with
-// `liveControlObservationTaps === 0n` is that session: it has no command staging, so `command()`
-// acknowledges every batch `UnsupportedKind`.
-//
-// ## Addressing is by stable key (issue 1677)
-//
-// A command names its tap by the stable key the engine's `OBSERVATION_ENDED` event uses: the
-// strip's ID (a track or a submix), the rack (`1` inserts, `3` console), the insert's or the
-// console slot's ID, and the effect-local tap ID. It carries no position, so a rebuild cannot make
-// a record arm another effect's tap. The engine resolves the key on the newest committed plan --
-// the successor between a rebuild's commit and the block that adopts it -- and refuses a key that
-// plan does not have with a typed reason (`UnknownTrack`, `UnknownEffect`, `UnknownTap`) before it
-// queues anything. The build-time metadata JSON is the vocabulary of the tap IDs.
-//
-// ## One batch is one transaction
-//
-// The worklet validates a whole submission -- shape, addressing and free queue room -- before it
-// pushes a single record. A refused batch admits nothing. Each effect keeps one bounded
-// observation queue, one slot per declared tap, so subscriptions stay in order, and a submission
-// that outruns it is refused before it reaches the queue. A submission names each observation tap
-// at most once: a second `ObserveSubscribe` or `ObserveUnsubscribe` for the same tap is
-// `Malformed`. `RESULT_BACKPRESSURE` (6) is returned by the main-realm host locally when its own
-// in-flight bound (256 records, `maximumCommandRecords`) is reached, and by the engine when an
-// effect's observation queue has no room because earlier submissions are not yet drained; a render
-// clears it.
-//
-// ## Application timing is exact
-//
-// An effect stage drains its observation queue at the top of the block, before it touches a
-// sample. `appliedAtSample` on the acknowledgement is the first sample of the next rendered block,
-// when the subscription takes effect.
-//
-// A batch may address several taps at once. It is still one transaction: the free-room check is
-// per observation queue, and one full queue refuses the whole batch.
+// no command record of its own (issues 1565 and 1589). Every live value -- a fader, a mute, a pan
+// or matrix, an input trim, polarity or filter, a send, a VCA, a solo, an effect parameter or
+// bypass -- moves through `control()`: a `SESSION_TRANSACTION_APPLY` carrying `SET_CONTROL` edits,
+// the same command frame the C ABI's `miso_engine_v1_submit_command` takes, decoded and classified
+// once by the engine's control plane. An observation tap is armed and disarmed the same way, by an
+// `Observe` edit in a `SESSION_TRANSACTION_APPLY`, and read with an `OBSERVATION_READ` frame: the
+// edit names its tap by the stable key the engine's `OBSERVATION_ENDED` event uses (the strip's ID,
+// the insert's or the console slot's ID, and the effect-local tap ID), and the reply carries its
+// arm tag. Every plan binds a queue for every declared tap of every effect (issue 1590), as on the
+// C ABI.
 //
 // ## What metering costs
 //
@@ -79,21 +44,19 @@
 // `generation`, `validity` and `lossCount` fields make lease resets, producer resets and dropped
 // peak windows visible without changing the peak array.
 //
-// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
-// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an armed
-// tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame leaves
-// that tap out until a window that opens at or after that sample closes. A strip's slot
+// The gain-reduction section is recomputed from the taps armed when each frame is polled. A
+// disarm is in effect from the block render applies it, so every meter frame polled after that
+// block leaves that tap out. An arm, also one that re-arms an armed tap, restarts its tap's window
+// at the block render applies it (the arm sample an `OBSERVATION_READ` row reports), and the frame
+// leaves that tap out until a window that opens at or after that sample closes. A strip's slot
 // (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at or
 // after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is `null`
 // when the designated strip has none.
 //
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
-// `subscribable`, a `computed` tap is an analysis pass that does not ship in V1 and is refused with
-// `MisoCommandReason.UnsupportedKind`. A session that never asks for observation
-// (`liveControlObservationTaps === 0n`) allocates none of it and renders byte-identical audio;
-// inside a session that does, an unarmed tap costs one predicted branch per driven effect per
+// `subscribable`, a `computed` tap is an analysis pass that does not ship in V1 and is refused by
+// the engine's `Observe` edit. An unarmed tap costs one predicted branch per driven effect per
 // block.
 //
 // ## What a frame costs the render callback
@@ -140,13 +103,18 @@
 // Sources stream just-in-time into bounded per-source rings. One message carries exactly one
 // quantum of planar PCM (the final chunk of a region may be shorter). Up to
 // `sourceRingFrames / quantumFrames` chunks may be unsettled per source ID at once -- there is
-// nowhere for a further chunk to go -- plus one unsettled seek per source. A request over its bound
+// nowhere for a further chunk to go -- plus one unsettled seek per source. With a zero
+// `sourceRingFrames` the bound is the ring the engine reports it resolved at boot (the default ring
+// below; the engine's `miso_engine_web_v1_resolved_source_ring_frames`). A request over its bound
 // rejects locally with `RESULT_BACKPRESSURE` (6) before any transfer, so the caller keeps its planes
 // and can retry. Status is never refused for being in flight: see `status()`.
 //
-// The default ring covers a 100 ms main-thread stall: `(ceil(100ms * fs / quantum) + 2) * quantum`
-// frames, which is 5 120 frames (40 KiB for stereo `f32`) at 48 kHz with a 128-frame quantum. It is
-// a prefill ahead of the render position and adds no output latency.
+// The default ring (a zero `sourceRingFrames`) covers a 100 ms main-thread stall and then holds a
+// warm successor's largest prime (issue #1406): in quanta, `ceil(100ms * fs / quantum) + 2 +
+// 4 * ceil(L_max / quantum) + 1`, with `L_max` the true-peak limiter's `fs / 100 + 6`. That is
+// 7 296 frames (57 KiB for stereo `f32`) at 48 kHz with a 128-frame quantum. The ABI layout's
+// `sourceRing` publishes the rule. It is a prefill ahead of the render position and adds no output
+// latency.
 //
 // Two options deliberately not taken, recorded so they are not rediscovered as bugs:
 //
@@ -179,130 +147,6 @@ export interface MisoUnsupportedBrowser {
   readonly requestId: 0;
   readonly result: 7;
   readonly capability: "simd128";
-}
-
-/// Frozen live-control command kinds (issue 137 D1).
-///
-/// Only the two observation kinds remain (issue #1565). They are one vocabulary, proved across
-/// every file that spells it -- this enum, the Rust `COMMAND_*` constants, the wire's decode
-/// whitelist, the host JS `COMMAND_KINDS` set, the metadata generator and the shipped
-/// `commandKinds` rows -- by `scripts/check-command-kind-vocabulary.py`. Kinds 1-6 and 9-17 were
-/// value kinds and are deleted: every value goes through `control()`. Their numbers are never
-/// reallocated, and a record that carries one is refused `MisoCommandReason.Malformed`.
-export const enum MisoCommandKind {
-  /// Arm one declared observation tap of one effect instance. Applied (issue #143).
-  ///
-  /// `tapId` carries the effect-local **tap id** from the metadata JSON's per-effect
-  /// `observations` array and `windowBlocks` the window length in render blocks (`0` for the
-  /// plan's default): a subscription changes what is read, never what is rendered.
-  ///
-  /// Applied on the `miso.observe.v1` plane: it binds an entry in the subscription map. The
-  /// metadata JSON reports it as `"plane": "observation"`.
-  ObserveSubscribe = 7,
-  /// Disarm one declared observation tap of one effect instance. Applied (issue #143).
-  ///
-  /// Applied on the `miso.observe.v1` plane: it clears an entry from the subscription map. The
-  /// metadata JSON reports it as `"plane": "observation"`.
-  ObserveUnsubscribe = 8,
-}
-
-/// Frozen typed reasons a live-control submission was refused (issue 137 D1).
-export const enum MisoCommandReason {
-  /// The submission was admitted whole.
-  None = 0,
-  /// Unknown kind, nonzero reserved word, an ID field that is not its length's bytes followed by
-  /// zeros, or a submission that names one observation tap more than once.
-  Malformed = 1,
-  /// `stripId` is not a track or a submix of the newest committed plan. The spelling is kept (issue
-  /// 1213, DESIGN P17).
-  UnknownTrack = 2,
-  /// `rack` is not an effect rack (`1` inserts or `3` console) on an effect-addressed kind. The
-  /// retired `simd1` (`0`) and `simd2` (`2`) codes are refused with it only on the raw export
-  /// path (issue #1096); `MisoAudioWorkletHost.command()` refuses them locally, before the port,
-  /// by rejecting with a `miso.error.v1` invalid argument, as it refuses any out-of-set code.
-  UnknownRack = 3,
-  /// `effectId` is not a console slot or insert (per `rack`) of the addressed strip on the newest
-  /// committed plan.
-  UnknownEffect = 4,
-  /// `parameterId` is not a parameter of the addressed effect.
-  UnknownParameter = 5,
-  /// A value is outside the addressed parameter's declared domain.
-  Domain = 6,
-  /// Well formed and correctly addressed; this ABI version cannot apply that kind.
-  UnsupportedKind = 7,
-  /// An effect's bounded observation queue had no room for the `ObserveSubscribe` or
-  /// `ObserveUnsubscribe` records the submission queues because earlier submissions are not yet
-  /// drained; nothing was admitted, and a render clears it. The reason is also returned with the internal result
-  /// code, not a backpressure one, when the plan's revision gate refuses the batch's stamp (a
-  /// revision past the gate's ceiling); that batch wrote nothing.
-  ///
-  /// Never the answer to a full observation event, which is `ObservationLimit`.
-  Backpressure = 8,
-  /// The engine is not `STATE_READY`.
-  WrongState = 9,
-  /// `tapId` is not a declared observation tap of the addressed effect (issue 143).
-  ///
-  /// Deliberately not `UnknownParameter`: a parameter and a tap are different namespaces on the
-  /// same effect, and a caller that confuses them learns which one it got wrong.
-  UnknownTap = 10,
-  /// The tap exists and the address is right; this session bound no observation capacity.
-  ///
-  /// Prepare with `liveControlObservationTaps` set. Retrying will not help, which is why this is
-  /// its own reason and not `Backpressure`.
-  ObservationUnbound = 11,
-  // Reasons 12-14 (`NotSoloable`, `UnknownRoute`, `UnknownVca`) were deleted with the value kinds
-  // (issue #1565); their numbers are never reused.
-  /// The subscription would leave more taps armed than the engine can end honestly in one
-  /// `OBSERVATION_ENDED` event in one control frame (issue 1685: the event's exact encoded bytes
-  /// against the browser's 16 KiB frame). `rejectedIndex` names the subscription that crossed it,
-  /// after every unsubscribe of the same submission is counted; nothing was admitted. The result
-  /// is `RESULT_UNSUPPORTED`.
-  ///
-  /// A render does not make room, so retrying the same submission will not help, which is why this
-  /// is its own reason and not `Backpressure`: unsubscribe another tap first.
-  ObservationLimit = 15,
-}
-
-/// One live-control command record: the subscription or withdrawal of one tap, named by its stable
-/// key (issue 1677).
-///
-/// Only the two observation kinds are carried (issue #1565). An effect is addressed in the
-/// session's terms (decision 12, issue #1096): a console slot as `rack` `3` with `effectId` the
-/// slot's ID, and an insert as `rack` `1` with `effectId` the insert's ID. The retired `simd1` (`0`)
-/// and `simd2` (`2`) codes are refused and never reallocated; the layout JSON's `racks` table is the
-/// vocabulary. An ID is at most 127 UTF-8 bytes; a longer one rejects locally.
-export interface MisoCommand {
-  kind: MisoCommandKind;
-  /// `1` inserts, `3` console.
-  rack: number;
-  /// The strip's ID: a track's or a submix's.
-  stripId: string;
-  /// The console slot's ID or the insert's ID.
-  effectId: string;
-  /// The effect-local observation tap id.
-  tapId: number;
-  /// The observation window length in render blocks, or `0` for the plan's default.
-  windowBlocks: number;
-}
-
-export interface MisoCommandRequest {
-  commands: MisoCommand[];
-}
-
-/// One live-control acknowledgement. `result` is `0` only when the whole batch was admitted.
-export interface MisoCommandAck {
-  readonly tag: "miso.ack.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly reason: MisoCommandReason;
-  /// Index of the first refused record; `0` on success.
-  readonly rejectedIndex: number;
-  /// The whole batch, or zero.
-  readonly admitted: number;
-  /// The exact absolute sample the admitted records take effect at.
-  readonly appliedAtSample: bigint;
-  /// The caller's record block, handed straight back.
-  readonly records: Uint8Array;
 }
 
 /// One compiled source, as the engine declares it (issue 207).
@@ -338,183 +182,6 @@ export interface MisoSessionMap {
   readonly metersAttached: boolean;
 }
 
-/** Numeric current-owner address used by the additive selected-observation request. */
-export interface MisoObservationAddress {
-  /// Strip index: the compiled session's tracks first, then its submixes (issue 1213).
-  readonly trackIndex: number;
-  /** `1` inserts or `3` console, addressed as `MisoCommand` addresses an effect. */
-  readonly rack: number;
-  readonly effectIndex: number;
-  readonly tapId: number;
-  /** `1` left, `2` right or `3` both. */
-  readonly channels: number;
-}
-
-/** One resident observation binding, in the prepared owner's stable map order. */
-export interface MisoObservationMapBinding {
-  /// Strip index: the compiled session's tracks first, then its submixes (issue 1213).
-  readonly trackIndex: number;
-  /** `1` inserts or `3` console. */
-  readonly rack: number;
-  readonly effectIndex: number;
-  readonly effectSlotId: string;
-  readonly nativeEffectId: string;
-  readonly tapIds: number[];
-}
-
-/** The current owner's observation map. */
-export interface MisoObservationMap {
-  readonly tag: "miso.observationmap.v1";
-  readonly requestId: number;
-  readonly result: number;
-  /// The structure epoch of the control list whose strip order `bindings` follow (issue 1562b):
-  /// the `structureEpoch` of `CONTROL_LIST_GET` pages, as the plan that renders carries it. A
-  /// binding's `trackIndex` indexes the tracks, then the submixes, of the list of this epoch. A
-  /// rebuild that adds, removes or reorders a strip changes it at the block that adopts the
-  /// replacement plan; between that commit and the adoption the control list is already the
-  /// replacement's, so a client names the strips of this map by the list of this epoch and never
-  /// by the newest list. A positive safe integer.
-  readonly structureEpoch: number;
-  readonly bindings: MisoObservationMapBinding[];
-}
-
-/** One numeric row copied from the fixed observation-result records. */
-export interface MisoObservationReadRow extends MisoObservationAddress {
-  readonly status: number;
-  readonly sampleRateHz: number;
-  readonly firstSample: bigint;
-  readonly endSample: bigint;
-  readonly sequence: bigint;
-  readonly blocks: number;
-  readonly leftPresent: number;
-  readonly rightPresent: number;
-  readonly left: number;
-  readonly right: number;
-}
-
-/** One bounded selected-observation reply. */
-export interface MisoObservationReadReply {
-  readonly tag: "miso.observation.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly rows: MisoObservationReadRow[];
-}
-
-/** Numeric grid selector used by the live track-response capture bridge. */
-export type MisoTrackResponseGrid = 1 | 2;
-
-/** Numeric channel selector used by the live track-response capture bridge. */
-export type MisoTrackResponseChannels = 1 | 2 | 3;
-
-/** One bounded capture request. Rust evaluates the grid after the Worklet copies this snapshot. */
-export interface MisoTrackResponseCaptureRequest {
-  readonly trackId: string;
-  /** `1` linear or `2` logarithmic. */
-  readonly grid: MisoTrackResponseGrid;
-  /** `1` left, `2` right or `3` both. */
-  readonly channels: MisoTrackResponseChannels;
-  readonly points: number;
-  readonly minimumHz: number;
-  readonly maximumHz: number;
-  /** Total raw capture/result byte budget, including the fixed header. */
-  readonly maximumResultBytes: number;
-}
-
-/** Detached immutable bytes captured from one prepared track boundary. */
-export interface MisoTrackResponseCaptureReply {
-  readonly tag: "miso.trackresponse.v1";
-  readonly requestId: number;
-  readonly result: number;
-  /** Non-empty only for `result === 0`; the analysis Worker owns the next copy. */
-  readonly snapshot: Uint8Array;
-}
-
-/// The track targets follow the `post_input` and `post_pan` taps (decision 12, issue #1096); their
-/// wire codes, `1` and `2`, are unchanged.
-export type MisoSpectrumTarget = "trackPostInput" | "trackPostPan" | "output";
-export type MisoSpectrumChannels = "left" | "right" | "both";
-
-/** One prepared spectrum boundary passed to the Worklet during boot. */
-export interface MisoSpectrumBootOptions {
-  readonly target: MisoSpectrumTarget;
-  readonly targetId: string;
-  readonly channels: MisoSpectrumChannels;
-  readonly maximumCaptureBytes: number;
-}
-
-/** Several exact graph boundaries prepared for one atomic managed spectrum owner. */
-export interface MisoSpectrumCollectionEntry {
-  readonly target: MisoSpectrumTarget;
-  readonly targetId: string;
-  readonly channels: MisoSpectrumChannels;
-}
-
-/** Caller-sized collection staging; the limit covers all retained entries. */
-export interface MisoSpectrumCollectionBootOptions {
-  readonly entries: readonly MisoSpectrumCollectionEntry[];
-  readonly maximumCaptureBytes: number;
-}
-
-export type MisoSpectrumOperation = "arm" | "read" | "cancel";
-
-/** Reply for one bounded spectrum arm/read/cancel request. */
-export interface MisoSpectrumReply {
-  readonly tag: "miso.spectrum.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly operation: MisoSpectrumOperation;
-  readonly snapshot: Uint8Array;
-}
-
-/** Raw generated metadata copied from one managed stream read. */
-export interface MisoSpectrumStreamMetadata {
-  readonly structSize: number;
-  readonly abiVersion: number;
-  readonly result: number;
-  readonly status: number;
-  readonly target: number;
-  readonly channels: number;
-  readonly sampleRateHz: number;
-  readonly quantumFrames: number;
-  readonly hopFrames: number;
-  readonly sourceUnderrun: number;
-  readonly captureEpoch: bigint;
-  readonly sequence: bigint;
-  readonly droppedCaptures: bigint;
-  readonly windows: bigint;
-  readonly capturedSample: bigint;
-  readonly endSample: bigint;
-  readonly analysisEpoch: bigint;
-  readonly historyStartSample: bigint;
-  readonly smoothingMs: number;
-}
-
-export interface MisoSpectrumStreamStartReply {
-  readonly tag: "miso.spectrum.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly operation: "streamStart" | "streamStop";
-  readonly metadata: MisoSpectrumStreamMetadata;
-}
-
-export interface MisoSpectrumSelectionReply {
-  readonly tag: "miso.spectrum.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly operation: "select" | "streamSelect";
-  readonly metadata?: MisoSpectrumStreamMetadata;
-}
-
-export interface MisoSpectrumStreamReadReply {
-  readonly tag: "miso.spectrum.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly operation: "streamRead";
-  readonly byteLength: number;
-  readonly buffer: ArrayBuffer;
-  readonly metadata: MisoSpectrumStreamMetadata;
-}
-
 /// One decimated meter window (issue 137 D2, extended by issue 143).
 export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
@@ -546,19 +213,19 @@ export interface MisoMeterFrame {
   /// an effect holds its reduction as negative decibels internally, and the fold is `max(|x|)` over
   /// the window. An app's `Math.max(0, x ?? 0)` is therefore a no-op rather than a silent zeroing.
   /// A `gainChangeDb` tap (`peakSigned`, issue 1918) is signed, positive for a boost: it adds only
-  /// a cut's depth here and a boost adds `0`; its signed value is read with `readObservations`.
+  /// a cut's depth here and a boost adds `0`; its signed value is read with `OBSERVATION_READ`.
   ///
   /// Every entry is finite. `0` deliberately conflates "not reducing" with "no observed effect on
   /// this track", because the array is positional and read without null checks; the distinction
-  /// lives in the `miso.observe.v1` acknowledgement's subscription map. Several armed taps on one
+  /// lives in the `OBSERVATION_READ` rows. Several armed taps on one
   /// track fold max-magnitude into the one slot, on the control plane. Each value is the latest
   /// available independently aged effect fold; this frame carries no GR sequence or sample span.
   ///
-  /// The gain-reduction section is recomputed from the taps armed when each frame is polled. An
-  /// unsubscribe disarms its tap when it is admitted, so every meter frame received after its
-  /// `result === 0` acknowledgement leaves that tap out. A subscribe, also one that re-arms an
-  /// armed tap, restarts its tap's window at the acknowledgement's `appliedAtSample`, and the frame
-  /// leaves that tap out until a window that opens at or after that sample closes. A strip's slot
+  /// The gain-reduction section is recomputed from the taps armed when each frame is polled. A
+  /// disarm is in effect from the block render applies it, so every frame polled after that block
+  /// leaves that tap out. An arm, also one that re-arms an armed tap, restarts its tap's window at
+  /// the block render applies it, and the frame leaves that tap out until a window that opens at or
+  /// after that sample closes. A strip's slot
   /// (`trackGrDb`, `submixGrDb`) is the maximum over its armed taps' latest windows that opened at
   /// or after their last subscribe, and `0` when no armed tap has such a window. `masterGrDb` is
   /// `null` when the designated strip has none.
@@ -571,9 +238,9 @@ export interface MisoMeterFrame {
   readonly masterGrDb: number | null;
   /// Absolute sample the reported window opened at, inclusive.
   ///
-  /// This timestamps only `peaks`. Correlate it against a `MisoCommandAck.appliedAtSample`: the
-  /// first peak window whose `firstSample >= appliedAtSample` is the first wholly after the
-  /// command. A generation change starts a fresh delivery epoch. Within one generation, a gap
+  /// This timestamps only `peaks`. Correlate it against an arm sample (an `OBSERVATION_READ` row's
+  /// `arm_sample`): the first peak window whose `firstSample` is at or after it is the first wholly
+  /// after the arm. A generation change starts a fresh delivery epoch. Within one generation, a gap
   /// between this frame's `endSample` and the next frame's `firstSample`, or the loss bit/count,
   /// reports omitted/rejected telemetry rather than a contiguous measurement.
   readonly firstSample: bigint;
@@ -588,87 +255,6 @@ export interface MisoMeterFrame {
   /// follows `trackGrDb`'s rules: positional, `0` for "not reducing" or "no observed effect",
   /// independently aged.
   readonly submixGrDb: Float32Array;
-}
-
-/// One arm/disarm request for a single declared observation tap (issues 143, 151).
-///
-/// Exactly these six fields, and no others: `observe()` rejects a subscription object carrying an
-/// unknown field with `RESULT_INVALID_ARGUMENT` (1) before anything reaches the port, so an
-/// optional-looking extra property is a local refusal rather than a field the engine ignores.
-export interface MisoObservationSubscription {
-  /// The strip's ID, as `MisoCommand.stripId`: a track's or a submix's.
-  stripId: string;
-  /// `1` inserts or `3` console, as `MisoCommand` addresses an effect. There is no `255` here:
-  /// a tap always names a rack.
-  rack: number;
-  /// The console slot's ID or the insert's ID, as `MisoCommand.effectId`.
-  effectId: string;
-  /// The effect-local tap id from the metadata JSON's per-effect `observations[].id`. Never `0`.
-  ///
-  /// This is a *tap* id, not a parameter id: they are different namespaces on one effect, and a
-  /// parameter id sent here comes back as `MisoCommandReason.UnknownTap`, never
-  /// `UnknownParameter`.
-  tapId: number;
-  /// Render blocks per published window, or `0` for the plan's default (`liveControlMeterBlocks`).
-  ///
-  /// The returned binding reports the window that is actually in force, so a caller that sends `0`
-  /// reads the resolved number back rather than having to know the default.
-  windowBlocks: number;
-  /// `true` arms the tap (wire kind `ObserveSubscribe`), `false` disarms it (`ObserveUnsubscribe`).
-  armed: boolean;
-}
-
-/// One observation batch. Like a command batch, it is one transaction (issues 143, 151).
-export interface MisoObservationRequest {
-  /// At least one and at most `256` subscriptions, arming and disarming freely mixed.
-  subscriptions: MisoObservationSubscription[];
-}
-
-/// The subscription map one `miso.observe.v1` acknowledgement carries (issue 143).
-///
-/// This is where "which tracks have an observed effect at all" lives. `trackGrDb` is positional
-/// and cannot express absence; this can.
-export interface MisoObservationBinding {
-  /// The strip's ID. The strip's gain-reduction entry in a meter frame is at its position in the
-  /// control list's strip order (tracks, then submixes).
-  readonly stripId: string;
-  /// `1` inserts or `3` console.
-  readonly rack: number;
-  /// The console slot's ID or the insert's ID.
-  readonly effectId: string;
-  /// The effect-local tap id, matching the metadata JSON's per-effect `observations[].id`.
-  readonly tapId: number;
-  /// Render blocks per published window, as it is actually in force.
-  readonly windowBlocks: number;
-}
-
-/// One observation acknowledgement (issue 143).
-///
-/// # A refusal is a resolved acknowledgement, not a thrown error
-///
-/// `observe()` settles with this record whenever the engine answered at all, including when it
-/// refused: `result` is nonzero, `reason` names why, and `bindings` is the map **unchanged**,
-/// because a batch is all-or-nothing and a refused batch armed nothing. The two reasons the
-/// observation path returns are `MisoCommandReason.UnknownTap` (10, `result: 1`) and
-/// `MisoCommandReason.ObservationUnbound` (11, `result: 7`).
-///
-/// A refusal is per request and costs the host nothing: later commands, meter frames, renders and
-/// further `observe()` calls all keep working. Only a locally malformed request rejects, with
-/// `MisoError` and `result: 1`, before anything is sent.
-///
-/// # Subscriptions follow the key
-///
-/// A tap is named by its stable key, so a structural session edit does not move it: the core keeps
-/// the tap armed on the replacement plan while the strip, the effect and the tap still exist, and
-/// announces a tap it ended with an `OBSERVATION_ENDED` event. `bindings` is this host's own record
-/// of what it armed and withdrew; it does not drop a tap the engine ended.
-export interface MisoObservationAck {
-  readonly tag: "miso.observe.v1";
-  readonly requestId: number;
-  readonly result: number;
-  readonly reason: MisoCommandReason;
-  /// Every tap this host armed and has not withdrawn, in `(stripId, rack, effectId, tapId)` order.
-  readonly bindings: MisoObservationBinding[];
 }
 
 /// One windowed render-telemetry frame (issue 137 D3). JavaScript only; Wasm never sees the lease.
@@ -691,34 +277,27 @@ export interface MisoTelemetryFrame {
 }
 
 export interface MisoWebBootOptions {
-  /// Per-source ring override, or `0` for the engine's 100 ms plus two-quanta derivation.
+  /// Per-source ring override, or `0` for the engine's default ring (the 100 ms stall ring plus the
+  /// largest warm-successor prime plus one quantum, issue #1406).
   sourceRingFrames: number;
   /// Total boot memory budget, or `0n` for the engine-owned default ceiling.
   maximumMemoryBytes: bigint;
-  /// Prepared continuous-spectrum hop in frames, or `0` for the engine-derived default.
-  spectrumHopFrames: number;
   /// Reserved (offset 32 of the boot options): must be exactly `0n`. It was the live-command queue
-  /// size; the command staging now exists exactly when `liveControlObservationTaps !== 0n`, and the
-  /// main-realm host's bound on commands in flight is `maximumCommandRecords` (issue #1565).
+  /// size until issue #1565.
   reserved1: bigint;
   /// Meter window in render blocks, or `0n` for the engine's default window with no delivery
   /// (issues 137, 1581).
   liveControlMeterBlocks: bigint;
-  /// Maximum declared observation taps to bind per effect, or `0n` for none at all (issue 143).
-  ///
-  /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
-  /// in the compiled plan, `observationRetainedBytes` is `0n`, and a subscription is refused with
-  /// `MisoCommandReason.UnsupportedKind`. A nonzero value also allocates the command staging
-  /// that carries the subscription records; without it `command()` is refused `UnsupportedKind`.
-  liveControlObservationTaps: bigint;
+  /// Reserved (offset 48 of the boot options): must be exactly `0n`. It was the observation-taps
+  /// word until issue 1590 retired it: every plan binds a queue for every declared tap of every
+  /// effect, as on the C ABI, so the session always serves the `Observe` edit and
+  /// `OBSERVATION_READ`.
+  reserved3: bigint;
   /// Reserved (offset 56 of the boot options): must be exactly `0n`. It was the master boot word
   /// until issue 1689 retired it: the app designates the master with the strip's `master` monitor
   /// row (`SET_CONTROL`), as on every host, and the core holds it by strip ID. With no tap on the
   /// strip `masterGrDb` is `null`.
   reserved2: bigint;
-  /// One optional prepared graph boundary; `null` retains no capture storage.
-  spectrum?: MisoSpectrumBootOptions | null;
-  spectrumCollection?: MisoSpectrumCollectionBootOptions | null;
 }
 
 export interface MisoWebResourceReport {
@@ -747,8 +326,8 @@ export interface MisoWebResourceReport {
   readonly largestNamedAllocationBytes: bigint;
   /// Engine-owned bytes the plan's observation lanes and conflating cells retain (issue 143).
   ///
-  /// Exactly `0n` for a session prepared with `liveControlObservationTaps === 0n`, and that zero is
-  /// walked over the built runtime rather than computed from the configuration.
+  /// Walked over the built runtime rather than computed from the configuration; `0n` for a session
+  /// with no effect that declares a tap.
   readonly observationRetainedBytes: bigint;
 }
 
@@ -896,6 +475,53 @@ export interface MisoSessionSeekReply {
   readonly generation: bigint;
 }
 
+/// @internal An anchored source seek (issue 1297a): `sourceFrame` enters the graph in the block
+/// that starts at absolute render sample `anchorSample`, a quantum multiple.
+export interface MisoSeekAtRequest {
+  sourceId: string;
+  generation: bigint;
+  sourceFrame: bigint;
+  anchorSample: bigint;
+}
+
+/// @internal Where a source landed after its newest seek (issue 1297a), the C ABI seek report's
+/// words: the generation in effect (`0n` until its ring rendered a block), the source-read sample
+/// and source frame of that generation's first block, and the cumulative underrun and held frames.
+export interface MisoSeekReport {
+  readonly generation: bigint;
+  readonly firstSample: bigint;
+  readonly sourceFrame: bigint;
+  readonly cumulativeUnderrunFrames: bigint;
+  readonly cumulativeHeldFrames: bigint;
+}
+
+/// @internal The reply to one seek report read (issue 1297a): the engine's result and, for `0`,
+/// the report; `null` otherwise.
+export interface MisoSeekReportReply {
+  readonly tag: "miso.seek-report.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly report: MisoSeekReport | null;
+}
+
+/// The output latency and tail of the plan that renders now (issue 2116): the words of the C ABI's
+/// plan resource report. `tailKind` is `0n` for a tail of `tailSamples`, `1n` for an unbounded tail
+/// (`tailSamples` is then `0n`).
+export interface MisoPlanLatency {
+  readonly samples: bigint;
+  readonly tailKind: bigint;
+  readonly tailSamples: bigint;
+}
+
+/// The reply to one plan latency read (issue 2116): the engine's result and, for `0`, the latency;
+/// `null` otherwise.
+export interface MisoPlanLatencyReply {
+  readonly tag: "miso.plan-latency.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly latency: MisoPlanLatency | null;
+}
+
 export interface MisoAudioWorkletHost {
   readonly node: AudioWorkletNode;
   readonly backend: MisoWebBackend;
@@ -905,6 +531,13 @@ export interface MisoAudioWorkletHost {
   /// Seeks source content while absolute render time remains continuous. Meter peak windows can
   /// straddle this content discontinuity; the seek does not advance the meter generation.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
+  /// @internal Seek one source at an anchor sample (issue 1297a); the worklet's message handler
+  /// applies it, never `process()`. It resolves with the engine's result. It shares the per-source
+  /// bound with `seekSource`: a second unsettled seek of a source rejects locally with result `6`.
+  seekSourceAt(request: MisoSeekAtRequest): Promise<MisoAck>;
+  /// @internal Read one source's seek report (issue 1297a); `$timeline` reads the timeline's. One
+  /// read of a source may be unsettled at a time; a second rejects locally with result `6`.
+  seekReport(sourceId: string): Promise<MisoSeekReportReply>;
   /// @internal Seek the timeline and every source under one new generation, all or nothing
   /// (issue 1644 D1). A plain seek (no `anchorSample`) declares the discontinuity in the same
   /// call; an anchored one keeps continuity. Reposition the PCM producers only after a `0` result,
@@ -921,9 +554,13 @@ export interface MisoAudioWorkletHost {
   /// Read the allocator calls this instance made in the exports its processor calls on the render
   /// thread after boot (issue 1333 D3). Read it on each host before that host's `dispose()`.
   renderAllocationCount(): Promise<MisoRenderAllocations>;
+  /// Read the output latency and tail of the plan that renders now (issue 2116). A rebuild's
+  /// successor shows from the first read after the block that adopts it. One read may be unsettled
+  /// at a time; a second rejects locally with result `6`.
+  planLatency(): Promise<MisoPlanLatencyReply>;
   /// Send one command frame to the engine's control plane (issue 1562a D1): the frames the C ABI's
-  /// `miso_engine_v1_submit_command` accepts, a `SESSION_TRANSACTION_APPLY` of `SET_CONTROL` edits,
-  /// `CONTROL_LIST_GET`, `CONTROL_STATE_GET`, `SESSION_SNAPSHOT_GET`, counters and capabilities.
+  /// `miso_engine_v1_submit_command` accepts, a `SESSION_TRANSACTION_APPLY` of `SET_CONTROL` and
+  /// `Observe` edits, `OBSERVATION_READ`, `CONTROL_LIST_GET`, `CONTROL_STATE_GET`, `SESSION_SNAPSHOT_GET`, counters and capabilities.
   /// Nothing in the frame is decoded here, and the engine decodes it in the worklet's message
   /// handler. The frame is copied. One request-ID allocator must serve every frame sent through
   /// this method, because the engine's replay cache refuses a reused ID with different bytes. A
@@ -933,49 +570,6 @@ export interface MisoAudioWorkletHost {
   /// boot's 1 MiB document bound; an empty one rejects with `RESULT_INVALID_ARGUMENT` (1) before
   /// the port, and one over the bound answers `RESULT_INVALID_ARGUMENT` with an empty response.
   control(frame: Uint8Array, document?: Uint8Array): Promise<MisoControlReply>;
-  /// Submit one batch of observation records (kinds 7 and 8) as a single transaction (issue 137
-  /// D1). Values go through `control()`.
-  command(request: MisoCommandRequest): Promise<MisoCommandAck>;
-  /// Arm or disarm declared observation taps and read back the subscription map (issues 143, 151).
-  ///
-  /// It is wire kinds `ObserveSubscribe`/`ObserveUnsubscribe` on one `miso.command.v1` batch --
-  /// one transaction, one `appliedAtSample` -- plus the map that answers what the positional
-  /// `MisoMeterFrame.trackGrDb` array structurally cannot: which tracks have an observed effect
-  /// at all. See `MisoObservationAck` for what a refusal settles as.
-  observe(request: MisoObservationRequest): Promise<MisoObservationAck>;
-  /// Read the current prepared owner's stable observation bindings.
-  observationMap(): Promise<MisoObservationMap>;
-  /// Read one bounded batch of numeric addresses resolved from `observationMap()`.
-  readObservations(request: { selections: MisoObservationAddress[] }): Promise<MisoObservationReadReply>;
-  /// Capture one immutable selected-track response snapshot for the existing Rust analysis Worker.
-  captureTrackResponse(
-    request: MisoTrackResponseCaptureRequest,
-  ): Promise<MisoTrackResponseCaptureReply>;
-  /// Arm the prepared spectrum boundary for its next complete window.
-  armSpectrum(): Promise<MisoSpectrumReply>;
-  /// Read one completed spectrum window; `result: 6` carries an empty pending snapshot.
-  readSpectrum(request: { readonly channels: MisoSpectrumChannels }): Promise<MisoSpectrumReply>;
-  /// Cancel the prepared spectrum boundary and discard any pending window.
-  cancelSpectrum(): Promise<MisoSpectrumReply>;
-  /// Start the continuously scheduled spectrum boundary.
-  startSpectrumStream(smoothingMs?: number): Promise<MisoSpectrumStreamStartReply>;
-  /// Select one prepared collection entry before starting its managed stream.
-  selectSpectrum(request: {
-    readonly target: MisoSpectrumTarget;
-    readonly targetId: string;
-    readonly channels: MisoSpectrumChannels;
-  }): Promise<MisoSpectrumSelectionReply>;
-  /// Atomically update the active collection entry and smoothing profile.
-  selectSpectrumStream(request: {
-    readonly target: MisoSpectrumTarget;
-    readonly targetId: string;
-    readonly channels: MisoSpectrumChannels;
-    readonly smoothingMs: number;
-  }): Promise<MisoSpectrumSelectionReply>;
-  /// Read one scheduled stream window into a caller-owned reusable buffer.
-  readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
-  /// Stop the continuously scheduled spectrum boundary.
-  stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
   /// Read the compiled session's canonical source order (issues 137 D1, 207).
   ///
   /// `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every

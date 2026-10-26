@@ -1,15 +1,18 @@
 import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
-import { MisoUsageError } from "../core/errors.ts";
+import { MisoEngineError, MisoUsageError, resultName } from "../core/errors.ts";
 import {
   MSB1_CONTROL,
   MSB1_CONTROL_BYTES,
   MSB1_CONTROL_I64_OFFSET,
   createMsb1Ring,
   Msb1RingObserver,
+  Msb1RingWriter,
 } from "./pcm-ring.ts";
+import type { MisoAudioWorkletHost, MisoSeekReport } from "./shipped-host.d.ts";
 
 export type PcmFeedOperation = "moduleLoad" | "nodeCreate" | "attachPost" | "readyTimeout" | "closed"
-  | "prepareState" | "prepareBusy" | "preparePost" | "prepareTimeout" | "prepareSuperseded" | "prepareRefused";
+  | "prepareState" | "prepareBusy" | "preparePost" | "prepareTimeout" | "prepareSuperseded" | "prepareRefused"
+  | "detachPost" | "detachTimeout" | "detachRefused";
 
 export class PcmFeedError extends Error {
   readonly operation: PcmFeedOperation;
@@ -60,18 +63,73 @@ export interface FeedPort { postMessage(message: unknown): void; onmessage?: ((e
 export interface FeedNode { readonly port: FeedPort; disconnect(): void }
 export interface FeedContext { readonly audioWorklet: { addModule(url: string): Promise<void> }; readonly state?: string }
 export interface FeedNodeOptions { readonly numberOfInputs: number; readonly numberOfOutputs: number }
-export interface FeedSource { readonly sourceId: string; readonly channels: 1 | 2 }
+/** The anchored seek that starts an added source (issue 1297b D4). */
+export interface FeedStartSeek {
+  readonly sourceId: string;
+  /** The new generation the source and its ring move to. */
+  readonly generation: bigint;
+  /** The source frame the stem plays at `anchorSample`: `frameAt(anchorSample)`'s answer. */
+  readonly frame: bigint;
+  /** The absolute render sample (a quantum multiple) of the block the stem starts in. */
+  readonly anchorSample: bigint;
+}
+/**
+ * How an added source starts in time with the playing stems (issue 1297b D4/D5, 1297c). Give
+ * exactly one of `frameAt` and `alignTo`. The engine has no playhead: `frameAt(anchorSample)` is
+ * the app's mapping from a render sample to the source's frame. `alignTo` names a playing source
+ * (or `$timeline`) instead: the SDK reads its seek report and starts this one at the frame the
+ * reference reads at the anchor, `sourceFrame + (anchorSample - firstSample)`. `prime(seek)`
+ * writes the source's PCM into its ring from `seek.frame` at `seek.generation` with the app's own
+ * `Msb1RingWriter`; it must not seek the ring, because the SDK has already published the anchored
+ * seek in it.
+ */
+export type FeedStart = FeedStartAt | FeedStartAligned;
+/** A start at the app's own frame mapping. */
+export interface FeedStartAt {
+  frameAt(anchorSample: bigint): bigint;
+  readonly alignTo?: never;
+  prime(seek: FeedStartSeek): void | Promise<void>;
+}
+/** A start aligned to a playing reference source's timeline (issue 1297c). */
+export interface FeedStartAligned {
+  readonly alignTo: string;
+  readonly frameAt?: never;
+  prime(seek: FeedStartSeek): void | Promise<void>;
+}
+export interface FeedSource { readonly sourceId: string; readonly channels: 1 | 2; readonly start?: FeedStart }
+/** The engine a feed belongs to: what `createEngine` resolves with. */
+export interface FeedEngine { readonly host: object }
 export interface FeedOptions<Context extends FeedContext = FeedContext> {
   readonly context: Context;
   readonly sources: readonly FeedSource[];
+  /**
+   * The engine this feed delivers to (issue 1297b). With it, `ready()` starts each source that
+   * has a `start` with one anchored seek, and a committed `engine.apply` or
+   * `engine.replaceSession` that removes a source of this feed detaches that source's ring once
+   * `engine.applied(revision)` resolved. A source with a `start` requires it.
+   */
+  readonly engine?: FeedEngine;
   readonly quantumFrames: number;
   readonly capacityChunks?: number;
   readonly moduleUrl?: string | URL;
   readonly createNode?: (context: Context, name: string, options: FeedNodeOptions) => FeedNode;
 }
 export interface EngineFeed {
+  /** The rings the feed still delivers, in source order: `detachSource` removes one. */
   readonly rings: readonly SharedArrayBuffer[];
   readonly state: "pending" | "active" | "closed";
+  /**
+   * Resolve once the worklet bound every ring; then start each source that has a `start` (issue
+   * 1297b D4), in order. A start reads `nextAbsoluteSample` once, sets the anchor `A` to it plus the
+   * ring's capacity in frames, rounded up to a quantum, asks `frameAt(A)` once (or, for `alignTo`,
+   * computes the reference's frame at `A` from its seek report, read before and after the status
+   * read; see `alignedFrame`), publishes the
+   * anchored seek in the ring, awaits `prime`, and then sends the same seek to the engine's message
+   * handler (`miso.seek-at.v1`), which applies it once. Until it did, the drain reads none of that
+   * ring's chunks. An anchor the audio reaches before the handler is late, not lost: the engine
+   * starts the stem at the frame plus the lateness and reports it in the source's seek report. A
+   * refused seek rejects with a `MisoEngineError` that carries the result, and closes the feed.
+   */
   ready(options?: { readonly timeoutMs?: number; readonly now?: () => number; readonly wait?: (ms: number) => Promise<void> }): Promise<void>;
   /** Prepare the producer's published seeks while suspended, freeing stale consumer slots.
    * Await the producer's seek acknowledgement before calling, and serialize this handoff
@@ -81,7 +139,87 @@ export interface EngineFeed {
    * One operation may be outstanding; a newer published seek rejects the old proof.
    * Timeout closes the feed, preventing an unobserved late acknowledgement from granting readiness. */
   prepareSeek(options?: { readonly timeoutMs?: number }): Promise<void>;
+  /**
+   * Withdraw one source's ring (issue 1297b D5): resolves after the worklet's drain stopped reading
+   * it, then releases it. The other rings keep draining. A worklet that withdrew no ring rejects
+   * with `detachRefused`; it and a timeout close the feed, which withdraws every ring.
+   */
+  detachSource(sourceId: string, options?: { readonly timeoutMs?: number }): Promise<void>;
   close(): void;
+}
+
+/** The engine side of the feeds linked to one engine (issue 1297b). */
+interface FeedLink {
+  readonly host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport">;
+  readonly reserveSeekGeneration: () => bigint;
+  readonly feeds: Set<LinkedFeed>;
+  /**
+   * Issue 1297c: the newest anchored start each linked feed published, by source ID, with its
+   * ring. Until the engine renders it, the source's seek report still shows the old generation,
+   * so an `alignTo` that names it aligns to this seek instead. Removed with its ring.
+   */
+  readonly starts: Map<string, { readonly seek: FeedStartSeek; readonly ring: SharedArrayBuffer }>;
+}
+interface LinkedFeed {
+  /** The source IDs whose rings the feed still delivers. */
+  sourceIds(): readonly string[];
+  /** The ring the feed still delivers for `sourceId`. */
+  ring(sourceId: string): SharedArrayBuffer | undefined;
+  /** Issue 1297c: `sourceId` is in the feed's start list and its anchored start is not published yet. */
+  startPending(sourceId: string): boolean;
+  detachSource(sourceId: string): Promise<void>;
+}
+/** Keyed by the engine's host object, which `FeedEngine.host` names. */
+const feedLinks = new WeakMap<object, FeedLink>();
+
+/** What `createEngine` tells the feeds linked to it after a commit (issue 1297b D6). */
+export interface FeedRetirement {
+  /** After a commit that removed `sourceIds`, detach each linked feed's ring of one once `applied` resolved. */
+  retire(sourceIds: readonly string[], applied: () => Promise<unknown>): void;
+  /** After a replace: `committedSources` reads the committed session's source IDs; detach the rest. */
+  retireAbsent(committedSources: () => Promise<ReadonlySet<string>>, applied: () => Promise<unknown>): void;
+}
+
+/**
+ * @internal `createEngine` links its host here (issue 1297b): a feed whose `engine` names it
+ * starts its added sources with generations this engine reserved, and has its removed sources
+ * retired by `FeedRetirement`. The SDK's own seam; not an application API.
+ */
+export function linkFeedEngine(
+  host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport">,
+  reserveSeekGeneration: () => bigint,
+): FeedRetirement {
+  const link: FeedLink = { host, reserveSeekGeneration, feeds: new Set(), starts: new Map() };
+  feedLinks.set(host, link);
+  const detachAfter = (owned: readonly (readonly [LinkedFeed, string])[], applied: () => Promise<unknown>): void => {
+    if (owned.length === 0) return;
+    // Keep delivering until the removal is in effect (#1325: a removal's revision completes at its
+    // phase-2 swap), so the strip's ramp-out is never starved. A rejected `applied` (a closed
+    // engine) detaches nothing: closing the feed is the app's.
+    void applied().then(
+      () => Promise.allSettled(owned.map(([feed, sourceId]) => feed.detachSource(sourceId))),
+      () => undefined,
+    );
+  };
+  const owners = (removed: (sourceId: string) => boolean) => {
+    const owned: (readonly [LinkedFeed, string])[] = [];
+    for (const feed of link.feeds) {
+      for (const sourceId of feed.sourceIds()) if (removed(sourceId)) owned.push([feed, sourceId]);
+    }
+    return owned;
+  };
+  return {
+    retire(sourceIds, applied) {
+      detachAfter(owners((sourceId) => sourceIds.includes(sourceId)), applied);
+    },
+    retireAbsent(committedSources, applied) {
+      if (link.feeds.size === 0) return;
+      void committedSources().then(
+        (present) => detachAfter(owners((sourceId) => !present.has(sourceId)), applied),
+        () => undefined,
+      );
+    },
+  };
 }
 
 export async function prepareEngineFeed(context: FeedContext, moduleUrl: string | URL = BUNDLED_ENGINE_ASSETS.pcmFeedWorklet): Promise<void> {
@@ -284,20 +422,51 @@ function yieldRunwayTurn(signal: AbortSignal | undefined): Promise<void> {
 
 export function attachEngineFeed<Context extends FeedContext>(options: FeedOptions<Context>): EngineFeed {
   if (!Number.isSafeInteger(options.quantumFrames) || options.quantumFrames <= 0) throw new MisoUsageError("quantumFrames must be a positive integer");
-  const rings = options.sources.map((source) => createMsb1Ring({ sourceId: source.sourceId, channels: source.channels, frameCapacity: options.quantumFrames, capacity: options.capacityChunks ?? 64 }));
+  const capacity = options.capacityChunks ?? 64;
+  const ids = new Set<string>();
+  for (const source of options.sources) {
+    if (ids.has(source.sourceId)) throw new MisoUsageError(`feed source IDs must be unique: ${source.sourceId}`);
+    ids.add(source.sourceId);
+  }
+  const starts = options.sources.map((source) => source.start);
+  if (starts.some((start) => start !== undefined && ((typeof start?.frameAt === "function") === (typeof start?.alignTo === "string") || typeof start.prime !== "function"))) {
+    throw new MisoUsageError("a feed source start needs a prime function and exactly one of frameAt and alignTo");
+  }
+  const order = startOrder(options.sources);
+  const link = options.engine === undefined ? undefined : feedLinks.get(options.engine.host);
+  if (options.engine !== undefined && link === undefined) throw new MisoUsageError("the feed's engine is not one createEngine resolved with");
+  if (link === undefined && starts.some((start) => start !== undefined)) throw new MisoUsageError("a feed source start needs the feed's engine");
+  const created = options.sources.map((source) => createMsb1Ring({ sourceId: source.sourceId, channels: source.channels, frameCapacity: options.quantumFrames, capacity }));
+  // The rings still delivered, by source ID, with each one's index in the attach list: a port
+  // clones a SharedArrayBuffer into a new object, so the worklet is told the index, never the ring.
+  const live = new Map(options.sources.map((source, index) => [source.sourceId, { ring: created[index]!, index }] as const));
+  const liveRings = (): readonly SharedArrayBuffer[] => Object.freeze([...live.values()].map((entry) => entry.ring));
+  let rings = liveRings();
   let node: FeedNode;
   try {
     node = options.createNode?.(options.context, "miso-sab-feed-attach", { numberOfInputs: 0, numberOfOutputs: 1 }) ?? defaultNode(options.context);
   } catch (error) {
-    release(rings); throw new PcmFeedError("nodeCreate", "Engine feed attach processor is unavailable", error);
+    release(created); throw new PcmFeedError("nodeCreate", "Engine feed attach processor is unavailable", error);
   }
-  let state: "pending" | "active" | "closed" = rings.length === 0 ? "active" : "pending";
+  let state: "pending" | "active" | "closed" = created.length === 0 ? "active" : "pending";
   let signalTerminal!: () => void;
   const terminal = new Promise<void>((resolve) => { signalTerminal = resolve; });
   let terminalSignaled = false;
   let requestId = 0;
   let pending: { id: number; seeks: SeekSnapshot[]; finish: (error?: PcmFeedError) => void } | undefined;
+  const detaching = new Map<number, (error?: PcmFeedError) => void>();
+  // Issue #1297b D4: the starts not yet run, and the one `ready()` that runs them.
+  // Issue #1297c: in dependency order, so a source that aligns to another source of this feed
+  // starts after that one published its start.
+  let unstarted = order.map((index) => ({ source: options.sources[index]!, start: options.sources[index]!.start!, ring: created[index]! }));
+  // Issue #1297c: the sources whose anchored start this feed has not published yet.
+  const pendingStarts = new Set(unstarted.map((entry) => entry.source.sourceId));
+  let starting: Promise<void> | undefined;
   node.port.onmessage = ({ data }: MessageEvent): void => {
+    if (data?.op === "source-detached") {
+      detaching.get(data.requestId)?.(data.detached === true ? undefined : new PcmFeedError("detachRefused", "PCM feed worklet withdrew no ring for the source"));
+      return;
+    }
     if (data?.op !== "seek-prepared" || data.requestId !== pending?.id || pending === undefined) return;
     if (options.context.state !== "suspended") {
       pending.finish(new PcmFeedError("prepareState", "AudioContext resumed during seek preparation"));
@@ -309,32 +478,117 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
       pending.finish();
     }
   };
+  const linked: LinkedFeed = {
+    sourceIds: () => [...live.keys()],
+    ring: (sourceId) => live.get(sourceId)?.ring,
+    startPending: (sourceId) => pendingStarts.has(sourceId),
+    detachSource: (sourceId) => feed.detachSource(sourceId),
+  };
   const close = (): void => {
     if (state === "closed") return;
-    state = "closed"; release(rings);
+    state = "closed"; release(created);
+    link?.feeds.delete(linked);
+    for (const [sourceId, start] of link?.starts ?? []) if (created.includes(start.ring)) link!.starts.delete(sourceId);
     pending?.finish(new PcmFeedError("closed", "Engine feed is closed"));
+    for (const finish of [...detaching.values()]) finish(new PcmFeedError("closed", "Engine feed is closed"));
     node.port.onmessage = null;
     if (!terminalSignaled) { terminalSignaled = true; signalTerminal(); }
     try { node.port.postMessage({ op: "detach" }); } catch { /* context already closed */ }
     try { node.disconnect(); } catch { /* never connected */ }
   };
-  try { node.port.postMessage({ op: "attach", rings }); }
+  try { node.port.postMessage({ op: "attach", rings: created }); }
   catch (error) { close(); throw new PcmFeedError("attachPost", "Engine feed attach message could not be posted", error); }
-  return {
-    rings,
+  link?.feeds.add(linked);
+  /** One anchored start (D4): the SDK publishes the seek in the ring once, and the engine's handler applies it once. */
+  const startSource = async (host: FeedLink["host"], reserve: () => bigint, entry: { source: FeedSource; start: FeedStart; ring: SharedArrayBuffer }): Promise<void> => {
+    const quantum = BigInt(options.quantumFrames);
+    const anchorFrom = (status: Awaited<ReturnType<FeedLink["host"]["status"]>>): bigint => {
+      if (status.result !== 0) throw refusedStart(entry.source.sourceId, status.result);
+      const earliest = status.nextAbsoluteSample + BigInt(capacity) * quantum;
+      return (earliest + quantum - 1n) / quantum * quantum;
+    };
+    const { alignTo } = entry.start;
+    let anchorSample: bigint;
+    let frame: bigint;
+    if (alignTo === undefined) {
+      anchorSample = anchorFrom(await host.status());
+      frame = entry.start.frameAt!(anchorSample);
+      if (!nonnegativeI64(frame)) throw new MisoUsageError(`frameAt for source ${entry.source.sourceId} must return a nonnegative bigint within the MSB1 frame domain`);
+    } else {
+      // Issue 1297c: the reference's report before the one status read, and a second one after it.
+      const refuse = alignRefusal(entry.source.sourceId, alignTo);
+      const before = await readSeekReport(host, entry.source.sourceId, alignTo);
+      const started = pendingStart(link!, alignTo, before.generation, refuse);
+      if (started === undefined && before.generation === 0n) throw refuse("it has not rendered yet", "feed.align.unrendered");
+      anchorSample = anchorFrom(await host.status());
+      if (started !== undefined) {
+        // The reference's own anchored start is not rendered yet: its report is the old
+        // generation's, so the frame comes from that start, exactly.
+        frame = started.frame + (anchorSample - started.anchorSample);
+        // A newer start of the reference published meanwhile moves its timeline.
+        if (pendingStart(link!, alignTo, before.generation, refuse) !== started) throw refuse("it seeked while the anchor was computed", "feed.align.reseeked");
+      } else {
+        const after = await readSeekReport(host, entry.source.sourceId, alignTo);
+        if (pendingStart(link!, alignTo, after.generation, refuse) !== undefined) throw refuse("it seeked while the anchor was computed", "feed.align.reseeked");
+        frame = alignedFrame(refuse, before, after, anchorSample);
+      }
+      if (!nonnegativeI64(frame)) throw refuse("its frame at the anchor is outside the MSB1 frame domain", "feed.align.domain");
+    }
+    // Closed or detached while the reports were read: nothing is published.
+    if (feed.state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
+    if (!live.has(entry.source.sourceId)) return;
+    const generation = reserve();
+    // The ring's seek is published first: from here the drain reads none of its chunks until the
+    // handler applied this seek, so the primed PCM at the new generation waits for it.
+    new Msb1RingWriter(entry.ring).seek(generation, frame, anchorSample);
+    const seek = Object.freeze({ sourceId: entry.source.sourceId, generation, frame, anchorSample });
+    link!.starts.set(seek.sourceId, { seek, ring: entry.ring });
+    pendingStarts.delete(seek.sourceId);
+    await entry.start.prime(seek);
+    if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
+    // Detached during its own prime: the ring is withdrawn, so the engine is not asked to seek it.
+    if (!live.has(entry.source.sourceId)) return;
+    let result: number;
+    try {
+      result = (await host.seekSourceAt({ sourceId: seek.sourceId, generation, sourceFrame: frame, anchorSample })).result;
+    } catch (error) {
+      const code = (error as { readonly result?: unknown }).result;
+      if (typeof code === "number" && Number.isSafeInteger(code) && code >= 0) throw refusedStart(seek.sourceId, code);
+      throw error;
+    }
+    if (result !== 0) throw refusedStart(seek.sourceId, result);
+  };
+  const feed: EngineFeed = {
+    get rings() { return rings; },
     get state() { return state; },
     async ready(settings = {}): Promise<void> {
       if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
-      if (state === "active") return;
-      const now = settings.now ?? (() => performance.now());
-      const wait = settings.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-      const deadline = now() + (settings.timeoutMs ?? 2_000);
-      while (state === "pending") {
-        if (rings.every(attached)) { state = "active"; return; }
-        if (now() >= deadline) { close(); throw new PcmFeedError("readyTimeout", "Engine feed attach confirmation timed out"); }
-        await Promise.race([wait(0), terminal]);
+      if (state === "pending") {
+        const now = settings.now ?? (() => performance.now());
+        const wait = settings.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+        const deadline = now() + (settings.timeoutMs ?? 2_000);
+        while (state === "pending") {
+          if (rings.every(attached)) { state = "active"; break; }
+          if (now() >= deadline) { close(); throw new PcmFeedError("readyTimeout", "Engine feed attach confirmation timed out"); }
+          await Promise.race([wait(0), terminal]);
+        }
+        if (state !== "active") throw new PcmFeedError("closed", "Engine feed is closed");
       }
-      if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
+      if (unstarted.length === 0) return;
+      starting ??= (async () => {
+        try {
+          for (const entry of unstarted) {
+            // A source detached while an earlier start was in flight is not started.
+            if (!live.has(entry.source.sourceId)) continue;
+            await startSource(link!.host, link!.reserveSeekGeneration, entry);
+          }
+          unstarted = [];
+        } catch (error) {
+          close();
+          throw error;
+        }
+      })();
+      return starting;
     },
     async prepareSeek(settings = {}): Promise<void> {
       if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
@@ -361,14 +615,150 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
         catch (cause) { pending?.finish(new PcmFeedError("preparePost", "PCM seek preparation could not be posted", cause)); close(); }
       });
     },
+    async detachSource(sourceId: string, settings = {}): Promise<void> {
+      if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
+      const entry = live.get(sourceId);
+      if (entry === undefined) throw new MisoUsageError(`the feed delivers no source ${sourceId}`);
+      const { ring, index } = entry;
+      const timeoutMs = settings.timeoutMs ?? 2_000;
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new MisoUsageError("detachSource timeoutMs must be finite and positive");
+      // The ring leaves the delivered set now, so no prepareSeek or later retirement names it.
+      live.delete(sourceId);
+      if (link?.starts.get(sourceId)?.ring === ring) link.starts.delete(sourceId);
+      pendingStarts.delete(sourceId);
+      rings = liveRings();
+      unstarted = unstarted.filter((entry) => entry.source.sourceId !== sourceId);
+      await new Promise<void>((resolve, reject) => {
+        const id = ++requestId;
+        const timer = setTimeout(() => {
+          if (!detaching.has(id)) return;
+          detaching.get(id)!(new PcmFeedError("detachTimeout", "PCM source detach confirmation timed out"));
+          close();
+        }, timeoutMs);
+        detaching.set(id, (error) => {
+          clearTimeout(timer);
+          detaching.delete(id);
+          if (error === undefined) { resolve(); return; }
+          reject(error);
+          // An unconfirmed withdrawal is not left to leak: closing withdraws every ring of the node.
+          if (error.operation === "detachRefused") close();
+        });
+        try { node.port.postMessage({ op: "detach-source", requestId: id, index }); }
+        catch (cause) { detaching.get(id)?.(new PcmFeedError("detachPost", "PCM source detach could not be posted", cause)); close(); }
+      });
+      // Confirmed: the drain no longer reads it, so the writer is released.
+      release([ring]);
+    },
     close,
   };
+  return feed;
+}
+
+/**
+ * Issue 1297c: the indexes of the sources that have a `start`, in a stable dependency order: a
+ * source whose `alignTo` names another started source of the same feed comes after it. An
+ * `alignTo` cycle, a self-alignment included, is refused. Each start names at most one reference, so the
+ * walk follows one chain at a time, without recursion.
+ */
+function startOrder(sources: readonly FeedSource[]): number[] {
+  const indexOf = new Map(sources.map((source, index) => [source.sourceId, index] as const));
+  const placed = new Set<number>();
+  const order: number[] = [];
+  for (let first = 0; first < sources.length; first += 1) {
+    const chain: number[] = [];
+    const onChain = new Set<number>();
+    let index: number | undefined = first;
+    while (index !== undefined && !placed.has(index)) {
+      const source: FeedSource = sources[index]!;
+      if (source.start === undefined) break;
+      if (onChain.has(index)) throw new MisoUsageError(`feed source ${source.sourceId} is on an alignTo cycle (a self-alignment is one)`);
+      chain.push(index); onChain.add(index);
+      const alignTo: string | undefined = source.start.alignTo;
+      index = alignTo === undefined ? undefined : indexOf.get(alignTo);
+    }
+    for (const entry of chain.reverse()) { placed.add(entry); order.push(entry); }
+  }
+  return order;
+}
+
+/** Bounded reads of a busy seek report (`RESULT_BACKPRESSURE`): render was publishing it. */
+const SEEK_REPORT_ATTEMPTS = 4;
+const RESULT_BACKPRESSURE = 6;
+
+/** Issue 1297c: one seek report of the `alignTo` reference, retried while busy. */
+async function readSeekReport(host: FeedLink["host"], sourceId: string, alignTo: string): Promise<MisoSeekReport> {
+  for (let attempt = 0; attempt < SEEK_REPORT_ATTEMPTS; attempt += 1) {
+    // One macrotask between reads, so a read of the same source in flight can settle first.
+    if (attempt !== 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    let result: number;
+    let report: MisoSeekReport | null = null;
+    try {
+      ({ result, report } = await host.seekReport(alignTo));
+    } catch (error) {
+      // The wrapper refuses a second unsettled read of one source locally, with the same result.
+      const code = (error as { readonly result?: unknown }).result;
+      if (typeof code !== "number" || !Number.isSafeInteger(code) || code < 0) throw error;
+      result = code;
+    }
+    if (result === RESULT_BACKPRESSURE) continue;
+    if (result !== 0 || report === null) throw refusedStart(sourceId, result);
+    return report;
+  }
+  throw alignRefusal(sourceId, alignTo)(`its seek report stayed busy after ${SEEK_REPORT_ATTEMPTS} reads`, "feed.align.busy");
+}
+
+function alignRefusal(sourceId: string, alignTo: string): (cause: string, code: string) => MisoUsageError {
+  return (cause, code) => new MisoUsageError(`source ${sourceId} cannot align to ${alignTo}: ${cause}; use frameAt`, code);
+}
+
+/**
+ * Issue 1297c: the reference's anchored start that a linked feed published and the engine has
+ * not rendered yet (its generation is above the report's), or `undefined`. Any other seek of a fed
+ * reference published above the report's generation (a ring seek the engine has not applied) is
+ * pending too, and the frame it will play is not known here: `feed.align.held`.
+ */
+function pendingStart(link: FeedLink, alignTo: string, reported: bigint, refuse: ReturnType<typeof alignRefusal>): FeedStartSeek | undefined {
+  // A linked feed will start the reference but has not published that start: its frame is not
+  // known yet. The SDK does not wait across feeds; the app retries after that feed's `ready()`.
+  for (const feed of link.feeds) {
+    if (feed.startPending(alignTo)) throw refuse("its own start is not published yet; retry after its feed's ready()", "feed.align.unstarted");
+  }
+  const start = link.starts.get(alignTo);
+  let ring: SharedArrayBuffer | undefined;
+  for (const feed of link.feeds) ring ??= feed.ring(alignTo);
+  const snapshot = ring === undefined ? undefined : seekSnapshot(ring);
+  const published = snapshot === undefined || snapshot.epoch === 0 ? 0n : snapshot.generation;
+  const pending = start !== undefined && start.seek.generation > reported ? start.seek : undefined;
+  if (published > (pending?.generation ?? reported)) throw refuse("a seek it has not rendered yet is pending", "feed.align.held");
+  return pending;
+}
+
+/**
+ * Issue 1297c: the frame the reference reads at `anchorSample`, `sourceFrame + (anchorSample -
+ * firstSample)` (source rate equals render rate, D15-12). The consumer advances its frame on an
+ * underrun too, so an underrun keeps the formula exact; a seek or held frames (an anchored seek
+ * waiting) between the two reads do not, and reject with the cause.
+ */
+function alignedFrame(refuse: ReturnType<typeof alignRefusal>, before: MisoSeekReport, after: MisoSeekReport, anchorSample: bigint): bigint {
+  if (after.generation !== before.generation || after.firstSample !== before.firstSample || after.sourceFrame !== before.sourceFrame) {
+    throw refuse("it seeked while the anchor was computed", "feed.align.reseeked");
+  }
+  if (after.cumulativeHeldFrames !== before.cumulativeHeldFrames) throw refuse("it held frames since its seek report", "feed.align.held");
+  return before.sourceFrame + (anchorSample - before.firstSample);
+}
+
+function refusedStart(sourceId: string, result: number): MisoEngineError {
+  return new MisoEngineError(`the browser host refused the anchored start of source ${sourceId}`, {
+    phase: "source",
+    code: resultName(result, "call"),
+    result,
+  });
 }
 
 interface SeekSnapshot { readonly epoch: number; readonly generation: bigint; readonly frame: bigint }
 function seekSnapshot(ring: SharedArrayBuffer): SeekSnapshot {
   const control = new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4);
-  const wide = new BigInt64Array(ring, MSB1_CONTROL_I64_OFFSET, 2);
+  const wide = new BigInt64Array(ring, MSB1_CONTROL_I64_OFFSET, 3);
   return { epoch: Atomics.load(control, MSB1_CONTROL.SEEK_EPOCH), generation: Atomics.load(wide, 0), frame: Atomics.load(wide, 1) };
 }
 function equalSeeks(actual: readonly SeekSnapshot[], expected: readonly SeekSnapshot[]): boolean {
