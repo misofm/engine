@@ -18,3 +18,10 @@ Re-pin the worklet module, record a fresh two-browser qualification (Chromium an
 - Release identity: npm-publish.yml's five `0.6.0` literals; test-npm-publish-modes.py follows (its "wrong release version" mutation moves 0.6.0 to 0.5.0). Release record: this issue.
 - Identity report (`--event push --before 2c77c8a44`): RELEASE line, every check passes. The base had no recorded digest yet (ARTIFACT CANNOT TELL); CI's run on the PR compares against it.
 - sdk/README.md: "Upgrading from 0.5.0"; the pump paragraph (two windows per source, eight reads in flight) and the manifest's artifact count (seven) are corrected.
+
+## Evidence and decision record (attempt 2, 2026-10-26)
+- Why attempt 1 failed: qualify run 40282768798 refused, correctly. Main 346c662 builds `455e771cd32a3faef113ddfe51cba433996b9a6f190b0d7faf1e8108ff216816` (5,763,203 B), not the pinned `049a07f3`: #2123 (#2115 loudness S1) merged after the release PR and edited crates/true-peak-limiter/src/lib.rs.
+- Cause (measured): named twins of e33f418 and 346c662 (both 6,526,337 B, same sections) differ in 158 bytes, all in the Data section; the Code section is byte-identical. Every differing word is a line number of a panic `Location` whose file is `crates/true-peak-limiter/src/lib.rs` (35 B): old lines 533-1695 move +11 and 1929-5959 move +12, exactly the lines #2123 added (the `annex2` module and doc comments). So the `pub` keywords themselves change no byte; the added source lines move the embedded panic line numbers. A code change, not a nondeterminism: each commit's digest reproduces (049a07f3 at e33f418 here and in attempt 1; 455e771c here and in CI).
+- Re-pinned the module to `455e771c...` (pin file, `EXPECTED_WORKLET_SHA256`, test-npm-publish-modes.py's accepted pin); `--check-pin` passes. Built from 775f10c94 (main 346c662 plus the spec and the re-pin).
+- Qualification (`--browser all --record-matrix --candidate-commit 775f10c94 --self-test-mutations`, Playwright 1.62.1, null PulseAudio sink): Chromium 151.0.7922.34 pass, WebKit 26.5 pass.
+- BLAKE3 module unchanged: `ee373d2f...` (44861 B); still no own pin (#2117).
