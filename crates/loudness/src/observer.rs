@@ -266,3 +266,50 @@ impl State {
     }
 }
 // REALTIME_POLICY_END
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn records(left: &[f32], right: &[f32]) -> Vec<HopRecord> {
+        let mut observer = LoudnessObserver::new(48_000).expect("launch rate");
+        let mut out = Vec::new();
+        observer.observe(left, right, 0, &mut |record| out.push(record));
+        out
+    }
+
+    #[test]
+    fn a_non_finite_sample_reads_as_zero_and_is_counted() {
+        let tone: Vec<f32> = (0..1_920)
+            .map(|n| ((n * 7) % 96) as f32 / 96.0 - 0.5)
+            .collect();
+        let mut left = tone.clone();
+        let mut right = tone.clone();
+        left[5] = f32::NAN;
+        right[5] = f32::INFINITY;
+        left[700] = f32::NEG_INFINITY;
+        right[1_919] = f32::NAN;
+        let mut zeroed_left = left.clone();
+        let mut zeroed_right = right.clone();
+        for sample in zeroed_left.iter_mut().chain(zeroed_right.iter_mut()) {
+            if !sample.is_finite() {
+                *sample = 0.0;
+            }
+        }
+        let dirty = records(&left, &right);
+        let clean = records(&zeroed_left, &zeroed_right);
+        assert_eq!(dirty.len(), 4);
+        let counts: Vec<u32> = dirty.iter().map(|record| record.sanitized).collect();
+        assert_eq!(counts, [2, 1, 0, 1]);
+        for (dirty, clean) in dirty.iter().zip(&clean) {
+            assert_eq!(clean.sanitized, 0);
+            assert_eq!(
+                HopRecord {
+                    sanitized: 0,
+                    ..*dirty
+                },
+                *clean
+            );
+        }
+    }
+}

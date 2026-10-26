@@ -371,3 +371,70 @@ impl LoudnessAnalysis {
         self.sanitized
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOP: u64 = 480;
+
+    /// Hop `k` of a 48 kHz run: energy `z` per sample per channel, true peak `1000 - k`.
+    fn hop(k: u64, z: f64) -> HopRecord {
+        HopRecord {
+            first_sample: k * HOP,
+            end_sample: (k + 1) * HOP,
+            energy: [z * HOP as f64; 2],
+            true_peak: [(1_000 - k) as f32; 2],
+            sanitized: 0,
+        }
+    }
+
+    #[test]
+    fn reset_drops_exactly_the_hops_before_its_sample() {
+        let mut analysis = LoudnessAnalysis::new();
+        for k in 0..100 {
+            analysis.ingest(&hop(k, 1e-3));
+        }
+        // Mid-hop, replayed from the ring: hop 37 starts before the sample, hop 38 is the first kept.
+        analysis.reset(37 * HOP + 5);
+        assert_eq!(analysis.integrating_since(), Some(38 * HOP));
+        assert_eq!(analysis.true_peak(), [962.0; 2]);
+        // Exactly on a boundary: that hop is kept.
+        analysis.reset(50 * HOP);
+        assert_eq!(analysis.integrating_since(), Some(50 * HOP));
+        assert_eq!(analysis.true_peak(), [950.0; 2]);
+        // Ahead of every record held: pending until the first kept hop arrives.
+        analysis.reset(120 * HOP + 1);
+        assert_eq!(analysis.integrating_since(), None);
+        assert_eq!(analysis.true_peak(), [0.0; 2]);
+        for k in 100..130 {
+            analysis.ingest(&hop(k, 1e-3));
+        }
+        assert_eq!(analysis.integrating_since(), Some(121 * HOP));
+        assert_eq!(analysis.true_peak(), [879.0; 2]);
+        // Nine kept hops: no momentary window lies wholly in them yet, though M itself runs on.
+        assert_eq!(analysis.momentary_max(), None);
+        assert!(analysis.momentary().is_some());
+    }
+
+    #[test]
+    fn a_gap_restarts_the_momentary_and_short_term_windows() {
+        let mut analysis = LoudnessAnalysis::new();
+        for k in 0..350 {
+            analysis.ingest(&hop(k, 1e-2));
+        }
+        assert!(analysis.short_term().is_some());
+        for k in 360..399 {
+            analysis.ingest(&hop(k, 1e-6));
+            assert_eq!(analysis.momentary(), None, "M across the gap at hop {k}");
+            assert_eq!(analysis.short_term(), None, "S across the gap at hop {k}");
+        }
+        analysis.ingest(&hop(399, 1e-6));
+        let quiet = -0.691 + 10.0 * math::log10(2e-6);
+        let momentary = analysis.momentary().expect("40 hops after the gap");
+        assert!(
+            (momentary - quiet).abs() < 1e-9,
+            "M {momentary}, expected {quiet}"
+        );
+    }
+}
