@@ -18,7 +18,11 @@ Measurement source: the scratch script
 (an `f64` numpy/scipy model of this design; not tracked; numbers below are its output). Command:
 `venv/bin/python measure.py lengths tail ned color corr` in that directory, plus the probes
 `probe3.py` (matrix held-out coloration), `probe_mod.py` (modulation), `probe_rt3.py` (RT60 grid),
-`probe_n8.py` (N = 8), `check_distinct.py` (length rule) in the same directory.
+`probe_n8.py` (N = 8), `check_distinct.py` (length rule), `pairs.py`, `pairs_measure.py` and
+`pairs_cells2.py` (output pair) in the same directory. Revised 2026-10-26 after the oracle review:
+the model now takes the outputs exactly as R8 (from the slot-ordered butterfly), and it runs R2's
+allpasses at `k = 0` as pure delays. Every figure below is from the revised model, except M3
+(see there).
 
 ## Adopted decisions
 
@@ -26,14 +30,14 @@ Measurement source: the scratch script
    per-line delays is lossless, and per-line gains set a frequency-dependent decay
    [JOT-CHAIGNE-FDN] [STAUTNER-PUCKETTE] [GERZON-UNITARY] [SCHLECHT-LOSSLESS] [SMITH-PASP-FDN].
    Choice: N = 16. Measured reason: at size 1, N = 16 against N = 8 gives a late-tail coloration
-   of 2.22 / 3.42 dB peak-to-median and 0.97 / 1.64 dB std, and a loop-alone mixing time of
-   167 / 310 ms (Decision record, M2, M5).
+   of 2.39 / 3.42 dB peak-to-median and 0.95 / 1.64 dB std, and a mixing time at diffusion 0 of
+   193 / 341 ms (Decision record, M1, M5).
 2. **The feedback matrix is `H16 P / 4`.** `H16` is the 16 x 16 Sylvester Hadamard matrix, and P
    is the fixed permutation `(P f)_j = f_{(14 - j) mod 16}`. It is applied as a fixed four-stage
    butterfly, which gives identical bits for W = 1, 4 and 8. Measured reason: candidate E is the
-   best of six candidates on coloration and as fast as the plain H16 on mixing. The plain Sylvester
-   H16 (candidate A) satisfies `(H16 / 4)^2 = I`, and that structure colours the tail
-   (5.67 dB against 1.93 dB). See M1-M3.
+   best of six candidates on coloration, and within 12 ms of the plain H16 on mixing. The plain
+   Sylvester H16 (candidate A) satisfies `(H16 / 4)^2 = I`, and that structure colours the tail
+   (four-path mean 4.67 dB against 2.85 dB). See M1-M3.
 3. **Absorption gains follow Jot.** `g_i = 10^(-3 D_i / (fs T))` with T = `decay_ms / 1000`
    [JOT-CHAIGNE-FDN] [SCHLECHT-RT60]. Every line then decays at the same per-sample rate
    `r0 = 10^(-3 / (fs T))`. The gain is applied **after** the matrix, on the line being written.
@@ -51,8 +55,8 @@ Measurement source: the scratch script
    about `R / 128` times. No l2 bound then holds under an adversarial size history
    (Numerical and stability limits, S1-S3). Cost: one scalar store per line per sample, two in a
    crossfade.
-7. **No modulation.** The measurement does not favour it. Over 32 conditions it moves coloration by
-   at most 0.08 dB mean and NED by at most 3 ms, inside the metric noise (M4). This is provisional
+7. **No modulation.** The measurement does not favour it. Over 32 conditions it changes the mean
+   coloration per size by -0.17 to +0.51 dB (worse on balance) and NED by at most 3 ms (M4). This is provisional
    pending the S4 listening record. Dropping it removes the fractional reads and the proof's
    `(1 + m)` factor.
 8. **The 16 line lengths are distinct primes at every size and rate.** `D_i` is the nearest prime to
@@ -92,12 +96,18 @@ BASE (48 kHz, size 1), line 0..15:
 DIFF_L (48 kHz) = 229 173 613 449        (4.77 3.60 12.77 9.35 ms: Dattorro's 142 107 379 277
 DIFF_R (48 kHz) = 233 179 617 457         at 29,761 Hz, scaled, nearest prime; R = next prime above L)
 B   = 0.5                                 input gain per line (exact)
-OUT = (5, 10)                             output slots: o_L from w_5, o_R from w_10
+OUT = (14, 15)                            output slots: o_L from w_14, o_R from w_15
 ```
 
 `sum BASE = 36,180` samples, which is about 0.75 modes per Hz at size 1 [JOT-CHAIGNE-FDN].
-Rows 5 and 10 of `H16` are orthogonal on lines 0-7 and on lines 8-15 separately: `5 xor 10 = 15`
-has non-zero low bits. So even the first trip of a one-sided input reaches the two outputs with
+The outputs read the butterfly, which acts on the slot-ordered vector. So, per line, output `a`
+carries the sign pattern `H16[a][pi(l)]` on line `l`. Lines 0-7 sit in slots 7-14 and lines 8-15
+in slots 15 and 0-6. The two per-line patterns are orthogonal on each half exactly when
+`sum over the half's slots of (-1)^popcount((a xor b) & j) = 0` for both halves. That holds for
+`a xor b` in 1..7, which means `a` and `b` agree in bit 3: 56 admissible pairs. (14, 15) is the
+pair with the lowest measured coloration among those that pass test 3 (M8). The scope's earlier
+(5, 10) is not admissible: its per-line dot products are -2 (lines 0-7) and +2 (lines 8-15). With
+an admissible pair, even the first trip of a one-sided input reaches the two outputs with
 orthogonal sign patterns.
 
 ### Per sample (frame `n`), in this order
@@ -122,7 +132,7 @@ All coefficient words are the ramped values of this sample. Indices are per chan
                     b_j = flush(fl(m_j + h2)); f_j = fl(l_j - m_j)
 (R7) matrix         w = f; for k in (3, 2, 1, 0): for every j with bit k of j clear, m = j + 2^k:
                         (w_j, w_m) = (fl(w_j + w_m), fl(w_j - w_m))
-(R8) outputs        o_L = fl(0.25 w_5), o_R = fl(0.25 w_10)                (exact scalings)
+(R8) outputs        o_L = fl(0.25 w_14), o_R = fl(0.25 w_15)               (exact scalings)
 (R9) feedback       q_L = fl(B e_L), q_R = fl(B e_R)
                     u_j = flush(fl(fl(c_j w_j) + q_{L if j < 8 else R}));  ring_j[n] = u_j
 (R10) width         mu = fl(0.5 fl(o_L + o_R)); sd = fl(width fl(0.5 fl(o_L - o_R)))
@@ -331,39 +341,63 @@ Each test is stated with the setting, the measured value from the scratch model 
 The real `f32` kernel is expected within the stated margins.
 
 1. **RT60 per band.** Settings: 48 and 96 kHz, decay 0.5 / 2 / 8 s, damping 20 k / 6 k / 2 k,
-   size 1, diffusion 0.7. Four impulse responses (L to L, L to R, R to L, R to R), each band-passed
-   (third-order Butterworth octave at 125 / 500 / 2 k / 8 k Hz) and then summed in energy. Schroeder
-   backward integration [SCHROEDER-1965], with a linear fit over 20 dB starting at the later of
-   -5 dB and 150 ms. **Prediction:** the 16 lines' Jot values are combined delay-weighted, which
+   size 1, diffusion 0.7, pre-delay 20 ms (default), all other controls at default.
+   **Render length:** `L = floor(max(1.5, 0.8 T + 0.4) * fs)` samples from the impulse at `n = 0`
+   (T in seconds). The test renders four unit impulse responses of length L (L to L, L to R, R to L,
+   R to R; the impulse in one input, zeros in the other).
+   **Band filter:** `scipy.signal.butter(3, [fc / sqrt 2, min(fc sqrt 2, 0.45 fs)], btype="band",
+   fs=fs, output="sos")`, run forward from zero state (`sosfilt`) on each response, for
+   fc = 125 / 500 / 2,000 / 8,000 Hz. The band energy is `e[n] = sum over the four responses of
+   y[n]^2`.
+   **EDC and fit** [SCHROEDER-1965]: `E[n] = sum_{m >= n} e[m]` over the rendered length (no noise
+   compensation), and `EDC[n] = 10 log10(E[n] / E[0])`. `i5 = max(first n with EDC[n] <= -5,
+   floor(0.15 fs))`, and `i25` is the first n with `EDC[n] <= EDC[i5] - 20`. Fit a least-squares
+   line to `(n / fs, EDC[n])` for `n` in `[i5, i25)`. The measured `T20 = -60 / slope`.
+   **Prediction:** the 16 lines' Jot values are combined delay-weighted, which
    holds for a well-mixed network: `T(f) = -3 sum_i D_i / (fs sum_i log10 |g_i H(f)|)`, with
    `H = HP(LP)` from the designed `f64` coefficients. This `T(f)` is evaluated on 600
-   log-spaced frequencies from 20 Hz to `0.45 fs`, weighted by the band filter's power, summed as
-   decays into a predicted EDC, and fitted the same way. The centre-frequency prediction alone
-   was off by up to 58 %, because steep damping lets slow low frequencies leak into the band.
-   **Bounds:** 5 % at decay 2 s and 8 s (measured worst 3.5 %), 8 % at 0.5 s (measured worst 4.9 %;
-   the 20 dB fit spans under 170 ms there, and finite-mode noise is about 3 % even with the filters
-   removed). Cells with `|H(fc)| < 0.5` (8 kHz at damping 2 kHz, about 12 dB loss per trip, where
-   Jot's smooth-decay model does not hold; measured -12.8 %) are excluded and recorded as a gap.
-   Red if a gain, filter, length or size mapping is wrong.
+   log-spaced frequencies `f_k` (`geomspace(20, 0.45 fs, 600)`), with weights
+   `w_k = |H_band(f_k)|^2 f_k` (the `f_k` factor for the log spacing). The predicted band energy is
+   `e_p[n] = sum_k w_k 10^(-6 (n / fs) / T(f_k))` over the same L samples, and it goes through the
+   same EDC and fit. The centre-frequency prediction alone was off by up to 58 %, because steep
+   damping lets slow low frequencies leak into the band.
+   **Bounds** (`|T20 / T_pred - 1|`): at decay 0.5 s, 10 % in every band (measured worst 8.8 %).
+   The 20 dB fit spans under 170 ms there, and with the loop filters removed, where the true decay
+   is exactly T, the same fit still reads +7.3 %: this is the fit's error, not the model's. At
+   decay 2 s and 8 s, 6 % at 125 Hz-2 kHz (measured worst 4.7 %) and 10 % at 8 kHz (measured worst
+   7.7 %, at 48 kHz with damping 20 kHz, capped at 12 kHz). Cells with `|H(fc)| < 0.5` (8 kHz at
+   damping 2 kHz, about 12 dB loss per trip, where Jot's smooth-decay model does not hold; measured
+   -9.5 % to +6.2 %) are excluded and recorded as a gap. The scope note's 5 % does not hold
+   everywhere in this measurement. Red if a gain, filter, length or size mapping is wrong.
 2. **Echo density** [ABEL-HUANG-NED]: `eta(t)` with a 20 ms Hann window normalised to unit sum,
    divided by `erfc(1 / sqrt 2)`, on a 1 ms hop. Settings: L impulse, L output, 48 kHz, size 1,
-   decay 1.8 s, damping 6 kHz, pre-delay 0. **Bound:** the 50 ms moving mean of `eta` reaches 0.9
-   by 150 ms at diffusion 0.7 (measured 103 ms) and by 200 ms at diffusion 0 (measured 167 ms).
-   Diffusion 0 isolates the matrix: B 261 ms, C 210 ms, Householder-16 251 ms, N = 8 310 ms and
-   N = 4 Householder 709 ms all fail it. The Gaussian-noise reference's 50 ms mean never falls
-   below 0.946.
-3. **Inter-channel correlation** of the wet output after 100 ms, at lag 0. **Bounds:**
-   `|r(0)| <= 0.1` at width 1 for a centred (L = R) impulse (measured worst 0.074 over
-   size {0.25, 1, 2} x diffusion {0, 0.7, 1} x decay {0.5, 1.8, 8} s) and for an L-only impulse
-   (measured 0.084). At width 0, `r(0) >= 0.99`; it is exactly 1 by construction, since
-   `wet_L = wet_R = mu`. Red if the output rows are not orthogonal or R10 is wrong.
+   decay 1.8 s, damping 6 kHz, pre-delay 0. Time counts from the impulse at `n = 0`. **Bound:** the
+   50 ms moving mean of `eta` reaches 0.9 by 150 ms at diffusion 0.7 (measured 104 ms) and by
+   215 ms at diffusion 0 (measured 193 ms). At diffusion 0, R2's allpasses are pure delays, so the
+   wet path starts `sum M + 3 = 1,467` samples (30.6 ms) later than with no diffusers. Diffusion 0
+   isolates the matrix: B 324 ms, C 228 ms, Householder-16 279 ms, N = 8 341 ms and N = 4
+   Householder 740 ms all fail it. Plain H16 passes (181 ms); it is rejected on coloration
+   (test 4). At diffusion 0.7 the diffusers dominate, and every 16-line candidate passes. The
+   Gaussian-noise reference's 50 ms mean never falls below 0.946.
+3. **Inter-channel correlation** of the wet output after 100 ms, at lag 0
+   (`sum L R / sqrt(sum L^2 sum R^2)` from `floor(0.1 fs)` to the end). Render length
+   `max(1, 0.5 T)` s. **Bounds:** `|r(0)| <= 0.1` at width 1 for a centred (L = R) impulse over
+   size {0.25, 1, 2} x diffusion {0, 0.7, 1} x decay {1.8, 8} s (measured worst 0.073; 0.029 at
+   defaults). At width 0, `r(0) >= 0.99`; it is exactly 1 by construction, since
+   `wet_L = wet_R = mu`. Not gated: a one-sided impulse (measured worst 0.098 on the same grid,
+   0.001 at defaults), and decay 0.5 s (measured worst 0.137). After 100 ms at 0.5 s, the tail is
+   still mostly the first trips, whose echoes carry unequal gains `g_i`, so the orthogonal sign
+   patterns do not cancel. Red if the output rows are not orthogonal or R10 is wrong.
 4. **Coloration.** Settings: 48 kHz, size 1, decay 1.8 s, damping 20 kHz, low cut 20 Hz,
-   diffusion 0.7, L impulse, L output. Take the tail from 0.2 to 1.7 s and multiply it by
-   `10^(3 t / T)`. Compute the power spectrum, average it in 1/24-octave bands from 200 Hz to
-   8 kHz, and divide by the 1-octave average at the same centre. **Bounds:** peak-to-median
-   `<= 3.5 dB` and std `<= 1.5 dB`. Measured 1.93 and 0.98. The Gaussian-noise reference gives
-   1.63-2.82 and 0.64-0.89 over eight seeds. The controls fail it: N = 4 Householder 6.40 / 3.06,
-   plain H16 5.67 / 1.64, N = 8 3.42 / 1.64. This gates only size 1; size 0.25 is a gap.
+   diffusion 0.7, all four paths (L to L, L to R, R to L, R to R). For each path, take the tail
+   from 0.2 to 1.7 s and multiply it by `10^(3 t / T)`. Compute the power spectrum, average it in
+   1/24-octave bands from 200 Hz to 8 kHz, and divide by the 1-octave average at the same centre.
+   **Bounds:** the mean over the four paths of the peak-to-median is `<= 3.5 dB`, and every
+   path's std is `<= 1.6 dB`. Measured: peak-to-median 2.15 / 4.31 / 3.12 / 1.80, mean 2.85; std
+   0.99 / 1.11 / 1.44 / 1.04. One path's peak-to-median is noisy: the Gaussian-noise reference gives
+   1.63-2.82 and 0.64-0.89 over eight seeds, so the bound is on the mean. The controls fail it:
+   N = 4 Householder 5.26 / 3.06 (mean / std max), plain H16 4.67 / 1.69, C 4.72 / 1.65. This
+   gates only size 1; size 0.25 is a gap.
 5. **Tail contract** (`tests/tail_contract.rs`, the delay's file as template), at decay 20 s,
    size 2 and damping 20 kHz, at 48 and 96 kHz, on the real kernel. The output must be below
    -144 dB by `tail` and bit-exact at rest by `rest`. Include one run with a size crossfade and a
@@ -392,7 +426,7 @@ Expected work per sample (counted from R1-R12; not a gate):
   plus 8 diffuser and 4 pre-delay accesses.
 
 The rejected B would save 12 vector ops (W = 4) but would need 30 scalar adds for the two output
-rows, which E gets free from `w_5` and `w_10`.
+rows, which E gets free from `w_14` and `w_15`.
 
 ## Listening protocol or evidence
 
@@ -436,17 +470,17 @@ No listening claim is made in this note.
 - **Dattorro plate tank** [DATTORRO-1997]: a figure-eight of nested allpasses, which is two serial
   scalar chains and a poor SIMD fit. Its l2 argument needs a storage term per nested stage. Only its
   input-diffuser idea is kept.
-- **N = 8.** Coloration 3.42 / 1.64 dB against 2.22 / 0.97 (size 1), and mixing 310 ms against
-  167 ms at diffusion 0. The `1 / sqrt 8` scale is also inexact.
-- **Matrix A, plain Sylvester H16.** It is an involution. Coloration is 5.67 dB, and the held-out
-  mean is 6.18 dB against E's 3.63 dB.
+- **N = 8.** Coloration 3.42 / 1.64 dB against 2.39 / 0.95 (size 1), and mixing 341 ms against
+  193 ms at diffusion 0. The `1 / sqrt 8` scale is also inexact.
+- **Matrix A, plain Sylvester H16.** It is an involution. Four-path coloration mean 4.67 dB against
+  E's 2.85 dB, and the held-out mean (M3) is 6.18 dB against E's 3.63 dB.
 - **Matrix B, `(H2 x I8) P / sqrt 2` (Pease, one stage per trip).** Cheapest, but it mixes slowly:
-  261 ms against 167 ms at diffusion 0, and `eta` is 0.38 against 0.74 at 100-150 ms. The
+  324 ms against 193 ms at diffusion 0, and `eta` is 0.27 against 0.41 at 100-150 ms. The
   `1 / sqrt 2` scale is inexact (folded into `c_i`, one extra `u`). It needs 30 scalar adds for the
   outputs. Held-out coloration 5.75 dB.
-- **Matrix C, `(H4 x I4) P2 / 2`.** 210 ms at diffusion 0, and it needs a re-layout at W = 8
+- **Matrix C, `(H4 x I4) P2 / 2`.** 228 ms at diffusion 0, and it needs a re-layout at W = 8
   anyway. Held-out coloration 5.87 dB.
-- **Householder 16, `I - 11^T / 8`.** Mostly diagonal (7/8): 251 ms at diffusion 0, held-out
+- **Householder 16, `I - 11^T / 8`.** Mostly diagonal (7/8): 279 ms at diffusion 0, held-out
   coloration 5.88 dB.
 - **Circulant** [ROCCHESSO-SMITH-CIRCULANT]: needs a cyclic shift, which `Lane` lacks; not measured.
 - **Delay-length modulation:** no measured gain (M4); deferred to listening.
@@ -467,8 +501,9 @@ No listening claim is made in this note.
   replace the scope note's plain crossfade.
 - The tail values are estimates (Latency and tail). S3 certifies them, tightens (b') with an l2
   bound for automated diffusion, and fixes the per-word discount.
-- Coloration at size 0.25 is 5.45-6.15 dB (std 3.7-4.2): low modal density (0.19 modes per Hz) is
-  inherent to a small room. It is not gated.
+- Coloration at size 0.25 has a four-path mean of 7.65 dB (std up to 4.4): low modal density
+  (0.19 modes per Hz) is inherent to a small room. It is not gated.
+- Test 3 does not gate decay 0.5 s or a one-sided input (measured 0.137 and 0.098).
 - RT60 cells with `|H(fc)| < 0.5` are excluded from test 1.
 - The modulation decision is provisional until the S4 listening record.
 - Size changes do not move the diffusers.
@@ -480,27 +515,41 @@ No listening claim is made in this note.
 2026-10-26, S1 (this note), from the scratch measurements. Settings, unless stated otherwise:
 48 kHz, size 1, decay 1.8 s, impulse into L, `f64` model.
 
-- **M1, mixing (NED, 50 ms mean of `eta`, time to reach 0.9; diffusion 0.7 / 0):**
-  A 103 / 161 ms, B 112 / 261, C 107 / 210, Householder-16 113 / 251, **E 103 / 167**,
-  E with modulation 101 / 170, N = 4 Householder 241 / 709. At diffusion 0.7 the diffusers
-  dominate and all are within 10 ms. At diffusion 0 the matrix decides: `eta` at 100-150 ms is
-  A 0.68, B 0.38, C 0.48, Householder 0.49, E 0.74.
-- **M2, coloration (peak-to-median / std, dB; damping 20 kHz):** A 5.67 / 1.64, B 3.12 / 1.35,
-  C 4.01 / 1.27, Householder 4.05 / 1.24, **E 1.93 / 0.98**, N = 4 Householder 6.40 / 3.06,
-  Gaussian noise 1.63-2.82 / 0.64-0.89.
+- **M1, mixing (NED, 50 ms mean of `eta`, time to reach 0.9; diffusion 0.7 / 0, R2 at k = 0):**
+  A 96 / 181 ms, B 144 / 324, C 105 / 228, Householder-16 127 / 279, **E 104 / 193**,
+  E with modulation 101 / 193, N = 8 121 / 341, N = 4 Householder 241 / 740. At diffusion 0.7 the
+  diffusers dominate. At diffusion 0 the matrix decides: `eta` at 100-150 ms is A 0.46, B 0.27,
+  C 0.38, Householder 0.35, E 0.41.
+- **M2, coloration (test 4, four paths; mean peak-to-median / largest std, dB):** A 4.67 / 1.69,
+  B 3.38 / 1.37, C 4.72 / 1.65, Householder 3.23 / 1.18, **E 2.85 / 1.44**, E with modulation
+  3.32 / 1.37, N = 4 Householder 5.26 / 3.06; Gaussian noise (one path) 1.63-2.82 / 0.64-0.89.
+  For A-D, the outputs are rows 14 and 15 of `H16` on the line-ordered vector.
 - **M3, selecting P without overfitting:** a sweep over all 128 affine permutations
   `j -> (a j + b) mod 16` on four conditions found the minimum at `a = 15, b = 14` (E). It was then
   re-scored on 24 held-out conditions (size 0.5 / 0.75 / 1.5, diffusion 0.3 / 1, decay 1 / 2.5 s,
   L or R). Held-out mean peak-to-median: **E 3.63**, next 4.05, plain A 6.18, B 5.75, C 5.87,
-  Householder 5.88.
+  Householder 5.88. This sweep predates the revision: every candidate used the same fixed output
+  pattern (rows 5 and 10 of `H16` on the line-ordered vector), so it compares matrices like for like,
+  but its absolute values are not test 4's.
 - **M4, modulation** (4 lines, linear interpolation, at most 8 samples at 48 kHz, 0.30-0.87 Hz,
   integer triangle). Over 32 conditions (size x decay x channel x diffusion), the mean
-  peak-to-median moved by -0.08 to +0.05 dB per size. NED moved by at most 3 ms. **Dropped,
+  peak-to-median per size, off / on: size 0.25 6.87 / 7.38, 0.5 4.04 / 3.87, 1 2.10 / 2.25,
+  2 2.08 / 2.14. NED moved by at most 3 ms. **Dropped,
   provisional pending listening.**
-- **M5, N = 8 against N = 16 coloration (peak-to-median / std):** size 1: 3.42 / 1.64 against
-  2.22 / 0.97. Size 2: 3.31 / 1.04 against 1.75 / 0.83. Size 0.25: 9.05 / 4.77 against 5.42 / 3.78.
-- **M6, RT60:** see test 1. Worst error outside the excluded cells: 4.9 % (0.5 s), 1.8 % (2 s),
-  3.5 % (8 s).
+- **M5, N = 8 against N = 16 coloration (L to L, peak-to-median / std):** size 1, decay 1.8 s:
+  3.42 / 1.64 against 2.39 / 0.95; decay 6 s: 2.79 / 1.74 against 1.92 / 0.88. Size 2:
+  2.20-3.19 against 1.68-2.17. Size 0.25: 8.31-8.73 against 7.73-7.82.
+- **M6, RT60:** see test 1. Worst error outside the excluded cells: 8.8 % (0.5 s; the filter-free
+  control reads +7.3 %), 4.7 % (2 s), 4.6 % at 125 Hz-2 kHz and 7.7 % at 8 kHz (8 s).
 - **M7, length rule:** plain rounding gave 120 of 120 pairs with a common factor at size 2. The
   nearest-prime rule gives 0 at every rate and size checked.
+- **M8, output pair (revision).** 56 pairs are admissible (`a xor b` in 1..7). First screen over all
+  56, on 9 correlation cells and 8 coloration cases: the best by worst-case coloration were (13, 14),
+  (3, 7), (14, 15), (13, 15), (6, 7), (4, 7), (12, 14), (12, 15). Re-scored on test 3's full grid
+  restricted to decay >= 1.8 s (centred input), (13, 14) reaches `|r|` 0.157, (3, 7) 0.254, (4, 7)
+  0.133 and (12, 15) 0.123, so they fail. The three that pass at decay >= 1.8 s (`|r|` centred / one-sided; four-path
+  peak-to-median, mean over 16 cases of size {1, 2} x decay {1.8, 4} s):
+  (14, 15) 0.073 / 0.098, 2.55; (6, 7) 0.054 / 0.094, 2.92; (12, 14) 0.081 / 0.097, 2.88.
+  **Chosen: (14, 15)**, for the lowest coloration. The oracle review found the error: the earlier
+  (5, 10) was measured on the line-ordered vector, which is not R8's tap.
 - Delivered to the coordinator as OQ1 and OQ2 above; root decides.
