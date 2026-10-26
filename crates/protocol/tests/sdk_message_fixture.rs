@@ -20,13 +20,13 @@ use protocol::{
     Capabilities, CapabilityFlags, CommandPayload, CounterId, CounterSnapshot, CounterSnapshotRef,
     CounterValue, CountersRequest, DecodeScratch, DecodedCommandPayload, Diagnostic,
     DiagnosticSeverity, DiagnosticsPage, DiagnosticsRequest, EventPayload, ExpectedRevision,
-    LoudnessReply, LoudnessRequest, MessageId, MeterBatch, MeterComponent, MeterEntry, MeterMetric, MeterRecord, MeterTarget,
-    NonOkResponse, ObservationEnded, ObservationSection, ObservationTapKey, PathSegment,
-    ProtocolCodec, ProtocolVersion, RequestId, SampleTime, SessionCommitted, SessionRevision,
-    SessionSnapshot, SessionSnapshotRequest, StatusCode, SuccessResponsePayload,
-    TelemetryConfiguration, TransportSetRequest, TransportSnapshot, TransportState,
-    TransportStateEvent, TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame,
-    TypedSuccessResponseFrame,
+    LoudnessReply, LoudnessRequest, MessageId, MeterBatch, MeterComponent, MeterEntry, MeterMetric,
+    MeterRecord, MeterTarget, NonOkResponse, ObservationEnded, ObservationSection,
+    ObservationTapKey, PathSegment, ProtocolCodec, ProtocolVersion, RequestId, SampleTime,
+    SessionCommitted, SessionRevision, SessionSnapshot, SessionSnapshotRequest, StatusCode,
+    SuccessResponsePayload, TelemetryConfiguration, TransportSetRequest, TransportSnapshot,
+    TransportState, TransportStateEvent, TypedCommandFrame, TypedEventFrame,
+    TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
 
 const FIXTURE: &str = "../../sdk/test/fixtures/protocol-messages.json";
@@ -1283,7 +1283,10 @@ fn loudness() -> Vec<Row> {
         .zip(50_u64..)
         .map(|((name, operation), request)| Row {
             name,
-            fields: vec![("request", obj(vec![("requestId", big(request)), ("op", text(name))]))],
+            fields: vec![(
+                "request",
+                obj(vec![("requestId", big(request)), ("op", text(name))]),
+            )],
             bytes: command_bytes(
                 request,
                 ExpectedRevision::Any,
