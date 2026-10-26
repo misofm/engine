@@ -249,3 +249,48 @@ impl LoudnessMonitor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hop of a stale arming that reaches the queue after a stop and a new start (a block in
+    /// flight across them on the render thread) is discarded, never ingested.
+    ///
+    /// Test value: red if the control half ingests a record whose arming is not the current one,
+    /// which only a render block racing a stop and a start can produce, so no single-thread
+    /// session test reaches it.
+    #[test]
+    fn a_record_of_an_earlier_arming_is_discarded() {
+        let (mut tap, mut monitor) = loudness_meter(48_000).expect("loudness meter");
+        monitor
+            .apply(protocol::LoudnessRequest::Start, 0)
+            .expect("start at 0");
+        monitor
+            .apply(protocol::LoudnessRequest::Stop, 0)
+            .expect("stop");
+        monitor
+            .apply(protocol::LoudnessRequest::Start, 960)
+            .expect("start at 960");
+        let record = HopRecord {
+            first_sample: 960,
+            end_sample: 1_440,
+            energy: [10.0; 2],
+            true_peak: [0.5; 2],
+            sanitized: 0,
+        };
+        for _ in 0..crate::loudness::LOUDNESS_QUEUE_DEPTH {
+            tap.hops
+                .try_push(ArmedHop { arm: 0, record })
+                .expect("room in the queue");
+        }
+        let reply = monitor
+            .apply(protocol::LoudnessRequest::Read, 1_440)
+            .expect("read");
+        assert_eq!(reply.observed_sample, 960, "no stale hop was delivered");
+        assert_eq!(reply.integrating_since, None);
+        assert_eq!(reply.gated_block_count, 0);
+        assert_eq!(reply.momentary_lufs, None);
+        assert_eq!(reply.hop_true_peak_dbtp, None);
+    }
+}

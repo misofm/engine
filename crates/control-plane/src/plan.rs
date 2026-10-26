@@ -435,8 +435,9 @@ impl<A: ControlAdapter> PlanState<A> {
     /// The output meter observes the block (#1581 D4): one gate load while it is inactive,
     /// otherwise a vector fold of each plane's sanitized peak ([`host_core::OutputPeakObserver`]).
     /// The loudness meter observes it too (#2115): one gate load while it is disarmed, otherwise
-    /// its K-weighted hop sums and Annex-2 true peak. Then the render sample and sequence advance, which the service step's counters read. The
-    /// per-block peak scan is gone (#1583 D6): the meter batches are the output meter's windows.
+    /// its K-weighted hop sums and Annex-2 true peak. Then the render sample and sequence advance,
+    /// which the service step's counters read. The per-block peak scan is gone (#1583 D6): the
+    /// meter batches are the output meter's windows.
     pub fn observe_rendered_block(
         &mut self,
         planes: [&[f32]; 2],
