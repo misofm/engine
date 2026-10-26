@@ -5595,6 +5595,14 @@ impl Runtime {
                     };
                     lane_map.record_facts(group, index, lanes, quiet);
                 }
+                // Issue #2135: a lane whose bypass settled or unsettled at this block's drain, in
+                // any row of a grouped chain, starts its strip's dwell. One load otherwise.
+                let edges = chain.settle_edges();
+                if edges != 0
+                    && let Some((group, _)) = lane_map.group(index)
+                {
+                    lane_map.record_settles(group, index, edges);
+                }
                 if defer
                     && let Some((group, pack)) = lane_map.group(index)
                     && pack.last as usize == index
@@ -10024,15 +10032,21 @@ pub(crate) struct PackGroup {
     /// The strips not at their home position. Zero is the identity map, under which every unit
     /// folds in its own fused epilogue exactly as before #1782.
     displaced: u32,
-    /// The strips of this group that were packable after the last block their first-row units
-    /// rendered (issue #1981: idle for [`PACK_IDLE_BLOCKS`] blocks or more). Zero, with `displaced`
-    /// zero, lets [`Runtime::pack_lanes`] pass the group by at the cost of one load.
-    packable: u32,
-    /// Something the packer decides on changed since its last step (issue #1981): a strip's idle
-    /// count crossed [`PACK_IDLE_BLOCKS`] either way, a strip moved, or the plan is new. Clear, the
-    /// same facts would make the same refused attempts, so [`Runtime::pack_lanes`] passes the
-    /// group by.
+    /// The packer has work on this group (issues #1981, #2135): a fact it sorts on changed (a
+    /// strip's idle count crossed [`PACK_IDLE_BLOCKS`], a lane's bypass settled, a strip's dwell
+    /// expired), a strip moved, or the plan is new; it stays set until a step's walk reaches the
+    /// group's end with no swap pending. Clear, [`pack_step`] passes the group by at one load.
     dirty: bool,
+    /// A fact the packer sorts on changed since the group's last step (issue #2135): the step
+    /// begins a new episode and forgets the strips the last one refused. A move is no new fact.
+    fresh: bool,
+    /// The strips of this group inside their dwell (issue #2135, `LaneMap::dwell` above zero).
+    /// Zero lets [`pack_step`] skip the group's dwell countdown.
+    dwelling: u32,
+    /// Where this group's ranked slots start in [`LaneMap`]'s `ranked`.
+    ranked_base: u32,
+    /// The group's ranked slots: its costliest `min(S, 8)` bypassable slots (issue #2135).
+    ranked: u32,
 }
 
 impl PackGroup {
@@ -10089,8 +10103,34 @@ pub(crate) struct LaneMap {
     swap_scratch: Box<[u8]>,
     /// Home position -> the blocks in a row, up to the last one its first-row unit rendered, in
     /// which that strip's input was exact `+0.0` on both planes and its lane was at rest after the
-    /// block (issue #1981), saturating. A strip is packable at [`PACK_IDLE_BLOCKS`].
+    /// block (issue #1981), saturating. A strip is silent at rest at [`PACK_IDLE_BLOCKS`].
     idle: Box<[u16]>,
+    /// Home position -> the blocks left of that strip's dwell after its last bypass settle (issue
+    /// #2135, `R_b`): above zero, the strip is fixed and demanding.
+    dwell: Box<[u16]>,
+    /// Home position -> whether a stored automation lane drives a bypass of that strip (issue
+    /// #2135): pinned at bind for the plan's life, never moved and never sorted.
+    pinned: Box<[bool]>,
+    /// Home position -> whether a move of that strip was refused in its group's current episode
+    /// (issue #2135): fixed until a fact changes.
+    refused: Box<[bool]>,
+    /// Home position -> the strip's pattern, written by each sort ([`pack_step`]).
+    pattern: Box<[u16]>,
+    /// Position -> the home position of the strip the sort places there, or [`NO_TARGET`] for a
+    /// fixed position ([`pack_step`]).
+    target: Box<[u32]>,
+    /// The sort's scratch: a group's movable positions, ascending.
+    movable: Box<[u32]>,
+    /// The sort's counters, one per pattern: [`PACK_PATTERNS`].
+    counts: Box<[u16]>,
+    /// Every group's ranked slots, `(row, slot)`, costliest first, from each group's
+    /// `ranked_base` (issue #2135).
+    ranked: Box<[(u32, u32)]>,
+    /// The group the next block's packer serves first (issue #2135): the global budget's
+    /// round-robin cursor, which survives blocks.
+    cursor: u32,
+    /// The plan's swaps per block, `B_total`: the widest group's width (issue #2135).
+    budget: u32,
     /// The lane moves [`Runtime::pack_lanes`] made, packing or homing (issue #1981): test
     /// evidence only.
     #[cfg(any(test, feature = "test-support"))]
@@ -10136,6 +10176,14 @@ impl LaneMap {
             .saturating_add(slice(&self.staging))
             .saturating_add(slice(&self.swap_scratch))
             .saturating_add(slice(&self.idle))
+            .saturating_add(slice(&self.dwell))
+            .saturating_add(slice(&self.pinned))
+            .saturating_add(slice(&self.refused))
+            .saturating_add(slice(&self.pattern))
+            .saturating_add(slice(&self.target))
+            .saturating_add(slice(&self.movable))
+            .saturating_add(slice(&self.counts))
+            .saturating_add(slice(&self.ranked))
     }
 
     /// The pack groups of `units`, at bind (issues #1782a, #2142). Allocates; never on the render
@@ -10328,8 +10376,11 @@ impl LaneMap {
                     folded,
                     master,
                     displaced: 0,
-                    packable: 0,
                     dirty: true,
+                    fresh: true,
+                    dwelling: 0,
+                    ranked_base: 0,
+                    ranked: 0,
                 },
                 units: run.iter().flatten().map(|&unit| index(unit)).collect(),
             });
@@ -10368,8 +10419,9 @@ impl LaneMap {
             group.base = u32::try_from(local.len()).expect("a position fits");
             group.units_base = u32::try_from(chain_units.len()).expect("a unit slot fits");
             group.displaced = 0;
-            group.packable = 0;
             group.dirty = true;
+            group.fresh = true;
+            group.dwelling = 0;
             debug_assert_eq!(
                 found.units.len(),
                 group.chains as usize * group.rows as usize,
@@ -10394,6 +10446,8 @@ impl LaneMap {
             kept.push(group);
         }
         let local: Box<[u32]> = local.into_boxed_slice();
+        let budget = kept.iter().map(|group| group.width).max().unwrap_or(0);
+        let positions = local.len();
         Self {
             groups: kept.into_boxed_slice(),
             group_of: group_of.into_boxed_slice(),
@@ -10402,7 +10456,17 @@ impl LaneMap {
             unit_idle: vec![false; units].into_boxed_slice(),
             chain_units: chain_units.into_boxed_slice(),
             home: local.clone(),
-            idle: vec![0; local.len()].into_boxed_slice(),
+            idle: vec![0; positions].into_boxed_slice(),
+            dwell: vec![0; positions].into_boxed_slice(),
+            pinned: vec![false; positions].into_boxed_slice(),
+            refused: vec![false; positions].into_boxed_slice(),
+            pattern: vec![0; positions].into_boxed_slice(),
+            target: vec![NO_TARGET; positions].into_boxed_slice(),
+            movable: vec![0; positions].into_boxed_slice(),
+            counts: vec![0; PACK_PATTERNS].into_boxed_slice(),
+            ranked: Box::default(),
+            cursor: 0,
+            budget,
             at: local,
             producer_lane: Box::default(),
             staging: vec![0.0; staging].into_boxed_slice(),
@@ -10596,12 +10660,13 @@ impl LaneMap {
 
     /// Record unit `unit`'s block for the packer (issue #1981), after its chain ran: bit `l` of
     /// `quiet` says lane `l`'s input was exact `+0.0` on both planes and the lane is at rest for
-    /// the coming block. Each populated lane's strip's idle count grows by one or falls to zero,
-    /// and the group's packable count is recounted, from zero at its first unit. Only a first-row
-    /// unit speaks for its strips (issue #2142): a later row's input is its predecessor's output,
-    /// whose silence is stated only when that chain skipped, so its fact would hide every strip
-    /// whose bank mates run. A later row's fact costs at most a bank's cost, never a bit, and is
-    /// not recorded. Panic-free, allocation-free, O(lanes).
+    /// the coming block. Each populated lane's strip's idle count grows by one or falls to zero;
+    /// a count that crosses [`PACK_IDLE_BLOCKS`] either way changes the strip's pattern and sets
+    /// the group dirty and fresh. Only a first-row unit speaks for its strips (issue #2142): a
+    /// later row's input is its predecessor's output, whose silence is stated only when that chain
+    /// skipped, so its fact would hide every strip whose bank mates run. A later row's fact costs
+    /// at most a bank's cost, never a bit, and is not recorded. Panic-free, allocation-free,
+    /// O(lanes).
     fn record_facts(&mut self, group: usize, unit: usize, lanes: usize, quiet: u32) {
         let Some(pack) = self.groups.get(group).copied() else {
             return;
@@ -10614,25 +10679,14 @@ impl LaneMap {
         let Some(&chain) = self.unit_chain.get(unit) else {
             return;
         };
-        // Issue #2142: no quiet lane and every count already zero: each count stays zero, nothing
-        // crosses, and this unit adds nothing to the packable count, which only its group's first
-        // unit resets.
+        // Issue #2142: no quiet lane and every count already zero: each count stays zero and
+        // nothing crosses.
         if quiet == 0 && !self.unit_idle.get(unit).copied().unwrap_or(true) {
-            if unit == pack.first as usize
-                && let Some(group) = self.groups.get_mut(group)
-            {
-                group.packable = 0;
-            }
             return;
         }
         let width = pack.width as usize;
         let first = pack.base as usize + chain as usize * width;
         let base = pack.base as usize;
-        let mut packable = if unit == pack.first as usize {
-            0
-        } else {
-            pack.packable
-        };
         let mut crossed = false;
         let mut any_idle = false;
         for lane in 0..lanes.min(width) {
@@ -10650,45 +10704,123 @@ impl LaneMap {
             };
             let is = *idle >= PACK_IDLE_BLOCKS;
             crossed |= was != is;
-            packable += u32::from(is);
             any_idle |= *idle > 0;
         }
         if let Some(flag) = self.unit_idle.get_mut(unit) {
             *flag = any_idle;
         }
-        if let Some(group) = self.groups.get_mut(group) {
-            group.packable = packable;
-            group.dirty |= crossed;
+        if crossed && let Some(group) = self.groups.get_mut(group) {
+            group.dirty = true;
+            group.fresh = true;
         }
     }
 
-    /// Whether the strip whose home is local position `strip` of `pack` is packable.
-    #[inline]
-    fn strip_packable(&self, pack: &PackGroup, strip: usize) -> bool {
-        self.idle
-            .get(pack.base as usize + strip)
-            .is_some_and(|&idle| idle >= PACK_IDLE_BLOCKS)
+    /// Record the settle edges of unit `unit`'s last block (issue #2135): bit `l` of `edges` says
+    /// lane `l` of some slot entered or left settled bypass at this block's drain. Any row's unit
+    /// speaks: its lanes render the same strips as its chain's first row. Each such strip starts
+    /// its dwell of [`PACK_DWELL_BLOCKS`] and its group is set dirty and fresh. Called only for a
+    /// nonzero mask; panic-free, allocation-free, O(lanes).
+    fn record_settles(&mut self, group: usize, unit: usize, edges: u32) {
+        let Some(pack) = self.groups.get(group).copied() else {
+            return;
+        };
+        if self.group_of.get(unit).copied() != u32::try_from(group).ok() {
+            return;
+        }
+        let Some(&chain) = self.unit_chain.get(unit) else {
+            return;
+        };
+        let width = pack.width as usize;
+        let base = pack.base as usize;
+        let first = base + chain as usize * width;
+        let mut started = 0_u32;
+        for lane in 0..width.min(32) {
+            if (edges >> lane) & 1 == 0 {
+                continue;
+            }
+            let Some(&strip) = self.home.get(first + lane) else {
+                continue;
+            };
+            let Some(dwell) = self.dwell.get_mut(base + strip as usize) else {
+                continue;
+            };
+            started += u32::from(*dwell == 0);
+            *dwell = PACK_DWELL_BLOCKS;
+        }
+        if let Some(group) = self.groups.get_mut(group) {
+            group.dwelling += started;
+            group.dirty = true;
+            group.fresh = true;
+        }
+    }
+
+    /// Count every dwelling strip of `group` down by one block (issue #2135); a dwell that ends
+    /// sets the group dirty and fresh, so the strip is sorted on the block its dwell expires with
+    /// no other event. O(span), and only while some strip of the group dwells.
+    fn tick_dwell(&mut self, group: usize) {
+        let Some(pack) = self.groups.get(group).copied() else {
+            return;
+        };
+        let base = pack.base as usize;
+        let Some(dwell) = self.dwell.get_mut(base..base + pack.span()) else {
+            return;
+        };
+        let mut ended = 0_u32;
+        for blocks in dwell.iter_mut().filter(|blocks| **blocks != 0) {
+            *blocks -= 1;
+            ended += u32::from(*blocks == 0);
+        }
+        if ended != 0
+            && let Some(group) = self.groups.get_mut(group)
+        {
+            group.dwelling = group.dwelling.saturating_sub(ended);
+            group.dirty = true;
+            group.fresh = true;
+        }
     }
     // REALTIME_POLICY_END
 }
 
 /// The blocks in a row a strip's input must be exact `+0.0` and its lane at rest before the
-/// packer may move it out of a running bank (issue #1981, `R`): 16 blocks, 43 ms at 48 kHz and a
-/// 128-frame quantum. Every chain's rest test already holds a lane until its state is exact, so
-/// the count only debounces a lane whose rest is immediate (an input that pauses for a block or
-/// two), which would otherwise be packed out and back on every pause; it is far below every
-/// effect's rest bound, so it delays no pack the chain would allow.
+/// packer counts it silent at rest (issue #1981, `R`): 16 blocks, 43 ms at 48 kHz and a 128-frame
+/// quantum. Every chain's rest test already holds a lane until its state is exact, so the count
+/// only debounces a lane whose rest is immediate (an input that pauses for a block or two), which
+/// would otherwise be packed out and back on every pause; it is far below every effect's rest
+/// bound, so it delays no pack the chain would allow.
 const PACK_IDLE_BLOCKS: u16 = 16;
 
-/// What the packer may do with a group position (issue #1981).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PackClass {
-    /// A padded lane: it never moves, and it never stops its bank's skip.
-    Fixed,
-    /// A strip idle for [`PACK_IDLE_BLOCKS`] blocks or more.
-    Packable,
-    /// Any other strip: its bank renders.
-    Running,
+/// A strip's dwell after a bypass settle (issue #2135, `R_b`): the blocks it stays fixed and
+/// demanding, so a toggle at the ramp period never moves. `R_b = R`, the same debounce, so a
+/// bypass ride and a fader ride are bounded alike.
+const PACK_DWELL_BLOCKS: u16 = 16;
+
+/// The slots a pattern names at most (issue #2135): the costliest `min(S, 8)`.
+const PACK_RANKED_SLOTS: usize = 8;
+
+/// The patterns a strip can have: one bit for "not silent at rest" over [`PACK_RANKED_SLOTS`]
+/// running bits.
+const PACK_PATTERNS: usize = 1 << (PACK_RANKED_SLOTS + 1);
+
+/// The pattern bit of a strip that is not silent at rest; every running bit is below it.
+const PACK_AUDIBLE: u16 = 1 << PACK_RANKED_SLOTS;
+
+/// A position the sort leaves where it is: [`LaneMap`]'s `target` filler.
+const NO_TARGET: u32 = u32::MAX;
+
+/// The pattern of a strip the sort leaves where it is: above every real pattern.
+const PACK_FIXED: u16 = u16::MAX;
+
+/// An effect's measured isolated cost per lane-sample, in thousandths of a cycle, for the
+/// packer's slot rank (issue #2135): the standing per-effect table of
+/// `docs/rulings/effect-floor-accounting.md`. An effect the table has not measured ranks below
+/// every measured one; ties keep chain order.
+fn pack_slot_cost(effect_id: &str) -> u32 {
+    match effect_id {
+        "miso.compressor" => 16_691,
+        "miso.true-peak-limiter" => 13_918,
+        "miso.parametric-eq" => 4_984,
+        _ => 0,
+    }
 }
 
 /// [`LaneMap::discover`]'s unit term (issue #2142, was #1782a's member term): whether unit `index`
@@ -10971,6 +11103,7 @@ impl Runtime {
         );
         self.lane_map
             .bind_producer_lanes(&self.units, &self.identity, &self.input_producers);
+        self.bind_ranked_slots();
         if !self.lane_map.groups.is_empty() && !self.block_end_units.is_empty() {
             self.block_end_units = widen_block_end_units(&self.block_end_units, &self.lane_map);
         }
@@ -11373,200 +11506,364 @@ impl Runtime {
         true
     }
 
-    /// Pack every pack group's running strips into fewer banks (issue #1981), once per block on
+    /// Pack every pack group's strips by activity pattern (issues #1981, #2135), once per block on
     /// the render thread, before the first unit runs, on the facts the previous block left
-    /// ([`LaneMap::record_facts`]).
+    /// ([`LaneMap::record_facts`], [`LaneMap::record_settles`]): [`pack_step`].
     ///
     /// Never mid-block: `observe_unit` interleaves with `execute`, so a move between two units
     /// would observe a moved strip twice and its partner never. The facts are a block old, and
-    /// that is always exact: each chain still decides its skip from this block's own input and
-    /// rest, so a strip packed on a stale fact costs its bank one rendered block, never a bit.
-    ///
-    /// A group with no packable strip and no displaced one, or whose facts have not changed since
-    /// its last step (`PackGroup::dirty`), is passed by at one load. Bounded and
-    /// allocation-free: per group, at most `W` moves and `span` attempts, and a scan quadratic in
-    /// the group's span at worst ([`Self::pack_group`]).
+    /// that is always exact: each chain still decides its skips from this block's own input, rest
+    /// and bypass, so a strip packed on a stale fact costs its bank one rendered block, never a
+    /// bit.
     pub(crate) fn pack_lanes(&mut self) {
         #[cfg(any(test, feature = "test-support"))]
         if TEST_ONLY_LANE_PACKING_DISABLED.with(std::cell::Cell::get) {
             return;
         }
-        for group in 0..self.lane_map.groups.len() {
-            let Some(pack) = self.lane_map.groups.get(group).copied() else {
-                return;
-            };
-            if pack.dirty && (pack.packable != 0 || pack.displaced != 0) {
-                self.pack_group(group, pack);
-            }
+        if self.lane_map.groups.is_empty() {
+            return;
         }
+        pack_step(self);
     }
 
-    /// The class of the strip at local position `position` of `pack`, for the packer: a padded
-    /// lane is [`PackClass::Fixed`] (it never moves, and it never stops its bank's skip).
-    fn pack_class(&self, pack: &PackGroup, position: usize) -> PackClass {
-        let Some((unit, lane)) = self.lane_map.unit_lane(pack, position, 0) else {
-            return PackClass::Fixed;
-        };
-        let populated = match self.units.get(unit) {
-            Some(RuntimeUnit::Bank { lanes, .. }) => *lanes,
-            _ => 0,
-        };
-        match self.lane_map.home.get(pack.base as usize + position) {
-            Some(&strip) if lane < populated => {
-                if self.lane_map.strip_packable(pack, strip as usize) {
-                    PackClass::Packable
-                } else {
-                    PackClass::Running
+    /// Issue #2135: rank every pack group's bypassable slots once, at bind, by the effect's
+    /// measured cost ([`pack_slot_cost`]), ties in chain order (row, then slot), keeping the
+    /// costliest [`PACK_RANKED_SLOTS`]. The group's chains are peers, so its first chain's slots
+    /// name every chain's. Allocates; never on the render thread.
+    fn bind_ranked_slots(&mut self) {
+        let mut ranked: Vec<(u32, u32)> = Vec::new();
+        for group in 0..self.lane_map.groups.len() {
+            let pack = self.lane_map.groups[group];
+            let mut slots: Vec<(u32, u32, u32)> = Vec::new();
+            for row in 0..pack.rows as usize {
+                let Some(&unit) = self
+                    .lane_map
+                    .chain_units
+                    .get(pack.units_base as usize + row)
+                else {
+                    continue;
+                };
+                let Some(RuntimeUnit::Bank { chain, .. }) = self.units.get(unit as usize) else {
+                    continue;
+                };
+                for slot in 0..chain.slot_count() {
+                    if let Some(effect) = chain.slot_effect_id(slot) {
+                        let index = |value: usize| u32::try_from(value).expect("an index fits");
+                        slots.push((pack_slot_cost(effect), index(row), index(slot)));
+                    }
                 }
             }
-            _ => PackClass::Fixed,
+            // Stable: equal costs keep chain order.
+            slots.sort_by(|a, b| b.0.cmp(&a.0));
+            slots.truncate(PACK_RANKED_SLOTS);
+            let group = &mut self.lane_map.groups[group];
+            group.ranked_base = u32::try_from(ranked.len()).expect("a slot index fits");
+            group.ranked = u32::try_from(slots.len()).expect("a slot count fits");
+            ranked.extend(slots.iter().map(|&(_, row, slot)| (row, slot)));
+        }
+        self.lane_map.ranked = ranked.into_boxed_slice();
+    }
+
+    /// Issue #2135: pin every grouped strip whose track `pinned` names (a stored automation lane
+    /// drives one of its bypasses), for the plan's life. A strip is named by its home lane's
+    /// track, which bind fixed. Bind-time.
+    pub(crate) fn pin_strips(&mut self, pinned: &[Box<str>]) {
+        if pinned.is_empty() {
+            return;
+        }
+        for group in 0..self.lane_map.groups.len() {
+            let pack = self.lane_map.groups[group];
+            for position in 0..pack.span() {
+                let Some((unit, lane)) = self.lane_map.unit_lane(&pack, position, 0) else {
+                    continue;
+                };
+                let named = self
+                    .identity
+                    .get(unit)
+                    .and_then(|row| row.lane_tracks.get(lane))
+                    .is_some_and(|track| pinned.contains(track));
+                if named
+                    && let Some(flag) = self.lane_map.pinned.get_mut(pack.base as usize + position)
+                {
+                    *flag = true;
+                }
+            }
         }
     }
+}
 
-    /// Whether lane chain `chain` of `pack` holds a running strip, so it renders whatever moves.
-    fn pack_unit_runs(&self, pack: &PackGroup, chain: usize) -> bool {
-        let width = pack.width as usize;
-        (chain * width..(chain + 1) * width)
-            .any(|position| self.pack_class(pack, position) == PackClass::Running)
+/// What [`pack_step`] reads and moves (issue #2135): the plan's runtime, or a test's stand-in
+/// whose patterns and refusals it sets itself.
+trait PackHost {
+    /// The lane map.
+    fn lanes(&self) -> &LaneMap;
+    /// The lane map, to write.
+    fn lanes_mut(&mut self) -> &mut LaneMap;
+    /// Whether local position `position` of `pack` is a padded lane, which never moves.
+    fn padded(&self, pack: &PackGroup, position: usize) -> bool;
+    /// The running bits of the strip at local position `position` of group `pack`: bit
+    /// `PACK_RANKED_SLOTS - 1 - k` set when the strip is not settled bypassed on ranked slot `k`.
+    fn running_bits(&self, pack: &PackGroup, position: usize) -> u16;
+    /// Trade the strips at local positions `a` and `b` of `pack` in every row; `false`, having
+    /// changed nothing, when the chains refuse.
+    fn trade(&mut self, pack: &PackGroup, a: usize, b: usize) -> bool;
+}
+
+impl PackHost for Runtime {
+    fn lanes(&self) -> &LaneMap {
+        &self.lane_map
     }
 
-    /// Trade the strips at local positions `a` and `b` of `pack`, counting the move.
-    fn pack_swap(&mut self, pack: &PackGroup, a: usize, b: usize) -> bool {
+    fn lanes_mut(&mut self) -> &mut LaneMap {
+        &mut self.lane_map
+    }
+
+    fn padded(&self, pack: &PackGroup, position: usize) -> bool {
+        self.lane_map
+            .unit_lane(pack, position, 0)
+            .is_none_or(|(unit, lane)| match self.units.get(unit) {
+                Some(RuntimeUnit::Bank { lanes, .. }) => lane >= *lanes,
+                _ => true,
+            })
+    }
+
+    fn running_bits(&self, pack: &PackGroup, position: usize) -> u16 {
+        let base = pack.ranked_base as usize;
+        let ranked = self
+            .lane_map
+            .ranked
+            .get(base..base + pack.ranked as usize)
+            .unwrap_or(&[]);
+        let mut bits = 0_u16;
+        for (rank, &(row, slot)) in ranked.iter().enumerate() {
+            let settled = self
+                .lane_map
+                .unit_lane(pack, position, row as usize)
+                .is_some_and(|(unit, lane)| match self.units.get(unit) {
+                    Some(RuntimeUnit::Bank { chain, .. }) => {
+                        (chain.slot_settled_bypassed_lanes(slot as usize) >> lane) & 1 != 0
+                    }
+                    _ => false,
+                });
+            bits |= u16::from(!settled) << (PACK_RANKED_SLOTS - 1 - rank);
+        }
+        bits
+    }
+
+    fn trade(&mut self, pack: &PackGroup, a: usize, b: usize) -> bool {
         let (Some(a), Some(b)) = (
             self.lane_map.unit_lane(pack, a, 0),
             self.lane_map.unit_lane(pack, b, 0),
         ) else {
             return false;
         };
-        let moved = self.swap_bank_lanes(a, b).is_ok();
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            self.lane_map.pack_attempts = self.lane_map.pack_attempts.saturating_add(1);
-            if moved {
-                self.lane_map.lane_moves = self.lane_map.lane_moves.saturating_add(1);
-            }
-        }
-        moved
+        self.swap_bank_lanes(a, b).is_ok()
     }
+}
 
-    /// One group's packing step (issue #1981).
-    ///
-    /// A position names a lane chain and a lane (issue #2142); "unit" below is a lane chain, whose
-    /// classes are its first row's, and a move trades the strip in every unit of both chains.
-    ///
-    /// **Pack.** From the group's last position down, each running strip in a unit above the
-    /// first trades places with a packable strip in a lower unit that runs anyway, lowest first:
-    /// the lower unit keeps running, and the higher one may then skip. A unit that runs only
-    /// through the strips moved into it would merely trade one rendered bank for another, so no
-    /// strip moves into a unit that does not run. A move the chains refuse (an automated strip
-    /// into a fader bank with no automation slots, two differently armed collapse banks, a
-    /// different per-lane slot shape) costs one attempt and the next candidate is tried. When a
-    /// running strip finds no candidate at all, no strip below it can (its candidates are a subset
-    /// of these), and the step stops.
-    ///
-    /// **Home.** With the budget left, a displaced strip trades back to its home position with
-    /// the strip there when both are of one class (both running or both packable), so every
-    /// unit's set of classes, and with it which units can skip, is unchanged; if that trade
-    /// refuses, the occupant is sent to its own home instead under the same rule (the way home of
-    /// [`Self::restore_home_lanes`]). Each homing trade puts a strip home and no pack move undoes
-    /// it until the classes change, so once activity returns the group comes back to the identity
-    /// map, whose fused epilogue costs nothing extra.
-    ///
-    /// Budget: at most `W` moves (`B`, one bank's state per block, the worst swap cost) and
-    /// `span` attempts per group per block. A step runs only while the group's `dirty` bit is set:
-    /// a refused shape whose facts do not change is attempted once, not every block, also when its
-    /// refusals spend the attempt budget (a move sets the bit, so a step that moved continues next
-    /// block; one that moved nothing would repeat itself exactly).
-    ///
-    /// Cost: the budget bounds moves and attempts, not the scan. Each running position the pack
-    /// loop examines either spends an attempt or ends the loop, so it examines at most `span + 1`
-    /// of them, and each walks the positions below it twice at most (the run test of each lower
-    /// unit, then the targets of a running one). So a step makes at most `2 * span * (span + 1)`
-    /// class reads plus `O(span)` for the rest of the pack loop and the homing pass: quadratic in
-    /// the group's span in the worst case. On the all-active steady state the first running
-    /// position finds no candidate and the step is one scan, and with no fact changed no step
-    /// runs.
-    fn pack_group(&mut self, group: usize, pack: PackGroup) {
-        let width = pack.width as usize;
-        let span = pack.span();
-        let budget = width;
-        let (mut moves, mut attempts) = (0_usize, 0_usize);
-        // A move sets the bit again (`LaneMap::record_swap`). A step that moved nothing leaves it
-        // clear even when its refusals spent the attempt budget: the scan is deterministic, so
-        // the same facts would make the same refusals and stop at the same place.
-        if let Some(group) = self.lane_map.groups.get_mut(group) {
-            group.dirty = false;
+/// One block of the pattern packer (issue #2135; `docs/BANKING_DESIGN.md` 3.3), on `host`.
+///
+/// **Dwell.** Every dwelling strip counts one block down ([`LaneMap::tick_dwell`]); a dwell that
+/// ends dirties its group, so a strip toggled once is sorted on the block its dwell expires.
+///
+/// **Budget.** At most `B_total = W` swaps and `A_total = 4W` swap attempts in all this block
+/// (`W` the widest group's width), served round-robin over the dirty groups from a cursor that
+/// survives blocks: the group a block's budget ends in is served first by the next. A clean group
+/// costs one load.
+///
+/// **The step** ([`pack_group_step`]) sorts a dirty group's movable strips by pattern and walks
+/// the sorted layout in; a group stays dirty until its walk reaches the end with no swap pending.
+/// Bounded and allocation-free: per visited group `O(span x ranked + PACK_PATTERNS)` reads for
+/// each sort, a sort per refusal, and the global caps on swaps and attempts.
+fn pack_step<H: PackHost>(host: &mut H) {
+    let groups = host.lanes().groups.len();
+    for group in 0..groups {
+        if host.lanes().groups[group].dwelling != 0 {
+            host.lanes_mut().tick_dwell(group);
         }
-        'pack: for position in (width..span).rev() {
-            if moves >= budget || attempts >= span {
-                break;
-            }
-            if self.pack_class(&pack, position) != PackClass::Running {
-                continue;
-            }
-            let mut candidate = false;
-            for lower in 0..position / width {
-                if !self.pack_unit_runs(&pack, lower) {
-                    continue;
-                }
-                for target in lower * width..(lower + 1) * width {
-                    if self.pack_class(&pack, target) != PackClass::Packable {
-                        continue;
-                    }
-                    candidate = true;
-                    attempts += 1;
-                    if self.pack_swap(&pack, position, target) {
-                        moves += 1;
-                        continue 'pack;
-                    }
-                    if attempts >= span {
-                        break 'pack;
-                    }
-                }
-            }
-            if !candidate {
-                break;
-            }
+    }
+    let swaps = host.lanes().budget as usize;
+    let mut budget = PackBudget {
+        swaps,
+        attempts: 4 * swaps,
+    };
+    let start = host.lanes().cursor as usize;
+    for offset in 0..groups {
+        let group = (start + offset) % groups;
+        if !host.lanes().groups[group].dirty {
+            continue;
         }
-        let base = pack.base as usize;
+        if !pack_group_step(host, group, &mut budget) {
+            host.lanes_mut().cursor = u32::try_from(group).unwrap_or(0);
+            return;
+        }
+    }
+}
+
+/// What is left of a block's packing budget ([`pack_step`]).
+struct PackBudget {
+    swaps: usize,
+    attempts: usize,
+}
+
+/// One dirty group's step ([`pack_step`]); `false` when the budget ran out first.
+///
+/// 1. *Pattern.* A strip silent at rest (its idle count at [`PACK_IDLE_BLOCKS`]) has pattern 0;
+///    any other strip [`PACK_AUDIBLE`] plus a running bit per ranked slot, the costliest slot most
+///    significant. A bank-slot skips when every lane is silent at rest (the whole-bank skip,
+///    #1107) or every lane settled bypassed on it (#2129), so strips of one pattern belong
+///    together.
+/// 2. *Fixed.* A padded lane, a pinned strip, a strip inside its dwell and a strip refused in this
+///    episode stay where they are.
+/// 3. *Sort.* A counting sort over [`PACK_PATTERNS`] counters gives the movable strips the
+///    movable positions in descending pattern order, strips of one pattern in home order: one
+///    pattern over the group is the identity map, under which the fused epilogue returns.
+/// 4. *Walk.* Positions upward: a position whose strip is not its target's trades with the
+///    target strip's position, which places that strip finally. A refused trade fixes the
+///    position's strip for the episode and the sort runs again, so each refusal fixes one more
+///    strip and an episode refuses at most `span` times.
+fn pack_group_step<H: PackHost>(host: &mut H, group: usize, budget: &mut PackBudget) -> bool {
+    let pack = host.lanes().groups[group];
+    let base = pack.base as usize;
+    let span = pack.span();
+    if pack.fresh {
+        let lanes = host.lanes_mut();
+        if let Some(refused) = lanes.refused.get_mut(base..base + span) {
+            refused.fill(false);
+        }
+        lanes.groups[group].fresh = false;
+    }
+    'sort: loop {
+        pack_sort(host, &pack);
         for position in 0..span {
-            if moves >= budget
-                || attempts >= span
-                || self
-                    .lane_map
-                    .groups
-                    .get(group)
-                    .is_none_or(|group| group.displaced == 0)
-            {
-                break;
-            }
-            let (Some(&occupant), Some(&holder)) = (
-                self.lane_map.home.get(base + position),
-                self.lane_map.at.get(base + position),
+            let lanes = host.lanes();
+            let (Some(&wanted), Some(&occupant)) = (
+                lanes.target.get(base + position),
+                lanes.home.get(base + position),
             ) else {
-                return;
+                return true;
             };
-            let (occupant, holder) = (occupant as usize, holder as usize);
-            if occupant == position {
+            if wanted == NO_TARGET || wanted == occupant {
                 continue;
             }
-            let class = self.lane_map.strip_packable(&pack, occupant);
-            if self.lane_map.strip_packable(&pack, position) == class {
-                attempts += 1;
-                if self.pack_swap(&pack, position, holder) {
-                    moves += 1;
-                    continue;
-                }
+            if budget.swaps == 0 || budget.attempts == 0 {
+                return false;
             }
-            let Some(&displaced) = self.lane_map.home.get(base + occupant) else {
-                return;
+            let Some(&from) = lanes.at.get(base + wanted as usize) else {
+                return true;
             };
-            if attempts < span && self.lane_map.strip_packable(&pack, displaced as usize) == class {
-                attempts += 1;
-                if self.pack_swap(&pack, position, occupant) {
-                    moves += 1;
-                }
+            budget.attempts -= 1;
+            let moved = host.trade(&pack, position, from as usize);
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                let lanes = host.lanes_mut();
+                lanes.pack_attempts = lanes.pack_attempts.saturating_add(1);
+                lanes.lane_moves = lanes.lane_moves.saturating_add(u64::from(moved));
             }
+            if moved {
+                budget.swaps -= 1;
+            } else {
+                // The position keeps its strip for the episode: the refusal is a property of the
+                // two chains' banks (collapse arming, automation fit, slot shape), and the target
+                // strip may still find a later position that takes it.
+                if let Some(refused) = host.lanes_mut().refused.get_mut(base + occupant as usize) {
+                    *refused = true;
+                }
+                continue 'sort;
+            }
+        }
+        break;
+    }
+    host.lanes_mut().groups[group].dirty = false;
+    true
+}
+
+/// [`pack_group_step`]'s steps 1 to 3 for `pack`: write every strip's pattern ([`PACK_FIXED`]
+/// for a fixed strip) and every position's target. `O(span x ranked + PACK_PATTERNS)`.
+fn pack_sort<H: PackHost>(host: &mut H, pack: &PackGroup) {
+    let base = pack.base as usize;
+    let span = pack.span();
+    // Pass 1, positions upward: each strip's pattern, and the movable positions in ascending
+    // order.
+    let mut movable = 0_usize;
+    for position in 0..span {
+        let padded = host.padded(pack, position);
+        let bits = if padded {
+            0
+        } else {
+            host.running_bits(pack, position)
+        };
+        let lanes = host.lanes_mut();
+        let Some(&strip) = lanes.home.get(base + position) else {
+            return;
+        };
+        let strip = base + strip as usize;
+        let fixed = padded
+            || lanes.pinned.get(strip).copied().unwrap_or(true)
+            || lanes.dwell.get(strip).is_none_or(|&dwell| dwell != 0)
+            || lanes.refused.get(strip).copied().unwrap_or(true);
+        let silent = lanes
+            .idle
+            .get(strip)
+            .is_some_and(|&idle| idle >= PACK_IDLE_BLOCKS);
+        if let Some(pattern) = lanes.pattern.get_mut(strip) {
+            *pattern = if fixed {
+                PACK_FIXED
+            } else if silent {
+                0
+            } else {
+                PACK_AUDIBLE | bits
+            };
+        }
+        if let Some(target) = lanes.target.get_mut(base + position) {
+            *target = NO_TARGET;
+        }
+        if !fixed && let Some(slot) = lanes.movable.get_mut(base + movable) {
+            *slot = u32::try_from(position).unwrap_or(u32::MAX);
+            movable += 1;
+        }
+    }
+    let LaneMap {
+        counts,
+        pattern,
+        target,
+        movable: positions,
+        ..
+    } = host.lanes_mut();
+    let (Some(pattern), Some(target), Some(positions)) = (
+        pattern.get(base..base + span),
+        target.get_mut(base..base + span),
+        positions.get(base..base + movable),
+    ) else {
+        return;
+    };
+    counts.fill(0);
+    for &value in pattern.iter().filter(|&&value| value != PACK_FIXED) {
+        if let Some(count) = counts.get_mut(usize::from(value)) {
+            *count += 1;
+        }
+    }
+    // Descending pattern order: each pattern's first rank among the movable positions.
+    let mut next = 0_u16;
+    for count in counts.iter_mut().rev() {
+        let here = *count;
+        *count = next;
+        next += here;
+    }
+    // Pass 2, strips in home order, so strips of one pattern keep home order.
+    for (strip, &value) in pattern.iter().enumerate() {
+        if value == PACK_FIXED {
+            continue;
+        }
+        let Some(rank) = counts.get_mut(usize::from(value)) else {
+            continue;
+        };
+        let place = usize::from(*rank);
+        *rank += 1;
+        if let Some(&to) = positions.get(place)
+            && let Some(slot) = target.get_mut(to as usize)
+        {
+            *slot = u32::try_from(strip).unwrap_or(NO_TARGET);
         }
     }
 }
@@ -16408,8 +16705,11 @@ mod tests {
                 folded: true,
                 master: FoldTarget::Output,
                 displaced: 0,
-                packable: 0,
                 dirty: true,
+                fresh: true,
+                dwelling: 0,
+                ranked_base: 0,
+                ranked: 0,
             },
             units: (first..=last).collect(),
         };

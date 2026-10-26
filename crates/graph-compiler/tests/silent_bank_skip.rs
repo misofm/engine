@@ -938,17 +938,17 @@ fn a_skipping_block_allocates_nothing() {
 /// Which tracks play a signal.
 type Playing = fn(usize) -> bool;
 
-/// Issue #1981: a pack shape the chains refuse, whose facts do not change, is attempted once and
-/// not again. `ch00` keeps the collapse-armed mono bank running with packable lanes beside it, and
-/// stereo strips run in higher banks; the only lower bank that runs is the mono one, and the
-/// chains refuse a move between differently armed banks. No ride: the second bank rests and does
-/// not run. Two shapes: `ch17` alone, whose refusals stay below the attempt budget, and enough
-/// running stereo strips that one step's refusals reach the group's span (`ch16..ch20` on eight
-/// lanes, 4 x 7 attempts against 24; `ch12..ch20` on four, 8 x 3 against 20).
+/// Issues #1981, #2135: a pack shape the chains refuse, whose facts do not change, is attempted once
+/// and not again. `ch00` keeps the collapse-armed mono bank running with silent lanes beside it, and
+/// stereo strips run in higher banks; the pattern sort puts the running strips first, into the mono
+/// bank, and the chains refuse a move between differently armed banks, so each refusal fixes one
+/// mono position for the episode and the running strips land in the stereo banks. Two shapes:
+/// `ch17` alone, and enough running stereo strips that the episode's refusals and moves span
+/// several blocks of the global budget (`ch16..ch20` on eight lanes, `ch12..ch20` on four).
 ///
-/// Test value: red when the packer retries a refused move every block although nothing it decides
-/// on changed (the `PackGroup::dirty` bit), a standing render cost no bit shows, including when the
-/// refusals use up the step's attempt budget.
+/// Test value: red when the packer retries a refused move every block although nothing it sorts on
+/// changed (the `PackGroup::dirty` bit, or a refusal that is not remembered for the episode), a
+/// standing render cost no bit shows.
 #[test]
 fn a_refused_pack_is_not_retried() {
     let blocks = 200;
@@ -959,18 +959,17 @@ fn a_refused_pack_is_not_retried() {
     let groups = graph::test_only_pack_groups(&probe.plan);
     assert_eq!(groups.len(), 1, "one pack group: {groups:?}");
     let lanes = groups[0].width;
-    let span = groups[0].chains.len() as u64 * u64::from(lanes);
     drop(probe);
     let wide: Playing = if lanes == 8 {
         |track| track == 0 || track >= 16
     } else {
         |track| track == 0 || track >= 12
     };
-    let shapes: [(&str, Playing, bool); 2] = [
-        ("ch17", |track| track == 0 || track == 17, false),
-        ("the span", wide, true),
+    let shapes: [(&str, Playing); 2] = [
+        ("ch17", |track| track == 0 || track == 17),
+        ("the span", wide),
     ];
-    for (name, playing, reaches_span) in shapes {
+    for (name, playing) in shapes {
         let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
             .map(|track| {
                 let kind = if playing(track) {
@@ -986,26 +985,17 @@ fn a_refused_pack_is_not_retried() {
         resting_second_bank(&mut model);
         let mut bound = bind(&model, &schedules, false);
         let mut pcm = vec![0.0_f32; bound.frames * 2];
-        let (mut settled, mut peak) = (0, 0);
+        let mut settled = 0;
         for block in 0..blocks as u64 {
             if block == 60 {
                 settled = graph::test_only_bank_pack_attempts(&bound.plan);
             }
-            let before = graph::test_only_bank_pack_attempts(&bound.plan);
             bound.render(block, true, &mut pcm);
-            peak = peak.max(graph::test_only_bank_pack_attempts(&bound.plan) - before);
         }
         let attempts = graph::test_only_bank_pack_attempts(&bound.plan);
-        eprintln!(
-            "{name}: attempts by block 60 {settled}, by the end {attempts}, peak step {peak}"
-        );
-        assert!(settled > 0, "{name}: the packer tried the refused move");
-        assert_eq!(bound.lane_moves(), 0, "{name}: every move was refused");
-        if reaches_span {
-            assert_eq!(peak, span, "{name}: a step's refusals reach the span");
-        } else {
-            assert!(peak < span, "{name}: the refusals stay below the span");
-        }
+        let moves = bound.lane_moves();
+        eprintln!("{name}: attempts by block 60 {settled}, by the end {attempts}, moves {moves}");
+        assert!(settled > moves, "{name}: the packer tried a refused move");
         assert_eq!(
             attempts, settled,
             "{name}: no attempt after the shape settled: the same facts make the same refusal"

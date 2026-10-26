@@ -910,7 +910,7 @@ impl GraphCompiler {
             })
             .cloned()
             .collect();
-        let graph = PreparedGraphPlan::new_hinted(
+        let mut graph = PreparedGraphPlan::new_hinted(
             PreparedGraphPlanParts {
                 plan_id,
                 spec,
@@ -938,6 +938,7 @@ impl GraphCompiler {
             lowering_hint,
         )
         .with_source_claim_lines(timing.claim_lines);
+        graph.pin_bypass_automated_strips(bypass_automated_strips(model));
         Ok(CompiledGraph {
             pool_classes,
             graph,
@@ -1269,4 +1270,26 @@ impl StripGains {
             RouteGate::OPEN,
         )))
     }
+}
+
+/// The strips a stored automation entry drives an effect bypass of (issue #2135): every strip
+/// owner of an entry whose target is a console slot's or an insert's row `0`, the effect's bypass
+/// (`session::ControlAddress`), in table order without repeats. The lane packer pins them: such a
+/// strip's bypass pattern is data-driven and unbounded in rate. Off the render thread.
+fn bypass_automated_strips(model: &session::SessionModel) -> Vec<Box<str>> {
+    let mut strips: Vec<Box<str>> = Vec::new();
+    for automation in &model.automation {
+        let target = &automation.target;
+        let session::Owner::Strip(strip) = &target.owner else {
+            continue;
+        };
+        let effect = matches!(
+            target.section,
+            session::Section::Console(_) | session::Section::Inserts(_)
+        );
+        if effect && target.control == 0 && !strips.iter().any(|id| &**id == strip.as_str()) {
+            strips.push(strip.as_str().into());
+        }
+    }
+    strips
 }

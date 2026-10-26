@@ -622,6 +622,29 @@ pub trait BankStage: Send {
         0
     }
 
+    /// The lanes (bit `l` is lane `l`) settled at bypass as of this stage's last drain (issue
+    /// #2135, the lane packer's pattern): each such lane emits exactly its latency-matched dry
+    /// signal. Read at a block boundary; a move trades the two lanes' bits. The default is a stage
+    /// with no bypass.
+    fn settled_bypassed_lanes(&self) -> u32 {
+        0
+    }
+
+    /// The lanes whose settled-bypass state the last drain changed (issue #2135, the packer's
+    /// settle trigger): bit `l` set when lane `l` entered or left settled bypass since the drain
+    /// before. Zero after a drain that changed none, and on the first drain. The default is a
+    /// stage with no bypass.
+    fn settle_edges(&self) -> u32 {
+        0
+    }
+
+    /// The native effect this stage renders, by its descriptor id, when its lanes can be
+    /// bypassed: the slots the packer ranks (issue #2135). `None` for a stage with no bypass (a
+    /// builtin, an effect bank with no control lane), which no pattern bit names. Bind-time.
+    fn effect_id(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Which side of the fader/matrix seam this stage sits on.
     ///
     /// The default is [`SeamSide::UpstreamOfSeam`], which is the **conservative** answer here and
@@ -1655,6 +1678,14 @@ pub struct LiveControlEffectBankStage {
     /// line holds only `+0.0`. Starts there, because the line starts at `+0.0`. Fed wherever the
     /// line is fed; never a scan of the line.
     zero_run: [u32; 8],
+    /// The lanes settled at bypass after the last drain that read the cells (issue #2135); a
+    /// skipped read changes none. A move trades the two lanes' bits.
+    settled: u8,
+    /// The lanes whose settled-bypass state the last drain changed (issue #2135).
+    settle_edges: u8,
+    /// Whether a drain has read the cells yet: the first read sets [`Self::settled`] and reports
+    /// no edge, so a session's own bypass is no settle.
+    settle_primed: bool,
 }
 
 impl LiveControlEffectBankStage {
@@ -1793,6 +1824,9 @@ impl LiveControlEffectBankStage {
             bypass_skips: 0,
             latency: latency_frames,
             zero_run: [latency_frames; 8],
+            settled: 0,
+            settle_edges: 0,
+            settle_primed: false,
         })
     }
 
@@ -2422,6 +2456,8 @@ impl BankStage for LiveControlEffectBankStage {
                 }
                 self.designed.swap(lane, other_lane);
                 swap_bits_within(&mut self.unrestored, lane, other_lane);
+                swap_bits_within(&mut self.settled, lane, other_lane);
+                swap_bits_within(&mut self.settle_edges, lane, other_lane);
                 if let Some(shunt) = self.shunt.as_mut() {
                     let swapped = shunt.swap_line_lanes(lane, lanes, None, other_lane, lanes);
                     debug_assert!(swapped, "a checked shunt line swaps");
@@ -2471,6 +2507,13 @@ impl BankStage for LiveControlEffectBankStage {
                     &mut self.unrestored,
                     lane,
                     &mut other.unrestored,
+                    other_lane,
+                );
+                swap_bits(&mut self.settled, lane, &mut other.settled, other_lane);
+                swap_bits(
+                    &mut self.settle_edges,
+                    lane,
+                    &mut other.settle_edges,
                     other_lane,
                 );
                 let other_lanes = other.width.lanes() as usize;
@@ -2593,6 +2636,18 @@ impl BankStage for LiveControlEffectBankStage {
     fn bypass_skips(&self) -> u64 {
         self.bypass_skips
     }
+
+    fn settled_bypassed_lanes(&self) -> u32 {
+        u32::from(self.settled)
+    }
+
+    fn settle_edges(&self) -> u32 {
+        u32::from(self.settle_edges)
+    }
+
+    fn effect_id(&self) -> Option<&'static str> {
+        Some(self.program_key.effect_id.as_str())
+    }
     // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
@@ -2660,9 +2715,18 @@ impl LiveControlEffectBankStage {
     /// prefixes, and the same [`LaneWalk`]. [`LiveSnapshot::ALL`] is not a publication and never
     /// skips. The observation queues are FIFOs outside the gate, so the second loop always runs.
     fn drain(&mut self, first_sample: u64, snapshot: LiveSnapshot) -> Result<(), RenderError> {
+        // Issue #2135: a skipped read changes no lane's bypass, so it reports no edge. A lane
+        // settles only at a drain that reads: a ramp or a hold leaves the walk not quiet.
+        let before = self.settled;
         if snapshot == LiveSnapshot::ALL || self.quiet_at != Some(snapshot.publication()) {
             self.read_cells(first_sample, snapshot);
         }
+        self.settle_edges = if self.settle_primed {
+            before ^ self.settled
+        } else {
+            0
+        };
+        self.settle_primed = true;
         // #1585 R2: a prepared arm reaches its slot in the plan's first block drain, before the
         // block's records; one load per lane on every later block.
         for observation in self
@@ -2714,6 +2778,7 @@ impl LiveControlEffectBankStage {
     fn read_cells(&mut self, first_sample: u64, snapshot: LiveSnapshot) {
         let mut packed = 0_usize;
         let mut walk = LaneWalk::default();
+        let mut settled = 0_u8;
         self.offsets[0] = 0;
         for (lane, channel) in self.lanes.iter_mut().enumerate() {
             if let Some(channel) = channel.as_mut() {
@@ -2744,9 +2809,11 @@ impl LiveControlEffectBankStage {
                 walk.targets |= staged.staged_targets != 0;
                 walk.needs_dry |= channel.needs_dry();
                 walk.ramping |= channel.bypass_ramping();
+                settled |= u8::from(channel.settled_bypassed()) << lane;
             }
             self.offsets[lane + 1] = packed as u32;
         }
+        self.settled = settled;
         self.staged_spans = packed;
         self.walk = walk;
         self.quiet_at = (packed == 0 && walk.quiet()).then_some(snapshot.publication());
@@ -3687,6 +3754,9 @@ pub struct BankChain {
     /// word: the caller's propagated fact, or every active lane on a skipped block (issues #1981,
     /// #2133, [`Self::input_silent_lanes`]).
     input_silent: u32,
+    /// The lanes any slot's last drain moved into or out of settled bypass (issue #2135,
+    /// [`Self::settle_edges`]).
+    settle_edges: u32,
 }
 
 /// The other lane of a [`BankChain::swap_lanes`] (issue #1747).
@@ -3837,6 +3907,7 @@ impl BankChain {
             // rather than resting on how the scratch was constructed.
             resident_zero: false,
             input_silent: 0,
+            settle_edges: 0,
         })
     }
 
@@ -4258,6 +4329,8 @@ impl BankChain {
         });
         // Step 0: every slot's live cells read and observation queue drained, before anything else. See
         // `BankStage::begin_block` for why this cannot be folded into `process`.
+        // Issue #2135: the settle edges are gathered here, one load per drained slot.
+        let mut settle_edges = 0_u32;
         for slot in &mut self.slots {
             // The same identity-slot guard `process` has always taken. A slot that is an identity
             // on every lane renders nothing, and draining its queues would consume records for a
@@ -4265,8 +4338,10 @@ impl BankChain {
             // that has no live lane to drain, never a drain (#1504 D3).
             if slot.has_active_lanes() {
                 slot.stage.begin_block(first_sample, snapshot)?;
+                settle_edges |= slot.stage.settle_edges();
             }
         }
+        self.settle_edges = settle_edges;
         // Publish after every drain. The armed decision combines each stage's lane bank once,
         // then reuses it if declining eligibility requires agreement maintenance below. Stages
         // outside rack may still forward nested processor queries; only this boundary is bulk.
@@ -4774,6 +4849,36 @@ impl BankChain {
     }
 
     // REALTIME_POLICY_BEGIN
+    /// The lanes (bit `l` is lane `l`) whose settled-bypass state some slot's drain changed in
+    /// this chain's last block (issue #2135, the lane packer's settle trigger): the OR of
+    /// [`BankStage::settle_edges`] over the drained slots. Zero before the first block.
+    #[must_use]
+    pub const fn settle_edges(&self) -> u32 {
+        self.settle_edges
+    }
+
+    /// Slot `slot`'s lanes settled at bypass as of its last drain
+    /// ([`BankStage::settled_bypassed_lanes`]); zero past the last slot (issue #2135).
+    #[must_use]
+    pub fn slot_settled_bypassed_lanes(&self, slot: usize) -> u32 {
+        self.slots
+            .get(slot)
+            .map_or(0, |slot| slot.stage.settled_bypassed_lanes())
+    }
+
+    /// Slot `slot`'s native effect id ([`BankStage::effect_id`]); `None` for a builtin stage or
+    /// past the last slot (issue #2135). Bind-time.
+    #[must_use]
+    pub fn slot_effect_id(&self, slot: usize) -> Option<&'static str> {
+        self.slots.get(slot).and_then(|slot| slot.stage.effect_id())
+    }
+
+    /// The slots this chain holds.
+    #[must_use]
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
     /// Lend slot `slot`'s stage mutably, or `None` past the last slot (issue #1276 D3).
     ///
     /// For the crate that built the stage, at bind and at a plan swap's carry, to reach its own
