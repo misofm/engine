@@ -18,7 +18,8 @@ a padded bank with free lanes on another strip, or on a submix.
 
 ## Smallest closable slice
 
-- After the chain pass (slice 6b (#2136)'s sweep over `Dynamic` chains), every insert effect node that is
+- After the chain pass (`plan_bank_groups` over `Dynamic` chains, `crates/graph-compiler/src/banks.rs:174-310`;
+  bucketed by level today and by window after #2136), every insert effect node that is
   not bound is re-offered as a one-slot candidate `(EffectProgramKey, window of the node)` and the
   sweep runs again over these; groups pad from `min_padded_insert_members` as today; each bound
   group is a one-slot `BankChain` placed by slice 6a (#2134)'s rule. A node still unbanked renders per
@@ -36,7 +37,9 @@ a padded bank with free lanes on another strip, or on a submix.
    bankable insert with a free same-key lane in its window renders per node.
 2. Bit identity against the per-node twin (the existing per-node differential, one new fixture
    row).
-3. The irregular-graph row of slice 0 (#2132), recorded.
+3. The irregular-graph row of slice 0 (#2132), recorded: one `bench console --bank-report` run
+   (native) and one W=4 counter run (#2143); the row's `banks`, lane use (46.4 % today) and per-node
+   effect count before and after.
 
 ## Paths
 
@@ -46,5 +49,13 @@ form it lacks (expected not: #96's per-effect one-slot banks were this shape), t
 
 ## Dependencies
 
-Slice 6b (#2136), and #2131 (`reset_lane` and the per-lane un-bypass law): a node moving from per node
-into a bank is a regrouping, class A only under that law.
+#2131 is merged (the law that makes a regrouping class A). #2136 is recommended first so the
+pass runs once on windows (it is sequencing, not substance: the pass takes the candidates however
+they are bucketed). If #2136 is deferred, this slice runs on levels with no other change.
+
+
+## Amendment (finish map, 2026-10-26; tree main `26d8f97c8` + #2142 PR #2154 `4f5d448eb`)
+
+- Dependency on #2136 restated as sequencing. Schedule: stream A step 5, after #2136 (or after
+  #2135 if 6a/6b are deferred). The claim is on user graphs (ragged inserts), measured by the
+  irregular row only; C1 has no inserts on tracks.
