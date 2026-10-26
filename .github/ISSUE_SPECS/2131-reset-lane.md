@@ -90,12 +90,51 @@ The conformance test file.
 - **Single source.** Gate, de-esser, dynamic EQ, soft clip and transient shaper: whole-bank `reset` is now
   `reset_lane` over every lane plus the shared part. Compressor: the whole resets loop over the new per-lane
   kernel helpers. EQ, multiband, limiter: per-lane resets from the D7 and lane helpers; whole resets kept.
-- **Mutants** (applied in the per-lane path only; every one red at 63ba35a81 except as noted): each effect's
-  forget-one-word mutant (gate gain, ramps, hold and link words; de-esser gain and link; dynamic EQ silence clock and
-  link; soft clip ramps; transient shaper ramps and link; compressor envelope and link glide; EQ silence counter and
-  settle/targets; multiband seed defaults and link glide; limiter limit/release snap, runtime clear and link snap) and
-  each effect's neighbour-lane mutant. Green: the EQ's stale `refresh_identity` mutant, because no section flag
-  changes at the call in this fixture (debug builds assert `identity_flags_agree` on every stationary block).
+- **Mutants.** Each mutant is in the per-lane path only (for the five single-source crates, the trait
+  wrapper), applied, run on its row of `reset_lane.rs`, and reverted. "Case" is the first assertion's case and what
+  differed ("payload" is the state payload right after the call unless stated). Commit is the tree it ran on.
+
+| Mutant (the diff) | Row | Case, what differed | Commit |
+|---|---|---|---|
+| Keep the lane's left `gain_db` | gate-expander | resting full lane 4: lane 4 payload vs whole reset, byte 8 | 63ba35a81 |
+| Keep the lane's left parameter ramps | gate-expander | running full lane 4: lane 4 payload vs whole reset, byte 49 | 63ba35a81 |
+| Keep the lane's left hysteresis hold word | gate-expander | running full lane 4: lane 4 payload vs whole reset, byte 17 | 63ba35a81 |
+| Also reset lane + 1 | gate-expander | running full lane 0: lane 1 payload vs untouched, byte 20 | 63ba35a81 |
+| Keep both channels' link weights | gate-expander | running full lane 0: lane 0 payload vs whole reset, byte 130 | 63ba35a81 |
+| Keep the lane's right `gain_db` | de-esser | running full lane 0: lane 0 payload vs whole reset, byte 380 | 63ba35a81 |
+| Also reset lane + 1 | de-esser | running full lane 0: lane 1 payload vs untouched, byte 8 | 63ba35a81 |
+| Keep both channels' link weights | de-esser | running full lane 0: lane 0 payload vs whole reset, byte 326 | 63ba35a81 |
+| Keep the lane's left silence clock `run` | dynamic-eq | resting full lane 0: lane 0 payload vs whole reset, byte 122 | 63ba35a81 |
+| Also reset lane + 1 | dynamic-eq | running full lane 0: lane 1 payload vs untouched, byte 64 | 63ba35a81 |
+| Keep both channels' link weights | dynamic-eq | running full lane 0: lane 0 payload vs whole reset, byte 1410 | 63ba35a81 |
+| Keep the lane's left `ramps[lane]` | soft-clip | running full lane 0: lane 0 payload vs whole reset, byte 28 | 63ba35a81 |
+| Also reset lane + 1 | soft-clip | running full lane 0: lane 1 payload vs untouched, byte 8 | 63ba35a81 |
+| Keep the lane's right `ramps[lane]` | transient-shaper | running full lane 0: lane 0 payload vs whole reset, byte 112 | 63ba35a81 |
+| Also reset lane + 1 | transient-shaper | running full lane 0: lane 1 payload vs untouched, byte 0 | 63ba35a81 |
+| Keep both channels' `links[lane]` | transient-shaper | running full lane 0: lane 0 payload vs whole reset, byte 58 | 63ba35a81 |
+| Skip the `limit`/`release` ramp snap (discontinuity) | true-peak-limiter | running discontinuity lane 0: lane 0 rest bit vs whole reset | 63ba35a81 |
+| Skip `clear_lane_runtime` (discontinuity) | true-peak-limiter | running discontinuity lane 0: lane 0 rest bit vs whole reset | a1a4fb0a7 |
+| Skip the lane's `link` glide snap (discontinuity) | true-peak-limiter | running discontinuity lane 0: lane 0 rest bit vs whole reset | a1a4fb0a7 |
+| Also `clear_lane_runtime((lane + 1) % W)` | true-peak-limiter | running discontinuity lane 0: lane 1 payload vs untouched, byte 20 | a1a4fb0a7 |
+| Skip the envelope clear (`clear_lane_state`) | compressor | running full lane 0: lane 0 payload vs whole reset, byte 0 | a1a4fb0a7 |
+| `clear_lane_state` also zeroes lane + 1 | compressor | running full lane 0: lane 1 payload vs untouched (verifier) | d0e541e07 |
+| Per-lane path keeps the lane's link glide (saved and restored around `snap_lane`) | compressor | running discontinuity lane 0: lane 0 payload vs whole reset, byte 150 | a1a4fb0a7 |
+| Silence counter not cleared (`parametric-eq/src/lib.rs:2057`) | parametric-eq | resting full lane 0: lane 0 payload vs whole reset (verifier) | d0e541e07 |
+| `targets[track]` not set in the full reset (`:2043`) | parametric-eq | running full lane 0: lane 0 payload vs whole reset (verifier) | d0e541e07 |
+| Also clear lane + 1's `ic1` | parametric-eq | running full lane 0: lane 1 payload vs untouched, byte 312 | a1a4fb0a7 |
+| No `refresh_identity` in `discontinuity_reset_lane` (`:2028`) | parametric-eq | the EQ's debug check `identity_flags_agree()` (`parametric-eq/src/lib.rs:2114`) inside the row; green before 927f18244 | 927f18244 |
+| Full reset skips `seed_lane_defaults` | multiband-compressor | running full lane 0: lane 0 payload vs whole reset, byte 380 | a1a4fb0a7 |
+| Link snap removed (`multiband-compressor/src/lib.rs:1034-1036`) | multiband-compressor | running discontinuity lane 0: lane 0 payload vs whole reset (verifier) | d0e541e07 |
+| Neighbour reset (`:1033`) | multiband-compressor | lane 1 payload vs untouched (verifier) | d0e541e07 |
+
+- **The stale-flag row.** Until 927f18244 no EQ section flag changed at the call, so the `refresh_identity` mutant
+  was green. Since then the middle lane (a picked lane) turns every switch on, on the block before the primed one,
+  and off on the primed block. Its HPF and LPF ramp to identity across the call, and resetting it flips its dry bits.
+  No other lane ramps those sections, so a skipped refresh survives to the next stationary block, where the EQ's
+  debug check of its flags fails. In this path a skipped refresh can only leave a dry bit clear (`not dry`), which
+  renders the same bits, so the red is the debug check and not an output word; it is red in debug builds only.
+- **No bit moved (verifier, one time, against origin/main).** For all 9 effects, both reset kinds and both schedules,
+  the whole-bank reset's renders compared equal: all 36 digests identical. This is PR evidence, not a committed test.
 - **Gates.** All 10 rows pass. `cargo test -p` for the 16 touched crates passes. Workspace clippy
   (`--all-targets --all-features -D warnings`), `cargo fmt --check`, `scripts/check-workspace-policy.sh`,
   `scripts/check-bench-policy.sh` and `realtime_policy` (233 regions in 43 files) are clean.
