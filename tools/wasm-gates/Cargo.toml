@@ -18,6 +18,9 @@ path = "src/main.rs"
 # `scripts/check-bench-policy.sh` fails if a second copy of a harness piece reappears under `tools/`,
 # so this edge is what keeps this crate from growing one.
 bench-support.workspace = true
+# Issue #2143: the C1 rows whose W=4 bank counters the guest reports, read in-process on a
+# four-lane build.
+console-workload.workspace = true
 automation.workspace = true
 builtins.workspace = true
 compressor.workspace = true

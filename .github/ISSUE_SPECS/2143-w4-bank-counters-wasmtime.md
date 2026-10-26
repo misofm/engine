@@ -68,3 +68,134 @@ console.rs` (the join), `scripts/run-wasm-gates.sh` only if the artifact path ch
 
 #2132 (the counters and the C1-16 fixture). Serves #2133, #2135, #2136 and slice 5a (#2142)'s W=4
 evidence. Not on the browser's product path.
+
+## Evidence and decision record (attempt 1, 2026-10-26)
+
+### What was built
+
+- **One counter read for both legs.** `console_workload::bank_counters(workload, blocks)`
+  (`tools/console-workload/src/lib.rs`) builds a row at `Backend::current()`, renders `blocks`
+  blocks through the row's own feed (`SessionRuntime::new`, `before_block`, `render`), and returns the
+  seven counters in `BANK_COUNTER_NAMES` order. `W4_COUNTER_WORKLOADS` (C1 16 in `Load`, `Typical`,
+  `AllActive`, `Sparse`) and `W4_COUNTER_BLOCKS = 256` are beside it. The guest and the native leg
+  run this function; neither has a copy of the activity.
+- **Guest.** `tools/wasm-gate-guest` depends on `console-workload` and exports
+  `miso_gate_console_row_count() -> u32` and `miso_gate_console_counter(row, counter) -> u64`
+  (wasm has `i64`, so no halves), memoised per row like `miso_gate_digest_word`. It traps on an
+  out-of-range row or counter. No `test-support` feature is needed: every counter comes from
+  readers every build keeps (`graph::test_only_bank_slot_runs`, `graph::bank_effect_lanes`, the
+  compile's `BankUtilisation`).
+- **Host.** `wasm_gates <guest.wasm> --expect-backend simd4 [--w4-counters <file>]` reads the rows
+  after the digest legs and the out-of-range trap check, fails the leg on any counter that differs
+  from `wasm_gates::W4_CONSOLE_COUNTERS`, and writes `w4-counters.json`
+  (`{ source, width, blocks, counters (names), rows: [{ row, counters }] }`). The evidence line
+  gains `console_rows` and `console_mismatches`. `scripts/run-wasm-gates.sh` passes
+  `--w4-counters "$output_dir/w4-counters.json"`.
+- **Bench.** `bench console --bank-report-w4 <w4-counters.json> [<v8-records.jsonl>]` prints one
+  table: the counters (labelled with the file's `source`) beside the V8 `p50_ns` of the document
+  with the same `workload_kind`, labelled `V8`, or "not measured: no V8 document of this name".
+
+### Root ruling (2026-10-26)
+
+Root accepts the G5-style comparison of decision 1 below: both legs equal one table of exact
+counts, and the counts are the claim, so the table is allowed. The wasm leg runs on x86
+(`wasm-guests`); the native `Simd4` leg runs on CI's `aarch64-release`. Reason: an eight-lane build
+refuses `Simd4` console banks (`console.slot.foreign_width`, #1694).
+
+**Successor action for #2129: replace `bypass_skips` and re-pin Load.**
+
+### Decisions taken without a ruling (for review)
+
+1. **The native `Simd4` leg runs on arm64 only, and both legs meet at pinned counts.** The spec
+   says the native leg reads the rows in-process at `Simd4`. On this x86-64-v3 host it cannot: an
+   eight-lane build's factories do not bind four-lane EQ, compressor, gate or drive banks (D4), so
+   C1's console at `Simd4` is refused with `console.slot.foreign_width` (#1694), and
+   `SessionRuntime::build_with_dispatch(Simd4)` folds the console into inserts first, which is a
+   different plan. A four-lane native build (NEON) builds the same plan as the `simd128` guest at
+   `Backend::current()`. So the comparison is G5's own: both legs equal one pinned table, exact
+   (a count is the claim, not a digest). The wasm leg is held to it in `wasm-guests` (x86); the
+   native leg in `w4_counters_match_between_wasm_and_native_simd4`, which `aarch64-release` runs
+   (`cargo test --release -p wasm-gates`) and which is `ignore`d, with its reason, on an eight-lane
+   build. **The pins come from the wasm run** (there is no third oracle for `Typical`'s seeded
+   draw); gate 2 holds them to the design's arithmetic, and the arm64 job is the first native
+   reading. It has not run yet: this branch is not on a PR.
+2. **`bank_counters` lives in `console-workload`**, which is not in the spec's paths: the guest is
+   a `cdylib` and cannot be linked by the host, and a second copy of the row activity in the guest
+   would be a second subject (the crate's own Cargo comment). The spec's fallback ("if
+   `console-workload` does not build for wasm32") did not apply: it builds unchanged.
+3. **Counter definitions.** `bank_slot_runs_track_group` is the runs of every row of
+   `test_only_bank_slot_runs` (a pack group, or a unit in none) that holds a track's lane, so total
+   minus it is the submixes' runs. `silent_skips` is the same rows' whole-chain skips (unit-blocks).
+   `pack_groups` is the rows spanning two units or more (a pack group always does).
+   `bypass_skips` is the constant 0: no bank-slot skip exists before #2129, so no bypassed slot
+   skips. #2129 replaces it with its reader; its `Load` runs fall to 0 and gate 2 goes red until it
+   re-pins, so the constant cannot outlive the skip silently.
+
+### Red evidence (each mutant run, then reverted)
+
+- Gate 1 (wasm leg, `wasm_gates` against the pins): the guest renders `W4_COUNTER_BLOCKS + 1`
+  blocks -> exit 1, e.g. `c1_console_16_load bank_slot_runs_total: expected 7424, got 7453`; the
+  guest reads row `(row + 2) % 4` (the wrong state for a row) -> exit 1, `c1_console_16_load
+  silent_skips: expected 0, got 259`; the track counter drops its track filter -> exit 1 (track runs
+  7424 against 4096).
+- **Not red: the `Sparse` state fed to the wrong tracks**, before or after #2133. Silencing
+  tracks 8..15 instead of the odd ones leaves every counter unchanged (exit 0), on the base and
+  again on the tree merged with origin/main at `7e824290f` (#2133). `Sparse` still equals
+  `AllActive` on every counter after the merge, and no pin moved. A diagnostic run (every track of
+  `Sparse` silent, then reverted) shows why: the track runs stay 4096 and only the submixes skip
+  more (1024 skips, 6400 runs). **No C1 track bank skips on input silence at W=4, even when every
+  track is silent.** #2133 changed where the packer's silence fact comes from (and states it for a
+  grouped unit only; every C1 track unit is ungrouped, #2142). It did not change the #1107 skip's
+  conditions (`rack` `BankChain::run`: inputs `+0.0`, every slot at rest, no armed auxiliary
+  destination), and one of them fails on every C1 track chain. Which one fails is not
+  investigated here, because it is outside this slice's paths. Candidates: the auxiliary
+  destination of the `post_fader` sends' split, or a slot that never reports rest. The spec's named
+  mutant can turn gate 1 red only once a C1 track bank can skip.
+- Gate 2 (`w4_counters_describe_the_designs_plan`): re-pinning the table from the unfiltered track
+  counter (track runs 7424 / 7165) -> red, `c1_console_16_load: track bank-slot runs, left 7424,
+  right 4096`.
+- Gate 3: the G5 digest legs are unchanged and green: 155 cases, 270 wasm comparisons, 385 native,
+  no mismatch, residency pin 70 limiter functions, f64 censuses as before.
+
+### Gates run
+
+- `bash scripts/run-wasm-gates.sh artifacts/steps/bank-design-0a` (native leg, simd128 guest,
+  residency and f64 censuses, V8 EQ spill gate): ok.
+- `cargo test --locked -p console-workload -p wasm-gates` and `cargo test --locked --release -p bench
+  -p console-workload -p wasm-gates`: all pass; `w4_counters_match_between_wasm_and_native_simd4`
+  is ignored on this eight-lane host by design (decision 1).
+- The lint job's gates (`.github/workflows/qualification.yml`, "fmt, clippy, doc, and hermetic
+  policy gates"): `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+  --no-deps`, and every hermetic policy script and self-test of that job, `check-lane-policy.sh`
+  included: 48 of 48 ok.
+- Not run: the arm64 native leg (no arm64 host here; CI's `aarch64-release` runs it).
+- After the merge with origin/main `7e824290f` (#2133): the wasm leg, the touched crates' tests and
+  the lint job's checks again: wasm gates ok (G5 155 cases, no mismatch; 4 console rows, no
+  mismatch), every test passes, lint 48 of 48 ok; the pins and the artifacts are unchanged.
+
+### Measurement (W=4 wasmtime, `artifacts/steps/bank-design-0a/`)
+
+`scripts/run-wasm-gates.sh artifacts/steps/bank-design-0a` at this commit; `w4-counters.json` and
+`w4-table.md` (`bench console --bank-report-w4`, no V8 file: the V8 runner has no C1 document, so
+the p50 column is "not measured"). 256 blocks per row. Beside #2132's W=8 native numbers for the
+same rows (round 2, `artifacts/steps/bank-design-0/`):
+
+| row | W | banks | pairs | BSR static | BSR/block | track BSR/block | silent skips (256 blocks) | pack groups | p50 us |
+|---|---|---|---|---|---|---|---|---|---|
+| c1 16 load | 8 | 10 | 0 | 20 | 20.00 | - | - | - | 125.2 (native) |
+| c1 16 load | 4 | 15 | 0 | 29 | 29.000 | 16.000 | 0 | 0 | not measured |
+| c1 16 typical | 8 | 10 | 0 | 20 | 20.00 | - | - | - | 125.1 (native) |
+| c1 16 typical | 4 | 15 | 0 | 29 | 29.000 | 16.000 | 0 | 0 | not measured |
+| c1 16 all active | 8 | 10 | 0 | 20 | 16.66 | - | - | - | 96.9 (native) |
+| c1 16 all active | 4 | 15 | 0 | 29 | 27.988 | 16.000 | 259 | 0 | not measured |
+| c1 16 sparse | 8 | 10 | 0 | 20 | 16.66 | - | - | - | 96.4 (native) |
+| c1 16 sparse | 4 | 15 | 0 | 29 | 27.988 | 16.000 | 259 | 0 | not measured |
+
+Against the design's W=4 "today" column (section 7): BSR 29 predicted, 29 measured. The banks are
+8 track banks (`ceil(16/4)` per console rack) and 7 submix banks, the design's W=4 plan exactly:
+pre over `{4 groups, aux B, aux A}` (2 banks, 6 BSR), drive over `{4 groups, aux B}` (2, 2), aux A's
+drive (1, 1), the master's pre and drive (2, 4). Unlike W=8 (12 submix BSR against the design's 13),
+W=4 has no gap. No W=4 row has a pack group, so no track bank packs at four lanes either (#2142's
+finding holds at W=4). In the load and typical states every BSR runs; all active skips 259
+unit-blocks (about 1.01 BSR per block, aux A's silent chain), against 3.34 per block at W=8.
