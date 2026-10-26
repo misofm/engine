@@ -17,7 +17,7 @@ banks instead of two. The planner never weighs it for console strips (`banks.rs:
 
 ## Smallest closable slice
 
-- After the sweep of slice 6b (#2136), per `(rack, program, placed)`: if the mono pool's last group is
+- After `plan_bank_groups` (levels today; `placed` windows after #2136), per `(rack, program, level)`: if the mono pool's last group is
   partial with `m` members and the stereo pool's last group is partial with `s` members and
   `m + s <= W`, the mono members join the stereo group (as stereo-class lanes) and the mono
   group is dropped. Objective: planes x banks; a merged stereo bank costs 1.0 against 0.6 + 1.0.
@@ -44,5 +44,15 @@ rewritten as the remainder rule), its tests, this spec.
 
 ## Dependencies
 
-Slice 6b (#2136), and #2131 (`reset_lane` and the per-lane un-bypass law): moving a strip between pools
-is a regrouping, class A only under that law.
+None in substance (#2131 is merged; the rule runs on levels or windows alike). **Deferred.**
+
+
+## Amendment (finish map, 2026-10-26; tree main `26d8f97c8` + #2142 PR #2154 `4f5d448eb`)
+
+- **Deferred; recommend closing as not worth it now.** The rule fires only when the mono pool and
+  the stereo pool both leave a partial remainder in one `(rack, program, level)`. No fixture shows
+  it: C1 is all-stereo (console stems), `sixty_four_track_console_half_mono` is 32 + 32 (no
+  remainder at W=8 or W=4), the irregular row's 8 mono tracks of 24 fill one W=8 bank exactly. The
+  saving is 0.6 of a bank's slots per occurrence. Reopening condition: a measured session shape
+  with two partial remainders in one class; then this slice runs after #2136 with the amendment
+  above and its three gates as written.
