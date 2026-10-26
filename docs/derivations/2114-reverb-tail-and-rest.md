@@ -238,7 +238,7 @@ valid bound). At decay 20 s the best is `delta_d` = 2.26e-4 (48 kHz), `K = 2.15e
 
 ## S6. The tail
 
-From `t_p`, `|y| <= (2 (1+u)^9 / gamma_c)(max(r, rho_d)^m K + Phi_U) + A_out U`. The audible tail is
+From `t_p`, `|y| <= (2 (1+u)^12 / gamma_c)(max(r, rho_d)^m K + Phi_U) + A_out U`: `(1+u)^7` from the five butterfly stages, the inexact `S <= (1+u)/sqrt 32` and the product's rounding, and `(1+u)^5` from width and mix (S4). The code's `grow(12) = 1 + 12u` omits the `O(u^2)` terms, which the `2^-24` upward rounding of every computed constant covers. The audible tail is
 `T_maj = floor(fs/4) + m`, `m` the first with the decaying part below the absolute part, which then
 gives `|y| < P eps` for `P >= P* = 2 (absolute part) / eps` (1.1e-22 at 48 kHz). `T_maj` =
 21,932,857 at 48 kHz, longer than the rest bound `R` of S7: from `N + R` the output is exactly

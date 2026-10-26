@@ -393,10 +393,11 @@ The real `f32` kernel is expected within the stated margins.
    -12.0 %, and at damping 2 kHz -16 % to -67 %. The 16-line design measured 3.2 % (125 Hz-2 kHz)
    and 4.4 % (8 kHz).
    **Filter-free control** (both loop filters removed, so every mode decays at exactly `r0` and the
-   true T is known): worst 1.7 % (decay 0.5 s, 125 Hz, 48 kHz), 1.4 % at 96 kHz, and at most 0.9 %
-   at decay 2 s and 8 s. The 1 % target is not met at decay 0.5 s. The residual is modal beating
-   (about 66 modes in the 125 Hz octave at size 1): moving the start from 0.2 s to 0.3 s swings
-   that cell from +1.7 % to -3.1 %. So a start chosen to hit 1 % would be fitted to noise.
+   true T is known), on the 32-line design (attempt 5): the errors range from -2.63 % to +3.07 %
+   over the cells. The 16-line design read at worst 1.7 % (decay 0.5 s, 125 Hz, 48 kHz). The 1 %
+   target is not met. The residual is modal beating inside the octave band: on the 16-line design,
+   moving the start from 0.2 s to 0.3 s swung its worst cell from +1.7 % to -3.1 %, so a start
+   chosen to hit 1 % would be fitted to noise.
    **Rules this replaces:** the earlier fit (start at the later of -5 dB and 150 ms, 20 dB span,
    length `max(1.5, 0.8 T + 0.4)` s) read +7.3 % on the control. A 20 dB or 30 dB span from 0.2 s
    still read 3.2-3.8 %. Red if a gain, filter, length or size mapping is wrong.

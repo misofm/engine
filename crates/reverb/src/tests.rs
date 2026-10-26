@@ -285,8 +285,6 @@ fn kernel_matches_the_f64_oracle() {
         dark[DIFFUSION] = 0.2;
         cases.push((sample_rate, dark));
     }
-    // The matrix normalisation constant is `1 / sqrt 32` to the last `f64` bit.
-    assert_eq!(INV_SQRT_LINES, 1.0 / (LINES as f64).sqrt());
     let mut worst = 0.0_f64;
     for (sample_rate, values) in cases {
         let mut effect = prepare_at(&values, sample_rate);
