@@ -361,11 +361,17 @@ export class CanonicalPcmPump {
       }
       state.blob ??= await this.#lease.read(state.identity)
       const end = Math.min(state.frames, start + this.#windowFrames)
-      return new Uint8Array(
+      const bytes = new Uint8Array(
         await state.blob
           .slice(start * state.frameBytes, end * state.frameBytes)
           .arrayBuffer()
       )
+      // A Blob shorter than its declared frames would never cover the chunk, and the fill would
+      // re-read the same short window without end.
+      if (bytes.byteLength !== (end - start) * state.frameBytes) {
+        throw new RangeError("PCM window is truncated")
+      }
+      return bytes
     })
     // A read ahead may fail while no pass awaits it; the pass that needs it rethrows.
     read.done.catch(() => {})
