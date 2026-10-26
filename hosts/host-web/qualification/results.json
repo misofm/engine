@@ -23,20 +23,6 @@
       }
     },
     {
-      "browser": "firefox",
-      "versionFloor": "153.0",
-      "outcome": "simd128 supported",
-      "gates": {
-        "attestation": "pass",
-        "audioWorkletBoot": "pass",
-        "nativeCorpusDigest": "pass",
-        "controlPath": "pass",
-        "observation": "pass",
-        "mainThreadStall": "pass",
-        "sdkResponse": "pass"
-      }
-    },
-    {
       "browser": "webkit",
       "versionFloor": "26.5",
       "outcome": "simd128 supported",

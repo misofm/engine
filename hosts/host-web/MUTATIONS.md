@@ -617,3 +617,8 @@ The seven result-field mutations and `requestFailureProofs()` of the spec are re
 proof above. Page mutations (d) `skip-unsubscribe` and (e) `feed-ends-at-boundary`, and source
 mutations M1-M3 (spec gate 6), are not run in this slice; they move to "Post-sprint qualification
 of decision 15's heavy gates" (#1605) with the loaded acceptance (gate 8).
+
+## Issue #2092 — Firefox is no longer run
+
+Owner ruling 2026-10-25: the browser qualification runs Chromium and WebKit only. The Firefox rows
+above are dated evidence of runs made before that ruling; no later run repeats them.

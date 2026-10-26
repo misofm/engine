@@ -14,8 +14,10 @@
 //   cd hosts/host-web/qualification && npm ci
 //   NODE_PATH=$PWD/node_modules node ../../../scripts/operator/run-stem-store-browser-evals.cjs [leg...]
 //
-// Legs default to all three. A leg whose browser lacks OPFS reports `available: false` with a
-// reason rather than failing: WebKit does that today for `navigator.storage.getDirectory`.
+// Legs default to chromium and webkit, the two supported browsers (owner ruling 2026-10-25,
+// #2092); any other leg, firefox included, is refused as unknown. A leg whose browser lacks OPFS
+// reports `available: false` with a reason rather than failing: WebKit does that today for
+// `navigator.storage.getDirectory`.
 //
 // This browser workload is intentionally outside the hermetic qualification/checker boundary:
 // the existing stem-store checker invokes only `--path-self-test`, while a human may invoke the
@@ -328,8 +330,8 @@ async function main() {
     return
   }
   const digest = prepareFixtureDigest()
-  const { chromium, firefox, webkit } = require("playwright")
-  const types = { chromium, firefox, webkit }
+  const { chromium, webkit } = require("playwright")
+  const types = { chromium, webkit }
   const requested = process.argv.slice(2)
   const legs = requested.length === 0 ? Object.keys(types) : requested
   const report = {}
