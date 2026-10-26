@@ -322,6 +322,11 @@ host's next render sample, and calculates `frame = sourceFrame + (atSample - fir
 frames rendered since. The frame does not move while the context is suspended. You do not need
 the meters to calculate a position.
 
+`engine.planLatency()` resolves with `{ samples, tailSamples }` on both engines: the output latency
+and tail of the plan that renders now, in samples, as the C ABI's plan resource report gives them
+(`tailSamples` is `null` for an unbounded tail). Use it to align meters, the playhead and visuals
+with the audio. After a rebuild, it changes at the block that adopts the new plan.
+
 `engine.play()` resumes the context and then sets the transport to `playing`. `engine.stop()`
 suspends the context and then sets the transport to `stopped`. Each call starts the context step
 at once, and sets the transport after that step settles, in call order. Each resolves with the
