@@ -168,8 +168,27 @@ export class Msb1RingWriter {
 }
 
 /**
- * Bounded-window store pump. A Blob snapshot is lazy; only one read-ahead
- * window per source becomes an ArrayBuffer. It never resolves a URL.
+ * The most window reads one pump has in flight at once, over all its sources (issue #2118).
+ *
+ * Each read is one `Blob.slice().arrayBuffer()`, which the browser serves off the calling thread,
+ * so reads of different stems overlap and a 64-stem window wave costs ceil(64 / 8) read latencies
+ * instead of 64. The bound keeps the request count the browser's blob and file I/O pool must queue
+ * small and caps the read buffers being filled at once at eight windows; the per-source rule below
+ * (one window resident, one ahead) bounds the rest.
+ */
+const MAX_READS_IN_FLIGHT = 8
+
+/**
+ * Bounded-window store pump. A Blob snapshot is lazy; per source at most two windows become
+ * ArrayBuffers: the one being written and the next one, read ahead. A read a seek superseded may
+ * still finish, so the bound adds at most `MAX_READS_IN_FLIGHT` windows briefly. It never resolves
+ * a URL.
+ *
+ * Window reads run concurrently across sources, at most `MAX_READS_IN_FLIGHT` at once and the rest
+ * queued in issue order. Every ring write (reserve, deinterleave, commit) is synchronous, so each
+ * ring's chunk order is exact. A read carries the generation it was issued under and its own start
+ * frame; a seek supersedes it, and a superseded read is never installed, so no pre-seek window can
+ * reach a ring.
  */
 export class CanonicalPcmPump {
   #lease
@@ -178,6 +197,8 @@ export class CanonicalPcmPump {
   #generation
   #stopped = false
   #onError
+  #readsInFlight = 0
+  #queuedReads = []
 
   /**
    * @param {{lease: {read: Function}, sources: Array<{sourceId: string, identity: string, channels: number, bitDepth: 16 | 24, frames: number, ring: object}>, windowFrames?: number, generation?: bigint, onError?: (error: unknown) => void}} options
@@ -198,10 +219,12 @@ export class CanonicalPcmPump {
     }
     this.#states = sources.map((source) => ({
       ...source,
+      frameBytes: (source.channels * source.bitDepth) / 8,
       cursor: 0,
       blob: null,
       window: null,
       windowStart: -1,
+      ahead: null,
       finished: false,
     }))
     for (const state of this.#states) state.ring.engage(this.#generation)
@@ -214,18 +237,10 @@ export class CanonicalPcmPump {
   /** Fill every ring until it is full or its source reaches end-of-region. */
   async pumpUntilFull() {
     if (this.#stopped) return { chunks: 0, frames: 0, finished: this.finished }
-    let chunks = 0
-    let frames = 0
+    const totals = { chunks: 0, frames: 0 }
     try {
-      for (const state of this.#states) {
-        while (!state.finished && state.ring.occupancy < state.ring.capacity) {
-          const written = await this.#writeOne(state)
-          if (written === 0) break
-          chunks += 1
-          frames += written
-        }
-      }
-      return { chunks, frames, finished: this.finished }
+      await Promise.all(this.#states.map((state) => this.#fill(state, totals)))
+      return { ...totals, finished: this.finished }
     } catch (error) {
       this.stop()
       this.#onError?.(error)
@@ -237,7 +252,7 @@ export class CanonicalPcmPump {
    * Reposition every stem to `frame`, clamped to its region, under a new generation. With
    * `generation` (issue #1644 D3) the pump uses that one, which must be above its own: pass the
    * generation of a session seek the engine accepted, and only after it did. Without one it uses
-   * its own next generation.
+   * its own next generation. A window read still in flight is superseded and never installed.
    */
   async seek(frame, generation) {
     const target = positiveOrZeroInteger(frame, "frame")
@@ -253,6 +268,7 @@ export class CanonicalPcmPump {
       state.cursor = Math.min(target, state.frames)
       state.window = null
       state.windowStart = -1
+      state.ahead = null
       state.finished = state.cursor === state.frames
       state.ring.seek(this.#generation, BigInt(state.cursor))
     }
@@ -264,34 +280,46 @@ export class CanonicalPcmPump {
     for (const state of this.#states) state.ring.release()
   }
 
-  async #writeOne(state) {
-    if (state.cursor >= state.frames) {
-      state.finished = true
-      return 0
+  /** One source's share of a pass: write chunks while the window covers them, else await one. */
+  async #fill(state, totals) {
+    while (!this.#stopped && !state.finished) {
+      if (state.cursor >= state.frames) {
+        state.finished = true
+        return
+      }
+      if (state.ring.occupancy >= state.ring.capacity) return
+      if (this.#windowCovers(state)) {
+        if (!this.#writeChunk(state, totals)) return
+        continue
+      }
+      let read = state.ahead
+      if (read === null || read.start !== state.cursor) read = this.#startRead(state, state.cursor)
+      const bytes = await read.done
+      if (this.#stopped) return
+      // A seek (or another pass) moved on while this read was in flight: drop it, re-decide.
+      if (read.generation !== this.#generation || state.ahead !== read) continue
+      state.window = bytes
+      state.windowStart = read.start
+      state.ahead = null
+      this.#readAhead(state)
     }
+  }
+
+  #windowCovers(state) {
+    if (state.window === null || state.cursor < state.windowStart) return false
+    const frames = Math.min(state.ring.frameCapacity, state.frames - state.cursor)
+    const windowEnd = state.windowStart + state.window.byteLength / state.frameBytes
+    return state.cursor + frames <= windowEnd
+  }
+
+  /** Reserve, deinterleave and commit one chunk, with no await in between. */
+  #writeChunk(state, totals) {
     const frames = Math.min(state.ring.frameCapacity, state.frames - state.cursor)
     const planes = state.ring.reserve(frames)
-    if (planes === null) return 0
-    const bytesPerSample = state.bitDepth / 8
-    const frameBytes = state.channels * bytesPerSample
-    const windowEnd = state.windowStart + (state.window?.byteLength ?? 0) / frameBytes
-    if (
-      state.window === null ||
-      state.cursor < state.windowStart ||
-      state.cursor + frames > windowEnd
-    ) {
-      state.blob ??= await this.#lease.read(state.identity)
-      const firstByte = state.cursor * frameBytes
-      const finalByte = Math.min(state.frames, state.cursor + this.#windowFrames) * frameBytes
-      state.window = new Uint8Array(
-        await state.blob.slice(firstByte, finalByte).arrayBuffer()
-      )
-      state.windowStart = state.cursor
-    }
-    const localFrame = state.cursor - state.windowStart
+    if (planes === null) return false
     deinterleaveCanonicalPcm(
       state.window,
-      localFrame,
+      state.cursor - state.windowStart,
       frames,
       state.channels,
       state.bitDepth,
@@ -306,7 +334,69 @@ export class CanonicalPcmPump {
       frames,
       endOfRegion: state.finished,
     })
-    return frames
+    totals.chunks += 1
+    totals.frames += frames
+    return true
+  }
+
+  /**
+   * Start reading the window the ring will need after the resident one: it begins at the first
+   * chunk the resident window cannot hold whole, since chunks step by the ring's frame capacity.
+   */
+  #readAhead(state) {
+    const windowEnd = state.windowStart + state.window.byteLength / state.frameBytes
+    if (windowEnd >= state.frames) return
+    const step = state.ring.frameCapacity
+    const next = state.cursor + step * Math.floor((windowEnd - state.cursor) / step)
+    this.#startRead(state, next)
+  }
+
+  #startRead(state, start) {
+    const read = { start, generation: this.#generation, done: null }
+    state.ahead = read
+    read.done = this.#schedule(async () => {
+      // Superseded while it queued: skip the I/O.
+      if (this.#stopped || read.generation !== this.#generation || state.ahead !== read) {
+        return null
+      }
+      state.blob ??= await this.#lease.read(state.identity)
+      const end = Math.min(state.frames, start + this.#windowFrames)
+      const bytes = new Uint8Array(
+        await state.blob
+          .slice(start * state.frameBytes, end * state.frameBytes)
+          .arrayBuffer()
+      )
+      // A Blob shorter than its declared frames would never cover the chunk, and the fill would
+      // re-read the same short window without end.
+      if (bytes.byteLength !== (end - start) * state.frameBytes) {
+        throw new RangeError("PCM window is truncated")
+      }
+      return bytes
+    })
+    // A read ahead may fail while no pass awaits it; the pass that needs it rethrows.
+    read.done.catch(() => {})
+    return read
+  }
+
+  /** Run `task` now if fewer than `MAX_READS_IN_FLIGHT` reads are in flight, else queue it FIFO. */
+  #schedule(task) {
+    return new Promise((resolve, reject) => {
+      const job = { task, resolve, reject }
+      if (this.#readsInFlight < MAX_READS_IN_FLIGHT) this.#run(job)
+      else this.#queuedReads.push(job)
+    })
+  }
+
+  #run(job) {
+    this.#readsInFlight += 1
+    Promise.resolve()
+      .then(job.task)
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        this.#readsInFlight -= 1
+        const next = this.#queuedReads.shift()
+        if (next !== undefined) this.#run(next)
+      })
   }
 }
 
