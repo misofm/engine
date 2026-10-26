@@ -17,6 +17,28 @@ All links were selected as bounded primary, official, author-hosted, or publishe
 - `[ZAVALISHIN-TPT]` Vadim Zavalishin, Native Instruments, [The Art of VA Filter Design](https://www.native-instruments.com/fileadmin/ni_media/downloads/pdf/VAFilterDesign_2.1.0.pdf), revision 2.1.0, 2018; topology-preserving bilinear transform and state-variable-filter derivation.
 - `[BILBAO-ADAA]` S. Bilbao, S. Esqueda, J. Parker, and V. Välimäki, [Antiderivative Antialiasing for Memoryless Nonlinearities](https://aaltodoc.aalto.fi/bitstreams/87839e85-c165-4bd9-aeed-7c96ff64026a/download), IEEE Signal Processing Letters, 2017, DOI [10.1109/LSP.2017.2675541](https://doi.org/10.1109/LSP.2017.2675541).
 
+## Reverberation
+
+Added 2026-10-26 for #2114 (`reverb.md`). DOIs were checked against Crossref. AES e-library pages
+are behind a bot check, so their numbers come from the AES search listing and the page itself was
+not opened; those entries say so.
+
+- `[JOT-CHAIGNE-FDN]` J.-M. Jot and A. Chaigne, "Digital Delay Networks for Designing Artificial Reverberators," AES 90th Convention, Paris, 1991, preprint 3030, [AES e-library 5663](https://aes2.org/publications/elibrary-page/?id=5663) (e-library page not opened; paywalled).
+- `[STAUTNER-PUCKETTE]` J. Stautner and M. Puckette, "Designing Multi-Channel Reverberators," *Computer Music Journal* 6(1), 52-65 (1982), [DOI 10.2307/3680358](https://doi.org/10.2307/3680358); [author scan](https://msp.ucsd.edu/Publications/cmj82.pdf). The end page 65 is from the author's page; Crossref gives the start page only.
+- `[GERZON-UNITARY]` M. A. Gerzon, "Unitary (Energy-Preserving) Multichannel Networks with Feedback," *Electronics Letters* 12(11), 278-279 (1976), [DOI 10.1049/el:19760215](https://doi.org/10.1049/el:19760215).
+- `[SMITH-PASP-FDN]` Julius O. Smith, *Physical Audio Signal Processing*, [Feedback Delay Networks (FDN)](https://ccrma.stanford.edu/~jos/pasp/Feedback_Delay_Networks_FDN.html), online text.
+- `[SCHLECHT-LOSSLESS]` S. J. Schlecht and E. A. P. Habets, "On Lossless Feedback Delay Networks," *IEEE Transactions on Signal Processing* 65(6), 1554-1564 (2017), [DOI 10.1109/TSP.2016.2637323](https://doi.org/10.1109/TSP.2016.2637323); [preprint arXiv:1606.07729](https://arxiv.org/abs/1606.07729).
+- `[SCHLECHT-ECHO-DENSITY]` S. J. Schlecht and E. A. P. Habets, "Feedback Delay Networks: Echo Density and Mixing Time," *IEEE/ACM Transactions on Audio, Speech, and Language Processing* 25(2), 374-383 (2017), [DOI 10.1109/TASLP.2016.2635027](https://doi.org/10.1109/TASLP.2016.2635027).
+- `[SCHLECHT-TIME-VARYING]` S. J. Schlecht and E. A. P. Habets, "Time-Varying Feedback Matrices in Feedback Delay Networks and Their Application in Artificial Reverberation," *J. Acoust. Soc. Am.* 138(3), 1389-1398 (2015), [DOI 10.1121/1.4928394](https://doi.org/10.1121/1.4928394).
+- `[SCHLECHT-RT60]` S. J. Schlecht and E. A. P. Habets, "Accurate Reverberation Time Control in Feedback Delay Networks," Proc. 20th International Conference on Digital Audio Effects (DAFx-17), Edinburgh, 337-344 (2017), [paper](https://dafx17.eca.ed.ac.uk/papers/DAFx17_paper_11.pdf).
+- `[ROCCHESSO-SMITH-CIRCULANT]` D. Rocchesso and J. O. Smith, "Circulant and Elliptic Feedback Delay Networks for Artificial Reverberation," *IEEE Transactions on Speech and Audio Processing* 5(1), 51-63 (1997), [DOI 10.1109/89.554269](https://doi.org/10.1109/89.554269).
+- `[VALIMAKI-FIFTY]` V. Välimäki, J. D. Parker, L. Savioja, J. O. Smith, and J. S. Abel, "Fifty Years of Artificial Reverberation," *IEEE Transactions on Audio, Speech, and Language Processing* 20(5), 1421-1448 (2012), [DOI 10.1109/TASL.2012.2189567](https://doi.org/10.1109/TASL.2012.2189567).
+- `[SCHROEDER-1962]` M. R. Schroeder, "Natural Sounding Artificial Reverberation," *J. Audio Eng. Soc.* 10(3), 219-223 (1962), [AES e-library 849](https://aes2.org/publications/elibrary-page/?id=849) (e-library page not opened).
+- `[MOORER-1979]` J. A. Moorer, "About This Reverberation Business," *Computer Music Journal* 3(2), 13-28 (1979), [DOI 10.2307/3680280](https://doi.org/10.2307/3680280). Crossref gives the start page only; the end page 28 is from secondary listings and is unconfirmed.
+- `[DATTORRO-1997]` J. Dattorro, "Effect Design, Part 1: Reverberator and Other Filters," *J. Audio Eng. Soc.* 45(9), 660-684 (1997), [AES e-library 10160](https://aes2.org/publications/elibrary-page/?id=10160) (e-library page not opened); [author copy](https://ccrma.stanford.edu/~dattorro/EffectDesignPart1.pdf).
+- `[SCHROEDER-1965]` M. R. Schroeder, "New Method of Measuring Reverberation Time," *J. Acoust. Soc. Am.* 37(3), 409-412 (1965), [DOI 10.1121/1.1909343](https://doi.org/10.1121/1.1909343).
+- `[ABEL-HUANG-NED]` J. S. Abel and P. Huang, "A Simple, Robust Measure of Reverberation Echo Density," AES 121st Convention, San Francisco, 2006, preprint 6985, AES e-library 13819 (number from the AES search listing; the page and the preprint number were not confirmed); [author copy](https://ccrma.stanford.edu/courses/318/mini-courses/rooms/mus318_Abel_Lecture/echo%20density.pdf).
+
 ## SIMD, hosts, and plugin contracts
 
 - `[WASM-SIMD]` WebAssembly Community Group, [SIMD proposal](https://github.com/WebAssembly/spec/blob/main/proposals/simd/SIMD.md).
