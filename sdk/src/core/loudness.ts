@@ -288,8 +288,10 @@ export class LoudnessOwner {
       } catch (error) {
         // The start may still reach the core after the sender gave up on it (a deadline, an
         // abort, a lost reply) and arm the meter with no handle, so every later start would be
-        // refused `loudness.active`. A quiet stop goes behind it, as the spectrum stream's does.
-        void this.#enqueue(() => this.#transport.send("stop")).catch(() => undefined);
+        // refused `loudness.active`. A quiet stop goes behind it, as the spectrum stream's does,
+        // but only when no handle is open: an open handle owns the armed meter, and the core
+        // refused or will refuse this start without touching it.
+        if (this.#handles.size === 0) void this.#enqueue(() => this.#transport.send("stop")).catch(() => undefined);
         throw error;
       }
       if (!reply.ok) throw spectrumRefusalError("the engine refused the loudness start", reply);

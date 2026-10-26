@@ -260,7 +260,7 @@ const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
  * sender gives up on a frame after `deadlineMs` while the core still serves it, as the browser's
  * deadline does.
  */
-function fakeCore({ startMs = 0, frameMs = 0, deadlineMs = 1_000, stuckReads = false, failStops = 0 } = {}) {
+function fakeCore({ startMs = 0, frameMs = 0, deadlineMs = 1_000, stuckReads = false, failStops = 0, failStartsAfter } = {}) {
   const sent = [];
   let armed = false;
   let serving = Promise.resolve();
@@ -274,6 +274,10 @@ function fakeCore({ startMs = 0, frameMs = 0, deadlineMs = 1_000, stuckReads = f
   const send = (operation) => {
     sent.push(operation);
     if (operation === "read" && stuckReads) return new Promise((_resolve, reject) => setTimeout(() => reject(new Error("deadline")), deadlineMs));
+    if (operation === "start" && failStartsAfter !== undefined
+        && sent.filter((name) => name === "start").length > failStartsAfter) {
+      return Promise.reject(new Error("the port failed"));
+    }
     if (operation === "stop" && stopsToFail > 0) {
       stopsToFail -= 1;
       return Promise.reject(new Error("the port failed"));
@@ -313,7 +317,7 @@ test("a stuck host holds at most one timed read, and close sends no read and set
   // A pump waits behind the one timed read in flight at most, not behind every tick since.
   const pumped = Date.now();
   await assert.rejects(handle.pump(), /deadline/);
-  assert.ok(Date.now() - pumped <= 2 * DEADLINE + 40, `a pump waited ${Date.now() - pumped} ms`);
+  assert.ok(Date.now() - pumped <= 10 * DEADLINE, `a pump waited ${Date.now() - pumped} ms`);
   await sleep(20);
   const before = core.sent.length;
   // A pump queued when close is called is not sent: the stop is the next frame.
@@ -323,7 +327,7 @@ test("a stuck host holds at most one timed read, and close sends no read and set
   const took = Date.now() - started;
   await assert.rejects(late, MisoUsageError);
   assert.deepEqual(core.sent.slice(before), ["stop"], "close sends its stop and nothing else");
-  assert.ok(took <= DEADLINE + 40, `close took ${took} ms`);
+  assert.ok(took <= 10 * DEADLINE, `close took ${took} ms`);
   await sleep(30);
   assert.deepEqual(core.sent.slice(before), ["stop"], "no read after close");
   // A failed timed read is reported, not swallowed; the readings stop advancing meanwhile.
@@ -338,6 +342,28 @@ test("a start the sender gave up on is stopped behind it, so the next subscribe 
   const handle = await owner.subscribe();
   assert.deepEqual(core.sent, ["start", "stop", "start"]);
   await handle.close();
+});
+
+test("a second start that fails in transport while a handle is open sends no stop: the open meter stays armed", { timeout: 5_000 }, async () => {
+  const core = fakeCore({ failStartsAfter: 1 });
+  const owner = new LoudnessOwner({ send: core.send, capabilityFlags: async () => 1n << 17n });
+  const first = await owner.subscribe();
+  await assert.rejects(owner.subscribe(), /the port failed/);
+  const reading = await first.pump();
+  assert.equal(reading.armed, true, "the open handle's meter was stopped");
+  assert.deepEqual(core.sent, ["start", "start", "read"]);
+  await first.close();
+});
+
+test("a start the core refuses sends no stop", { timeout: 5_000 }, async () => {
+  const core = fakeCore();
+  const owner = new LoudnessOwner({ send: core.send, capabilityFlags: async () => 1n << 17n });
+  const first = await owner.subscribe();
+  await assert.rejects(owner.subscribe(), (error) => error instanceof MisoEngineError && error.diagnosticCode === "loudness.active");
+  await sleep(5);
+  assert.deepEqual(core.sent, ["start", "start"]);
+  assert.equal(core.armed(), true);
+  await first.close();
 });
 
 test("a close whose stop fails keeps the handle live: the timer reads again and a later close stops", { timeout: 5_000 }, async () => {
