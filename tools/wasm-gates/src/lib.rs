@@ -236,10 +236,10 @@ pub struct ConsoleCounters {
 /// holds the table to the plan the banking design's W=4 finish line is stated for. A deliberate
 /// plan change re-pins from both legs' printed rows, never from one.
 pub const W4_CONSOLE_COUNTERS: [[u64; 7]; 4] = [
-    // c1_console_16_load
-    [15, 0, 7424, 4096, 0, 0, 0],
-    // c1_console_16_typical
-    [15, 0, 7424, 4096, 0, 0, 0],
+    // c1_console_16_load: every console slot bypassed, so every bank skips its wet path (#2129)
+    [15, 0, 0, 0, 260, 7164, 0],
+    // c1_console_16_typical: the banks whose drawn lanes are all bypassed skip (#2129)
+    [15, 0, 3584, 2304, 260, 3580, 0],
     // c1_console_16_all_active
     [15, 0, 7165, 4096, 259, 0, 0],
     // c1_console_16_sparse

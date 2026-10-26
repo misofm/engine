@@ -855,9 +855,8 @@ pub const BANK_COUNTER_NAMES: [&str; 7] = [
 /// 3. `bank_slot_runs_track_group`: the runs of the rows (pack groups, or units in none) that hold
 ///    a track's lane, so `2 - 3` is the submixes' runs;
 /// 4. `silent_skips`: the whole-chain skips of the same rows, in unit-blocks;
-/// 5. `bypass_skips`: zero. No bank-slot skip exists before #2129, so a bypassed slot never skips;
-///    #2129's reader replaces this entry, and the `Load` row's runs, which then fall to zero, turn
-///    `wasm-gates`' plan gate red until it does;
+/// 5. `bypass_skips`: the slot-blocks the same rows' banks skipped their wet path because every
+///    lane was settled bypassed (issue #2129); `2` already leaves them out;
 /// 6. `pack_groups`: the rows that are pack groups (a group spans two units or more).
 ///
 /// Built at [`Backend::current()`], so it describes a four-lane plan only on a four-lane build (the
@@ -904,7 +903,7 @@ pub fn bank_counters(workload: Workload, blocks: u64) -> [u64; 7] {
             .map(|row| row.runs)
             .sum(),
         rows.iter().map(|row| row.skips).sum(),
-        0,
+        rows.iter().map(|row| row.bypass_skips).sum(),
         rows.iter()
             .filter(|row| row.last_unit > row.first_unit)
             .count() as u64,

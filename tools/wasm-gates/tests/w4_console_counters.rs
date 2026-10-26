@@ -74,25 +74,38 @@ fn w4_counters_describe_the_designs_plan() {
             "{kind}: banks"
         );
         assert_eq!(pins[counter("mergeable_partial_pairs")], 0, "{kind}: pairs");
-        // No C1 row silences a whole track bank, so every track bank runs every slot each block.
+        // Every bank-slot of every block runs, skips its wet path (#2129) or is in a chain the
+        // block skipped whole: the slot-blocks the plan holds.
+        let slots_of_skipped_chains = pins[counter("silent_skips")];
+        assert!(
+            pins[counter("bank_slot_runs_total")] + pins[counter("bypass_skips")]
+                <= (track_bsr + submix_bsr) * W4_COUNTER_BLOCKS
+                && pins[counter("bank_slot_runs_total")]
+                    + pins[counter("bypass_skips")]
+                    + slots_of_skipped_chains
+                    >= (track_bsr + submix_bsr) * W4_COUNTER_BLOCKS,
+            "{kind}: runs, bypass skips and skipped chains cover the plan's slot-blocks"
+        );
+    }
+    for kind in ["c1_console_16_all_active", "c1_console_16_sparse"] {
+        // No bypassed lane and no whole silent track bank: every track bank runs every slot.
         assert_eq!(
-            pins[counter("bank_slot_runs_track_group")],
+            row(kind)[counter("bank_slot_runs_track_group")],
             track_bsr * W4_COUNTER_BLOCKS,
             "{kind}: track bank-slot runs"
         );
+        assert_eq!(
+            row(kind)[counter("bypass_skips")],
+            0,
+            "{kind}: nothing bypassed"
+        );
     }
-    // Before #2129 a bypassed slot still runs: the load state runs every bank slot every block.
-    // #2129's bank-slot skip makes this 0, and this assertion is where its slice re-pins.
+    // #2129: the load state bypasses every console slot, so no bank runs its wet path.
     let load = row("c1_console_16_load");
     assert_eq!(
         load[counter("bank_slot_runs_total")],
-        (track_bsr + submix_bsr) * W4_COUNTER_BLOCKS,
-        "load: banks x slots x blocks"
-    );
-    assert_eq!(
-        load[counter("bypass_skips")],
         0,
-        "load: no bypass skip before #2129"
+        "load: no bank runs"
     );
-    assert_eq!(load[counter("silent_skips")], 0, "load: nothing rests");
+    assert!(load[counter("bypass_skips")] > 0, "load: the banks skip");
 }

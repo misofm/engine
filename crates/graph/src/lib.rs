@@ -6315,6 +6315,9 @@ pub struct TestOnlyBankSlotRuns {
     pub runs: u64,
     /// Blocks the group's chains skipped whole (issue #1107), summed over its units.
     pub skips: u64,
+    /// Slot-blocks the group's banks skipped their wet path because every lane was settled
+    /// bypassed (issue #2129), summed over its units; already left out of `runs`.
+    pub bypass_skips: u64,
 }
 
 /// Every pack group's bank-slot runs (issue #2132), then, in unit order among them, every bank
@@ -6337,13 +6340,16 @@ pub fn test_only_bank_slot_runs(plan: &mut PreparedRenderPlan) -> Vec<TestOnlyBa
                 .bank_slot_runs()
                 .into_iter()
                 .map(
-                    |[first, last, width, effect_slots, runs, skips]| TestOnlyBankSlotRuns {
-                        first_unit: narrow(first),
-                        last_unit: narrow(last),
-                        width: narrow(width),
-                        effect_slots: narrow(effect_slots),
-                        runs,
-                        skips,
+                    |[first, last, width, effect_slots, runs, skips, bypass_skips]| {
+                        TestOnlyBankSlotRuns {
+                            first_unit: narrow(first),
+                            last_unit: narrow(last),
+                            width: narrow(width),
+                            effect_slots: narrow(effect_slots),
+                            runs,
+                            skips,
+                            bypass_skips,
+                        }
                     },
                 )
                 .collect()

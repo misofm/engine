@@ -10545,7 +10545,8 @@ impl Runtime {
     }
 
     /// The bank-slot runs (issue #2132) of every pack group and of every bank unit in none, in
-    /// unit order: `[first unit, last unit, width, effect slots per unit, runs, whole-chain skips]`.
+    /// unit order: `[first unit, last unit, width, effect slots per unit, runs, whole-chain skips,
+    /// bypass skips]`.
     /// Units with no effect slot are left out. Off the render thread.
     ///
     /// A run is one bank executing one effect slot for one block. Every slot of a chain has the
@@ -10555,8 +10556,8 @@ impl Runtime {
     /// No render-path state is added for it. A slot that skipped its wet path because every lane was
     /// settled bypassed (#2129, [`BankChain::bypass_skips`]) ran no bank, and its count is
     /// subtracted.
-    pub(crate) fn bank_slot_runs(&mut self) -> Vec<[u64; 6]> {
-        let mut rows: Vec<[u64; 6]> = Vec::new();
+    pub(crate) fn bank_slot_runs(&mut self) -> Vec<[u64; 7]> {
+        let mut rows: Vec<[u64; 7]> = Vec::new();
         for index in 0..self.units.len() {
             let RuntimeUnit::Bank { chain, .. } = &mut self.units[index] else {
                 continue;
@@ -10569,9 +10570,10 @@ impl Runtime {
                 continue;
             }
             // #2129: a slot that skipped its wet path ran no bank on that block.
+            let bypass_skips = chain.bypass_skips();
             let runs = effect_slots
                 .saturating_mul(chain.transposes())
-                .saturating_sub(chain.bypass_skips());
+                .saturating_sub(bypass_skips);
             let skips = chain.silent_skips();
             let width = u64::from(chain.width().lanes());
             let unit = index as u64;
@@ -10585,6 +10587,7 @@ impl Runtime {
                     row[1] = unit;
                     row[4] = row[4].saturating_add(runs);
                     row[5] = row[5].saturating_add(skips);
+                    row[6] = row[6].saturating_add(bypass_skips);
                 }
                 Some((_, group)) => rows.push([
                     u64::from(group.first),
@@ -10593,8 +10596,9 @@ impl Runtime {
                     effect_slots,
                     runs,
                     skips,
+                    bypass_skips,
                 ]),
-                None => rows.push([unit, unit, width, effect_slots, runs, skips]),
+                None => rows.push([unit, unit, width, effect_slots, runs, skips, bypass_skips]),
             }
         }
         rows
