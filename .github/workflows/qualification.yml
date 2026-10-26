@@ -149,6 +149,7 @@ jobs:
         run: |
           python3 -B scripts/check-wasm-producers.py --self-test
           python3 -B scripts/check-wasm-producers.py target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm --toolchain "$TOOLCHAIN"
+          python3 -B scripts/check-wasm-producers.py target/ci/qualification-artifacts/miso-engine-v1-blake3.simd128.wasm --toolchain "$TOOLCHAIN"
       - name: Upload shipped artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

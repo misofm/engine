@@ -12,10 +12,11 @@ build or link anything itself: `cargo metadata` is read-only, and the root manif
 text. If either input drifts (a new shipped cdylib, a changed profile), the override's reasoning
 should be re-derived, not silently kept valid by a stale pin.
 
-The three packages below are exactly the shipped-cdylib/staticlib set: `capi` (rlib + staticlib +
-cdylib, the native C ABI), `host-web` (rlib + cdylib), and the wasm guest test cdylib
-`wasm-gate-guest` (its own target triple, so it does not actually clobber, but it is still
-exactly-pinned membership, not "cdylib crates in general"). #359 pinned five; #1037 removed
+The four packages below are exactly the shipped-cdylib/staticlib set: `capi` (rlib + staticlib +
+cdylib, the native C ABI), `host-web` (rlib + cdylib), the browser's stem-identity hash
+`blake3-web` (cdylib only, #2111), and the wasm guest test cdylib `wasm-gate-guest`. The last two
+ship or run only for `wasm32-unknown-unknown` and nothing links them, so neither actually clobbers,
+but each is still exactly-pinned membership, not "cdylib crates in general". #359 pinned five; #1037 removed
 `effect-package` (rlib + cdylib) with the third-party effect package surface, and #1039 removed
 the second wasm guest, `wasm-console-guest`, with the wasmtime console benchmark.
 
@@ -36,6 +37,7 @@ import tempfile
 import tomllib
 
 EXPECTED_CDYLIB_OR_STATICLIB = frozenset({
+    "blake3-web",
     "capi",
     "host-web",
     "wasm-gate-guest",
@@ -217,6 +219,7 @@ def _valid_metadata() -> dict:
     packages = [
         _pkg("capi", ["rlib", "staticlib", "cdylib"]),
         _pkg("host-web", ["rlib", "cdylib"]),
+        _pkg("blake3-web", ["cdylib"]),
         _pkg("wasm-gate-guest", ["cdylib"]),
         _pkg("engine", ["lib"]),
         _pkg("lane", ["lib"]),
@@ -259,10 +262,10 @@ def self_test() -> None:
     assert actual == EXPECTED_CDYLIB_OR_STATICLIB, actual
     check_release_profile(VALID_CARGO_TOML)
 
-    # A fourth cdylib crate is rejected.
-    fourth = _valid_metadata()
-    fourth["packages"].append(_pkg("fourth-shipped-cdylib", ["cdylib"]))
-    _expect_invalid("fourth cdylib crate", check_crate_types, fourth, needle="unexpected")
+    # A fifth cdylib crate is rejected.
+    fifth = _valid_metadata()
+    fifth["packages"].append(_pkg("fifth-shipped-cdylib", ["cdylib"]))
+    _expect_invalid("fifth cdylib crate", check_crate_types, fifth, needle="unexpected")
 
     # A missing expected crate is rejected.
     missing = _valid_metadata()

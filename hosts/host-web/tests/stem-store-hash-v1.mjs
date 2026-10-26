@@ -1,6 +1,9 @@
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { hexLower } from "../web/hex-lower.js"
-import { IncrementalBlake3, blake3Stream } from "../web/stem-store/incremental-blake3.js"
+import { IncrementalBlake3, blake3Stream, prepareBlake3 } from "../web/stem-store/incremental-blake3.js"
 import {
   FetchStemResolver,
   MemoryStemResolver,
@@ -16,6 +19,11 @@ const vectors = [
   [new Uint8Array(), "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"],
   [new TextEncoder().encode("abc"), "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"],
   [new Uint8Array(1_000_000).fill("a".charCodeAt(0)), "616f575a1b58d4c9797d4217b9730ae5e6eb319d76edef6549b46f4efe31ff8b"],
+  // Issue #2111: the official BLAKE3 test vectors' input pattern (byte i is i mod 251) at
+  // 300,000 bytes, past the WebAssembly module's 256 KiB staging buffer with bytes that differ
+  // across the refill (a period of 256, like the two inputs above, would hide a refill that
+  // re-copies). The digest is the blake3 crate 1.8.7's native build's, and the JavaScript class's.
+  [Uint8Array.from({ length: 300_000 }, (_, index) => index % 251), "6cc9dce05d4cff8c5bef5c5a24681e42b13f03e34a0bc5e66f65a91d48c944fa"],
 ]
 
 // Independent BLAKE3-256 KATs from hash-wasm 4.12.0. Their endings exercise a partial final
@@ -26,26 +34,85 @@ const irregularEndingVectors = [
   [1025, "b8c5c46b114817810a6ed499350cb4d2423cd23dd08d32c137b226d8559b8ab0"],
 ]
 
-for (const [length, expected] of irregularEndingVectors) {
-  const bytes = new Uint8Array(length)
-  for (let index = 0; index < bytes.length; index += 1) bytes[index] = (index * 31 + 7) & 0xff
-  for (const chunkBytes of [1, 17, 64, 127, 1024]) {
-    const hash = new IncrementalBlake3()
-    for (let offset = 0; offset < bytes.byteLength; offset += chunkBytes) {
-      hash.update(bytes.subarray(offset, offset + chunkBytes))
+// Issue #2111: the same loops run through each engine `IncrementalBlake3` can take. The
+// JavaScript run is first, before any preparation; the WebAssembly SIMD run follows when
+// MISO_ENGINE_SDK_ARTIFACTS_HEX names a built artifact directory (hex of its path, as
+// scripts/check-sdk-headless.sh spells it). A one-update run of a vector above 256 KiB crosses the
+// module's staging-buffer refill.
+function checkVectors(engine) {
+  for (const [length, expected] of irregularEndingVectors) {
+    const bytes = new Uint8Array(length)
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = (index * 31 + 7) & 0xff
+    for (const chunkBytes of [1, 17, 64, 127, 1024]) {
+      const hash = new IncrementalBlake3()
+      for (let offset = 0; offset < bytes.byteLength; offset += chunkBytes) {
+        hash.update(bytes.subarray(offset, offset + chunkBytes))
+      }
+      assert.equal(hash.digestHex(), expected, `${engine}: irregular ${length}-byte KAT with ${chunkBytes}-byte chunks`)
     }
-    assert.equal(hash.digestHex(), expected, `irregular ${length}-byte KAT with ${chunkBytes}-byte chunks`)
+  }
+
+  for (const [bytes, expected] of vectors) {
+    for (const chunkBytes of [1, 7, 63, 64, 65, 4093, bytes.byteLength || 1]) {
+      const hash = new IncrementalBlake3()
+      for (let offset = 0; offset < bytes.byteLength; offset += chunkBytes) {
+        hash.update(bytes.subarray(offset, offset + chunkBytes))
+      }
+      assert.equal(hash.digestHex(), expected, `${engine}: ${bytes.byteLength}-byte KAT with ${chunkBytes}-byte chunks`)
+    }
   }
 }
+checkVectors("javascript")
 
-for (const [bytes, expected] of vectors) {
-  for (const chunkBytes of [1, 7, 63, 64, 65, 4093, bytes.byteLength || 1]) {
-    const hash = new IncrementalBlake3()
-    for (let offset = 0; offset < bytes.byteLength; offset += chunkBytes) {
-      hash.update(bytes.subarray(offset, offset + chunkBytes))
+// A module that cannot load leaves hashing in JavaScript: the preparation resolves, never rejects.
+assert.equal(await prepareBlake3({ url: new URL("./missing-blake3.wasm", import.meta.url) }), "javascript")
+assert.equal(await prepareBlake3(null), "javascript", "a null options object neither throws nor rejects")
+assert.equal(new IncrementalBlake3().update(vectors[1][0]).digestHex(), vectors[1][1], "the digest after a failed load")
+
+const artifactsHex = process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX
+if (artifactsHex !== undefined) {
+  const module = join(Buffer.from(artifactsHex, "hex").toString(), "miso-engine-v1-blake3.simd128.wasm")
+  // Node's fetch has no file: scheme; serve the one module file the way a web server would.
+  // The first fetch of the module fails, so the retry below is the load.
+  let failNextModuleFetch = true
+  const networkFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    if (new URL(String(url)).protocol !== "file:") return networkFetch(url, init)
+    if (failNextModuleFetch) {
+      failNextModuleFetch = false
+      return new Response(null, { status: 503 })
     }
-    assert.equal(hash.digestHex(), expected)
+    return new Response(await readFile(new URL(String(url))), { headers: { "content-type": "application/wasm" } })
   }
+  // Count the module's update and free calls, so a hash that silently stays in JavaScript, or a
+  // failed stream that keeps its hasher, turns red.
+  const instantiate = WebAssembly.instantiate
+  let moduleUpdates = 0
+  let moduleFrees = 0
+  WebAssembly.instantiate = async (...args) => {
+    const result = await instantiate(...args)
+    const { miso_engine_blake3_v1_update: update, miso_engine_blake3_v1_free: free } = result.instance?.exports ?? {}
+    if (update === undefined) return result // Node's own HTTP parser module.
+    const exports = {
+      ...result.instance.exports,
+      miso_engine_blake3_v1_update: (...call) => ((moduleUpdates += 1), update(...call)),
+      miso_engine_blake3_v1_free: (handle) => ((moduleFrees += 1), free(handle)),
+    }
+    return { instance: { exports } }
+  }
+  assert.equal(await prepareBlake3({ url: pathToFileURL(module) }), "javascript", "the failed first fetch")
+  assert.equal(await prepareBlake3({ url: pathToFileURL(module) }), "simd128", "a failed load is retried, not cached")
+  WebAssembly.instantiate = instantiate
+  checkVectors("simd128")
+  assert.ok(moduleUpdates > 0, "the simd128 run hashed in the module")
+  const freesBefore = moduleFrees
+  const failing = new ReadableStream({
+    pull(controller) {
+      controller.error(new Error("read failed"))
+    },
+  })
+  await assert.rejects(blake3Stream(failing), /read failed/)
+  assert.equal(moduleFrees, freesBefore + 1, "a failed stream frees its Wasm hasher at once")
 }
 
 const fixture = new Uint8Array(512 * 1024 + 31)

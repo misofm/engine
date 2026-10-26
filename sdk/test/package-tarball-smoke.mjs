@@ -88,6 +88,7 @@ assert.deepEqual(
     "miso-engine-v1-audio-worklet-host.js",
     "miso-engine-v1-audio-worklet.js",
     "miso-engine-v1-audio-worklet.simd128.wasm",
+    "miso-engine-v1-blake3.simd128.wasm",
     "miso-engine-v1-parameter-metadata.json",
   ],
   "the package manifest declares exactly the Engine artifact closure",
@@ -110,9 +111,26 @@ for (const [packed, engineCopy] of [
 ]) {
   assert.ok((await readFile(resolve(packageRoot, packed))).equals(await readFile(engineCopy)), `packed ${packed} is the engine's copy`);
 }
-for (const name of ["readWavHeader", "CanonicalPcmPump", "deinterleaveCanonicalPcm", "blake3Stream", "IncrementalBlake3", "WavFormatError", "CanonicalPcmPumpError"]) {
+for (const name of ["readWavHeader", "CanonicalPcmPump", "deinterleaveCanonicalPcm", "blake3Stream", "IncrementalBlake3", "prepareBlake3", "WavFormatError", "CanonicalPcmPumpError"]) {
   assert.equal(typeof imported["./browser"][name], "function", `the browser entry exports ${name}`);
 }
+// Issue #2111: the hash's WebAssembly SIMD module ships once, the gated closure's digested copy
+// in dist/assets, and the packed entry's default `prepareBlake3()` URL loads exactly that file, so
+// the corpus loop below hashes in the module. Node's fetch has no file: scheme; serve files as a
+// web server would, and record which files were fetched.
+const blake3Module = "miso-engine-v1-blake3.simd128.wasm";
+assert.deepEqual(files.filter((name) => name.endsWith(blake3Module)), [`dist/assets/${blake3Module}`], "the BLAKE3 module is packed once");
+const fetched = [];
+const networkFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  if (new URL(String(url)).protocol !== "file:") return networkFetch(url, init);
+  fetched.push(fileURLToPath(new URL(String(url))));
+  const bytes = await readFile(new URL(String(url)));
+  return new Response(bytes, { headers: { "content-type": "application/wasm" } });
+};
+assert.equal(await imported["./browser"].prepareBlake3(), "simd128", "the packed BLAKE3 module loads from its default URL");
+assert.deepEqual(fetched, [resolve(packageRoot, "dist/assets", blake3Module)], "the default URL is the closure's copy");
+globalThis.fetch = networkFetch;
 const stemCorpus = resolve(repoRoot, "fixtures/stem-identity/v1");
 const [, vectorHeader, ...vectorRows] = (await readFile(resolve(stemCorpus, "VECTORS.tsv"), "utf8")).trim().split("\n").map((line) => line.split("\t"));
 for (const cells of vectorRows) {
