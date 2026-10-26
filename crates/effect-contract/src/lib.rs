@@ -1559,12 +1559,13 @@ pub struct PreparedEffectMetadata {
 ///
 /// * **The wet path runs while any lane needs it.** A bypassed lane keeps its bank, so the cohort
 ///   does not split, and in a bank with an enabled, ramping or warming lane its wet path runs with
-///   the others and its state stays continuous. A bank whose every lane is settled bypassed, with
-///   no span, no prepared target and no armed tap that needs a computed value, skips its wet path
-///   for the block and emits the same latency-matched dry words; the lane that ends the skip
-///   resets the bank and holds dry for the effect's
-///   [`warmup_samples`](PreparedNativeEffectBank::warmup_samples) before its crossfade (owner
-///   decision of 2026-10-26, issue #2129, amending decision 12).
+///   the others. A bank whose every lane is settled bypassed, with no span, no prepared target and
+///   no armed tap that needs a computed value, skips its wet path for the block and emits the same
+///   latency-matched dry words. Every lane that leaves settled bypass is reset alone
+///   ([`reset_lane`](PreparedNativeEffectBank::reset_lane), keeping parameters) and holds dry for
+///   the effect's [`warmup_samples`](PreparedNativeEffectBank::warmup_samples) before its
+///   crossfade, whether or not its bank skipped (owner decisions of 2026-10-26, issue #2129,
+///   amending decision 12).
 /// * **A per-lane bitwise select, never an arithmetic identity.** The rack's shunt copies the
 ///   delayed dry words into exactly the bypassed lanes. `fma(0, wet, dry)` is **not** equivalent:
 ///   `-0.0 + 0.0` is `+0.0`.
@@ -2249,9 +2250,8 @@ pub enum ParameterAccessError {
 pub trait PreparedNativeEffect: Send {
     fn reset(&mut self, kind: ResetKind);
     /// The frames this instance renders from a reset before its output can be crossfaded
-    /// in for a lane whose bypass ends (issue #2129 D3): a lane resumed from a bank whose wet path
-    /// was skipped is reset and holds the dry signal for this many frames before its crossfade
-    /// runs. `declared_latency` is the instance's [`PreparedEffectMetadata::latency`]; it is the
+    /// in for a lane whose bypass ends (issue #2129 D3): a lane that leaves settled bypass is reset
+    /// and holds the dry signal for this many frames before its crossfade runs. `declared_latency` is the instance's [`PreparedEffectMetadata::latency`]; it is the
     /// default, because a lane whose output reads only its latency line is exact once the line
     /// holds post-reset input. An effect whose output reads more history than its latency (a FIFO
     /// detector or a FIR past its group delay) returns that history, so the first crossfaded frame
@@ -2460,9 +2460,8 @@ pub trait PreparedNativeEffect: Send {
 pub trait PreparedNativeEffectBank: Send {
     fn reset(&mut self, kind: ResetKind);
     /// The frames a lane of this bank renders from a reset before its output can be crossfaded
-    /// in for a lane whose bypass ends (issue #2129 D3): a lane resumed from a bank whose wet path
-    /// was skipped is reset and holds the dry signal for this many frames before its crossfade
-    /// runs. `declared_latency` is the bank's [`PreparedEffectMetadata::latency`]; it is the
+    /// in for a lane whose bypass ends (issue #2129 D3): a lane that leaves settled bypass is reset
+    /// and holds the dry signal for this many frames before its crossfade runs. `declared_latency` is the bank's [`PreparedEffectMetadata::latency`]; it is the
     /// default, because a lane whose output reads only its latency line is exact once the line
     /// holds post-reset input. An effect whose output reads more history than its latency (a FIFO
     /// detector or a FIR past its group delay) returns that history, so the first crossfaded frame
