@@ -264,10 +264,11 @@ fn within(level: Option<f32>, label: &str) {
 /// Start, read, reset and stop on a -23 dBFS 1 kHz stereo sine through the real session.
 ///
 /// Test value: red if the meter is not wired to the rendered master (no hops, or the wrong
-/// planes), if start arms from the wrong sample or a second start does not refuse, if a read
-/// does not drain first, if reset does not restart integration on a hop boundary at the render
-/// sample, if stop leaves the meter armed, or if a start after an immediate stop continues the
-/// last arming's windows instead of restarting the analysis.
+/// planes), if start arms from the wrong sample or a second start does not refuse, if reset does
+/// not restart integration on a hop boundary at the render sample, if stop leaves the meter
+/// armed, if a start after an immediate stop continues the last arming's windows instead of
+/// restarting the analysis, or if a new arming does not restart the render half's hop grid at
+/// its first block.
 #[test]
 fn start_read_reset_and_stop_measure_the_master() {
     let mut rig = Rig::new();
@@ -358,6 +359,24 @@ fn start_read_reset_and_stop_measure_the_master() {
     assert_eq!(
         early.momentary_lufs, None,
         "4 hops of the new arming are no 400 ms window"
+    );
+
+    // Stop off the hop grid (128 samples past a hop end) and start at once: the render half
+    // restarts its grid at the new arming, so its first hop starts there.
+    rig.blocks(1, true);
+    assert_ne!((rig.frame - origin) % HOP, 0);
+    rig.loudness(LoudnessRequest::Stop).expect("stop");
+    let armed_at = rig
+        .loudness(LoudnessRequest::Start)
+        .expect("start")
+        .observed_sample;
+    rig.blocks(ALIGNED_BLOCKS, true);
+    assert_eq!(
+        rig.loudness(LoudnessRequest::Read)
+            .expect("read")
+            .integrating_since,
+        Some(armed_at),
+        "the new arming's first hop starts at its arm sample"
     );
 }
 
