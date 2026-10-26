@@ -1879,7 +1879,7 @@ impl ObservationLane {
             .map(|(descriptor, publisher)| ObservationTap {
                 publisher,
                 fold: descriptor.fold,
-                bypass: descriptor.bypass_observation(),
+                bypass: descriptor.bypass_observation,
                 armed: false,
                 start_pending: false,
                 arm_unpublished: false,

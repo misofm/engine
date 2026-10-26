@@ -409,6 +409,7 @@ pub const DE_ESSER_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDescri
     channels: ObservationChannels::PerLane,
     minimum: 0.0,
     maximum: 100.0,
+    bypass_observation: Some(0.0),
 }];
 
 /// Immutable descriptor for the launch de-esser contract.

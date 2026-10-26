@@ -506,6 +506,7 @@ const fn observation(id: u32, display_name: &'static str) -> ObservationDescript
         channels: ObservationChannels::PerLane,
         minimum: -RANGE_MAX_DB,
         maximum: RANGE_MAX_DB,
+        bypass_observation: Some(0.0),
     }
 }
 

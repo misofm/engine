@@ -1128,6 +1128,7 @@ fn observation_cost_classes_are_what_they_claim() {
         channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
+        bypass_observation: Some(0.0),
     }];
 
     // The counting stand-in for a prepared effect: exactly the surface the publish step touches.

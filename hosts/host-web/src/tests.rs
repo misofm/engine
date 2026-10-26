@@ -4994,6 +4994,7 @@ fn observation_unit_conversion_is_declared_and_clamped() {
             channels: ObservationChannels::PerLane,
             minimum: 0.0,
             maximum: 100.0,
+            bypass_observation: Some(0.0),
         }
     }
     let decibels = tap(ParameterUnit::Db);

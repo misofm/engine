@@ -468,6 +468,7 @@ pub const COMPRESSOR_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDesc
     channels: ObservationChannels::PerLane,
     minimum: 0.0,
     maximum: 100.0,
+    bypass_observation: Some(0.0),
 }];
 
 /// Immutable launch compressor descriptor.

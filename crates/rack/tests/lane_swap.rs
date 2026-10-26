@@ -393,6 +393,7 @@ const fn tap(id: u32) -> ObservationDescriptor {
         channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
+        bypass_observation: Some(0.0),
     }
 }
 static TAPS: [ObservationDescriptor; 2] = [tap(1), tap(2)];

@@ -81,6 +81,7 @@ fn registry_refuses_an_invalid_main_descriptor() {
             channels: ObservationChannels::Shared,
             minimum: -24.0,
             maximum: 24.0,
+            bypass_observation: Some(0.0),
         };
         let with_tap: &'static EffectDescriptor = Box::leak(Box::new(EffectDescriptor {
             observations: Box::leak(Box::new([tap])),

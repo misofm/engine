@@ -424,6 +424,7 @@ pub const TRUE_PEAK_LIMITER_OBSERVATIONS: [ObservationDescriptor; 1] = [Observat
     channels: ObservationChannels::PerLane,
     minimum: 0.0,
     maximum: 100.0,
+    bypass_observation: Some(0.0),
 }];
 
 /// Immutable launch true-peak limiter descriptor.

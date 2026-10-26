@@ -391,7 +391,11 @@ fn patterns(lanes: usize) -> Vec<Vec<bool>> {
 /// * the shunt built only when a lane has a live channel (`has_channel()` without
 ///   `|| bypassed()`) -> no shunt, and a bypassed lane renders wet;
 /// * `BypassShunt::capture` stops feeding its latency line -> the limiter's and the soft clip's
-///   bypassed lanes emit undelayed words.
+///   bypassed lanes emit undelayed words;
+/// * issue #2129: the all-bypassed pattern renders every block through the stage's skip (the
+///   count is asserted), so `BypassShunt::passthrough` writing the stale dry staging in place of
+///   the line's words, adding `+0.0` to each word (a `-0.0` run comes out `+0.0`), or feeding the
+///   right line the left plane each fail the limiter's and the soft clip's rows.
 #[test]
 fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
     let registry = launch_native_effect_registry().expect("launch registry");
@@ -512,6 +516,19 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
                         assert_bits(&format!("{what} right"), &members.right[lane], &right[lane]);
                     }
                 }
+                // Issue #2129 gate 1: the all-bypassed pattern renders through the skip on every
+                // block, so the rows above hold the skip's words; a bank with an enabled lane
+                // never skips.
+                let expected_skips = if bypassed.iter().all(|bypassed| *bypassed) {
+                    BLOCKS
+                } else {
+                    0
+                };
+                assert_eq!(
+                    chain.bypass_skips(),
+                    expected_skips,
+                    "{effect_id} {case:?} pattern {pattern_index}: bypass skips"
+                );
             }
         }
         if bound {

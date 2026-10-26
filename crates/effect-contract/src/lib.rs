@@ -887,28 +887,20 @@ pub struct ObservationDescriptor {
     pub minimum: f32,
     /// Declared inclusive upper bound of the published value.
     pub maximum: f32,
-}
-
-impl ObservationDescriptor {
     /// The value this tap publishes, in its transport [`unit`](Self::unit), for a block whose lane
     /// emitted its settled-bypassed dry signal, or `None` when no such value exists and the tap
     /// must be computed from a running wet path (issue #2129 D5).
     ///
     /// An observed value describes the block emitted. A settled-bypassed lane emitted the dry
-    /// signal, so the effect applied no gain at all, and both launch tap kinds report exactly
-    /// that: [`ObservationKind::GainReductionDb`] publishes `0` for no reduction in either of its
-    /// transport units (decibels, or the true-peak limiter's linear reduction `d` of
-    /// `gain = 1 - d`), and [`ObservationKind::GainChangeDb`] publishes `0` dB for no change. So a
-    /// bypassed lane's armed tap folds `0.0`, whether its bank's wet path ran or was skipped, and
-    /// a lane's observation never depends on its bank-mates. A tap kind added later states its own
-    /// value here; `None` keeps an armed tap's bank running.
-    #[must_use]
-    pub const fn bypass_observation(&self) -> Option<f32> {
-        match self.kind {
-            ObservationKind::GainReductionDb | ObservationKind::GainChangeDb => Some(0.0),
-        }
-    }
+    /// signal, so the effect applied no gain at all: every launch tap declares `Some(0.0)`, which
+    /// is "no reduction" in both transport units a [`ObservationKind::GainReductionDb`] tap uses
+    /// (decibels, or the true-peak limiter's linear reduction `d` of `gain = 1 - d`) and "no
+    /// change" for a [`ObservationKind::GainChangeDb`] tap. A bypassed lane's armed tap folds it
+    /// whether its bank's wet path ran or was skipped, so a lane's observation never depends on its
+    /// bank-mates. `None` keeps an armed tap's bank running while its lane is bypassed.
+    pub bypass_observation: Option<f32>,
 }
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QualityDescriptor {
     pub quality: EffectQuality,

@@ -173,6 +173,9 @@ impl FloorRow {
 ///
 /// The two packing rows (issue #1783) are absent on the sparse row's terms: their silent lanes are
 /// arithmetic no inventory counts.
+///
+/// The bypassed sixteen-track row (issue #2129) is absent because its bypassed banks skip their wet
+/// path: what it renders is shunt copies, which no inventory counts.
 pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
     let full = 1.0_f64;
     Some(match workload {
@@ -185,7 +188,8 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         | Workload::SixtyFourTrackAppShape
         | Workload::SixtyFourTrackConsoleSparse
         | Workload::SixtyFourTrackConsoleToggle
-        | Workload::SixtyFourTrackConsoleOnePerBank => return None,
+        | Workload::SixtyFourTrackConsoleOnePerBank
+        | Workload::SixteenTrackStripBypassed => return None,
         Workload::NineTrackRaggedStrip => FloorRow {
             lane_ops: BUILTINS_LANE_OPS + EQ_LANE_OPS + COMPRESSOR_LANE_OPS + LIMITER_LANE_OPS,
             width_factor: RAGGED_NINE_TRACK_WIDTH_FACTOR,

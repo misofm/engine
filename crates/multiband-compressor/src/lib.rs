@@ -481,6 +481,7 @@ pub const MULTIBAND_COMPRESSOR_OBSERVATIONS: [ObservationDescriptor; 1] = [Obser
     channels: ObservationChannels::PerLane,
     minimum: 0.0,
     maximum: 100.0,
+    bypass_observation: Some(0.0),
 }];
 
 /// Immutable descriptor for the launch two-band multiband compressor.
