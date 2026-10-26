@@ -133,6 +133,9 @@ pub enum MessageId {
     /// `SESSION_REPLACE` (#1386): replace the session with a document the host passes beside the
     /// frame, applied as the one transaction its diff against the committed model gives.
     SessionReplace = 0x0013,
+    /// `LOUDNESS` (#2115): start, read, reset or stop the session's output loudness meter
+    /// (BS.1770-5 loudness, EBU Tech 3342 loudness range and Annex-2 true peak of the master).
+    Loudness = 0x0014,
     /// `SESSION_COMMITTED`.
     SessionCommitted = 0x8001,
     /// `TRANSPORT_STATE`.
@@ -202,6 +205,7 @@ impl MessageId {
             0x0011 => Self::SpectrumCapture,
             0x0012 => Self::SpectrumStream,
             0x0013 => Self::SessionReplace,
+            0x0014 => Self::Loudness,
             0x8001 => Self::SessionCommitted,
             0x8010 => Self::TransportState,
             0x8011 => Self::ObservationEnded,

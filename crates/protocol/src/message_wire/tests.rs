@@ -440,6 +440,25 @@ fn capability_id_views_reject_order_allocation_and_session_family_identically() 
     ] {
         assert_parity_rejects(partial, &events);
     }
+    // #2115: `LOUDNESS` (`0x0014`) is listed exactly when bit 17 is set.
+    let bit_17 = |commands: &'static [u16], flags: u64| CapabilityInvariantView {
+        flags: CapabilityFlags(view(IdSource::Native(&[]), IdSource::Native(&[])).flags.0 | flags),
+        ..view(IdSource::Native(commands), IdSource::Native(&events))
+    };
+    assert!(
+        check_capabilities_invariants(bit_17(&[1, 2, 3, 0x0014], CapabilityFlags::LOUDNESS.0))
+            .is_ok()
+    );
+    assert_eq!(
+        check_capabilities_invariants(bit_17(&[1, 2, 3, 0x0014], 0)),
+        Err(DecodeError::InvalidTlv),
+        "0x0014 without bit 17"
+    );
+    assert_eq!(
+        check_capabilities_invariants(bit_17(&[1, 2, 3], CapabilityFlags::LOUDNESS.0)),
+        Err(DecodeError::InvalidTlv),
+        "bit 17 without 0x0014"
+    );
     let without_session = |commands: &'static [u16]| CapabilityInvariantView {
         maximum_transaction_edits: 0,
         flags: CapabilityFlags(CapabilityFlags::B1B_BASE.0 & !(1 << 3)),
@@ -1967,11 +1986,11 @@ fn retired_message_ids_are_never_reused_or_advertised() {
             .all(|id| allocated_id(id, true))
     );
     assert!(
-        [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0x0013]
+        [1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0x0013, 0x0014]
             .into_iter()
             .all(|id| allocated_id(id, false))
     );
-    assert!(!allocated_id(0, false) && !allocated_id(0x0014, false));
+    assert!(!allocated_id(0, false) && !allocated_id(0x0015, false));
 }
 
 fn session_capabilities<'a>(commands: &'a [u16], events: &'a [u16]) -> Capabilities<'a> {
@@ -5377,5 +5396,107 @@ fn observation_read_round_trips_and_refuses_malformed_frames_both_ways() {
             Err(DecodeError::InvalidField),
             "{name}"
         );
+    }
+}
+
+/// #2115: the `LOUDNESS` reply's value rules hold on encode and on decode, and an operation
+/// outside the table is refused. Every level is finite and at or above the -120 floor, a loudness
+/// range is at least 0, and the true peak since reset comes exactly with `integrating_since`.
+///
+/// Test value: red if either direction lets a non-finite or below-floor level, a negative range,
+/// a true peak without its integration start or an unknown operation cross the wire.
+#[test]
+fn loudness_reply_rules_hold_both_ways_and_an_unknown_op_is_refused() {
+    let codec = codec();
+    let valid = LoudnessReply {
+        observed_sample: 4_800,
+        armed: true,
+        integrating_since: Some(480),
+        hops_dropped: 0,
+        sanitized_samples: 0,
+        gated_block_count: 0,
+        momentary_lufs: Some(LOUDNESS_LEVEL_FLOOR),
+        short_term_lufs: None,
+        integrated_lufs: None,
+        loudness_range_lu: Some(0.0),
+        momentary_max_lufs: None,
+        short_term_max_lufs: None,
+        true_peak_dbtp: Some([-6.0, -7.0]),
+        hop_true_peak_dbtp: Some([-6.0, -7.0]),
+    };
+    let encode = |value: &LoudnessReply| {
+        let mut bytes = vec![0; 512];
+        codec
+            .encode_loudness_reply(value, &mut bytes)
+            .map(|written| bytes[..written].to_vec())
+    };
+    let bytes = encode(&valid).expect("a valid reply");
+    assert_eq!(
+        codec.decode_loudness_reply(&bytes, top_level_count(&bytes)),
+        Ok(valid)
+    );
+    for (label, broken) in [
+        (
+            "NaN level",
+            LoudnessReply {
+                momentary_lufs: Some(f32::NAN),
+                ..valid
+            },
+        ),
+        (
+            "below the floor",
+            LoudnessReply {
+                integrated_lufs: Some(-120.5),
+                ..valid
+            },
+        ),
+        (
+            "infinite peak",
+            LoudnessReply {
+                hop_true_peak_dbtp: Some([f32::INFINITY, 0.0]),
+                ..valid
+            },
+        ),
+        (
+            "negative range",
+            LoudnessReply {
+                loudness_range_lu: Some(-0.1),
+                ..valid
+            },
+        ),
+        (
+            "peak without its start",
+            LoudnessReply {
+                integrating_since: None,
+                ..valid
+            },
+        ),
+    ] {
+        assert_eq!(encode(&broken), Err(EncodeError::InvalidField), "{label}");
+    }
+    // The decoder applies the same rule: the momentary floor patched to -121 is refused.
+    let floor = LOUDNESS_LEVEL_FLOOR.to_le_bytes();
+    let at = bytes
+        .windows(4)
+        .position(|word| word == floor)
+        .expect("the floor word");
+    let mut below = bytes.clone();
+    below[at..at + 4].copy_from_slice(&(-121.0_f32).to_le_bytes());
+    assert_eq!(
+        codec.decode_loudness_reply(&below, top_level_count(&below)),
+        Err(DecodeError::InvalidField)
+    );
+    // Operations 1 to 4 decode; 0 and 5 are `INVALID_FIELD`.
+    for op in 0_u8..=5 {
+        let mut request = vec![0_u8; 16];
+        let mut writer = crate::btlv::SliceSink::new(&mut request, codec.limits());
+        write_loudness_request(&mut writer, LoudnessRequest::Start).expect("request");
+        let at = request.len() - 8;
+        request[at] = op;
+        let decoded = codec.decode_loudness_request(&request, 1);
+        match op {
+            1..=4 => assert!(decoded.is_ok(), "op {op}"),
+            _ => assert_eq!(decoded, Err(DecodeError::InvalidField), "op {op}"),
+        }
     }
 }

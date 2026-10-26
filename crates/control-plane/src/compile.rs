@@ -2279,6 +2279,7 @@ where
             // spectrum through them advertises them.
             provider_features: ProviderFeatures {
                 spectrum: A::SPECTRUM,
+                loudness: false,
                 // #1586 R2: `OBSERVATION_READ` and bit 15 follow the `Observe` edit, so the
                 // adapter that serves one serves both; #1589 R1: only with the queues it needs.
                 observation: A::OBSERVE_EDIT && preparer.observation_queues(),

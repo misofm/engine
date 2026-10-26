@@ -4471,6 +4471,11 @@ where
                 let outcome = self.spectrum_stream(request);
                 return self.complete_spectrum_stream(prepared, outcome);
             }
+            // Not advertised yet, so the controller never routes it here.
+            protocol::SessionCommand::Loudness(_) => {
+                drop(prepared);
+                return Err(CommandError::Internal);
+            }
         };
         let outcome = self.spectrum_configure(request, plan);
         match outcome {

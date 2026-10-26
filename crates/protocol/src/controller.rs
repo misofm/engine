@@ -22,16 +22,17 @@ use crate::{
     ControlListPage, ControlListRequest, ControlStatePage, CounterSnapshot, CounterSnapshotRef,
     CounterTelemetryRecord, CounterValue, CountersRequest, DecodeError, DecodeScratch,
     DecodedCommandPayload, Diagnostic, DiagnosticEvent, DiagnosticsPage, DiagnosticsRequest,
-    EditPath, EncodeError, EventPayload, ExpectedRevision, MessageId, MeterBatch, MeterRecord,
-    NonOkResponse, ObservationEnded, ObservationReadPage, ObservationReadRequest,
-    ObservationTapKey, PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport,
-    ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest, ResponseReady, ResponseResult,
-    ResponseTarget, SampleTime, SessionCommitted, SessionEdit, SessionReplaceRequest,
-    SessionRevision, SessionSnapshot, SessionStore, SessionStoreError, SpectrumCaptureReply,
-    SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured, SpectrumStreamReply,
-    SpectrumStreamRequest, StatusCode, SuccessResponsePayload, TelemetryConfiguration,
-    TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest, TransportSnapshot,
-    TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    EditPath, EncodeError, EventPayload, ExpectedRevision, LoudnessReply, LoudnessRequest,
+    MessageId, MeterBatch, MeterRecord, NonOkResponse, ObservationEnded, ObservationReadPage,
+    ObservationReadRequest, ObservationTapKey, PreparedSessionTransaction, ProtocolCodec,
+    ProtocolQueues, QueueReport, ReliablePayload, ReliableSlot, RequestId, ResponseGetRequest,
+    ResponseReady, ResponseResult, ResponseTarget, SampleTime, SessionCommitted, SessionEdit,
+    SessionReplaceRequest, SessionRevision, SessionSnapshot, SessionStore, SessionStoreError,
+    SpectrumCaptureReply, SpectrumCaptureRequest, SpectrumConfigureRequest, SpectrumConfigured,
+    SpectrumStreamReply, SpectrumStreamRequest, StatusCode, SuccessResponsePayload,
+    TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
+    TransportSnapshot, TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame,
+    TypedSuccessResponseFrame,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{ControlBody, ControlEntry, ParameterChannel, ResponseCurves, TransportState};
@@ -204,6 +205,9 @@ pub struct ProviderFeatures {
     /// #1594 D10, #1595 D8): a host whose session serves the spectrum reads on its own transport
     /// advertises the three together.
     pub spectrum: bool,
+    /// `LOUDNESS` (capability flag bit 17, #2115): a host whose session serves the output
+    /// loudness meter on its own transport advertises it.
+    pub loudness: bool,
     /// `OBSERVATION_READ` (capability flag bit 15, #1586 D6): a host whose session serves the
     /// read and the `Observe` edit on its own transport advertises it. It rides the session
     /// family, so it needs `session_events`.
@@ -223,6 +227,7 @@ impl ProviderFeatures {
         transport_events: true,
         observation_events: true,
         spectrum: true,
+        loudness: true,
         observation: true,
     };
     /// Disable every optional provider and event family.
@@ -237,6 +242,7 @@ impl ProviderFeatures {
         transport_events: false,
         observation_events: false,
         spectrum: false,
+        loudness: false,
         observation: false,
     };
 }
@@ -1134,6 +1140,11 @@ pub enum ControlCommand<'a> {
     SpectrumStream {
         request: SpectrumStreamRequest,
     },
+    /// `LOUDNESS` (#2115): executed by the session, refused here as
+    /// [`Self::SpectrumConfigure`] is.
+    Loudness {
+        request: LoudnessRequest,
+    },
     /// `OBSERVATION_READ` (#1586): executed by the session, refused here as
     /// [`Self::SpectrumConfigure`] is.
     ObservationRead {
@@ -1169,6 +1180,7 @@ impl ControlCommand<'_> {
             Self::SpectrumConfigure { .. } => MessageId::SpectrumConfigure,
             Self::SpectrumCapture { .. } => MessageId::SpectrumCapture,
             Self::SpectrumStream { .. } => MessageId::SpectrumStream,
+            Self::Loudness { .. } => MessageId::Loudness,
             Self::ObservationRead { .. } => MessageId::ObservationRead,
         }
     }
@@ -1202,7 +1214,7 @@ pub struct ControllerResponse {
 
 #[derive(Clone, Copy)]
 struct CapabilitySet {
-    commands: [u16; 16],
+    commands: [u16; 17],
     command_len: u8,
     events: [u16; 7],
     event_len: u8,
@@ -1383,6 +1395,8 @@ pub enum SessionCommand {
     SpectrumCapture(SpectrumCaptureRequest),
     /// `SPECTRUM_STREAM` (#1595).
     SpectrumStream(SpectrumStreamRequest),
+    /// `LOUDNESS` (#2115).
+    Loudness(LoudnessRequest),
 }
 
 /// The success reply of a command the session executed. A reply borrows what it carries (a
@@ -1395,6 +1409,8 @@ pub enum SessionCommandReply<'a> {
     SpectrumCaptured(SpectrumCaptureReply<'a>),
     /// The `SPECTRUM_STREAM` reply.
     SpectrumStreamed(SpectrumStreamReply<'a>),
+    /// The `LOUDNESS` reply (#2115).
+    Loudness(LoudnessReply),
 }
 
 /// A command the session executes, decoded and checked, whose replay entry is planned against
@@ -2012,6 +2028,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumStream(request) => {
                 ControlCommand::SpectrumStream { request }
             }
+            DecodedCommandPayload::Loudness(request) => ControlCommand::Loudness { request },
             DecodedCommandPayload::ObservationRead(request) => {
                 ControlCommand::ObservationRead { request }
             }
@@ -2245,7 +2262,8 @@ impl<P: ControlProvider> ProtocolController<P> {
         if matches!(
             header.message_id,
             MessageId::SpectrumConfigure | MessageId::SpectrumCapture | MessageId::SpectrumStream
-        ) {
+        ) || (header.message_id == MessageId::Loudness && self.config.provider_features.loudness)
+        {
             return self.prepare_session_command(input, scratch, output_capacity, header);
         }
         if header.message_id == MessageId::ObservationRead && self.serves_observation_read() {
@@ -2314,6 +2332,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 DecodedCommandPayload::SpectrumStream(request) => {
                     SessionCommand::SpectrumStream(request)
                 }
+                DecodedCommandPayload::Loudness(request) => SessionCommand::Loudness(request),
                 _ => {
                     let outcome = refusal(self, StatusCode::Internal);
                     return self.prepare_planned_immediate(
@@ -2569,6 +2588,13 @@ impl<P: ControlProvider> ProtocolController<P> {
                 return self.complete_session_borrowed(
                     prepared,
                     SuccessResponsePayload::SpectrumStreamed(value),
+                    output,
+                );
+            }
+            SessionCommandReply::Loudness(value) => {
+                return self.complete_session_borrowed(
+                    prepared,
+                    SuccessResponsePayload::Loudness(value),
                     output,
                 );
             }
@@ -3547,6 +3573,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             DecodedCommandPayload::SpectrumStream(request) => {
                 ControlCommand::SpectrumStream { request }
             }
+            DecodedCommandPayload::Loudness(request) => ControlCommand::Loudness { request },
             DecodedCommandPayload::ObservationRead(request) => {
                 ControlCommand::ObservationRead { request }
             }
@@ -4445,6 +4472,7 @@ impl<P: ControlProvider> ProtocolController<P> {
             ControlCommand::SpectrumConfigure { .. }
             | ControlCommand::SpectrumCapture { .. }
             | ControlCommand::SpectrumStream { .. }
+            | ControlCommand::Loudness { .. }
             | ControlCommand::ObservationRead { .. } => self.non_ok(StatusCode::Unavailable, None),
             ControlCommand::ControlListGet { request } => {
                 match self.provider.control_list(request) {
@@ -4928,11 +4956,12 @@ impl<P: ControlProvider> ProtocolController<P> {
         let features = self.config.provider_features;
         let session_transactions =
             features.session_events && self.config.maximum_transaction_edits != 0;
-        let mut commands = [0_u16; 16];
+        let mut commands = [0_u16; 17];
         let mut command_len = 0_usize;
         // The three spectrum commands are listed together, with bit 16, or not at all (#1595 D8);
         // `OBSERVATION_READ` with bit 15, on the session family (#1586 D6).
-        for id in 1_u16..=0x0013 {
+        // `LOUDNESS` with bit 17 (#2115).
+        for id in 1_u16..=0x0014 {
             let enabled = match id {
                 // The retired IDs are never advertised.
                 id if crate::RETIRED_MESSAGE_IDS.contains(&id) => false,
@@ -4946,6 +4975,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 0x000f => self.serves_observation_read(),
                 0x0010..=0x0012 => features.spectrum,
                 0x0013 => session_transactions && self.config.document_replace.is_some(),
+                0x0014 => features.loudness,
                 _ => true,
             };
             if enabled {
@@ -5007,6 +5037,9 @@ impl<P: ControlProvider> ProtocolController<P> {
         }
         if features.spectrum {
             flags |= CapabilityFlags::SPECTRUM.0;
+        }
+        if features.loudness {
+            flags |= CapabilityFlags::LOUDNESS.0;
         }
         CapabilitySet {
             commands,
