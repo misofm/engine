@@ -67,6 +67,20 @@ await copyFile(
   resolve(destination, "miso-engine-v1-pcm-feed-worklet.js"),
 );
 await copyFile(resolve(repoRoot, "NOTICE"), resolve(sdkRoot, "dist", "NOTICE"));
+// Issue #2102: the browser entry re-exports the engine's canonical PCM pump and incremental
+// BLAKE3 from `./stems/`. In the source tree those two files redirect to
+// `hosts/host-web/web/stem-store`; the package carries verbatim copies (with the hash's provenance
+// record and its `../hex-lower.js` import), and the hand-written declarations beside them.
+const stemStore = resolve(repoRoot, "hosts", "host-web", "web", "stem-store");
+const stems = resolve(sdkRoot, "dist", "browser", "stems");
+await mkdir(stems, { recursive: true });
+for (const name of ["pcm-pump.js", "incremental-blake3.js", "incremental-blake3.provenance.json"]) {
+  await copyFile(resolve(stemStore, name), resolve(stems, name));
+}
+await copyFile(resolve(stemStore, "..", "hex-lower.js"), resolve(sdkRoot, "dist", "browser", "hex-lower.js"));
+for (const name of ["pcm-pump.d.ts", "incremental-blake3.d.ts"]) {
+  await copyFile(resolve(sdkRoot, "src", "browser", "stems", name), resolve(stems, name));
+}
 console.log(`staged ${expected.length} Engine V1 artifacts and package manifest`);
 
 // A consumer bundler may copy an exported new-URL asset without following its imports. Emit an

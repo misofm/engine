@@ -1,5 +1,3 @@
-import { StemStoreError } from "./opfs-store.js"
-
 const MSB1_MAGIC = 0x4d534231
 const MSB1_VERSION = 1
 const MSB1_WRAP = 1 << 30
@@ -29,6 +27,24 @@ const CONTROL = Object.freeze({
   WROTE: 14,
   OVERFLOW: 15,
 })
+
+/**
+ * A typed pump refusal. The pump owns it, so the module imports nothing and the SDK publishes it
+ * as a verbatim copy (issue #2102).
+ */
+export class CanonicalPcmPumpError extends Error {
+  /**
+   * @param {string} code
+   * @param {string} message
+   * @param {Record<string, unknown>} [details]
+   */
+  constructor(code, message, details = {}) {
+    super(message)
+    this.name = "CanonicalPcmPumpError"
+    this.code = code
+    this.details = Object.freeze({ ...details })
+  }
+}
 
 /** The Worker-side writer for the MSB1 V1 ring format. It publishes plain seeks only. */
 export class Msb1RingWriter {
@@ -368,7 +384,7 @@ function validateSource(source) {
     !Number.isSafeInteger(source.ring?.frameCapacity) ||
     source.ring.frameCapacity <= 0
   ) {
-    throw new StemStoreError(
+    throw new CanonicalPcmPumpError(
       "stem.pump.ring_shape",
       `MSB1 ring shape does not match ${source.sourceId}`,
       { sourceId: source.sourceId }
