@@ -4,6 +4,16 @@ Date: 2026-10-26, amended the same day after the bounded review (a bounded opus-
 Tree read: `/home/bl/misofm/engine` at `80532ee4a` (main), the #1981 worktree at `a1a2bc128`,
 the #2129 worktree at `bd18f6c28`. Read-only; nothing was built.
 
+## Changelog (amendment 3, 2026-10-26, after #2132's review)
+
+- **Split strips.** C1's post-fader sends split every track strip into two bank units linked by
+  position (resident pairing, producer rows), which `pack_member_eligible` excluded, so no C1
+  track bank was in a pack group. New slice 5a (#2142): a pack group is over **lane chains** and one
+  permutation moves every unit of a strip; it files before #2135. Section 1.1's "pack group"
+  term and the slice table are amended.
+- **W=4 counters.** New slice 0a (#2143) reads #2132's counters at four lanes on the wasmtime guest; V8
+  keeps the timing. Slice table amended.
+
 ## Changelog (amendment 2, 2026-10-26, after the re-check: PASS-WITH-FIXES)
 
 - **N1.** "A strip's dwell expires" is a packing trigger (per-strip countdown at the drain);
@@ -91,8 +101,11 @@ the owner's 2026-10-26 bypass decision (section 8).
   (`banks.rs:174-225`, `graph-compiler/src/lib.rs:7708`, `:11685`).
 - **Cohort**: segments that share one chain program key and one bank. **Bank-slot run (BSR)**:
   one bank executing one slot for one block. Cost is per BSR, not per lane.
-- **Pack group**: adjacent bank units of one program, one width, one fold target and one collapse
-  arming (`LaneMap::discover`, `runtime.rs:9484`). A lane moves only inside its pack group.
+- **Lane chain**: the ordered bank units that render the same strips at the same positions,
+  linked by resident pairing or a bank producer row (a strip split by a send, a stage meter or a
+  sidechain tap). **Pack group**: a run of peer lane chains of one program, one width, one fold
+  target and one collapse arming (`LaneMap::discover`, `runtime.rs:9484`; slice 5a (#2142)). A lane moves
+  only inside its pack group, and a move trades a strip in every unit of its lane chain at once.
 - **Lane use**: `strip-slots that need to run / (BSR x W)`.
 - **Activity pattern** of a strip: `silent_at_rest: bool` and `bypassed[slot]: bool` (settled
   bypass), plus `automated: bool` (a bind-time bit).
@@ -464,7 +477,9 @@ after #1981 and #2131).
 | file | slice | depends on | unblocks | supersedes or amends |
 |---|---|---|---|---|
 | slice-0 | bank utilisation report and the C1 rows | nothing | the finish-line measurement | none |
+| slice-0a | W=4 bank counters on the wasmtime guest | #2132 | W=4 finish-line evidence | none |
 | slice-4 | silence as a propagated fact | #1981 | slice 5 (#2135)'s V8 baseline | #1981's gather OR (measurement note) |
+| slice-5a | pack groups across split strips: lane chains, one permutation per strip | #1981, #2131, #2132 | #2135 (blocks it) | #1981's `pack_member_eligible` |
 | slice-5 | pattern packing: the pattern sort, dwell, pins, global budget | #1981, #2131, #2129 (slice 4 (#2133) recommended) | the dynamic finish line | #1981's predicate; #1782 D5 |
 | slice-6a | executor order as a contracted topological order; colouring over it | nothing | slice 6b (#2136) | #96 F12 restated; #169 argument re-made |
 | slice-6b | ASAP/ALAP windows in the planner | #2131, slice 6a (#2134) | the static finish line | #96 F12; #966; #1098 H2 |
@@ -472,8 +487,9 @@ after #1981 and #2131).
 | slice-8 | insert leftover pass | #2131, slice 6b (#2136) | nothing | #163 phase 1 placement |
 | slice-9 | banked sidechain port (after the finish line) | slice 6b (#2136) | sidechained inserts bank | #96 F9 |
 
-Filing and merge order: slice-0, #1981, #2131, #2129, slice-4, slice-6a, slice-5, slice-6b,
-slice-7, slice-8, slice-9. #2131, slice-4 and slice-6a are mutually independent (effects and
+Filing and merge order: slice-0 (#2132), slice-0a, #1981, #2131, #2129, slice-4 (#2133),
+slice-6a (#2134), **slice-5a**, slice-5 (#2135), slice-6b (#2136), slice-7 (#2137), slice-8
+(#2138), slice-9 (#2139). #2131, slice-4 and slice-6a are mutually independent (effects and
 effect-contract; source, capi, host-web and graph flags; graph program and runtime order) and may
 run in parallel worktrees.
 
