@@ -184,61 +184,43 @@ impl AoSoaScratch {
     /// This is the **per-lane scalar** move: one `f32` store per lane-sample, at the lane's stride
     /// through the block. It is the ragged tail of the tiled gather (frames past the last whole
     /// tile), and in a test build the whole of the scalar oracle.
-    ///
-    /// Returns the OR of every moved word's bits on both planes (issue #1981): zero exactly when
-    /// each is `+0.0`.
-    fn gather_lane(
-        &mut self,
-        lane: usize,
-        left: &[f32],
-        right: &[f32],
-        from: usize,
-        frames: u32,
-    ) -> u32 {
+    fn gather_lane(&mut self, lane: usize, left: &[f32], right: &[f32], from: usize, frames: u32) {
         let lanes = self.width.lanes() as usize;
         let len = frames as usize * lanes;
         debug_assert!(lane < lanes);
         debug_assert!(left.len() == frames as usize && right.len() == frames as usize);
         debug_assert!(len <= self.left.len());
         debug_assert!(from <= frames as usize);
-        let mut bits = 0_u32;
         for (chunk, &sample) in self.left[from * lanes..len]
             .chunks_exact_mut(lanes)
             .zip(&left[from..])
         {
             chunk[lane] = sample;
-            bits |= sample.to_bits();
         }
         for (chunk, &sample) in self.right[from * lanes..len]
             .chunks_exact_mut(lanes)
             .zip(&right[from..])
         {
             chunk[lane] = sample;
-            bits |= sample.to_bits();
         }
-        bits
     }
     // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
-    /// [`AoSoaScratch::gather_lane`] for the left plane alone: the collapsed cohort's move. Returns
-    /// the OR of the moved words' bits.
-    fn gather_lane_left(&mut self, lane: usize, left: &[f32], from: usize, frames: u32) -> u32 {
+    /// [`AoSoaScratch::gather_lane`] for the left plane alone: the collapsed cohort's move.
+    fn gather_lane_left(&mut self, lane: usize, left: &[f32], from: usize, frames: u32) {
         let lanes = self.width.lanes() as usize;
         let len = frames as usize * lanes;
         debug_assert!(lane < lanes);
         debug_assert!(left.len() == frames as usize);
         debug_assert!(len <= self.left.len());
         debug_assert!(from <= frames as usize);
-        let mut bits = 0_u32;
         for (chunk, &sample) in self.left[from * lanes..len]
             .chunks_exact_mut(lanes)
             .zip(&left[from..])
         {
             chunk[lane] = sample;
-            bits |= sample.to_bits();
         }
-        bits
     }
     // REALTIME_POLICY_END
 
@@ -286,17 +268,12 @@ impl AoSoaScratch {
 /// `W` is the bank width, never a literal: a four-lane bank tiles four frames at a time and an
 /// eight-lane bank eight, so the wasm `simd128` build (four lanes) and the `x86-64-v3` build (eight)
 /// each transpose at their own width (#183).
-///
-/// Returns, per lane, the OR of the bits of every word it moved (issue #1981): lane `l`'s entry is
-/// zero exactly when each of its words is `+0.0`. A side result, one vector OR per stored row: the
-/// stored words are unchanged.
 #[inline(always)]
 fn tile_gather<const W: usize>(
     destination: &mut [f32],
     planes: &[&[f32]; W],
     transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W],
-) -> [u32; W] {
-    let mut bits = [0_u32; W];
+) {
     for (tile, block) in destination.chunks_exact_mut(W * W).enumerate() {
         let base = tile * W;
         let mut rows = [[0.0_f32; W]; W];
@@ -305,12 +282,8 @@ fn tile_gather<const W: usize>(
         }
         for (chunk, row) in block.as_chunks_mut::<W>().0.iter_mut().zip(transpose(rows)) {
             chunk.copy_from_slice(&row);
-            for (lane, word) in bits.iter_mut().zip(row) {
-                *lane |= word.to_bits();
-            }
         }
     }
-    bits
 }
 // REALTIME_POLICY_END
 
@@ -3483,8 +3456,9 @@ pub struct BankChain {
     /// processes. A run of skips zeroes once, and a resident successor reads it as "this
     /// predecessor's output is silent" without a pass over the words.
     resident_zero: bool,
-    /// The active lanes whose input this chain's last block read as exact `+0.0` on every word
-    /// (issue #1981, [`Self::input_silent_lanes`]).
+    /// The active lanes whose input this chain's last block was known to be exact `+0.0` on every
+    /// word: the caller's propagated fact, or every active lane on a skipped block (issues #1981,
+    /// #2133, [`Self::input_silent_lanes`]).
     input_silent: u32,
 }
 
@@ -4281,13 +4255,7 @@ impl BankChain {
     ) {
         let len = frames as usize * self.lanes;
         // The skip's input test proved every active lane's input `+0.0` (issue #1981).
-        self.input_silent = self
-            .active
-            .iter()
-            .enumerate()
-            .fold(0, |mask, (lane, &active)| {
-                mask | (u32::from(active) << lane)
-            });
+        self.input_silent = self.active_lanes_mask();
         if !self.resident_zero {
             self.scratch.left.fill(0.0);
             self.scratch.right.fill(0.0);
@@ -4398,8 +4366,6 @@ impl BankChain {
     /// gather's `+0.0`; its words are only ever read by its own discarded kernel lane, never by an
     /// active lane or a member.
     fn acquire_resident_input(&mut self, source: &BankChain, frames: u32, mono: bool) {
-        // No gather reads the inputs, so no lane is known silent (issue #1981).
-        self.input_silent = 0;
         let len = frames as usize * self.lanes;
         self.scratch.left[..len].copy_from_slice(&source.scratch.left[..len]);
         if !mono {
@@ -4410,15 +4376,12 @@ impl BankChain {
     fn gather_mono<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
         #[cfg(test)]
         if self.scalar_transpose {
-            let mut silent = 0;
             for lane in 0..self.lanes {
                 if self.active[lane] {
                     let (left, _right) = members.plane(lane);
-                    let bits = self.scratch.gather_lane_left(lane, left, 0, frames);
-                    silent |= u32::from(bits == 0) << lane;
+                    self.scratch.gather_lane_left(lane, left, 0, frames);
                 }
             }
-            self.input_silent = silent;
             return;
         }
         effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
@@ -4448,13 +4411,12 @@ impl BankChain {
                 &self.zero_plane[..frames_used]
             };
         }
-        let mut bits = tile_gather(&mut self.scratch.left[..tiled * W], &left_planes, transpose);
+        tile_gather(&mut self.scratch.left[..tiled * W], &left_planes, transpose);
         if tiled < frames_used {
             for (lane, plane) in left_planes.iter().enumerate() {
-                bits[lane] |= self.scratch.gather_lane_left(lane, plane, tiled, frames);
+                self.scratch.gather_lane_left(lane, plane, tiled, frames);
             }
         }
-        self.input_silent = self.silent_mask(&bits);
     }
     // REALTIME_POLICY_END
 
@@ -4844,15 +4806,12 @@ impl BankChain {
     fn gather<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
         #[cfg(test)]
         if self.scalar_transpose {
-            let mut silent = 0;
             for lane in 0..self.lanes {
                 if self.active[lane] {
                     let (left, right) = members.plane(lane);
-                    let bits = self.scratch.gather_lane(lane, left, right, 0, frames);
-                    silent |= u32::from(bits == 0) << lane;
+                    self.scratch.gather_lane(lane, left, right, 0, frames);
                 }
             }
-            self.input_silent = silent;
             return;
         }
         effect_contract::match_bank_width!(self.scratch.width, |_, W, transpose| {
@@ -4887,18 +4846,15 @@ impl BankChain {
             left_planes[lane] = left;
             right_planes[lane] = right;
         }
-        let mut bits = tile_gather(&mut self.scratch.left[..tiled * W], &left_planes, transpose);
-        let right_bits = tile_gather(
+        tile_gather(&mut self.scratch.left[..tiled * W], &left_planes, transpose);
+        tile_gather(
             &mut self.scratch.right[..tiled * W],
             &right_planes,
             transpose,
         );
-        for (lane, right) in bits.iter_mut().zip(right_bits) {
-            *lane |= right;
-        }
         if tiled < frames_used {
             for lane in 0..W {
-                bits[lane] |= self.scratch.gather_lane(
+                self.scratch.gather_lane(
                     lane,
                     left_planes[lane],
                     right_planes[lane],
@@ -4907,18 +4863,6 @@ impl BankChain {
                 );
             }
         }
-        self.input_silent = self.silent_mask(&bits);
-    }
-
-    /// The active lanes whose gathered words' OR `bits` is zero: [`Self::input_silent_lanes`].
-    #[inline(always)]
-    fn silent_mask<const W: usize>(&self, bits: &[u32; W]) -> u32 {
-        bits.iter()
-            .zip(self.active.iter())
-            .enumerate()
-            .fold(0, |mask, (lane, (&bits, &active))| {
-                mask | (u32::from(active && bits == 0) << lane)
-            })
     }
     // REALTIME_POLICY_END
 
@@ -5202,17 +5146,37 @@ impl BankChain {
             })
     }
 
-    /// The active lanes whose input this chain's last block read as exact `+0.0` (raw bits zero)
-    /// on every word of both planes, bit `l` for lane `l` (issue #1981, the lane packer's input
-    /// fact). The gather computes it as a side result, one OR per moved row, so a running block
-    /// pays no second pass over its inputs; a skipped block reports every active lane (its input
-    /// test proved them); a block that took a resident predecessor's output, which gathers
-    /// nothing, reports none. On a collapsed block the gather reads the left plane alone, and the
-    /// mask is the left plane's: the collapse is armed only for lanes whose two channels read one
-    /// source channel. Zero before the first block.
+    /// The active lanes whose input this chain's last block was known to be exact `+0.0` (raw
+    /// bits zero) on every word of both planes, bit `l` for lane `l` (issue #1981, the lane
+    /// packer's input fact). Since issue #2133 the chain never computes it from the words it
+    /// moves: the caller states it for a block that ran ([`Self::set_input_silent_lanes`]) from
+    /// facts propagated where the inputs were written, and a skipped block reports every active lane
+    /// (its own input test proved them). A clear bit means "not known silent", never "audible".
+    /// Zero before the first block.
     #[must_use]
     pub const fn input_silent_lanes(&self) -> u32 {
         self.input_silent
+    }
+
+    /// State the last block's [`Self::input_silent_lanes`] after a [`Self::run`] that did not skip
+    /// (issue #2133; a skip states its own): bit
+    /// `l` set only when lane `l`'s input is known, from how it was produced, to be exact `+0.0`
+    /// on every word of both planes. Masked to the active lanes. The fact feeds the lane packer
+    /// alone: the whole-bank skip keeps its own input test, so a wrong bit can cost a move but
+    /// never a rendered word.
+    pub fn set_input_silent_lanes(&mut self, lanes: u32) {
+        self.input_silent = lanes & self.active_lanes_mask();
+    }
+
+    /// The active lanes, bit `l` for lane `l`.
+    fn active_lanes_mask(&self) -> u32 {
+        self.active
+            .iter()
+            .enumerate()
+            .take(32)
+            .fold(0, |mask, (lane, &active)| {
+                mask | (u32::from(active) << lane)
+            })
     }
 
     /// Every lane of the bank, padded lanes included: bit `l` for lane `l`.
@@ -7902,108 +7866,6 @@ mod tests {
             }
         }
         assert_eq!(chain.transposes(), 1);
-    }
-
-    /// Issue #1981: the gather's silent-lane mask names exactly the active lanes whose every input
-    /// word is `+0.0`, on the tiled frames and the ragged tail, through the tiled and the scalar
-    /// gather, and is renewed every block. `-0.0` is not silent, and an inactive lane is never
-    /// reported.
-    ///
-    /// Test value: red when a lane with one non-zero word -- on either plane, in a whole tile or
-    /// in the tail -- is reported silent, or a stale mask survives a block, which the lane packer
-    /// would read as a quiet input.
-    #[test]
-    fn the_gather_reports_exactly_the_silent_lanes() {
-        // Sixteen tiled frames and a ragged tail of three, at either width.
-        let frames = 19_u32;
-        let lanes = WIDEST.lanes() as usize;
-        let mut state = 0x1981_u64;
-        let frames_used = frames as usize;
-        for scalar in [false, true] {
-            let mut planes = Planes {
-                left: (0..lanes)
-                    .map(|_| (0..frames).map(|_| seeded(&mut state)).collect())
-                    .collect(),
-                right: (0..lanes)
-                    .map(|_| (0..frames).map(|_| seeded(&mut state)).collect())
-                    .collect(),
-            };
-            let zero = |planes: &mut Planes, lane: usize| {
-                planes.left[lane] = vec![0.0; frames_used];
-                planes.right[lane] = vec![0.0; frames_used];
-            };
-            // Lane 0 silent; lane 1 one word in a whole tile of its right plane; lane 2 one word in
-            // the tail of its left plane; lane 3 inactive and silent.
-            for lane in 0..4 {
-                zero(&mut planes, lane);
-            }
-            planes.right[1][5] = 1e-30;
-            planes.left[2][frames_used - 1] = f32::from_bits(1);
-            let mut expected = 0b0001_u32;
-            if lanes == 8 {
-                // Lane 4 every word `-0.0`; lane 5 silent.
-                planes.left[4] = vec![-0.0; frames_used];
-                planes.right[4] = vec![-0.0; frames_used];
-                zero(&mut planes, 5);
-                expected |= 1 << 5;
-            }
-            let active: Vec<bool> = (0..lanes).map(|lane| lane != 3).collect();
-            let mut chain = BankChain::new(
-                AoSoaScratch::new(WIDEST, frames).expect("scratch"),
-                active.clone().into_boxed_slice(),
-                vec![slot(active, Box::new(PassThrough))],
-            )
-            .expect("chain");
-            chain.set_silent_skip(false);
-            chain.scalar_transpose = scalar;
-            assert_eq!(
-                chain.input_silent_lanes(),
-                0,
-                "nothing before the first block"
-            );
-            chain
-                .run(&mut planes, frames, 0, LiveSnapshot::ALL)
-                .expect("run");
-            assert_eq!(
-                chain.input_silent_lanes(),
-                expected,
-                "scalar {scalar}: block 1"
-            );
-            // Lane 0 is audible on its last right word: the next block's mask drops it.
-            zero(&mut planes, 1);
-            planes.right[0][frames_used - 1] = 0.5;
-            chain
-                .run(&mut planes, frames, u64::from(frames), LiveSnapshot::ALL)
-                .expect("run");
-            assert_eq!(
-                chain.input_silent_lanes(),
-                (expected & !1) | 0b10,
-                "scalar {scalar}: block 2"
-            );
-            // The collapsed cohort's gather reads the left plane only. Lane 0 silent on its left
-            // plane, audible on its right; lane 1 every left word `-0.0`; lane 2 one left word in
-            // the tail; lane 3 inactive; lanes 4.. (eight lanes) seeded, one silent.
-            for lane in 0..lanes {
-                planes.left[lane] = (0..frames).map(|_| seeded(&mut state)).collect();
-                planes.right[lane] = (0..frames).map(|_| seeded(&mut state)).collect();
-            }
-            for lane in 0..4 {
-                planes.left[lane] = vec![0.0; frames_used];
-            }
-            planes.left[1] = vec![-0.0; frames_used];
-            planes.left[2][frames_used - 1] = f32::from_bits(1);
-            let mut collapsed = 0b0001_u32;
-            if lanes == 8 {
-                planes.left[5] = vec![0.0; frames_used];
-                collapsed |= 1 << 5;
-            }
-            chain.gather_mono(&planes, frames);
-            assert_eq!(
-                chain.input_silent_lanes(),
-                collapsed,
-                "scalar {scalar}: the collapsed gather"
-            );
-        }
     }
 
     /// T2: a stage sees the frame-major index law of master plan §4.1.
