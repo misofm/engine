@@ -16,16 +16,34 @@ const IV = new Uint32Array([
   0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
   0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ])
-const MESSAGE_PERMUTATION = new Uint8Array([
-  2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8,
-])
+const MESSAGE_PERMUTATION = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
 const BLOCK_BYTES = 64
-const CHUNK_BYTES = 1024
-const MAX_CHUNKS = 1n << 64n
+const BLOCKS_PER_CHUNK = 16
 const CHUNK_START = 1
 const CHUNK_END = 2
 const PARENT = 4
 const ROOT = 8
+const WORDS_PER_CV = 8
+// 2^54 chunks is 2^64 bytes, BLAKE3's input limit; the stack holds one chaining value per level.
+const MAX_DEPTH = 54
+const TWO_POW_32 = 2 ** 32
+
+// The message word order of each of the seven rounds: round r reads word SCHEDULE[16r + i] where
+// round 0 reads word i, and each later round permutes the one before by MESSAGE_PERMUTATION.
+const SCHEDULE = new Uint8Array(7 * 16)
+for (let index = 0; index < 16; index += 1) SCHEDULE[index] = index
+for (let round = 1; round < 7; round += 1) {
+  for (let index = 0; index < 16; index += 1) {
+    SCHEDULE[round * 16 + index] = SCHEDULE[(round - 1) * 16 + MESSAGE_PERMUTATION[index]]
+  }
+}
+
+// Issue #2111: the hash allocates nothing per block or per chunk. Every compression works in
+// these module scratch arrays (a hash is synchronous, so no two compressions interleave), and a
+// hasher owns fixed-size buffers for its block, chaining values and tree stack.
+const STATE = new Uint32Array(16)
+const WORDS = new Uint32Array(16)
+const CHUNK_CV = new Uint32Array(WORDS_PER_CV)
 
 const rotateRight = (value, count) =>
   (value >>> count) | (value << (32 - count))
@@ -42,192 +60,161 @@ function mix(state, a, b, c, d, x, y) {
   state[b] = rotateRight(state[b] ^ state[c], 7)
 }
 
-/** @param {Uint8Array} block */
-function blockWords(block) {
-  const words = new Uint32Array(16)
-  const view = new DataView(block.buffer, block.byteOffset, BLOCK_BYTES)
-  for (let index = 0; index < words.length; index += 1) {
-    words[index] = view.getUint32(index * 4, true)
-  }
-  return words
-}
-
-/** @param {Uint32Array} chainingValue @param {Uint32Array} words @param {bigint} counter @param {number} blockLength @param {number} flags */
-function compress(chainingValue, words, counter, blockLength, flags) {
-  const state = new Uint32Array(16)
-  state.set(chainingValue)
-  state.set(IV.subarray(0, 4), 8)
-  state[12] = Number(counter & 0xffff_ffffn)
-  state[13] = Number((counter >> 32n) & 0xffff_ffffn)
+/**
+ * Compress `words` under the chaining value `cv[cvAt..cvAt+8]` and write the first eight output
+ * words (the next chaining value, or the root digest's words) to `out[outAt..outAt+8]`. `out` may
+ * be `cv` at the same offset.
+ *
+ * @param {Uint32Array} cv @param {number} cvAt @param {Uint32Array} words @param {number} counter
+ * @param {number} blockLength @param {number} flags @param {Uint32Array} out @param {number} outAt
+ */
+function compress(cv, cvAt, words, counter, blockLength, flags, out, outAt) {
+  const state = STATE
+  for (let index = 0; index < 8; index += 1) state[index] = cv[cvAt + index]
+  state[8] = IV[0]
+  state[9] = IV[1]
+  state[10] = IV[2]
+  state[11] = IV[3]
+  state[12] = counter % TWO_POW_32
+  state[13] = Math.floor(counter / TWO_POW_32)
   state[14] = blockLength
   state[15] = flags
-  let message = words
-  for (let round = 0; round < 7; round += 1) {
-    mix(state, 0, 4, 8, 12, message[0], message[1])
-    mix(state, 1, 5, 9, 13, message[2], message[3])
-    mix(state, 2, 6, 10, 14, message[4], message[5])
-    mix(state, 3, 7, 11, 15, message[6], message[7])
-    mix(state, 0, 5, 10, 15, message[8], message[9])
-    mix(state, 1, 6, 11, 12, message[10], message[11])
-    mix(state, 2, 7, 8, 13, message[12], message[13])
-    mix(state, 3, 4, 9, 14, message[14], message[15])
-    if (round !== 6) {
-      const next = new Uint32Array(16)
-      for (let index = 0; index < next.length; index += 1) next[index] = message[MESSAGE_PERMUTATION[index]]
-      message = next
-    }
+  for (let base = 0; base < SCHEDULE.length; base += 16) {
+    mix(state, 0, 4, 8, 12, words[SCHEDULE[base]], words[SCHEDULE[base + 1]])
+    mix(state, 1, 5, 9, 13, words[SCHEDULE[base + 2]], words[SCHEDULE[base + 3]])
+    mix(state, 2, 6, 10, 14, words[SCHEDULE[base + 4]], words[SCHEDULE[base + 5]])
+    mix(state, 3, 7, 11, 15, words[SCHEDULE[base + 6]], words[SCHEDULE[base + 7]])
+    mix(state, 0, 5, 10, 15, words[SCHEDULE[base + 8]], words[SCHEDULE[base + 9]])
+    mix(state, 1, 6, 11, 12, words[SCHEDULE[base + 10]], words[SCHEDULE[base + 11]])
+    mix(state, 2, 7, 8, 13, words[SCHEDULE[base + 12]], words[SCHEDULE[base + 13]])
+    mix(state, 3, 4, 9, 14, words[SCHEDULE[base + 14]], words[SCHEDULE[base + 15]])
   }
-  const output = new Uint32Array(16)
-  for (let index = 0; index < 8; index += 1) {
-    output[index] = state[index] ^ state[index + 8]
-    output[index + 8] = state[index + 8] ^ chainingValue[index]
-  }
-  return output
+  for (let index = 0; index < 8; index += 1) out[outAt + index] = state[index] ^ state[index + 8]
 }
 
-class Output {
-  /** @param {Uint32Array} inputChainingValue @param {Uint32Array} words @param {bigint} counter @param {number} blockLength @param {number} flags */
-  constructor(inputChainingValue, words, counter, blockLength, flags) {
-    this.inputChainingValue = inputChainingValue
-    this.words = words
-    this.counter = counter
-    this.blockLength = blockLength
-    this.flags = flags
-  }
-
-  chainingValue() {
-    return compress(
-      this.inputChainingValue,
-      this.words,
-      this.counter,
-      this.blockLength,
-      this.flags,
-    ).subarray(0, 8)
-  }
-
-  rootDigest() {
-    const output = compress(
-      this.inputChainingValue,
-      this.words,
-      0n,
-      this.blockLength,
-      this.flags | ROOT,
-    )
-    const digest = new Uint8Array(32)
-    const view = new DataView(digest.buffer)
-    for (let index = 0; index < 8; index += 1) view.setUint32(index * 4, output[index], true)
-    return digest
-  }
-}
-
-class ChunkState {
-  /** @param {bigint} counter */
-  constructor(counter) {
-    this.chainingValue = new Uint32Array(IV)
-    this.counter = counter
-    this.block = new Uint8Array(BLOCK_BYTES)
-    this.blockLength = 0
-    this.blocksCompressed = 0
-  }
-
-  length() {
-    return this.blocksCompressed * BLOCK_BYTES + this.blockLength
-  }
-
-  /** @param {Uint8Array} input */
-  update(input) {
-    let offset = 0
-    while (offset < input.byteLength) {
-      if (this.blockLength === BLOCK_BYTES) {
-        const flags = this.blocksCompressed === 0 ? CHUNK_START : 0
-        this.chainingValue = compress(
-          this.chainingValue,
-          blockWords(this.block),
-          this.counter,
-          BLOCK_BYTES,
-          flags,
-        ).subarray(0, 8)
-        this.blocksCompressed += 1
-        this.blockLength = 0
-        // `output()` reads a complete 64-byte block even when its declared length is
-        // shorter. Clear the tail left by the previous compressed block before filling it.
-        this.block.fill(0)
-      }
-      const take = Math.min(BLOCK_BYTES - this.blockLength, input.byteLength - offset)
-      this.block.set(input.subarray(offset, offset + take), this.blockLength)
-      this.blockLength += take
-      offset += take
-    }
-  }
-
-  output() {
-    const flags = (this.blocksCompressed === 0 ? CHUNK_START : 0) | CHUNK_END
-    return new Output(
-      this.chainingValue,
-      blockWords(this.block),
-      this.counter,
-      this.blockLength,
-      flags,
-    )
+/** Load 16 little-endian words from `bytes[at..at+64]`. @param {Uint8Array} bytes @param {number} at */
+function loadWords(bytes, at) {
+  for (let index = 0; index < 16; index += 1) {
+    const byte = at + index * 4
+    WORDS[index] = bytes[byte] | (bytes[byte + 1] << 8) | (bytes[byte + 2] << 16) | (bytes[byte + 3] << 24)
   }
 }
 
 /** The JavaScript BLAKE3-256: the engine when the WebAssembly module is not loaded. */
 class JavaScriptBlake3 {
-  #chunk = new ChunkState(0n)
-  #chainingValues = []
+  #cv = new Uint32Array(IV)
+  /** The current chunk's index. */
+  #chunk = 0
+  /** Whole blocks of the current chunk already compressed into `#cv`. */
+  #blocks = 0
+  /** The current chunk's newest block, compressed only once more input shows it is not the last. */
+  #block = new Uint8Array(BLOCK_BYTES)
+  #blockLength = 0
+  /** The chaining values of the completed subtrees, one per level, eight words each. */
+  #stack = new Uint32Array(MAX_DEPTH * WORDS_PER_CV)
+  #depth = 0
   #finished = false
 
   /** @param {ArrayBuffer | ArrayBufferView} input */
   update(input) {
     if (this.#finished) throw new Error("BLAKE3 digest is already finalized")
     const bytes = asBytes(input)
+    const length = bytes.length
     let offset = 0
-    while (offset < bytes.byteLength) {
-      if (this.#chunk.length() === CHUNK_BYTES) {
-        const chunkChainingValue = this.#chunk.output().chainingValue()
-        const totalChunks = this.#chunk.counter + 1n
-        if (totalChunks >= MAX_CHUNKS) throw new RangeError("BLAKE3 input exceeds its chunk counter")
-        this.#addChunkChainingValue(chunkChainingValue, totalChunks)
-        this.#chunk = new ChunkState(totalChunks)
+    while (offset < length) {
+      // More input follows a full buffered block, so it is not the hash's last block.
+      if (this.#blockLength === BLOCK_BYTES) {
+        loadWords(this.#block, 0)
+        this.#compressBlock()
+        this.#blockLength = 0
       }
-      const take = Math.min(CHUNK_BYTES - this.#chunk.length(), bytes.byteLength - offset)
-      this.#chunk.update(bytes.subarray(offset, offset + take))
-      offset += take
+      if (this.#blockLength === 0) {
+        // Whole blocks straight from the input while more input follows each.
+        while (length - offset > BLOCK_BYTES) {
+          loadWords(bytes, offset)
+          this.#compressBlock()
+          offset += BLOCK_BYTES
+        }
+      }
+      const block = this.#block
+      let filled = this.#blockLength
+      const end = Math.min(offset + BLOCK_BYTES - filled, length)
+      while (offset < end) block[filled++] = bytes[offset++]
+      this.#blockLength = filled
     }
     return this
+  }
+
+  /** Compress the block in WORDS, known not to be the hash's last, into the current chunk. */
+  #compressBlock() {
+    const flags = this.#blocks === 0 ? CHUNK_START : 0
+    if (this.#blocks === BLOCKS_PER_CHUNK - 1) {
+      compress(this.#cv, 0, WORDS, this.#chunk, BLOCK_BYTES, flags | CHUNK_END, CHUNK_CV, 0)
+      this.#pushChunk()
+    } else {
+      compress(this.#cv, 0, WORDS, this.#chunk, BLOCK_BYTES, flags, this.#cv, 0)
+      this.#blocks += 1
+    }
+  }
+
+  /** Merge the completed chunk's chaining value (CHUNK_CV) into the tree stack; start the next. */
+  #pushChunk() {
+    const stack = this.#stack
+    let total = this.#chunk + 1
+    if (total > Number.MAX_SAFE_INTEGER) throw new RangeError("BLAKE3 input exceeds its chunk counter")
+    // Each trailing zero bit of the chunk count completes one subtree: merge it with its left
+    // sibling on the stack, in place in CHUNK_CV.
+    while (total % 2 === 0) {
+      this.#depth -= 1
+      const left = this.#depth * WORDS_PER_CV
+      for (let index = 0; index < 8; index += 1) {
+        WORDS[index] = stack[left + index]
+        WORDS[index + 8] = CHUNK_CV[index]
+      }
+      compress(IV, 0, WORDS, 0, BLOCK_BYTES, PARENT, CHUNK_CV, 0)
+      total /= 2
+    }
+    if (this.#depth >= MAX_DEPTH) throw new RangeError("BLAKE3 tree depth exceeds its chunk counter")
+    stack.set(CHUNK_CV, this.#depth * WORDS_PER_CV)
+    this.#depth += 1
+    this.#chunk += 1
+    this.#cv.set(IV)
+    this.#blocks = 0
   }
 
   digest() {
     if (this.#finished) throw new Error("BLAKE3 digest is already finalized")
     this.#finished = true
-    let output = this.#chunk.output()
-    for (let index = this.#chainingValues.length - 1; index >= 0; index -= 1) {
-      output = parentOutput(this.#chainingValues[index], output.chainingValue())
+    // The last chunk's last block, zero past its length, then each parent up the stack; the
+    // final node is compressed with ROOT and counter 0.
+    this.#block.fill(0, this.#blockLength)
+    loadWords(this.#block, 0)
+    let cv = this.#cv
+    let counter = this.#chunk
+    let blockLength = this.#blockLength
+    let flags = (this.#blocks === 0 ? CHUNK_START : 0) | CHUNK_END
+    for (let level = this.#depth - 1; level >= 0; level -= 1) {
+      compress(cv, 0, WORDS, counter, blockLength, flags, CHUNK_CV, 0)
+      for (let index = 0; index < 8; index += 1) {
+        WORDS[index] = this.#stack[level * WORDS_PER_CV + index]
+        WORDS[index + 8] = CHUNK_CV[index]
+      }
+      cv = IV
+      counter = 0
+      blockLength = BLOCK_BYTES
+      flags = PARENT
     }
-    return output.rootDigest()
-  }
-
-  /** @param {Uint32Array} newChainingValue @param {bigint} totalChunks */
-  #addChunkChainingValue(newChainingValue, totalChunks) {
-    let value = newChainingValue
-    let count = totalChunks
-    while ((count & 1n) === 0n) {
-      value = parentOutput(this.#chainingValues.pop(), value).chainingValue()
-      count >>= 1n
+    compress(cv, 0, WORDS, 0, blockLength, flags | ROOT, CHUNK_CV, 0)
+    const digest = new Uint8Array(32)
+    for (let index = 0; index < 8; index += 1) {
+      const word = CHUNK_CV[index]
+      digest[index * 4] = word
+      digest[index * 4 + 1] = word >>> 8
+      digest[index * 4 + 2] = word >>> 16
+      digest[index * 4 + 3] = word >>> 24
     }
-    if (this.#chainingValues.length >= 64) throw new RangeError("BLAKE3 tree depth exceeds its chunk counter")
-    this.#chainingValues.push(value)
+    return digest
   }
-}
-
-/** @param {Uint32Array | undefined} left @param {Uint32Array} right */
-function parentOutput(left, right) {
-  if (left === undefined) throw new Error("BLAKE3 tree state is inconsistent")
-  const words = new Uint32Array(16)
-  words.set(left)
-  words.set(right, 8)
-  return new Output(new Uint32Array(IV), words, 0n, BLOCK_BYTES, PARENT)
 }
 
 const DIGEST_BYTES = 32
