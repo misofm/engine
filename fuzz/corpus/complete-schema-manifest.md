@@ -1,14 +1,14 @@
 # Issue-005 complete typed BTLV corpus
 
-The shared `complete_schema_corpus()` fixture has 59 canonical frames: all 16 commands (the
+The shared `complete_schema_corpus()` fixture has 61 canonical frames: all 17 commands (the
 session transaction contains all 36 allocated `SessionEditOpcode` values, and `RESPONSE_GET` has a
-configuration and a strip target), all 18 successful responses, all 16 registered non-OK statuses
+configuration and a strip target), all 19 successful responses, all 16 registered non-OK statuses
 (including typed `BACKPRESSURE`), and all seven event schemas (`RESPONSE_READY` in its ready and
 refused forms). Optional/boundary values are represented by the transaction's nested fixture, the optional
 transport-event origin, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`dea650f7e506833e`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`de7d7cf504ca191a`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -149,3 +149,8 @@ Issue #1690 re-pinned it from `cb8db815ed0103a0`: the meter table gains the mast
 no strip ID, gain reduction only), so `command.telemetry_configure` and `response.telemetry`
 carry a third entry, the master's gain reduction. Only those two frames move; the 57 others are
 byte-equal. The frame count stays 59.
+
+Issue #2115 re-pinned it from `dea650f7e506833e`: `LOUDNESS` (`0014`) adds `command.loudness` (a
+start) and `response.loudness` (an armed read with every optional level present). The static
+capabilities response does not list `0014` and leaves bit 17 clear, which the invariant allows.
+The 59 earlier frames are byte-equal (their hash is the old pin). The frame count is 61.

@@ -85,7 +85,14 @@ pub struct ControlSideEntry {
 /// The day-one control-side allowlist (#1443 D7): path, function, sites, thread, reason. A reason
 /// says why the pop never runs inside a product render callback (the C ABI render call, the
 /// worklet's `process()` or a worklet message handler).
-const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 12] = [
+const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 13] = [
+    (
+        "crates/control-plane/src/loudness.rs",
+        "LoudnessMonitor::drain",
+        1,
+        "the session's control thread (both hosts' service step and LOUDNESS commands)",
+        "the loudness meter's control half drains its hop records off the render thread; the render half only pushes (#2115)",
+    ),
     (
         "crates/protocol/src/queue.rs",
         "ProtocolQueues::try_dequeue_event",
@@ -252,8 +259,10 @@ impl Policy {
             // its counts again. A change that adds a marker raises them in the same change: #1640
             // adds two in `crates/source` (the shared seek state's observe and reads, and the
             // timeline consumer's block entry and history readers).
-            marked_files_floor: 33,
-            marked_regions_floor: 153,
+            // #2115 adds two: the loudness meter's render half in `crates/loudness` (S1) and its
+            // session tap in `crates/control-plane/src/loudness.rs` (S2).
+            marked_files_floor: 35,
+            marked_regions_floor: 155,
             render_thread_exports: table::parse(RENDER_THREAD_EXPORTS)
                 .unwrap_or_else(|error| panic!("render-thread-exports.json: {error}")),
             unwrapped_exports: UNWRAPPED_EXPORTS
