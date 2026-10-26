@@ -80,11 +80,13 @@ fn a_silent_bank_reaches_exact_rest_and_a_skip_equals_a_render() {
 
 /// The shelf SVF (#1984) is rest state: on a split, high-pass bank at Q 0.5 and 1 kHz after a
 /// 0.003 DC input, the critically damped band SVF flushes to `+0.0` before the Butterworth shelf
-/// does, so at every 32-frame block where `lanes_at_rest` claims rest, a skipped twin
-/// (`advance_clocks`) must leave the payload the rendered block leaves.
+/// does. Lane 0 keeps a noise input, so the bank never takes its silent fast path and renders every
+/// block; at every 32-frame block where `lanes_at_rest` claims the other lanes rest, a twin that
+/// skips them (`advance_clocks`) must hold the payload the rendered block leaves.
 #[test]
 fn the_shelf_state_is_part_of_rest() {
     const BLOCK: usize = 32;
+    const STEPS: usize = 200;
     let mut values = defaults();
     set(&mut values, 0, 1_000.0);
     set(&mut values, 1, 0.5);
@@ -95,14 +97,18 @@ fn the_shelf_state_is_part_of_rest() {
     let mut bank = prepare_bank(&values, &links);
     let mut twin = prepare_bank(&values, &links);
     let offsets = vec![0_u32; NATIVE_LANES + 1];
-    let all = (1 << NATIVE_LANES) - 1;
+    let quiet = ((1_u32 << NATIVE_LANES) - 1) & !1;
+    let busy = noise(11, BLOCK * STEPS, 0.003);
     let mut claims = 0;
-    for step in 0..3_000_usize {
+    for step in 0..STEPS {
         let level = if step < 20 { 0.003 } else { 0.0 };
-        let input = vec![level; BLOCK * NATIVE_LANES];
+        let mut input = vec![level; BLOCK * NATIVE_LANES];
+        for frame in 0..BLOCK {
+            input[frame * NATIVE_LANES] = busy[step * BLOCK + frame];
+        }
         let first = (step * BLOCK) as u64;
         // A skip is the contract only for a `+0.0` block over lanes at rest.
-        let resting = level == 0.0 && bank.processor.lanes_at_rest() == all;
+        let resting = level == 0.0 && bank.processor.lanes_at_rest() & quiet == quiet;
         let (mut left, mut right) = (input.clone(), input.clone());
         process_bank(
             &mut bank,
@@ -115,8 +121,8 @@ fn the_shelf_state_is_part_of_rest() {
         );
         if resting {
             claims += 1;
-            twin.processor.advance_clocks(all, BLOCK as u32);
-            for track in 0..NATIVE_LANES as u32 {
+            twin.processor.advance_clocks(quiet, BLOCK as u32);
+            for track in 1..NATIVE_LANES as u32 {
                 assert_eq!(
                     snapshot_bank(&bank, track),
                     snapshot_bank(&twin, track),
@@ -136,5 +142,5 @@ fn the_shelf_state_is_part_of_rest() {
             );
         }
     }
-    assert!(claims > 0, "the bank rests");
+    assert!(claims > 0, "the quiet lanes rest");
 }
