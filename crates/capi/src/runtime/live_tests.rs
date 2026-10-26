@@ -3435,14 +3435,19 @@ fn bypass_crossfade_documents(
 
 /// Gate 5 of #1341. A bypass transaction on a playing session crossfades the per-node effect over
 /// the session's `mute_ms` ramp (480 frames at 48 kHz, so the ramp ends inside a block) and lands
-/// on a control booted bypassed, and a lift crossfades back and lands on the wet control. The
-/// effect sits once as an insert (a lone track's remainder, rendered per node) and once as a console
-/// slot (always banked): both render the one law. Frame `k`
-/// of the ramp (counted from the first frame of the block that drains the commit, from 1) is
-/// `D + (W - D) * m(k)` with `m` the indexed ramp law from `1` to `0` (the bypass) or `0` to `1`
-/// (the lift), `W` the output of a control that is never bypassed and `D` that of a control booted
-/// bypassed; frames before the commit equal the booted state (W, or D for a lift) and frames from
-/// the ramp's end equal the target (D, or W for a lift), bit for bit.
+/// on a control booted bypassed. The effect sits once as an insert (a lone track's remainder,
+/// rendered per node) and once as a console slot (always banked): both render the one law. Frame
+/// `k` of the ramp (counted from the first frame of the block that drains the commit, from 1) is
+/// `D + (W - D) * m(k)` with `m` the indexed ramp law from `1` to `0`, `W` the output of a control
+/// that is never bypassed and `D` that of a control booted bypassed; frames before the commit equal
+/// the booted state and frames from the ramp's end equal `D`, bit for bit.
+///
+/// A lift resumes the effect from rest (#2129, owner decision "un-bypass from rest"): its effect is
+/// reset at the commit and holds `D` for the effect's warm-up (60 frames for the soft clip, none
+/// for the others) before its crossfade, so no never-bypassed control is its target. The lift rows
+/// hold `D` through the warm-up, and the insert and the console slot render the same lifted words,
+/// bit for bit (the crossfade law itself is pinned at the effect's output by `graph-compiler`'s
+/// `bypass_skip_warmup`).
 /// The ramp blocks render without one allocation (statics warmed). A zero-latency effect (the
 /// compressor) and one with latency (the soft clip, 31 samples) run, and the delay and the
 /// multiband compressor, whose bypasses are live since #1339 and #1340 (inserts only, as neither
@@ -3451,8 +3456,8 @@ fn bypass_crossfade_documents(
 ///
 /// Test value: red if the C ABI producer forgets the session ramp (the toggle steps, so the first
 /// block is already D), if the record's ramp is another row's (the fader's or pan's length), if a
-/// ramp block allocates, or if a lift ramps from the wrong end or lands off W (the zero-latency lift
-/// is the one the review of #1341a1 found uncovered through the real runtime). The delay's and the
+/// ramp block allocates, if a lift leaves `D` before its warm-up ends, or if the per-node and the
+/// banked lift disagree. The delay's and the
 /// multiband's rows are red if the bypass is still prepared: the lift is refused or rebuilds a
 /// plan, or is acked and renders the prepared bypass (#1339 gate 4, #1340 gate 5).
 #[test]
@@ -3473,7 +3478,10 @@ fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed
                     } else {
                         &[false, true]
                     };
+                // #2129: the lifted words of each placement, compared after the loop.
+                let mut lifted: Vec<Vec<Vec<u32>>> = Vec::new();
                 for &console in consoles {
+                    let mut lifted_rows = Vec::new();
                     let (document, bypassed_document) = bypass_crossfade_documents(
                         effect_id,
                         hard.then_some(HARD_SWITCH).flatten(),
@@ -3544,6 +3552,23 @@ fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed
                             (0, 0),
                             "{effect_id}: block {block} allocated or freed"
                         );
+                        if lift {
+                            // The effect's warm-up: the soft clip's latency plus its tail.
+                            let warmup = if effect_id == "miso.soft-clip" { 60 } else { 0 };
+                            for (index, sample) in live.iter().enumerate().skip(quantum) {
+                                let frame = (block - record_block) * quantum as u64
+                                    + (index % quantum) as u64;
+                                if frame < warmup {
+                                    assert_eq!(
+                                        sample.to_bits(),
+                                        dry[block as usize][index].to_bits(),
+                                        "{effect_id}: block {block} sample {index} holds dry"
+                                    );
+                                }
+                            }
+                            lifted_rows.push(bits(&live));
+                            continue;
+                        }
                         let peak = [&wet, &dry]
                             .iter()
                             .flat_map(|control| control[block as usize][quantum..].iter())
@@ -3590,6 +3615,10 @@ fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed
                             );
                         }
                     }
+                    if lift {
+                        lifted.push(lifted_rows);
+                        continue;
+                    }
                     assert_eq!(
                         ramping,
                         (ramp as usize).saturating_sub(1),
@@ -3598,6 +3627,12 @@ fn a_live_bypass_crossfades_over_the_session_mute_ramp_and_lands_on_the_bypassed
                     assert!(
                         between >= ramping / 2,
                         "{effect_id}: the ramp is audibly between the wet and the dry control"
+                    );
+                }
+                if let [insert, console] = lifted.as_slice() {
+                    assert_eq!(
+                        insert, console,
+                        "{effect_id}: the per-node and banked lifts"
                     );
                 }
             }
