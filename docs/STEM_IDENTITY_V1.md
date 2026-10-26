@@ -71,19 +71,20 @@ The `32f` sample text is exact hexadecimal IEEE-754 bits. Those rows cover NaN p
 positive subnormal, and negative zero without relying on host-language float formatting.
 
 All six rows have committed headerless `.pcm` files. The stereo row at each depth also has a
-committed `.wav` fixture. Every WAVE path (today only the release CLI's, below) MUST strip the two
-different wrappers and produce bytes and identity equal to the corresponding `.pcm` row.
+committed `.wav` fixture. Every WAVE path (today the release CLI's and the SDK's, below) MUST strip
+the two different wrappers and produce bytes and identity equal to the corresponding `.pcm` row.
 
 ## Implementations and the corpus gate
 
 The engine carries no reference hashing tool and no container parser. Hosts decode stems
 themselves and submit planar PCM: #1035 removed the native decode workers and the Rust
 `stem-hasher` oracle, and #1033 removed the native WAV/RF64 parser that was left. The contract has
-two owners, and they own different halves of it:
+three implementations, and each owns a different part of it:
 
 * **Serialization and WAVE stripping: the release CLI** (`misofm/cli`, `src/stem-identity.ts`).
-  It is the only implementation that reads a WAVE (RIFF or RF64) container, serializes its samples
-  canonically and hashes them into a `blake3:` identity. Its `tests/stem-identity.test.ts` runs
+  It is the only implementation that serializes samples canonically: it reads a WAVE (RIFF or
+  RF64) container, writes its samples in the canonical form and hashes them into a `blake3:`
+  identity. Its `tests/stem-identity.test.ts` runs
   against byte-identical copies of the ten corpus files (`VECTORS.tsv`, six `.pcm`, three `.wav`).
 * **Identity grammar and the hash of given canonical bytes: the browser stem store.**
   `hosts/host-web/web/stem-store/identity.js` only parses the `blake3:` spelling, and
@@ -91,6 +92,14 @@ two owners, and they own different halves of it:
   checks the declared byte length and re-verifies on open. It has no container decoder and never
   serializes decoded PCM. `hosts/host-web/tests/stem-store-hash-v1.mjs` and
   `stem-store-core-v1.mjs` test it, through `scripts/check-stem-store-v1.mjs`.
+* **WAVE stripping without serialization: the SDK's `readWavHeader`** (`sdk/src/browser/stems.ts`,
+  #2102). It reads the header of a RIFF, RF64 or BW64 WAVE (the RF64 data size from `ds64`) and
+  returns where the `data` chunk's whole frames are. It serializes nothing: for a 16- or 24-bit
+  integer WAVE those bytes are the canonical bytes, and the app hashes them with the package's
+  verbatim copy of `incremental-blake3.js`. It refuses float WAVE. It conforms through
+  `sdk/test/browser-pcm-evals.mjs`, which strips both integer `.wav` fixtures to their corpus
+  identities and refuses the `32f` one, and through `sdk/test/package-tarball-smoke.mjs`, which
+  hashes every `.pcm` row with the packed copy to its corpus identity.
 
 Any other implementation that serializes samples or strips a container, a mobile app's included,
 MUST reproduce every row of the corpus. The corpus gate is the independent

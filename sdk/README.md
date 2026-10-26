@@ -340,8 +340,8 @@ export async function lowerTrack(
 ## Load local WAV stems
 
 The browser entry reads a stem from a local file without a decoder of your own. `readWavHeader`
-reads a 16- or 24-bit integer PCM WAV's header (plain or `WAVE_FORMAT_EXTENSIBLE`) with small
-reads, and returns where its samples are. For such a WAV the `data` chunk is exactly the stem's
+reads a 16- or 24-bit integer PCM WAV's header (RIFF, or RF64/BW64 with the data size from
+`ds64`; plain or `WAVE_FORMAT_EXTENSIBLE` fmt) with small reads, and returns where its samples are. For such a WAV the `data` chunk is exactly the stem's
 canonical PCM (`docs/STEM_IDENTITY_V1.md`), so one slice of the file is both the input of
 `blake3Stream`, which gives the session's `content` identity, and what `CanonicalPcmPump` writes
 into the source's `Msb1RingWriter` ring as planar `f32`.
