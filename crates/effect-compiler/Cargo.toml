@@ -23,6 +23,7 @@ true-peak-limiter.workspace = true
 soft-clip.workspace = true
 transient-shaper.workspace = true
 delay.workspace = true
+reverb.workspace = true
 
 [dev-dependencies]
 # Only `tests/symmetry_designed_words.rs` names the running backend; the library does not use `lane`.

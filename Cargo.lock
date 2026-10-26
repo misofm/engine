@@ -667,6 +667,7 @@ dependencies = [
  "lane",
  "multiband-compressor",
  "parametric-eq",
+ "reverb",
  "session",
  "soft-clip",
  "transient-shaper",
