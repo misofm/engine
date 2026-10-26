@@ -36,6 +36,8 @@ export interface WavInfo {
 /** Why `readWavHeader` refused a file. */
 export type WavFormatErrorCode =
   | "wav.not_riff"
+  | "wav.ds64_missing"
+  | "wav.ds64_short"
   | "wav.fmt_short"
   | "wav.fmt_duplicate"
   | "wav.float_unsupported"
@@ -71,18 +73,28 @@ const SUBFORMAT_TAG_AT = 24;
 const SUBFORMAT_GUID_TAIL = [0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
 const LAUNCH_RATES: readonly number[] = [44_100, 48_000, 88_200, 96_000];
 
+// RF64 and BW64 (EBU Tech 3306, ITU-R BS.2088) carry the 64-bit sizes in a `ds64` chunk, which
+// comes before `data`: RIFF size, data size and sample count (three u64), then a table.
+const DS64_BYTES = 28;
+const DS64_DATA_SIZE_AT = 8;
+const SIZE_IN_DS64 = 0xffff_ffff;
+
 /**
- * Read a 16- or 24-bit integer PCM WAV's header without reading its samples. It walks the chunk
- * headers with one 8-byte read each (and one read of the `fmt ` body), steps over each odd-sized
+ * Read a 16- or 24-bit integer PCM WAV's header without reading its samples. It reads RIFF, and
+ * RF64/BW64 with the 64-bit data size from their `ds64` chunk. It walks the chunk headers with
+ * one 8-byte read each (and one read of the `fmt ` and `ds64` bodies), steps over each odd-sized
  * chunk's pad byte, accepts `WAVE_FORMAT_EXTENSIBLE`, and reads a `data` size larger than the
- * file (an unpatched or `0xFFFFFFFF` size) to the file's end. It refuses float, more than two
- * channels, and a rate other than 44.1, 48, 88.2 or 96 kHz with a `WavFormatError`.
+ * file (an unpatched or `0xFFFFFFFF` RIFF size) to the file's end. It refuses float, more than
+ * two channels, and a rate other than 44.1, 48, 88.2 or 96 kHz with a `WavFormatError`.
  */
 export async function readWavHeader(file: Blob): Promise<WavInfo> {
   const riff = await readView(file, 0, 12);
-  if (riff.byteLength < 12 || fourcc(riff, 0) !== "RIFF" || fourcc(riff, 8) !== "WAVE") {
-    throw new WavFormatError("wav.not_riff", "not a RIFF/WAVE file");
+  const magic = riff.byteLength < 12 ? "" : fourcc(riff, 0);
+  const wide = magic === "RF64" || magic === "BW64";
+  if ((magic !== "RIFF" && !wide) || fourcc(riff, 8) !== "WAVE") {
+    throw new WavFormatError("wav.not_riff", "not a RIFF, RF64 or BW64 WAVE file");
   }
+  let ds64DataSize: number | null = null;
   let format: Omit<WavInfo, "frames" | "dataOffset" | "canonicalBytes"> | null = null;
   let offset = 12;
   while (offset + 8 <= file.size) {
@@ -93,10 +105,23 @@ export async function readWavHeader(file: Blob): Promise<WavInfo> {
     if (id === "fmt ") {
       if (format !== null) throw new WavFormatError("wav.fmt_duplicate", "the file has two fmt chunks");
       format = await readFormat(file, body, size);
+    } else if (id === "ds64" && wide) {
+      if (size < DS64_BYTES) throw new WavFormatError("wav.ds64_short", "the ds64 chunk is too short");
+      const ds64 = await readView(file, body, DS64_BYTES);
+      if (ds64.byteLength < DS64_BYTES) throw new WavFormatError("wav.ds64_short", "the ds64 chunk is truncated");
+      // A size beyond 2^53 is far beyond any file, and the clamp to the file's end below wins.
+      ds64DataSize = Number(ds64.getBigUint64(DS64_DATA_SIZE_AT, true));
     } else if (id === "data") {
       if (format === null) throw new WavFormatError("wav.data_before_fmt", "the data chunk comes before the fmt chunk");
       const frameBytes = format.channels * (format.bitDepth / 8);
-      const available = Math.min(size, file.size - body);
+      let declared = size;
+      if (wide && size === SIZE_IN_DS64) {
+        if (ds64DataSize === null) {
+          throw new WavFormatError("wav.ds64_missing", `a ${magic} data chunk needs a ds64 chunk before it`);
+        }
+        declared = ds64DataSize;
+      }
+      const available = Math.min(declared, file.size - body);
       const frames = Math.floor(available / frameBytes);
       if (frames <= 0) throw new WavFormatError("wav.no_frames", "the data chunk has no audio frames");
       return { ...format, frames, dataOffset: body, canonicalBytes: frames * frameBytes };
