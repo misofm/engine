@@ -134,7 +134,8 @@ The conformance test file.
   debug check of its flags fails. In this path a skipped refresh can only leave a dry bit clear (`not dry`), which
   renders the same bits, so the red is the debug check and not an output word; it is red in debug builds only.
 - **No bit moved (verifier, one time, against origin/main).** For all 9 effects, both reset kinds and both schedules,
-  the whole-bank reset's renders compared equal: all 36 digests identical. This is PR evidence, not a committed test.
+  the verifier's render digests on this branch equal those on origin/main: all 36 identical. This is PR evidence,
+  not a committed test.
 - **Gates.** All 10 rows pass. `cargo test -p` for the 16 touched crates passes. Workspace clippy
   (`--all-targets --all-features -D warnings`), `cargo fmt --check`, `scripts/check-workspace-policy.sh`,
   `scripts/check-bench-policy.sh` and `realtime_policy` (233 regions in 43 files) are clean.
