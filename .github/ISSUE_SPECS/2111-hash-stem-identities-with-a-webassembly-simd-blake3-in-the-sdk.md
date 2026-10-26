@@ -20,3 +20,24 @@ Filed by root from the console sprint (2026-10-26). The console opens a folder o
 - A descriptive throughput figure (one run, two rounds) against the JS implementation, recorded in the spec.
 - The tarball smoke covers the new module.
 - AGENTS.md: browser Wasm builds on the pinned browser toolchain; no target-specific code.
+
+## Decision record (attempt 1)
+- D1 Crate `hosts/blake3-web` (cdylib, lib `blake3_web`), `blake3 = "=1.8.7"`, default features off, `pure` + `wasm32_simd`. Built by one more cargo line in `scripts/build-web-audioworklet.sh` on the `[browser-artifact]` nightly with `-Zbuild-std` and `+simd128`, in delivery and `--check-pin` modes only; shipped in the closure as `miso-engine-v1-blake3.simd128.wasm` (44,861 B, `name` section stripped). The worklet module's bytes are unchanged (cmp against a base build of `e4421343c`).
+- D2 Exports (contract identity, V1): `miso_engine_blake3_v1_{new, input_capacity, input, update, finalize, free}`. Deviation from the scope note: `update(h, len)` hashes the first `len` bytes of the hasher's own 256 KiB staging buffer, and `finalize(h)` writes the digest to the start of that buffer, so no export takes a data pointer and a bad length is refused (returns 0), not a stray read.
+- D3 JS: `IncrementalBlake3` and `blake3Stream` keep their API; `prepareBlake3({ url? }) -> Promise<"simd128" | "javascript">` is the one addition. One load per URL per realm; a hasher takes the module when one has loaded, else the JS class; a load failure resolves `"javascript"` and never rejects. `blake3Stream` and `OpfsStemStore.open()` prepare. Undigested hashers are freed by a `FinalizationRegistry`.
+- D4 The JS fallback allocates nothing per block or per chunk (coordinator addition): module scratch arrays, a precomputed round schedule, number counters, a fixed tree stack.
+- D5 Provenance: `incremental-blake3.provenance.json` keeps its shape; its `implementation`/`reason` name the module. The crate version, features and checksum are in Cargo.toml/Cargo.lock, the toolchain in the module's `producers` section, so no sibling record duplicates them. A release fingerprint for the module is a successor issue (root).
+
+## Evidence (attempt 1)
+Descriptive, one invocation, one warmup, two rounds, 64 MiB per worker in 1 MiB updates; equal digests across every engine and round.
+
+| harness | engine | 1 worker (MB/s) | 8 workers, per worker / aggregate (MB/s) |
+|---|---|---|---|
+| Chromium 151 (headless) | JS before | 24.4, 24.3 | 6.5 / 51.0, 6.5 / 51.5 |
+| Chromium 151 | JS after D4 | 66.2, 65.6 | 66.1 / 518, 66.1 / 525 |
+| Chromium 151 | Wasm simd128 | 1,488, 1,462 | 1,557 / 11,957, 1,529 / 11,571 |
+| node 22 | JS before | 25.1, 25.2 | 25.7, 24.6 per worker |
+| node 22 | JS after D4 | 56.5, 60.0 | 60.5, 60.9 per worker |
+| node 22 | Wasm simd128 | 1,471, 1,432 | 1,393, 1,529 per worker |
+
+Chromium reproduces the console's 8-worker collapse of the old JS class (allocator contention); node does not. Aggregate is total bytes over the slowest worker's hash time. Harness: scratch `b3bench/` (not committed).
