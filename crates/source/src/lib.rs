@@ -539,6 +539,12 @@ struct TransferBlock {
     frames: u32,
     end_of_region: bool,
     native_decoder_sanitized_samples: u64,
+    /// The producer's monotone last-non-zero frame of this block's generation as it stood after
+    /// copying this block (issue #2133, [`PcmSourceProducer::last_nonzero`]): the absolute source
+    /// frame of the newest frame, in this block or an earlier one of its generation, holding a word
+    /// whose bits are not `+0.0` on any channel. `None` when there is none. The block's every word
+    /// is exact `+0.0` when this is below [`Self::start_frame`].
+    last_nonzero: Option<SourceFrame>,
     samples: Box<[f32]>,
 }
 
@@ -555,6 +561,7 @@ impl TransferBlock {
             frames: 0,
             end_of_region: false,
             native_decoder_sanitized_samples: 0,
+            last_nonzero: Some(SourceFrame(u64::MAX)),
             samples: samples.into_boxed_slice(),
         })
     }
@@ -565,6 +572,16 @@ impl TransferBlock {
         self.frames = 0;
         self.end_of_region = false;
         self.native_decoder_sanitized_samples = 0;
+        // A recycled block claims nothing until a submit stamps it again: "not silent".
+        self.last_nonzero = Some(SourceFrame(u64::MAX));
+    }
+
+    /// Whether every word this block lends or copies is exact `+0.0` (issue #2133): its frames by
+    /// the producer's stamp, and the tail past `frames`, which `PcmSourceConsumer::play` zeroes.
+    /// One compare; never reads a word.
+    fn is_positive_zero(&self) -> bool {
+        self.last_nonzero
+            .is_none_or(|frame| frame.0 < self.start_frame.0)
     }
 }
 
@@ -768,6 +785,8 @@ impl PcmSourceRing {
                 native_decoder_sanitized_samples: 0,
                 seek_report: seek_report_reader,
                 prime_required,
+                last_nonzero: None,
+                last_nonzero_generation: config.initial_generation,
             },
             consumer,
             report,
@@ -858,6 +877,15 @@ pub struct PcmSourceProducer {
     seek_report: PublishedWordsReader<SEEK_REPORT_WORDS>,
     /// The ring's `prime_required` flag, shared with the consumer (#1320 D4).
     prime_required: Arc<AtomicBool>,
+    /// Issue #2133: the absolute source frame of the newest submitted frame of
+    /// [`Self::last_nonzero_generation`] holding a word whose bits are not `+0.0` (a `-0.0` word
+    /// counts: conservative, cost only), or `None`. Monotone within a generation; a chunk of
+    /// another generation (a seek) resets it before its own words are folded in. Advanced by the
+    /// submit's copy on the control thread and stamped into each block, so render learns a
+    /// block's silence by one compare.
+    last_nonzero: Option<SourceFrame>,
+    /// The generation [`Self::last_nonzero`] counts.
+    last_nonzero_generation: SourceGeneration,
 }
 
 /// The control thread's handle on one ring's `prime_required` flag (#1320 D4).
@@ -1233,12 +1261,26 @@ impl PcmSourceProducer {
         block.end_of_region = chunk.end_of_region;
         block.native_decoder_sanitized_samples = 0;
         let frames = usize::try_from(chunk.frames).expect("u32 fits usize");
+        if chunk.generation != self.last_nonzero_generation {
+            self.last_nonzero = None;
+            self.last_nonzero_generation = chunk.generation;
+        }
+        let mut newest = None;
         for (channel, plane) in chunk.planes.iter().enumerate() {
             let offset = channel
                 .checked_mul(quantum)
                 .expect("prepared channel offset");
-            block.samples[offset..offset + frames].copy_from_slice(&plane[..frames]);
+            let words = &plane[..frames];
+            block.samples[offset..offset + frames].copy_from_slice(words);
+            if let Some(frame) = words.iter().rposition(|word| word.to_bits() != 0) {
+                newest = newest.max(Some(frame));
+            }
         }
+        if let Some(frame) = newest {
+            let frame = SourceFrame(chunk.start_frame.0.saturating_add(frame as u64));
+            self.last_nonzero = self.last_nonzero.max(Some(frame));
+        }
+        block.last_nonzero = self.last_nonzero;
         self.publish_block(block, chunk.frames, chunk.end_of_region)
     }
 
@@ -2074,6 +2116,19 @@ impl PcmSourceConsumer {
         let quantum = usize::try_from(self.quantum_frames).ok()?;
         let offset = usize::try_from(channel).ok()?.checked_mul(quantum)?;
         block.samples.get(offset..offset.checked_add(quantum)?)
+    }
+
+    /// Whether every word [`Self::played_plane`] lends and [`Self::copy_channel`] writes this
+    /// quantum is exact `+0.0` on every channel (issue #2133): no block was played (an underrun,
+    /// a held seek, the end of the region: the consumer emits the `+0.0` itself), or the played
+    /// block's last-non-zero stamp is below its first frame (a short block's tail is zeroed by
+    /// `play`). One compare: it reads no sample. `false` never drops audio; it only costs time.
+    /// This render-path operation allocates nothing and never blocks.
+    #[must_use]
+    pub fn played_block_silent(&self) -> bool {
+        self.played
+            .as_ref()
+            .is_none_or(|block| block.is_positive_zero())
     }
     // REALTIME_POLICY_END
 
@@ -3371,6 +3426,24 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             consumer.played_plane(mapping.right_channel)?,
         ))
     }
+
+    /// The claim's source played no block, its played block is stamped silent, or the entry is
+    /// vacant (issue #2133): every word `copy_track_input` writes or `played_planes` lends is
+    /// exact `+0.0`. The fact was computed where the host's chunk was copied in, on the control
+    /// thread; no host states it.
+    fn played_block_silent(&self, claim_index: usize) -> bool {
+        let Some(source) = self
+            .mappings
+            .get(claim_index)
+            .and_then(|mapping| self.sources.get(mapping.source_index))
+        else {
+            return false;
+        };
+        source
+            .consumer
+            .as_ref()
+            .is_none_or(PcmSourceConsumer::played_block_silent)
+    }
     // REALTIME_POLICY_END
 
     fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
@@ -3880,6 +3953,55 @@ mod tests {
                 .max(metadata)
                 .max(report.seek_report_bytes)
                 .max(report.prime_required_bytes)
+        );
+    }
+
+    /// Issue #2133 gate 1: the played block's silence is the producer's monotone last-non-zero
+    /// frame against the block's first frame. A `+0.0` chunk plays silent; one `-0.0` word in the
+    /// last frame of the right plane makes its block not silent, and the next `+0.0` block is
+    /// silent again; an underrun plays silent; after a seek back to frame 0 the counter starts
+    /// over, so a `+0.0` chunk of the new generation plays silent; and a short final `+0.0` block,
+    /// whose tail the ring zeroes itself, plays silent.
+    ///
+    /// Test value: red when a block with a non-zero word is reported silent (a counter that
+    /// ignores the right plane or the last frame, or a stamp read against the wrong frame), or
+    /// when the counter survives a seek and keeps a silent block audible.
+    #[test]
+    fn a_played_block_is_silent_iff_its_producer_copied_no_nonzero_word() {
+        let (producer, mut consumer, _) = session_ring(config(2, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let zero = [0.0_f32; 4];
+        let late = [0.0, 0.0, 0.0, -0.0];
+        host.submit(chunk(1, 0, &[&zero, &zero], 4, false)).unwrap();
+        host.submit(chunk(1, 4, &[&zero, &late], 4, false)).unwrap();
+        host.submit(chunk(1, 8, &[&zero, &zero], 4, false)).unwrap();
+        let mut plays = Vec::new();
+        for block in 0..4_u64 {
+            let report = consumer.begin_block_at(block * 4);
+            plays.push((report.copied_frames, consumer.played_block_silent()));
+        }
+        assert_eq!(
+            plays,
+            [(4, true), (4, false), (4, true), (0, true)],
+            "a +0.0 block, the -0.0 word, +0.0 again, an underrun"
+        );
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(0),
+        })
+        .unwrap();
+        host.submit(chunk(2, 0, &[&zero, &zero], 4, false)).unwrap();
+        host.submit(chunk(2, 4, &[&zero[..2], &zero[..2]], 2, true))
+            .unwrap();
+        let mut plays = Vec::new();
+        for block in 4..6_u64 {
+            let report = consumer.begin_block_at(block * 4);
+            plays.push((report.copied_frames, consumer.played_block_silent()));
+        }
+        assert_eq!(
+            plays,
+            [(4, true), (2, true)],
+            "after the seek: frame 0 again, then the short final block"
         );
     }
 
