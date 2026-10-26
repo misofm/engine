@@ -65,7 +65,7 @@ artifact_dir="$root/artifacts/$step_directory"
 if [[ "$subject" == swap ]]; then
     artifact=swap-benchmark records_required=2 disposition_issue=1286
 else
-    artifact=console-benchmark records_required=78 disposition_issue=149
+    artifact=console-benchmark records_required=80 disposition_issue=149
 fi
 raw="$artifact_dir/$artifact.raw.jsonl"
 accepted="$artifact_dir/$artifact.accepted.jsonl"
