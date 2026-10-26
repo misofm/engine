@@ -132,7 +132,7 @@ damping state reach exact rest. Today it declares `Infinite`.
   delay fixture `launch_delay_fixture_closes_scalar_state_tail_pdc_and_transactional_caps`
   (three `Infinite` assertions: metadata tail, output tail, node tail), not `:13803/:13867/:13878`.
 - **A2 D1a amended: a per-sample positive majorant replaces the period potential.** The spec's
-  `V(t + L) <= q V(t)`, `L = D_max + K_d`, is within about 1 % at `D = 2 fs` but 7 times loose at
+  `V(t + L) <= q V(t)`, `L = D_max + K_d`, is within about 2 % at `D = 2 fs` but 6 to 8 times loose at
   `D = 48` (each period pays the damping's `K_d ~ 2,000` samples), so gate 3's 80 % check could
   not hold. The note's majorant (`F(r) = A r^-D (beta + alpha b / (r - a)) <= 1`, certified by
   bisection) is the real loop's slowest pole up to rounding: gate 3 rests 0.18 % below its bound.

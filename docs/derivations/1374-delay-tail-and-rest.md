@@ -123,8 +123,8 @@ T = 256 + D + n_r,   n_r the smallest n with r^n c_rel < eps / 2
 
 and `P* = 2 (c_abs U + W_U) / eps` is the flush floor below which the underflow part exceeds the
 other half. `T` = 35,116,372 / 38,231,966 / 70,442,653 / 76,712,855 samples (13.3 minutes at
-every rate). The spec's period form (`V(t + L) <= q V(t)`, `L = D + K_d`) gives about 1 % more at
-`D = 2 fs`, but 7 times more at `D = 48`, where gate 3's 80 % non-vacuity check could not hold;
+every rate). The spec's period form (`V(t + L) <= q V(t)`, `L = D + K_d`) gives about 2 % more at
+`D = 2 fs`, but 6 to 8 times more at `D = 48` (tail and rest), where gate 3's 80 % non-vacuity check could not hold;
 the per-sample majorant replaces it (decision record, A2).
 
 ## (N2), the decay and the gains
