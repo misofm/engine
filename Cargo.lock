@@ -350,6 +350,8 @@ dependencies = [
  "engine",
  "host-core",
  "lane",
+ "loudness",
+ "math",
  "protocol",
  "session",
  "sha2 0.11.0",

@@ -1431,6 +1431,13 @@ impl Budget {
 /// merged on `main`; before #1586b the same 656 B showed as 313,553). #1587b adds nothing here:
 /// the reference session has no observation reader, so it builds neither the readers' strip
 /// indices nor the record of the readers a swap carries. The ceiling stays.
+///
+/// #2115 raised `capi_retained_bytes`, a structural move: every session now carries the output
+/// loudness meter, preallocated at boot (its 512-hop record queue, two shared words and the
+/// analysis's ring and histograms, 75,432 bytes, charged exactly), and its render half inside the
+/// plan state the C ABI's `Plan` holds. Measured 340,878 -> 418,934 on x86-64; the ceiling is the
+/// new value plus 10 %, rounded up to 64: 460,827.4 -> 460,864, at both widths (the four-lane
+/// plan state is smaller).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -1537,8 +1544,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "capi_retained_bytes",
         value: |report| report.capi_retained_bytes,
-        eight_lanes: 344_192,
-        four_lanes: 344_192,
+        eight_lanes: 460_864,
+        four_lanes: 460_864,
     },
     Budget {
         row: "largest_named_allocation_bytes",

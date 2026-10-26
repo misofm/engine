@@ -22,6 +22,9 @@ effect-contract.workspace = true
 host-core = { workspace = true, features = ["control-provider"] }
 # #1709 D1: every control entry composes level values in `lane::CanonicalFpEnv`.
 lane.workspace = true
+# #2115: the session's output loudness meter and its dBTP conversion.
+loudness.workspace = true
+math.workspace = true
 protocol.workspace = true
 session.workspace = true
 # #1386 D3: the `SESSION_REPLACE` document digest.

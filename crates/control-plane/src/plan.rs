@@ -60,6 +60,9 @@ pub struct PlanState<A: ControlAdapter> {
     /// The output meter's render half (#1581 D4): made with the session's first plan and part of
     /// no plan, so a plan swap does not touch it. The session hands out its reader and gate.
     pub(crate) output_meter: host_core::OutputPeakObserver,
+    /// The output loudness meter's render half (#2115): made with the session's first plan and
+    /// part of no plan, as the output meter is. The session keeps its control half.
+    pub(crate) loudness: crate::loudness::LoudnessTap,
     /// The render half of the session's response capture (#1577 D3): made with the session's
     /// first plan and part of no plan, run after every successful block.
     pub(crate) response_capture: host_core::ResponseCaptureServer,
@@ -81,6 +84,7 @@ impl<A: ControlAdapter> PlanState<A> {
         output_meter: host_core::OutputPeakObserver,
         output_gate: Option<host_core::meters::OutputPeakGateRelay>,
         response_capture: host_core::ResponseCaptureServer,
+        loudness: crate::loudness::LoudnessTap,
     ) -> Self {
         #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_plan_constructed += 1);
@@ -89,6 +93,7 @@ impl<A: ControlAdapter> PlanState<A> {
             shared,
             fp_env_attested: core::cell::Cell::new(false),
             output_meter,
+            loudness,
             response_capture,
             output_gate,
             rendered_epoch: 0,
@@ -429,7 +434,8 @@ impl<A: ControlAdapter> PlanState<A> {
     ///
     /// The output meter observes the block (#1581 D4): one gate load while it is inactive,
     /// otherwise a vector fold of each plane's sanitized peak ([`host_core::OutputPeakObserver`]).
-    /// Then the render sample and sequence advance, which the service step's counters read. The
+    /// The loudness meter observes it too (#2115): one gate load while it is disarmed, otherwise
+    /// its K-weighted hop sums and Annex-2 true peak. Then the render sample and sequence advance, which the service step's counters read. The
     /// per-block peak scan is gone (#1583 D6): the meter batches are the output meter's windows.
     pub fn observe_rendered_block(
         &mut self,
@@ -439,6 +445,8 @@ impl<A: ControlAdapter> PlanState<A> {
     ) {
         self.output_meter
             .observe(planes[0], planes[1], first_sample, next_sample);
+        // #2115: one gate load while the loudness meter is disarmed.
+        self.loudness.observe(planes[0], planes[1], first_sample);
         self.publish_render_observation();
     }
 
@@ -541,6 +549,9 @@ mod tests {
                 host_core::response_capture_channel()
                     .expect("capture channel")
                     .1,
+                crate::loudness::loudness_meter(48_000)
+                    .expect("loudness meter")
+                    .0,
             ),
             gate,
         )
