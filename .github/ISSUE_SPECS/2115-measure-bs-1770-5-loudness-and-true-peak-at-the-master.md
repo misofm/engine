@@ -238,3 +238,17 @@ start.
   from the merged tree, module 66573ae5): `check-sdk-types`, `check-sdk-generated`, `check-sdk-headless` (684/684),
   `check-sdk-deletions.py`, `sdk-package.sh check` and `lint-checks.sh`. The loudness evals passed 8 of 8 concurrent
   runs.
+
+## S3 attempt 4 (the review found that the quiet stop could land behind a queued start)
+- **Fix (root's ruling).** The quiet stop after a failed start is now sent inside the same queue step, before that
+  step rethrows, and that step also reads the `#handles.size === 0` guard. Nothing is enqueued. The steps are serial,
+  so the stop goes out directly behind the failed start and before any start queued in the meantime.
+- **New eval row (10).** Two `subscribe()` calls are made together, and the first start fails in transport. The
+  second handle must be open, the core armed, and the frames exactly start, stop, start. It catches a quiet stop
+  queued behind a subscribe that was made while the failed start was in flight. The rows for an open handle and for a
+  typed refusal are unchanged (now numbered 9 and 11).
+- **Red evidence.** The row is red on attempt 3's `loudness.ts` (9 pass, 1 fail) and green on the fix. The
+  verifier's `race.test.mjs` passes on the fix.
+- **Gates** (the stream coordinator re-ran them on bb2fd1d68): `check-sdk-types`, `check-sdk-generated`,
+  `check-sdk-headless` (685/685), `check-sdk-deletions.py`, `sdk-package.sh check` and `lint-checks.sh`. The loudness
+  evals passed 8 of 8 concurrent runs.
