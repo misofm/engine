@@ -1,4 +1,4 @@
-import { IncrementalBlake3 } from "./incremental-blake3.js"
+import { IncrementalBlake3, prepareBlake3 } from "./incremental-blake3.js"
 import { StemResolverError, stemDigest, stemFileName } from "./identity.js"
 
 export const DEFAULT_STEM_STORE_FOLDER = "miso-stems-blake3-v1"
@@ -106,6 +106,9 @@ export class OpfsStemStore {
         "Origin-private stem storage is unavailable"
       )
     }
+    // Issue #2111: every ingest and verify-on-open hash after this takes the WebAssembly SIMD
+    // BLAKE3 when it loads; a load failure resolves to the JavaScript hash and never throws.
+    await prepareBlake3()
     try {
       const root = await this.#storage.getDirectory()
       this.#directory = await root.getDirectoryHandle(this.#folderName, {

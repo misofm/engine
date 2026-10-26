@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.5.0
+npm install @misofm/engine@0.6.0
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -322,6 +322,11 @@ host's next render sample, and calculates `frame = sourceFrame + (atSample - fir
 frames rendered since. The frame does not move while the context is suspended. You do not need
 the meters to calculate a position.
 
+`engine.planLatency()` resolves with `{ samples, tailSamples }` on both engines: the output latency
+and tail of the plan that renders now, in samples, as the C ABI's plan resource report gives them
+(`tailSamples` is `null` for an unbounded tail). Use it to align meters, the playhead and visuals
+with the audio. After a rebuild, it changes at the block that adopts the new plan.
+
 `engine.play()` resumes the context and then sets the transport to `playing`. `engine.stop()`
 suspends the context and then sets the transport to `stopped`. Each call starts the context step
 at once, and sets the transport after that step settles, in call order. Each resolves with the
@@ -448,13 +453,21 @@ export async function localStem(file: File) {
 
 Call `pump.pumpUntilFull()` before `context.resume()` and again as the ring drains, and pass the
 pump to `engine.seek(frame, { producers: [pump] })`: it repositions every ring it writes after
-the engine accepted the seek. The pump holds one read-ahead window per source (`windowFrames`,
-4096 by default), never the whole stem. `readWavHeader` refuses with a `WavFormatError`, whose
+the engine accepted the seek. The pump holds at most two windows per source, the resident one and
+the next one read ahead (`windowFrames`, 4096 by default), never the whole stem; it reads the
+sources' windows concurrently, at most eight at a time. `readWavHeader` refuses with a `WavFormatError`, whose
 `code` names the cause: a float WAV (`wav.float_unsupported`: export 16- or 24-bit PCM), more than
 two channels (`wav.channels`), and a rate other than 44.1, 48, 88.2 or 96 kHz (`wav.sample_rate`).
 A `data` size larger than the file is read to the file's end. The pump and the hash are the
 engine's own code, copied into the package unchanged; `IncrementalBlake3` is the same hash for
 bytes you already hold.
+
+The hash runs in a WebAssembly SIMD module, `dist/assets/miso-engine-v1-blake3.simd128.wasm` (about 1.5 GB/s per core in Chromium, against about 65 MB/s for the JavaScript fallback).
+`blake3Stream` loads it itself; call `await prepareBlake3()` once before `new IncrementalBlake3()`
+to hash in it, and pass `prepareBlake3({ url })` if your bundler moves the file. It resolves
+`"simd128"`, or `"javascript"` when the module cannot load (no WebAssembly SIMD, a failed fetch);
+it never rejects, and the digests are the same either way. To hash many stems at once, run one
+`blake3Stream` per Worker: each Worker loads its own copy of the module.
 
 ## Change a mix and read the core's answer
 
@@ -700,8 +713,9 @@ resolution, transport-byte verification, decoding, and seek coordination belong 
 There is no implicit sample-rate conversion. The control protocol carries commands, never PCM.
 
 `BUNDLED_ENGINE_ASSETS` locates the installed release's assets. Its
-`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the six engine
-artifacts, including Wasm, host, processor, host declaration, metadata, and ABI layout.
+`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the seven engine
+artifacts: the engine Wasm, host, processor, host declaration, metadata, ABI layout, and the BLAKE3
+Wasm.
 `loadBundledEngineAsset()` verifies the Wasm length and digest before compilation; boot checks
 the exported ABI version. Browser package-relative URLs bind deployment locations but do not
 constitute runtime digest verification. Custom delivery must preserve the matching artifact set;
@@ -709,7 +723,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.5.0 release record](https://github.com/misofm/engine/issues/2110) contains the accepted artifact
+[0.6.0 release record](https://github.com/misofm/engine/issues/2121) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -735,6 +749,24 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.5.0
+
+0.6.0 adds to the 0.5.0 API and removes nothing.
+
+- New: `prepareBlake3()` (`./browser`) loads the WebAssembly SIMD BLAKE3 module before
+  `new IncrementalBlake3()`; it resolves `"simd128"` or `"javascript"` and never rejects.
+- New: `engine.planLatency()` resolves `{ samples, tailSamples }` on both engines.
+- Changed: `blake3Stream` and `IncrementalBlake3` hash in WebAssembly SIMD when the module loads;
+  the JavaScript fallback allocates nothing per chunk. The digests do not change.
+- Changed: `CanonicalPcmPump` reads windows concurrently (at most eight in flight) and reads one
+  window ahead per source.
+- Fixed: a seek during a window read no longer commits the pre-seek window at the post-seek frame.
+- Unchanged: a window read shorter than its declared range is refused, as before, with
+  `RangeError("PCM window is truncated")`, and the pump calls `onError` once.
+- The delivery closure has a seventh file, `miso-engine-v1-blake3.simd128.wasm` (in `dist/assets`).
+  Custom delivery must serve it, or pass `prepareBlake3({ url })`; without it the hash falls back
+  to JavaScript.
 
 ## Upgrading from 0.4.3
 

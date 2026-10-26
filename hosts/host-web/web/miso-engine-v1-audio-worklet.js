@@ -35,6 +35,10 @@ const SEEK_REPORT_WORDS = [
   ["generation", 8], ["firstSample", 16], ["sourceFrame", 24],
   ["cumulativeUnderrunFrames", 32], ["cumulativeHeldFrames", 40],
 ];
+// Issue #2116: the 64-byte plan latency record `miso_engine_web_v1_plan_latency_ptr` names, in the
+// C ABI report's order: struct size, a reserved word, then latency, tail kind and tail samples.
+const PLAN_LATENCY_BYTES = 64;
+const PLAN_LATENCY_WORDS = [["samples", 8], ["tailKind", 16], ["tailSamples", 24]];
 const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
 // The telemetry window: 128 blocks is ~341 ms at 48 kHz with a 128-frame quantum, long enough for
@@ -57,6 +61,8 @@ const SESSION_SEEK_FIELDS = ["tag", "requestId", "generation", "sourceFrame", "a
 // Issue #1297a: the anchored source seek and the seek report, both control work of the handler.
 const SEEK_AT_FIELDS = ["tag", "requestId", "sourceId", "generation", "sourceFrame", "anchorSample"];
 const SEEK_REPORT_FIELDS = ["tag", "requestId", "sourceId"];
+// Issue #2116: the plan latency read, control work of the handler.
+const PLAN_LATENCY_FIELDS = ["tag", "requestId"];
 const CONTROL_FIELDS = ["tag", "requestId", "frame"];
 /// Issue #1697: a `SESSION_REPLACE` frame carries its document beside it.
 const CONTROL_DOCUMENT_FIELDS = [...CONTROL_FIELDS, "document"];
@@ -340,6 +346,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const seekReportPointer = this.exports.miso_engine_web_v1_source_seek_report_ptr(this.handle);
     if (!u32(seekReportPointer) || seekReportPointer === 0) return RESULT_INTERNAL;
     this.bindView("seekReportView", DataView, seekReportPointer, SEEK_REPORT_BYTES);
+    // Issue #2116: the plan latency record is at a stable address, bound once here.
+    const planLatencyPointer = this.exports.miso_engine_web_v1_plan_latency_ptr(this.handle);
+    if (!u32(planLatencyPointer) || planLatencyPointer === 0) return RESULT_INTERNAL;
+    this.bindView("planLatencyView", DataView, planLatencyPointer, PLAN_LATENCY_BYTES);
     // The boot watermark is the baseline, not an advance: only a later change is posted.
     if (this.exports.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
       this.watermarkRevision = this.watermarkView.getBigUint64(8, true);
@@ -846,6 +856,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     } else if (message?.tag === "miso.seek-report.v1"
         && exactFields(message, SEEK_REPORT_FIELDS)) {
       this.receiveSeekReport(message);
+    } else if (message?.tag === "miso.plan-latency.v1"
+        && exactFields(message, PLAN_LATENCY_FIELDS)) {
+      this.receivePlanLatency(message);
     } else if (message?.tag === "miso.control.v1"
         && (exactFields(message, CONTROL_FIELDS)
           || exactFields(message, CONTROL_DOCUMENT_FIELDS))) {
@@ -1182,6 +1195,33 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       requestId: message.requestId,
       result,
       report,
+    });
+  }
+
+  /// Issue #2116, `single` mode: read the output latency and tail of the plan that renders now. The
+  /// handler calls `plan_latency_read` once (never in `process()`) and copies the record's words
+  /// into the reply; a refusal is the reply's result with a null latency, and is not sticky. The
+  /// worklet computes nothing from the words.
+  receivePlanLatency(message) {
+    const result = this.exports.miso_engine_web_v1_plan_latency_read(this.handle);
+    let latency = null;
+    if (result === RESULT_OK) {
+      this.rebindMemoryViews();
+      const view = this.planLatencyView;
+      if (view.getUint32(0, true) !== PLAN_LATENCY_BYTES) {
+        this.sticky(RESULT_INTERNAL, message.requestId);
+        return;
+      }
+      latency = {};
+      for (const [field, offset] of PLAN_LATENCY_WORDS) {
+        latency[field] = view.getBigUint64(offset, true);
+      }
+    }
+    this.port.postMessage({
+      tag: "miso.plan-latency.v1",
+      requestId: message.requestId,
+      result,
+      latency,
     });
   }
 

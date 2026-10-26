@@ -175,8 +175,7 @@ async function unalignedSeekKeepsChunksQuantumShaped() {
 
   await pump.pumpUntilFull()
   const preSeekSliceCount = slices.length
-  const control = new Int32Array(shared, 0, 128 / 4)
-  Atomics.store(control, 9, control[8])
+  drainRing(shared)
   await pump.seek(2)
   assert.deepEqual(await pump.pumpUntilFull(), {
     chunks: 4,
@@ -207,6 +206,203 @@ async function unalignedSeekKeepsChunksQuantumShaped() {
     assert.equal(end % frameBytes, 0, "slice ends on a frame boundary")
     assert.ok(end - start <= 5 * frameBytes, "slice stays within one window")
     assert.ok(end <= frames * frameBytes, "slice stays within the source")
+  }
+  pump.stop()
+}
+
+// --- Issue #2118: window reads run concurrently and read ahead -----------------------------------
+
+/** The pump's bound on window reads in flight (`MAX_READS_IN_FLIGHT` in pcm-pump.js). */
+const READS_IN_FLIGHT = 8
+
+/** MSB1 control words (`CONTROL` in pcm-pump.js). */
+const WRITE_INDEX = 8
+const READ_INDEX = 9
+
+/** Consume every committed chunk, as the render thread would. */
+function drainRing(shared) {
+  const control = new Int32Array(shared, 0, 128 / 4)
+  Atomics.store(control, READ_INDEX, control[WRITE_INDEX])
+}
+
+async function windowReadsOverlapAcrossSources() {
+  // N sources whose window reads each take `delay`. One pass needs one window per source, so a
+  // pump that awaits each read in turn takes N * delay; this one takes ceil(N / 8) * delay.
+  const sources = 24
+  const delay = 40
+  const windowFrames = 8
+  const frames = 3 * windowFrames
+  const bytes = pcm16(Array.from({ length: frames }, (_, frame) => frame), 1)
+  let inFlight = 0
+  let maxInFlight = 0
+  // After the cold pass, reads stay pending until the test releases them.
+  let held = null
+  const slowBlob = {
+    slice(start, end) {
+      return {
+        arrayBuffer() {
+          inFlight += 1
+          maxInFlight = Math.max(maxInFlight, inFlight)
+          const finish = (resolve) => {
+            inFlight -= 1
+            resolve(bytes.slice(start, end).buffer)
+          }
+          return new Promise((resolve) => {
+            if (held === null) setTimeout(() => finish(resolve), delay)
+            else held.push(() => finish(resolve))
+          })
+        },
+      }
+    },
+  }
+  const rings = Array.from({ length: sources }, () =>
+    createFixtureMsb1Ring({ channels: 1, frameCapacity: 4, capacity: 2 })
+  )
+  const pump = new CanonicalPcmPump({
+    lease: { async read() { return slowBlob } },
+    windowFrames,
+    sources: rings.map((ring, index) => ({
+      sourceId: `slow-${index}`,
+      identity: `blake3:${String(index).padStart(64, "0")}`,
+      channels: 1,
+      bitDepth: 16,
+      frames,
+      ring: new Msb1RingWriter(ring),
+    })),
+  })
+
+  const started = performance.now()
+  assert.deepEqual(await pump.pumpUntilFull(), { chunks: 2 * sources, frames: 8 * sources, finished: false })
+  const coldMs = performance.now() - started
+  const rounds = Math.ceil(sources / READS_IN_FLIGHT)
+  assert.equal(maxInFlight, READS_IN_FLIGHT, "reads overlap up to the bound and never past it")
+  assert.ok(coldMs >= rounds * delay - 5, `a pass waited ${coldMs} ms, under ${rounds} read rounds`)
+
+  // Each source's next window was read ahead after the pass: once the rings drain, the next pass
+  // writes it while every read it starts stays pending.
+  while (inFlight > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+  held = []
+  rings.forEach(drainRing)
+  let stall
+  const warm = await Promise.race([
+    pump.pumpUntilFull(),
+    new Promise((resolve) => { stall = setTimeout(() => resolve("waited on a read"), 2000) }),
+  ])
+  clearTimeout(stall)
+  assert.deepEqual(warm, { chunks: 2 * sources, frames: 8 * sources, finished: false },
+    "a pass over read-ahead windows waited on a read")
+  for (const [index, ring] of rings.entries()) {
+    for (const slot of [0, 1]) {
+      const chunk = inspectRing(ring, slot)
+      assert.equal(chunk.startFrame, BigInt(8 + 4 * slot), `source ${index} keeps its chunk order`)
+      assert.equal(chunk.planes[0][0], (8 + 4 * slot) / 32_768)
+    }
+  }
+  pump.stop()
+  while (held.length > 0 || inFlight > 0) {
+    held.splice(0).forEach((release) => release())
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+}
+
+async function truncatedReadAheadStopsOnce() {
+  // The Blob holds 10 of the 16 declared frames. The cold pass writes window [0, 8) and reads
+  // [8, 16) ahead; that read comes back short while no pass awaits it. The next pass must refuse
+  // it once, stop the pump and release the ring, not re-read the short window without end.
+  const declared = 16
+  const bytes = pcm16(Array.from({ length: 10 }, (_, frame) => frame), 1)
+  let reads = 0
+  const shortBlob = {
+    slice(start, end) {
+      reads += 1
+      return {
+        arrayBuffer: () =>
+          new Promise((resolve) => setImmediate(() => resolve(bytes.slice(start, end).buffer))),
+      }
+    },
+  }
+  const shared = createFixtureMsb1Ring({ channels: 1, frameCapacity: 4, capacity: 2 })
+  const errors = []
+  const pump = new CanonicalPcmPump({
+    lease: { async read() { return shortBlob } },
+    windowFrames: 8,
+    onError(error) { errors.push(error) },
+    sources: [{
+      sourceId: "short",
+      identity: `blake3:${"2".repeat(64)}`,
+      channels: 1,
+      bitDepth: 16,
+      frames: declared,
+      ring: new Msb1RingWriter(shared),
+    }],
+  })
+  assert.deepEqual(await pump.pumpUntilFull(), { chunks: 2, frames: 8, finished: false })
+  while (reads < 2) await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(errors.length, 0, "a failed read ahead waits for the pass that needs it")
+  drainRing(shared)
+  let stall
+  const outcome = await Promise.race([
+    pump.pumpUntilFull().then(() => "resolved", (error) => error),
+    new Promise((resolve) => { stall = setTimeout(() => resolve("re-read a short window without end"), 2000) }),
+  ])
+  clearTimeout(stall)
+  assert.ok(outcome instanceof RangeError, `a truncated window ${outcome}`)
+  assert.match(outcome.message, /PCM window is truncated/)
+  assert.equal(errors.length, 1, "the truncation reaches onError exactly once")
+  assert.equal(Atomics.load(new Int32Array(shared, 0, 128 / 4), WRITER_STATE), 0, "the pump released its ring")
+  assert.equal(reads, 2, "the short window was read once")
+}
+
+async function seekDuringReadCommitsNoStaleWindow() {
+  // A window read is in flight when a seek lands. The pre-seek window must never reach the ring:
+  // every chunk is the post-seek generation, at its own frame, with that frame's samples.
+  const frames = 16
+  const samples = Array.from({ length: frames }, (_, frame) => frame * 100)
+  const bytes = pcm16(samples, 1)
+  let openFirstRead
+  const firstRead = new Promise((resolve) => { openFirstRead = resolve })
+  let reads = 0
+  const blob = {
+    slice(start, end) {
+      const read = reads
+      reads += 1
+      return {
+        async arrayBuffer() {
+          if (read === 0) await firstRead
+          return bytes.slice(start, end).buffer
+        },
+      }
+    },
+  }
+  const shared = createFixtureMsb1Ring({ channels: 1, frameCapacity: 4, capacity: 4 })
+  const pump = new CanonicalPcmPump({
+    lease: { async read() { return blob } },
+    windowFrames: 8,
+    sources: [{
+      sourceId: "seek-in-flight",
+      identity: `blake3:${"1".repeat(64)}`,
+      channels: 1,
+      bitDepth: 16,
+      frames,
+      ring: new Msb1RingWriter(shared),
+    }],
+  })
+  const pass = pump.pumpUntilFull()
+  while (reads === 0) await new Promise((resolve) => setImmediate(resolve))
+  await pump.seek(4)
+  openFirstRead()
+  assert.deepEqual(await pass, { chunks: 3, frames: 12, finished: true })
+  for (const [slot, start] of [4, 8, 12].entries()) {
+    const chunk = inspectRing(shared, slot)
+    assert.equal(chunk.generation, 2n, "no chunk carries the pre-seek generation")
+    assert.equal(chunk.startFrame, BigInt(start))
+    assert.equal(chunk.flags, start === 12 ? 1 : 0)
+    assert.deepEqual(
+      Array.from(chunk.planes[0]),
+      samples.slice(start, start + 4).map((sample) => sample / 32_768),
+      "a seek during a window read committed the pre-seek window"
+    )
   }
   pump.stop()
 }
@@ -658,6 +854,9 @@ async function seekReArmsAFinishedLoop() {
 await transformContract()
 await workerPumpContract()
 await unalignedSeekKeepsChunksQuantumShaped()
+await windowReadsOverlapAcrossSources()
+await seekDuringReadCommitsNoStaleWindow()
+await truncatedReadAheadStopsOnce()
 await rejectsWindowSmallerThanRingBeforeEngaging()
 await readFailureHardStops()
 await resumeInsideGestureGate()

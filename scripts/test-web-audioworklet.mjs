@@ -2177,6 +2177,7 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
       return calls.seekAtResult;
     },
     miso_engine_web_v1_source_seek_report_ptr: () => seekReportPointer,
+    miso_engine_web_v1_plan_latency_ptr: () => 66300,
     miso_engine_web_v1_source_seek_report: (...args) => {
       calls.seekReport.push([...args, new TextDecoder().decode(
         new Uint8Array(memory.buffer, pointers[2], args[1]).slice())]);

@@ -77,6 +77,8 @@ await mkdir(stems, { recursive: true });
 for (const name of ["pcm-pump.js", "incremental-blake3.js", "incremental-blake3.provenance.json"]) {
   await copyFile(resolve(stemStore, name), resolve(stems, name));
 }
+// Issue #2111: the hash's WebAssembly SIMD module ships once, as the closure's copy in
+// `dist/assets`; `incremental-blake3.js`'s default `prepareBlake3()` URL resolves to it.
 await copyFile(resolve(stemStore, "..", "hex-lower.js"), resolve(sdkRoot, "dist", "browser", "hex-lower.js"));
 for (const name of ["pcm-pump.d.ts", "incremental-blake3.d.ts"]) {
   await copyFile(resolve(sdkRoot, "src", "browser", "stems", name), resolve(stems, name));

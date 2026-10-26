@@ -16,7 +16,7 @@ import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { hexLower } from "../src/core/hex.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
-import { moduleBytes, sessionDocument } from "./support.mjs";
+import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
 
 /**
  * Every `WebAssembly.compile` in this process, counted.
@@ -297,7 +297,7 @@ describe("eval 7 -- skew", () => {
     assert.equal(asset.provenance.abiVersion, ABI_LAYOUT.abiVersion);
     assert.equal(asset.provenance.abiVersion, 0x0001_0000);
     assert.deepEqual(asset.provenance.stagingSequence, ABI_LAYOUT.stagingSequence);
-    assert.equal(asset.provenance.artifacts.length, 6);
+    assert.equal(asset.provenance.artifacts.length, 7);
   });
 });
 
@@ -324,6 +324,23 @@ describe("eval 8 -- lifecycle", () => {
     } finally {
       engine.dispose();
     }
+  });
+
+  test("#2116: planLatency() reports the plan's latency, 486 samples for a limiter at 48 kHz", async () => {
+    // Red if the read decodes the wrong record word (the tail or the struct size), drops the
+    // limiter's look-ahead, or reports a document's latency instead of the plan's.
+    const engine = await createOfflineEngine(
+      sessionDocument({ effects: { inserts: [effectEntry("limit", "miso.true-peak-limiter")] } }),
+      { asset },
+    );
+    try {
+      const latency = await engine.planLatency();
+      assert.equal(latency.samples, 486);
+      assert.ok(latency.tailSamples === null || latency.tailSamples >= latency.samples, "the tail includes the latency");
+    } finally {
+      engine.dispose();
+    }
+    await assert.rejects(engine.planLatency(), MisoUsageError);
   });
 
   test("boot while live surfaces the typed lifecycle refusal", async () => {
