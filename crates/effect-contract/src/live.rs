@@ -852,6 +852,7 @@ pub fn effect_control_lane(
         bypass,
         mix: settled_mix(bypass),
         mix_position: 0,
+        hold: 0,
         symmetry,
         carried_bypass: CarriedCell::EMPTY,
         carried_link: CarriedCell::EMPTY,
@@ -910,6 +911,11 @@ pub struct EffectControlLane {
     /// Ramp frames rendered since the ramp started, saturated at the ramp's length. The ramp is
     /// settled exactly when it has reached the length.
     mix_position: u32,
+    /// Frames the lane still holds the dry signal before its crossfade runs (issue #2129 D3): set
+    /// by [`Self::begin_hold`] when the lane's bypass ends on the block that resumes a bank whose
+    /// wet path was skipped, consumed by [`Self::advance_bypass_mix`] before the ramp advances, and
+    /// `0` otherwise. A lane with a hold reads dry and counts as ramping.
+    hold: u32,
     /// This instance's live channel-symmetry terms, retained across blocks exactly as `bypass`
     /// is, and for the same reason: the terms describe what the *drained* values did, so
     /// they have to survive the block that drained them.
@@ -1015,6 +1021,7 @@ impl EffectControlLane {
             bypass,
             mix: settled_mix(bypass),
             mix_position: 0,
+            hold: 0,
             symmetry,
             carried_bypass: CarriedCell::EMPTY,
             carried_link: CarriedCell::EMPTY,
@@ -1171,10 +1178,31 @@ impl EffectControlLane {
         self.bypass
     }
 
-    /// Whether a bypass crossfade is running: the mix has not reached its target.
+    /// Whether a bypass crossfade is running: the mix has not reached its target, or the lane
+    /// still holds dry before its crossfade starts ([`Self::begin_hold`]).
     #[must_use]
     pub const fn bypass_ramping(&self) -> bool {
-        self.mix_position < self.mix.length
+        self.mix_position < self.mix.length || self.hold != 0
+    }
+
+    /// Whether this lane is settled at bypass: its target is bypassed and no crossfade runs, so it
+    /// emits exactly the latency-matched dry signal (issue #2129 D1).
+    #[must_use]
+    pub const fn settled_bypassed(&self) -> bool {
+        self.bypass && !self.bypass_ramping()
+    }
+
+    /// Hold the dry signal for `frames` frames before this lane's crossfade runs (issue #2129
+    /// D3): the bank this lane renders in was reset because its wet path was skipped, and its
+    /// output reads `frames` of post-reset history before it is the output a never-skipped lane
+    /// renders. The ramp starts when the hold ends, on the [`IndexedRamp`] law from its first
+    /// frame, so the frame `frames` into the hold takes `k = 1`. Clamped to
+    /// [`INDEXED_RAMP_LENGTH_MAXIMUM`], which keeps every crossfade index exact in `f32`. A lane
+    /// that is bypassed, or a `frames` of `0`, takes no hold. Render thread, at a block boundary.
+    pub fn begin_hold(&mut self, frames: u32) {
+        if !self.bypass {
+            self.hold = frames.min(INDEXED_RAMP_LENGTH_MAXIMUM);
+        }
     }
 
     /// Whether this block reads the dry signal: the instance is bypassed, or its crossfade is
@@ -1196,12 +1224,14 @@ impl EffectControlLane {
     /// [`BankCrossfade`] (#1341 D4).
     #[must_use]
     pub fn bypass_crossfade_lane(&self) -> BankCrossfadeLane {
-        let ramping = self.bypass_ramping();
+        let ramping = self.mix_position < self.mix.length;
         BankCrossfadeLane {
             step: self.mix.step[0],
             start: self.mix.start[0],
-            // Exact: a position is at most the ramp's length, at most `2^22`.
-            position: self.mix_position as f32,
+            // Exact: a position is at most the ramp's length and a hold at most
+            // `INDEXED_RAMP_LENGTH_MAXIMUM`, both at most `2^22`. A held lane's position is
+            // negative, so its first `hold` frames take an index below `1` and read dry (#2129).
+            position: self.mix_position as f32 - self.hold as f32,
             // A settled lane has length `0`, so no frame index (all at least `1`) is below it.
             length: if ramping { self.mix.length as f32 } else { 0.0 },
             settled_dry: self.bypass,
@@ -1225,6 +1255,9 @@ impl EffectControlLane {
         left: &mut [f32],
         right: &mut [f32],
     ) {
+        // The per-node path never resumes from a skipped wet path in this slice (#2129 S1), so
+        // no per-node lane holds.
+        debug_assert_eq!(self.hold, 0, "a per-node lane takes no hold");
         if self.bypass_ramping() {
             shunt.crossfade::<L>(left, right, &self.mix, self.mix_position, self.bypass);
             let frames = left.len().min(right.len());
@@ -1240,14 +1273,18 @@ impl EffectControlLane {
     /// [`Self::apply_bypass`] calls it; a bank mixes through [`BypassShunt::crossfade_bank`] and
     /// then calls it once per block, so each lane's state stays in step with the timeline.
     pub fn advance_bypass_mix(&mut self, frames: u32) {
-        if self.mix_position >= self.mix.length {
+        if !self.bypass_ramping() {
             return;
         }
+        // A hold is spent before the ramp moves (#2129 D3): the frames past its end are the
+        // ramp's first.
+        let held = self.hold.min(frames);
+        self.hold -= held;
         self.mix_position = self
             .mix_position
-            .saturating_add(frames)
+            .saturating_add(frames - held)
             .min(self.mix.length);
-        if self.mix_position >= self.mix.length && !self.bypass {
+        if !self.bypass_ramping() && !self.bypass {
             self.symmetry
                 .admit(&EffectControlRecord::Bypass(BypassSwitch::step(false)));
         }
@@ -1307,6 +1344,7 @@ impl EffectControlLane {
         self.bypass = predecessor.bypass;
         self.mix = predecessor.mix;
         self.mix_position = predecessor.mix_position;
+        self.hold = predecessor.hold;
         self.symmetry = predecessor.symmetry;
         if predecessor.link.is_some() {
             self.link = predecessor.link;
@@ -1450,6 +1488,7 @@ impl EffectControlLane {
             bypass,
             mix,
             mix_position,
+            hold,
             symmetry,
             carried_bypass,
             carried_link,
@@ -1501,6 +1540,9 @@ impl EffectControlLane {
                     ramp_samples.min(INDEXED_RAMP_LENGTH_MAXIMUM),
                 );
                 *mix_position = 0;
+                // A switch during a hold starts from the mix the hold kept, the dry `0`, and ends
+                // the hold: the new ramp is the lane's whole law from here (#2129 D3).
+                *hold = 0;
                 *bypass = value;
                 // A ramping lane counts as bypassed until it settles at wet (#1341 D6).
                 symmetry.admit(&EffectControlRecord::Bypass(BypassSwitch::step(
@@ -1753,6 +1795,9 @@ struct ObservationTap {
     publisher: ObservationPublisher,
     /// The declared fold, copied once at bind so the render path never walks the descriptor.
     fold: ObservationFold,
+    /// The declared bypass value ([`ObservationDescriptor::bypass_observation`], issue #2129 D5),
+    /// copied once at bind: what the tap folds for a block its lane emitted settled-bypassed.
+    bypass: Option<f32>,
     armed: bool,
     /// Armed at preparation ([`ObservationLane::arm_prepared`]) and not yet accumulated: the
     /// window's first sample is the first sample of the first block that folds into it, which is
@@ -1804,6 +1849,10 @@ pub struct ObservationLane {
     /// a tap *does*; this is only a redundant count of it, and `set_arm` (behind `arm` and
     /// `arm_prepared`) and `disarm_all` are the only two writers of either.
     armed_count: u32,
+    /// How many armed taps of this lane declare no bypass value (issue #2129 D5): an armed tap that
+    /// needs its wet path computed. Maintained beside [`Self::armed_count`] by the same writers,
+    /// so [`any_armed_computed`](Self::any_armed_computed) is one load.
+    armed_computed: u32,
     /// Whether a tap of this lane may hold a prepared arm its slot has not published (#1585 R2),
     /// so [`publish_prepared_arms`](Self::publish_prepared_arms) is one load on every block after
     /// the first. Set by `arm_prepared`, cleared by that publication and by `disarm_all`.
@@ -1830,6 +1879,7 @@ impl ObservationLane {
             .map(|(descriptor, publisher)| ObservationTap {
                 publisher,
                 fold: descriptor.fold,
+                bypass: descriptor.bypass_observation(),
                 armed: false,
                 start_pending: false,
                 arm_unpublished: false,
@@ -1847,8 +1897,9 @@ impl ObservationLane {
         Some(Self {
             taps: taps.into_boxed_slice(),
             default_window_blocks,
-            // Every tap is built unarmed, so the count starts where they do.
+            // Every tap is built unarmed, so the counts start where they do.
             armed_count: 0,
+            armed_computed: 0,
             arms_unpublished: false,
         })
     }
@@ -1936,9 +1987,16 @@ impl ObservationLane {
             .and_then(|index| self.taps.get_mut(index))?;
         // Maintained across the transition, not recomputed: a re-arm of an already-armed tap is
         // idempotent here exactly as it is for `armed` itself.
+        let computed = u32::from(tap.bypass.is_none());
         match (tap.armed, armed) {
-            (false, true) => self.armed_count = self.armed_count.saturating_add(1),
-            (true, false) => self.armed_count = self.armed_count.saturating_sub(1),
+            (false, true) => {
+                self.armed_count = self.armed_count.saturating_add(1);
+                self.armed_computed = self.armed_computed.saturating_add(computed);
+            }
+            (true, false) => {
+                self.armed_count = self.armed_count.saturating_sub(1);
+                self.armed_computed = self.armed_computed.saturating_sub(computed);
+            }
             _ => {}
         }
         tap.armed = armed;
@@ -1998,6 +2056,7 @@ impl ObservationLane {
     /// `rack::BankSlot::disarm_observations`.
     pub fn disarm_all(&mut self) {
         self.armed_count = 0;
+        self.armed_computed = 0;
         self.arms_unpublished = false;
         for tap in self.taps.iter_mut() {
             tap.armed = false;
@@ -2021,6 +2080,44 @@ impl ObservationLane {
     #[must_use]
     pub const fn any_armed(&self) -> bool {
         self.armed_count != 0
+    }
+
+    /// Whether an armed tap of this lane declares no bypass value, so its reading needs the wet
+    /// path to run (issue #2129 D5). One load, from the count the arm writers maintain.
+    #[must_use]
+    pub const fn any_armed_computed(&self) -> bool {
+        self.armed_computed != 0
+    }
+
+    /// Tap `tap_index`'s declared bypass value, or `None` for a tap that declares none or an index
+    /// this lane has no tap for (issue #2129 D5).
+    #[must_use]
+    pub fn bypass_value(&self, tap_index: usize) -> Option<f32> {
+        self.taps.get(tap_index).and_then(|tap| tap.bypass)
+    }
+
+    /// Fold every armed tap's declared bypass value into its window, for a block the lane emitted
+    /// settled-bypassed and no wet path rendered (issue #2129 D5): each tap folds it exactly as
+    /// [`Self::accumulate`] folds a computed reading, so window peaks, cadence and the window's
+    /// samples are unchanged in shape. An armed tap that declares no value folds nothing; a caller
+    /// skips a block only when no such tap is armed ([`Self::any_armed_computed`]).
+    pub fn accumulate_bypass(&mut self, first_sample: u64, frames: u64) {
+        if !self.any_armed() {
+            return;
+        }
+        for tap in 0..self.taps.len() {
+            if let Some(value) = self.taps[tap].bypass {
+                self.accumulate(
+                    tap,
+                    ObservationSample {
+                        left: value,
+                        right: value,
+                    },
+                    first_sample,
+                    frames,
+                );
+            }
+        }
     }
 
     /// Whether [`Self::swap_state`] would exchange this lane's taps with `other`'s: both declare
@@ -2050,6 +2147,7 @@ impl ObservationLane {
         }
         core::mem::swap(&mut self.taps, &mut other.taps);
         core::mem::swap(&mut self.armed_count, &mut other.armed_count);
+        core::mem::swap(&mut self.armed_computed, &mut other.armed_computed);
         core::mem::swap(&mut self.arms_unpublished, &mut other.arms_unpublished);
         true
     }
@@ -2399,6 +2497,41 @@ impl BypassShunt {
         };
     }
 
+    /// Replace this block with the latency-matched dry block in place, for a block no wet path
+    /// renders (issue #2129 D1): the latency line half of [`capture`](Self::capture) run on the
+    /// planes themselves, so each plane leaves holding the words `capture` followed by
+    /// [`apply`](Self::apply) leaves there, and the line and its cursor end as `capture` leaves
+    /// them. Every word moves by a copy, so `-0.0` survives. The dry staging is not written: it is
+    /// per-block scratch, and a block no wet path renders has no mix to read it. A shunt without a
+    /// line writes nothing, because the planes already hold the dry words.
+    pub fn passthrough(&mut self, left: &mut [f32], right: &mut [f32]) {
+        if self.line_left.is_empty() {
+            return;
+        }
+        let frames = left.len().min(self.dry_left.len()).min(right.len());
+        let length = self.line_left.len();
+        let mut offset = 0;
+        while offset < frames {
+            let take = core::cmp::min(length, frames - offset);
+            let cursor = self.cursor;
+            let mut left_cursor = cursor;
+            pdc_delay_block(
+                &mut self.line_left,
+                &mut left_cursor,
+                &mut left[offset..offset + take],
+            );
+            let mut right_cursor = cursor;
+            pdc_delay_block(
+                &mut self.line_right,
+                &mut right_cursor,
+                &mut right[offset..offset + take],
+            );
+            debug_assert_eq!(left_cursor, right_cursor);
+            self.cursor = left_cursor;
+            offset += take;
+        }
+    }
+
     /// Copy lane `predecessor_lane` of `predecessor`'s interleaved latency line into lane `lane`
     /// of this one, at a plan swap (#1280 D5). Both shunts are the lines of an AoSoA bank, of
     /// `predecessor_lanes` and `lanes` lanes, and one lane's samples are every `lanes`-th word of
@@ -2651,6 +2784,9 @@ impl BypassShunt {
     /// * otherwise the lane is settled: `settled_dry` takes the dry word and a settled-wet lane
     ///   keeps the wet word. Both are a bit select, so `-0.0`, NaN payloads and subnormals pass
     ///   unchanged, and a lane's wet word never reaches the arithmetic of a settled neighbour.
+    /// * `k < 1`: the lane holds dry before its ramp starts (issue #2129 D3; a held lane's
+    ///   position is minus its hold), a bit select of the dry word, whatever the other two rules
+    ///   say. Every lane without a hold has `k >= 1`, so the rule never selects for it.
     ///
     /// Every lane's bits equal the per-node [`Self::crossfade`] of the same lane at any width:
     /// `m(k)` is a pure function of the lane's own `k`, and the mix is the same operation order.
@@ -2697,14 +2833,19 @@ impl BypassShunt {
         // index past a lane's length only has to compare at or above it.
         let mut index = L::load(&lanes.position[..L::WIDTH]).add(one);
         for (((left, right), dry_left), dry_right) in planes {
+            // A held lane's frames before its ramp take an index below `1` and read dry (#2129
+            // D3); every other lane's index is at least `1`, so the select passes it through.
+            let held = index.lt(one);
             let ramping = index.lt(length);
             let mix = index.fma(step, start);
             let (dry, wet) = (L::load(dry_left), L::load(left));
             let ramped = dry.add(wet.sub(dry).mul(mix));
-            L::select(ramping, ramped, L::select(settled_dry, dry, wet)).store(left);
+            let settled = L::select(settled_dry, dry, wet);
+            L::select(held, dry, L::select(ramping, ramped, settled)).store(left);
             let (dry, wet) = (L::load(dry_right), L::load(right));
             let ramped = dry.add(wet.sub(dry).mul(mix));
-            L::select(ramping, ramped, L::select(settled_dry, dry, wet)).store(right);
+            let settled = L::select(settled_dry, dry, wet);
+            L::select(held, dry, L::select(ramping, ramped, settled)).store(right);
             index = index.add(one);
         }
     }
@@ -2773,7 +2914,9 @@ impl BankCrossfade {
         self.position[lane] = state.position;
         self.length[lane] = state.length;
         self.settled_dry[lane] = if state.settled_dry { 1.0 } else { 0.0 };
-        self.ramping = self.length.iter().any(|length| *length > 0.0);
+        // A held lane (negative position, #2129 D3) needs the per-frame body as a ramping one does.
+        self.ramping = self.length.iter().any(|length| *length > 0.0)
+            || self.position.iter().any(|position| *position < 0.0);
     }
 }
 

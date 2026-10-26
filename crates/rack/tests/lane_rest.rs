@@ -2,7 +2,8 @@
 //!
 //! `LiveControlEffectBankStage::lanes_at_rest` is the effect's own mask minus every lane with work
 //! of its own in the block: a staged span, a staged prepared target, a lane that reads the dry
-//! shunt (bypassed or crossfading) and an armed observation tap. Its `advance_clocks` forwards the
+//! shunt while crossfading, or settled bypassed with a word that is not `+0.0` in its run of the
+//! latency line (issue #2129 D6), and an armed observation tap. Its `advance_clocks` forwards the
 //! effect's clocks and feeds the dry shunt's latency line the skipped `+0.0` block.
 //!
 //! The effect is a stand-in with an honest predicate: per lane and channel a one-pole state word
@@ -497,9 +498,9 @@ const fn observe(armed: bool) -> EffectControlRecord {
 
 /// Gates 1 and 2 for the live-control effect bank stage (issue #1781).
 ///
-/// Scripted, each term on its own: a staged span, a staged prepared target, a bypass (crossfading
-/// and settled) and an armed tap each clear exactly their lane's bit for exactly the blocks they
-/// hold; a block of signal whose last frame is silent leaves the effect at rest with signal in
+/// Scripted, each term on its own: a staged span, a staged prepared target, a bypass crossfade and
+/// an armed tap each clear exactly their lane's bit for exactly the blocks they hold, and a
+/// settled bypass on silence clears none (issue #2129 D6); a block of signal whose last frame is silent leaves the effect at rest with signal in
 /// the latency line, the next silent block is skipped, and a step bypass after it renders the
 /// line's words exactly as the twin that rendered the skipped block. Then a random schedule of
 /// signal, silence, spans, targets, bypass switches and tap subscriptions on every lane. Every
@@ -533,8 +534,20 @@ fn the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly() {
     assert_eq!(pair.step(&quiet), ALL, "the tap was disarmed");
     // A bypass crossfade over 40 frames, then the settled bypass, then back to wet.
     pair.push(1, bypass(true, 40));
-    for _ in 0..5 {
-        assert_eq!(pair.step(&quiet), ALL & !(1 << 1), "a bypassed lane");
+    for _ in 0..3 {
+        assert_eq!(pair.step(&quiet), ALL & !(1 << 1), "a crossfading lane");
+    }
+    // Issue #2129 D6: settled, its run of the latency line all `+0.0`, the bypassed lane rests on
+    // silence and the bank skips. Red on the #1781 predicate, which kept every lane that reads
+    // dry rendering.
+    for _ in 0..2 {
+        let skips = pair.skips;
+        assert_eq!(pair.step(&quiet), ALL, "a settled-bypassed lane on silence");
+        assert_eq!(
+            pair.skips,
+            skips + 1,
+            "the bank with a bypassed lane skipped"
+        );
     }
     pair.push(1, bypass(false, 20));
     assert_eq!(

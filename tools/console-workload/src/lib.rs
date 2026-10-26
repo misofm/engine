@@ -457,6 +457,13 @@ pub enum Workload {
     ///
     /// Not in [`WORKLOADS`]: see [`PACKING_WORKLOADS`].
     SixtyFourTrackConsoleToggle,
+    /// The standing strip at sixteen tracks with every console slot bypassed on every track
+    /// (issue #2129 gate 6): [`Self::SixteenTrackStrip`]'s two full eight-lane banks per slot,
+    /// each of whose lanes is settled bypassed, so every bank skips its wet path and renders the
+    /// shunt's latency-matched dry words. Read against [`Self::SixteenTrackStrip`].
+    ///
+    /// Not in [`WORKLOADS`]: see [`BYPASS_WORKLOADS`].
+    SixteenTrackStripBypassed,
     /// One active lane per bank (issue #1783): the standing console with one track per bank fed
     /// the tone and every other track exact zeros ([`InputSignal::OneTrackPerBank`]).
     ///
@@ -699,6 +706,11 @@ pub const PACKING_WORKLOADS: [Workload; 2] = [
     Workload::SixtyFourTrackConsoleOnePerBank,
 ];
 
+/// The bypass-skip row the native bench emits after [`PACKING_WORKLOADS`] (issue #2129 gate 6):
+/// the sixteen-track strip with every console slot bypassed, read against
+/// [`Workload::SixteenTrackStrip`]. Descriptive; it states no floor.
+pub const BYPASS_WORKLOADS: [Workload; 1] = [Workload::SixteenTrackStripBypassed];
+
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
 /// [`DRIVER_FED_WORKLOADS`], then [`LIVE_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then
 /// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`].
@@ -817,6 +829,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleSparse => "sixty_four_track_console_sparse",
             Self::SixtyFourTrackConsoleToggle => "sixty_four_track_console_toggle",
             Self::SixtyFourTrackConsoleOnePerBank => "sixty_four_track_console_one_per_bank",
+            Self::SixteenTrackStripBypassed => "sixteen_track_strip_bypassed",
         }
     }
     /// How many console tracks this workload renders.
@@ -825,7 +838,7 @@ impl Workload {
             Self::NineTrackBaseline | Self::NineTrackRaggedStrip => 9,
             Self::TenTrackRaggedStrip => 10,
             Self::ThirteenTrackRaggedStrip => 13,
-            Self::SixteenTrackStrip => 16,
+            Self::SixteenTrackStrip | Self::SixteenTrackStripBypassed => 16,
             Self::OneTwentyEightTrackStretch => 128,
             _ => 64,
         }
@@ -1175,6 +1188,12 @@ fn console_model(workload: Workload) -> SessionModel {
         synthesise_tracks(&mut model, workload.tracks() as usize);
     }
     apply_strip(&mut model, workload.strip());
+    if workload == Workload::SixteenTrackStripBypassed {
+        // Issue #2129 gate 6: every console slot bypassed on every track.
+        for entry in model.tracks.iter_mut().flat_map(|track| &mut track.console) {
+            entry.bypass = true;
+        }
+    }
     assert_eq!(
         model.tracks.len(),
         workload.tracks() as usize,

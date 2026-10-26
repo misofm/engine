@@ -273,6 +273,19 @@ const fn tail_samples() -> u64 {
     (last - kernel::DRY_DELAY) as u64
 }
 
+/// The frames a lane renders from a reset before its output is the output a never-reset lane
+/// renders on the same input (issue #2129 D3): `latency + T = 31 + 29 = 60`.
+///
+/// The wet output at `n` reads `e[n-1] .. e[n-30]`, and each `e[m]` reads `X[m-1] .. X[m-30]`
+/// ([`tail_samples`]' layout), so the output reads input back to `n - 60`; the odd phase and the
+/// dry path read `x[n-31]`. A lane reset at `s` holds `+0.0` for every input before `s`, so from
+/// `s + 60` its output reads only post-reset input. The exact-rest bound ([`rest_samples`], 62) is
+/// longer because it covers every stored row of each ring, its mirrors included, and an output
+/// sample reads only the 30 ages per ring. A ramp holds no input-driven state.
+const fn warmup_samples(declared_latency: u32) -> u32 {
+    declared_latency + tail_samples() as u32
+}
+
 /// The exact-rest bound `R` beyond the latency, in samples (#1376 D2), from the ring layout.
 ///
 /// The histories are FIR delay lines of [`LIVE_ROWS`] live rows (each mirrored), and the ramps
@@ -1647,6 +1660,11 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
 }
 
 impl PreparedNativeEffect for PreparedSoftClip {
+    /// Issue #2129 D3: the latency plus the tail, [`warmup_samples`].
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        warmup_samples(declared_latency)
+    }
+
     fn retained_bytes(&self) -> u64 {
         self.inner.heap_bytes()
     }
@@ -1711,6 +1729,11 @@ impl PreparedNativeEffect for PreparedSoftClip {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
+    /// Issue #2129 D3: the latency plus the tail, [`warmup_samples`].
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        warmup_samples(declared_latency)
+    }
+
     fn retained_bytes(&self) -> u64 {
         self.inner.heap_bytes()
     }

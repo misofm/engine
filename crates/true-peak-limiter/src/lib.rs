@@ -40,6 +40,17 @@
 //! lane's failure (#1091, decision 12). No second copy of the ramp, the payload codec or the
 //! parameter validator (#90 F9): they come from `effect-runtime`.
 //!
+//! # The warm-up after a skipped wet path (issue #2129 D3)
+//!
+//! A bank whose every lane is bypassed skips its wet path, and the block that runs it again resets
+//! it (`DiscontinuityKeepParameters`). A lane whose bypass ends there holds dry for `T + N` frames
+//! before its crossfade: for `T` frames the main-delay ring still emits the reset's zeros, and
+//! after them the box ramp still averages `Wb <= R = N + 1` gains, some taken before the reset
+//! held signal, so `g[n] <= r[n-N]` does not hold yet. From `T + N` every box term is a minimum
+//! over post-reset required gains, the ring holds only post-reset input, and the ceiling bound of
+//! the gain law holds from the first crossfaded frame. `T` alone would leave `N` frames above the
+//! ceiling on overs.
+//!
 //! # The link glide (issue #1370 D2-D5)
 //!
 //! [`PreparedNativeEffect::retarget_link`] moves one lane's peak link between `DualMono` and
@@ -4036,6 +4047,13 @@ struct LimiterCore<L: Lane> {
 }
 
 impl<L: Lane> LimiterCore<L> {
+    /// `T + N`: the frames a lane renders from a reset before its gain is the gain a never-reset
+    /// lane applies (issue #2129 D3; the module's warm-up note).
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        let n = u32::try_from(self.shape.n).unwrap_or(u32::MAX);
+        declared_latency.saturating_add(n)
+    }
+
     /// Allocates one core of `L::WIDTH` tracks. The only allocating function in the render crate.
     fn new(
         metadata: PreparedEffectMetadata,
@@ -5471,6 +5489,11 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
         self.core.heap_bytes()
     }
 
+    /// Issue #2129 D3: the lookahead ring and then the box ramp (see the module's warm-up note).
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        self.core.warmup_samples(declared_latency)
+    }
+
     fn channel_symmetry(&self) -> bool {
         self.core.designed_channel_symmetry(0)
     }
@@ -5542,6 +5565,11 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     fn retained_bytes(&self) -> u64 {
         self.core.heap_bytes()
+    }
+
+    /// Issue #2129 D3: the lookahead ring and then the box ramp (see the module's warm-up note).
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        self.core.warmup_samples(declared_latency)
     }
 
     fn lane_channel_symmetry(&self, lane: usize) -> bool {
