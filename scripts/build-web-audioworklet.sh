@@ -21,7 +21,7 @@ set -euo pipefail
 #
 # Modes (one at most):
 #   (none)         the delivery closure: module, host and worklet JavaScript, declaration,
-#                  parameter metadata and ABI layout.
+#                  parameter metadata, ABI layout and the stem-identity BLAKE3 module (#2111).
 #   --module-only  the module alone (issue #1009), built by exactly the cargo line below, for a gate
 #                  that reads only the module (`run-wasm-gates.sh`'s V8 spill gate, the identity
 #                  job's twin build). The build has one home, here.
@@ -176,6 +176,16 @@ remap+=" --remap-path-prefix=$sysroot=/rustc-sysroot"
   RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$simd_target" \
     RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
     cargo build --locked --release -Zbuild-std=std,panic_abort ${features[@]+"${features[@]}"} --target wasm32-unknown-unknown -p host-web
+  # Issue #2111: the stem identities' WebAssembly SIMD BLAKE3, `hosts/blake3-web`, ships in the
+  # delivery closure as `miso-engine-v1-blake3.simd128.wasm`. A browser Wasm artifact like the one
+  # above, so the same toolchain, std rebuild and flags (`+simd128` is what lets the `blake3`
+  # crate's `wasm32_simd` kernels inline); its own cargo line, so no feature of its dependencies
+  # unifies into the worklet module. --module-only and the probe build only the worklet module.
+  if [[ $mode == delivery || $mode == pinned ]]; then
+    RUSTUP_TOOLCHAIN="$channel" CARGO_TARGET_DIR="$simd_target" \
+      RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
+      cargo build --locked --release -Zbuild-std=std,panic_abort --target wasm32-unknown-unknown -p blake3-web
+  fi
 )
 
 if [[ $mode == probe ]]; then
@@ -211,6 +221,9 @@ if [[ $mode == module ]]; then
 fi
 
 cp "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
+python3 -B "$repo_root/scripts/strip-wasm-names.py" strip \
+  "$simd_target/wasm32-unknown-unknown/release/blake3_web.wasm" \
+  "$output_dir/miso-engine-v1-blake3.simd128.wasm" >&2
 cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" "$output_dir/"
 cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" "$output_dir/"
 cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" "$output_dir/"

@@ -34,6 +34,7 @@ members = [
     "crates/dsp-reference",
     "crates/conformance",
     "hosts/host-web",
+    "hosts/blake3-web",
     "tools/bench-support",
     "tools/bench",
     "tools/console-workload",
@@ -96,6 +97,9 @@ wasm-gate-guest = { path = "tools/wasm-gate-guest", version = "0.1.0" }
 sha2 = { version = "=0.11.0", default-features = false }
 wide = { version = "=1.6.1", default-features = false }
 microfft = { version = "=0.6.0", default-features = false, features = ["size-2048"] }
+# Issue #2111: the browser stem-identity hash (`hosts/blake3-web`). `pure` keeps native builds C-free;
+# `wasm32_simd` turns on the crate's `v128` kernels on wasm32 (the builder adds `+simd128`).
+blake3 = { version = "=1.8.7", default-features = false, features = ["pure", "wasm32_simd"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

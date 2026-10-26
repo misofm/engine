@@ -52,6 +52,9 @@ const ARTIFACT_SET = [
   "miso-engine-v1-audio-worklet-host.js",
   "miso-engine-v1-audio-worklet.js",
   "miso-engine-v1-audio-worklet.simd128.wasm",
+  // Issue #2111: the stem identities' WebAssembly SIMD BLAKE3, staged again beside
+  // `browser/stems/incremental-blake3.js`, which loads it.
+  "miso-engine-v1-blake3.simd128.wasm",
   "miso-engine-v1-parameter-metadata.json",
 ];
 
