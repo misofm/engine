@@ -427,12 +427,12 @@ fn f32_at_or_above(x: f64) -> f32 {
 ///   `S_b = ((1 + 6u) W + 7 U) / (1 - 7u)`, because each loop element is non-expansive in the
 ///   sample maximum up to its counted rounding (the damping coefficient is at most `1/2`).
 /// * **Tail.** From `SETTLE_SAMPLES` after the input stops, the settled loop's majorant
-///   ([`Majorant`]) contracts by `r` per sample from `c = S_b(P)`; the output is at most the tap,
+///   (`Majorant`) contracts by `r` per sample from `c = S_b(P)`; the output is at most the tap,
 ///   so `T = SETTLE_SAMPLES + D + n` with `r^n c_rel < eps / 2`, and `P*` is where the underflow
 ///   part reaches `eps / 2`.
 /// * **Rest.** Every ring write is `+0.0` once its majorant is below `FLUSH_EPS`; `D` samples
 ///   later every tap is `+0.0`, the damping state then rests in the follower walk
-///   [`effect_runtime::tail::rate_follower_rest_samples`] at `c_eff <= 2 g_lo - 3u`, and the
+///   `effect_runtime::tail::rate_follower_rest_samples` at `c_eff <= 2 g_lo - 3u`, and the
 ///   ring is all `+0.0` one ring length after the first zero write. The rest state is the reset
 ///   state.
 ///
