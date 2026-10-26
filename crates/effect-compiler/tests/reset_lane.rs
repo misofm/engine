@@ -326,11 +326,14 @@ fn blocks(
     let mut sample = 0_u64;
     let mut out = Vec::new();
     for (index, &phase) in phases.iter().enumerate() {
+        let prime = primed == Some(index);
+        // The primed block is shorter than the shortest ramp a span starts (the limiter's 64
+        // updates), so a ramp it starts is still in flight at the call.
         let frames = match phase {
+            _ if prime => 32,
             Phase::Dynamic => FRAMES[index % FRAMES.len()],
             Phase::Quiet | Phase::Silent => QUANTUM,
         };
-        let prime = primed == Some(index);
         let size = frames as usize * lanes;
         let mut left = vec![0.0_f32; size];
         let mut right = vec![0.0_f32; size];
@@ -354,8 +357,9 @@ fn blocks(
             }
         }
         let controlled = phase == Phase::Dynamic || prime;
-        // Spans: up to two per lane, and on the primed block one lands on its last frame on every
-        // lane, so a ramp is in flight across the call.
+        // Spans: up to two per lane. On the primed block every lane takes two, on its first frame
+        // (the limiter admits a span only there) and on its last, so a ramp is in flight across
+        // the call.
         let mut spans = Vec::new();
         let mut offsets = vec![0_u32];
         let mut targets = vec![Vec::new(); lanes];
@@ -367,6 +371,7 @@ fn blocks(
                     .map(|_| sample + rng.below(frames as usize) as u64)
                     .collect();
                 if prime {
+                    at[0] = sample;
                     at[count - 1] = sample + u64::from(frames) - 1;
                 }
                 at.sort_unstable();
