@@ -2441,6 +2441,7 @@ dependencies = [
  "math",
  "multiband-compressor",
  "parametric-eq",
+ "reverb",
  "sha2 0.11.0",
  "soft-clip",
  "transient-shaper",

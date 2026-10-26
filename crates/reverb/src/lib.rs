@@ -43,6 +43,7 @@ use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_vali
 use effect_runtime::ramp::LinearRamp;
 use lane::Lane;
 
+pub mod corpus;
 mod kernel;
 mod state;
 mod tail;

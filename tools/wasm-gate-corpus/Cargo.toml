@@ -28,6 +28,7 @@ math = { workspace = true, features = ["lane"] }
 # so the wasm leg replays the gate rather than a copy of it.
 multiband-compressor.workspace = true
 parametric-eq.workspace = true
+reverb.workspace = true
 soft-clip.workspace = true
 transient-shaper.workspace = true
 true-peak-limiter.workspace = true

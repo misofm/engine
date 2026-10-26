@@ -686,7 +686,7 @@ jobs:
       - name: Workspace debug tests (excluding DSP crates, audit, and wasm evidence tools)
         run: |
           cargo test --locked --workspace --all-targets \
-            --exclude lane --exclude math --exclude effect-runtime --exclude delay \
+            --exclude lane --exclude math --exclude effect-runtime --exclude delay --exclude reverb \
             --exclude compressor --exclude multiband-compressor --exclude gate-expander --exclude de-esser --exclude dynamic-eq \
             --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
             --exclude parametric-eq --exclude builtins --exclude dsp-reference \
@@ -699,7 +699,7 @@ jobs:
       - name: Workspace doctests (same packages and features as the debug tests)
         run: |
           cargo test --locked --workspace --doc \
-            --exclude lane --exclude math --exclude effect-runtime --exclude delay \
+            --exclude lane --exclude math --exclude effect-runtime --exclude delay --exclude reverb \
             --exclude compressor --exclude multiband-compressor --exclude gate-expander --exclude de-esser --exclude dynamic-eq \
             --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
             --exclude parametric-eq --exclude builtins --exclude dsp-reference \
@@ -732,7 +732,7 @@ jobs:
       - name: DSP crates debug tests (lane feature unification pinned explicitly)
         run: |
           cargo test --locked --all-targets \
-            -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
+            -p lane -p math -p effect-runtime -p delay -p reverb -p compressor -p multiband-compressor \
             -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p de-esser -p dynamic-eq \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \
             --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
@@ -740,7 +740,7 @@ jobs:
       - name: DSP crates doctests (same packages and features as the debug tests)
         run: |
           cargo test --locked --doc \
-            -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
+            -p lane -p math -p effect-runtime -p delay -p reverb -p compressor -p multiband-compressor \
             -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p de-esser -p dynamic-eq \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \
             --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
@@ -778,9 +778,14 @@ jobs:
         run: cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract
       # #1375: the compressor's and the limiter's tail and exact-rest gates at release scale (every
       # launch rate and both peak cases; debug runs 48 kHz and one peak case only). #1374: the
-      # delay's, whose real-kernel soundness gate (about 200M frames) runs in release only.
-      - name: Compressor, limiter and delay tail and exact-rest gates (tail_contract) in release
-        run: cargo test --locked --release -p compressor -p true-peak-limiter -p gate-expander -p transient-shaper -p soft-clip -p delay --test tail_contract
+      # delay's, whose real-kernel soundness gate (about 200M frames) runs in release only. #2114:
+      # the reverb's, whose real-kernel gate (about 110M frames) runs in release only.
+      - name: Compressor, limiter, delay and reverb tail and exact-rest gates (tail_contract) in release
+        run: cargo test --locked --release -p compressor -p true-peak-limiter -p gate-expander -p transient-shaper -p soft-clip -p delay -p reverb --test tail_contract
+      # #2114 test 1: the reverb's RT60 per octave band against the design prediction (about 30M
+      # frames and their band filters), ignored in debug.
+      - name: Reverb RT60 per band (rt60) in release
+        run: cargo test --locked --release -p reverb --test rt60
       # #1379: the graph tail composition's real-kernel gates (C1, C2, C6 at every launch rate,
       # C11 (b)), ignored in debug.
       - name: Graph tail composition gates (host-core tail_composition) in release
