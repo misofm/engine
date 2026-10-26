@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.6.0
+npm install @misofm/engine@0.7.0
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -774,7 +774,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.6.0 release record](https://github.com/misofm/engine/issues/2121) contains the accepted artifact
+[0.7.0 release record](https://github.com/misofm/engine/issues/2152) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -800,6 +800,24 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.6.0
+
+0.7.0 adds to the 0.6.0 API and removes nothing. One behaviour changes: an un-bypass.
+
+- New: `subscribeLoudness()` on both engines. It reads the master's BS.1770-5 momentary,
+  short-term and integrated loudness, the loudness range and the true peak (see "Master
+  loudness" above). It refuses an engine whose `CAPABILITIES_GET` lacks capability flag bit 17
+  (`sdk.asset.capability`).
+- New: the engine reverb `miso.reverb`, a 32-line feedback delay network. It is an insert, not a
+  console slot. Use it as an aux return: put it on a submix at `mix` 1, send each track to it
+  from its `post_fader` tap, and route the submix to the output (see "Aux reverb return" above).
+- Changed: an effect that you un-bypass now starts from rest. It holds the dry signal for its
+  warm-up (its declared latency), then fades in. Before 0.7.0 a bypassed effect kept running and
+  faded back in with the state it had. A bypassed effect now does no wet-path work, so a console
+  with bypassed slots uses less CPU.
+- Changed: console banks pack their active strips into fewer banks, and a silent strip passes
+  its silence downstream without processing. Neither change moves a rendered sample.
 
 ## Upgrading from 0.5.0
 
