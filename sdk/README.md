@@ -697,7 +697,8 @@ I, LRA, the maxima and TP from the next hop boundary (`integratingSince`); M and
 `hopsDropped` counts the hops the engine lost over the session's whole life: subtract two readings
 to see a loss between them. The meter is one per session: a second `subscribeLoudness()` while a
 handle is open is refused with `MisoEngineError` (`diagnosticCode` `loudness.active`). After
-`close()` the handle keeps its last reading and refuses `pump()` and `reset()`.
+`close()` the handle keeps its last reading and refuses `pump()` and `reset()`. A timed read that
+fails goes to the request's `onError`; the readings stop advancing until a read lands.
 
 Use the recorded sample spans to compare observations with the first block after a transaction. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling

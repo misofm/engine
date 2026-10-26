@@ -54,6 +54,12 @@ export interface LoudnessSubscriptionNotification {
 export interface LoudnessSubscriptionRequest {
   /** Called, off render, with each delivered reading that differs from the previous one. */
   readonly onUpdate?: (notification: LoudnessSubscriptionNotification) => void;
+  /**
+   * Called with the error of a timed read that failed (a deadline, a closed port, a refusal). The
+   * handle stays open and the next tick reads again; until a read lands, `readLatest()` keeps the
+   * last reading, so its `observedSample` stops advancing. `pump()` rejects with its own failures.
+   */
+  readonly onError?: (error: unknown) => void;
 }
 
 /**
@@ -78,7 +84,12 @@ export interface LoudnessSubscription {
    * and short-term windows keep running. Rejects with `MisoUsageError` after `close()`.
    */
   reset(): Promise<void>;
-  /** Stop the meter. Idempotent: a second call returns the first call's promise. */
+  /**
+   * Stop the meter. From the call on, the handle sends no read: the timer stops, and a `pump()` or
+   * `reset()` not yet sent rejects. The stop goes after the one frame already in flight at most.
+   * Idempotent: a second call returns the first call's promise. If the stop fails, the promise
+   * rejects and the handle is open again, its timer running, so `close()` may be called again.
+   */
   close(): Promise<void>;
 }
 
@@ -142,49 +153,66 @@ function capabilityRefusal(): MisoEngineError {
   });
 }
 
+type HandleState = "open" | "closing" | "closed";
+
 class LoudnessHandle implements LoudnessSubscription {
   readonly #owner: LoudnessOwner;
   readonly #callback: ((notification: LoudnessSubscriptionNotification) => void) | undefined;
+  readonly #onError: ((error: unknown) => void) | undefined;
   #latest: LoudnessReading | undefined;
-  #closed = false;
+  #state: HandleState = "open";
   #closing: Promise<void> | undefined;
   #timer: unknown;
+  /** Whether a timed read is in flight: a tick while one is skips, so a stuck host holds one. */
+  #timedRead = false;
 
-  constructor(owner: LoudnessOwner, callback: ((notification: LoudnessSubscriptionNotification) => void) | undefined) {
+  constructor(
+    owner: LoudnessOwner,
+    callback: ((notification: LoudnessSubscriptionNotification) => void) | undefined,
+    onError: ((error: unknown) => void) | undefined,
+  ) {
     this.#owner = owner;
     this.#callback = callback;
+    this.#onError = onError;
   }
 
   get handle(): LoudnessSubscription { return this; }
 
-  get closed(): boolean { return this.#closed; }
+  /** `open` until `close()` is called, `closing` until its stop lands, then `closed`. */
+  get state(): HandleState { return this.#state; }
 
   readLatest(): LoudnessReading | undefined { return this.#latest; }
 
   pump(): Promise<LoudnessReading> {
-    if (this.#closed) return Promise.reject(closedError());
+    if (this.#state !== "open") return Promise.reject(closedError());
     return this.#owner.command(this, "read");
   }
 
   reset(): Promise<void> {
-    if (this.#closed) return Promise.reject(closedError());
+    if (this.#state !== "open") return Promise.reject(closedError());
     return this.#owner.command(this, "reset").then(() => undefined);
   }
 
   close(): Promise<void> {
     if (this.#closing !== undefined) return this.#closing;
-    if (this.#closed) return Promise.resolve();
+    if (this.#state === "closed") return Promise.resolve();
+    this.#state = "closing";
     this.#stopTimer();
     const pending = this.#owner.command(this, "stop").then(() => {
-      this.#closed = true;
+      this.#state = "closed";
       this.#owner.forget(this);
-    });
-    // A refused or failed stop leaves the handle open, so `close()` may be called again.
-    this.#closing = pending.catch((error: unknown) => {
+    }, (error: unknown) => {
+      // A refused or failed stop leaves the meter as it was: the handle is open again, reads on
+      // its timer, and `close()` may be called again. An engine that ended meanwhile closed it.
       this.#closing = undefined;
+      if (this.#state === "closing") {
+        this.#state = "open";
+        this.startTimer();
+      }
       throw error;
     });
-    return this.#closing;
+    this.#closing = pending;
+    return pending;
   }
 
   /** Deliver a reply's reading, and tell the listener when it changed. */
@@ -195,12 +223,16 @@ class LoudnessHandle implements LoudnessSubscription {
     try { this.#callback(Object.freeze({ handle: this, reading })); } catch { /* a listener cannot break the handle */ }
   }
 
-  startTimer(scheduler: ObservationSubscriptionScheduler | undefined): void {
-    if (scheduler === undefined) return;
+  startTimer(): void {
+    const scheduler = this.#owner.scheduler;
+    if (scheduler === undefined || this.#timer !== undefined) return;
     this.#timer = scheduler.setInterval(() => {
-      if (this.#closed || this.#closing !== undefined) return;
-      // A failed timed read is dropped; the next tick reads again, and `pump()` reports failures.
-      void this.#owner.command(this, "read").catch(() => undefined);
+      if (this.#state !== "open" || this.#timedRead) return;
+      this.#timedRead = true;
+      this.#owner.command(this, "read").then(() => undefined, (error: unknown) => {
+        if (this.#state !== "open") return;
+        try { this.#onError?.(error); } catch { /* a listener cannot break the handle */ }
+      }).finally(() => { this.#timedRead = false; });
     }, LOUDNESS_READ_CADENCE_MS);
   }
 
@@ -212,7 +244,7 @@ class LoudnessHandle implements LoudnessSubscription {
   /** End the handle without a frame: the engine it reads was disposed or rebooted. */
   invalidate(): void {
     this.#stopTimer();
-    this.#closed = true;
+    this.#state = "closed";
   }
 }
 
@@ -243,26 +275,45 @@ export class LoudnessOwner {
     if (callback !== undefined && typeof callback !== "function") {
       return Promise.reject(new MisoUsageError("loudness onUpdate must be a function"));
     }
+    const onError = request?.onError;
+    if (onError !== undefined && typeof onError !== "function") {
+      return Promise.reject(new MisoUsageError("loudness onError must be a function"));
+    }
     return this.#enqueue(async () => {
       if (this.#ended) throw new MisoUsageError("the engine was disposed");
       if ((await this.#transport.capabilityFlags() & CAPABILITY_LOUDNESS) === 0n) throw capabilityRefusal();
-      const reply = await this.#transport.send("start");
+      let reply: LoudnessFrameReply;
+      try {
+        reply = await this.#transport.send("start");
+      } catch (error) {
+        // The start may still reach the core after the sender gave up on it (a deadline, an
+        // abort, a lost reply) and arm the meter with no handle, so every later start would be
+        // refused `loudness.active`. A quiet stop goes behind it, as the spectrum stream's does.
+        void this.#enqueue(() => this.#transport.send("stop")).catch(() => undefined);
+        throw error;
+      }
       if (!reply.ok) throw spectrumRefusalError("the engine refused the loudness start", reply);
-      const handle = new LoudnessHandle(this, callback);
+      const handle = new LoudnessHandle(this, callback, onError);
       this.#handles.add(handle);
-      handle.startTimer(this.#transport.scheduler);
+      handle.startTimer();
       return handle;
     });
   }
 
-  /** Send `operation` for `handle` after every earlier frame, and deliver its reading. */
+  /**
+   * Send `operation` for `handle` after every earlier frame, and deliver its reading. A read or a
+   * reset whose turn comes once the handle is closing is not sent: it rejects, so a stop waits
+   * behind at most the one frame already in flight.
+   */
   command(handle: LoudnessHandle, operation: Exclude<LoudnessFrameOperation, "start">): Promise<LoudnessReading> {
     return this.#enqueue(async () => {
-      if (handle.closed || !this.#handles.has(handle)) throw closedError();
+      const allowed = operation === "stop" ? handle.state !== "closed" : handle.state === "open";
+      if (!allowed || !this.#handles.has(handle)) throw closedError();
       const reply = await this.#transport.send(operation);
       if (!reply.ok) throw spectrumRefusalError(`the engine refused the loudness ${operation}`, reply);
       const reading = loudnessReadingOf(reply.value);
-      handle.deliver(reading);
+      // The engine may have ended the handle while the frame was in flight.
+      if (handle.state !== "closed") handle.deliver(reading);
       return reading;
     });
   }

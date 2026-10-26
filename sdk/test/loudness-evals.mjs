@@ -15,9 +15,16 @@ import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { LoudnessOwner, loudnessReadingOf } from "../src/core/loudness.ts";
 import { decodeLoudnessReply, encodeLoudnessCommand } from "../src/core/loudness-frame.ts";
+import { concat, field, readFields } from "../src/core/control-frame.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
 
 const SKIP = { skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX };
+/**
+ * The Rust codec's `LOUDNESS` frames (`crates/protocol/tests/sdk_message_fixture.rs`). Read before
+ * the first `test()`: a top-level await after one would let the runner finish without the tests
+ * registered behind it.
+ */
+const FIXTURE = JSON.parse(await readFile(new URL("./fixtures/protocol-messages.json", import.meta.url), "utf8")).loudness;
 const RATE = 48_000;
 const QUANTUM = 128;
 /** About 3.5 s of tone, then 1 s of silence. */
@@ -137,14 +144,12 @@ test("close stops the meter: a fresh subscribe succeeds and the closed handle re
   }
 });
 
-/** The Rust codec's `LOUDNESS` frames (`crates/protocol/tests/sdk_message_fixture.rs`). */
-const FIXTURE = JSON.parse(await readFile(new URL("./fixtures/protocol-messages.json", import.meta.url), "utf8")).loudness;
 const fixtureRow = (name) => FIXTURE.find((row) => row.name === name);
 const bytesOf = (hex) => Uint8Array.from(Buffer.from(hex, "hex"));
 /** A value in the fixture's spelling: bigints as decimal strings. */
 const plain = (value) => JSON.parse(JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item)));
 
-test("the LOUDNESS codec is the Rust codec's: every operation's bytes, every reply field, and a reply that breaks a rule", () => {
+test("the LOUDNESS codec is the Rust codec's: every operation's bytes and every reply field", () => {
   for (const name of ["start", "read", "reset", "stop"]) {
     const row = fixtureRow(name);
     assert.equal(Buffer.from(encodeLoudnessCommand(BigInt(row.request.requestId), row.request.op)).toString("hex"), row.hex, name);
@@ -159,14 +164,55 @@ test("the LOUDNESS codec is the Rust codec's: every operation's bytes, every rep
       name,
     );
   }
-  // The full reply with its momentary level (field 7, F32) made NaN: the Rust codec refuses it on
-  // both sides, and so does this one.
-  const broken = bytesOf(fixtureRow("reply_full").hex);
-  const at = broken.findIndex((_byte, index) => broken[index] === 7 && broken[index + 1] === 0 && broken[index + 2] === 6
-    && broken[index + 4] === 4 && broken[index + 5] === 0 && broken[index + 6] === 0 && broken[index + 7] === 0);
-  assert.ok(at > 48, "the full reply carries a momentary level");
-  new DataView(broken.buffer).setFloat32(at + 8, Number.NaN, true);
-  assert.throws(() => decodeLoudnessReply(broken), (error) => error instanceof MisoEngineError && error.code === "internal");
+});
+
+/** `reply_full` with its fields edited by `edit` (a map from field ID to new bytes; `null` drops it). */
+function editedReply(edit) {
+  const bytes = bytesOf(fixtureRow("reply_full").hex);
+  const view = new DataView(bytes.buffer);
+  const fields = readFields(bytes.subarray(48), view.getUint32(40, true))
+    .flatMap((row) => {
+      if (!(row.id in edit)) return [row];
+      return edit[row.id] === null ? [] : [{ ...row, value: edit[row.id] }];
+    });
+  // An ID the frame lacks is appended as an F32 (wire 6); every such ID here is above the last.
+  for (const [id, value] of Object.entries(edit)) {
+    if (value !== null && !fields.some((row) => row.id === Number(id))) fields.push({ id: Number(id), wire: 6, value });
+  }
+  const body = concat(fields.map((row) => field(row.id, row.wire, false, row.value)));
+  const out = new Uint8Array(48 + body.length);
+  out.set(bytes.subarray(0, 48));
+  out.set(body, 48);
+  const header = new DataView(out.buffer);
+  header.setUint32(20, body.length, true);
+  header.setUint32(40, fields.length, true);
+  return out;
+}
+
+const f32 = (value) => {
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setFloat32(0, value, true);
+  return out;
+};
+
+test("the LOUDNESS decoder refuses every reply the Rust codec refuses", () => {
+  // The unedited frame decodes, so each row below fails on its own rule.
+  assert.equal(decodeLoudnessReply(editedReply({})).ok, true);
+  assert.equal(decodeLoudnessReply(editedReply({ 7: f32(-120) })).ok, true, "the -120 floor itself is a level");
+  const rules = {
+    "a non-finite level": { 7: f32(Number.NaN) },
+    "a level below the -120 floor": { 9: f32(-120.5) },
+    "a negative loudness range": { 10: f32(-0.25) },
+    "half a true-peak pair": { 14: null },
+    "half a last-hop true-peak pair": { 15: null },
+    "a true peak without integrating-since": { 3: null },
+    "integrating-since without a true peak": { 13: null, 14: null },
+    "a field the schema does not hold": { 17: f32(0) },
+  };
+  for (const [rule, edit] of Object.entries(rules)) {
+    assert.throws(() => decodeLoudnessReply(editedReply(edit)),
+      (error) => error instanceof MisoEngineError && error.code === "internal", rule);
+  }
 });
 
 test("a managed loudness handle reads on its scheduler's tick and tells onUpdate", async () => {
@@ -195,4 +241,124 @@ test("a managed loudness handle reads on its scheduler's tick and tells onUpdate
   assert.equal(handle.readLatest(), updates[0].reading);
   await handle.close();
   assert.equal(tick, undefined, "close stopped the timer");
+});
+
+const REFUSED_ACTIVE = Object.freeze({
+  ok: false,
+  requestId: 1n,
+  revision: 0n,
+  status: "validation_failed",
+  diagnostics: [{ code: "loudness.active", severity: "error", path: [] }],
+  omittedDiagnostics: 0,
+  backpressure: undefined,
+});
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+/**
+ * A fake core behind a fake port: frames are served one at a time in send order, the first start
+ * takes `startMs`, any other frame `frameMs` (a read never answers with `stuckReads`), and the
+ * sender gives up on a frame after `deadlineMs` while the core still serves it, as the browser's
+ * deadline does.
+ */
+function fakeCore({ startMs = 0, frameMs = 0, deadlineMs = 1_000, stuckReads = false, failStops = 0 } = {}) {
+  const sent = [];
+  let armed = false;
+  let serving = Promise.resolve();
+  let stopsToFail = failStops;
+  let firstStart = true;
+  const state = () => ({
+    observedSample: 0n, armed, integratingSince: undefined, hopsDropped: 0n, sanitizedSamples: 0n, gatedBlockCount: 0n,
+    momentaryLufs: undefined, shortTermLufs: undefined, integratedLufs: undefined, loudnessRangeLu: undefined,
+    momentaryMaxLufs: undefined, shortTermMaxLufs: undefined, truePeakDbtp: undefined, hopTruePeakDbtp: undefined,
+  });
+  const send = (operation) => {
+    sent.push(operation);
+    if (operation === "read" && stuckReads) return new Promise((_resolve, reject) => setTimeout(() => reject(new Error("deadline")), deadlineMs));
+    if (operation === "stop" && stopsToFail > 0) {
+      stopsToFail -= 1;
+      return Promise.reject(new Error("the port failed"));
+    }
+    const slow = operation === "start" && firstStart;
+    if (operation === "start") firstStart = false;
+    const served = serving.then(() => sleep(slow ? startMs : frameMs)).then(() => {
+      if (operation === "start") {
+        if (armed) return REFUSED_ACTIVE;
+        armed = true;
+      }
+      if (operation === "stop") armed = false;
+      return { ok: true, requestId: 1n, revision: 0n, value: Object.freeze(state()) };
+    });
+    serving = served;
+    return Promise.race([served, sleep(deadlineMs).then(() => { throw new Error("deadline"); })]);
+  };
+  return { send, sent, armed: () => armed };
+}
+
+function realScheduler(milliseconds) {
+  return {
+    setInterval: (callback) => setInterval(callback, milliseconds),
+    clearInterval: (handle) => clearInterval(handle),
+  };
+}
+
+test("a stuck host holds at most one timed read, and close sends no read and settles within one deadline", { timeout: 5_000 }, async () => {
+  const DEADLINE = 50;
+  const core = fakeCore({ deadlineMs: DEADLINE, stuckReads: true });
+  const owner = new LoudnessOwner({ send: core.send, capabilityFlags: async () => 1n << 17n, scheduler: realScheduler(5) });
+  const errors = [];
+  const handle = await owner.subscribe({ onError: (error) => errors.push(error) });
+  await sleep(300);
+  const reads = core.sent.filter((operation) => operation === "read").length;
+  assert.ok(reads <= Math.ceil(300 / DEADLINE) + 1, `${reads} timed reads were sent against a host that answers none`);
+  const before = core.sent.length;
+  const started = Date.now();
+  await handle.close();
+  const took = Date.now() - started;
+  assert.deepEqual(core.sent.slice(before), ["stop"], "close sends its stop and nothing else");
+  assert.ok(took <= DEADLINE + 40, `close took ${took} ms`);
+  await sleep(30);
+  assert.deepEqual(core.sent.slice(before), ["stop"], "no read after close");
+  // A failed timed read is reported, not swallowed; the readings stop advancing meanwhile.
+  assert.ok(errors.length >= 1 && errors.every((error) => /deadline/.test(error.message)), "onError saw the failures");
+});
+
+test("a start the sender gave up on is stopped behind it, so the next subscribe is not refused loudness.active", { timeout: 5_000 }, async () => {
+  const core = fakeCore({ startMs: 40, deadlineMs: 10 });
+  const owner = new LoudnessOwner({ send: core.send, capabilityFlags: async () => 1n << 17n });
+  await assert.rejects(owner.subscribe(), /deadline/);
+  await sleep(60);
+  const handle = await owner.subscribe();
+  assert.deepEqual(core.sent, ["start", "stop", "start"]);
+  await handle.close();
+});
+
+test("a close whose stop fails keeps the handle live: the timer reads again and a later close stops", { timeout: 5_000 }, async () => {
+  const core = fakeCore({ failStops: 1 });
+  let tick;
+  const owner = new LoudnessOwner({
+    send: core.send,
+    capabilityFlags: async () => 1n << 17n,
+    scheduler: { setInterval: (callback) => { tick = callback; return 1; }, clearInterval: () => { tick = undefined; } },
+  });
+  const handle = await owner.subscribe();
+  await assert.rejects(handle.close(), /the port failed/);
+  assert.equal(typeof tick, "function", "the failed close restarted the timer");
+  tick();
+  await sleep(5);
+  assert.deepEqual(core.sent, ["start", "stop", "read"]);
+  await handle.close();
+  assert.equal(core.armed(), false);
+  assert.equal(tick, undefined);
+});
+
+test("an engine without capability bit 17 is refused before any LOUDNESS frame", { timeout: 5_000 }, async () => {
+  const core = fakeCore();
+  const owner = new LoudnessOwner({ send: core.send, capabilityFlags: async () => (1n << 16n) | (1n << 18n) });
+  await assert.rejects(owner.subscribe(), (error) => {
+    assert.ok(error instanceof MisoEngineError, String(error));
+    assert.equal(error.code, "unsupported");
+    assert.equal(error.diagnosticCode, "sdk.asset.capability");
+    return true;
+  });
+  assert.deepEqual(core.sent, []);
 });
