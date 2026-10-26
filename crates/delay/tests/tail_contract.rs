@@ -32,7 +32,6 @@ const FLUSH: f32 = 1.0e-20;
 const TIME: usize = 0;
 const FEEDBACK: usize = 1;
 const DAMPING: usize = 2;
-const MIX: usize = 3;
 const CROSS: usize = 4;
 
 fn rates() -> &'static [u32] {
