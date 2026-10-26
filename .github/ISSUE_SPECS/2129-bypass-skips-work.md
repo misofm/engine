@@ -476,3 +476,50 @@ skip that reads `bypassed()` without `bypass_ramping()` or drops the line exchan
 measures the reverb). Realtime: the arm is inside its `REALTIME_POLICY` region; record the count.
 Paths: `crates/graph/src/runtime.rs`, the test file, this spec. The module bytes move: the
 release-window rule applies.
+
+### S2 attempt 1 (2026-10-26): the per-node skip
+
+- **Change.** `crates/graph/src/runtime.rs:6308-6336`, the `NodeKind::LiveControlEffect` arm: a
+  block that begins settled bypassed with `staged.staged == 0`, no prepared target and no armed
+  tap whose bypass value is `None` runs `shunt.passthrough` on the planes (nothing written at zero
+  latency), folds the declared tap values through `publish_observations(.., true, ..)`, counts
+  `LiveControlEffect::bypass_skips` (`:3099`) and returns: no `capture`, no `process`, no
+  `apply_bypass`, no D7 check (E4). It holds for every per-node live effect, not only the two
+  never-banked ones. Reader: `RuntimeUnit::bypass_skips` (`:3709`) and
+  `graph::test_only_node_bypass_skips` (`crates/graph/src/lib.rs:6291`, test-support). Not added to
+  `bank_slot_runs` or `console_workload::bank_counters` (W=4 pins unchanged).
+- **Tests.** One per claim, in the owning crate:
+  - `graph` `a_settled_bypassed_per_node_effect_skips_only_blocks_without_work`
+    (`lib.rs:11248`), latency 2: no skip on the two crossfade blocks, 3 on 3 settled blocks, none
+    on the block that stages a span. Red: the skip reads `bypassed()` in place of
+    `settled_bypassed` (the ramp blocks count, `0` expected); the skip drops `staged.staged == 0`
+    (the span block counts). Red on base: the counter does not exist (never counts).
+  - `graph` `live_bypass_is_latency_preserving_and_reversible` now holds the line exchange of the
+    skipped block: removing `live.shunt.passthrough(..)` is red (the input renders undelayed).
+  - `graph-compiler` `bypass_cohorts::a_bypassed_delay_and_reverb_skip_their_wet_path_and_pass_their_dry_block`
+    (`:926`, rewritten from `a_bypassed_delay_passes_its_dry_block_when_its_ring_trips`, whose
+    "the ring tripped" guard S2 makes unreachable on a settled block): a bypassed delay then a
+    bypassed reverb on one track, `Feed::Trip`, bits equal the bare session at the host width and
+    at `Scalar`, and `node_bypass_skips == 2 * BLOCKS`. The `bypass_shunt_identity.rs` harness
+    re-implements the arm and cannot see the runtime's skip, so the row is here, not there.
+  - `bypass_cohorts::a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged` (`:818`):
+    its `Scalar` proof that `Feed::Hot` trips D7 now renders track 0 enabled per node, because a
+    settled-bypassed per-node instance runs no wet path. The bank claim is unchanged.
+  - Lost coverage, stated: E4's "the shunt wins over a tripped ring" on a bypassed per-node block
+    that does not skip (a span or a computed tap while bypassed) has no graph-level row now.
+- **Bits (one-time, PR evidence).** C1-16 `Load` and `Toggle`, 600 blocks, `to_bits` SHA-256 of
+  the output, base `d28d97c41` against head: `Load` `0265284a…`, `Toggle` `ffce347e…`, both equal.
+  With aux.a's delay bypassed, a bypassed `miso.reverb` at its defaults after it, and every
+  `.send.aux.a` unmuted at -6 dB (temporary patch, not committed): `Load` `56916656…` on both
+  (differs from the plain `Load`, so the aux is audible), `Toggle` equal. `-0.0` per node is held by
+  `a_negative_zero_from_an_enabled_stage_passes_a_bypassed_slot_unchanged`'s `Scalar` leg.
+- **CPU (descriptive, one invocation, one warmup, two rounds).** `bench console --bank-report`,
+  Simd8: `c1_console_16_load` p50 21.200 / 21.771 us, `c1_console_16_toggle` 100.642 / 102.796 us.
+- **Realtime.** The skip is inside `execute_op`'s existing region: `realtime_policy` ok, 283 marked
+  regions in 45 files (no region added).
+- **Gates.** Every lint-job step (fmt, clippy `-D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc`,
+  every policy script incl. `check-lane-policy.sh`); the workspace debug test step with its exact
+  excludes and features (242 binaries ok); the AudioWorklet artifact gates (build, call graph and
+  roster, expected resources, scalar-oracle absent, hermetic host/worklet suite, V8 spill); the SDK
+  headless evals; `scripts/run-wasm-gates.sh` ok. The module bytes move: the release-window rule
+  applies.
