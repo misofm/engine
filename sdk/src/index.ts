@@ -66,6 +66,13 @@ export type {
   SpectrumSubscriptionReceipt,
   SpectrumSubscriptionRequest,
 } from "./core/observation-subscriptions.ts";
+export { LOUDNESS_READ_CADENCE_MS } from "./core/loudness.ts";
+export type {
+  LoudnessReading,
+  LoudnessSubscription,
+  LoudnessSubscriptionNotification,
+  LoudnessSubscriptionRequest,
+} from "./core/loudness.ts";
 // Named, not `export *`: `core/session.ts` also exports the `@internal` normalizers the
 // transaction builder shares (#1383), which are not public API.
 export {

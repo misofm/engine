@@ -51,6 +51,10 @@ import type {
   TransportSnapshot,
 } from "../core/protocol-messages.ts";
 import { isResponseReady } from "../core/response-frame.ts";
+import { LoudnessOwner } from "../core/loudness.ts";
+import type { LoudnessSubscription, LoudnessSubscriptionRequest } from "../core/loudness.ts";
+import { decodeLoudnessReply, encodeLoudnessCommand } from "../core/loudness-frame.ts";
+import type { LoudnessFrameOperation, LoudnessFrameReply } from "../core/loudness-frame.ts";
 import { TrackResponseRequester } from "../core/live-response.ts";
 import type { TrackResponseQuery, TrackResponseResult } from "../core/live-response.ts";
 import type { ResponseWorkerFactory } from "./response-worker.ts";
@@ -292,6 +296,16 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * delivery is off-render.
    */
   subscribeSpectrum(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscription>;
+  /**
+   * Start the session's output loudness meter (`LOUDNESS` start, #2115) through the host's
+   * `control` message and return its managed handle. The handle reads the meter every 100 ms on a
+   * timer of this page (off render), and `pump()` reads it at once; `close()` stops the meter. The
+   * core refuses a start while the meter is armed (`invalidArgument`, `diagnosticCode`
+   * `loudness.active`), and an engine whose `CAPABILITIES_GET` lacks flag bit 17 is refused
+   * `unsupported` (`sdk.asset.capability`). Each frame is bounded by `requestDeadlineMs`; `close()`
+   * of the engine ends the handle.
+   */
+  subscribeLoudness(request?: LoudnessSubscriptionRequest): Promise<LoudnessSubscription>;
   /**
    * Capture one complete 2048-frame window of a configured tap, analyzed by the core
    * (`SPECTRUM_CAPTURE` arm and read; with a collection, a select first). A core refusal rejects with
@@ -1034,6 +1048,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       policy.liveControls !== undefined,
     );
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
+    let loudnessOwner: LoudnessOwner | undefined;
     // The map from the core's control list (its section headers name each console slot's and
     // insert's effect) and the generated catalog's taps, by stable IDs only (#1590 D3).
     const observationMap = async (): Promise<ObservationMap> => observationMapOf(await stripOrders.current());
@@ -1101,6 +1116,29 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       spectrumQueue = queue;
       editQueue ??= queue;
       return sendSpectrumFrame(host, queue, request, decode);
+    };
+    // #2115 S3: one `LOUDNESS` frame through the host's `control` message, on the host's one
+    // request-ID allocator, bounded by the request deadline.
+    const loudnessFrame = async (operation: LoudnessFrameOperation): Promise<LoudnessFrameReply> => {
+      if (closed) throw new MisoUsageError("the browser engine is closed");
+      const started = Date.now();
+      const deadline = spectrumDeadlineMs(options.requestDeadlineMs ?? 5_000);
+      const send = async (): Promise<LoudnessFrameReply> => {
+        const queue = spectrumQueue ?? await createBrowserControlQueue(host);
+        spectrumQueue = queue;
+        editQueue ??= queue;
+        const requestId = queue.requestIds.next();
+        const reply = await host.control(encodeLoudnessCommand(requestId, operation));
+        queue.noteCommit(reply.revision);
+        if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
+        const decoded = decodeLoudnessReply(reply.response);
+        if (decoded.requestId !== requestId) {
+          throw malformed(`the reply answers request ${decoded.requestId}, not ${requestId}`);
+        }
+        return decoded;
+      };
+      return awaitSpectrum(send(), started, deadline, options.signal,
+        () => new MisoUsageError(`the loudness ${operation} exceeded its deadline`));
     };
     /** Send `request` and drop its answer: it undoes a frame whose caller stopped waiting. */
     const sendQuietly = (request: SpectrumFrameRequest): void => {
@@ -1471,6 +1509,14 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         .then((receipt) => receipt.handle),
       subscribeSpectrum: (request: SpectrumSubscriptionRequest) => observationOwner().subscribeSpectrum(request)
         .then((receipt) => receipt.handle),
+      subscribeLoudness: (request?: LoudnessSubscriptionRequest) => (loudnessOwner ??= new LoudnessOwner({
+        send: loudnessFrame,
+        capabilityFlags: async () => (await (await protocolClient()).capabilities()).flags,
+        scheduler: {
+          setInterval: (callback, milliseconds) => globalThis.setInterval(callback, milliseconds),
+          clearInterval: (handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
+        },
+      })).subscribe(request),
       queryTrackResponse,
       querySpectrum,
       configureSpectrum,
@@ -1630,6 +1676,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         editQueue?.close();
         measurementFeeds.close();
         observationSubscriptions?.invalidate(true);
+        loudnessOwner?.invalidate(true);
         // Every pending and queued track response query rejects now, not at its deadline.
         trackResponseRequester?.close(trackResponseClosed());
         // Edits staged for the host are rejected and no new one is accepted; a transaction already

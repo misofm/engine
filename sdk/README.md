@@ -658,6 +658,7 @@ instead of growing with stem duration.
 | Live EQ/filter response | `queryTrackResponse()` or `subscribeTrackResponse()`. `capturedSample` marks capture of applied target state at a block boundary. The curve is a stationary EQ/input-filter subtotal; fader, pan, routing, and unsupported processors are excluded. |
 | Spectrum | Browser `querySpectrum()`; headless `armSpectrum()`, explicit renders, then `readSpectrum()`. Each result covers 2,048 captured PCM samples, `[capturedSample, endSample)`, with dBFS bins and a graph-wide source-underrun flag. |
 | Continuous spectrum | `subscribeSpectrum()` retains one managed stream. Metadata carries the capture span, hop, epochs, drops, and smoothing history. The default 100 ms power smoothing includes earlier windows; set `smoothingMs: 0` for unsmoothed analysis. |
+| Master loudness | `subscribeLoudness()` starts the session's one output loudness meter and returns a handle with `readLatest()`, `pump()`, `reset()` and `close()`. A `LoudnessReading` gives BS.1770-5 momentary, short-term and integrated LUFS, the EBU Tech 3342 range in LU, their maxima, and the Annex-2 true peak in dBTP of the rendered master pair; `observedSample` ends the last 10 ms hop it covers. |
 | Render telemetry | Browser `subscribeTelemetry()` reports CPU/deadline measurements. It has no audio sample span. |
 
 For spectrum, pass either `spectrum` for one boundary or `spectrumCollection` for several
@@ -685,6 +686,18 @@ operation rejects at once: render, then retry. In a browser engine it waits for 
 again, up to `requestDeadlineMs` and at most 8 resends (one render drains the tap, so more means
 another writer keeps refilling it), and then ends in typed `backpressure`. Resident effect taps
 need no boot option: every plan binds every declared tap (issue #1590).
+
+`subscribeLoudness()` measures the rendered master pair. Momentary loudness (M) is the last 400 ms,
+short-term (S) the last 3 s, integrated (I) the gated mean since the last start or reset, and the
+loudness range (LRA) the spread of the short-term values since then; true peak (TP) is the 4x
+oversampled peak per channel. The engine updates the meter every 10 ms hop; the handle reads it about
+every 100 ms (the browser on a timer, the headless engine at each `pump()` between your renders).
+A level is absent until its window holds enough audio, and silence reads -120. `reset()` restarts
+I, LRA, the maxima and TP from the next hop boundary (`integratingSince`); M and S run on.
+`hopsDropped` counts the hops the engine lost over the session's whole life: subtract two readings
+to see a loss between them. The meter is one per session: a second `subscribeLoudness()` while a
+handle is open is refused with `MisoEngineError` (`diagnosticCode` `loudness.active`). After
+`close()` the handle keeps its last reading and refuses `pump()` and `reset()`.
 
 Use the recorded sample spans to compare observations with the first block after a transaction. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling
