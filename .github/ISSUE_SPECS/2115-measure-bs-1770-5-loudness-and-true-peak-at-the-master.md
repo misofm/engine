@@ -29,8 +29,8 @@ EBU Tech 3341 and 3342 conformance signals (the minimum requirements), with each
   the same at every rate; an unnormalized 1, -2, 1 at every rate would spread 0.025 dB across the four rates (44.1 kHz +0.0471 dB to 96 kHz +0.0217 dB).
 - **True peak.** The limiter's Annex-2 detector (`true_peak_limiter::annex2`), `f32`, L/R as two lanes of one
   native-width bank, the same 4x table at all four rates.
-- **Integrated and LRA.** Bounded 0.1 LU histograms over [-70, +10) LUFS with `u64` counts and exact `f64` energy
-  sums; the gate-straddling bin is the only approximation, bounded by the oracle test (|dI| <= 0.05 LU,
+- **Integrated and LRA.** Bounded 0.1 LU histograms over [-70, +30) LUFS (above full scale: the `f32` master can
+  exceed it) with `u64` counts and rounded `f64` energy sums; the gate-straddling bin is the only approximation, bounded by the oracle test (|dI| <= 0.05 LU,
   |dLRA| <= 0.1 LU).
 - **Conformance scope.** Recipe-defined cases only: Tech 3341 1-5, 9-23; Tech 3342 1-4. Excluded: Tech 3341 case 6
   (5.0 layout; the engine measures stereo), Tech 3341 7-8 and Tech 3342 5-6 (authentic programme files), the
@@ -60,3 +60,12 @@ S1 attempt 1 (implementer; root's verifier has not reviewed it yet).
   both gates.
 - **Mutants.** Each of the 15 mutants turned its own gate red (implementer's table, in the hand-back). The true-peak
   limiter's full debug suite passes after the `annex2` visibility change.
+
+## Review (S1 attempt 1)
+- Root's verifier passed S1. Root accepts D1 (the 10 ms hop), D2 (the 48 kHz stage-2 gain at every rate), D3 (the
+  `loudness` dev-profile opt-level) and D4 (the defaults: a silent window reads -120 LUFS; the maxima count only windows
+  wholly after the reset; a reset replays the held hops; `gated_block_count` counts the blocks that pass both gates).
+- Folded in: a continuity test (a block that does not continue the last one restarts the observer), a test of the
+  production percentile rank rule, the histogram ceiling raised to +30 LUFS, the REALTIME_POLICY region extended over
+  `State::rest`, and corrections to the research note (a silent window reads -120 LUFS; subnormal states are flushed at the
+  hop end). The S2 note about a non-monotone absolute sample is left for S2.

@@ -35,13 +35,14 @@ display format of readings, or file-based conformance with the BS.2217 material.
    phases, 48 taps, `f32`), with L and R as two lanes of one native-width bank plus padding lanes,
    and a per-hop maximum per channel [ITU-BS1770-5]. Measurable reason: Tech 3341 cases 15-23 within
    `+0.2/-0.4 dBTP` and agreement with the `f64` Annex-2 reference.
-7. **Bounded statistics.** Integrated loudness and LRA use 0.1 LU histograms over `[-70, +10)` LUFS,
-   each bin a `u64` count and an `f64` energy sum, about 26 KB in all for any programme length.
+7. **Bounded statistics.** Integrated loudness and LRA use 0.1 LU histograms over `[-70, +30)` LUFS
+   (the ceiling sits above full scale because the engine's `f32` master can run above it), each bin a
+   `u64` count and a rounded `f64` energy sum, about 32 KB in all for any programme length.
    Measurable reason: oracle tests against exact `f64` block lists (`|dI| <= 0.05 LU`,
    `|dLRA| <= 0.1 LU`).
 8. **Measurement runs on silence.** Skip-on-silence does not apply to a measurement: silent hops are
-   real data for gating and for M/S. A zero-energy window has no finite loudness and is reported as
-   absent, never as the logarithm of zero.
+   real data for gating and for M/S. A zero-energy window has no finite loudness and reads the floor,
+   -120 LUFS, never the logarithm of zero.
 
 ## Definitions and assumptions
 
@@ -91,9 +92,9 @@ Integrated loudness [ITU-BS1770-5]: for each gating block `j` with mean square
 - `Gamma_r = -0.691 + 10 log10(mean of z_j over the absolute-gated blocks) - 10 LU`;
 - `I = -0.691 + 10 log10(mean of z_j over blocks with l_j > -70 and l_j > Gamma_r)`.
 
-Each admitted block goes into the bin `floor((l_j + 70) / 0.1)` of 800 bins; the bin adds 1 to its
-count and `z_j` to its energy sum. A block at or above +10 LUFS goes into the top bin with its exact
-`z_j`. The relative gate is applied to whole bins: the bin that straddles `Gamma_r` is included or
+Each admitted block goes into the bin `floor((l_j + 70) / 0.1)` of 1000 bins; the bin adds 1 to its
+count and `z_j` to its `f64` energy sum. A block at or above +30 LUFS goes into the top bin with its
+own `z_j`. The relative gate is applied to whole bins: the bin that straddles `Gamma_r` is included or
 excluded as a unit, and the error that this causes is bounded by the oracle test.
 
 Loudness range [EBU-TECH3342]: 3 s blocks every 100 ms; absolute gate -70 LUFS; relative gate
@@ -148,10 +149,11 @@ maxima update at each hop.
   at `|dI| <= 0.05 LU`. A percentile reads its bin's mean level, so it is within half a bin of the
   exact block value, and LRA is bounded at `|dLRA| <= 0.1 LU` by the oracle test.
 - A block level at or below -70 LUFS is gated out and not stored; a block level at or above
-  +10 LUFS is in the top bin with exact energy, so its energy contribution to I stays exact.
-- A window with zero energy has no finite loudness: the control half reports it as absent (the
-  transport may floor it); it never computes `log10(0)`.
-- Memory: two histograms of 800 bins at 16 bytes each (about 26 KB) plus the fixed hop windows for
+  +30 LUFS is in the top bin with its own energy, so its energy contribution to I is kept (as a
+  rounded `f64` sum, like every bin).
+- A window with zero energy has no finite loudness: the control half reads it as the floor,
+  -120 LUFS (`LOUDNESS_FLOOR_LUFS`); it never computes `log10(0)`.
+- Memory: two histograms of 1000 bins at 16 bytes each (about 32 KB) plus the fixed hop windows for
   M, S and block assembly. Memory does not depend on programme length.
 - The 10 ms grid can miss up to 5 ms of a burst on arbitrary programme (see decision 3).
 
@@ -184,9 +186,13 @@ the M/S windows and the gating-block assembly.
 - Input: a non-finite sample (NaN, +inf, -inf) becomes 0 before filtering and increments the hop's
   sanitized count. The count is in each hop record.
 - State: the filters run in `f64` under the engine's canonical floating-point environment (no
-  flush-to-zero, no denormals-are-zero). Subnormal values are finite and take part as they are.
+  flush-to-zero, no denormals-are-zero). At each hop end a biquad state word below `1e-250` in
+  magnitude is set to zero (`STATE_FLUSH`), so long silence never drives the states subnormal, where
+  some targets take a slow path; such a word adds less than `1e-490` to any hop energy, below `f64`
+  resolution, so no reading changes.
 - Signed zero: the sign of zero does not affect a square or an absolute value.
-- Output: all readings are finite or absent. A zero-energy window is absent, not `-inf`.
+- Output: all readings are finite or absent (absent only until a window or gated block exists). A
+  zero-energy window reads -120 LUFS, not `-inf`.
 - Reset: control-plane statistics only; render filter state is not cleared by a reset.
 
 ## Fixtures
