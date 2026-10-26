@@ -218,6 +218,7 @@ impl PreparedReverb {
 
         let mut history = self.history;
         let mut slots = [0.0_f32; LINES];
+        let mut old_taps = [0.0_f32; LINES];
         let mut scratch = [0.0_f32; LINES];
         let mut gathered = [0.0_f32; LINES];
         let mut x = [L::zero(); LINES];
@@ -314,7 +315,8 @@ impl PreparedReverb {
             let injected_left = INPUT_GAIN * self.pipe[3];
             let injected_right = INPUT_GAIN * self.pipe[7];
 
-            // R3-R4: clear-on-read taps into slot order.
+            // R3-R4: clear-on-read taps into slot order. The ring reads and clears are per line
+            // (each line has its own length and index), so they stay scalar.
             for line in 0..LINES {
                 let len = geometry.line_len[line] as usize;
                 let base = geometry.line_offset[line];
@@ -326,9 +328,10 @@ impl PreparedReverb {
                 } else {
                     0.0
                 };
-                let tap = if self.line_fade == 0 {
+                let slot = slot_of_line(line);
+                if self.line_fade == 0 {
                     self.lines[old_index] = 0.0;
-                    old
+                    slots[slot] = old;
                 } else {
                     let new_delay = self.line_transition[line];
                     let new_index = base + wrap(cursor + len - new_delay as usize, len);
@@ -339,9 +342,20 @@ impl PreparedReverb {
                     };
                     self.lines[old_index] = 0.0;
                     self.lines[new_index] = 0.0;
-                    blend(old, new, self.line_fade)
-                };
-                slots[slot_of_line(line)] = tap;
+                    old_taps[slot] = old;
+                    slots[slot] = new;
+                }
+            }
+            // The size crossfade's blend, one vector pass over all sixteen slots: every line
+            // shares one alpha. The last update (`line_fade == 1`) is the new word exactly,
+            // which `slots` already holds.
+            if self.line_fade > 1 {
+                let alpha = L::splat(fade_alpha(self.line_fade));
+                for v in 0..vectors {
+                    let old = L::load(&old_taps[v * w..]);
+                    let new = L::load(&slots[v * w..]);
+                    alpha.fma(new.sub(old), old).store(&mut slots[v * w..]);
+                }
             }
 
             // R5-R6: the in-loop low-pass and high-pass, slot order.

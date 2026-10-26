@@ -289,10 +289,11 @@ SCALAR_SLACK = 8
 #   dynamic-eq           f32x4    511 /  0   ratio 0        (collapsed, #17 S2; 316 / 0 before #1969)
 #   de-esser             f32x4    893 /  0   ratio 0        (dual, #1920; 561 / 0 before #1969)
 #   de-esser             f32x4    450 /  0   ratio 0        (collapsed, #1920; 283 / 0 before #1969)
-#   reverb               f32x4     72 / 28   ratio 0.389    (#2114, `render::<_, true>`; ceiling 0.50, below)
-#   reverb               f32x4     72 / 28   ratio 0.389    (#2114, `render::<_, false>`; ceiling 0.50)
+#   reverb               f32x4     84 / 25   ratio 0.298    (#2114, `render::<_, true>`; ceiling 0.50, below; 72 / 28 before the vector tap blend)
+#   reverb               f32x4     84 / 25   ratio 0.298    (#2114, `render::<_, false>`; ceiling 0.50)
 #
-# The reverb rows were measured on the named twin built from the #2114 S4 tree (on `e0e599a73`).
+# The reverb rows were measured on the named twin built from the #2114 attempt-2 tree (on
+# `f2e80a362` plus the vector tap blend).
 #
 # The dynamic-eq and de-esser rows were re-measured after #1969 (its detector link glide), on the
 # named twin built from `e3e7cdab3`; the other rows are the #1970 build's.
@@ -445,24 +446,25 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     # #2114 S4: the reverb's per-block render, `PreparedReverb::render::<L, FULL>`, kept out of
     # line (`#[inline(never)]`) so its symbol carries the lane type; inlined into `process` it
     # carried none and this gate never saw it. `Kb1_` is `FULL = true` (every ring word is valid
-    # history, the steady state), `Kb0_` the filling form; both are 72 vector / 28 scalar.
+    # history, the steady state), `Kb0_` the filling form; both are 84 vector / 25 scalar.
     #
-    # The scalar 28 is by design, not a scalarisation: every one of the sixteen lines and eight
-    # diffusers has its own length, so the ring reads, clear-on-read writes, tap crossfade blends
-    # and cursor wraps are per-line scalar work (the delay has no four-lane kernel for the same
-    # reason), and the two output taps, the width M/S matrix and the mix are per-sample scalar
-    # arithmetic on two words. The vector 72 is the loop (two diffuser vectors, four vectors of
-    # low-pass/high-pass, the 4-stage Hadamard butterfly, the gain ramp and injection).
+    # The scalar 25 is by design, not a scalarisation: every one of the sixteen lines and eight
+    # diffusers has its own length, so the ring reads, clear-on-read writes and cursor wraps are
+    # per-line scalar work (the delay has no four-lane kernel for the same reason), and the
+    # pre-delay crossfade blend, the two output taps, the width M/S matrix and the mix are
+    # per-sample scalar arithmetic on two words. The vector 84 is the loop (two diffuser vectors,
+    # the size crossfade's tap blend over four vectors, four vectors of low-pass/high-pass, the
+    # 4-stage Hadamard butterfly, the gain ramp and injection).
     #
     # The ceiling is **not** four times the ratio here, and why: the derivation's "four times"
     # assumes a near-zero baseline, where one scalarised statement multiplies the ratio. From
-    # 0.389, the smallest loop-wide scalarisation -- one butterfly stage or one filter statement
-    # across the four vectors, 4 vector operations become 16 scalar -- reads 44 / 68 = 0.647, and
-    # four times the ratio (1.56, budget 112) would admit it and every other partial one (the
-    # "vector strictly dominates" rule would admit it too). 0.50 sits between the measured 0.389
-    # and 0.647 (budget 36: room for 8 more scalar operations, the slack's size) and refuses it.
+    # 0.298, the smallest loop-wide scalarisation -- one butterfly stage or one filter statement
+    # across the four vectors, 4 vector operations become 16 scalar -- reads 41 / 80 = 0.513, and
+    # four times the ratio (1.19, budget 100) would admit it and every other partial one (the
+    # "vector strictly dominates" rule would admit it too). 0.50 sits between the measured 0.298
+    # and 0.513 (budget 42: room for 17 more scalar operations) and refuses it.
     # The scalar part is fixed per sample rather than proportional to the vector part, so a
-    # genuine cut of more than about a fifth of the vector operations with the scalar part
+    # genuine cut of more than about two fifths of the vector operations with the scalar part
     # unchanged trips this row: re-measure it then, with the reason, rather than raising the
     # ceiling to absorb a scalarisation.
     (
