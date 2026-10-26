@@ -308,3 +308,47 @@ accepted for its groups. No further reduction was tried in this attempt.
 - `scripts/run-wasm-gates.sh`: ok, and no pin moved in this attempt.
 - AudioWorklet build and checks, and `test-web-audioworklet.sh`: ok.
 - `silent_bank_skip.rs`: 11 of 11 pass.
+
+## Evidence and decision record (attempt 3, 2026-10-26)
+
+**Lever: the fact path writes nothing when the facts cannot change.** `LaneMap::unit_idle` (one
+`bool` per unit) records whether any of a first-row unit's strips has an idle count above zero
+after its last `record_facts`. When the block has no quiet lane and that flag is clear,
+`record_facts` returns at once. Every count is already zero and stays zero, nothing crosses
+`PACK_IDLE_BLOCKS` (so `dirty` misses no change), and the unit adds nothing to the packable count.
+The group's first unit still resets that count to zero. The write-nothing path is exact.
+`lane_input_silence` still runs: the input facts are what decide whether a lane is quiet, and no
+cheaper exact condition was found for skipping it.
+
+**Red row.** `a_strip_that_plays_again_is_not_packable`: C1-16 on `Sparse` packs by `C1_PACKED`,
+then every strip plays for 24 blocks, and the group must be home (`displaced == 0`). Mutant: take
+the write-nothing path on every block with no quiet lane, ignoring the flag. Red:
+`every strip plays again, so the packer took the group home, left: 8`. Green on the real code.
+
+### CPU (descriptive; one invocation each of main `16f548a92` and this branch, one warmup, two rounds, `taskset -c 31`)
+
+Raw output is in `artifacts/steps/bank-design-5a/bank-report.attempt3.*.jsonl`. p50 us per
+block, round 1 / round 2:
+
+| row | main | branch | change |
+|---|---|---|---|
+| c1 16 load | 23.86 / 24.40 | 24.31 / 23.92 | +1.9 % / -2.0 % |
+| c1 32 load | 35.057 / 35.146 | 35.768 / 35.467 | **+2.03 %** / +0.9 % |
+| c1 64 load | 60.11 / 60.66 | 57.82 / 60.69 | -3.8 % / +0.0 % |
+| c1 16 all active | 97.08 / 98.42 | 97.92 / 98.05 | +0.9 % / -0.4 % |
+| c1 32 all active | 147.26 / 146.85 | 145.17 / 145.84 | -1.4 % / -0.7 % |
+| c1 64 all active | 247.19 / 247.34 | 242.95 / 246.41 | -1.7 % / -0.4 % |
+| c1 16 / 32 / 64 sparse | 98.77 / 146.39 / 245.33 (r1) | 80.33 / 110.79 / 172.79 (r1) | -18.7 / -24.3 / -29.6 % |
+
+As measured, with no retry. One round of one row is above 2 %: the 32-track load, round 1, at
++2.03 %, which is 0.71 us per block. Every other load round is within 2 %. Per the brief, tuning
+stops here and the trade-off goes to the owner.
+
+### Gates run (attempt 3)
+
+All ok:
+- Lint job: fmt, clippy, doc, every policy script and self-test, and `realtime_policy`.
+- Workspace debug step: 2648 passed.
+- Release tests: 84 passed.
+- `run-wasm-gates.sh`: no pin moved.
+- AudioWorklet build and checks, and `test-web-audioworklet.sh`.

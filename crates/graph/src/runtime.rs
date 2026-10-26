@@ -10024,6 +10024,11 @@ pub(crate) struct LaneMap {
     /// Unit -> its row in its lane chain, stored at bind so no reader divides (issue #2142);
     /// meaningless outside a group. Empty when there is no group.
     unit_row: Box<[u32]>,
+    /// First-row unit -> whether any of its strips' idle counts is above zero after its last
+    /// [`Self::record_facts`] (issue #2142). Clear, a block with no quiet lane changes no count,
+    /// crosses nothing and adds nothing to the packable count, so the call writes nothing. Empty
+    /// when there is no group.
+    unit_idle: Box<[bool]>,
     /// Every group's units, chain-major from its `units_base`: `rows` units per chain.
     chain_units: Box<[u32]>,
     /// Home position -> the position that strip renders at, per group from its `base`.
@@ -10080,6 +10085,7 @@ impl LaneMap {
             .saturating_add(slice(&self.group_of))
             .saturating_add(slice(&self.unit_chain))
             .saturating_add(slice(&self.unit_row))
+            .saturating_add(slice(&self.unit_idle))
             .saturating_add(slice(&self.chain_units))
             .saturating_add(slice(&self.at))
             .saturating_add(slice(&self.home))
@@ -10350,6 +10356,7 @@ impl LaneMap {
             group_of: group_of.into_boxed_slice(),
             unit_chain: unit_chain.into_boxed_slice(),
             unit_row: unit_row.into_boxed_slice(),
+            unit_idle: vec![false; units].into_boxed_slice(),
             chain_units: chain_units.into_boxed_slice(),
             home: local.clone(),
             idle: vec![0; local.len()].into_boxed_slice(),
@@ -10555,6 +10562,17 @@ impl LaneMap {
         let Some(&chain) = self.unit_chain.get(unit) else {
             return;
         };
+        // Issue #2142: no quiet lane and every count already zero: each count stays zero, nothing
+        // crosses, and this unit adds nothing to the packable count, which only its group's first
+        // unit resets.
+        if quiet == 0 && !self.unit_idle.get(unit).copied().unwrap_or(true) {
+            if unit == pack.first as usize
+                && let Some(group) = self.groups.get_mut(group)
+            {
+                group.packable = 0;
+            }
+            return;
+        }
         let width = pack.width as usize;
         let first = pack.base as usize + chain as usize * width;
         let base = pack.base as usize;
@@ -10564,6 +10582,7 @@ impl LaneMap {
             pack.packable
         };
         let mut crossed = false;
+        let mut any_idle = false;
         for lane in 0..lanes.min(width) {
             let Some(&strip) = self.home.get(first + lane) else {
                 continue;
@@ -10580,6 +10599,10 @@ impl LaneMap {
             let is = *idle >= PACK_IDLE_BLOCKS;
             crossed |= was != is;
             packable += u32::from(is);
+            any_idle |= *idle > 0;
+        }
+        if let Some(flag) = self.unit_idle.get_mut(unit) {
+            *flag = any_idle;
         }
         if let Some(group) = self.groups.get_mut(group) {
             group.packable = packable;

@@ -1911,3 +1911,57 @@ fn a_split_strip_move_allocates_nothing() {
     );
     assert_eq!(after.displaced(), 0, "the successor is home again");
 }
+
+/// Issue #2142: the packer's fact path writes nothing for a first-row unit whose lanes are all
+/// unquiet and whose idle counts are all zero (the load state's every block). A strip that plays
+/// again after it was packed must still reset its count: C1 at 16 tracks on `Sparse` packs by
+/// [`C1_PACKED`]; then every strip plays, every strip is running, and the packer takes the group
+/// home within a few blocks.
+///
+/// Test value: red when the write-nothing path hides a count that must fall to zero (taken on
+/// every unquiet block, not only when every count is already zero): the strips that play again
+/// stay packable, the displaced ones never trade home, and the group pays the displaced fold and
+/// a lost skip with no bit to show it.
+#[test]
+fn a_strip_that_plays_again_is_not_packable() {
+    let model = c1_all_active();
+    let blocks = C1_PACKED + 24;
+    let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
+        .map(|track| {
+            (0..blocks)
+                .map(|block| {
+                    if track % 2 == 1 && block < C1_PACKED {
+                        Block::Silence
+                    } else {
+                        Block::Signal(0.05)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into()
+        })
+        .collect();
+    let mut bound = bind_with(
+        &model,
+        &schedules,
+        false,
+        Setup {
+            stereo: |_| true,
+            live: false,
+        },
+    );
+    let mut pcm = vec![0.0_f32; bound.frames * 2];
+    for block in 0..blocks as u64 {
+        if block == C1_PACKED as u64 {
+            assert!(
+                bound.displaced() > 0,
+                "the group is packed before the strips play"
+            );
+        }
+        bound.render(block, true, &mut pcm);
+    }
+    assert_eq!(
+        bound.displaced(),
+        0,
+        "every strip plays again, so the packer took the group home"
+    );
+}
