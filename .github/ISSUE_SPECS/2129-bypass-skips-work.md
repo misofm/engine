@@ -505,8 +505,9 @@ release-window rule applies.
   - `bypass_cohorts::a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged` (`:818`):
     its `Scalar` proof that `Feed::Hot` trips D7 now renders track 0 enabled per node, because a
     settled-bypassed per-node instance runs no wet path. The bank claim is unchanged.
-  - Lost coverage, stated: E4's "the shunt wins over a tripped ring" on a bypassed per-node block
-    that does not skip (a span or a computed tap while bypassed) has no graph-level row now.
+  - The shunt on a settled-bypassed per-node block that does not skip: the lib row's span block
+    must emit the dry input delayed by the latency (attempt 2). This closes the gap attempt 1
+    recorded as lost coverage; what has no row now is only a *tripped ring* on such a block.
 - **Bits (one-time, PR evidence).** C1-16 `Load` and `Toggle`, 600 blocks, `to_bits` SHA-256 of
   the output, base `d28d97c41` against head: `Load` `0265284a…`, `Toggle` `ffce347e…`, both equal.
   With aux.a's delay bypassed, a bypassed `miso.reverb` at its defaults after it, and every
@@ -523,3 +524,13 @@ release-window rule applies.
   roster, expected resources, scalar-oracle absent, hermetic host/worklet suite, V8 spill); the SDK
   headless evals; `scripts/run-wasm-gates.sh` ok. The module bytes move: the release-window rule
   applies.
+
+### S2 attempt 2 (2026-10-26): the review's MAJOR
+
+- **MAJOR** (`runtime.rs` mix guard): the mix written as `if needs_dry && !settled_bypassed` made a
+  settled-bypassed block that does not skip emit wet, and no test saw it. The lib row
+  `a_settled_bypassed_per_node_effect_skips_only_blocks_without_work` now asserts the span block's
+  words are the delayed dry input. Red on that mutant: `left: [6.0, 7.0, 10.0, 10.5, -6.0, -7.0,
+  -20.0, -21.0]` against `right: [18.0, 19.0, 20.0, 21.0, -18.0, -19.0, -20.0, -21.0]`; green on
+  revert.
+- Gates: `graph` lib tests, clippy and fmt, every lint-job step.

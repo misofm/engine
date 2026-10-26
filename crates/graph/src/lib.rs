@@ -11243,7 +11243,8 @@ mod tests {
     /// reversible`'s.)
     ///
     /// Red mutations: the skip reads the lane's `bypassed()` without `bypass_ramping()` -> the two
-    /// ramp blocks count; the skip ignores `staged.staged` -> the parameter block counts.
+    /// ramp blocks count; the skip ignores `staged.staged` -> the parameter block counts; the mix
+    /// runs only when `needs_dry && !settled_bypassed` -> the span block emits wet.
     #[test]
     fn a_settled_bypassed_per_node_effect_skips_only_blocks_without_work() {
         let (writer, control) = control_pair();
@@ -11268,7 +11269,14 @@ mod tests {
             channel: ParameterChannel::Left,
             value: 0.5,
         });
-        render_live_control_blocks(&mut plan, 5, 2);
+        let span_block = render_live_control_blocks(&mut plan, 5, 2);
+        // The span block runs the wet path (gain 0.5 on the left) and still emits the dry input
+        // delayed by the declared latency, on both channels.
+        assert_eq!(
+            &span_block[..8],
+            &[18.0, 19.0, 20.0, 21.0, -18.0, -19.0, -20.0, -21.0],
+            "a settled-bypassed block that runs the wet path emits the delayed dry input"
+        );
         assert_eq!(
             test_only_node_bypass_skips(&plan),
             4,
