@@ -46,7 +46,7 @@ export function packageInfo() {
 A session declares its console once: `preInsert` slots run before each track's inserts and
 `postInsert` slots after them, each with a slot ID, an effect, and the quality and link mode every
 track runs it at. Every track then carries one `console` entry per slot, in slot order, with only
-its own `bypass` and parameters, plus its own `inserts`. A console slot is one of the six effects
+its own `bypass` and parameters, plus its own `inserts`. A console slot is one of the seven effects
 in `CONSOLE_ELIGIBLE_EFFECTS` and takes no sidechain; a keyed or other effect is an insert.
 
 ```ts
