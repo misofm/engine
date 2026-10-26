@@ -10191,8 +10191,8 @@ impl LaneMap {
             }
         }
         let mut chains: Vec<Vec<usize>> = Vec::new();
-        for head in 0..count {
-            if !bank(units, head) || predecessor[head].is_some() {
+        for (head, linked) in predecessor.iter().enumerate() {
+            if !bank(units, head) || linked.is_some() {
                 continue;
             }
             let mut chain = vec![head];
@@ -11463,7 +11463,6 @@ impl Runtime {
     }
 }
 
-// REALTIME_POLICY_BEGIN
 /// Whether the chains of units `a.0` and `b.0` would trade lanes `a.1` and `b.1`
 /// ([`BankChain::lane_swap_check`]), asked in the order [`swap_unit_lanes`] swaps them; writes
 /// nothing (issue #2142).
@@ -11590,7 +11589,6 @@ fn swap_unit_lanes(
     }
     Ok(())
 }
-// REALTIME_POLICY_END
 
 /// The master fold of a displaced pack group (issue #1782a), after its last unit has run: for
 /// each unit in schedule order, its home lanes' routed tiles accumulate into the master in home

@@ -1,0 +1,3 @@
+Linux devbox 6.8.0-139-generic #139-Ubuntu SMP PREEMPT_DYNAMIC Sat Aug  1 03:52:05 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+Model name:                              AMD EPYC 7313P 16-Core Processor
+taskset -c 31, one invocation each, one warmup + two measured rounds (bench console --bank-report)
