@@ -377,10 +377,11 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
             + corpus::COMPRESSOR_CASE_COUNT
             + 2
             + corpus::AUTOMATION_CASE_COUNT
-            + corpus::GRAPH_FOLD_CASE_COUNT,
+            + corpus::GRAPH_FOLD_CASE_COUNT
+            + corpus::REVERB_CASE_COUNT,
         corpus::CASE_COUNT,
-        "two builtin cases, the automation block, then the graph block follow the original final \
-         compressor case"
+        "two builtin cases, the automation block, the graph block, then the reverb block follow \
+         the original final compressor case"
     );
     assert_eq!(corpus::BUILTINS_ORIGINAL_CASE_COUNT, 8);
     assert_eq!(corpus::BUILTINS_CASE_COUNT, 10);
@@ -436,6 +437,19 @@ fn g5_delegated_cases_use_the_owning_crates_pins() {
         assert_eq!(
             corpus::case_name(graph_base + case),
             format!("graph/{}", graph::corpus::CASE_NAMES[case])
+        );
+    }
+    // The reverb block is last (#2114); its pins are `reverb::corpus::G5_DIGESTS`, which
+    // `expected_digest` reads, as the delay's.
+    let reverb_base = graph_base + corpus::GRAPH_FOLD_CASE_COUNT;
+    for case in 0..corpus::REVERB_CASE_COUNT {
+        assert!(
+            corpus::is_width_dependent(reverb_base + case),
+            "a reverb case is lane generic and must be digested at every width"
+        );
+        assert!(
+            corpus::case_name(reverb_base + case).starts_with("effect/reverb/"),
+            "reverb cases keep their owning crate's names"
         );
     }
     for case in 0..corpus::COMPRESSOR_CASE_COUNT {

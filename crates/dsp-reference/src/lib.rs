@@ -24,6 +24,7 @@ mod parametric_eq;
 mod processor;
 mod ramp;
 pub mod randomized;
+mod reverb;
 mod signals;
 mod soft_clip;
 mod spectrum;
@@ -61,6 +62,9 @@ pub use parametric_eq::{
 };
 pub use processor::{IdentityProcessor, OfflineF64Processor, render_planar_f64};
 pub use ramp::ReferenceLinearRamp;
+pub use reverb::{
+    ReferenceReverb, ReferenceReverbError, ReferenceReverbParameters, reference_reverb_rt60_seconds,
+};
 pub use signals::{
     ReferenceSignalError, deterministic_bipolar_noise, deterministic_impulse, deterministic_sine,
 };

@@ -20,6 +20,7 @@ members = [
     "crates/soft-clip",
     "crates/transient-shaper",
     "crates/delay",
+    "crates/reverb",
     "crates/effect-compiler",
     "crates/rack",
     "crates/rack-compiler",
@@ -83,6 +84,7 @@ loudness = { path = "crates/loudness", version = "0.1.0" }
 soft-clip = { path = "crates/soft-clip", version = "0.1.0" }
 transient-shaper = { path = "crates/transient-shaper", version = "0.1.0" }
 delay = { path = "crates/delay", version = "0.1.0" }
+reverb = { path = "crates/reverb", version = "0.1.0" }
 effect-compiler = { path = "crates/effect-compiler", version = "0.1.0" }
 rack = { path = "crates/rack", version = "0.1.0" }
 rack-compiler = { path = "crates/rack-compiler", version = "0.1.0" }

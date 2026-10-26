@@ -243,7 +243,7 @@ const _: () = {
     shared_across_threads::<RegistryError>();
 };
 
-/// The ten launch factories, in registry order. Called only by the static's one build.
+/// The eleven launch factories, in registry order. Called only by the static's one build.
 fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryError> {
     NativeEffectRegistry::new([
         Box::new(parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>,
@@ -256,6 +256,7 @@ fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, Registr
         Box::new(delay::DelayFactory) as Box<dyn NativeEffectFactory>,
         Box::new(de_esser::DeEsserFactory) as Box<dyn NativeEffectFactory>,
         Box::new(dynamic_eq::DynamicEqFactory) as Box<dyn NativeEffectFactory>,
+        Box::new(reverb::ReverbFactory) as Box<dyn NativeEffectFactory>,
     ])
 }
 
@@ -264,7 +265,7 @@ fn build_launch_native_effect_registry() -> Result<NativeEffectRegistry, Registr
 /// A console slot always banks, so it must be an effect whose homogeneous bank kernel the console
 /// can rely on: the parametric EQ, compressor, gate/expander, soft-clip, transient shaper,
 /// true-peak limiter and multiband compressor (admitted by #1893 once #1069 closed). The delay
-/// never banks, the de-esser is excluded until the owner rules on its eligibility (#1920), and the
+/// and the reverb never bank, the de-esser is excluded until the owner rules on its eligibility (#1920), and the
 /// dynamic EQ is an insert only at launch (#17 S2). Anything else is refused with
 /// `console.slot.ineligible_effect` where native identities resolve, in
 /// [`prepare_native_session_effects`]; the session schema refuses a third-party slot before this
@@ -284,13 +285,14 @@ pub const CONSOLE_ELIGIBLE_EFFECTS: [&str; 7] = [
 /// This list says only that the effect declines a bank; it does not decide its bypass. A session
 /// bypass on a never-banked effect is lowered to per-lane shunt state like any other
 /// (issue #1339), and the effect renders per node as a live-control
-/// effect whose shunt emits the dry block while it is bypassed. The delay's block-boundary check
+/// effect whose shunt emits the dry block while it is bypassed. The delay and the reverb (#2114)
+/// both decline every bank and render per node. The delay's block-boundary check
 /// (D7) still runs on its wet path when a runaway feedback ring trips it, and the shunt then
 /// passes the dry block instead of the zeros a prepared bypass emitted (decision 15 E4).
 ///
 /// `graph-compiler`'s `bypass_shunt_identity` test holds this list to exactly the launch factories
 /// that decline a well-formed bank at the host's width.
-pub const NEVER_BANKED_EFFECTS: [&str; 1] = ["miso.delay"];
+pub const NEVER_BANKED_EFFECTS: [&str; 2] = ["miso.delay", "miso.reverb"];
 
 pub fn prepare_native_session_effects(
     session: &CompiledSession,

@@ -46,7 +46,7 @@ export function packageInfo() {
 A session declares its console once: `preInsert` slots run before each track's inserts and
 `postInsert` slots after them, each with a slot ID, an effect, and the quality and link mode every
 track runs it at. Every track then carries one `console` entry per slot, in slot order, with only
-its own `bypass` and parameters, plus its own `inserts`. A console slot is one of the six effects
+its own `bypass` and parameters, plus its own `inserts`. A console slot is one of the seven effects
 in `CONSOLE_ELIGIBLE_EFFECTS` and takes no sidechain; a keyed or other effect is an insert.
 
 ```ts
@@ -82,7 +82,7 @@ export function vocalMix() {
 
 The builder refuses what the engine refuses -- a missing, repeated or misordered console entry, an
 unknown slot, an ineligible effect, a sidechain or bypass on a slot, a link mode the effect does
-not support (`EFFECT_LINK_MODES`: the EQ, soft-clip and delay are `dual_mono` only, and the limiter
+not support (`EFFECT_LINK_MODES`: the EQ, soft-clip, delay and reverb are `dual_mono` only, and the limiter
 has no `average`) -- and `MisoUsageError`'s `diagnosticCode` is the engine's own code for it
 (`console.entry_order`, `console.slot.ineligible_effect`, `effect.link_mode.unsupported`, ...).
 The seven track taps are `input`, `post_input`, `insert_send`, `insert_return`, `pre_fader`,
@@ -123,6 +123,43 @@ never boosts, so a mono source stays at its stereo twin's level at every positio
 A strip has `pan` or `matrix`, not both. To give a matrix strip a live `pan(left, right)`, put
 `matrixMode("pan")` in the same transaction: `controls.submit(strip.matrixMode("pan"),
 strip.pan(left, right))`. A `pan` edit alone on a matrix strip is refused with `control.inactive`.
+
+### Aux reverb return
+
+`miso.reverb` is an insert, not a console slot. Put it on a submix (the aux return) at `mix` 1
+(its default: the return carries only the wet signal), and send each track to it from its
+`post_fader` tap. The return and the dry tracks then sum at the output.
+
+```ts
+import { effect, session } from "@misofm/engine";
+
+export function vocalWithReverb() {
+  return session({ id: "vocal.verb", sampleRateHz: 48_000 })
+    .source("vox", { channels: 2, bitDepth: 24, frames: 480_000, content: `blake3:${"0".repeat(64)}` })
+    .track("vocal", { source: "vox" })
+    .submix("aux-b", { inserts: [effect("miso.reverb", { decay: 2400, mix: 1 }, { slotId: "verb" })] })
+    .output("main")
+    .route({
+      id: "vocal-aux-b",
+      source: { kind: "track", trackId: "vocal", tap: "post_fader" },
+      destination: { kind: "submix_input", submixId: "aux-b" },
+      gainDb: -6,
+    })
+    .route({
+      id: "vocal-main",
+      source: { kind: "track", trackId: "vocal", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main" },
+    })
+    .route({
+      id: "aux-b-main",
+      source: { kind: "submix", submixId: "aux-b", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main" },
+    });
+}
+```
+
+The send's `gainDb` sets how much of the track reaches the reverb. The reverb has no latency, so
+the return needs no delay compensation.
 
 ## Render offline
 

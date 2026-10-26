@@ -225,6 +225,7 @@ export const EFFECT_LINK_MODES: Readonly<Record<EffectId, readonly LinkMode[]>> 
   "miso.gate-expander": Object.freeze(["dual_mono", "maximum", "average"] as const),
   "miso.multiband-compressor": Object.freeze(["dual_mono", "maximum", "average"] as const),
   "miso.parametric-eq": Object.freeze(["dual_mono"] as const),
+  "miso.reverb": Object.freeze(["dual_mono"] as const),
   "miso.soft-clip": Object.freeze(["dual_mono"] as const),
   "miso.transient-shaper": Object.freeze(["dual_mono", "maximum", "average"] as const),
   "miso.true-peak-limiter": Object.freeze(["dual_mono", "maximum"] as const),

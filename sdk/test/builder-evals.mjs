@@ -1007,7 +1007,7 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
   });
 
   test("an effect that declares no sidechain input refuses every port", () => {
-    // Six of the eight launch effects are in this class. The type says `never` for `portId`, so a
+    // Seven of the eleven launch effects are in this class. The type says `never` for `portId`, so a
     // caller who typechecks cannot write this at all; the runtime refusal is for the caller who
     // does not -- plain JS, or a `portId` that arrived as a `string` from JSON.
     const portless = CATALOG.effects
@@ -1017,6 +1017,7 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
       "miso.delay",
       "miso.multiband-compressor",
       "miso.parametric-eq",
+      "miso.reverb",
       "miso.soft-clip",
       "miso.transient-shaper",
       "miso.true-peak-limiter",
@@ -1037,14 +1038,14 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
     }
   });
 
-  test("every catalog port row is a launch descriptor row, and there are twenty-four", () => {
+  test("every catalog port row is a launch descriptor row, and there are twenty-six", () => {
     // The catalog is the SDK's only authority on ports, so the shape it publishes is worth
-    // stating once here: ten effects, each with exactly one main input and one main output,
+    // stating once here: eleven effects, each with exactly one main input and one main output,
     // and exactly four of them with an optional `sidechain-in`.
     const rows = CATALOG.effects.flatMap((entry) => entry.ports);
-    assert.equal(rows.length, 24);
-    assert.equal(rows.filter((port) => port.roleName === "mainInput").length, 10);
-    assert.equal(rows.filter((port) => port.roleName === "mainOutput").length, 10);
+    assert.equal(rows.length, 26);
+    assert.equal(rows.filter((port) => port.roleName === "mainInput").length, 11);
+    assert.equal(rows.filter((port) => port.roleName === "mainOutput").length, 11);
     assert.equal(rows.filter((port) => port.roleName === "sidechainInput").length, 4);
     assert.ok(rows.every((port) => port.layoutName === "dualMonoPlanar"));
     assert.ok(rows.every((port) => port.required === (port.roleName !== "sidechainInput")));
