@@ -104,17 +104,21 @@ keeps its image. Give `pan: { left, right }` only when you want the per-lane pan
 power on each lane, so `{ left: 0, right: 0 }` puts both lanes in the centre and folds a stereo
 source to mono.
 
-A mono source reads its channel 0 on both lanes. The engine processes it as one plane up to the
-fader/matrix seam and copies it to the two lanes there. With the identity matrix, a mono source
-plays at exactly the level of its stereo dual-mono twin (the same signal on both channels): a mono
-file is a smaller copy of that twin, not a different sound.
+A mono source reads its channel 0 on both lanes. When both lanes carry the same settings the
+engine may render it as one plane and copy it at the fader/matrix seam; the output is the same
+either way. With the identity matrix, a mono source plays at exactly the level of its stereo
+dual-mono twin (the same signal on both channels): a mono file is a smaller copy of that twin, not
+a different sound.
 
-The console's placement law is a balance, not a -3 dB equal-power mono pan (root ruling, #2101). At
-the centre both sides are at 0 dB. At position `p` in `[-1, 1]`, the far side is `cos(p * pi / 2)`
-and the near side stays at 0 dB: for `p > 0` the matrix is `{ ll: cos(p * pi / 2), lr: 0, rl: 0,
-rr: 1 }`, and for `p < 0` it is `{ ll: 1, lr: 0, rl: 0, rr: cos(p * pi / 2) }`. A matrix coefficient
-is at most 1 in magnitude, so a constant-power law with 0 dB at the centre is not possible. The
-balance keeps a mono source at its stereo twin's level at every position.
+The recommended placement law (apply it with `matrix(...)`) is a balance, not a -3 dB equal-power
+mono pan (root ruling, #2101). At the centre both sides are at 0 dB. At position `p` in `[-1, 1]`,
+the far side is `cos(p * pi / 2)` and the near side stays at 0 dB: for `p > 0` the matrix is
+`{ ll: cos(p * pi / 2), lr: 0, rl: 0, rr: 1 }`, and for `p < 0` it is `{ ll: 1, lr: 0, rl: 0,
+rr: cos(p * pi / 2) }`. With no crossfeed
+(`lr = rl = 0`), a coefficient of at most 1 cannot lift the near side above 0 dB, so a
+constant-power law with 0 dB at the centre needs crossfeed, which would mix the lanes of a stereo
+source and lift a mono source up to +3 dB at the sides. The balance keeps the lanes separate and
+never boosts, so a mono source stays at its stereo twin's level at every position.
 
 A strip has `pan` or `matrix`, not both. To give a matrix strip a live `pan(left, right)`, put
 `matrixMode("pan")` in the same transaction: `controls.submit(strip.matrixMode("pan"),
