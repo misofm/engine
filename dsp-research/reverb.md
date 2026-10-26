@@ -403,7 +403,7 @@ The real `f32` kernel is expected within the stated margins.
    1/24-octave bands from 200 Hz to 8 kHz, and divide by the 1-octave average at the same centre.
    **Bounds:** the mean over the four paths of the peak-to-median is `<= 3.5 dB`, and every
    path's std is `<= 1.5 dB` (commit bd48100ff moved this to 1.6 dB after the measurement; attempt
-   2 restored it; the diffuse-reference rule in the spec's evidence is to replace it). Measured:
+   2 restored it). These bounds are not derived from a stated rule. Root's diffuse-reference rule (the maximum over 32 seeds of tilt-matched decaying Gaussian noise under the same measurement: 2.826 dB mean, 1.03 dB std) fails the design (2.831 / 1.45 dB; the R-L path's std), so the bound is open for root's ruling (spec evidence, attempt 2). Measured:
    peak-to-median 2.15 / 4.31 / 3.12 / 1.80, mean 2.85; std 0.99 / 1.11 / 1.44 / 1.04. One
    path's peak-to-median is noisy: the Gaussian-noise reference gives 1.63-2.82 and 0.64-0.89
    over eight seeds, so the bound is on the mean. The controls fail it:
