@@ -18,6 +18,8 @@ export const ARTIFACT_NAMES = new Set([
   "miso-engine-v1-parameter-metadata.json",
   // Issue #243: so does the ABI layout, emitted by the same generator from the same engine.
   "miso-engine-v1-abi-layout.json",
+  // Issue #2111: the stem identities' WebAssembly SIMD BLAKE3.
+  "miso-engine-v1-blake3.simd128.wasm",
 ]);
 const CONTENT_TYPES = new Map([
   [".d.ts", "text/plain; charset=utf-8"],

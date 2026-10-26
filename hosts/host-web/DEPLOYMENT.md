@@ -1,6 +1,6 @@
 # Browser AudioWorklet deployment
 
-Build the release directory with `scripts/build-web-audioworklet.sh EMPTY_DIRECTORY`. Deploy all six files together under one release-scoped URL; the host JavaScript, worklet JavaScript, declaration, `miso-engine-v1-audio-worklet.simd128.wasm`, `miso-engine-v1-parameter-metadata.json`, and `miso-engine-v1-abi-layout.json` are one indivisible artifact set.
+Build the release directory with `scripts/build-web-audioworklet.sh EMPTY_DIRECTORY`. Deploy all seven files together under one release-scoped URL; the host JavaScript, worklet JavaScript, declaration, `miso-engine-v1-audio-worklet.simd128.wasm`, `miso-engine-v1-parameter-metadata.json`, `miso-engine-v1-abi-layout.json` and the stem identities' `miso-engine-v1-blake3.simd128.wasm` (#2111) are one indivisible artifact set.
 
 `miso-engine-v1-parameter-metadata.json` (issue 137) is the app's parameter vocabulary: effect IDs, parameter IDs, names, units, ranges, defaults and enumerations, plus the builtin track surface and the observation vocabularies. It is generated from the engine's own effect registry at build time, so it always describes the module beside it — serve it from the same release URL and never hand-edit it. Read its `liveUpdatable` field before sending a `SET_CONTROL` edit: it says which parameters the control path can actually move, and the browser ABI's `.d.ts` header explains why the answer is what it is.
 
