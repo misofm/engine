@@ -1,12 +1,13 @@
 //! EBU Tech 3342 (2023) Table 1, the loudness-range cases defined by recipe, at every launch rate.
 //!
-//! The production meter and the `dsp-reference` oracle (Tech 3342's MATLAB function, exactly) run
-//! on the same `f32` samples and are both held to the case's expectation, +-1 LU. Cases 5 and 6
+//! The production meter runs at every launch rate; at 48 kHz the `dsp-reference` oracle (Tech
+//! 3342's MATLAB function, exactly) runs on the same `f32` samples. Both are held to the case's
+//! expectation, +-1 LU. Cases 5 and 6
 //! are authentic programme files: a file-based successor's work.
 
 mod common;
 
-use common::{assert_within, planes, run, trace};
+use common::{assert_within, oracle_at, planes, run};
 use dsp_reference::loudness::reference_tone_sequence;
 use loudness::{LoudnessAnalysis, SUPPORTED_RATES};
 
@@ -26,15 +27,16 @@ fn tech_3342_recipe_cases_at_every_launch_rate() {
             let (plane, widened) = planes(&reference_tone_sequence(rate, &segments));
             let mut analysis = LoudnessAnalysis::new();
             run(rate, &plane, &mut analysis, |_, _| {});
-            let oracle = trace(rate, &widened);
             let what = format!("case {case} at {rate} Hz: LRA");
             assert_within(&what, analysis.loudness_range(), expected, TOLERANCE);
-            assert_within(
-                &format!("oracle {what}"),
-                oracle.loudness_range(0, oracle.segments()),
-                expected,
-                TOLERANCE,
-            );
+            if let Some(oracle) = oracle_at(rate, &widened) {
+                assert_within(
+                    &format!("oracle {what}"),
+                    oracle.loudness_range(0, oracle.segments()),
+                    expected,
+                    TOLERANCE,
+                );
+            }
         }
     }
 }

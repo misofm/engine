@@ -39,6 +39,16 @@ pub fn trace(rate: u32, widened: &[f64]) -> ReferenceLoudnessTrace {
     ReferenceLoudnessTrace::measure(widened, widened, rate).expect("oracle")
 }
 
+/// The rate at which the recipe tests also hold the oracle to each case's expectation.
+pub const ORACLE_RATE: u32 = 48_000;
+
+/// The oracle's trace at [`ORACLE_RATE`] only, `None` at any other rate.
+// The oracle's other-rate K design is already cross-checked by the histogram test at 44.1 and
+// 96 kHz, where it must agree with production to 0.05/0.1 LU.
+pub fn oracle_at(rate: u32, widened: &[f64]) -> Option<ReferenceLoudnessTrace> {
+    (rate == ORACLE_RATE).then(|| trace(rate, widened))
+}
+
 /// Asserts `value` is within `tolerance` of `expected`, naming the reading.
 pub fn assert_within(what: &str, value: Option<f64>, expected: f64, tolerance: f64) {
     let value = value.unwrap_or_else(|| panic!("{what}: undefined, expected {expected}"));

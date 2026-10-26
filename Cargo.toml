@@ -137,3 +137,9 @@ debug = 1
 # Benchmarks measure the shipped profile, never a separately tuned one.
 [profile.bench]
 inherits = "release"
+
+# #2115: the workspace debug job runs `crates/loudness`'s conformance tests, and the production
+# render half's generic lane/`wide` code is instantiated in this crate, where unoptimised it runs
+# about 30x slower. Only the optimisation level changes: debug assertions and overflow checks stay on.
+[profile.dev.package.loudness]
+opt-level = 3
