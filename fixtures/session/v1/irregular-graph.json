@@ -1,0 +1,3201 @@
+{
+  "schema_version": 1,
+  "session_id": "irregular.graph",
+  "revision": "0",
+  "sample_rate_hz": 48000,
+  "quantum_frames": 128,
+  "render_profile": {
+    "id": "native",
+    "mode": "single_thread"
+  },
+  "output_profile": {
+    "id": "main",
+    "channels": 2,
+    "sample_format": "f32_planar"
+  },
+  "sources": [
+    {
+      "id": "src.ch00",
+      "content": "blake3:c617c35ae6fddb4a6824e63c7526a8fa9cdb14184dc519878754b1ce668a78ac",
+      "channels": 1,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch01",
+      "content": "blake3:73750d8f2b2e7eab7c1677c8b714f977f0d6328bc3f63a1bff31eaad1d8c914f",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch02",
+      "content": "blake3:0000195ac2a7d11b0fe3809abc282dae98d2d471aee41c24b7f0e23f4a9cc6bd",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch03",
+      "content": "blake3:072f2a368a99adcd8c209dfad9abb07f3009309dd51c78f57cff863501334277",
+      "channels": 1,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch04",
+      "content": "blake3:d4f6c1a6c1c229597a92d0dac53ee7b8c6f4e909a8c60e30fc9f732a404ada1e",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch05",
+      "content": "blake3:b77b96761d2ffc15551ee1a056692617de99eafaf5ceeb9bd31c7dbb128478f3",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch06",
+      "content": "blake3:595fb8c3ebf03afcce0de9a1064b387c894b197d5805c8c36ee567afd97810c1",
+      "channels": 1,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch07",
+      "content": "blake3:e949f320d6e68a3a9999fa583eaa578159c676e11bc2858bc4114247737afdd9",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch08",
+      "content": "blake3:bc094f3fcde16d102a5ed83db22e8e2f752e66f15c22920b8681daa3b732094c",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch09",
+      "content": "blake3:4bf5dc8100fd61edfa71ba89779126ee1413d90f529edde4e0b9a248293876b2",
+      "channels": 1,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch10",
+      "content": "blake3:0437a86f08fd32058d6412289756596ad1fee5de72b422e5d545789765cfdbb0",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch11",
+      "content": "blake3:feef2689236a1fd04e576415b5f5d856085270fc33530652620eb95b35eb4db2",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch12",
+      "content": "blake3:5fba0db72bc30b82b7a691ce36528eee9d1a5238999ee79df7c5c0dacfe4f8bf",
+      "channels": 1,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch13",
+      "content": "blake3:28e6a9e2253c0ecc4ad404beea0a5102dc9db7e84f5bc4e252a52cbd2b309d26",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch14",
+      "content": "blake3:392922f621732197a891281a6ac765a9935aab76d924e1da756f5b21a865954c",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch15",
+      "content": "blake3:e353438ce568c3e0cd0bfdfc981c4176bceef247c2dddc60c98e04dd6b0b80f1",
+      "channels": 1,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch16",
+      "content": "blake3:402e00e4059f23050f74cf6418b45ee1b87ff89e2a70d490b1b248bc88f2d0dc",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch17",
+      "content": "blake3:caf6177fd199173f2dc4729d3641b4c7136e1e1295242e95c5bfa737d171f1cc",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch18",
+      "content": "blake3:310b25a4f37426ee39fc9e07b2878c5168d2573c0675c1027f775a9481587f2f",
+      "channels": 1,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch19",
+      "content": "blake3:e7b909713ba7900b60462b810573cefca703c5d5a67ff78def2b6adf992575ed",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch20",
+      "content": "blake3:7b6a282c1ddf29bcaade9b41ed583007fdf8337376eac495cb7c1581a594ad18",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch21",
+      "content": "blake3:0937acfda78c46503db8408dad05926f85290a8cb9209ead5eef711594224261",
+      "channels": 1,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch22",
+      "content": "blake3:2d478642bf2d8e4ad4072004420d11fcc266e45eff149ea71dc2c5d69c76e7da",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch23",
+      "content": "blake3:b0b820cdae0eb240859f9c9df1430cf7a4dbe347fd555739b561be6bebb8212d",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    }
+  ],
+  "console": {
+    "pre_insert": [
+      {
+        "slot": "gate",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.gate-expander"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      },
+      {
+        "slot": "eq",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.parametric-eq"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      },
+      {
+        "slot": "comp",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.compressor"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      }
+    ],
+    "post_insert": [
+      {
+        "slot": "drive",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.soft-clip"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      }
+    ]
+  },
+  "tracks": [
+    {
+      "id": "ch00",
+      "source_id": "src.ch00",
+      "left_source_channel": 0,
+      "right_source_channel": 0,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch01",
+      "source_id": "src.ch01",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch02",
+      "source_id": "src.ch02",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch03",
+      "source_id": "src.ch03",
+      "left_source_channel": 0,
+      "right_source_channel": 0,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.shape",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.transient-shaper"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch04",
+      "source_id": "src.ch04",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch05",
+      "source_id": "src.ch05",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.duck",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.compressor"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "routed",
+              "source": {
+                "kind": "track",
+                "track_id": "ch00",
+                "tap": "post_fader"
+              },
+              "port_id": "sidechain-in"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch06",
+      "source_id": "src.ch06",
+      "left_source_channel": 0,
+      "right_source_channel": 0,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch07",
+      "source_id": "src.ch07",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.shape",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.transient-shaper"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch08",
+      "source_id": "src.ch08",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch09",
+      "source_id": "src.ch09",
+      "left_source_channel": 0,
+      "right_source_channel": 0,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch10",
+      "source_id": "src.ch10",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch11",
+      "source_id": "src.ch11",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.shape",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.transient-shaper"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch12",
+      "source_id": "src.ch12",
+      "left_source_channel": 0,
+      "right_source_channel": 0,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch13",
+      "source_id": "src.ch13",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch14",
+      "source_id": "src.ch14",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch15",
+      "source_id": "src.ch15",
+      "left_source_channel": 0,
+      "right_source_channel": 0,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.shape",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.transient-shaper"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch16",
+      "source_id": "src.ch16",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch17",
+      "source_id": "src.ch17",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch18",
+      "source_id": "src.ch18",
+      "left_source_channel": 0,
+      "right_source_channel": 0,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch19",
+      "source_id": "src.ch19",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.shape",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.transient-shaper"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch20",
+      "source_id": "src.ch20",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch21",
+      "source_id": "src.ch21",
+      "left_source_channel": 0,
+      "right_source_channel": 0,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch22",
+      "source_id": "src.ch22",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch23",
+      "source_id": "src.ch23",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "ins.eq",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.parametric-eq"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.deess",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.de-esser"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "ins.shape",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.transient-shaper"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ],
+  "submixes": [
+    {
+      "id": "bus.inst",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "delay",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.delay"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "group.a",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "group.b",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "group.c",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "master",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": false,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "limiter",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.true-peak-limiter"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "maximum",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ],
+  "vcas": [],
+  "control_smoothing": {
+    "kind": "default"
+  },
+  "outputs": [
+    {
+      "id": "main"
+    }
+  ],
+  "routes": [
+    {
+      "id": "bus.inst.to.master",
+      "source": {
+        "kind": "submix",
+        "submix_id": "bus.inst",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch00.to.group.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch00",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch01.to.group.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch01",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch02.to.group.c",
+      "source": {
+        "kind": "track",
+        "track_id": "ch02",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.c"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch03.to.group.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch03",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch04.to.group.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch04",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch05.to.group.c",
+      "source": {
+        "kind": "track",
+        "track_id": "ch05",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.c"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch06.to.group.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch06",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch07.to.group.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch07",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch08.to.group.c",
+      "source": {
+        "kind": "track",
+        "track_id": "ch08",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.c"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch09.to.group.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch09",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch10.to.group.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch10",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch11.to.group.c",
+      "source": {
+        "kind": "track",
+        "track_id": "ch11",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.c"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch12.to.group.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch12",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch13.to.group.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch13",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch14.to.group.c",
+      "source": {
+        "kind": "track",
+        "track_id": "ch14",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.c"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch15.to.group.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch15",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch16.to.group.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch16",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch17.to.group.c",
+      "source": {
+        "kind": "track",
+        "track_id": "ch17",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.c"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch18.to.group.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch18",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch19.to.group.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch19",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch20.to.group.c",
+      "source": {
+        "kind": "track",
+        "track_id": "ch20",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.c"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch21.to.group.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch21",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch22.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch22",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch23.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch23",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "group.a.to.bus.inst",
+      "source": {
+        "kind": "submix",
+        "submix_id": "group.a",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "bus.inst"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "group.b.to.bus.inst",
+      "source": {
+        "kind": "submix",
+        "submix_id": "group.b",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "bus.inst"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "group.c.to.master",
+      "source": {
+        "kind": "submix",
+        "submix_id": "group.c",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "master.to.main",
+      "source": {
+        "kind": "submix",
+        "submix_id": "master",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    }
+  ],
+  "automation": []
+}

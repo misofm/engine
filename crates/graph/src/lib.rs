@@ -6265,6 +6265,59 @@ pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
         })
 }
 
+/// One pack group's bank-slot runs since bind (issue #2132), or one bank unit's that is in no
+/// pack group. Evidence, read off the render thread.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestOnlyBankSlotRuns {
+    /// The group's first runtime unit.
+    pub first_unit: u32,
+    /// Its last runtime unit, inclusive: `first_unit` for a unit in no group.
+    pub last_unit: u32,
+    /// The lanes per unit, `W`.
+    pub width: u32,
+    /// The effect slots of each unit of the group (builtin stages are not counted): one program,
+    /// so one count for every unit of a group.
+    pub effect_slots: u32,
+    /// Bank-slot runs: one per unit per effect slot executed, none for a skipped chain.
+    pub runs: u64,
+    /// Blocks the group's chains skipped whole (issue #1107), summed over its units.
+    pub skips: u64,
+}
+
+/// Every pack group's bank-slot runs (issue #2132), then, in unit order among them, every bank
+/// unit in no group that has an effect slot; empty for any other plan. Read between renders, on
+/// the render thread's side of a block boundary.
+///
+/// Not gated on `test-support`, unlike the other `test_only_` readers: the console bench reads it
+/// (`bench console --bank-report`), and building the bench with `test-support` would put that
+/// feature's render-path switches into the binary it measures. It reads counters every build
+/// keeps (each chain's round trips and whole-chain skips) and adds no render-path state.
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_slot_runs(plan: &mut PreparedRenderPlan) -> Vec<TestOnlyBankSlotRuns> {
+    let narrow = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .map_or_else(Vec::new, |executor| {
+            executor
+                .runtime
+                .bank_slot_runs()
+                .into_iter()
+                .map(
+                    |[first, last, width, effect_slots, runs, skips]| TestOnlyBankSlotRuns {
+                        first_unit: narrow(first),
+                        last_unit: narrow(last),
+                        width: narrow(width),
+                        effect_slots: narrow(effect_slots),
+                        runs,
+                        skips,
+                    },
+                )
+                .collect()
+        })
+}
+
 /// Test-only (issue #1782a): `(first unit, last unit, width)` of each pack group of a graph plan,
 /// in unit order; empty for any other plan.
 #[cfg(any(test, feature = "test-support"))]
