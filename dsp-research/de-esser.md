@@ -45,12 +45,15 @@ A connected sidechain feeds a second SVF with the same words for the detector on
 
 Per channel and sample, in this order: ramps advance; `v1, v2 = svf_step(x)`; `b = k v1`;
 `h = x - b - v2`; `f = b + D (h - b)` (`D` the detector switch word, selected at 0 and 1);
-`l = svf_step_shelf(x).v2` (the same flush threshold as the main SVF); detector tap `d = f` (or the
-sidechain SVF's tap); after both channels:
+`l = svf_step_shelf(x).v2` (the same flush threshold as the main SVF) on a live lane (`M` and `D`
+both nonzero; any other lane holds `l = 0` and a `+0.0` shelf state, and a block in which no lane
+can be live skips the step); detector tap `d = f` (or the sidechain SVF's tap); after both channels:
 `L = clamp(fast_level_db(max(link(|d_own|, |d_partner|), 1e-8)), -160, 24)`;
 `t = max(min(0, (1/R - 1)(L - T)) , -range)`; `c = attack if |t| > |G| else release`;
 `G = snap(G + c (t - G))`; `g = fast_gain_from_db(G)`; `wide = g x`;
-`split = blend((g - 1) f + x, g (x - l) + l, D)` (`x` when `G = 0`);
+`split = blend((g - 1) b + x, g (x - l) + l, D)` (`x` when `G = 0`; the band cut takes the band tap
+`b`, not the crossfaded `f`, so every point of a detector switch is a convex mix of two responses
+with `|H| <= 1` and stays `<= 1`);
 `y = blend(blend(wide, split, M), f, Λ)`, `y = x` when bypassed. `M` and `Λ` are the mode and
 listen words; `blend(a, b, w)` is `a` at `w = 0`, `b` at `w = 1`, `a + w (b - a)` between.
 
@@ -240,12 +243,22 @@ record), in one packet with the dynamic EQ's if the owner wants it.
 - A first-order shelf: no dip under `g`, but 6 dB per octave, which leaves the 1 kHz tone at
   about -0.1 dB at the defaults (the isolation gate's margin).
 - An RBJ shelf with moving poles: needs a per-sample coefficient redesign as `g` moves.
-- Cost of the adopted shelf: one more SVF step, a subtraction, a fused multiply-add and a blend
-  per channel-sample in every mode (a lane cannot branch on a live word; stepping it always also
-  means a detector or mode switch never starts it cold). The `cargo run -p audit -- de-esser`
-  workload (an eight-lane bank and a connected scalar instance, 100,000 blocks of 128) took
-  1,875 and 1,883 ms against 1,627 and 1,631 ms before (one warmup, two rounds; wall time of the
-  whole audit process, descriptive, not a floor row).
+- A shelf that steps in every mode (#1984 attempt 1, so that a switch never starts it cold): it
+  cost about 15 % of the `audit de-esser` workload in the modes that never read it. Rejected for
+  the gated shelf below; a per-frame runtime branch on the gate also cost about 9 %, so the gate is
+  a const segment parameter (`SHELF`).
+- Cost and cold start of the adopted gated shelf: the shelf steps only on a live lane (split and
+  the high-pass detector), and a block in which no lane can be live compiles it out. The
+  `cargo run -p audit -- de-esser` workload (an eight-lane bank and a connected scalar instance,
+  100,000 blocks of 128; wall time of the whole process, one warmup and two rounds, descriptive,
+  not a floor row), base f62e4312d against #1984: wideband 1,644 / 1,636 against 1,655 / 1,655 ms
+  (+0.9 %), split + band-pass 1,638 / 1,639 against 1,656 / 1,651 ms (+0.9 %), split + high-pass
+  1,638 / 1,631 against 1,857 / 1,867 ms (+14 %, the shelf's own work). A switch onto the path
+  starts the shelf from `+0.0`: against an always-on shelf, on a -1.8 dBFS-peak mix (150 Hz at
+  0.3, 1 kHz, noise, an 8 kHz burst) the output differs by at most -49.7 dB re the input peak for
+  at most 112 samples (mode switch at 1 kHz) and -47.5 dB for 17 samples at 6.5 kHz; a detector
+  switch -74.4 dB (1 kHz) and -50.0 dB (6.5 kHz). The detector and mode words ramp over 64
+  samples, which fades the shelf arm in over the transient.
 
 ## Known gaps and follow-up
 
