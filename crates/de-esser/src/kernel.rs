@@ -138,8 +138,10 @@ struct Taps<L: Lane> {
     selected: L,
     /// The unity-peak band-pass tap `k v1`, the band cut's.
     band: L,
-    /// The shelf SVF's low-pass output, `+0.0` on a lane that is not live.
-    shelf: L,
+    /// The shelf SVF's low-pass output, `+0.0` on a lane that is not live; `None` in a block that
+    /// skips the shelf ([`Args::shelf`]), where every lane's split arm is the band cut's bits (its
+    /// detector word is `+0.0` all block, or its mode word is and the split arm is not read).
+    shelf: Option<L>,
 }
 
 /// One SVF step on `x`: the selected tap, band `k v1` (0 dB at the centre) or high
@@ -190,7 +192,7 @@ fn front<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: boo
     let (selected, band, rest) =
         filter::<L, ARMABLE>(x, &mut s.main, &mut s.run, &s.ramps, armed_after);
     let zero = L::zero();
-    let low = if shelf {
+    let low = shelf.then(|| {
         let w = &s.ramps;
         let live = L::mask_and(w[MODE].current.gt(zero), w[DETECTOR].current.gt(zero));
         let mut stepped = s.shelf;
@@ -208,9 +210,7 @@ fn front<L: Lane, const RAMPING: bool, const CONNECTED: bool, const ARMABLE: boo
             ic2: L::select(live, stepped.ic2, zero),
         };
         L::select(live, v2, zero)
-    } else {
-        zero
-    };
+    });
     let detector = if CONNECTED {
         filter::<L, ARMABLE>(side, &mut s.side, &mut s.side_run, &s.ramps, armed_after).0
     } else {
@@ -298,8 +298,11 @@ fn back<L: Lane, const GLIDE: bool>(
     let wide = L::select(unity, x, x.mul(g));
     let r = &s.ramps;
     let cut = g.sub(L::splat(1.0)).fma(taps.band, x);
-    let high_shelf = g.fma(x.sub(taps.shelf), taps.shelf);
-    let split = L::select(unity, x, blend(cut, high_shelf, r[DETECTOR].current));
+    let split = match taps.shelf {
+        Some(low) => blend(cut, g.fma(x.sub(low), low), r[DETECTOR].current),
+        None => cut,
+    };
+    let split = L::select(unity, x, split);
     let out = blend(
         blend(wide, split, r[MODE].current),
         taps.selected,
