@@ -220,7 +220,8 @@ const DAMPING_REFERENCE_RATE_HZ: f64 = 48_000.0;
 /// `0.45 * 44_100`: strictly below Nyquist at every launch rate.
 const DAMPING_MAX_CUTOFF_HZ: f64 = 19_845.0;
 
-/// Maps the frozen linear damping control to the one-pole coefficient at `sample_rate_hz`.
+/// Maps the frozen linear damping control to the one-pole coefficient at `sample_rate_hz`:
+/// `fc = min(-ln(c) * 48_000 / (2 pi), 19_845, fs / 4)`, `G = tan(pi fc / fs)`, `g = G / (1 + G)`.
 ///
 /// The frozen `y = (1 - c) * x + c * y` recurrence has its pole at `-ln(c) * fs / (2 pi)`; holding
 /// that cutoff — evaluated once at the 48 kHz reference rate — fixed in hertz is what makes the
@@ -230,8 +231,11 @@ fn damping_coefficient(c: f64, sample_rate_hz: f64) -> f64 {
     if c == 0.0 {
         return 0.0;
     }
+    // #1374 (owner ruling of 2026-10-25): the cutoff is also capped at a quarter of the sample
+    // rate, where `tan(pi fc / fs) = 1` and the coefficient is `1/2`.
     let cutoff = (-c.ln() * DAMPING_REFERENCE_RATE_HZ / (2.0 * core::f64::consts::PI))
-        .min(DAMPING_MAX_CUTOFF_HZ);
+        .min(DAMPING_MAX_CUTOFF_HZ)
+        .min(sample_rate_hz / 4.0);
     let big_g = (core::f64::consts::PI * cutoff / sample_rate_hz).tan();
     big_g / (1.0 + big_g)
 }
