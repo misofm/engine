@@ -142,7 +142,7 @@ start.
   - "read does not drain" is equivalent: the service step drains before every command.
   - "the arming tag is ignored" is a known gap: a stale record needs a block in flight on another thread across a stop
     and a start, which the single-thread rig cannot produce.
-- **Gates** (root ran them all on dd739e007):
+- **Gates** (the stream coordinator re-ran them all on dd739e007, and the implementer ran them too):
   - cargo test: loudness, protocol, conformance, control-plane `--features test-support`, capi, host-web
     `--features test-support`, plus host-web, protocol and control-plane with CI's feature set (476 passed);
   - fmt, clippy `-D warnings`, the aarch64 `--tests` check and the `-D warnings` release check, the avx2/fma release
