@@ -69,3 +69,37 @@ S1 attempt 1 (implementer; root's verifier has not reviewed it yet).
   production percentile rank rule, the histogram ceiling raised to +30 LUFS, the REALTIME_POLICY region extended over
   `State::rest`, and corrections to the research note (a silent window reads -120 LUFS; subnormal states are flushed at the
   hop end). The S2 note about a non-monotone absolute sample is left for S2.
+
+## S2 decision record (root, 2026-10-26; core wiring and the `LOUDNESS` command)
+- **Placement.** The render half (`control_plane::loudness`, gate word plus the observer plus a record queue) is a field
+  of the session's one `PlanState`, called in `observe_rendered_block`. The control half stays in `SessionState` on
+  both hosts, and nothing crosses a plan swap: `PlanState` lives for the whole session and the swap continues the
+  clock. While disarmed, render pays one `Acquire` load per block. Records carry their arming's word, so a hop pushed
+  during stop-then-start is discarded.
+- **Queue.** Depth 512 hop records (5.12 s at 100 records/s). The service step drains it on both hosts (C ABI
+  `miso_engine_v1_service` and every session call; the browser worklet services after each message and on a host tick),
+  and each read and reset also drains first. A full queue drops the hop and counts it exactly (lossy telemetry,
+  AGENTS). `hops-dropped` counts over the session's life, so a reader diffs it. A drop is a gap for the analysis.
+- **Acked-batch answer.** No ack can come before a drop. `start` acknowledges arming, never delivery. A read drains
+  before it answers and reports only drained hops, together with the exact drop count.
+- **Monotone sample.** On both hosts the rendered absolute sample is strictly continuous: `render_contiguous` refuses a
+  block off the clock, an adopted plan continues the clock, and observation runs only after a successful block. A
+  session seek moves source time, not the render clock, so integration continues across a seek; a host that wants
+  otherwise resets. So `LoudnessAnalysis` needs no backward-step case; any non-continuation is already a gap.
+- **Ops.** start (a full `LoudnessAnalysis::restart`, then arm), read, reset, stop. A start while armed is refused
+  with `VALIDATION_FAILED` `loudness.active`. Every session serves the command (`ProviderFeatures::ALL`), and
+  capability bit 17 is set exactly when 0x0014 is listed.
+- **Cost.** About 71 KB per session at boot (the analysis 46 KB, the queue 24 KB), charged exactly. The C ABI and
+  browser resource ceilings are raised from measurements.
+- **Parity.** One host row only: the byte-equal script row in `protocol_cross_host`, which drives both hosts through
+  their real entries. A second C ABI row would test the same claim twice, so `capi/src/runtime/tests.rs` gets only the
+  forced capability re-pins.
+- **Extra paths (beyond the scope note), needed by the spectrum pattern and the gates:**
+  - protocol: `message_wire.rs`, `message_wire/loudness.rs` (new), `controller.rs`, and their tests;
+  - `control-plane/Cargo.toml`, `control-plane/tests/loudness_monitor.rs` (new), `Cargo.lock`;
+  - `fuzz/corpus/complete-schema-manifest.md`;
+  - `tools/realtime-policy/src/policy.rs`;
+  - `capi/tests/resource_lifecycle.rs`;
+  - `hosts/host-web/tests/browser-v1/expected.json`;
+  - the S1 crate (`restart()`; `tests/allocation.rs` deleted, because the armed meter joins the cross-host render
+    zero-allocation test).
