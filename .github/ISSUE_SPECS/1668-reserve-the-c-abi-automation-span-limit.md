@@ -204,3 +204,17 @@ nonzero word, so caller and library update together. Focused validation passes: 
 `git diff --check`. The C ABI checker and mutation suite are running at this
 checkpoint (shared-library build passed, static-library build in progress); final
 shared gates run after merging the newest main.
+
+Root adversarial review at `c172d4dbc`: **PASS, attempt 1**, with one minor
+stale span-limit doc sentence removed before delivery. Independent actual-FFI
+mutations removing either reserved1 or reserved0 validation fail with OK versus
+INVALID_ARGUMENT; clean/restored tests pass. Test value: the export test detects
+accepting either reserved word, premature diagnostics writes or child publication,
+and retaining the old nonzero requirement; layout assertions pin offset 8.
+No render arithmetic or allocation changes. Root evidence is preserved in
+`/home/bl/misofm/engine-work-evidence/1668/root-review/1668-*.log`.
+`bash scripts/check-capi-abi.sh --self-test` passes, including its unmutated
+positive control, C/C++ fixtures, shared/static links and drift mutations.
+Implementation evidence is preserved outside the worktree under
+`/home/bl/misofm/engine-work-evidence/1668/astra/`. Final shared qualification
+follows integration of the newest main.

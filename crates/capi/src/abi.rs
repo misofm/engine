@@ -135,7 +135,6 @@ pub struct CompileLimits {
     pub struct_size: u32,
     /// Preallocated frames in every host-fed source ring.
     pub source_ring_frames: u32,
-    /// Maximum accepted automation spans in one block.
     /// Formerly maximum_automation_spans_per_block; must be zero in ABI V1. Layout unchanged.
     pub reserved1: u32,
     /// Must be zero in ABI V1.
