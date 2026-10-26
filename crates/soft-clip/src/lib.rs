@@ -580,34 +580,26 @@ impl<L: Lane> Channel<L> {
     /// the render thread has no allocator.
     fn reset_full(&mut self, defaults: &[[f32; PARAMETER_COUNT]]) {
         debug_assert_eq!(defaults.len(), L::WIDTH);
-        self.history.clear();
-        for (lane, (values, ramps)) in defaults.iter().zip(self.ramps.iter_mut()).enumerate() {
-            for (parameter, value) in values.iter().copied().enumerate() {
-                ramps[parameter] = LinearRamp::fixed(value);
-                set_lane(self.state.field_mut(parameter), lane, value);
-            }
+        for (lane, values) in defaults.iter().enumerate() {
+            self.reset_lane_full(lane, values);
         }
+        self.history.pos = 0;
     }
 
     /// Clears every history and snaps every ramp to its target, keeping parameters.
     fn reset_discontinuity(&mut self) {
-        self.history.clear();
-        for (lane, ramps) in self.ramps.iter_mut().enumerate() {
-            for (parameter, ramp) in ramps.iter_mut().enumerate() {
-                ramp.snap();
-                set_lane(self.state.field_mut(parameter), lane, ramp.current);
-            }
+        for lane in 0..L::WIDTH {
+            self.reset_lane_discontinuity(lane);
         }
+        self.history.pos = 0;
     }
 
-    /// [`reset_discontinuity`](Self::reset_discontinuity) for one lane: its rows of every history
-    /// are zeroed and its ramps snapped, and every other lane is left bit-unchanged (issue #1092).
+    /// Zeroes one lane's rows of every history, leaving every other lane bit-unchanged.
     ///
     /// The shared cursor is not moved. It need not be: every row of the lane is zero, so the ring
     /// reads the same at any rotation, which is the property a lane restore already relies on
-    /// ([`apply_lane_words`]). So this is bit-for-bit what a scalar instance's whole reset does to
-    /// its one lane.
-    fn reset_lane_discontinuity(&mut self, lane: usize) {
+    /// ([`apply_lane_words`]).
+    fn clear_lane_rows(&mut self, lane: usize) {
         let width = L::WIDTH;
         for history in [
             &mut self.history.x,
@@ -618,6 +610,25 @@ impl<L: Lane> Channel<L> {
                 *word = 0.0;
             }
         }
+    }
+
+    /// [`reset_full`](Self::reset_full) for one lane (issue #2131): its rows of every history are
+    /// zeroed and its ramps rest at `defaults`, and every other lane and the shared cursor are left
+    /// bit-unchanged, as in [`reset_lane_discontinuity`](Self::reset_lane_discontinuity).
+    fn reset_lane_full(&mut self, lane: usize, defaults: &[f32; PARAMETER_COUNT]) {
+        self.clear_lane_rows(lane);
+        for (parameter, value) in defaults.iter().copied().enumerate() {
+            self.ramps[lane][parameter] = LinearRamp::fixed(value);
+            set_lane(self.state.field_mut(parameter), lane, value);
+        }
+    }
+
+    /// [`reset_discontinuity`](Self::reset_discontinuity) for one lane: its rows of every history
+    /// are zeroed and its ramps snapped, and every other lane is left bit-unchanged (issue #1092).
+    /// The shared cursor is not moved ([`clear_lane_rows`](Self::clear_lane_rows)), so this is
+    /// bit-for-bit what a scalar instance's whole reset does to its one lane.
+    fn reset_lane_discontinuity(&mut self, lane: usize) {
+        self.clear_lane_rows(lane);
         for (parameter, ramp) in self.ramps[lane].iter_mut().enumerate() {
             ramp.snap();
             set_lane(self.state.field_mut(parameter), lane, ramp.current);
@@ -1217,6 +1228,28 @@ impl<L: Lane> SoftClip<L> {
         }
     }
 
+    /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
+    /// [`reset`](Self::reset) on both channels, and nothing of any other lane. Each channel's
+    /// shared cursor stays where it is, as the D7 recovery leaves it: the lane's rows are all zero,
+    /// so they read the same at any rotation, and the payload is age-ordered from the cursor.
+    /// `collapsed` stays as the whole-bank reset leaves it. A lane past the width changes nothing.
+    /// Bounded by one lane's rows and words.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if lane >= L::WIDTH {
+            return;
+        }
+        match kind {
+            ResetKind::FullToDefaults => {
+                self.left.reset_lane_full(lane, &self.left_defaults[lane]);
+                self.right.reset_lane_full(lane, &self.right_defaults[lane]);
+            }
+            ResetKind::DiscontinuityKeepParameters => {
+                self.left.reset_lane_discontinuity(lane);
+                self.right.reset_lane_discontinuity(lane);
+            }
+        }
+    }
+
     /// Renders one block of both channels and applies the master plan §4.4 boundary check.
     ///
     /// Returns, per channel (`[left, right]`), the bitmask of the active lanes whose own output on
@@ -1711,9 +1744,8 @@ impl PreparedNativeEffect for PreparedSoftClip {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
-    // #2131 placeholder: replaced by the per-lane reset.
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
-        let _ = (lane, kind);
+        self.inner.reset_lane(lane, kind);
     }
     fn retained_bytes(&self) -> u64 {
         self.inner.heap_bytes()

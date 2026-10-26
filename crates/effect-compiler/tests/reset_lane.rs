@@ -28,11 +28,13 @@
 use bench_support::alloc as bench_alloc;
 use effect_compiler::{NEVER_BANKED_EFFECTS, launch_native_effect_registry};
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, EffectDescriptor, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, ParameterDescriptor, PortRole, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ResetKind, StatePayloadOutput, StatePayloadSizes,
-    decimal_to_f32, default_initial_values, parameter_lattice_points,
+    BankWidth, EffectBankProcessBlock, EffectDescriptor, EffectQuality, EffectTargetRequest,
+    InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectTargetPreparation,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, ParameterDescriptor, PortRole,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedEffectTarget, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
+    ResetKind, StatePayloadOutput, StatePayloadSizes, decimal_to_f32, default_initial_values,
+    parameter_lattice_points,
 };
 use lane::Backend;
 
@@ -232,13 +234,17 @@ impl Fixture {
     }
 }
 
-/// One block's input and automation for every lane.
+/// One block's input and control for every lane.
 struct Block {
     frames: u32,
     left: Vec<f32>,
     right: Vec<f32>,
     spans: Vec<PreparedAutomationSpan>,
     offsets: Vec<u32>,
+    /// Per lane: prepared targets applied to the lane before the block.
+    targets: Vec<Vec<PreparedEffectTarget>>,
+    /// Per lane: a detector-link glide started before the block.
+    links: Vec<Option<(LinkMode, u32)>>,
 }
 
 /// What one block of a run left: both output planes, the rest mask and every lane's payload.
@@ -251,37 +257,57 @@ struct Observed {
 
 #[derive(Clone, Copy)]
 enum Schedule {
-    /// Signal on every block.
+    /// Dynamic signal, a long quiet passage, the call, dynamic signal again. Every control is in
+    /// flight across the call: a span on the last frame before it, a prepared target and a link
+    /// glide started on the block before it.
     Running,
-    /// Signal, then silence long enough to settle, the call, more silence, then signal again.
+    /// The same, with exact silence on both sides of the call, so rest and silence bookkeeping is
+    /// what the call meets.
     Resting,
 }
 
-/// Blocks before the call and after it.
-const BEFORE: usize = 10;
-const AFTER: usize = 10;
-const RESTING_SILENCE: usize = 48;
+/// Dynamic blocks at the start and after the call.
+const DYNAMIC: usize = 24;
+/// Quiet full-quantum blocks before the call: over a second at 48 kHz, longer than the gate's
+/// longest hold (1000 ms), so a gate is closing and every detector releasing when the call lands.
+const QUIET: usize = 420;
+/// Exact-silence blocks on each side of the call in the resting schedule.
+const SILENT: usize = 48;
 
-fn blocks(fixture: &Fixture, schedule: Schedule, seed: u64) -> (Vec<Block>, usize) {
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    /// Level drawn per lane per block from -66 dB to +6 dB, with spans and targets.
+    Dynamic,
+    /// -66 dB to -40 dB, no control: below most thresholds, so the detectors release.
+    Quiet,
+    /// Exact `+0.0`, no control.
+    Silent,
+}
+
+fn blocks(
+    fixture: &Fixture,
+    preparation: Option<&dyn NativeEffectTargetPreparation>,
+    schedule: Schedule,
+    seed: u64,
+) -> (Vec<Block>, usize) {
     let mut rng = Rng(seed);
     let lanes = fixture.lanes;
-    let (before, after, silent) = match schedule {
-        Schedule::Running => (BEFORE, AFTER, 0..0),
-        Schedule::Resting => (
-            BEFORE + RESTING_SILENCE,
-            RESTING_SILENCE + AFTER,
-            BEFORE..BEFORE + 2 * RESTING_SILENCE,
-        ),
-    };
-    // Per-lane signal shape: a level, a tone period and a noise share.
-    let shapes: Vec<(f32, f32, f32)> = (0..lanes)
-        .map(|_| {
-            (
-                0.05 + 1.9 * rng.signed().abs(),
-                8.0 + rng.below(400) as f32,
-                rng.signed().abs(),
-            )
-        })
+    let mut phases = vec![Phase::Dynamic; DYNAMIC];
+    phases.extend([Phase::Quiet; QUIET]);
+    if matches!(schedule, Schedule::Resting) {
+        phases.extend([Phase::Silent; SILENT]);
+    }
+    let before = phases.len();
+    if matches!(schedule, Schedule::Resting) {
+        phases.extend([Phase::Silent; SILENT]);
+    }
+    phases.extend([Phase::Dynamic; DYNAMIC]);
+    // The last block before the call carries every control in the running schedule.
+    let primed = matches!(schedule, Schedule::Running).then_some(before - 1);
+
+    // Per-lane signal shape: a tone period and a noise share.
+    let shapes: Vec<(f32, f32)> = (0..lanes)
+        .map(|_| (8.0 + rng.below(400) as f32, rng.signed().abs()))
         .collect();
     let automatable: Vec<InitialParameterValue> = default_initial_values(fixture.descriptor)
         .filter(|slot| {
@@ -289,18 +315,36 @@ fn blocks(fixture: &Fixture, schedule: Schedule, seed: u64) -> (Vec<Block>, usiz
             parameter.automatable && live(parameter)
         })
         .collect();
+    let link_modes: Vec<LinkMode> = [LinkMode::Maximum, LinkMode::Average]
+        .into_iter()
+        .filter(|&mode| {
+            fixture.descriptor.lane_link && fixture.descriptor.supported_link_modes.contains(mode)
+        })
+        .collect();
+    // Each lane's committed candidate, which its prepared targets are designed from.
+    let mut candidates = fixture.initial.clone();
     let mut sample = 0_u64;
     let mut out = Vec::new();
-    for index in 0..before + after {
-        let frames = FRAMES[index % FRAMES.len()];
-        let quiet = silent.contains(&index);
+    for (index, &phase) in phases.iter().enumerate() {
+        let frames = match phase {
+            Phase::Dynamic => FRAMES[index % FRAMES.len()],
+            Phase::Quiet | Phase::Silent => QUANTUM,
+        };
+        let prime = primed == Some(index);
         let size = frames as usize * lanes;
         let mut left = vec![0.0_f32; size];
         let mut right = vec![0.0_f32; size];
-        if !quiet {
+        if phase != Phase::Silent {
+            let (spread, centre) = match phase {
+                Phase::Dynamic => (36.0, -30.0),
+                _ => (13.0, -53.0),
+            };
+            let levels: Vec<f32> = (0..lanes)
+                .map(|_| 10_f32.powf(rng.signed().mul_add(spread, centre) / 20.0))
+                .collect();
             for frame in 0..frames as usize {
                 let t = (sample + frame as u64) as f32;
-                for (lane, &(level, period, noise)) in shapes.iter().enumerate() {
+                for (lane, (&(period, noise), &level)) in shapes.iter().zip(&levels).enumerate() {
                     let tone = (core::f32::consts::TAU * t / period).sin();
                     left[frame * lanes + lane] =
                         level * (tone * (1.0 - noise) + noise * rng.signed());
@@ -309,17 +353,20 @@ fn blocks(fixture: &Fixture, schedule: Schedule, seed: u64) -> (Vec<Block>, usiz
                 }
             }
         }
-        // Spans: up to two per lane, and on the last block before the call one lands on that
-        // block's last frame on every lane, so a ramp is in flight across the boundary.
+        let controlled = phase == Phase::Dynamic || prime;
+        // Spans: up to two per lane, and on the primed block one lands on its last frame on every
+        // lane, so a ramp is in flight across the call.
         let mut spans = Vec::new();
         let mut offsets = vec![0_u32];
-        for _lane in 0..lanes {
-            if !quiet && !automatable.is_empty() {
-                let count = if index + 1 == before { 2 } else { rng.below(3) };
+        let mut targets = vec![Vec::new(); lanes];
+        let mut links = vec![None; lanes];
+        for lane in 0..lanes {
+            if controlled && !automatable.is_empty() {
+                let count = if prime { 2 } else { rng.below(3) };
                 let mut at: Vec<u64> = (0..count)
                     .map(|_| sample + rng.below(frames as usize) as u64)
                     .collect();
-                if index + 1 == before {
+                if prime {
                     at[count - 1] = sample + u64::from(frames) - 1;
                 }
                 at.sort_unstable();
@@ -335,6 +382,25 @@ fn blocks(fixture: &Fixture, schedule: Schedule, seed: u64) -> (Vec<Block>, usiz
                 }
             }
             offsets.push(spans.len() as u32);
+            // A prepared target on a third of the dynamic blocks and on the primed one: one live
+            // parameter of the lane's candidate moves on both channels.
+            if let Some(preparation) = preparation
+                && controlled
+                && !automatable.is_empty()
+                && (prime || rng.below(3) == 0)
+            {
+                targets[lane] = target(
+                    fixture,
+                    preparation,
+                    &mut candidates[lane],
+                    &automatable,
+                    &mut rng,
+                );
+            }
+            // A link glide on the primed block, long enough to be in flight across the call.
+            if prime && !link_modes.is_empty() {
+                links[lane] = Some((link_modes[rng.below(link_modes.len())], 4096));
+            }
         }
         out.push(Block {
             frames,
@@ -342,10 +408,54 @@ fn blocks(fixture: &Fixture, schedule: Schedule, seed: u64) -> (Vec<Block>, usiz
             right,
             spans,
             offsets,
+            targets,
+            links,
         });
         sample += u64::from(frames);
     }
     (out, before)
+}
+
+/// Moves one automatable parameter of `candidate` to a fresh lattice draw and designs its targets.
+/// A refused design keeps the candidate and returns no target.
+fn target(
+    fixture: &Fixture,
+    preparation: &dyn NativeEffectTargetPreparation,
+    candidate: &mut Vec<InitialParameterValue>,
+    automatable: &[InitialParameterValue],
+    rng: &mut Rng,
+) -> Vec<PreparedEffectTarget> {
+    let parameter = automatable[rng.below(automatable.len())].parameter_index;
+    let values = &fixture.lattices[parameter as usize];
+    let mut next = candidate.clone();
+    let mut changed = vec![false; next.len()];
+    for (slot, touched) in next.iter_mut().zip(&mut changed) {
+        if slot.parameter_index == parameter {
+            slot.value = values[rng.below(values.len())];
+            *touched = true;
+        }
+    }
+    let mut out = vec![
+        PreparedEffectTarget {
+            slot: 0,
+            channel: ParameterChannel::Left,
+            words: [0; PREPARED_EFFECT_TARGET_WORDS],
+        };
+        preparation.maximum_targets()
+    ];
+    let Ok(count) = preparation.prepare_targets(
+        EffectTargetRequest {
+            sample_rate: SAMPLE_RATE,
+            values: &next,
+            changed: &changed,
+        },
+        &mut out,
+    ) else {
+        return Vec::new();
+    };
+    *candidate = next;
+    out.truncate(count);
+    out
 }
 
 /// Runs `blocks` on `bank`, calling `at_boundary` before block `boundary`, and records what each
@@ -368,6 +478,18 @@ fn run(
                 rest: bank.lanes_at_rest(),
                 payloads: fixture.payloads(bank),
             });
+        }
+        for (lane, (targets, link)) in block.targets.iter().zip(&block.links).enumerate() {
+            for target in targets {
+                bank.apply_prepared_target_lane(lane, target)
+                    .unwrap_or_else(|failure| panic!("lane {lane} target: {failure:?}"));
+            }
+            if let Some((mode, samples)) = *link {
+                assert!(
+                    bank.retarget_link(lane, mode, samples),
+                    "lane {lane} link glide"
+                );
+            }
         }
         let mut left = block.left.clone();
         let mut right = block.right.clone();
@@ -405,8 +527,22 @@ fn kind_name(kind: ResetKind) -> &'static str {
     }
 }
 
+/// How the reset lane's state payload is judged against the whole-bank reset's.
+#[derive(Clone, Copy, PartialEq)]
+enum LanePayload {
+    /// Byte for byte.
+    Exact,
+    /// Not at all: the payload carries the bank's shared clocks (the limiter's ring cursors, and
+    /// the van Herk phase and ring rotation measured from them). The whole-bank reset rewinds
+    /// those clocks and `reset_lane` must not, because every other lane's payload carries them
+    /// too (spec item 3: the limiter's shared cursors stay where per-lane D7 recovery leaves
+    /// them). The reset lane is then judged by what the clocks cannot change: every output word
+    /// and its rest bit. Every other lane's payload is still compared byte for byte.
+    SharedClocks,
+}
+
 /// The whole check for one effect.
-fn check(effect: &str) {
+fn check(effect: &str, lane_payload: LanePayload) {
     bench_alloc::assert_installed();
     let registry = launch_native_effect_registry().expect("launch registry");
     let factory = registry.get_ascii(effect).expect("a launch effect");
@@ -423,7 +559,12 @@ fn check(effect: &str) {
         (Schedule::Running, "running"),
         (Schedule::Resting, "resting"),
     ] {
-        let (blocks, boundary) = blocks(&fixture, schedule, seed ^ 0x5eed);
+        let (blocks, boundary) = blocks(
+            &fixture,
+            factory.target_preparation(),
+            schedule,
+            seed ^ 0x5eed,
+        );
         let untouched = run(
             &fixture,
             &mut *fixture.bind(factory),
@@ -458,7 +599,7 @@ fn check(effect: &str) {
                     },
                 );
                 assert_eq!(heap, 0, "{case}: reset_lane reached the allocator");
-                compare(&case, lanes, target, &one, &untouched, &whole);
+                compare(&case, lanes, target, lane_payload, &one, &untouched, &whole);
             }
             // The check must be able to fail: on the running schedule every picked lane of the
             // whole-reset twin differs from the untouched twin somewhere, or an empty
@@ -495,6 +636,7 @@ fn compare(
     case: &str,
     lanes: usize,
     target: usize,
+    lane_payload: LanePayload,
     one: &[Observed],
     untouched: &[Observed],
     whole: &[Observed],
@@ -512,10 +654,12 @@ fn compare(
                 (kept, "the untouched run")
             };
             // The first differing byte, not two whole payloads: a payload is kilobytes.
+            let judged = lane != target || lane_payload == LanePayload::Exact;
             let first = got.payloads[lane]
                 .iter()
                 .zip(&reference.payloads[lane])
-                .position(|(got, reference)| got != reference);
+                .position(|(got, reference)| got != reference)
+                .filter(|_| judged);
             assert!(
                 first.is_none(),
                 "{case}: lane {lane}'s state payload {at} differs from {which} at byte {first:?}"
@@ -539,27 +683,27 @@ fn compare(
 }
 
 macro_rules! rows {
-    ($($name:ident => $effect:literal,)*) => {
+    ($($name:ident => $effect:literal $payload:ident,)*) => {
         const ROWS: &[&str] = &[$($effect),*];
         $(
             #[test]
             fn $name() {
-                check($effect);
+                check($effect, LanePayload::$payload);
             }
         )*
     };
 }
 
 rows! {
-    reset_lane_compressor => "miso.compressor",
-    reset_lane_de_esser => "miso.de-esser",
-    reset_lane_dynamic_eq => "miso.dynamic-eq",
-    reset_lane_gate_expander => "miso.gate-expander",
-    reset_lane_multiband_compressor => "miso.multiband-compressor",
-    reset_lane_parametric_eq => "miso.parametric-eq",
-    reset_lane_soft_clip => "miso.soft-clip",
-    reset_lane_transient_shaper => "miso.transient-shaper",
-    reset_lane_true_peak_limiter => "miso.true-peak-limiter",
+    reset_lane_compressor => "miso.compressor" Exact,
+    reset_lane_de_esser => "miso.de-esser" Exact,
+    reset_lane_dynamic_eq => "miso.dynamic-eq" Exact,
+    reset_lane_gate_expander => "miso.gate-expander" Exact,
+    reset_lane_multiband_compressor => "miso.multiband-compressor" Exact,
+    reset_lane_parametric_eq => "miso.parametric-eq" Exact,
+    reset_lane_soft_clip => "miso.soft-clip" Exact,
+    reset_lane_transient_shaper => "miso.transient-shaper" Exact,
+    reset_lane_true_peak_limiter => "miso.true-peak-limiter" SharedClocks,
 }
 
 /// Red mutation: a launch effect that binds a bank and has no row here (the reverb, #2114, landing

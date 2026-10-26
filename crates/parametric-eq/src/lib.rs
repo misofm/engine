@@ -2008,6 +2008,54 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             self.refresh_identity(section);
         }
     }
+
+    /// [`discontinuity_reset`](Self::discontinuity_reset) for lane `track` alone (issue #2131):
+    /// the lane's integrators and silence counter cleared and every section's ramp ended at its
+    /// target, through the lane's own mask. Every other lane keeps every word; each section's
+    /// `identity` flag and `dry` mask are re-derived from the words.
+    fn discontinuity_reset_lane(&mut self, track: usize) {
+        self.clear_lane_runtime(track);
+        let mask = lane_mask::<L>(track);
+        for section in 0..EQ_SECTION_COUNT {
+            let slot = &mut self.sections[section];
+            for index in 0..EQ_COEFFICIENT_WORDS {
+                let target = coef_word(&slot.target, index);
+                let word = coef_word_mut(&mut slot.coef, index);
+                *word = L::select(mask, target, *word);
+                lane_put(step_word_mut(&mut slot.step, index), mask, 0.0);
+            }
+            self.remaining[section][track] = 0;
+            self.refresh_identity(section);
+        }
+    }
+
+    /// A full reset of lane `track` alone (issue #2131): the lane's prepared bands and designed
+    /// words settled with no ramp in flight ([`settle`](Self::settle), which re-derives each
+    /// section's flags), and its integrators and silence counter cleared, as
+    /// [`from_prepared`](Self::from_prepared) builds every lane.
+    fn reset_lane_to_prepared(
+        &mut self,
+        track: usize,
+        targets: [BandTarget; EQ_SECTION_COUNT],
+        words: [EqSvfWords; EQ_SECTION_COUNT],
+    ) {
+        self.clear_lane_runtime(track);
+        self.targets[track] = targets;
+        for (section, words) in words.into_iter().enumerate() {
+            self.settle(section, track, words);
+        }
+    }
+
+    /// Lane `track`'s cross-frame words to `+0.0`: both integrators of every section and the
+    /// silence counter.
+    fn clear_lane_runtime(&mut self, track: usize) {
+        let mask = lane_mask::<L>(track);
+        for section in &mut self.sections {
+            lane_put(&mut section.state.ic1, mask, 0.0);
+            lane_put(&mut section.state.ic2, mask, 0.0);
+        }
+        lane_put(&mut self.silence, mask, 0.0);
+    }
 }
 
 /// Runs both channels' six-section cascades over one block.
@@ -3518,6 +3566,30 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         }
     }
 
+    /// [`reset_state`](Self::reset_state) for lane `lane` alone (issue #2131): both channels of
+    /// the lane take the words the whole reset writes there, every other lane keeps every word,
+    /// and each section's `identity` flag and `dry` mask are re-derived. The silent claim is
+    /// withdrawn, as the whole reset withdraws it; `collapsed` is left alone, as there. A lane past
+    /// the width changes nothing.
+    fn reset_lane_state(&mut self, lane: usize, kind: ResetKind) {
+        if lane >= W {
+            return;
+        }
+        self.silent_fixed_point = false;
+        match kind {
+            ResetKind::FullToDefaults => {
+                let [left, right] = self.initial[lane];
+                let [left_words, right_words] = self.initial_words[lane];
+                self.left.reset_lane_to_prepared(lane, left, left_words);
+                self.right.reset_lane_to_prepared(lane, right, right_words);
+            }
+            ResetKind::DiscontinuityKeepParameters => {
+                self.left.discontinuity_reset_lane(lane);
+                self.right.discontinuity_reset_lane(lane);
+            }
+        }
+    }
+
     /// Restores every band of both channels to the parameters preparation was given.
     fn reset_to_defaults(&mut self) {
         let left = core::array::from_fn(|track| self.initial[track][0]);
@@ -4081,9 +4153,9 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<L, W> {
-    // #2131 placeholder: replaced by the per-lane reset.
+    /// Issue #2131: see [`reset_lane_state`](PreparedParametricEq::reset_lane_state).
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
-        let _ = (lane, kind);
+        self.reset_lane_state(lane, kind);
     }
     fn retained_bytes(&self) -> u64 {
         self.heap_bytes()

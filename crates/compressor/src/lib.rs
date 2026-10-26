@@ -748,6 +748,33 @@ impl<L: Lane> Instance<L> {
         }
     }
 
+    /// [`reset`](Self::reset) for lane `lane` alone (issue #2131): both channels of the lane take
+    /// the words the whole reset writes there (`kernel::Channel::full_reset_lane`,
+    /// `kernel::Channel::discontinuity_reset_lane`), and a full reset seats the lane's link weights
+    /// at rest at its mode. Every other lane keeps every word. The compressor has no shared cursor
+    /// or counter; the silent claim is withdrawn, as `reset` withdraws it. A lane past the width
+    /// changes nothing.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if lane >= L::WIDTH {
+            return;
+        }
+        self.silent_fixed_point = false;
+        let rate = self.sample_rate;
+        match kind {
+            ResetKind::FullToDefaults => {
+                self.left.full_reset_lane(lane, rate);
+                self.right.full_reset_lane(lane, rate);
+                let mode = self.link_modes[lane];
+                self.left.rest_link(lane, mode);
+                self.right.rest_link(lane, mode);
+            }
+            ResetKind::DiscontinuityKeepParameters => {
+                self.left.discontinuity_reset_lane(lane, rate);
+                self.right.discontinuity_reset_lane(lane, rate);
+            }
+        }
+    }
+
     /// Renders one block and applies the section 4.4 boundary policy to each channel.
     ///
     /// `record(lane, left_failed, right_failed)` is called once per lane, and only when a block
@@ -1434,9 +1461,9 @@ impl PreparedNativeEffect for PreparedCompressor {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
-    // #2131 placeholder: replaced by the per-lane reset.
+    /// Issue #2131: see `Instance::reset_lane`.
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
-        let _ = (lane, kind);
+        self.instance.reset_lane(lane, kind);
     }
     /// Every field is inline: this instance owns no heap (#1074).
     fn retained_bytes(&self) -> u64 {
