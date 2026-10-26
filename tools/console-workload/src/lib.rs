@@ -3285,9 +3285,10 @@ mod tests {
         let mut driver = FrozenSourceDriver::new(&claims, InputSignal::Tone, &injected, &mappings);
         let count = claims.len();
         let report = driver.resource_report();
+        // The frozen planes, and one silence flag per claim (issue #2133); a tone never toggles.
         assert_eq!(
             report.total_engine_owned_bytes,
-            (count * SOURCE_BLOCK_VALUES * core::mem::size_of::<f32>()) as u64
+            (count * SOURCE_BLOCK_VALUES * core::mem::size_of::<f32>() + count) as u64
         );
         assert_eq!(
             report.pcm_payload_already_charged_bytes + report.overhead_bytes,
