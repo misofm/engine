@@ -66,8 +66,8 @@
         "observationRetainedBytes": "0"
       },
       "resourceCeilings": {
-        "bridgeMetadataBytes": "546176",
-        "bridgeRetainedBytes": "587008",
+        "bridgeMetadataBytes": "630784",
+        "bridgeRetainedBytes": "671616",
         "sourceTotalBytes": "4352",
         "sourceOverheadBytes": "3264",
         "builtinRetainedBytes": "6720",

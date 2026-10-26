@@ -153,10 +153,10 @@ fn limits() -> ControlLimits {
 
 /// A 1 kHz sine at -23 dBFS on both channels: Tech 3341 case 1, which reads -23 LUFS.
 fn tone(frame: u64) -> [f32; QUANTUM] {
-    let amplitude = 10.0_f64.powf(-23.0 / 20.0);
+    let amplitude = math::db_to_gain(-23.0);
     core::array::from_fn(|index| {
         let t = (frame + index as u64) as f64 / f64::from(SAMPLE_RATE_HZ);
-        (amplitude * (2.0 * core::f64::consts::PI * 1_000.0 * t).sin()) as f32
+        (amplitude * math::sin(2.0 * core::f64::consts::PI * 1_000.0 * t)) as f32
     })
 }
 
