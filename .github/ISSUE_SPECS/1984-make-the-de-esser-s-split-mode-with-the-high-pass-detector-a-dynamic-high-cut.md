@@ -33,3 +33,53 @@ A complementary high split: `y = g x + (1 - g) v2`, where `v2` is the SVF's low-
 ## Paths
 
 `crates/de-esser/src/` (the split arm and its doc), `crates/de-esser/tests/`, `crates/dsp-reference/` (the oracle arm), `dsp-research/de-esser.md`, this spec.
+
+## Decision record
+
+- **Owner approval (2026-10-26, "Yes for 1984").** Split mode with the high-pass detector becomes a
+  dynamic high shelf with no boost at any frequency; bits move only on that path (class B).
+- **The proposed formula is not boost-free (scoper's proof).** With `D = s^2 + k s + 1` (`k = 1/Q`,
+  `w` normalised to f_c after prewarp), any numerator `g s^2 + b s + 1` over `D` has
+  `|H|^2 - 1 = -w^2 ((1 - g^2) w^2 + k^2 - b^2 - 2 (1 - g)) / |D|^2`, so `|H| <= 1` for all
+  frequencies iff `k^2 >= b^2 + 2 (1 - g)`. `g x + (1 - g) v2` on the detector SVF has `b = g k`:
+  boost-free only for `Q <= sqrt((1 + g)/2)`; +5.1 dB at f_c at the default Q 2 and -20 dB held,
+  +11.1 dB at Q 4.
+- **Root ruling: a dedicated shelf SVF.** Per channel, a third SVF on the main input at the same
+  frequency with fixed Butterworth damping `k = sqrt 2`, and `y = g x + (1 - g) v2_shelf`. Then
+  `k^2 = 2 >= 2/(1 + g)` for every `g` in `[0, 1]`. Butterworth because a fixed damping must meet
+  the bound for every held gain, and `2/(1 + g)` reaches 2 as `g -> 0`: `k = sqrt 2` is the least
+  damping, so the sharpest second-order (12 dB per octave) shelf, that never boosts, and it does
+  not change shape with the detector's Q. Q now shapes only the detector in
+  high mode. Rejected: the formula on the detector SVF (boosts), `Q_shelf = min(Q, 1/sqrt 2)`
+  (shape follows a detector parameter), a first-order shelf (6 dB per octave; 1 kHz at about
+  -0.1 dB), an RBJ moving-pole shelf (per-sample redesign).
+- **Known limit (root tells the owner).** 1.5 to 3 octaves above f_c the response dips deeper than
+  `g`: -25.8 dB at +2 octaves (-27.3 dB minimum at +1.74 octaves) with -20 dB held; never a boost.
+  At f_c itself the cut is `|g - j (1 - g)/sqrt 2|`, between -3.1 and -4.8 dB for any held gain
+  (measured -4.755 dB at 8 kHz with -8.842 dB held), so the held gain is reached about an octave
+  above f_c.
+- **Class A elsewhere.** The split arm is `blend(x - (1 - g) f, g (x - l) + l, D)`; `blend` is
+  exact at 0 and 1, so wideband, split + band-pass and listen keep their bits. Bits move at
+  `D = 1` in split mode and during a detector-switch ramp in split mode.
+- **State.** The shelf adds two integrators and three ramps per channel (`RAMPS` 12 -> 15); the
+  integrators follow the ramps in the channel section so every earlier payload word keeps its
+  index. `STATE_LAYOUT_VERSION` stays 1: the payload is the in-memory plan-swap carry, not
+  persisted state (R6b). The shelf steps in every mode with the main input's flush threshold
+  (#1328), so a detector or mode switch never starts it cold, and it is part of the rest check and
+  the D7 state scan.
+
+## Evidence (attempt 1)
+
+- Gate 1, `split_with_the_high_pass_detector_is_a_shelf_without_boost` (new): red on main (first
+  failure: Q 0.5, -2 octaves, +0.390 dB); green on the branch, every probe equal to the analytic
+  shelf to 0.001 dB (f_c -3.820 dB, +1 octave -17.053 dB, +2 octaves -23.167 dB at 96 kHz).
+- Gate 2, `split_mode_cuts_the_band_and_leaves_an_out_of_band_tone` over both detectors: red on
+  main (high-pass detector: 1 kHz moved +0.142 dB); green on the branch.
+- Gate 3, `every_output_arm_matches_the_reference`: the (Split, HighPass) row against the new
+  oracle law (RBJ Butterworth low-pass in `dsp_reference::de_esser`), tolerance unchanged.
+- Class A: a one-time base (f62e4312d) against branch render diff (scalar and native eight-lane
+  bank, dual and collapsed, static and ramped parameters, live mode, listen and detector switches,
+  two link modes): every wideband, split + band-pass and listen output bit-identical; only the
+  split + high-pass renders and the split detector switch moved.
+- Gate 4: `dsp-research/de-esser.md` (topology, equations, the shelf bound and its limit, the
+  three re-recorded rows, rejected alternatives) and the detector doc in `lib.rs`.

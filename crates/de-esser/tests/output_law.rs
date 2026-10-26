@@ -217,7 +217,7 @@ fn split_with_the_high_pass_detector_is_a_shelf_without_boost() {
         for octave in [-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0] {
             let frequency = CENTRE * 2.0_f64.powf(octave);
             let main = sine(frequency, 1.0e-3);
-            let ours = render_connected(&values, RATE_96, FRAMES_96, &main, sine(CENTRE, 1.0));
+            let ours = render_connected(&values, RATE_96, FRAMES_96, main, sine(CENTRE, 1.0));
             let dry: Vec<f32> = (0..FRAMES_96).map(&main).collect();
             let got = 20.0 * (magnitude(&ours, frequency) / magnitude(&dry, frequency)).log10();
             let w = prewarp(frequency) / prewarp(CENTRE);

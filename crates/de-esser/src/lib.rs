@@ -156,8 +156,10 @@ const MODE_CHOICES: [EnumChoice; 2] = [
     },
 ];
 
-/// The detector choices. The selected tap is also the band the split arm cuts and the listen arm
-/// plays, so split mode with the high-pass detector is a dynamic high cut.
+/// The detector choices. The selected tap is also what the listen arm plays. The split arm cuts
+/// the band with the band detector, and with the high-pass detector it is a dynamic high shelf
+/// that never boosts (#1984): `g x + (1 - g) v2s`, `v2s` a Butterworth low-pass at the band's
+/// frequency (`kernel`), unity at DC and the held gain toward Nyquist.
 const DETECTOR_CHOICES: [EnumChoice; 2] = [
     EnumChoice {
         value: 1.0,
@@ -1030,14 +1032,14 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
         }
     }
 
-    /// The lanes of one channel at exact rest: both SVFs' integrators and the gain word `+0.0`
+    /// The lanes of one channel at exact rest: the three SVFs' integrators and the gain word `+0.0`
     /// and every ramp settled, the link weights included (issue #1969: a glide in flight moves
     /// its detector every frame, so it is never at rest and never skipped). The silence clocks are clocks, not state (a `+0.0` block moves
     /// them to `min(run + frames, 2^24)` whatever the signal was).
     ///
     /// Why that is a fixed point of a `+0.0` frame that writes `+0.0`: with `+0.0` input and
     /// integrators, `svf_step` gives `v1 = v2 = +0.0` and keeps them (armed or not, the flush
-    /// keeps `+0.0`), so both taps and the crossfaded detector tap are `+0.0`; the level floors at
+    /// keeps `+0.0`), so both taps, the shelf's low-pass and the detector tap are `+0.0`; the level floors at
     /// -160 dB, under every threshold, so the curve's target is `+0.0` (`gain_delta_db`'s identity
     /// arm, then `max(-range)` and `min(range)`, which give `+-0.0`); the rate step's rest snap
     /// (`effect_runtime::dynamic_band::CHANGE_REST_DB`) then writes `+0.0`, so the gain word stays; a zero gain word selects the dry `+0.0` on the

@@ -10,10 +10,14 @@ certified tail bound (deferred with the parametric EQ's #1372, see Known gaps).
 ## Adopted decisions
 
 - **Topology.** One TPT state-variable filter per channel on the main input; the selected tap `f`
-  (band-pass or high-pass) is the detector and the attenuated band. Split mode `y = x - (1 - g) f`,
-  wideband mode `y = g x`, listen `y = f` (Zoelzer, DAFX, ch. 4: the de-esser as a compressor whose
-  side chain, and in split form whose processed band, is a band-pass of the input). With `g = 1`
-  the split output is the input exactly (a zero gain word selects the dry word).
+  (band-pass or high-pass) is the detector and the listen output. Wideband mode `y = g x`, listen
+  `y = f`. Split mode with the band-pass detector `y = x - (1 - g) b` (Zoelzer, DAFX, ch. 4: the
+  de-esser as a compressor whose side chain, and in split form whose processed band, is a band-pass
+  of the input). Split mode with the high-pass detector is a dynamic high shelf (#1984):
+  `y = g x + (1 - g) l`, `l` the low-pass output of a second, shelf SVF per channel on the main
+  input at the same frequency with fixed Butterworth damping `k = sqrt 2`; Q shapes only the
+  detector there. With `g = 1` the split output is the input exactly (a zero gain word selects the
+  dry word).
 - **Shared band step.** The detector and gain law are `effect_runtime::dynamic_band`, shared with
   the dynamic EQ (#17); its `f64` oracle is `dsp_reference::dynamic_band`. The de-esser owns only
   its output law.
@@ -30,7 +34,8 @@ certified tail bound (deferred with the parametric EQ's #1372, see Known gaps).
 ## Definitions and assumptions
 
 `x` main input word, `s` sidechain word, `v1, v2` the SVF band and low outputs, `b = k v1` the
-unity-peak band-pass tap, `h = x - k v1 - v2` the high-pass tap, `f` the selected tap, `L` the
+unity-peak band-pass tap, `h = x - k v1 - v2` the high-pass tap, `f` the selected tap, `l` the
+shelf SVF's low-pass output (`Q = 1/sqrt 2`, same frequency, same input), `L` the
 detector level in dB, `T` threshold in dB, `R` ratio, `G` the smoothed change in dB (`<= 0`),
 `g = 10^(G/20)`. Dual mono: each channel has its own filter, envelope and parameters; a link mode
 (dual mono, maximum, average) combines the two detector magnitudes before the dB conversion.
@@ -40,10 +45,12 @@ A connected sidechain feeds a second SVF with the same words for the detector on
 
 Per channel and sample, in this order: ramps advance; `v1, v2 = svf_step(x)`; `b = k v1`;
 `h = x - b - v2`; `f = b + D (h - b)` (`D` the detector switch word, selected at 0 and 1);
-detector tap `d = f` (or the sidechain SVF's tap); after both channels:
+`l = svf_step_shelf(x).v2` (the same flush threshold as the main SVF); detector tap `d = f` (or the
+sidechain SVF's tap); after both channels:
 `L = clamp(fast_level_db(max(link(|d_own|, |d_partner|), 1e-8)), -160, 24)`;
 `t = max(min(0, (1/R - 1)(L - T)) , -range)`; `c = attack if |t| > |G| else release`;
-`G = snap(G + c (t - G))`; `g = fast_gain_from_db(G)`; `wide = g x`; `split = (g - 1) f + x`;
+`G = snap(G + c (t - G))`; `g = fast_gain_from_db(G)`; `wide = g x`;
+`split = blend((g - 1) f + x, g (x - l) + l, D)` (`x` when `G = 0`);
 `y = blend(blend(wide, split, M), f, Λ)`, `y = x` when bypassed. `M` and `Λ` are the mode and
 listen words; `blend(a, b, w)` is `a` at `w = 0`, `b` at `w = 1`, `a + w (b - a)` between.
 
@@ -51,8 +58,9 @@ listen words; `blend(a, b, w)` is `a` at `w = 0`, `b` at `w = 1`, `a + w (b - a)
 
 A parameter record commits its value at the block's first sample and retargets the ramps whose
 design moved: threshold and range in dB, the slope `1/R - 1`, the rate coefficients
-`1 - exp(-1000 / (t fs))`, the four SVF words, and the switch words (`1.0` for split, high, listen
-on). Every ramp is 64 samples, `ramp_toward` with the endpoint clamp (#1409) and the target on the
+`1 - exp(-1000 / (t fs))`, the four SVF words, the switch words (`1.0` for split, high, listen
+on) and the shelf SVF's three words (the same design at `Q = 1/sqrt 2`, which move only with the
+frequency). Every ramp is 64 samples, `ramp_toward` with the endpoint clamp (#1409) and the target on the
 final sample. Linear interpolation of `(c1, a2, a3)` between two stable designs stays contractive:
 the transition norm is convex in the words (`effect_runtime::svf`).
 
@@ -66,6 +74,19 @@ Out-of-band transparency of the split arm: the change at frequency `f` is
 to 40 dB, at least this far from the centre (in octaves, either side): Q 0.5: 3.72, Q 1: 2.75,
 Q 2: 1.83, Q 4: 1.08, Q 8: 0.58. This is the "nominal" region of the acceptance gate; nearer the
 centre the band-pass skirt (6 dB per octave) is attenuated by design.
+
+The high shelf (#1984). With `w` the prewarped frequency over f_c, `s = jw` and the Butterworth
+`LP = 1 / (s^2 + sqrt2 s + 1)`, the split response is `H = g + (1 - g) LP =
+(g s^2 + g sqrt2 s + 1) / (s^2 + sqrt2 s + 1)`. For any numerator `g s^2 + b s + 1` over the
+denominator `s^2 + k s + 1`, `|H|^2 - 1 = -w^2 ((1 - g^2) w^2 + k^2 - b^2 - 2 (1 - g)) / |D|^2`, so
+`|H| <= 1` at every frequency exactly when `k^2 >= b^2 + 2 (1 - g)`. With `k = sqrt 2` and
+`b = g k` that is `2 >= 2 / (1 + g)`, true for every `g` in `[0, 1]`: no boost at any frequency and
+any held gain. The response is unity at DC, `g` at Nyquist and 12 dB per octave between. Its known
+limit: above about 1.5 octaves over f_c the low-pass phase nears -180 degrees and `|H|` dips
+under `g` -- a deeper cut, never a boost: -27.3 dB at +1.74 octaves for -20 dB held (-25.8 dB at
++2 octaves), 2.9 dB under `g` at -10 dB held, 17 dB under `g` (at +3.3 octaves) at -40 dB held.
+At f_c itself the cut is `|g - j (1 - g)/sqrt2|`: -4.77 dB at -10 dB held, -3.82 dB at -20 dB,
+-3.1 dB at -40 dB, so the held gain is reached about an octave above f_c, not at it.
 
 ## Latency and tail
 
@@ -139,9 +160,9 @@ change reaches 90 % of held, release the first frame after the burst where it fa
 | split, band-pass | -26 | 0 | 0.000 | +0.000 | +0.000 | none | none |
 | split, band-pass | -14 | -4.500 | -3.538 | -3.538 | -0.008 | 173 (3.60 ms) | 5,527 (115.15 ms) |
 | split, band-pass | -6 | -10.500 | -9.468 | -9.469 | -0.013 | 169 (3.52 ms) | 5,528 (115.17 ms) |
-| split, high-pass (#1984) | -26 | -0.015 | -0.033 | +0.000 | +0.000 | 831 (17.31 ms) | 5,526 (115.12 ms) |
-| split, high-pass (#1984) | -14 | -9.015 | -8.842 | **+4.202** | +0.072 | 291 (6.06 ms) | 5,528 (115.17 ms) |
-| split, high-pass (#1984) | -6 | -15.015 | -14.842 | **+5.661** | +0.092 | 252 (5.25 ms) | 5,530 (115.21 ms) |
+| split, high-pass (#1984) | -26 | -0.015 | -0.033 | -0.033 | -0.000 | 831 (17.31 ms) | 5,526 (115.12 ms) |
+| split, high-pass (#1984) | -14 | -9.015 | -8.842 | -4.755 | -0.026 | 291 (6.06 ms) | 5,528 (115.17 ms) |
+| split, high-pass (#1984) | -6 | -15.015 | -14.842 | -4.340 | -0.017 | 252 (5.25 ms) | 5,530 (115.21 ms) |
 | wideband, band-pass | -26 | 0 | 0.000 | +0.000 | +0.000 | none | none |
 | wideband, band-pass | -14 | -4.500 | -3.538 | -3.538 | -3.538 | 173 (3.60 ms) | 5,527 (115.15 ms) |
 | wideband, band-pass | -6 | -10.500 | -9.468 | -9.469 | -9.468 | 169 (3.52 ms) | 5,528 (115.17 ms) |
@@ -160,19 +181,24 @@ runs only while the instantaneous target exceeds the change, part of each cycle.
 high-pass row the tap's peak is about `-26 + 6.02 = -19.98` dB, a hair over the threshold, hence
 its small, slow change.
 
-**Split with the high-pass detector boosts (#1984, class B, open owner question).** The two bold
-cells are not a cut: `y = x - (1 - g) h` with `h = jQ` at f_c gives
-`|1 - (1 - g) jQ| = +5.66` dB at the -14.842 dB change, as measured. #1984 proposes a complementary
-high split; the three "split, high-pass" rows are re-recorded by #1984's implementer after the
-owner's ruling. Every other row stays valid.
+**Split with the high-pass detector (#1984).** The three "split, high-pass" rows are re-recorded
+on the dynamic high shelf (the same harness shape, #1984's branch; the wideband rows reproduced to
+the digit). Before #1984 the arm was `x - (1 - g) h` and boosted: +4.202 and +5.661 dB at 8 kHz and
++0.072 and +0.092 dB at 1 kHz at -14 and -6 dBFS. Now 8 kHz is cut by `|g - j (1 - g)/sqrt2|`, the
+shelf's value at f_c (-4.755 dB at the -8.842 dB change, -4.340 dB at -14.842 dB; the deeper cut
+lies above f_c, Numerical limits), and 1 kHz moves at most 0.026 dB. The detector and the change
+columns are unchanged, as the detector path is.
 
 ## Objective tests and tolerances
 
 `effect-runtime/tests/dynamic_band.rs`: the band step against the oracle, change within 0.1 dB per
 sample, attack (to 90 %) and release (to 10 %) within max(1 sample, 2 %), downward hard knee and
 upward 6 dB knee, a million samples finite. `de-esser/tests/output_law.rs`: every arm within `1e-5`
-of the oracle; split isolation (1 kHz moves at most 0.1 dB, measured `-0.020` dB; 7 kHz cut at
-least 3 dB, measured `-7.0` dB). `bank.rs`: each bank lane bit-equal to its scalar instance under
+of the oracle (the high shelf against an RBJ Butterworth low-pass, `g x + (1 - g) l`); split
+isolation with both detectors (1 kHz moves at most 0.1 dB, measured `-0.020` dB; 7 kHz cut at least
+3 dB, measured `-7.0` dB); the high shelf's response on the product (#1984: a held -20 dB, probes
+from -2 to +2 octaves at 96 kHz, Q 0.5 to 4, each at most +0.02 dB and within 0.5 dB of
+`|g + (1 - g) LP|`; measured equal to the analytic value to 0.001 dB at every probe). `bank.rs`: each bank lane bit-equal to its scalar instance under
 automation and every link mode; collapsed then desymmetrized bank bit-equal to a dual one.
 `rest.rs`: exact rest after silence; a skipped block equals a rendered one. The conformance macro.
 
@@ -204,6 +230,22 @@ record), in one packet with the dynamic EQ's if the owner wants it.
 - Lookahead: deferred (latency 0 at launch).
 - `ar_one_pole_step` (two-product retention form): the rate form is used because the attack and
   release coefficient ramps (#1336) are designed for it, as in the gate.
+- The high shelf on the detector SVF's own poles, `g x + (1 - g) v2` (#1984's first proposal):
+  by the bound in Numerical limits it is boost-free only for `Q <= sqrt((1 + g)/2)` (0.742 at
+  -20 dB held). At the default Q 2 it boosts +5.1 dB at f_c (+11.1 dB at Q 4). No second-order
+  shelf sharing those poles is boost-free for `Q > 1/sqrt 2`; the boost is the poles' resonance.
+- `Q_shelf = min(Q, 1/sqrt 2)` instead of a fixed Butterworth shelf: it follows Q below the
+  Butterworth value, so the shelf's corner shape would change with a parameter the user sets for
+  the detector; fixed damping keeps one shelf shape and the same bound.
+- A first-order shelf: no dip under `g`, but 6 dB per octave, which leaves the 1 kHz tone at
+  about -0.1 dB at the defaults (the isolation gate's margin).
+- An RBJ shelf with moving poles: needs a per-sample coefficient redesign as `g` moves.
+- Cost of the adopted shelf: one more SVF step, a subtraction, a fused multiply-add and a blend
+  per channel-sample in every mode (a lane cannot branch on a live word; stepping it always also
+  means a detector or mode switch never starts it cold). The `cargo run -p audit -- de-esser`
+  workload (an eight-lane bank and a connected scalar instance, 100,000 blocks of 128) took
+  1,875 and 1,883 ms against 1,627 and 1,631 ms before (one warmup, two rounds; wall time of the
+  whole audit process, descriptive, not a floor row).
 
 ## Known gaps and follow-up
 
@@ -212,5 +254,3 @@ record), in one packet with the dynamic EQ's if the owner wants it.
 - Registry and consumer wiring (S2), banking surfaces and console eligibility (S3), lookahead (S4);
   the measured response tables are recorded (#1921 O1, Fixtures); the floor row and blinded
   listening are owner items.
-- Split mode with the high-pass detector boosts at and below f_c instead of cutting (#1984, class
-  B, awaiting the owner's ruling); its Fixtures rows are re-recorded after the fix.
