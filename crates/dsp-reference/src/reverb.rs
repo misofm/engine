@@ -33,7 +33,7 @@ const DIFF_R: [u32; 4] = [233, 179, 617, 457];
 const INPUT_GAIN: f64 = 0.5;
 
 /// The matrix output rows that feed the left and right outputs (the note's `OUT`).
-const OUTPUT_ROWS: (usize, usize) = (5, 10);
+const OUTPUT_ROWS: (usize, usize) = (14, 15);
 
 /// The damping cutoff cap in hertz (#1374; the second term of `min(19,845, fs / 4)`).
 const DAMPING_CAP_HZ: f64 = 19_845.0;
