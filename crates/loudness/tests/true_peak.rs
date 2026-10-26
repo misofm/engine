@@ -15,8 +15,8 @@ use dsp_reference::loudness::{reference_true_peak_burst, reference_true_peak_sin
 use dsp_reference::reference_true_peak_estimate;
 use loudness::{LoudnessAnalysis, SUPPORTED_RATES};
 
-/// Largest admitted `|production - oracle|`, linear full scale.
-const ORACLE_BOUND: f64 = 4e-6;
+/// Largest admitted `|production - oracle|`, linear full scale; the measured worst is 9.6e-8.
+const ORACLE_BOUND: f64 = 1e-6;
 
 /// Seconds of each test tone.
 const SECONDS: f64 = 1.0;
