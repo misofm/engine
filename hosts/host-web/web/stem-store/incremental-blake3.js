@@ -2,8 +2,8 @@
  * Incremental BLAKE3-256 for canonical-PCM ingest and verify-on-open.
  *
  * The browser has no streaming Web Crypto BLAKE3 interface. Issue #2111: a hash
- * runs in the engine's WebAssembly SIMD module (`hosts/blake3-web`, shipped as
- * `miso-engine-v1-blake3.simd128.wasm` beside this file) once `prepareBlake3`
+ * runs in the engine's WebAssembly SIMD module (`hosts/blake3-web`, shipped in
+ * the delivery closure as `miso-engine-v1-blake3.simd128.wasm`) once `prepareBlake3`
  * has loaded it, and otherwise in the repository-owned, bounded-memory
  * JavaScript implementation of the BLAKE3 hash mode below. Both spell the same
  * digest; the corpus tests cover official vectors and hostile chunk boundaries
@@ -231,7 +231,9 @@ const preparations = new Map()
 
 /**
  * Load the WebAssembly SIMD BLAKE3 so that every later `IncrementalBlake3` and
- * `blake3Stream` hashes in it. Idempotent: one load per URL per realm. Resolves
+ * `blake3Stream` hashes in it. The default URL is the SDK package's layout: this
+ * file is `dist/browser/stems/incremental-blake3.js` and the module is the gated
+ * closure's copy, `dist/assets/miso-engine-v1-blake3.simd128.wasm`. Idempotent: one load per URL per realm. Resolves
  * `"simd128"` when the module is loaded, and `"javascript"` when the fetch,
  * the compile (a browser without simd128) or the instantiation fails; it never
  * rejects, and hashing then stays in JavaScript.
@@ -240,7 +242,7 @@ const preparations = new Map()
  * @returns {Promise<"simd128" | "javascript">}
  */
 export function prepareBlake3(options = {}) {
-  const url = String(options.url ?? new URL(`./${MODULE_NAME}`, import.meta.url))
+  const url = String(options.url ?? new URL(`../../assets/${MODULE_NAME}`, import.meta.url))
   let preparation = preparations.get(url)
   if (preparation === undefined) {
     preparation = load(url).then(

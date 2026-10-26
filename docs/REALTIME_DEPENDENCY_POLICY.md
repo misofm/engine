@@ -196,6 +196,13 @@ no reserved (or `RES0`) bit, and names the guard or write-back that restores the
   (`:2102`) registers `CountingAllocator` as the unit-test binary's `#[global_allocator]` (added by
   `708036a76`). It forwards every operation unchanged to `System` and counts successful operations
   in thread-local counters, only while armed; its `SAFETY` comments state that forwarding.
+- `hosts/blake3-web/src/lib.rs` (#2111): the raw Wasm32 hasher-handle boundary of the browser's
+  stem-identity BLAKE3 module (`miso_engine_blake3_v1_*`). Its unsafe sites are the
+  `#[unsafe(no_mangle)]` exports and the handle borrows of `input`, `update` and `finalize` and
+  the `Box::from_raw` of `free`; each carries a `SAFETY` comment naming the caller's live-handle
+  contract or the `Box::into_raw` it reverses. No export takes a data pointer: the hasher owns its
+  staging buffer and a length beyond it is refused. Control-side only; it never runs on an audio
+  thread.
 - `crates/capi/tests/plan_swap_race.rs` (#1042, #1273): races control calls against
   plan-swapping render calls, both through the exported C entries. Its unsafe is the C calls
   themselves, each with the handle and storage contract stated beside it; the allocator it runs

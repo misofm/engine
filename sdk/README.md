@@ -456,8 +456,7 @@ A `data` size larger than the file is read to the file's end. The pump and the h
 engine's own code, copied into the package unchanged; `IncrementalBlake3` is the same hash for
 bytes you already hold.
 
-The hash runs in a WebAssembly SIMD module, `miso-engine-v1-blake3.simd128.wasm`, packed beside
-it (about 1.5 GB/s per core in Chromium, against about 65 MB/s for the JavaScript fallback).
+The hash runs in a WebAssembly SIMD module, `dist/assets/miso-engine-v1-blake3.simd128.wasm` (about 1.5 GB/s per core in Chromium, against about 65 MB/s for the JavaScript fallback).
 `blake3Stream` loads it itself; call `await prepareBlake3()` once before `new IncrementalBlake3()`
 to hash in it, and pass `prepareBlake3({ url })` if your bundler moves the file. It resolves
 `"simd128"`, or `"javascript"` when the module cannot load (no WebAssembly SIMD, a failed fetch);
