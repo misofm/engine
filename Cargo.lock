@@ -2483,6 +2483,7 @@ dependencies = [
 name = "wasm-gate-guest"
 version = "0.1.0"
 dependencies = [
+ "console-workload",
  "lane",
  "wasm-gate-corpus",
 ]
@@ -2495,6 +2496,7 @@ dependencies = [
  "bench-support",
  "builtins",
  "compressor",
+ "console-workload",
  "effect-runtime",
  "gate-expander",
  "graph",
