@@ -251,7 +251,9 @@ record), in one packet with the dynamic EQ's if the owner wants it.
   the high-pass detector), and a block in which no lane can be live compiles it out. The
   `cargo run -p audit -- de-esser` workload (an eight-lane bank and a connected scalar instance,
   100,000 blocks of 128; wall time of the whole process, one warmup and two rounds, descriptive,
-  not a floor row), base f62e4312d against #1984: wideband 1,644 / 1,636 against 1,655 / 1,655 ms
+  not a floor row; the audit hard-codes split + band-pass in `active_values()` of
+  `tools/audit/src/de_esser.rs`, so each mode was set by a local, uncommitted edit of its mode and
+  detector values there), base f62e4312d against #1984: wideband 1,644 / 1,636 against 1,655 / 1,655 ms
   (+0.9 %), split + band-pass 1,638 / 1,639 against 1,656 / 1,651 ms (+0.9 %), split + high-pass
   1,638 / 1,631 against 1,857 / 1,867 ms (+14 %, the shelf's own work). A switch onto the path
   starts the shelf from `+0.0`: against an always-on shelf, on a -1.8 dBFS-peak mix (150 Hz at
@@ -259,6 +261,11 @@ record), in one packet with the dynamic EQ's if the owner wants it.
   at most 112 samples (mode switch at 1 kHz) and -47.5 dB for 17 samples at 6.5 kHz; a detector
   switch -74.4 dB (1 kHz) and -50.0 dB (6.5 kHz). The detector and mode words ramp over 64
   samples, which fades the shelf arm in over the transient.
+  The const `SHELF` doubles the segment variants from 32 to 64; the browser module grew from
+  5,680,787 to 5,758,730 bytes (+1.4 %).
+  A detector switch in split mode stays at or under the dry level at every ramp sample (the band
+  cut takes the band tap): measured -4.10 dB peak over a held -20 dB, Q 4, 6.5 kHz tone, against
+  +2.12 dB with the cut on the crossfaded tap (`a_detector_switch_in_split_mode_never_boosts`).
 
 ## Known gaps and follow-up
 
