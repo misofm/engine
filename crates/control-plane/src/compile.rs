@@ -2556,7 +2556,6 @@ mod admission_tests {
     fn unlimited() -> ControlLimits {
         ControlLimits {
             source_ring_frames: 0,
-            maximum_automation_spans_per_block: 0,
             maximum_document_bytes: 0,
             maximum_diagnostic_bytes: 0,
             maximum_tracks: 0,

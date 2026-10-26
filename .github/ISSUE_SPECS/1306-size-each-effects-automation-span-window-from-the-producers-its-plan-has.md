@@ -312,3 +312,14 @@ Head `audit capi` matches baseline `bffc21e857b5e134`, all violation counters ze
 Eight-lane reference graph rows: session-plus-plan 374,654; incremental 374,414;
 metadata 114,049. Existing resource ceilings pass unchanged. Broader portability,
 browser and workspace qualification run on the coherent #1306/#1668 boundary.
+
+Root adversarial review of `89b6208bc`: **PASS, attempt 1**, conditional on the
+shared final browser/portability/workspace qualification. Independent owner-test
+mutations fail when caller ceiling replaces descriptor capacity and when the
+ceiling check is deleted; the restored owner test passes. Test value: the owner
+test catches capacity inflation, insufficient-ceiling acceptance, missing minimum
+1 and dropped dirty cells; the temporary CAPI test catches host resource coupling
+to S and is deleted by #1668. Review evidence is preserved under
+`/home/bl/misofm/engine-work-evidence/1668/root-review/1306-*.log`.
+The current realtime-policy binary passes (233 marked regions, 43 files), with
+2 unit and 240 policy tests passing.

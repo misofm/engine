@@ -7,6 +7,7 @@
 static_assert(MISO_ENGINE_V1_ABI_VERSION == UINT32_C(0x00010000));
 static_assert(sizeof(miso_engine_v1_engine_config) == MISO_ENGINE_V1_ENGINE_CONFIG_SIZE);
 static_assert(sizeof(miso_engine_v1_compile_limits) == MISO_ENGINE_V1_COMPILE_LIMITS_SIZE);
+static_assert(offsetof(miso_engine_v1_compile_limits, reserved1) == 8);
 static_assert(sizeof(miso_engine_v1_capabilities) == MISO_ENGINE_V1_CAPABILITIES_SIZE);
 static_assert(std::is_standard_layout<miso_engine_v1_plan_resource_report>::value);
 static_assert(sizeof(miso_engine_v1_watermark) == MISO_ENGINE_V1_WATERMARK_SIZE);

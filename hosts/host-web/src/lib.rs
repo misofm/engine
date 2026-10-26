@@ -3022,7 +3022,6 @@ fn prepare_caps(
 fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
     ControlLimits {
         source_ring_frames: caps.source_ring_frames,
-        maximum_automation_spans_per_block: 0,
         maximum_document_bytes: u64::from(MAXIMUM_DOCUMENT_BYTES),
         maximum_diagnostic_bytes: u64::from(DIAGNOSTIC_BYTES),
         maximum_tracks: caps.maximum_tracks,

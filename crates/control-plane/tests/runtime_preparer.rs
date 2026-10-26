@@ -91,7 +91,6 @@ impl RuntimePreparer for CountingPreparer {
 fn limits(source_ring_frames: u32) -> ControlLimits {
     ControlLimits {
         source_ring_frames,
-        maximum_automation_spans_per_block: 128,
         maximum_document_bytes: 1_000_000,
         maximum_diagnostic_bytes: 4_096,
         maximum_tracks: 100,

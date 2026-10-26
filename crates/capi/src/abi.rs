@@ -136,7 +136,8 @@ pub struct CompileLimits {
     /// Preallocated frames in every host-fed source ring.
     pub source_ring_frames: u32,
     /// Maximum accepted automation spans in one block.
-    pub maximum_automation_spans_per_block: u32,
+    /// Formerly maximum_automation_spans_per_block; must be zero in ABI V1. Layout unchanged.
+    pub reserved1: u32,
     /// Must be zero in ABI V1.
     pub reserved0: u32,
     /// Maximum borrowed strict-JSON input bytes.
@@ -570,6 +571,7 @@ mod tests {
         assert_eq!(align_of::<Watermark>(), 8);
         assert_eq!(align_of::<SourceSeekReport>(), 8);
 
+        assert_eq!(offset_of!(CompileLimits, reserved1), 8);
         assert_eq!(offset_of!(CompileLimits, maximum_document_bytes), 16);
         assert_eq!(offset_of!(CompileLimits, maximum_replay_entries), 168);
         assert_eq!(offset_of!(CompileLimits, maximum_submixes), 176);

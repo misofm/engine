@@ -174,35 +174,35 @@ pub(crate) fn compile_children(
 }
 
 pub(crate) fn all_limits_nonzero(limits: CompileLimits) -> bool {
-    limits.maximum_automation_spans_per_block != 0
-        && [
-            limits.maximum_document_bytes,
-            limits.maximum_diagnostic_bytes,
-            limits.maximum_tracks,
-            limits.maximum_sources,
-            limits.maximum_routes,
-            limits.maximum_effects,
-            limits.maximum_graph_session_plus_plan_bytes,
-            limits.maximum_source_total_bytes,
-            limits.maximum_source_overhead_bytes,
-            limits.maximum_effect_state_bytes,
-            limits.maximum_effect_scratch_bytes,
-            limits.maximum_builtin_retained_bytes,
-            limits.maximum_capi_retained_bytes,
-            limits.maximum_named_allocation_bytes,
-            limits.maximum_meter_streams,
-            limits.maximum_meter_items,
-            limits.maximum_meter_bytes,
-            limits.maximum_control_frame_bytes,
-            limits.maximum_replay_bytes,
-            limits.maximum_replay_entries,
-        ]
-        .into_iter()
-        .all(|value| value != 0)
+    [
+        limits.maximum_document_bytes,
+        limits.maximum_diagnostic_bytes,
+        limits.maximum_tracks,
+        limits.maximum_sources,
+        limits.maximum_routes,
+        limits.maximum_effects,
+        limits.maximum_graph_session_plus_plan_bytes,
+        limits.maximum_source_total_bytes,
+        limits.maximum_source_overhead_bytes,
+        limits.maximum_effect_state_bytes,
+        limits.maximum_effect_scratch_bytes,
+        limits.maximum_builtin_retained_bytes,
+        limits.maximum_capi_retained_bytes,
+        limits.maximum_named_allocation_bytes,
+        limits.maximum_meter_streams,
+        limits.maximum_meter_items,
+        limits.maximum_meter_bytes,
+        limits.maximum_control_frame_bytes,
+        limits.maximum_replay_bytes,
+        limits.maximum_replay_entries,
+    ]
+    .into_iter()
+    .all(|value| value != 0)
 }
 
 pub(crate) fn limits_are_valid(limits: CompileLimits) -> bool {
     limits.struct_size == crate::COMPILE_LIMITS_SIZE
+        && limits.reserved1 == 0
         && limits.reserved0 == 0
         && limits.reserved == [0; 2]
         && all_limits_nonzero(limits)
@@ -210,12 +210,11 @@ pub(crate) fn limits_are_valid(limits: CompileLimits) -> bool {
 
 /// The frozen ABI limits as the control plane's plain limits (#1309 D3): every numeric field, same
 /// name and type, with `maximum_capi_retained_bytes` as `maximum_control_retained_bytes`. The
-/// header words (`struct_size`, `reserved0`, `reserved`) are `limits_are_valid`'s alone.
+/// header words (`struct_size`, `reserved1`, `reserved0`, `reserved`) are `limits_are_valid`'s alone.
 impl From<CompileLimits> for ControlLimits {
     fn from(limits: CompileLimits) -> Self {
         Self {
             source_ring_frames: limits.source_ring_frames,
-            maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
             maximum_document_bytes: limits.maximum_document_bytes,
             maximum_diagnostic_bytes: limits.maximum_diagnostic_bytes,
             maximum_tracks: limits.maximum_tracks,

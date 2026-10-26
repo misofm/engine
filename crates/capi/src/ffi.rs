@@ -1845,7 +1845,7 @@ mod tests {
         CompileLimits {
             struct_size: crate::COMPILE_LIMITS_SIZE,
             source_ring_frames: 1_024,
-            maximum_automation_spans_per_block: 128,
+            reserved1: 0,
             reserved0: 0,
             maximum_document_bytes: 1_000_000,
             maximum_diagnostic_bytes: 4_096,
@@ -2447,6 +2447,66 @@ mod tests {
         unsafe {
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
+        }
+        destroy(engine);
+    }
+
+    /// Reserved compile words refuse without publishing a child or altering diagnostics.
+    #[test]
+    fn compile_reserved_words_are_refused_before_diagnostics() {
+        const JSON: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        for (reserved1, reserved0) in [(1, 0), (0, 1), (0, 0)] {
+            let mut limits = limits();
+            limits.reserved1 = reserved1;
+            limits.reserved0 = reserved0;
+            let mut storage = [0xa5_u8; 64];
+            let mut diagnostics = BytesOut {
+                struct_size: BYTES_OUT_SIZE,
+                reserved0: 0,
+                data: storage.as_mut_ptr(),
+                capacity_bytes: storage.len() as u64,
+                required_bytes: u64::MAX,
+            };
+            let mut session = ptr::dangling_mut::<Session>();
+            let mut plan = ptr::dangling_mut::<Plan>();
+            // SAFETY: The handle is live; all input/output regions are complete local values.
+            let result = unsafe {
+                miso_engine_v1_compile_session(
+                    engine,
+                    JSON.as_ptr(),
+                    JSON.len() as u64,
+                    &limits,
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                )
+            };
+            if reserved1 != 0 || reserved0 != 0 {
+                assert_eq!(result, RESULT_INVALID_ARGUMENT);
+                assert!(session.is_null() && plan.is_null());
+                assert_eq!(
+                    (
+                        diagnostics.struct_size,
+                        diagnostics.reserved0,
+                        diagnostics.data,
+                        diagnostics.capacity_bytes,
+                        diagnostics.required_bytes
+                    ),
+                    (BYTES_OUT_SIZE, 0, storage.as_mut_ptr(), 64, u64::MAX),
+                );
+                assert_eq!(storage, [0xa5; 64]);
+            } else {
+                assert_eq!(result, RESULT_OK);
+                assert!(!session.is_null() && !plan.is_null());
+                // SAFETY: The successful call published uniquely owned child handles.
+                unsafe {
+                    miso_engine_v1_plan_destroy(plan);
+                    miso_engine_v1_session_destroy(session);
+                }
+            }
         }
         destroy(engine);
     }

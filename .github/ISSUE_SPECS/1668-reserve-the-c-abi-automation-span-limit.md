@@ -172,3 +172,35 @@ not change the existing failure-publication contract.
 Authorize the obsolete `ControlLimits` literal field removal in
 `hosts/host-web/src/lib.rs` as well. #1306 and #1668 are sequential checkpoints
 with independent review, delivered in one coherent PR.
+
+Current-source authorized literal inventory includes `crates/control-plane/tests/`,
+all `CompileLimits` literals under `crates/capi/tests/`, and the C smoke initializer.
+Existing Rust/C/C++ layout gates explicitly pin `reserved1` at offset 8.
+#1306 prerequisite checkpoint `89b6208bc` received root PASS before implementation
+of this slice; no preparation path reads the former ABI word.
+
+## Implementation record (2026-10-26, attempt 1)
+
+`reserved1` occupies the former S word, with Rust, C11 and C++17 assertions at
+offset 8; the struct remains 208 bytes and no version, symbol or feature bit
+changes. `limits_are_valid` requires zero for this word and `all_limits_nonzero`
+no longer treats it as a limit. The portable `ControlLimits` field and all its
+literals are removed; every C ABI literal supplies zero. The temporary #1306
+S-invariance test is deleted in this same change; the owner capacity test stays.
+
+The new FFI test calls the actual compile export with reserved1 = 1, reserved0 = 1,
+and both zero. The refusals clear sentinel handle outputs to null and preserve
+every diagnostics descriptor field and all payload bytes; the zero case publishes
+both handles successfully and destroys them. Test value: it catches acceptance
+of either reserved word, premature diagnostics writes or child publication, while
+the zero row catches retention of the old required-nonzero rule. No existing
+compile test supplies nonzero reserved words. The layout assertions catch a moved
+word without pinning unrelated resources or rendered bytes.
+
+The documentation records both directions of prelaunch compatibility: an old
+library refuses the new zero word, and this library refuses an old caller's
+nonzero word, so caller and library update together. Focused validation passes: `cargo test --locked -p capi -p control-plane
+--features control-plane/test-support`, `cargo fmt --all -- --check`, and
+`git diff --check`. The C ABI checker and mutation suite are running at this
+checkpoint (shared-library build passed, static-library build in progress); final
+shared gates run after merging the newest main.
