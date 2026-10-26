@@ -257,3 +257,54 @@ measured (the V8 runner has no C1 document, as #2143 recorded).
   `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm`,
   `strip-wasm-names.py check`, `test-web-audioworklet.sh`: ok.
 - Not run: the arm64 native legs and the browser legs (Playwright).
+
+## Evidence and decision record (attempt 2, 2026-10-26)
+
+Attempt 1's verdict was FAIL on one MAJOR: the load state costs more. Root accepted the layout
+term. Attempt 2 makes these changes:
+
+- **MAJOR, the fact path.** Each unit's chain and row are stored at bind (`unit_chain`,
+  `unit_row`), so `local` no longer divides. Only a first-row unit computes the packer facts:
+  `lane_input_silence`, the rest query and `record_facts` all run behind `LaneMap::fact_group`.
+  A later row's facts were discarded before, and now they are never computed.
+  `bind_silence_readers` wants only first-row inputs. `record_facts` computes the chain once per
+  call and reads `home` by `chain * W + lane`.
+- **MINOR 1, `bank_slot_runs`.** A row is now one `(group, chain row)`, merged only across units
+  that are adjacent among the effect banks. Gate 2's fixture taps at `insert_send`, so row 1 has
+  the drive. A new assertion in
+  `a_packed_split_strip_renders_the_bits_of_an_unpacked_one` checks that the sum of
+  `effect_slots x units` over the rows equals the compile's bound banks. Red on attempt 1's
+  `bank_slot_runs`: `left: 127, right: 21`. Green now.
+- **MINOR 2, `widen_block_end_units`.** It now widens only within the listed unit's row: a move
+  carries members between units of one row only. The change is exact and moves no bit.
+
+### CPU (descriptive; one invocation each of main `16f548a92` and this branch, one warmup, two rounds, `taskset -c 31`)
+
+p50 us per block, round 1 / round 2. Raw output is in
+`artifacts/steps/bank-design-5a/bank-report.attempt2.*.jsonl`.
+
+| row | main | branch | change |
+|---|---|---|---|
+| c1 16 load | 23.52 / 23.57 | 23.77 / 24.30 | +1.0 % / +3.1 % |
+| c1 32 load | 34.93 / 35.04 | 36.11 / 36.06 | +3.4 % / +2.9 % |
+| c1 64 load | 60.87 / 61.05 | 60.85 / 61.18 | -0.0 % / +0.2 % |
+| c1 16 all active | 96.45 / 97.27 | 94.97 / 94.70 | -1.5 % / -2.6 % |
+| c1 32 all active | 146.10 / 145.19 | 142.02 / 143.12 | -2.8 % / -1.4 % |
+| c1 64 all active | 245.76 / 246.98 | 244.07 / 238.78 | -0.7 % / -3.3 % |
+| c1 16 / 32 / 64 sparse | 98.23 / 147.45 / 247.30 (r2) | 77.22 / 107.44 / 167.66 (r2) | -21.4 / -27.1 / -32.2 % |
+
+As measured, with no retry. The 16- and 32-track load rows are still above 2 % in at least one
+round. What a first-row unit still pays per block in the load state: `lane_input_silence` over
+its lanes, and `record_facts`, which resets each lane's idle count to zero. Main pays neither on
+C1, because no C1 track unit is grouped there. That is the same per-unit cost #1981 already
+accepted for its groups. No further reduction was tried in this attempt.
+
+### Gates run (attempt 2)
+
+- Lint job: fmt, clippy `-D warnings`, doc `-D warnings`, every policy script and self-test, and
+  `realtime_policy`: ok.
+- Workspace debug test step (exact excludes and features): exit 0, 2647 passed.
+- `cargo test --release -p bench -p console-workload -p wasm-gates`: 84 passed.
+- `scripts/run-wasm-gates.sh`: ok, and no pin moved in this attempt.
+- AudioWorklet build and checks, and `test-web-audioworklet.sh`: ok.
+- `silent_bank_skip.rs`: 11 of 11 pass.

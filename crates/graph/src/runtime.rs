@@ -5491,7 +5491,9 @@ impl Runtime {
                 };
                 // Issue #1981: a grouped unit's packer fact is read after its chain runs (one load
                 // for an ungrouped unit); the skip counter says whether the chain skipped.
-                let grouped = lane_map.group(index).map(|(group, _)| group);
+                // Issue #2142: only a first-row unit states the packer's facts; a later row's are
+                // never read.
+                let grouped = lane_map.fact_group(index);
                 let mut planes = ArenaMembers {
                     arena: &mut *arena,
                     inputs: &bank_inputs[..lanes],
@@ -10016,9 +10018,12 @@ pub(crate) struct LaneMap {
     groups: Box<[PackGroup]>,
     /// Unit -> its group's index, or [`NO_PACK_GROUP`]. Empty when there is no group.
     group_of: Box<[u32]>,
-    /// Unit -> its place in its group, `chain * rows + row`; meaningless outside a group. Empty
-    /// when there is no group.
-    unit_slot: Box<[u32]>,
+    /// Unit -> its lane chain in its group; meaningless outside a group. Empty when there is no
+    /// group.
+    unit_chain: Box<[u32]>,
+    /// Unit -> its row in its lane chain, stored at bind so no reader divides (issue #2142);
+    /// meaningless outside a group. Empty when there is no group.
+    unit_row: Box<[u32]>,
     /// Every group's units, chain-major from its `units_base`: `rows` units per chain.
     chain_units: Box<[u32]>,
     /// Home position -> the position that strip renders at, per group from its `base`.
@@ -10073,7 +10078,8 @@ impl LaneMap {
         use engine::realtime::retained::slice;
         slice(&self.groups)
             .saturating_add(slice(&self.group_of))
-            .saturating_add(slice(&self.unit_slot))
+            .saturating_add(slice(&self.unit_chain))
+            .saturating_add(slice(&self.unit_row))
             .saturating_add(slice(&self.chain_units))
             .saturating_add(slice(&self.at))
             .saturating_add(slice(&self.home))
@@ -10303,7 +10309,8 @@ impl LaneMap {
         scratch: usize,
     ) -> Self {
         let mut group_of = vec![NO_PACK_GROUP; units];
-        let mut unit_slot = vec![0_u32; units];
+        let mut unit_chain = vec![0_u32; units];
+        let mut unit_row = vec![0_u32; units];
         let mut chain_units = Vec::new();
         let mut local = Vec::new();
         let mut kept = Vec::with_capacity(groups.len());
@@ -10326,8 +10333,12 @@ impl LaneMap {
                 if let Some(entry) = group_of.get_mut(unit as usize) {
                     *entry = u32::try_from(index).expect("a group index fits");
                 }
-                if let Some(entry) = unit_slot.get_mut(unit as usize) {
-                    *entry = u32::try_from(slot).expect("a unit slot fits");
+                let rows = group.rows.max(1) as usize;
+                if let Some(entry) = unit_chain.get_mut(unit as usize) {
+                    *entry = u32::try_from(slot / rows).expect("a chain index fits");
+                }
+                if let Some(entry) = unit_row.get_mut(unit as usize) {
+                    *entry = u32::try_from(slot % rows).expect("a row index fits");
                 }
             }
             chain_units.extend_from_slice(&found.units);
@@ -10337,7 +10348,8 @@ impl LaneMap {
         Self {
             groups: kept.into_boxed_slice(),
             group_of: group_of.into_boxed_slice(),
-            unit_slot: unit_slot.into_boxed_slice(),
+            unit_chain: unit_chain.into_boxed_slice(),
+            unit_row: unit_row.into_boxed_slice(),
             chain_units: chain_units.into_boxed_slice(),
             home: local.clone(),
             idle: vec![0; local.len()].into_boxed_slice(),
@@ -10416,11 +10428,20 @@ impl LaneMap {
             return None;
         }
         let pack = self.groups.get(group)?;
-        let rows = pack.rows as usize;
-        let slot = *self.unit_slot.get(unit)? as usize;
-        let chain = slot.checked_div(rows)?;
+        let chain = *self.unit_chain.get(unit)? as usize;
+        let row = *self.unit_row.get(unit)? as usize;
         (chain < pack.chains as usize && lane < pack.width as usize)
-            .then(|| (chain * pack.width as usize + lane, slot % rows))
+            .then(|| (chain * pack.width as usize + lane, row))
+    }
+
+    /// Unit `unit`'s pack group when it is a first-row unit, the one row whose packer facts are
+    /// recorded ([`Self::record_facts`]); `None` for a later row or a unit in no group. Two
+    /// bounds-checked loads.
+    #[inline]
+    fn fact_group(&self, unit: usize) -> Option<usize> {
+        let group = *self.group_of.get(unit)?;
+        (group != NO_PACK_GROUP && self.unit_row.get(unit).copied() == Some(0))
+            .then_some(group as usize)
     }
 
     /// The unit and lane of local position `position` of `pack`, in row `row`: `None` past the
@@ -10526,6 +10547,16 @@ impl LaneMap {
         let Some(pack) = self.groups.get(group).copied() else {
             return;
         };
+        if self.group_of.get(unit).copied() != u32::try_from(group).ok()
+            || self.unit_row.get(unit).copied() != Some(0)
+        {
+            return;
+        }
+        let Some(&chain) = self.unit_chain.get(unit) else {
+            return;
+        };
+        let width = pack.width as usize;
+        let first = pack.base as usize + chain as usize * width;
         let base = pack.base as usize;
         let mut packable = if unit == pack.first as usize {
             0
@@ -10533,12 +10564,8 @@ impl LaneMap {
             pack.packable
         };
         let mut crossed = false;
-        for lane in 0..lanes {
-            let Some(&strip) = self
-                .local(group, unit, lane)
-                .filter(|&(_, row)| row == 0)
-                .and_then(|(position, _)| self.home.get(base + position))
-            else {
+        for lane in 0..lanes.min(width) {
+            let Some(&strip) = self.home.get(first + lane) else {
                 continue;
             };
             let Some(idle) = self.idle.get_mut(base + strip as usize) else {
@@ -10833,17 +10860,21 @@ fn pack_peers(units: &mut [RuntimeUnit], earlier: usize, later: usize) -> bool {
     false
 }
 
-/// The units of `table` that hold a `block_end` observer, widened to every unit of each pack group
-/// any of whose units is listed (issue #1782a): a move carries an observer to another unit of its
-/// group. A unit with no such observer adds a walk and calls nothing. Bind-time.
+/// The units of `table` that hold a `block_end` observer, widened to every unit of the same row of
+/// each pack group any of whose units is listed (issue #1782a; rows, issue #2142): a move carries
+/// an observer to another unit of its group's row, never to another row. A unit with no such observer adds a walk and calls nothing. Bind-time.
 fn widen_block_end_units(table: &[u32], map: &LaneMap) -> Box<[u32]> {
     let listed = |unit: usize| table.iter().any(|&listed| listed as usize == unit);
     let mut widened: Vec<u32> = Vec::with_capacity(table.len());
     for unit in 0..map.group_of.len() {
         let wanted = listed(unit)
             || map.group(unit).is_some_and(|(group, pack)| {
+                // Issue #2142: a move trades members between units of one row only.
+                let row = map.unit_row.get(unit).copied();
                 (pack.first as usize..=pack.last as usize).any(|other| {
-                    map.group_of.get(other).copied() == u32::try_from(group).ok() && listed(other)
+                    map.group_of.get(other).copied() == u32::try_from(group).ok()
+                        && map.unit_row.get(other).copied() == row
+                        && listed(other)
                 })
             });
         if wanted {
@@ -10871,12 +10902,14 @@ impl Runtime {
     }
 
     /// Issue #2133: build [`Self::silent_readers`] once the pack groups are known. The only
-    /// consumer of a fact is a grouped bank's lane input, so the walk runs back from the end: a
-    /// grouped bank wants the flags of its first-slot members' inputs; an op whose output is
+    /// consumer of a fact is a grouped first-row bank's lane input (issue #2142: a later row's facts
+    /// are never read), so the walk runs back from the end: such a bank wants the flags of its
+    /// first-slot members' inputs; an op whose output is
     /// wanted is a reader-feeding op, and then wants its own inputs; a writer satisfies the want
     /// on what it writes, so an earlier writer of the same buffer is not one. A bank states its
-    /// final lanes' flags whatever this says. Pack-group lane moves trade members between peer
-    /// units only, whose inputs all come from before the group, so they move no want. Bind-time;
+    /// final lanes' flags whatever this says. Pack-group lane moves trade members between the
+    /// first-row units of one group, whose inputs all come from before the group
+    /// (`group_layout_holds`), so they move no want. Bind-time;
     /// allocates.
     fn bind_silence_readers(&mut self) {
         let mut wanted = vec![false; self.silent.len()];
@@ -10906,7 +10939,8 @@ impl Runtime {
                     for member in &members[last..] {
                         want(member.output, false);
                     }
-                    if self.lane_map.group(index).is_some() {
+                    // Issue #2142: only a first-row unit reads its lanes' facts.
+                    if self.lane_map.fact_group(index).is_some() {
                         for member in &members[..*lanes] {
                             for &input in &member.inputs {
                                 want(input, true);
@@ -10940,8 +10974,9 @@ impl Runtime {
             .collect()
     }
 
-    /// The bank-slot runs (issue #2132) of every pack group and of every bank unit in none, in
-    /// unit order: `[first unit, last unit, width, effect slots per unit, runs, whole-chain skips,
+    /// The bank-slot runs (issue #2132) of every pack group row (issue #2142: each row of a
+    /// split strip's lane chains apart, adjacent among the effect banks) and of every bank unit in
+    /// none, in unit order: `[first unit, last unit, width, effect slots per unit, runs, whole-chain skips,
     /// bypass skips]`.
     /// Units with no effect slot are left out. Off the render thread.
     ///
@@ -10954,6 +10989,9 @@ impl Runtime {
     /// subtracted.
     pub(crate) fn bank_slot_runs(&mut self) -> Vec<[u64; 7]> {
         let mut rows: Vec<[u64; 7]> = Vec::new();
+        // Issue #2142: each row's `(group, chain row)`, so a split strip's rows, whose slots differ,
+        // are counted apart, and a row merges only units adjacent among the effect banks.
+        let mut keys: Vec<Option<(usize, u32)>> = Vec::new();
         for index in 0..self.units.len() {
             let RuntimeUnit::Bank { chain, .. } = &mut self.units[index] else {
                 continue;
@@ -10973,28 +11011,23 @@ impl Runtime {
             let skips = chain.silent_skips();
             let width = u64::from(chain.width().lanes());
             let unit = index as u64;
-            match self.lane_map.group(index) {
-                Some((_, group))
-                    if rows
-                        .last()
-                        .is_some_and(|row| row[0] == u64::from(group.first)) =>
-                {
-                    let row = rows.last_mut().expect("the group's row");
+            let key = self.lane_map.group(index).map(|(group, _)| {
+                (
+                    group,
+                    self.lane_map.unit_row.get(index).copied().unwrap_or(0),
+                )
+            });
+            match (key, rows.last_mut()) {
+                (Some(key), Some(row)) if keys.last() == Some(&Some(key)) => {
                     row[1] = unit;
                     row[4] = row[4].saturating_add(runs);
                     row[5] = row[5].saturating_add(skips);
                     row[6] = row[6].saturating_add(bypass_skips);
                 }
-                Some((_, group)) => rows.push([
-                    u64::from(group.first),
-                    unit,
-                    width,
-                    effect_slots,
-                    runs,
-                    skips,
-                    bypass_skips,
-                ]),
-                None => rows.push([unit, unit, width, effect_slots, runs, skips, bypass_skips]),
+                _ => {
+                    rows.push([unit, unit, width, effect_slots, runs, skips, bypass_skips]);
+                    keys.push(key);
+                }
             }
         }
         rows
@@ -11633,7 +11666,8 @@ fn fold_displaced_group(
         at,
         staging,
         group_of,
-        unit_slot,
+        unit_chain,
+        unit_row,
         chain_units,
         ..
     } = map;
@@ -11676,10 +11710,10 @@ fn fold_displaced_group(
         if own_fold.is_empty() {
             continue;
         }
-        let Some(&slot) = unit_slot.get(unit) else {
+        let (Some(&chain_index), Some(&row)) = (unit_chain.get(unit), unit_row.get(unit)) else {
             return;
         };
-        let (chain_index, row) = (slot as usize / rows, slot as usize % rows);
+        let (chain_index, row) = (chain_index as usize, row as usize);
         let count = *lanes;
         if count > width {
             debug_assert!(false, "a grouped unit's lanes fit its width");

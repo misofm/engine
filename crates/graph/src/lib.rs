@@ -6302,14 +6302,15 @@ pub fn test_only_route_destination_silence(plan: &PreparedRenderPlan) -> Vec<boo
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TestOnlyBankSlotRuns {
-    /// The group's first runtime unit.
+    /// The row's first runtime unit. A row is one row of a pack group's lane chains (issue
+    /// #2142), its units adjacent among the effect banks, or one unit in no group.
     pub first_unit: u32,
     /// Its last runtime unit, inclusive: `first_unit` for a unit in no group.
     pub last_unit: u32,
     /// The lanes per unit, `W`.
     pub width: u32,
-    /// The effect slots of each unit of the group (builtin stages are not counted): one program,
-    /// so one count for every unit of a group.
+    /// The effect slots of each unit of the row (builtin stages are not counted): one program,
+    /// so one count for every unit of a row.
     pub effect_slots: u32,
     /// Bank-slot runs: one per unit per effect slot executed, none for a skipped chain.
     pub runs: u64,

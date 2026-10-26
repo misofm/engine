@@ -1699,7 +1699,7 @@ fn split_strip_differential(
 #[test]
 fn a_packed_split_strip_renders_the_bits_of_an_unpacked_one() {
     let model = c1_collapse_armed();
-    let probe = bind_with(
+    let mut probe = bind_with(
         &model,
         &c1_sparse(1),
         false,
@@ -1726,6 +1726,16 @@ fn a_packed_split_strip_renders_the_bits_of_an_unpacked_one() {
             "part two collapses on its producer row's proof"
         );
     }
+    // Both rows hold effect slots here (part two has the drive): each row's units count that row's
+    // slots, so the rows' counts sum to the banks the compile bound (issue #2132's relation).
+    let counted: u64 = graph::test_only_bank_slot_runs(&mut probe.plan)
+        .iter()
+        .map(|row| u64::from(row.effect_slots) * u64::from(row.last_unit - row.first_unit + 1))
+        .sum();
+    assert_eq!(
+        counted, probe.bound_banks,
+        "every bank-slot row counts its own row's slots once per unit"
+    );
     drop(probe);
     let packed = split_strip_differential(&model, |track| track % 2 == 1, Some(true));
     assert!(packed.lane_moves() > 0, "strips moved");
