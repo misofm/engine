@@ -7,7 +7,7 @@ This directory is the engine's implementation evidence base. It documents decisi
 - `BIBLIOGRAPHY.md` is the bounded source list and stable citation keys.
 - `CITATION_POLICY.md` defines what counts as evidence and how it is cited.
 - `NOTE_TEMPLATE.md` contains the mandatory headings for new topic notes.
-- The ten `*.md` topic notes live directly in this directory.
+- The topic notes (every other `*.md` file) live directly in this directory.
 - `../fixtures/conformance/` contains the deterministic `.mepcm` fixture corpus.
 - `listening/TEMPLATE.md` records blinded listening evidence without treating it as a substitute for measurement.
 - `listening/FORMAT_EXAMPLE.md` is a fully populated synthetic A/A record with no human or sound-quality claim.
