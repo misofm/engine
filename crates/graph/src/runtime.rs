@@ -3081,6 +3081,9 @@ pub(crate) struct LiveControlEffect {
     /// Whether a plan swap's carry marked this instance for its pending-`Observe` drain (#1816),
     /// taken by [`Self::carry_observes`]. Always `false` while the plan renders.
     observe_carry: bool,
+    /// The frames the lane holds dry when it leaves settled bypass: the effect's
+    /// `warmup_samples` of its declared latency, read at bind (issue #2129 D3).
+    warmup: u32,
 }
 
 impl LiveControlEffect {
@@ -3093,6 +3096,14 @@ impl LiveControlEffect {
     #[inline]
     fn stage(&mut self, snapshot: LiveSnapshot, first_sample: u64) -> effect_contract::Staged {
         let staged = self.control.stage(&mut self.spans, first_sample, snapshot);
+        // #2129 D2, D3 (as amended): leaving settled bypass resumes from rest, as a bank lane
+        // does, so the instance's bits after the switch do not depend on where it renders.
+        if self.control.take_rest() {
+            self.effect
+                .processor
+                .reset(effect_contract::ResetKind::DiscontinuityKeepParameters);
+            self.control.begin_hold(self.warmup);
+        }
         // #1371 D2: the lane's link switch reaches the processor before the block renders.
         if let Some(link) = staged.link {
             let taken = self
@@ -3220,7 +3231,11 @@ impl LiveControlEffect {
             .expect("a live-control effect's staging window holds every live parameter cell");
         let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
         let layout = rack::EffectLaneLayout::of(&effect.metadata.program_key());
+        let warmup = effect
+            .processor
+            .warmup_samples(u32::try_from(latency).unwrap_or(u32::MAX));
         Self {
+            warmup,
             observation,
             spans,
             shunt: BypassShunt::new(frames, latency),
@@ -3253,6 +3268,7 @@ impl LiveControlEffect {
 fn publish_observations(
     observation: &mut ObservationLane,
     processor: &dyn PreparedNativeEffect,
+    bypassed: bool,
     first_sample: u64,
     frames: u64,
 ) {
@@ -3265,6 +3281,16 @@ fn publish_observations(
     };
     for tap in 0..observation.len() {
         if !observation.wants(tap) {
+            continue;
+        }
+        // #2129 D5: a settled-bypassed instance emitted dry, so a tap that declares a bypass
+        // value folds it, as the same lane does in a bank.
+        if bypassed && let Some(value) = observation.bypass_value(tap) {
+            let value = ObservationSample {
+                left: value,
+                right: value,
+            };
+            observation.accumulate(tap, value, first_sample, frames);
             continue;
         }
         let index = tap as u32;
@@ -5927,6 +5953,8 @@ fn execute_op(
             // boundary and the skip moves no rendered bit. A crossfade toward wet still captures
             // its last block, because the lane is ramping when the block begins.
             let needs_dry = live.control.needs_dry();
+            // #2129 D5: decided before the mix advances the lane, as the bank decides it.
+            let settled_bypassed = live.control.settled_bypassed();
             let capture_dry = needs_dry || live.shunt.feeds_line();
             let effect = &mut live.effect;
             for target in live.control.prepared_targets() {
@@ -5982,6 +6010,7 @@ fn execute_op(
                 publish_observations(
                     observation,
                     live.effect.processor.as_ref(),
+                    settled_bypassed,
                     first_sample,
                     arena.frames() as u64,
                 );

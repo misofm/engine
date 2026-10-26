@@ -1167,6 +1167,15 @@ fn bank_equals_node(effect_id: &str, backend: Backend) {
         for (lane, node) in nodes.iter_mut().enumerate() {
             let (left, right) = (&mut expected_left[lane], &mut expected_right[lane]);
             node.control.stage(&mut [], first_sample, gate.snapshot());
+            // #2129 D2, D3 (as amended): leaving settled bypass resumes from rest, as
+            // `runtime::LiveControlEffect::stage` does.
+            if node.control.take_rest() {
+                node.effect
+                    .reset(effect_contract::ResetKind::DiscontinuityKeepParameters);
+                let latency = u32::try_from(latency).expect("latency fits");
+                let warmup = node.effect.warmup_samples(latency);
+                node.control.begin_hold(warmup);
+            }
             let needs_dry = node.control.needs_dry();
             if needs_dry || node.shunt.feeds_line() {
                 node.shunt.capture(left, right);

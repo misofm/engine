@@ -282,6 +282,11 @@ const fn tail_samples() -> u64 {
 /// `s + 60` its output reads only post-reset input. The exact-rest bound ([`rest_samples`], 62) is
 /// longer because it covers every stored row of each ring, its mirrors included, and an output
 /// sample reads only the 30 ages per ring. A ramp holds no input-driven state.
+///
+/// `W - 1` cannot be made red by any output word: the one reset word the frame `s + 59` still reads
+/// is `X[s - 1]`, weighted by the product of the two outermost half-band taps (about `1.7e-9`, below
+/// half an `f32` ulp of the frame's other terms), so it rounds away; `W - 2` is red. The
+/// derivation is the record.
 const fn warmup_samples(declared_latency: u32) -> u32 {
     declared_latency + tail_samples() as u32
 }

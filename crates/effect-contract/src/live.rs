@@ -853,6 +853,7 @@ pub fn effect_control_lane(
         mix: settled_mix(bypass),
         mix_position: 0,
         hold: 0,
+        rest_pending: false,
         symmetry,
         carried_bypass: CarriedCell::EMPTY,
         carried_link: CarriedCell::EMPTY,
@@ -911,11 +912,17 @@ pub struct EffectControlLane {
     /// Ramp frames rendered since the ramp started, saturated at the ramp's length. The ramp is
     /// settled exactly when it has reached the length.
     mix_position: u32,
-    /// Frames the lane still holds the dry signal before its crossfade runs (issue #2129 D3): set
-    /// by [`Self::begin_hold`] when the lane's bypass ends on the block that resumes a bank whose
-    /// wet path was skipped, consumed by [`Self::advance_bypass_mix`] before the ramp advances, and
-    /// `0` otherwise. A lane with a hold reads dry and counts as ramping.
+    /// Frames the lane still holds the dry signal before its crossfade runs (issue #2129 D3, as
+    /// amended): set by [`Self::begin_hold`] when the lane leaves settled bypass, consumed by
+    /// [`Self::advance_bypass_mix`] before the ramp advances, and `0` otherwise. A lane with a
+    /// hold reads dry and counts as ramping. Per-lane state: it moves with the lane in a lane
+    /// swap and a plan swap's carry.
     hold: u32,
+    /// Set by the [`Self::stage`] that applies a switch out of **settled** bypass (issue #2129 D2,
+    /// as amended): the lane's effect state is stale and the caller resets the lane, keeping
+    /// parameters, and starts its hold before the block renders ([`Self::take_rest`]). A switch
+    /// that reverses a crossfade toward bypass before it settled does not set it.
+    rest_pending: bool,
     /// This instance's live channel-symmetry terms, retained across blocks exactly as `bypass`
     /// is, and for the same reason: the terms describe what the *drained* values did, so
     /// they have to survive the block that drained them.
@@ -1022,6 +1029,7 @@ impl EffectControlLane {
             mix: settled_mix(bypass),
             mix_position: 0,
             hold: 0,
+            rest_pending: false,
             symmetry,
             carried_bypass: CarriedCell::EMPTY,
             carried_link: CarriedCell::EMPTY,
@@ -1192,10 +1200,19 @@ impl EffectControlLane {
         self.bypass && !self.bypass_ramping()
     }
 
+    /// Whether the last [`Self::stage`] took this lane out of settled bypass, clearing the flag
+    /// (issue #2129 D2, as amended). When it returns `true` the caller resets the lane's effect
+    /// state, keeping parameters (a bank's `reset_lane`, an instance's `reset`), and calls
+    /// [`Self::begin_hold`] with the effect's warm-up, before anything of the block reaches the
+    /// effect. Every un-bypass from settled bypass resumes from rest, so a lane's bits never
+    /// depend on whether its bank mates kept its wet path running.
+    pub fn take_rest(&mut self) -> bool {
+        core::mem::take(&mut self.rest_pending)
+    }
+
     /// Hold the dry signal for `frames` frames before this lane's crossfade runs (issue #2129
-    /// D3): the bank this lane renders in was reset because its wet path was skipped, and its
-    /// output reads `frames` of post-reset history before it is the output a never-skipped lane
-    /// renders. The ramp starts when the hold ends, on the [`IndexedRamp`] law from its first
+    /// D3, as amended): the lane's state was reset as it left settled bypass, and its output
+    /// reads `frames` of post-reset history before it is the output of a lane that never paused. The ramp starts when the hold ends, on the [`IndexedRamp`] law from its first
     /// frame, so the frame `frames` into the hold takes `k = 1`. Clamped to
     /// [`INDEXED_RAMP_LENGTH_MAXIMUM`], which keeps every crossfade index exact in `f32`. A lane
     /// that is bypassed, or a `frames` of `0`, takes no hold. Render thread, at a block boundary.
@@ -1255,10 +1272,19 @@ impl EffectControlLane {
         left: &mut [f32],
         right: &mut [f32],
     ) {
-        // The per-node path never resumes from a skipped wet path in this slice (#2129 S1), so
-        // no per-node lane holds.
-        debug_assert_eq!(self.hold, 0, "a per-node lane takes no hold");
-        if self.bypass_ramping() {
+        if self.hold != 0 {
+            // #2129 D3: the held frames are dry, then the ramp runs from its first frame.
+            shunt.crossfade_held::<L>(
+                left,
+                right,
+                &self.mix,
+                self.mix_position,
+                self.hold,
+                self.bypass,
+            );
+            let frames = left.len().min(right.len());
+            self.advance_bypass_mix(u32::try_from(frames).unwrap_or(u32::MAX));
+        } else if self.bypass_ramping() {
             shunt.crossfade::<L>(left, right, &self.mix, self.mix_position, self.bypass);
             let frames = left.len().min(right.len());
             self.advance_bypass_mix(u32::try_from(frames).unwrap_or(u32::MAX));
@@ -1345,6 +1371,7 @@ impl EffectControlLane {
         self.mix = predecessor.mix;
         self.mix_position = predecessor.mix_position;
         self.hold = predecessor.hold;
+        self.rest_pending = predecessor.rest_pending;
         self.symmetry = predecessor.symmetry;
         if predecessor.link.is_some() {
             self.link = predecessor.link;
@@ -1489,6 +1516,7 @@ impl EffectControlLane {
             mix,
             mix_position,
             hold,
+            rest_pending,
             symmetry,
             carried_bypass,
             carried_link,
@@ -1531,6 +1559,8 @@ impl EffectControlLane {
             // lane is settled there or still on its way (#1341 D2). Otherwise the crossfade starts
             // from the mix the lane is at now, so a reversal mid-ramp continues without a jump.
             if value != *bypass {
+                // #2129 D2: a lane leaving settled bypass resumes from rest.
+                *rest_pending = !value && *mix_position >= mix.length && *hold == 0;
                 let now = mix.coefficients_at(*mix_position)[0];
                 let target = if value { 0.0 } else { 1.0 };
                 // The writer refuses a longer ramp, so the cell holds only checked words.
@@ -2714,14 +2744,70 @@ impl BypassShunt {
         position: u32,
         settled_dry: bool,
     ) {
-        // All four planes are cut to the shortest, so no index below can fail: the kernel is never
-        // inlined into the render loop, and a bounds check here would be its own trap owner.
+        crossfade_planes::<L>(
+            left,
+            right,
+            &self.dry_left,
+            &self.dry_right,
+            ramp,
+            position,
+            settled_dry,
+        );
+    }
+
+    /// [`Self::crossfade`] for a lane that still holds dry for `hold` frames (issue #2129 D3):
+    /// the first `hold` frames of the block (all of them, for a longer hold) take the dry words by
+    /// a copy, and the frames after them crossfade from ramp position `position`, so the first
+    /// frame past the hold takes `k = position + 1`. Bit for bit what a bank lane renders with the
+    /// hold folded into its position ([`BypassShunt::crossfade_bank`]'s `k < 1` rule).
+    pub fn crossfade_held<L: Lane>(
+        &self,
+        left: &mut [f32],
+        right: &mut [f32],
+        ramp: &IndexedRamp,
+        position: u32,
+        hold: u32,
+        settled_dry: bool,
+    ) {
         let count = core::cmp::min(
             core::cmp::min(left.len(), right.len()),
             core::cmp::min(self.dry_left.len(), self.dry_right.len()),
         );
+        let held = core::cmp::min(count, hold as usize);
+        left[..held].copy_from_slice(&self.dry_left[..held]);
+        right[..held].copy_from_slice(&self.dry_right[..held]);
+        crossfade_planes::<L>(
+            &mut left[held..count],
+            &mut right[held..count],
+            &self.dry_left[held..count],
+            &self.dry_right[held..count],
+            ramp,
+            position,
+            settled_dry,
+        );
+    }
+}
+
+/// The body of [`BypassShunt::crossfade`] over planes and their aligned dry words.
+#[inline(never)]
+fn crossfade_planes<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    dry_left: &[f32],
+    dry_right: &[f32],
+    ramp: &IndexedRamp,
+    position: u32,
+    settled_dry: bool,
+) {
+    {
+        // All four planes are cut to the shortest, so no index below can fail: the kernel is never
+        // inlined into the render loop, and a bounds check here would be its own trap owner.
+        let count = core::cmp::min(
+            core::cmp::min(left.len(), right.len()),
+            core::cmp::min(dry_left.len(), dry_right.len()),
+        );
         let (left, right) = (&mut left[..count], &mut right[..count]);
-        let (dry_left, dry_right) = (&self.dry_left[..count], &self.dry_right[..count]);
+        let (dry_left, dry_right) = (&dry_left[..count], &dry_right[..count]);
         // `k = position + f + 1 < length` holds for the first `length - position - 1` frames.
         let ramping = ramp.length.saturating_sub(position).saturating_sub(1);
         let ramping = core::cmp::min(count, ramping as usize);
@@ -2771,7 +2857,9 @@ impl BypassShunt {
             right_settled.copy_from_slice(dry_right_settled);
         }
     }
+}
 
+impl BypassShunt {
     /// Crossfade a bank's interleaved wet block against the captured dry block, in place, one
     /// vector per frame and channel, each lane along its own ramp (#1341 D4).
     ///

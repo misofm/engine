@@ -40,16 +40,22 @@
 //! lane's failure (#1091, decision 12). No second copy of the ramp, the payload codec or the
 //! parameter validator (#90 F9): they come from `effect-runtime`.
 //!
-//! # The warm-up after a skipped wet path (issue #2129 D3)
+//! # The warm-up after an un-bypass (issue #2129 D3)
 //!
-//! A bank whose every lane is bypassed skips its wet path, and the block that runs it again resets
-//! it (`DiscontinuityKeepParameters`). A lane whose bypass ends there holds dry for `T + N` frames
-//! before its crossfade: for `T` frames the main-delay ring still emits the reset's zeros, and
-//! after them the box ramp still averages `Wb <= R = N + 1` gains, some taken before the reset
-//! held signal, so `g[n] <= r[n-N]` does not hold yet. From `T + N` every box term is a minimum
-//! over post-reset required gains, the ring holds only post-reset input, and the ceiling bound of
-//! the gain law holds from the first crossfaded frame. `T` alone would leave `N` frames above the
-//! ceiling on overs.
+//! A lane that leaves settled bypass is reset (`DiscontinuityKeepParameters`) and holds dry for
+//! `W` frames before its crossfade. `W = T`, the declared latency, which is the trait's default:
+//!
+//! * for `n < s + T` the main-delay ring still emits the reset's `+0.0`, so the wet output is not
+//!   yet the signal and a crossfade there would dip;
+//! * from `s + T` every term of the gain law reads post-reset words: the box ramp averages
+//!   `Wb <= R = N + 1 <= T` values of `m_q`, all computed after the reset, and each is a minimum
+//!   over a window that contains `n - N >= s + 6`, so `g[n] <= r[n-N]` holds by the algebra above,
+//!   and the detector modelled exactly the emitted wet signal, which is `+0.0` before `s + T`;
+//! * so the ceiling bound holds from the first crossfaded frame, and on a signal below the ceiling
+//!   the gain is exactly `1`, as on a lane that never paused.
+//!
+//! `T - 1` is the first value too short: its first crossfaded frame mixes in the ring's last
+//! `+0.0` and dips below both the dry and the reference sample.
 //!
 //! # The link glide (issue #1370 D2-D5)
 //!
@@ -4048,13 +4054,6 @@ struct LimiterCore<L: Lane> {
 }
 
 impl<L: Lane> LimiterCore<L> {
-    /// `T + N`: the frames a lane renders from a reset before its gain is the gain a never-reset
-    /// lane applies (issue #2129 D3; the module's warm-up note).
-    fn warmup_samples(&self, declared_latency: u32) -> u32 {
-        let n = u32::try_from(self.shape.n).unwrap_or(u32::MAX);
-        declared_latency.saturating_add(n)
-    }
-
     /// Allocates one core of `L::WIDTH` tracks. The only allocating function in the render crate.
     fn new(
         metadata: PreparedEffectMetadata,
@@ -5541,11 +5540,6 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
         self.core.heap_bytes()
     }
 
-    /// Issue #2129 D3: the lookahead ring and then the box ramp (see the module's warm-up note).
-    fn warmup_samples(&self, declared_latency: u32) -> u32 {
-        self.core.warmup_samples(declared_latency)
-    }
-
     fn channel_symmetry(&self) -> bool {
         self.core.designed_channel_symmetry(0)
     }
@@ -5621,11 +5615,6 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     }
     fn retained_bytes(&self) -> u64 {
         self.core.heap_bytes()
-    }
-
-    /// Issue #2129 D3: the lookahead ring and then the box ramp (see the module's warm-up note).
-    fn warmup_samples(&self, declared_latency: u32) -> u32 {
-        self.core.warmup_samples(declared_latency)
     }
 
     fn lane_channel_symmetry(&self, lane: usize) -> bool {

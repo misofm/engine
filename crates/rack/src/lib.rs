@@ -649,13 +649,6 @@ pub trait BankStage: Send {
         0
     }
 
-    /// Bring this stage's state to what a plan swap's carry may snapshot, before the carry reads
-    /// any lane (issue #2129 D4): [`BankChain::disengage_for_carry`] calls it on every slot of a
-    /// predecessor chain. A stage whose wet path was skipped resets its stale bank here, so a
-    /// carried payload is at rest with current parameters. Render thread, at the swap block:
-    /// allocation-free and bounded by the state size. The default holds nothing stale.
-    fn settle_for_carry(&mut self) {}
-
     /// Which side of the fader/matrix seam this stage sits on.
     ///
     /// The default is [`SeamSide::UpstreamOfSeam`], which is the **conservative** answer here and
@@ -864,19 +857,6 @@ fn swap_bits(own: &mut u8, first: usize, other: &mut u8, second: usize) {
     let (own_bit, other_bit) = ((*own >> first) & 1, (*other >> second) & 1);
     *own = (*own & !(1 << first)) | (other_bit << first);
     *other = (*other & !(1 << second)) | (own_bit << second);
-}
-
-/// Exchange bit `first` of `own` with bit `second` of `other`, two stages' stale masks (issue
-/// #2129 D4), except that a bit never makes a stage stale that was not: a stale bit means the
-/// stage's next rendered block resets the whole bank, which would wipe the running state of a
-/// stage whose other lanes never skipped. A stale lane a swap moves is at rest (a swap moves only
-/// lanes [`BankStage::lanes_at_rest`] reports), so dropping its bit loses no state worth keeping.
-fn swap_stale_bits(own: &mut u8, first: usize, other: &mut u8, second: usize) {
-    let (own_bit, other_bit) = ((*own >> first) & 1, (*other >> second) & 1);
-    let own_rest = *own & !(1 << first);
-    let other_rest = *other & !(1 << second);
-    *own = own_rest | (other_bit * u8::from(own_rest != 0)) << first;
-    *other = other_rest | (own_bit * u8::from(other_rest != 0)) << second;
 }
 
 /// Fold one block's input into each lane's run of trailing `+0.0` frames the shunt's latency line
@@ -1576,10 +1556,15 @@ const fn lane_witness(designed: bool, restored: bool) -> ChannelSymmetryWitness 
 /// target and arms no tap that needs a computed reading, steps 2-4 are replaced by the shunt's
 /// passthrough (`BypassShunt::passthrough`): the same dry words by copies, the line fed, no bank
 /// call. Each armed tap folds its declared bypass value, as a settled-bypassed lane's tap does in
-/// a running bank (D5). The bank is then stale: the first block that runs it again resets it
-/// whole, keeping parameters, and a lane whose bypass ends on that block holds dry for the
-/// effect's `warmup_samples` before its crossfade (D2, D3). A bank with any enabled, ramping or
-/// holding lane runs as above, so banking couples the lanes' cost, never their bits.
+/// a running bank (D5). A bank with any enabled, ramping or holding lane runs as above.
+///
+/// Whether the bank skipped never reaches a lane's bits: every lane that leaves settled bypass is
+/// reset alone, keeping parameters (`PreparedNativeEffectBank::reset_lane`), in the drain of the
+/// block that applies the switch, and holds dry for the effect's `warmup_samples` before its
+/// crossfade (D2, D3 as amended). A bypassed lane in a running bank still computes, but its state
+/// is discarded at its un-bypass, so its output after the switch is the output of the same lane in
+/// a bank that skipped. The hold lives in the lane's control lane, so it moves with the lane in a
+/// lane swap and a plan swap's carry.
 ///
 /// # Partition invariance and `to_bits` identity extend to command timelines
 ///
@@ -1662,12 +1647,7 @@ pub struct LiveControlEffectBankStage {
     /// lane of the width until a chain binds it. A lane outside it is padded and counts as settled
     /// for the bypass skip (issue #2129 D1).
     active: u8,
-    /// The lanes whose effect state is stale because the bank's wet path was skipped while they
-    /// were settled bypassed (issue #2129 D2): set by a skipped block, cleared by the whole-bank
-    /// reset of the first block that runs the bank again ([`Self::resume`]) or by
-    /// [`BankStage::settle_for_carry`].
-    stale: u8,
-    /// The frames a lane whose bypass ends on a resuming block holds dry before its crossfade:
+    /// The frames a lane that leaves settled bypass holds dry before its crossfade:
     /// the bank's [`PreparedNativeEffectBank::warmup_samples`] of its declared latency, read at
     /// bind (issue #2129 D3).
     warmup: u32,
@@ -1814,7 +1794,6 @@ impl LiveControlEffectBankStage {
             program_key: metadata.program_key,
             carry_refused: 0,
             active: u8::MAX >> (8 - lane_count),
-            stale: 0,
             warmup,
             bypass_skips: 0,
             latency: latency_frames,
@@ -2448,7 +2427,6 @@ impl BankStage for LiveControlEffectBankStage {
                 }
                 self.designed.swap(lane, other_lane);
                 swap_bits_within(&mut self.unrestored, lane, other_lane);
-                swap_bits_within(&mut self.stale, lane, other_lane);
                 if let Some(shunt) = self.shunt.as_mut() {
                     let swapped = shunt.swap_line_lanes(lane, lanes, None, other_lane, lanes);
                     debug_assert!(swapped, "a checked shunt line swaps");
@@ -2500,7 +2478,6 @@ impl BankStage for LiveControlEffectBankStage {
                     &mut other.unrestored,
                     other_lane,
                 );
-                swap_stale_bits(&mut self.stale, lane, &mut other.stale, other_lane);
                 let other_lanes = other.width.lanes() as usize;
                 if let (Some(own), Some(theirs)) = (self.shunt.as_mut(), other.shunt.as_mut()) {
                     let swapped =
@@ -2620,14 +2597,6 @@ impl BankStage for LiveControlEffectBankStage {
 
     fn bypass_skips(&self) -> u64 {
         self.bypass_skips
-    }
-
-    /// A stale bank resets here, keeping parameters, so every lane the carry snapshots is at rest
-    /// with current parameters whether its successor skips or runs (issue #2129 D4).
-    fn settle_for_carry(&mut self) {
-        if core::mem::take(&mut self.stale) != 0 {
-            self.processor.reset(ResetKind::DiscontinuityKeepParameters);
-        }
     }
     // REALTIME_POLICY_END
 
@@ -2754,6 +2723,15 @@ impl LiveControlEffectBankStage {
         for (lane, channel) in self.lanes.iter_mut().enumerate() {
             if let Some(channel) = channel.as_mut() {
                 let staged = channel.stage(&mut self.staging, first_sample, snapshot);
+                // #2129 D2, D3 (as amended): a lane that leaves settled bypass resumes from rest,
+                // whether or not its bank ran while it was bypassed: its state alone is reset,
+                // keeping parameters, before this block's targets and spans reach it, and it holds
+                // dry for the effect's warm-up.
+                if channel.take_rest() {
+                    self.processor
+                        .reset_lane(lane, ResetKind::DiscontinuityKeepParameters);
+                    channel.begin_hold(self.warmup);
+                }
                 // #1371 D2: the lane's link switch reaches the processor here, before the chain
                 // decides the block's mode or asks which lanes rest. It moves both channels'
                 // weights alike, so a collapsed block and its desymmetrize boundary see one glide.
@@ -2889,7 +2867,7 @@ impl LiveControlEffectBankStage {
     /// settled select produce. At zero latency the planes already hold them and nothing is
     /// written. A collapsed block feeds the line its left plane twice, as the body does; the seam
     /// writes the right plane after the prefix. Every armed tap folds its declared bypass value
-    /// (D5), the bank is stale from here (D2), and the block counts.
+    /// (D5), and the block counts.
     fn pass_bypassed<const MONO: bool>(&mut self, block: BankBlock<'_>) {
         if let Some(shunt) = self.shunt.as_mut()
             && shunt.feeds_line()
@@ -2911,34 +2889,9 @@ impl LiveControlEffectBankStage {
                 observation.accumulate_bypass(block.first_sample, u64::from(block.frames));
             }
         }
-        self.stale |= self.active;
         self.bypass_skips = self.bypass_skips.saturating_add(1);
     }
 
-    /// Run a stale bank again (issue #2129 D2, D3): reset the whole bank, keeping parameters,
-    /// before this block's targets and spans reach it, and give every lane whose bypass ended on
-    /// this block the warm-up hold, so its crossfade starts on post-reset history. Every stale
-    /// lane was settled bypassed throughout, so no lane holds state worth keeping.
-    fn resume(&mut self) {
-        self.processor.reset(ResetKind::DiscontinuityKeepParameters);
-        let stale = core::mem::take(&mut self.stale);
-        let mut held = false;
-        for (lane, control) in self.lanes.iter_mut().enumerate() {
-            if stale & (1 << lane) != 0
-                && let Some(control) = control.as_mut()
-                && !control.bypassed()
-            {
-                control.begin_hold(self.warmup);
-                held |= control.bypass_ramping();
-            }
-        }
-        if held {
-            // A held lane reads dry and advances; the next drain walks the lanes again.
-            self.walk.needs_dry = true;
-            self.walk.ramping = true;
-            self.quiet_at = None;
-        }
-    }
     // REALTIME_POLICY_END
 
     // REALTIME_POLICY_BEGIN
@@ -2958,10 +2911,6 @@ impl LiveControlEffectBankStage {
         if self.skips_wet_path(packed) {
             self.pass_bypassed::<MONO>(block);
             return Ok(());
-        }
-        // D2: the first block that runs a skipped bank again resets it before anything reaches it.
-        if self.stale != 0 {
-            self.resume();
         }
         // The chain has already performed any collapsed-to-dual state restoration before it
         // dispatches this stage. Apply each lane's staged target prefix at that boundary;
@@ -4862,17 +4811,12 @@ impl BankChain {
 
     /// Prepare this chain to hand lane state to a successor plan (issue #1276 D5): when it
     /// rendered its last block collapsed, take the disengage boundary now, so both channels of
-    /// every prefix stage hold real state; and reset every stage whose wet path was skipped
-    /// ([`BankStage::settle_for_carry`], issue #2129 D4). The chain renders no more.
-    /// Allocation-free; a no-op on a chain that rendered dual and skipped nothing.
+    /// every prefix stage hold real state. The chain renders no more. Allocation-free; a no-op
+    /// on a chain that rendered dual.
     pub fn disengage_for_carry(&mut self) {
         if self.collapsed {
             self.disengage_collapse();
             self.collapsed = false;
-        }
-        // #2129 D4: a stage whose wet path was skipped resets before any lane is snapshot.
-        for slot in &mut self.slots {
-            slot.stage.settle_for_carry();
         }
     }
 

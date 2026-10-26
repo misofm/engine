@@ -11094,10 +11094,12 @@ mod tests {
             effect_contract::BypassSwitch::step(false),
         ));
         let restored = render_live_control_blocks(&mut plan, 3, 1);
-        assert!(
-            restored[..4].iter().all(|value| *value == 0.0),
-            "releasing bypass returns the *current* wet signal, not a stale one: {:?}",
+        // #2129 D2, D3: releasing bypass resets the instance, keeping the zero gain, and holds dry
+        // for the warm-up (the declared latency, 2), then the current wet signal.
+        assert_eq!(
             &restored[..4],
+            &[10.0, 11.0, 0.0, 0.0],
+            "releasing bypass holds dry for the warm-up, then returns the *current* wet signal"
         );
         assert_eq!(
             &restored[4..],

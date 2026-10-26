@@ -1,26 +1,27 @@
-//! Issue #2129 S1, gate 5: a lane whose bypass ends on the block that resumes a skipped bank holds
-//! the dry signal for its effect's warm-up, then crossfades onto output a never-bypassed lane
-//! renders, with no dip, no NaN and no subnormal, and the limiter keeps its ceiling from the first
-//! crossfaded frame.
+//! Issue #2129 S1b, gate 5 and the B1 row: a lane leaving settled bypass is reset alone and holds
+//! the dry signal for its effect's warm-up `W`, then crossfades onto the output of a lane that never
+//! paused, with no NaN and no subnormal; the limiter keeps its ceiling from the first wet frame; and
+//! the lane's words after its un-bypass do not depend on its bank mates.
 //!
 //! Three legs of one bank of the host's width, through the rack's real live stage, at 48 kHz, with
 //! every lane carrying a live bypass cell:
 //!
 //! * **resumed**: every lane bypassed, so the bank skips its wet path for 16 blocks; lane 0 is then
-//!   un-bypassed with a ramp. The block that resumes resets the bank and lane 0 holds dry for `W`.
+//!   un-bypassed.
 //! * **reference**: lane 0 never bypassed; its bank never skips.
 //! * **running**: lane 0 bypassed and un-bypassed at the same block as the resumed leg, but lane 1
-//!   is enabled, so the bank never skipped and lane 0 takes today's crossfade with no hold.
+//!   is enabled, so the bank never skipped and lane 0's wet path ran while it was bypassed.
 //!
-//! The true-peak limiter (`W = T + N = 966` at 48 kHz) and the soft clip (`W = latency + tail =
-//! 60`) are the two launch effects whose warm-up exceeds their latency; the test reads each bank's
-//! declared `W` (`warmup_samples`), so a wrong declaration is caught by what it renders.
+//! The soft clip (`W = latency + tail = 60`) is the launch effect whose warm-up exceeds its latency;
+//! the true-peak limiter's is its latency `T` (486 at 48 kHz), and its wet output is `+0.0` until
+//! then. The test reads each bank's declared `W` (`warmup_samples`), so a wrong declaration is
+//! caught by what it renders.
 
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
     BankWidth, BypassSwitch, EffectCellWriter, EffectControlLane, EffectControlRecord,
     EffectDescriptor, EffectLaneShape, EffectLaneSpec, EffectQuality, InitialParameterValue,
-    LinkMode, ParameterChannel, ParameterChannelPolicy, PrepareEffectBankRequest,
+    LinkMode, ParameterChannel, ParameterChannelPolicy, PortRole, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
     effect_control_lane,
 };
@@ -69,9 +70,7 @@ fn request<'a>(
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPorts {
-            sidechain: PreparedSidechainPort::None,
-        },
+        ports: unrouted_ports(descriptor),
         initial_values: values,
         limits: PrepareEffectLimits {
             maximum_total_state_bytes: 1 << 30,
@@ -82,6 +81,25 @@ fn request<'a>(
             .expect("launch registry")
             .tail_bound(descriptor.id, RATE, EffectQuality::Normal)
             .expect("a declared row"),
+    }
+}
+
+/// The ports `effect-compiler` prepares for an effect with no sidechain route.
+fn unrouted_ports(descriptor: &EffectDescriptor) -> PreparedPorts {
+    match descriptor
+        .ports
+        .iter()
+        .find(|port| port.role == PortRole::SidechainInput)
+    {
+        Some(port) => PreparedPorts {
+            sidechain: PreparedSidechainPort::Unconnected {
+                id: port.id,
+                required: port.required,
+            },
+        },
+        None => PreparedPorts {
+            sidechain: PreparedSidechainPort::None,
+        },
     }
 }
 
@@ -237,87 +255,104 @@ fn dry(n: usize, channel: usize, latency: usize, amplitude: f32) -> f32 {
     }
 }
 
+fn mix_at(length: u32, k: u32) -> f32 {
+    lane::kernels::IndexedRamp::new([0.0; 4], [1.0, 0.0, 0.0, 0.0], length).coefficients_at(k)[0]
+}
+
+/// `dry + (wet - dry) * m`, as the shunt's crossfade computes it: a separate subtract, multiply
+/// and add.
+fn mixed(dry: f32, wet: f32, m: f32) -> f32 {
+    dry + (wet - dry) * m
+}
+
 /// Gate 5, the crossfade rows, for the limiter and the soft clip on a sub-threshold triangle:
 ///
 /// * the resumed leg skipped every block before [`RESUME`], and its output has no NaN and no
 ///   subnormal;
 /// * it is the dry signal, bit for bit, over `[s_B, s_B + W)`;
+/// * over `[s_B + W, s_B + W + RAMP)` it is the crossfade from the dry signal onto the reference
+///   leg's output on the ramp law, `dry + (ref - dry) * m(k)` with `k = n - s_B - W + 1`, bit for
+///   bit: the wet side is already the reference, so there is no dip;
 /// * from `s_B + W + RAMP` it is the reference leg's output, bit for bit;
-/// * over the crossfade between them it is never outside `[min, max]` of the dry and reference
-///   samples by more than `1e-6`: no dip;
-/// * the running leg, whose bank never skipped, takes no hold: it is the reference from
-///   `s_B + RAMP`.
+/// * and again with a step un-bypass (ramp `0`), whose first wet frame is `s_B + W` itself: at
+///   `m(1)` of a ramp a one-frame-short `W` can round away, at a step it cannot.
 ///
-/// Red mutations: the soft clip's `W` at its latency (31; the crossfade starts while its half-band
-/// FIR reads reset zeros and dips below the dry and reference samples); a stage that marks a bank
-/// stale while a lane is merely bypassed in a running bank (the running leg holds and resets, and
-/// the soft clip's misses the reference from `s_B + RAMP`).
+/// Red mutations: the limiter's `W` one frame short (`T - 1`; its first wet frame reads the main
+/// ring's reset `+0.0`), the soft clip's two frames short (`58`; its `59` is not observable, see
+/// `soft_clip::warmup_samples`), no hold, a bank crossfade that ignores the hold.
 #[test]
-fn a_resumed_lane_holds_dry_for_its_warmup_then_crossfades_without_a_dip() {
+fn a_resumed_lane_holds_dry_for_its_warmup_then_crossfades_onto_the_reference() {
     let amplitude = 0.1;
-    for effect_id in ["miso.true-peak-limiter", "miso.soft-clip"] {
-        let resumed = render(effect_id, Leg::Resumed, amplitude, RAMP);
-        let reference = render(effect_id, Leg::Reference, amplitude, RAMP);
-        let running = render(effect_id, Leg::Running, amplitude, RAMP);
+    for (effect_id, ramp) in ["miso.true-peak-limiter", "miso.soft-clip"]
+        .into_iter()
+        .flat_map(|effect_id| [(effect_id, RAMP), (effect_id, 0)])
+    {
+        let resumed = render(effect_id, Leg::Resumed, amplitude, ramp);
+        let reference = render(effect_id, Leg::Reference, amplitude, ramp);
         let resume = (RESUME * u64::from(QUANTUM)) as usize;
-        let (latency, warmup, end) = (resumed.latency, resumed.warmup, resumed.output[0].len());
-        assert!(
-            warmup > latency,
-            "{effect_id}: the warm-up exceeds the latency"
-        );
+        let (latency, warmup) = (resumed.latency, resumed.warmup);
         assert_eq!(
             resumed.skips, RESUME,
             "{effect_id}: the bank skipped until it resumed"
         );
-        assert_eq!(
-            reference.skips + running.skips,
-            0,
-            "{effect_id}: never skipped"
-        );
+        assert_eq!(reference.skips, 0, "{effect_id}: never skipped");
+        let fade = resume + warmup;
         for channel in 0..2 {
             let (out, wet) = (&resumed.output[channel], &reference.output[channel]);
-            for (n, sample) in out.iter().enumerate() {
+            for (n, (sample, wet)) in out.iter().zip(wet).enumerate().skip(resume) {
                 assert!(
                     sample.is_finite() && !sample.is_subnormal(),
                     "{effect_id}: channel {channel} sample {n} is {sample:e}"
                 );
-            }
-            for (n, sample) in out.iter().enumerate().take(resume + warmup).skip(resume) {
+                let dry = dry(n, channel, latency, amplitude);
+                let expected = if n < fade {
+                    dry
+                } else if n < fade + ramp as usize {
+                    mixed(dry, *wet, mix_at(ramp, (n - fade + 1) as u32))
+                } else {
+                    *wet
+                };
                 assert_eq!(
                     sample.to_bits(),
-                    dry(n, channel, latency, amplitude).to_bits(),
-                    "{effect_id}: channel {channel} sample {n} holds dry"
+                    expected.to_bits(),
+                    "{effect_id}: channel {channel} sample {n} is {sample}, expected {expected} \
+                     (dry {dry}, reference {wet}, crossfade from {fade})"
                 );
             }
-            for n in resume + warmup..resume + warmup + RAMP as usize {
-                let dry = dry(n, channel, latency, amplitude);
-                let (low, high) = (dry.min(wet[n]), dry.max(wet[n]));
-                assert!(
-                    out[n] >= low - 1e-6 && out[n] <= high + 1e-6,
-                    "{effect_id}: channel {channel} sample {n} is {} outside the dry {dry} and \
-                     the reference {}",
-                    out[n],
-                    wet[n]
-                );
-            }
-            for n in resume + warmup + RAMP as usize..end {
-                assert_eq!(
-                    out[n].to_bits(),
-                    wet[n].to_bits(),
-                    "{effect_id}: channel {channel} sample {n} is the reference"
-                );
-            }
-            let settled = resume + RAMP as usize;
-            for (n, (sample, wet)) in running.output[channel]
+        }
+    }
+}
+
+/// Issue #2129, the B1 row: a lane's un-bypass does not depend on its bank mates. Lane 0 is
+/// un-bypassed at the same block with the same ramp in a bank whose other lanes are all bypassed
+/// (so the bank skipped its wet path) and in a bank where lane 1 stays enabled (so it never
+/// skipped and lane 0's wet path ran while it was bypassed). Lane 0's output words are the same
+/// in both, from the first sample on, for a zero-latency effect and the two with a warm-up.
+///
+/// Red mutation: the D2/D3 law as first ruled, which reset and held a lane only when its whole
+/// bank had skipped (the running leg continued warm and crossfaded at once).
+#[test]
+fn a_lanes_un_bypass_does_not_depend_on_its_bank_mates() {
+    for effect_id in [
+        "miso.compressor",
+        "miso.true-peak-limiter",
+        "miso.soft-clip",
+    ] {
+        let resumed = render(effect_id, Leg::Resumed, 0.1, RAMP);
+        let running = render(effect_id, Leg::Running, 0.1, RAMP);
+        assert_eq!(resumed.skips, RESUME, "{effect_id}: one bank skipped");
+        assert_eq!(running.skips, 0, "{effect_id}: the other never did");
+        for channel in 0..2 {
+            for (n, (a, b)) in resumed.output[channel]
                 .iter()
-                .zip(wet)
+                .zip(&running.output[channel])
                 .enumerate()
-                .skip(settled)
             {
                 assert_eq!(
-                    sample.to_bits(),
-                    wet.to_bits(),
-                    "{effect_id}: the running leg's channel {channel} sample {n} took no hold"
+                    a.to_bits(),
+                    b.to_bits(),
+                    "{effect_id}: channel {channel} sample {n}: {a} after a skipped bank, {b} \
+                     after a running one"
                 );
             }
         }
@@ -325,11 +360,12 @@ fn a_resumed_lane_holds_dry_for_its_warmup_then_crossfades_without_a_dip() {
 }
 
 /// Gate 5, the ceiling row: the limiter on a triangle about 10 dB over its ceiling, un-bypassed with
-/// a step, so every sample from `s_B + W` is wet. None is above the ceiling: at `T + N` the box ramp
-/// averages only post-reset gains, so the gain law's bound holds from the first wet frame.
+/// a step, so every sample from `s_B + W` is wet. None is above the ceiling: from `T` every box
+/// term is a post-reset minimum over a window that holds `n - N`, so the gain law's bound holds from
+/// the first wet frame (the limiter's module docs).
 ///
-/// Red mutation: the limiter's `W` at `T` alone (its latency): the first `N` wet frames take the
-/// box's reset gains of `1` and pass the overs.
+/// Red mutation: no hold (the dry overs pass). `W = T - 1` is not red here: its extra frame is the
+/// main ring's reset `+0.0`, under any ceiling; the crossfade row catches it.
 #[test]
 fn a_resumed_limiter_keeps_its_ceiling_from_the_first_wet_frame() {
     let effect_id = "miso.true-peak-limiter";

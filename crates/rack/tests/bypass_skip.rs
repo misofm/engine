@@ -1,12 +1,12 @@
-//! Issue #2129 S1, gates 3 and 4: a live-control bank whose every lane is settled bypassed skips its
-//! wet path, and the first block that runs it again resets it once, keeping parameters.
+//! Issue #2129 S1b, gates 3 and 4: a live-control bank whose every lane is settled bypassed skips
+//! its wet path, and a lane that leaves settled bypass is reset alone, keeping parameters.
 //!
 //! The bank is a recording stand-in: parameter 0 (or a prepared target) is a per-lane gain, its
-//! block multiplies by it, a `FullToDefaults` reset returns every gain to `1`, a
-//! `DiscontinuityKeepParameters` reset keeps them, and every call is logged in order. Its two taps
+//! block multiplies by it, a `FullToDefaults` reset (whole or of one lane) returns the gains it
+//! covers to `1`, a `DiscontinuityKeepParameters` reset keeps them, and every call is logged in order. Its two taps
 //! read `7.0` from the running state: tap 0 declares the bypass value `0.0`, tap 1 declares none.
 //! What is gated is the rack: which blocks reach the bank, what a skipped block emits and folds,
-//! and when the bank is reset.
+//! and when a lane or the bank is reset.
 
 use std::sync::{Arc, Mutex};
 
@@ -458,46 +458,37 @@ fn a_bank_whose_every_lane_is_settled_bypassed_skips_unless_a_lane_has_work() {
     assert_eq!(world.skips(), 1, "settled, the bank skips");
 }
 
-/// Gate 4: the block that runs a skipped bank again resets it once, with
-/// `DiscontinuityKeepParameters`, before the bank processes; a parameter the lane took while the
-/// bank was stale is its value after the reset; and a bank that never skipped is never reset.
+/// Gate 4, as amended (issue #2129 D2): a lane that leaves settled bypass is reset alone, once,
+/// with `DiscontinuityKeepParameters`, before the bank processes its block, and keeps the
+/// parameter it took while bypassed; this holds alike in a bank that skipped and in one that never
+/// did; a span that runs a skipped bank resets nothing; a crossfade toward bypass reversed before it
+/// settles resets nothing; and the bank is never reset whole.
 ///
-/// Red mutations: drop the reset from `resume` (no reset call), pass `FullToDefaults` (the gain
-/// returns to `1` and the kind differs), or leave `stale` set after the reset (every later block
-/// resets).
+/// Red mutations: drop the reset from the drain (no call), pass `FullToDefaults` (the kind differs
+/// and the gain returns to `1`), reset the whole bank in place of the lane, or flag the rest on
+/// every switch to wet whether or not the lane was settled (the reversal resets).
 #[test]
-fn a_resumed_bank_resets_once_keeping_parameters_and_a_running_bank_never_resets() {
+fn a_lane_leaving_settled_bypass_is_reset_alone_keeping_parameters() {
+    let rest = |lane| Call::ResetLane(lane, ResetKind::DiscontinuityKeepParameters);
     let mut world = World::new([true; LANES]);
     for _ in 0..3 {
         let (_, calls) = world.step();
-        assert_eq!(calls, []);
+        assert_eq!(calls, [], "skipped");
     }
-    // A span while stale runs the bank: it resumes, so it resets first and then applies the span.
     world.push(0, gain(0.25));
     let (_, calls) = world.step();
     assert_eq!(
         calls,
-        [
-            Call::Reset(ResetKind::DiscontinuityKeepParameters),
-            Call::Process
-        ],
-        "the span's block resets the stale bank, then runs"
+        [Call::Process],
+        "a span runs the bank and resets nothing"
     );
     for _ in 0..3 {
         let (_, calls) = world.step();
-        assert_eq!(calls, [], "stale again");
+        assert_eq!(calls, [], "skipped again");
     }
-    // Lane 0 leaves bypass: its block resets once and runs; the next blocks only run.
     world.push(0, bypass(false, 0));
     let (output, calls) = world.step();
-    assert_eq!(
-        calls,
-        [
-            Call::Reset(ResetKind::DiscontinuityKeepParameters),
-            Call::Process
-        ],
-        "the resuming block"
-    );
+    assert_eq!(calls, [rest(0), Call::Process], "the un-bypass block");
     assert_eq!(world.gain(0), 0.25, "the reset kept the lane's parameter");
     assert_eq!(
         output[0],
@@ -507,21 +498,32 @@ fn a_resumed_bank_resets_once_keeping_parameters_and_a_running_bank_never_resets
     assert_eq!(output[1..], dry()[1..], "the bypassed lanes stay dry");
     for _ in 0..3 {
         let (_, calls) = world.step();
-        assert_eq!(calls, [Call::Process], "a running bank is not reset again");
+        assert_eq!(calls, [Call::Process], "reset once");
     }
 
     let mut world = World::new([false, true, true, true]);
     for _ in 0..3 {
-        let _ = world.step();
+        let (_, calls) = world.step();
+        assert_eq!(calls, [Call::Process]);
     }
     world.push(1, bypass(false, 0));
-    for _ in 0..3 {
-        let (_, calls) = world.step();
-        assert_eq!(
-            calls,
-            [Call::Process],
-            "a never-skipped bank is never reset"
-        );
-    }
+    let (_, calls) = world.step();
+    assert_eq!(
+        calls,
+        [rest(1), Call::Process],
+        "a running bank resets the lane as a skipped one does"
+    );
+    // A crossfade toward bypass, reversed before it settles.
+    world.push(2, bypass(false, 0));
+    let _ = world.step();
+    world.push(2, bypass(true, 20));
+    let _ = world.step();
+    world.push(2, bypass(false, 20));
+    let (_, calls) = world.step();
+    assert_eq!(
+        calls,
+        [Call::Process],
+        "a reversal before settling resets nothing"
+    );
     assert_eq!(world.skips(), 0);
 }
