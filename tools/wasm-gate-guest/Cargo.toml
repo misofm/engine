@@ -16,6 +16,8 @@ name = "wasm_gate_guest"
 crate-type = ["cdylib"]
 
 [dependencies]
+# Issue #2143: the C1 rows and their bank counters, the same code `wasm-gates`' native leg runs.
+console-workload.workspace = true
 lane.workspace = true
 wasm-gate-corpus.workspace = true
 

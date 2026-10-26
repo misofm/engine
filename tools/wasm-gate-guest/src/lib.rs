@@ -232,3 +232,40 @@ pub extern "C" fn miso_gate_digest_word(case: u32, width: u32, word: u32) -> u32
         digest[offset + 3],
     ])
 }
+
+/// The last console row's bank counters, so that reading seven counters costs one render.
+static LAST_COUNTERS: Mutex<Option<(u32, [u64; 7])>> = Mutex::new(None);
+
+/// Number of console rows whose bank counters this module reports (issue #2143):
+/// `console_workload::W4_COUNTER_WORKLOADS`.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_gate_console_row_count() -> u32 {
+    console_workload::W4_COUNTER_WORKLOADS.len() as u32
+}
+
+/// Counter `counter` (`console_workload::BANK_COUNTER_NAMES` order) of console row `row` after
+/// `console_workload::W4_COUNTER_BLOCKS` blocks, compiled and rendered by the real pipeline at this
+/// module's own width, `Simd4` (issue #2143). Memoised across a row's counter reads.
+///
+/// Traps on an out-of-range argument, which the host reports as a failure rather than a mismatch.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_gate_console_counter(row: u32, counter: u32) -> u64 {
+    let workload = *console_workload::W4_COUNTER_WORKLOADS
+        .get(row as usize)
+        .expect("console row out of range");
+    let mut cache = LAST_COUNTERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let counters = match cache.as_ref() {
+        Some((last, counters)) if *last == row => *counters,
+        _ => {
+            let counters =
+                console_workload::bank_counters(workload, console_workload::W4_COUNTER_BLOCKS);
+            *cache = Some((row, counters));
+            counters
+        }
+    };
+    *counters
+        .get(counter as usize)
+        .expect("console counter out of range")
+}

@@ -2,26 +2,27 @@
 //!
 //! ```text
 //! wasm_gates --native
-//! wasm_gates <guest.wasm> --expect-backend simd4
+//! wasm_gates <guest.wasm> --expect-backend simd4 [--w4-counters <w4-counters.json>]
 //! wasm_gates --print-pins
 //! ```
 //!
 //! Each gate run prints one JSON evidence line, reports every mismatch, and fails if any digest
-//! or differential disagrees.
+//! or differential disagrees. `--w4-counters` also writes the guest's W=4 console bank counters
+//! (issue #2143) to that file, for `bench console --bank-report-w4`.
 //! `scripts/run-wasm-gates.sh` builds the `simd128` guest and runs both legs.
 
 use std::path::Path;
 use std::process::ExitCode;
 
 use wasm_gates::{
-    ExpectedBackend, Report, WASMTIME_LICENCE, WASMTIME_VERSION, native_report, print_lane_pins,
-    wasm_report,
+    ExpectedBackend, Report, WASMTIME_LICENCE, WASMTIME_VERSION, console_counters_json,
+    native_report, print_lane_pins, wasm_report,
 };
 
 /// Usage text, printed on an argument error.
 const USAGE: &str = "usage:\n  \
      wasm_gates --native\n  \
-     wasm_gates <guest.wasm> --expect-backend simd4\n  \
+     wasm_gates <guest.wasm> --expect-backend simd4 [--w4-counters <w4-counters.json>]\n  \
      wasm_gates --print-pins";
 
 fn main() -> ExitCode {
@@ -36,9 +37,15 @@ fn main() -> ExitCode {
             println!("wasmtime {WASMTIME_VERSION} ({WASMTIME_LICENCE})");
             ExitCode::SUCCESS
         }
-        Some(path) if arguments.len() == 3 && arguments[1] == "--expect-backend" => {
+        Some(path)
+            if (arguments.len() == 3
+                || (arguments.len() == 5 && arguments[3] == "--w4-counters"))
+                && arguments[1] == "--expect-backend" =>
+        {
             match ExpectedBackend::parse(&arguments[2]) {
-                Ok(expected) => run_wasm(Path::new(path), expected),
+                Ok(expected) => {
+                    run_wasm(Path::new(path), expected, arguments.get(4).map(Path::new))
+                }
                 Err(unknown) => {
                     eprintln!("unknown backend '{unknown}'\n{USAGE}");
                     ExitCode::from(2)
@@ -59,15 +66,25 @@ fn run_native() -> ExitCode {
 
 fn report_outcome(report: Report) -> ExitCode {
     println!("{}", report.json());
-    if report.mismatches.is_empty()
-        && report.minmax_lowering_mismatches == 0
-        && report.f64_lane_mismatches == 0
-        && report.meter_block_mismatches == 0
-    {
+    if report.passed() {
         ExitCode::SUCCESS
     } else {
         for mismatch in &report.mismatches {
             eprintln!("{} mismatch: {mismatch}", report.leg);
+        }
+        for mismatch in &report.console_mismatches {
+            eprintln!("{} W=4 console counter mismatch: {mismatch}", report.leg);
+        }
+        if !report.console_mismatches.is_empty() {
+            eprintln!(
+                "{} W=4 console counters read: {:?}",
+                report.leg,
+                report
+                    .console_counters
+                    .iter()
+                    .map(|row| (row.row, row.counters))
+                    .collect::<Vec<_>>()
+            );
         }
         report_minmax_lowering(report.leg, report.minmax_lowering_mismatches);
         report_f64_lane(report.leg, report.f64_lane_mismatches);
@@ -110,10 +127,22 @@ fn report_meter_block(leg: &str, mismatches: u32) {
     }
 }
 
-/// The wasm leg: the same corpus executed under wasmtime against the same pins.
-fn run_wasm(path: &Path, expected: ExpectedBackend) -> ExitCode {
+/// The wasm leg: the same corpus executed under wasmtime against the same pins, and the W=4
+/// console counters written to `counters` when one is given (issue #2143).
+fn run_wasm(path: &Path, expected: ExpectedBackend, counters: Option<&Path>) -> ExitCode {
     match wasm_report(path, expected) {
-        Ok(report) => report_outcome(report),
+        Ok(report) => {
+            if let Some(counters) = counters
+                && let Err(error) = std::fs::write(
+                    counters,
+                    console_counters_json("wasmtime simd128", &report.console_counters),
+                )
+            {
+                eprintln!("wasm gate failure: writing {}: {error}", counters.display());
+                return ExitCode::FAILURE;
+            }
+            report_outcome(report)
+        }
         Err(error) => {
             eprintln!("wasm gate failure: {error:?}");
             ExitCode::FAILURE

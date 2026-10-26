@@ -802,6 +802,103 @@ pub const BANK_REPORT_WORKLOADS: [Workload; 16] = {
     ]
 };
 
+/// The rows whose bank counters the four-lane wasm guest reads (issue #2143): the 16-track C1
+/// shape in [`C1State::Load`], [`C1State::Typical`], [`C1State::AllActive`] and
+/// [`C1State::Sparse`], in that order. One list for both legs: `wasm-gate-guest` renders it under
+/// wasmtime and `wasm-gates` names its rows from it.
+pub const W4_COUNTER_WORKLOADS: [Workload; 4] = {
+    const fn c1(state: C1State) -> Workload {
+        Workload::C1Console {
+            tracks: C1Tracks::Sixteen,
+            state,
+        }
+    }
+    [
+        c1(C1State::Load),
+        c1(C1State::Typical),
+        c1(C1State::AllActive),
+        c1(C1State::Sparse),
+    ]
+};
+
+/// The blocks [`bank_counters`] renders per row (issue #2143).
+pub const W4_COUNTER_BLOCKS: u64 = 256;
+
+/// The counters [`bank_counters`] reads, in its array's order (issue #2143).
+pub const BANK_COUNTER_NAMES: [&str; 7] = [
+    "banks",
+    "mergeable_partial_pairs",
+    "bank_slot_runs_total",
+    "bank_slot_runs_track_group",
+    "silent_skips",
+    "bypass_skips",
+    "pack_groups",
+];
+
+/// One row's bank counters after `blocks` rendered blocks at this build's width (issue #2143), in
+/// [`BANK_COUNTER_NAMES`] order:
+///
+/// 0. `banks` and 1. `mergeable_partial_pairs`: the compile's [`graph_compiler::BankUtilisation`];
+/// 2. `bank_slot_runs_total`: every effect bank unit's runs (`graph::test_only_bank_slot_runs`);
+/// 3. `bank_slot_runs_track_group`: the runs of the rows (pack groups, or units in none) that hold
+///    a track's lane, so `2 - 3` is the submixes' runs;
+/// 4. `silent_skips`: the whole-chain skips of the same rows, in unit-blocks;
+/// 5. `bypass_skips`: zero. No bank-slot skip exists before #2129, so a bypassed slot never skips;
+///    #2129's reader replaces this entry, and the `Load` row's runs, which then fall to zero, turn
+///    `wasm-gates`' plan gate red until it does;
+/// 6. `pack_groups`: the rows that are pack groups (a group spans two units or more).
+///
+/// Built at [`Backend::current()`], so it describes a four-lane plan only on a four-lane build (the
+/// `simd128` guest, or NEON): an eight-lane build cannot bank C1's console at four lanes
+/// (`console.slot.foreign_width`, #1694).
+///
+/// # Panics
+///
+/// As [`SessionRuntime::build`], and if a block fails to render.
+#[must_use]
+pub fn bank_counters(workload: Workload, blocks: u64) -> [u64; 7] {
+    let model = console_model(workload);
+    let tracks: BTreeSet<&str> = model.tracks.iter().map(|track| track.id.as_str()).collect();
+    let mut runtime = SessionRuntime::new(workload);
+    for block in 0..blocks {
+        runtime.before_block(block);
+        runtime
+            .render(block)
+            .unwrap_or_else(|_| panic!("{}: block {block} rendered", workload.kind()));
+    }
+    let utilisation = runtime.utilisation;
+    let track_units: BTreeSet<u32> = graph::bank_effect_lanes(&mut runtime.plan)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(strip, _)| tracks.contains(strip.as_ref()))
+        .filter_map(|(_, lane)| match lane.location {
+            graph::GraphEffectSite::Lane(at) => Some(at.unit),
+            graph::GraphEffectSite::Node(_) => None,
+        })
+        .collect();
+    let rows = graph::test_only_bank_slot_runs(&mut runtime.plan);
+    let holds_a_track = |row: &graph::TestOnlyBankSlotRuns| {
+        track_units
+            .range(row.first_unit..=row.last_unit)
+            .next()
+            .is_some()
+    };
+    [
+        u64::from(utilisation.banks),
+        u64::from(utilisation.mergeable_partial_pairs),
+        rows.iter().map(|row| row.runs).sum(),
+        rows.iter()
+            .filter(|row| holds_a_track(row))
+            .map(|row| row.runs)
+            .sum(),
+        rows.iter().map(|row| row.skips).sum(),
+        0,
+        rows.iter()
+            .filter(|row| row.last_unit > row.first_unit)
+            .count() as u64,
+    ]
+}
+
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
 /// [`DRIVER_FED_WORKLOADS`], then [`LIVE_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then
 /// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`].

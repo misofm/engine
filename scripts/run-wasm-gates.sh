@@ -81,7 +81,8 @@ run_guest() {
         RUSTFLAGS="-C target-feature=$feature" \
         cargo build --locked --release -Zbuild-std=std,panic_abort --target "$TARGET" -p wasm-gate-guest
     cargo run --locked --release -q -p wasm-gates -- \
-        "$target_directory/$TARGET/release/$GUEST" --expect-backend "$expected" | tee -a "$evidence"
+        "$target_directory/$TARGET/release/$GUEST" --expect-backend "$expected" \
+        --w4-counters "$output_dir/w4-counters.json" | tee -a "$evidence"
 }
 
 # Round 2 R2: the limiter's twelve-word detector history must live in wasm *locals*.
