@@ -10535,6 +10535,15 @@ impl LaneMap {
                 .is_some_and(|&position| position as usize != strip)
         };
         let after = u32::from(away(strip_a)) + u32::from(away(strip_b));
+        // Issue #2142: a strip with a nonzero idle count may now sit in either chain, so both
+        // first-row units take the full fact path on their next block, which recomputes the flag.
+        for local in [local_a, local_b] {
+            if let Some((unit, _)) = self.unit_lane(&pack, local, 0)
+                && let Some(flag) = self.unit_idle.get_mut(unit)
+            {
+                *flag = true;
+            }
+        }
         if let Some(group) = self.groups.get_mut(group) {
             group.displaced = (group.displaced + after).saturating_sub(before);
             group.dirty = true;

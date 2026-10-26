@@ -352,3 +352,50 @@ All ok:
 - Release tests: 84 passed.
 - `run-wasm-gates.sh`: no pin moved.
 - AudioWorklet build and checks, and `test-web-audioworklet.sh`.
+
+## Evidence and decision record (attempt 4, 2026-10-26)
+
+Attempt 3's verdict was FAIL on one MAJOR, which moves no bits: a lane swap left `unit_idle` stale.
+A strip could have a nonzero idle count, be moved into a first-row unit whose strips all played,
+and play from the block of that move. The unit's clear flag then took the write-nothing exit, so
+the strip's count never fell and nothing set `dirty`. The strip stayed packable while it played.
+
+- **Fix.** `LaneMap::record_swap` sets `unit_idle` on the first-row units of both chains. Their
+  next `record_facts` takes the full path and recomputes the flag. The cost is one store per chain
+  per swap.
+- **Test.** `a_strip_that_plays_again_is_not_packable` gains a second case. Only `ch01` is silent.
+  A probe run finds the block whose top moves it into the second chain, whose strips all play, and
+  the measured run plays `ch01` from that block on. The group must then go home. Red on attempt 3's
+  code: `ch01 plays from the block it moved, so the packer took it home, left: 2, right: 0`. Green
+  with the fix.
+- **Known limit (MINOR 1 of attempt 2, recorded).** `bank_slot_runs` merges units of one
+  `(group, chain row)` that are adjacent among the effect banks. Its consumers' `last - first + 1`
+  span then also counts a unit between them that has no effect slot, which `bank_slot_runs`
+  leaves out. That happens only in a chain-major layout, which no fixture builds. It affects test
+  and bench counters only.
+
+### CPU (descriptive; same protocol: one invocation each of main `16f548a92` and this branch, one warmup, two rounds, `taskset -c 31`, no retries)
+
+p50 us per block, round 1 / round 2. Raw output is in
+`artifacts/steps/bank-design-5a/bank-report.attempt4.*.jsonl`.
+
+| row | main | branch | change |
+|---|---|---|---|
+| c1 16 load | 23.68 / 23.52 | 24.08 / 23.55 | +1.7 % / +0.2 % |
+| c1 32 load | 34.96 / 35.16 | 34.92 / 35.60 | -0.1 % / +1.3 % |
+| c1 64 load | 59.90 / 60.40 | 59.06 / 61.14 | -1.4 % / +1.2 % |
+| c1 16 all active | 96.89 / 98.18 | 95.57 / 94.91 | -1.4 % / -3.3 % |
+| c1 32 all active | 147.78 / 147.04 | 145.26 / 146.86 | -1.7 % / -0.1 % |
+| c1 64 all active | 245.89 / 247.92 | 237.86 / 240.66 | -3.3 % / -2.9 % |
+
+Every round of every row is within 2 % in this run. Attempt 3's 32-track +2.03 % did not recur.
+The fix adds only one store per swap, so this attempt changed no per-block code.
+
+### Gates run (attempt 4)
+
+All ok:
+- Lint job: fmt, clippy, doc, every policy script and self-test, and `realtime_policy`.
+- Workspace debug step: 2648 passed.
+- Release tests: 84 passed.
+- `run-wasm-gates.sh`: no pin moved.
+- AudioWorklet build and checks, and `test-web-audioworklet.sh`.

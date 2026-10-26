@@ -1914,40 +1914,48 @@ fn a_split_strip_move_allocates_nothing() {
 
 /// Issue #2142: the packer's fact path writes nothing for a first-row unit whose lanes are all
 /// unquiet and whose idle counts are all zero (the load state's every block). A strip that plays
-/// again after it was packed must still reset its count: C1 at 16 tracks on `Sparse` packs by
-/// [`C1_PACKED`]; then every strip plays, every strip is running, and the packer takes the group
-/// home within a few blocks.
+/// again after it was packed must still reset its count, in two cases on C1 at 16 tracks:
 ///
-/// Test value: red when the write-nothing path hides a count that must fall to zero (taken on
-/// every unquiet block, not only when every count is already zero): the strips that play again
-/// stay packable, the displaced ones never trade home, and the group pays the displaced fold and
-/// a lost skip with no bit to show it.
+/// * `Sparse` packs by [`C1_PACKED`]; then every strip plays, every strip is running, and the
+///   packer takes the group home within a few blocks;
+/// * only `ch01` is silent, so the packer trades it with a playing strip of the second chain, a
+///   unit whose every strip played until then; `ch01` plays from the very block of that move. The
+///   unit that now renders it must count its idle down, and the group goes home.
+///
+/// Test value: red when the write-nothing path hides a count that must fall to zero -- taken on
+/// every unquiet block, or (the second case) taken by a unit a move just filled with a strip whose
+/// count is not zero -- so the strip that plays again stays packable, the displaced strips never
+/// trade home, and the group pays the displaced fold and a lost skip with no bit to show it.
 #[test]
 fn a_strip_that_plays_again_is_not_packable() {
     let model = c1_all_active();
+    let setup = Setup {
+        stereo: |_| true,
+        live: false,
+    };
+    let schedules = |blocks: usize, silent: &dyn Fn(usize, usize) -> bool| -> Vec<Arc<[Block]>> {
+        (0..TRACKS)
+            .map(|track| {
+                (0..blocks)
+                    .map(|block| {
+                        if silent(track, block) {
+                            Block::Silence
+                        } else {
+                            Block::Signal(0.05)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            })
+            .collect()
+    };
+    // Case 1: every strip plays again.
     let blocks = C1_PACKED + 24;
-    let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
-        .map(|track| {
-            (0..blocks)
-                .map(|block| {
-                    if track % 2 == 1 && block < C1_PACKED {
-                        Block::Silence
-                    } else {
-                        Block::Signal(0.05)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into()
-        })
-        .collect();
     let mut bound = bind_with(
         &model,
-        &schedules,
+        &schedules(blocks, &|track, block| track % 2 == 1 && block < C1_PACKED),
         false,
-        Setup {
-            stereo: |_| true,
-            live: false,
-        },
+        setup,
     );
     let mut pcm = vec![0.0_f32; bound.frames * 2];
     for block in 0..blocks as u64 {
@@ -1963,5 +1971,38 @@ fn a_strip_that_plays_again_is_not_packable() {
         bound.displaced(),
         0,
         "every strip plays again, so the packer took the group home"
+    );
+    // Case 2: find the block whose top moves `ch01`, then play it from that block on.
+    let blocks = C1_PACKED + 24;
+    let silent_alone = |track: usize, _: usize| track == 1;
+    let mut probe = bind_with(&model, &schedules(blocks, &silent_alone), false, setup);
+    let mut moved = None;
+    for block in 0..blocks as u64 {
+        probe.render(block, true, &mut pcm);
+        if probe.lane_moves() > 0 {
+            moved = Some(block as usize);
+            break;
+        }
+    }
+    let moved = moved.expect("the packer moves ch01");
+    let mut bound = bind_with(
+        &model,
+        &schedules(blocks, &|track, block| track == 1 && block < moved),
+        false,
+        setup,
+    );
+    for block in 0..blocks as u64 {
+        bound.render(block, true, &mut pcm);
+        if block == moved as u64 {
+            assert!(
+                bound.displaced() > 0,
+                "ch01 moved at the top of block {moved}"
+            );
+        }
+    }
+    assert_eq!(
+        bound.displaced(),
+        0,
+        "ch01 plays from the block it moved, so the packer took it home"
     );
 }
