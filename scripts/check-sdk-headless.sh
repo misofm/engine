@@ -87,8 +87,8 @@ fi
 cd "$repo_root/sdk"
 # The glob names the eval suites explicitly. Passing the directory would also run support.mjs,
 # which carries fixtures rather than tests, and Node reports a bare directory argument as a
-# failing test of its own.
-MISO_ENGINE_SDK_ARTIFACTS_HEX="$artifact_dir_hex" node --test 'test/*-evals.mjs'
-# Issue #2111: the stem hash's official-vector and hostile-boundary loops through the built
-# WebAssembly SIMD BLAKE3 as well as the JavaScript class (the lint job runs the JavaScript half).
-MISO_ENGINE_SDK_ARTIFACTS_HEX="$artifact_dir_hex" node "$repo_root/hosts/host-web/tests/stem-store-hash-v1.mjs"
+# failing test of its own. Issue #2111: the engine's stem-hash test runs in the same invocation,
+# so its official-vector and hostile-boundary loops go through the built WebAssembly SIMD BLAKE3
+# as well as the JavaScript class (the lint job runs it without artifacts: the JavaScript half).
+MISO_ENGINE_SDK_ARTIFACTS_HEX="$artifact_dir_hex" node --test 'test/*-evals.mjs' \
+  ../hosts/host-web/tests/stem-store-hash-v1.mjs
