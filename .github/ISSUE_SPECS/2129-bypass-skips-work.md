@@ -409,3 +409,31 @@ the three lane-guard builds); the realtime-policy tool; CI's workspace debug tes
 features (host-web's render-lock probe and host-core's zero-allocation render tests included);
 the DSP crates, graph-compiler, bench and console-workload in release;
 `scripts/test-console-benchmark.sh`.
+
+### S1b attempt 3 (2026-10-26): the review's two test gaps, the counter walk, the W=4 re-pin
+
+- **MAJOR 1, C ABI lift rows** (`capi` `a_live_bypass_crossfades_over_the_session_mute_ramp...`):
+  each lift row now requires words past `W` plus the ramp that are not the dry control's. Red on
+  an acked lift that stays dry (the lane's `stage` ignoring a switch to wet), run per effect: the
+  compressor, the soft clip, the delay and the multiband each fail "the lift was acked but its
+  output stayed dry"; green on revert.
+- **MAJOR 2, D6 across lane moves** (`lane_rest::the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly`,
+  extended): a bypassed lane whose line holds signal (right plane only) is moved into lane 1 by a
+  swap in the stage, a carry from a donor stage and a cross-stage swap, and is not at rest until its
+  line holds only `+0.0`. Removing each of the three zero-run copies (carry, same-stage swap,
+  cross-stage swap) is red at the row's "claimed at rest, but a silent block wrote" check: the tail
+  drop itself.
+- **MINOR**: `note_line_input` walks frame-major over the contiguous interleaved block from its end
+  and stops when no lane counts or after `latency` frames (the run saturates there). The lane
+  vocabulary has no bitwise lane test (its `eq` takes `-0.0` as `+0.0`), so the fold is over `u32`
+  words. A counter that reads one plane only is red (the move rows feed the right plane alone).
+- **#2143's successor action** (after #2149 merged): `Runtime::bank_slot_runs` carries each row's
+  bypass skips, `TestOnlyBankSlotRuns::bypass_skips` exposes them, and
+  `console_workload::bank_counters` reports them in place of the constant 0. New W=4 pins, from the
+  wasm leg (the native `Simd4` leg runs on arm64 in CI and has not read them yet):
+  `c1_console_16_load` `[15, 0, 0, 0, 260, 7164, 0]`, `c1_console_16_typical`
+  `[15, 0, 3584, 2304, 260, 3580, 0]`; `all_active` and `sparse` unchanged. The plan gate holds
+  every row's runs, bypass skips and skipped chains to the plan's slot-blocks, the two unbypassed
+  rows to the full track runs, and `Load` to no run.
+- Gates: `scripts/run-wasm-gates.sh` (both legs, then the V8 spill gate) ok; every lint-job step;
+  `cargo test` for rack, graph-compiler, bench, console-workload, wasm-gates and capi.
