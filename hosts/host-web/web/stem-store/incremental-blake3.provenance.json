@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "artifact": "incremental-blake3.js",
-  "sha256": "fcdf222f41bda542f8742853da1a095c9ede0f8a1e9312a2643ff8e8c8c91a2c",
+  "sha256": "68188476448f3f948147730d61c0dbb5ebb1be78b55a479d64a0aa56fde27165",
   "dependencies": [
     {
       "artifact": "../hex-lower.js",
@@ -9,6 +9,6 @@
     }
   ],
   "algorithmAuthority": "BLAKE3 specification, 32-byte default output",
-  "implementation": "repository-owned independent JavaScript implementation",
-  "reason": "Canonical-PCM stems exceed one-shot digest RAM budgets, so the browser ships an incremental BLAKE3-256 implementation. No zero-shipped-code claim is made."
+  "implementation": "repository-owned independent JavaScript implementation, and the blake3 crate's WebAssembly SIMD build (hosts/blake3-web, miso-engine-v1-blake3.simd128.wasm) once prepareBlake3 loads it",
+  "reason": "Canonical-PCM stems exceed one-shot digest RAM budgets, so the browser ships an incremental BLAKE3-256 implementation. Issue #2111 adds the WebAssembly SIMD module for speed and keeps this JavaScript as its fallback. No zero-shipped-code claim is made."
 }

@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -88,6 +89,7 @@ assert.deepEqual(
     "miso-engine-v1-audio-worklet-host.js",
     "miso-engine-v1-audio-worklet.js",
     "miso-engine-v1-audio-worklet.simd128.wasm",
+    "miso-engine-v1-blake3.simd128.wasm",
     "miso-engine-v1-parameter-metadata.json",
   ],
   "the package manifest declares exactly the Engine artifact closure",
@@ -110,9 +112,24 @@ for (const [packed, engineCopy] of [
 ]) {
   assert.ok((await readFile(resolve(packageRoot, packed))).equals(await readFile(engineCopy)), `packed ${packed} is the engine's copy`);
 }
-for (const name of ["readWavHeader", "CanonicalPcmPump", "deinterleaveCanonicalPcm", "blake3Stream", "IncrementalBlake3", "WavFormatError", "CanonicalPcmPumpError"]) {
+for (const name of ["readWavHeader", "CanonicalPcmPump", "deinterleaveCanonicalPcm", "blake3Stream", "IncrementalBlake3", "prepareBlake3", "WavFormatError", "CanonicalPcmPumpError"]) {
   assert.equal(typeof imported["./browser"][name], "function", `the browser entry exports ${name}`);
 }
+// Issue #2111: the hash's WebAssembly SIMD module is packed beside it, byte for byte the gated
+// closure's, and the packed entry's default `prepareBlake3()` URL loads it, so the corpus loop
+// below hashes in the module. Node's fetch has no file: scheme; serve files as a web server would.
+const blake3Module = "miso-engine-v1-blake3.simd128.wasm";
+assert.equal(
+  createHash("sha256").update(await readFile(resolve(packageRoot, "dist/browser/stems", blake3Module))).digest("hex"),
+  assetManifest.artifacts[blake3Module].sha256,
+  "the packed BLAKE3 module is the gated closure's",
+);
+const networkFetch = globalThis.fetch;
+globalThis.fetch = async (url, init) => new URL(String(url)).protocol === "file:"
+  ? new Response(await readFile(new URL(String(url))), { headers: { "content-type": "application/wasm" } })
+  : networkFetch(url, init);
+assert.equal(await imported["./browser"].prepareBlake3(), "simd128", "the packed BLAKE3 module loads from its default URL");
+globalThis.fetch = networkFetch;
 const stemCorpus = resolve(repoRoot, "fixtures/stem-identity/v1");
 const [, vectorHeader, ...vectorRows] = (await readFile(resolve(stemCorpus, "VECTORS.tsv"), "utf8")).trim().split("\n").map((line) => line.split("\t"));
 for (const cells of vectorRows) {

@@ -1,9 +1,13 @@
 /*
  * Incremental BLAKE3-256 for canonical-PCM ingest and verify-on-open.
  *
- * The browser has no streaming Web Crypto BLAKE3 interface. This is a
- * repository-owned, bounded-memory implementation of the BLAKE3 hash mode;
- * the corpus tests cover official vectors and hostile chunk boundaries.
+ * The browser has no streaming Web Crypto BLAKE3 interface. Issue #2111: a hash
+ * runs in the engine's WebAssembly SIMD module (`hosts/blake3-web`, shipped as
+ * `miso-engine-v1-blake3.simd128.wasm` beside this file) once `prepareBlake3`
+ * has loaded it, and otherwise in the repository-owned, bounded-memory
+ * JavaScript implementation of the BLAKE3 hash mode below. Both spell the same
+ * digest; the corpus tests cover official vectors and hostile chunk boundaries
+ * through each.
  */
 
 import { hexLower } from "../hex-lower.js"
@@ -168,8 +172,8 @@ class ChunkState {
   }
 }
 
-/** A bounded-memory incremental BLAKE3-256 implementation. */
-export class IncrementalBlake3 {
+/** The JavaScript BLAKE3-256: the engine when the WebAssembly module is not loaded. */
+class JavaScriptBlake3 {
   #chunk = new ChunkState(0n)
   #chainingValues = []
   #finished = false
@@ -204,10 +208,6 @@ export class IncrementalBlake3 {
     return output.rootDigest()
   }
 
-  digestHex() {
-    return hexLower(this.digest())
-  }
-
   /** @param {Uint32Array} newChainingValue @param {bigint} totalChunks */
   #addChunkChainingValue(newChainingValue, totalChunks) {
     let value = newChainingValue
@@ -230,6 +230,137 @@ function parentOutput(left, right) {
   return new Output(new Uint32Array(IV), words, 0n, BLOCK_BYTES, PARENT)
 }
 
+const DIGEST_BYTES = 32
+const MODULE_NAME = "miso-engine-v1-blake3.simd128.wasm"
+const EXPORTS = ["memory", "new", "input", "input_capacity", "update", "finalize", "free"]
+
+/**
+ * The loaded module, or `undefined` while no preparation has succeeded in this realm.
+ * @type {{ memory: WebAssembly.Memory, create: () => number, input: (handle: number) => number, update: (handle: number, length: number) => number, finalize: (handle: number) => number, free: (handle: number) => void, capacity: number, registry: FinalizationRegistry<number> | undefined } | undefined}
+ */
+let loaded
+/** One preparation per module URL. @type {Map<string, Promise<"simd128" | "javascript">>} */
+const preparations = new Map()
+
+/**
+ * Load the WebAssembly SIMD BLAKE3 so that every later `IncrementalBlake3` and
+ * `blake3Stream` hashes in it. Idempotent: one load per URL per realm. Resolves
+ * `"simd128"` when the module is loaded, and `"javascript"` when the fetch,
+ * the compile (a browser without simd128) or the instantiation fails; it never
+ * rejects, and hashing then stays in JavaScript.
+ *
+ * @param {{ url?: string | URL }} [options]
+ * @returns {Promise<"simd128" | "javascript">}
+ */
+export function prepareBlake3(options = {}) {
+  const url = String(options.url ?? new URL(`./${MODULE_NAME}`, import.meta.url))
+  let preparation = preparations.get(url)
+  if (preparation === undefined) {
+    preparation = load(url).then(
+      (module) => {
+        loaded = module
+        return "simd128"
+      },
+      () => "javascript",
+    )
+    preparations.set(url, preparation)
+  }
+  return preparation
+}
+
+/** @param {string} url */
+async function load(url) {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`BLAKE3 module fetch failed: ${response.status}`)
+  const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), {})
+  const names = Object.fromEntries(
+    EXPORTS.map((name) => [name, instance.exports[name === "memory" ? name : `miso_engine_blake3_v1_${name}`]]),
+  )
+  if (!(names.memory instanceof WebAssembly.Memory)) throw new Error("BLAKE3 module has no memory")
+  for (const name of EXPORTS.slice(1)) {
+    if (typeof names[name] !== "function") throw new Error(`BLAKE3 module has no ${name} export`)
+  }
+  const free = names.free
+  return {
+    memory: names.memory,
+    create: names.new,
+    input: names.input,
+    update: names.update,
+    finalize: names.finalize,
+    free,
+    capacity: names.input_capacity(),
+    // A hash dropped before its digest releases its Wasm memory when collected.
+    registry:
+      typeof FinalizationRegistry === "function"
+        ? new FinalizationRegistry((handle) => free(handle))
+        : undefined,
+  }
+}
+
+/** The WebAssembly SIMD BLAKE3-256 (`hosts/blake3-web`). */
+class WasmBlake3 {
+  #module
+  #handle
+  #input
+  #finished = false
+
+  /** @param {NonNullable<typeof loaded>} module */
+  constructor(module) {
+    this.#module = module
+    this.#handle = module.create()
+    this.#input = module.input(this.#handle)
+    module.registry?.register(this, this.#handle, this)
+  }
+
+  /** @param {ArrayBuffer | ArrayBufferView} input */
+  update(input) {
+    if (this.#finished) throw new Error("BLAKE3 digest is already finalized")
+    const bytes = asBytes(input)
+    const module = this.#module
+    let offset = 0
+    while (offset < bytes.byteLength) {
+      const take = Math.min(module.capacity, bytes.byteLength - offset)
+      // A view per copy: an allocation by another hash may have grown, and so replaced, the buffer.
+      new Uint8Array(module.memory.buffer, this.#input, take).set(bytes.subarray(offset, offset + take))
+      module.update(this.#handle, take)
+      offset += take
+    }
+  }
+
+  digest() {
+    if (this.#finished) throw new Error("BLAKE3 digest is already finalized")
+    this.#finished = true
+    const module = this.#module
+    module.finalize(this.#handle)
+    const digest = new Uint8Array(module.memory.buffer, this.#input, DIGEST_BYTES).slice()
+    module.registry?.unregister(this)
+    module.free(this.#handle)
+    return digest
+  }
+}
+
+/**
+ * A bounded-memory incremental BLAKE3-256. It hashes in the WebAssembly SIMD
+ * module when `prepareBlake3` has loaded it, and in JavaScript otherwise.
+ */
+export class IncrementalBlake3 {
+  #engine = loaded === undefined ? new JavaScriptBlake3() : new WasmBlake3(loaded)
+
+  /** @param {ArrayBuffer | ArrayBufferView} input */
+  update(input) {
+    this.#engine.update(input)
+    return this
+  }
+
+  digest() {
+    return this.#engine.digest()
+  }
+
+  digestHex() {
+    return hexLower(this.digest())
+  }
+}
+
 /** @param {ArrayBuffer | ArrayBufferView} input */
 function asBytes(input) {
   if (input instanceof ArrayBuffer) return new Uint8Array(input)
@@ -246,6 +377,7 @@ function asBytes(input) {
  * @param {{signal?: AbortSignal, onChunk?: (bytes: number) => void}} [options]
  */
 export async function blake3Stream(stream, options = {}) {
+  await prepareBlake3()
   const hash = new IncrementalBlake3()
   const reader = stream.getReader()
   let bytes = 0

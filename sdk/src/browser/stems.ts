@@ -18,7 +18,7 @@ export type {
   CanonicalPcmRing,
   CanonicalStemIdentity,
 } from "./stems/pcm-pump.js";
-export { IncrementalBlake3, blake3Stream } from "./stems/incremental-blake3.js";
+export { IncrementalBlake3, blake3Stream, prepareBlake3 } from "./stems/incremental-blake3.js";
 
 /** The canonical PCM a WAV's `data` chunk carries, and where it starts. */
 export interface WavInfo {
