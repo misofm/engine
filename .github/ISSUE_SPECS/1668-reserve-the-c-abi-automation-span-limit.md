@@ -235,3 +235,44 @@ host-web parity tests pass (`cargo test --locked -p host-web --features
 test-support,render-lock-probe --test control_parity --test protocol_cross_host`);
 only failed broad gates will be rerun, while
 independent production/browser/audit/cross-target results remain applicable.
+
+## Final aggregate qualification (2026-10-26)
+
+Root's independent final bounded reviews: **#1306 attempt 2 PASS** at
+`1f6e12dcf`; **#1668 attempt 2 PASS** at `8a10367ca`. These supersede the
+provisional attempt-1 component passes and their recorded integration failures.
+The final full `qualification.yml` debug-a workspace/all-target corpus, using its
+exact exclusions/features with `--no-fail-fast`, passes on `1f6e12dcf` (exit 0).
+Its separate workspace doctest step with the same exclusions/features also passes.
+
+Other completed gates: workspace/all-target/all-feature clippy with warnings
+denied; formatting and diff checks; host-core and workspace policies and their
+mutation suites; current realtime-policy binary plus 242 tests; C11/C++17 ABI
+checker and its mutation suite, including shared/static consumers; and the full
+cross-target matrix (iOS/Android checks and lint, iOS memset ratchet, Wasm SIMD,
+32-bit/scalar-Wasm refusal rows). The capi/control-plane focused suites pass.
+Console-workload's affected production-tool preparation passes its 56 release
+functional tests; no timed benchmark was run. The later changes are test fixtures
+and that tool helper, outside the engine/browser closure, so the already-passed
+product qualification remains applicable as independently reviewed by root.
+
+Production baseline `8f32d1673` and integrated production `1508be064` both give
+`audit capi` PCM digest `bffc21e857b5e134` over 100,000 calls, with zero render errors
+and zero allocations, frees, locks, syscalls or other realtime violations.
+The source-built browser module SHA-256 is
+`408bd79a0570609afa12f7578b2149449477c432a9d6908b98ea9332cc9e63af`.
+Static/object/closure gates, native/SIMD digest and resource parity, hermetic
+host/worklet tests, and current supported Chromium 151.0.7922.34/WebKit 26.5
+qualification with matrix checks and red mutations all pass. Expected PCM
+digests are unchanged. The checked release matrix retains its own lineage;
+`final-browser-matrix.log` is the current-run evidence, linked to the artifact
+and source commit by `final-browser-run-receipt.json`.
+
+All logs (including initial failures), browser artifacts and the run receipt
+are preserved outside the worktree at
+`/home/bl/misofm/engine-work-evidence/1668/astra/`; independent reviewer mutation
+evidence is under `../root-review/`. Final full-corpus/clippy logs are
+`final-debug-a-complete.log`, `final-debug-a-doc.log` and
+`final-clippy-complete.log`. This evidence checkpoint changes only the two issue
+specs; root owns PR qualification, merged-body synchronization and explicit
+GitHub closure.
