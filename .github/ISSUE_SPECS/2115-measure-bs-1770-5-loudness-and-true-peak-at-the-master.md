@@ -37,4 +37,26 @@ EBU Tech 3341 and 3342 conformance signals (the minimum requirements), with each
   BS.2217 file set. These are successors, filed by root.
 
 ## Evidence
-(S1 attempt 1: filled in at hand-back.)
+S1 attempt 1 (implementer; root's verifier has not reviewed it yet).
+- **Debug cost.** The production observer runs about 3 us per frame unoptimised, because the Annex-2 FIR uses the generic
+  `wide` lane ops, and the suite feeds about 160M frames (13 min 22 s in debug). Root decision: `[profile.dev.package.loudness]
+  opt-level = 3` in the root `Cargo.toml` (debug assertions and overflow checks stay on), and the recipe tests check
+  the oracle against the expected values at 48 kHz only. The histogram test cross-checks the oracle at 44.1 and 96 kHz
+  against production. Debug `cargo test -p loudness` now takes 25 s.
+- **Tech 3341, production (the oracle agrees to 4 decimals), LUFS, at 44.1/48/88.2/96 kHz, all within +-0.1 LU:**
+  case 1 -22.994/-22.993/-22.989/-22.989; 2 -32.994/-32.993/-32.989/-32.989; 3 and 4 -23.015/-23.014/-23.010/-23.010;
+  5 -22.980/-22.979/-22.975/-22.974; 9 (S after 3 s) -22.987/-22.986/-22.982/-22.982; 12 (M after 1 s)
+  -22.962/-22.960/-22.956/-22.956; 10 (Max S, 20 files) -22.994/-22.993/-22.989/-22.989; 13 (Max M, 20 files)
+  -22.995/-22.994/-22.990/-22.989; 11 and 14 (20 successive maxima, -38 to -19): worst deviation +0.011 LU.
+- **Tech 3342 cases 1-4:** LRA 10.000/5.000/20.000/15.000 LU at every rate (tolerance +-1 LU).
+- **True peak, Tech 3341 cases 15-23, in dBTP, the same at every rate (tolerance +0.2/-0.4):** -6.021, -5.976, -6.316,
+  -6.028, +3.029, -0.130, -0.079, -0.204, -0.079. The largest difference from the f64 Annex-2 reference is 9.6e-8 linear
+  (the bound is 1e-6). Case 17 (fs/6 at 60 degrees) is 0.084 dB inside its lower limit; that is how a 4x Annex-2
+  detector reads it, and the oracle reads the same value.
+- **Histogram against exact gating (150 s of stepped noise):** dI +0.0056 / -0.0113 LU and dLRA -0.0070 / +0.0131 LU at
+  44.1 / 96 kHz (bounds 0.05 / 0.1).
+- **Defaults.** M and S read -120 LUFS (the floor) for silence. The maxima count only windows whose hops all come after
+  the reset. A reset replays the held hops at or after its sample. `gated_block_count` counts the blocks that pass
+  both gates.
+- **Mutants.** Each of the 15 mutants turned its own gate red (implementer's table, in the hand-back). The true-peak
+  limiter's full debug suite passes after the `annex2` visibility change.
