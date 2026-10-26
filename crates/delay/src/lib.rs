@@ -338,7 +338,9 @@ struct Majorant {
     /// `nu <= -ln r`, `r` the per-sample contraction: a certified upper bound of the majorant's
     /// Perron root.
     nu: f64,
-    /// `sigma r^D = b' / (r - a')`, the damping state's weight relative to the oldest tap.
+    /// `b' / (r - a')`, the damping state's weight relative to the oldest tap: at least the tight
+    /// `sigma r^D = b' r / (r - a')` (`sigma = b' r^(1-D) / (r - a')`, the state after a sample's
+    /// update), so a conservative upper bound.
     state_weight: f64,
     /// `1 / (1 - A H(1))`: the loop's gain to a constant injection into every ring word.
     loop_gain: f64,

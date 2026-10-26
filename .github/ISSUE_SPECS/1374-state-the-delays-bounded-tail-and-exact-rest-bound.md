@@ -79,8 +79,13 @@ damping state reach exact rest. Today it declares `Infinite`.
 
 ## Hazards
 
-- The tail is minutes long. Hosts cap tails at `u64::MAX` (`crates/host-core/src/prepare.rs:1559`);
-  `graph_fixture` caps at 10,000,000 and a fixture graph with a delay would hit `graph.tail.limit`.
+- The tail is minutes long. Hosts cap tails at `u64::MAX` (`crates/host-core/src/prepare.rs:1559`).
+  The real exposure (verifier, attempt 1): console-workload's `graph_caps`
+  (`tools/console-workload/src/lib.rs` ~2483) and the audit tools cap finite tails at 10,000,000
+  samples, and the delay's tail is 35M samples and more. The sends fixture's output tail stays
+  `Infinite` today only because its parametric EQ is `Infinite`; when #1372 makes the EQ finite,
+  that fixture is refused with `graph.tail.limit`. `graph_fixture` prepares no effects, so it is
+  not exposed. Root files the tool-cap change as its own issue, ordered before #1372.
 
 ## Objective gates
 
@@ -148,9 +153,13 @@ damping state reach exact rest. Today it declares `Infinite`.
 - **A6 Re-pin.** G5 `delay/ping_pong_automated` (48 kHz) moved: its 0.15 damping event is inside
   the capped range. Re-pinned from the scalar-oracle digest gate G5 prints
   (`crates/delay/src/corpus.rs`). No other delay fixture moved (record below).
-- **A7 Left for root** (outside the authorized paths): `crates/dsp-reference/src/delay.rs` keeps
-  the old 19,845 Hz cap (no test drives it below `c = 0.375`); `crates/delay/tests/MUTATIONS.md`
-  M4 describes the clamp mutant against the old expectation.
+- **A7 Root rulings (2026-10-26).** The release `tail_contract` step of `qualification.yml` runs
+  `-p delay`; the f64 oracle (`crates/dsp-reference/src/delay.rs`) caps the cutoff at
+  `min(19,845 Hz, fs / 4)` from the equation (E3 re-run at damping 0.1, inside the cap, matched at
+  all four rates as scratch evidence); `crates/delay/tests/MUTATIONS.md` M4 names the new cap.
+- **A8 Tool tail caps (verifier MINOR-2).** See Hazards: console-workload and the audit tools cap
+  finite tails at 10M samples; the sends fixture is refused once #1372 makes the EQ finite. A
+  separate root issue, ordered before #1372, owns the cap change.
 
 **No-bit-move record (PR evidence, base `b0dc1216f` vs branch, own target dirs, removed after).**
 A scratch harness rendered the two G5 corpus cases and 23 damping values (0 to 0.995, both sides

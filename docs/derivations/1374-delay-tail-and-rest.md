@@ -91,11 +91,12 @@ descriptor).
 
 F2', F3 and F4-F6 make a positive linear majorant of the loop (the two lanes share it: the matrix
 takes the larger lane). Take a word written `n` samples after the start at most `c r^n` and the
-damping state at most `c sigma r^n`. Both stay so for the next sample when
+damping state after sample `n`'s update at most `c sigma r^n`. Both stay so for the next sample
+when
 
 ```text
 F(r) = A r^-D (beta + alpha b / (r - a)) <= 1,   A = f_max (1 + u)^5,
-sigma = b r^-D / (r - a)
+sigma = b r^(1-D) / (r - a)
 ```
 
 because a tap at most `D` samples old is at most `c r^(n - D)` (a younger tap is smaller). `F`
@@ -105,7 +106,7 @@ slowest pole up to rounding (gate 3 measures 0.18 % of slack at `D = 48`): the d
 delay, about `(1 - g) / (2g)` samples, lengthens each pass. The worst lane is `g = g_lo`: with
 `e = 1 - r`, `d/dg (beta + alpha b / (r - a))` has the sign of
 `e^2 - 2e + 15ue - 28u + 14u^2 < 0`, so `F` falls as `g` rises, and `sigma`, `b / (r - a)` and the
-steady terms below fall too. The identity arm is dominated (`H >= 1`, `sigma r^(D+1) >= 1`). The
+steady terms below fall too. The identity arm is dominated (`H >= 1`, `sigma r^D >= 1`). The
 start is `c = S_b(P)`: every readable word and both states are at most `S_b`, and `sigma >= 1`.
 
 Underflow adds a constant majorant: `W_U = (8 + 4 A alpha / (1 - a)) U / (1 - A H(1))` per ring
@@ -150,7 +151,8 @@ The rest state `Z` is the reset state: every ring word and both damping states `
 1. From `N + 256 + j_w`, `j_w` the smallest `j` with `c r^j < FLUSH_EPS - W_U`, every ring write
    is below `FLUSH_EPS` before its flush, so it is `+0.0`, and stays so.
 2. `D` samples later every tap reads `+0.0` and the output is `+-0.0`. The damping state is then
-   at most `FLUSH_EPS b / (r - a) + S_U` (`sigma r^D = b / (r - a)`).
+   at most `FLUSH_EPS b / (r - a) + S_U`. The stored weight `b / (r - a)` is at least the tight
+   `sigma r^D = b r / (r - a)`, so it is a conservative upper bound.
 3. With a `+0.0` tap the state step is `s' = flush(fl(fl(s - p) - p))`, `p = fl(g s)`. A state
    that is not flushed is at least `FLUSH_EPS`, so `p >= 1e-23` is normal. Since
    `p >= g s (1 - u)` and each difference rounds up by at most `u` of itself,
