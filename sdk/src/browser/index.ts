@@ -112,6 +112,8 @@ export * from "./policy.ts";
 // it is barrel surface rather than a deep import.
 export * from "./host-mirror.ts";
 export * from "./pcm-ring.ts";
+// Issue #2102: the WAV header reader, the canonical PCM pump and the engine's BLAKE3 identity.
+export * from "./stems.ts";
 // By name: `linkFeedEngine` and `FeedRetirement` are `createEngine`'s seam (#1297b), not public.
 export { PcmFeedError, PcmRunwayError, attachEngineFeed, prepareEngineFeed, waitForPcmRunway } from "./pcm-feed.ts";
 export type {

@@ -99,6 +99,27 @@ assert.equal(files.some((name) => /flac|decoder|cli\/stems/i.test(name)), false,
 assert.ok(files.includes("dist/LICENSE"));
 assert.ok(files.includes("dist/NOTICE"));
 assert.ok(files.includes("dist/assets/miso-engine-v1-pcm-feed-worklet.js"));
+// Issue #2102: the browser entry's canonical PCM layer is the engine's stem-store code, staged
+// verbatim, and its hash spells the engine's `blake3:` identity of every corpus vector.
+const stemStore = resolve(repoRoot, "hosts/host-web/web/stem-store");
+for (const [packed, engineCopy] of [
+  ["dist/browser/stems/pcm-pump.js", resolve(stemStore, "pcm-pump.js")],
+  ["dist/browser/stems/incremental-blake3.js", resolve(stemStore, "incremental-blake3.js")],
+  ["dist/browser/stems/incremental-blake3.provenance.json", resolve(stemStore, "incremental-blake3.provenance.json")],
+  ["dist/browser/hex-lower.js", resolve(stemStore, "../hex-lower.js")],
+]) {
+  assert.ok((await readFile(resolve(packageRoot, packed))).equals(await readFile(engineCopy)), `packed ${packed} is the engine's copy`);
+}
+for (const name of ["readWavHeader", "CanonicalPcmPump", "deinterleaveCanonicalPcm", "blake3Stream", "IncrementalBlake3", "WavFormatError", "CanonicalPcmPumpError"]) {
+  assert.equal(typeof imported["./browser"][name], "function", `the browser entry exports ${name}`);
+}
+const stemCorpus = resolve(repoRoot, "fixtures/stem-identity/v1");
+const [, vectorHeader, ...vectorRows] = (await readFile(resolve(stemCorpus, "VECTORS.tsv"), "utf8")).trim().split("\n").map((line) => line.split("\t"));
+for (const cells of vectorRows) {
+  const row = Object.fromEntries(vectorHeader.map((key, index) => [key, cells[index]]));
+  const pcm = new Blob([await readFile(resolve(stemCorpus, row.pcm_file))]);
+  assert.equal(`blake3:${(await imported["./browser"].blake3Stream(pcm.stream())).hex}`, row.identity, `packed blake3Stream: ${row.name}`);
+}
 assert.equal(files.some((name) => name.includes("node_modules")), false);
 assert.equal(files.some((name) => name.startsWith("test") || name.includes("/test/")), false);
 assert.equal(files.includes("dist/effect.js"), false);
@@ -124,7 +145,7 @@ const consumer = resolve(consumerRoot, "index.ts");
 await writeFile(consumer, `
 import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
-import { createEngine, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver } from "@misofm/engine/browser";
+import { createEngine, prepareEngineFeed, attachEngineFeed, Msb1RingWriter, Msb1RingObserver, CanonicalPcmPump, readWavHeader } from "@misofm/engine/browser";
 import type {
   BrowserEngine,
   MasterMeter,
@@ -177,6 +198,17 @@ void [meterUpdate.generation, meterUpdate.validity, meterUpdate.lossCount, telem
   trackMeter.peakLeft, masterMeter.gainReductionDb];
 packedObserver.close();
 void prepareEngineFeed(domContext, BUNDLED_ENGINE_ASSETS.pcmFeedWorklet);
+async function localStem(file: Blob) {
+  const info = await readWavHeader(file);
+  const pump = new CanonicalPcmPump({
+    lease: { read: async () => file.slice(info.dataOffset, info.dataOffset + info.canonicalBytes) },
+    sources: [{ sourceId: "packed-source", identity: \`blake3:\${"0".repeat(64)}\`, channels: info.channels,
+      bitDepth: info.bitDepth, frames: info.frames, ring: packedWriter }],
+  });
+  const rate: 44_100 | 48_000 | 88_200 | 96_000 = info.sampleRateHz;
+  void [rate, browser.seek(0n, { producers: [pump] })];
+}
+void localStem;
 async function defaultBrowserContext() {
   const engine = await createEngine({ document: "opaque" });
   await engine.context.resume();

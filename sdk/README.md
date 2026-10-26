@@ -420,6 +420,42 @@ export async function lowerTrack(
 }
 ```
 
+## Load local WAV stems
+
+The browser entry reads a stem from a local file without a decoder of your own. `readWavHeader`
+reads a 16- or 24-bit integer PCM WAV's header (RIFF, or RF64/BW64 with the data size from
+`ds64`; plain or `WAVE_FORMAT_EXTENSIBLE` fmt) with small reads, and returns where its samples are. For such a WAV the `data` chunk is exactly the stem's
+canonical PCM (`docs/STEM_IDENTITY_V1.md`), so one slice of the file is both the input of
+`blake3Stream`, which gives the session's `content` identity, and what `CanonicalPcmPump` writes
+into the source's `Msb1RingWriter` ring as planar `f32`.
+
+```ts
+import { CanonicalPcmPump, Msb1RingWriter, blake3Stream, readWavHeader } from "@misofm/engine/browser";
+
+export async function localStem(file: File) {
+  const wav = await readWavHeader(file); // sampleRateHz, channels, bitDepth, frames, dataOffset, canonicalBytes
+  const pcm = file.slice(wav.dataOffset, wav.dataOffset + wav.canonicalBytes);
+  const identity = `blake3:${(await blake3Stream(pcm.stream())).hex}` as const;
+  // Declare the source with { channels, bitDepth, frames, content: identity } and the session at
+  // wav.sampleRateHz. When the engine is up, pump into the ring of that source's feed:
+  const pump = (ring: SharedArrayBuffer, sourceId: string) => new CanonicalPcmPump({
+    lease: { read: async () => pcm },
+    sources: [{ sourceId, identity, channels: wav.channels, bitDepth: wav.bitDepth, frames: wav.frames, ring: new Msb1RingWriter(ring) }],
+  });
+  return { wav, identity, pump };
+}
+```
+
+Call `pump.pumpUntilFull()` before `context.resume()` and again as the ring drains, and pass the
+pump to `engine.seek(frame, { producers: [pump] })`: it repositions every ring it writes after
+the engine accepted the seek. The pump holds one read-ahead window per source (`windowFrames`,
+4096 by default), never the whole stem. `readWavHeader` refuses with a `WavFormatError`, whose
+`code` names the cause: a float WAV (`wav.float_unsupported`: export 16- or 24-bit PCM), more than
+two channels (`wav.channels`), and a rate other than 44.1, 48, 88.2 or 96 kHz (`wav.sample_rate`).
+A `data` size larger than the file is read to the file's end. The pump and the hash are the
+engine's own code, copied into the package unchanged; `IncrementalBlake3` is the same hash for
+bytes you already hold.
+
 ## Change a mix and read the core's answer
 
 A value edit (a fader, a mute, a pan or matrix, a trim, a filter, a send, a VCA, an effect

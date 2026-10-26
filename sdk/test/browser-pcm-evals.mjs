@@ -1419,6 +1419,111 @@ test("observer drops PCM reused during copy before sequence publication, and see
   }
 });
 
+// Issue #2102: the browser entry's canonical PCM layer, against the engine's frozen stem-identity
+// corpus (docs/STEM_IDENTITY_V1.md).
+const STEM_CORPUS = new URL("../../fixtures/stem-identity/v1/", import.meta.url);
+async function stemVector(name) {
+  const [, header, ...rows] = (await readFile(new URL("VECTORS.tsv", STEM_CORPUS), "utf8")).trim().split("\n").map((line) => line.split("\t"));
+  const row = Object.fromEntries(header.map((key, index) => [key, rows.find((cells) => cells[0] === name)[index]]));
+  return { ...row, channels: Number(row.channels), frames: Number(row.frames), pcm: await readFile(new URL(row.pcm_file, STEM_CORPUS)),
+    samples: row.samples_by_frame.split("|").map((frame) => frame.split(",").map(Number)) };
+}
+
+test("the package's CanonicalPcmPump writes canonical 16-bit mono and 24-bit stereo into Msb1RingWriter rings as exact f32", async () => {
+  // The published barrel's pump writes into the SDK's own Msb1RingWriter, and the SDK's
+  // Msb1RingObserver reads back every boundary sample exactly.
+  const stems = await import("../src/browser/index.ts");
+  const vectors = [await stemVector("pcm16-mono-boundaries"), await stemVector("pcm24-stereo-boundaries")];
+  const rings = vectors.map((v) => createMsb1Ring({ sourceId: v.name, channels: v.channels, frameCapacity: 2, capacity: 4 }));
+  const pump = new stems.CanonicalPcmPump({
+    lease: { read: async (identity) => new Blob([vectors.find((v) => v.identity === identity).pcm]) },
+    sources: vectors.map((v, index) => ({ sourceId: v.name, identity: v.identity, channels: v.channels,
+      bitDepth: Number(v.bit_depth), frames: v.frames, ring: new Msb1RingWriter(rings[index]) })),
+  });
+  assert.deepEqual(await pump.pumpUntilFull(), { chunks: 5, frames: 8, finished: true });
+  vectors.forEach((v, index) => {
+    const planes = Array.from({ length: v.channels }, () => []); const starts = []; let ended = false;
+    new Msb1RingObserver(rings[index]).pull((chunk) => {
+      starts.push(chunk.startFrame); ended = chunk.endOfRegion;
+      chunk.planes.forEach((plane, channel) => planes[channel].push(...plane.subarray(0, chunk.frames)));
+    });
+    const scale = 2 ** (Number(v.bit_depth) - 1);
+    assert.deepEqual(starts, [0n, 2n, 4n].slice(0, Math.ceil(v.frames / 2)), v.name);
+    assert.equal(ended, true, `${v.name} ends its region`);
+    assert.deepEqual(planes, Array.from({ length: v.channels }, (_, channel) => v.samples.map((frame) => frame[channel] / scale)), v.name);
+  });
+});
+
+function riffWave(chunks, { riff = "RIFF" } = {}) {
+  const parts = chunks.flatMap(([id, body, size = body.byteLength]) => {
+    const header = Buffer.alloc(8); header.write(id, 0, "latin1"); header.writeUInt32LE(size, 4);
+    return body.byteLength % 2 === 1 ? [header, body, Buffer.alloc(1)] : [header, body];
+  });
+  const head = Buffer.alloc(12); head.write(riff, 0, "latin1"); head.write("WAVE", 8, "latin1");
+  head.writeUInt32LE(4 + parts.reduce((sum, part) => sum + part.byteLength, 0), 4);
+  return Buffer.concat([head, ...parts]);
+}
+function waveFormat({ tag = 1, channels = 2, rate = 48_000, bits = 24, extensible = false, guidTail = "000000001000800000aa00389b71" }) {
+  const fmt = Buffer.alloc(extensible ? 40 : 16);
+  fmt.writeUInt16LE(extensible ? 0xfffe : tag, 0); fmt.writeUInt16LE(channels, 2); fmt.writeUInt32LE(rate, 4);
+  fmt.writeUInt32LE(rate * channels * (bits / 8), 8); fmt.writeUInt16LE(channels * (bits / 8), 12); fmt.writeUInt16LE(bits, 14);
+  if (extensible) {
+    fmt.writeUInt16LE(22, 16); fmt.writeUInt16LE(bits, 18); fmt.writeUInt32LE(3, 20); fmt.writeUInt16LE(tag, 24);
+    Buffer.from(guidTail, "hex").copy(fmt, 26);
+  }
+  return fmt;
+}
+
+test("readWavHeader strips plain and extensible WAVs to the canonical bytes of the engine's blake3 identity", async () => {
+  // The two header layouts a real stem has (plain and WAVE_FORMAT_EXTENSIBLE), an odd chunk's pad
+  // byte and an unpatched data size each move dataOffset or canonicalBytes, and the identity of
+  // the slice then misses the corpus; a reader that probes ever larger prefixes reads too much.
+  const { readWavHeader, blake3Stream, WavFormatError } = await import("../src/browser/index.ts");
+  const identity = async (blob, info) => `blake3:${(await blake3Stream(blob.slice(info.dataOffset, info.dataOffset + info.canonicalBytes).stream())).hex}`;
+  for (const name of ["pcm16-stereo-boundaries", "pcm24-stereo-boundaries"]) {
+    const v = await stemVector(name), blob = new Blob([await readFile(new URL(v.wave_file, STEM_CORPUS))]);
+    const info = await readWavHeader(blob);
+    assert.deepEqual(info, { sampleRateHz: 48_000, channels: 2, bitDepth: Number(v.bit_depth), frames: 3, dataOffset: 44, canonicalBytes: v.pcm.byteLength }, name);
+    assert.equal(await identity(blob, info), v.identity, name);
+  }
+  const v = await stemVector("pcm24-stereo-boundaries");
+  const odd = Buffer.from("abc", "latin1");
+  const reads = [];
+  const bytes = riffWave([["fmt ", waveFormat({ extensible: true })], ["LIST", odd], ["data", v.pcm, 0xffff_ffff]]);
+  const real = new Blob([bytes]);
+  const recorded = { size: real.size, slice(start, end) { reads.push(end - start); return real.slice(start, end); } };
+  const info = await readWavHeader(recorded);
+  assert.deepEqual(info, { sampleRateHz: 48_000, channels: 2, bitDepth: 24, frames: 3, dataOffset: 12 + 8 + 40 + 8 + 4 + 8, canonicalBytes: 18 });
+  assert.equal(await identity(real, info), v.identity);
+  assert.deepEqual(reads, [12, 8, 40, 8, 8], "one 12-byte RIFF read, an 8-byte read per chunk header and one fmt body read");
+  for (const rate of [44_100, 88_200, 96_000]) {
+    assert.equal((await readWavHeader(new Blob([riffWave([["fmt ", waveFormat({ rate, bits: 16, channels: 1 })], ["data", v.pcm.subarray(0, 4)]])]))).sampleRateHz, rate);
+  }
+  // RF64/BW64: the data size comes from ds64. The trailing chunk makes a reader that ignores ds64
+  // and reads to the file's end take its bytes as frames.
+  const ds64 = (dataSize) => { const body = Buffer.alloc(28); body.writeBigUInt64LE(BigInt(dataSize), 8); body.writeBigUInt64LE(3n, 16); return body; };
+  const tail = ["LIST", Buffer.from("tail", "latin1")];
+  const twin = new Blob([riffWave([["JUNK", Buffer.alloc(28)], ["fmt ", waveFormat({})], ["data", v.pcm], tail])]);
+  const twinInfo = await readWavHeader(twin);
+  for (const magic of ["RF64", "BW64"]) {
+    const wide = new Blob([riffWave([["ds64", ds64(v.pcm.byteLength)], ["fmt ", waveFormat({})], ["data", v.pcm, 0xffff_ffff], tail], { riff: magic })]);
+    const wideInfo = await readWavHeader(wide);
+    assert.deepEqual(wideInfo, twinInfo, `${magic} reads like its RIFF twin`);
+    assert.equal(await identity(wide, wideInfo), v.identity, magic);
+  }
+  const refusal = async (blob, code, message) => {
+    await assert.rejects(readWavHeader(blob), (error) => error instanceof WavFormatError && error.code === code && message.test(error.message));
+  };
+  await refusal(new Blob([await readFile(new URL("f32-stereo-edge-bits.wav", STEM_CORPUS))]), "wav.float_unsupported", /32-bit float.*export 16- or 24-bit/);
+  await refusal(new Blob([riffWave([["fmt ", waveFormat({ tag: 3, bits: 32, extensible: true })], ["data", v.pcm]])]), "wav.float_unsupported", /export 16- or 24-bit/);
+  await refusal(new Blob([riffWave([["fmt ", waveFormat({ extensible: true, guidTail: "000000001000800000aa00389b72" })], ["data", v.pcm]])]), "wav.format_unsupported", /not a WAVE format/);
+  await refusal(new Blob([riffWave([["fmt ", waveFormat({ channels: 3 })], ["data", v.pcm]])]), "wav.channels", /mono or stereo/);
+  await refusal(new Blob([riffWave([["fmt ", waveFormat({ rate: 192_000 })], ["data", v.pcm]])]), "wav.sample_rate", /44\.1, 48, 88\.2 or 96 kHz/);
+  await refusal(new Blob([riffWave([["fmt ", waveFormat({})], ["data", v.pcm, 0xffff_ffff]], { riff: "RF64" })]), "wav.ds64_missing", /needs a ds64 chunk before it/);
+  await refusal(new Blob([riffWave([["fmt ", waveFormat({})], ["data", v.pcm, 0xffff_ffff], ["ds64", ds64(v.pcm.byteLength)]], { riff: "RF64" })]), "wav.ds64_missing", /needs a ds64 chunk before it/);
+  await refusal(new Blob([riffWave([["ds64", Buffer.alloc(8)], ["fmt ", waveFormat({})], ["data", v.pcm, 0xffff_ffff]], { riff: "RF64" })]), "wav.ds64_short", /too short/);
+});
+
 test("the PCM feed worklet calls only exports that the render-thread table lists for it", () => {
   // The actual-Wasm and prelude tests above drive the feed's process drain and both seek paths,
   // so the recording is not empty; an empty one would mean the proxy lost its hook.

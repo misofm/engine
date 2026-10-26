@@ -185,6 +185,11 @@ export class Msb1RingWriter {
   release(): void
 }
 
+export class CanonicalPcmPumpError extends Error {
+  readonly code: string
+  readonly details: Readonly<Record<string, unknown>>
+}
+
 export class CanonicalPcmPump {
   constructor(options: {
     lease: Pick<StemSessionLease, "read">
