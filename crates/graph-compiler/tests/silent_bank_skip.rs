@@ -1186,8 +1186,15 @@ struct Pair {
 }
 
 fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
-    let mut before = bind(model, schedules, true);
-    let mut after = bind(model, schedules, true);
+    carried_pair_with(model, schedules, Setup::DESK)
+}
+
+/// [`carried_pair`] under `setup`, for `model`'s tracks.
+fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Setup) -> Pair {
+    let tracks = model.tracks.len();
+    let all_strips = tracks + model.submixes.len();
+    let mut before = bind_with(model, schedules, true, setup);
+    let mut after = bind_with(model, schedules, true, setup);
     graph::install_carry_program(
         &mut after.plan,
         graph::GraphCarryProgram {
@@ -1209,7 +1216,7 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
             predecessor: inputs[&strip],
         })
         .collect();
-    assert_eq!(input_moves.len(), TRACKS, "every input section carries");
+    assert_eq!(input_moves.len(), all_strips, "every input section carries");
     graph::install_builtin_input_carry(&mut after.plan, input_moves).expect("input carry");
     let strips: BTreeMap<_, _> = graph::builtin_strip_lanes(&mut before.plan)
         .expect("a graph plan")
@@ -1228,7 +1235,7 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
         .collect();
     assert_eq!(
         strip_moves.len(),
-        2 * TRACKS,
+        2 * all_strips,
         "every fader and matrix carries"
     );
     graph::install_builtin_strip_carry(&mut after.plan, strip_moves).expect("strip carry");
@@ -1247,7 +1254,7 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
         .collect();
     assert_eq!(effect_moves.len(), effects.len(), "every effect carries");
     assert!(
-        effect_moves.len() >= 3 * TRACKS,
+        effect_moves.len() >= 3 * tracks,
         "every console effect carries"
     );
     graph::install_effect_carry(&mut after.plan, effect_moves, 0).expect("effect carry");
@@ -1462,9 +1469,15 @@ const C1_PACKED: usize = 400;
 /// #2132's `Sparse` input: every odd track exact `+0.0`, every even track playing, for `blocks`
 /// blocks (one schedule per [`TRACKS`] slot; C1 reads the first 16).
 fn c1_sparse(blocks: usize) -> Vec<Arc<[Block]>> {
+    c1_input(blocks, |track| track % 2 == 1)
+}
+
+/// Every track for which `silent` holds exact `+0.0`, every other track playing, for `blocks`
+/// blocks.
+fn c1_input(blocks: usize, silent: fn(usize) -> bool) -> Vec<Arc<[Block]>> {
     (0..TRACKS)
         .map(|track| {
-            let kind = if track % 2 == 1 {
+            let kind = if silent(track) {
                 Block::Silence
             } else {
                 Block::Signal(0.05)
@@ -1594,13 +1607,18 @@ fn trim_moved_strip(bound: &mut Bound) {
         });
 }
 
-/// Render `model` twice over #2132's `Sparse` input, packing and not packing, with every track
+/// Render `model` twice over `input` ([`c1_input`]), packing and not packing, with every track
 /// collapse-armed and [`SPLIT_MOVED`]'s right trim moved live before [`SPLIT_TRIM`]; every block's
-/// host words and every track's post-matrix words must agree by `to_bits`, NaNs folded. Returns the
-/// packing plan, rendered, for the caller's own checks.
-fn split_strip_differential(model: &SessionModel) -> Bound {
+/// host words and every track's post-matrix words must agree by `to_bits`, NaNs folded. `moves`:
+/// whether the packer must have moved strips by then, if the caller knows. Returns the packing
+/// plan, rendered, for the caller's own checks.
+fn split_strip_differential(
+    model: &SessionModel,
+    silent: fn(usize) -> bool,
+    moves: Option<bool>,
+) -> Bound {
     let blocks = C1_PACKED + 32;
-    let schedules = c1_sparse(blocks);
+    let schedules = c1_input(blocks, silent);
     let setup = Setup {
         stereo: |_| false,
         live: true,
@@ -1613,10 +1631,13 @@ fn split_strip_differential(model: &SessionModel) -> Bound {
     let mut unpacked_pcm = vec![0.0_f32; frames * 2];
     for block in 0..blocks as u64 {
         if block == SPLIT_TRIM {
-            assert!(
-                packed.displaced() > 0,
-                "the packer moved strips before the trim"
-            );
+            if let Some(moves) = moves {
+                assert_eq!(
+                    packed.displaced() > 0,
+                    moves,
+                    "whether the packer moved strips before the trim"
+                );
+            }
             trim_moved_strip(&mut packed);
             trim_moved_strip(&mut unpacked);
         }
@@ -1646,7 +1667,7 @@ fn split_strip_differential(model: &SessionModel) -> Bound {
                 "ch{track:02}: post-matrix word {index} differs"
             );
         }
-        if track == moved {
+        if track == moved && moves == Some(true) {
             let block = 2 * frames;
             let last = &a[a.len() - block..];
             assert_ne!(
@@ -1706,7 +1727,7 @@ fn a_packed_split_strip_renders_the_bits_of_an_unpacked_one() {
         );
     }
     drop(probe);
-    let packed = split_strip_differential(&model);
+    let packed = split_strip_differential(&model, |track| track % 2 == 1, Some(true));
     assert!(packed.lane_moves() > 0, "strips moved");
 }
 
@@ -1771,6 +1792,112 @@ fn a_per_node_insert_reads_the_moved_strip() {
         );
     }
     drop(probe);
-    let packed = split_strip_differential(&model);
+    let packed = split_strip_differential(&model, |track| track % 2 == 1, Some(true));
     assert!(packed.lane_moves() > 0, "strips moved");
+}
+
+/// Issue #2142 gate 1a, the layout term: C1, collapse-armed, with its sends tapped after the input
+/// section. Part one is then the input section alone, and the second chain's part one writes its
+/// outputs into the buffers the first chain's part one gathered its inputs from: the colouring
+/// recycles them, since the first chain has read them by then (at eight lanes; the four-lane plan's
+/// colouring is its own). A move would have a strip written by an earlier unit overwrite an input a
+/// later unit still gathers, so such chains form no group, and the packing plan renders its
+/// unpacked twin's bits whatever the width.
+///
+/// Test value: red when a group forms over a buffer that holds two values in its span (the
+/// "inputs are never written" term of `group_layout_holds` dropped): a moved strip's part one
+/// overwrites a bank mate's input and the packed plan's bits move, which none of the other rows
+/// reaches, because the colouring recycles no group buffer there.
+#[test]
+fn a_recycled_buffer_keeps_its_strips_apart() {
+    let mut model = c1_collapse_armed();
+    for route in &mut model.routes {
+        if let RouteSource::Track { tap, .. } = &mut route.source
+            && *tap == SendTap::InsertSend
+        {
+            *tap = SendTap::PostInput;
+        }
+    }
+    // The first chain's odd strips silent, every other strip playing: at eight lanes the second
+    // chain's strips move into the first chain's silent lanes, and a strip moved into the first
+    // chain writes a buffer a displaced strip still gathers from.
+    split_strip_differential(&model, |track| track < 8 && track % 2 == 1, None);
+}
+
+/// Issue #2142 gate 4: on C1 at 16 tracks, a move of a split strip (both units of both lane chains)
+/// allocates and frees nothing on the render thread, made by hand or by the packer, and neither
+/// does the carry out of a displaced split-strip group (`restore_home_lanes` walks the chains) or
+/// any block between.
+///
+/// Test value: red when a chain swap, the walk home over lane chains or a displaced split group's
+/// render allocates, which the eight-track desk's allocation gate (#1981) cannot reach: its strips
+/// are not split.
+#[test]
+fn a_split_strip_move_allocates_nothing() {
+    let model = c1_all_active();
+    let blocks = 48;
+    let setup = Setup {
+        stereo: |_| true,
+        live: false,
+    };
+    let Pair {
+        mut before,
+        mut after,
+    } = carried_pair_with(&model, &c1_sparse(blocks), setup);
+    let (group, _) = track_group(&before.plan);
+    let group = group.expect("the track banks are in a pack group");
+    assert!(group.chains.iter().all(|chain| chain.len() == 2));
+    // Two strips of the second chain trade with two of the first, named by their part-one units.
+    let (low, high) = (group.chains[0][0] as usize, group.chains[1][0] as usize);
+    let moves = [((low, 1), (high, 0)), ((low, 3), (high, 2))];
+    let mut pcm = vec![0.0_f32; before.frames * 2];
+    assert_installed();
+    let swap = 24;
+    before.pack = false;
+    for block in 0..blocks as u64 {
+        let bound = if block < swap {
+            &mut before
+        } else {
+            &mut after
+        };
+        let mark = current_thread_counters();
+        if block == 10 || block == swap + 4 {
+            for (a, b) in moves {
+                assert!(
+                    graph::test_only_swap_bank_lanes(&mut bound.plan, a, b),
+                    "block {block}: {a:?} and {b:?} trade"
+                );
+            }
+        }
+        if block == swap {
+            assert!(
+                before.displaced() > 0,
+                "the predecessor is displaced at the swap"
+            );
+            assert_eq!(
+                after.plan.adopt_predecessor_plan(&mut before.plan),
+                engine::realtime::CarryOutcome::Carried,
+                "the successor takes the carry"
+            );
+        }
+        let bound = if block < swap {
+            &mut before
+        } else {
+            &mut after
+        };
+        bound.render(block, true, &mut pcm);
+        let delta = current_thread_delta_since(mark);
+        if block >= 10 {
+            assert_eq!(
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (0, 0, 0),
+                "block {block}: a split strip's move, carry or displaced block allocated or freed"
+            );
+        }
+    }
+    assert!(
+        after.lane_moves() > 0,
+        "the successor's packer moved the displaced strips home"
+    );
+    assert_eq!(after.displaced(), 0, "the successor is home again");
 }

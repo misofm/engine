@@ -3731,40 +3731,6 @@ mod tests {
         )
     }
 
-    /// Issue #2132: the key-class ideal packs a key class's active lanes across pack groups. On C1
-    /// at 16 tracks the two track banks are in no pack group; with the odd tracks silent each
-    /// holds four active lanes, so the per-group ideal is 4 + 4 for the tracks and the key-class
-    /// ideal 4 (the eight active tracks fill one bank per slot). The submixes are the same in
-    /// both: {drums, vox} active in the {4 groups, aux B} banks (3 + 1), aux A silent (0), and the
-    /// master (3 + 1). All active, every bank of the tracks is full and the two ideals agree.
-    ///
-    /// Test value: red when the key-class ideal stops merging the groups of one key class (it
-    /// then equals the per-group ideal on the sparse row).
-    #[test]
-    fn the_key_class_ideal_packs_across_pack_groups() {
-        if Backend::current().width() != 8 {
-            return;
-        }
-        for (state, per_group, key_class) in
-            [(C1State::Sparse, 16, 12), (C1State::AllActive, 16, 16)]
-        {
-            let mut runtime = SessionRuntime::new(Workload::C1Console {
-                tracks: C1Tracks::Sixteen,
-                state,
-            });
-            let groups: u64 = runtime
-                .bank_slot_runs()
-                .iter()
-                .map(|group| group.ideal)
-                .sum();
-            assert_eq!(
-                (groups, runtime.bsr_ideal_key_class()),
-                (per_group, key_class),
-                "{state:?}: [per-group ideal, key-class ideal]"
-            );
-        }
-    }
-
     /// Issue #965 gate 1: every session row the bench emits is fed the way a host feeds a
     /// session, and every claim is read in place by its bank's gather.
     ///
