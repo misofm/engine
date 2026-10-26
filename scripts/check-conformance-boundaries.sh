@@ -218,7 +218,8 @@ gate_scan_forbidden 'protocol inline extracted tests' \
     crates/protocol/src/controller.rs crates/protocol/src/message_wire.rs crates/protocol/src/session_wire.rs || exit $?
 # #1075 retired the protocol benchmark, the only user of `flatbuffers`, `protocol` and `session`.
 # #938 added `rustix`, Linux-only, for the bench's thread pinning.
-expected_conformance_bench=$'bench-support\nbuiltins\nbuiltins-compiler\nconformance\nconsole-workload\neffect-compiler\neffect-contract\nengine\ngraph\ngraph-compiler\nlane\nrustix\nsha2'
+# #1286 D4 added `controls`, `host-core` and `session` for the swap subject's host-core preparation.
+expected_conformance_bench=$'bench-support\nbuiltins\nbuiltins-compiler\nconformance\nconsole-workload\ncontrols\neffect-compiler\neffect-contract\nengine\ngraph\ngraph-compiler\nhost-core\nlane\nrustix\nsession\nsha2'
 [[ "$(dependency_names tools/bench/Cargo.toml)" == "$expected_conformance_bench" ]] || {
     printf 'conformance boundary failure: consolidated benchmark dependency union changed\n' >&2
     exit 1
