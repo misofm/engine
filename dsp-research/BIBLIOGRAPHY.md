@@ -8,6 +8,10 @@ All links were selected as bounded primary, official, author-hosted, or publishe
 - `[REISS-COMP]` D. Giannoulis, M. Massberg, and J. D. Reiss, [Digital Dynamic Range Compressor Design—A Tutorial and Analysis](https://eecs.qmul.ac.uk/~josh/documents/2012/GiannoulisMassbergReiss-dynamicrangecompression-JAES2012.pdf), JAES 2012.
 - `[ITU-BS1770-5]` ITU-R, [Recommendation BS.1770-5](https://www.itu.int/rec/R-REC-BS.1770-5-202311-I), 2023.
 - `[EBU-R128]` EBU, [R 128: Loudness normalisation and permitted maximum level of audio signals](https://tech.ebu.ch/files/live/sites/tech/files/shared/r/r128v5_0.pdf), version 5, 2023.
+- `[EBU-TECH3341]` EBU, [Tech 3341: Loudness Metering: 'EBU Mode' metering to supplement EBU R 128 loudness normalization](https://tech.ebu.ch/docs/tech/tech3341.pdf), version 4, November 2023; retrieved and checked 2026-10-26.
+- `[EBU-TECH3342]` EBU, [Tech 3342: Loudness Range: a measure to supplement EBU R 128 loudness normalization](https://tech.ebu.ch/docs/tech/tech3342.pdf), version 4, November 2023; retrieved and checked 2026-10-26.
+- `[ITU-BS2217]` ITU-R, [Report BS.2217-2: Compliance material for Recommendation ITU-R BS.1770](https://www.itu.int/pub/R-REP-BS.2217), October 2016, the edition in force on 2026-10-26.
+- `[DEMAN-R128-2018]` Brecht De Man, “Evaluation of Implementations of the EBU R128 Loudness Measurement,” 145th AES Convention, New York, October 2018, paper 10064, [AES E-Library 19790](https://www.aes.org/e-lib/browse.cfm?elib=19790); paywalled, cited for provenance of the analog K-weighting prototype; author code [loudness.py](https://github.com/BrechtDeMan/loudness.py).
 - `[AES17-PREVIEW]` Audio Engineering Society, [AES17 preview: measurement of digital audio equipment](https://www.aes.org/publications/standards/preview.cfm?ID=21). The full standard is paywalled.
 - `[SMITH-SASP]` Julius O. Smith, [Spectral Audio Signal Processing](https://www.dsprelated.com/freebooks/sasp/), online text.
 - `[VAIDYANATHAN-MULTIRATE]` P. P. Vaidyanathan, [Multirate Systems and Filter Banks](https://authors.library.caltech.edu/records/rmhds-22q28), Prentice Hall, 1993.

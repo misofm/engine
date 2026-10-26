@@ -16,6 +16,7 @@ members = [
     "crates/de-esser",
     "crates/dynamic-eq",
     "crates/true-peak-limiter",
+    "crates/loudness",
     "crates/soft-clip",
     "crates/transient-shaper",
     "crates/delay",
@@ -78,6 +79,7 @@ gate-expander = { path = "crates/gate-expander", version = "0.1.0" }
 de-esser = { path = "crates/de-esser", version = "0.1.0" }
 dynamic-eq = { path = "crates/dynamic-eq", version = "0.1.0" }
 true-peak-limiter = { path = "crates/true-peak-limiter", version = "0.1.0" }
+loudness = { path = "crates/loudness", version = "0.1.0" }
 soft-clip = { path = "crates/soft-clip", version = "0.1.0" }
 transient-shaper = { path = "crates/transient-shaper", version = "0.1.0" }
 delay = { path = "crates/delay", version = "0.1.0" }
@@ -139,3 +141,9 @@ debug = 1
 # Benchmarks measure the shipped profile, never a separately tuned one.
 [profile.bench]
 inherits = "release"
+
+# #2115: the workspace debug job runs `crates/loudness`'s conformance tests, and the production
+# render half's generic lane/`wide` code is instantiated in this crate, where unoptimised it runs
+# about 30x slower. Only the optimisation level changes: debug assertions and overflow checks stay on.
+[profile.dev.package.loudness]
+opt-level = 3

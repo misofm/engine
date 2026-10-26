@@ -1446,6 +1446,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "loudness"
+version = "0.1.0"
+dependencies = [
+ "bench-support",
+ "dsp-reference",
+ "lane",
+ "math",
+ "true-peak-limiter",
+]
+
+[[package]]
 name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
