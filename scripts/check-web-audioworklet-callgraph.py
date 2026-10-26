@@ -760,7 +760,8 @@ RENDER_KERNELS: dict[str, str] = {
         "live route mix, one ramped route (#1220)",
     "_RINvNtCs_4lane7kernels28route_mix_column_ramps_blockNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
         "live route mix, the indexed-ramp column body",
-    "_RINvMNtCs_15effect_contract4liveNtB_11BypassShunt9crossfadeNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
+    # #2129: the per-node crossfade's body, behind `BypassShunt::crossfade` and `crossfade_held`.
+    "_RINvNtCs_15effect_contract4live16crossfade_planesNtNtCs_4wide6f32x4_5f32x4ECs_5graph":
         "live bypass crossfade of a per-node insert",
     "_RINvMNtCs_15effect_contract4liveNtB_11BypassShunt14crossfade_bankNtNtCs_4wide6f32x4_5f32x4ECs_4rack":
         "live bypass crossfade of a banked console slot or insert",
