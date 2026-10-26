@@ -340,6 +340,9 @@ struct Bound {
     pack: bool,
     /// Each track's post-matrix words, when observed.
     sinks: Vec<Arc<Mutex<Vec<u32>>>>,
+    /// The effect banks the compile bound: one bank-slot run each on a block every chain renders
+    /// (issue #2132).
+    bound_banks: u64,
 }
 
 /// Compile `model` at [`width`] the way every host does, bind every track input to its schedule,
@@ -407,6 +410,7 @@ fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bou
     })
     .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
     let latency = artifact.report().output_latency.0;
+    let bound_banks = artifact.report().rack_cohorts.bound_slots.len() as u64;
     let envelope = artifact.envelope();
     let frames = envelope.quantum.0 as usize;
     let nodes = artifact
@@ -469,6 +473,7 @@ fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bou
         latency,
         pack: true,
         sinks,
+        bound_banks,
     }
 }
 
@@ -513,6 +518,63 @@ fn fold_nan(word: u32) -> u32 {
     } else {
         word
     }
+}
+
+// ---- Issue #2132 gate 2: bank-slot runs ---------------------------------------------------------
+
+/// Issue #2132 gate 2: a pack group's bank-slot runs per block are its banks times its effect slots
+/// when every chain renders, and none for a chain the block skipped; over the plan, a block every
+/// chain renders runs exactly the effect banks the compile bound.
+///
+/// Test value: red when the counter and the skips disagree -- a run counted for a skipped chain,
+/// or a builtin stage counted as an effect slot -- which the skip differential (gate 1) cannot see,
+/// because a counter moves no output bit.
+#[test]
+fn bank_slot_runs_follow_the_skips() {
+    let blocks = TAIL + 8;
+    let schedules = schedules(blocks, 0x2132);
+    let mut bound = bind(&session(first_sixteen), &schedules, false);
+    let mut pcm = vec![0.0_f32; bound.frames * 2];
+    let mut previous = graph::test_only_bank_slot_runs(&mut bound.plan);
+    assert!(!previous.is_empty(), "the console has bank units");
+    let per_block: u64 = previous
+        .iter()
+        .map(|group| {
+            u64::from(group.effect_slots) * u64::from(group.last_unit - group.first_unit + 1)
+        })
+        .sum();
+    assert_eq!(
+        per_block, bound.bound_banks,
+        "every bound effect bank is one slot of one unit, and no builtin stage is counted"
+    );
+    let [mut every_chain_ran, mut a_chain_skipped] = [0_u32; 2];
+    for block in 0..blocks as u64 {
+        bound.render(block, true, &mut pcm);
+        let now = graph::test_only_bank_slot_runs(&mut bound.plan);
+        assert_eq!(now.len(), previous.len());
+        let mut total = 0;
+        for (before, after) in previous.iter().zip(&now) {
+            let banks = u64::from(after.last_unit - after.first_unit + 1);
+            let skipped = after.skips - before.skips;
+            let runs = after.runs - before.runs;
+            assert_eq!(
+                runs,
+                u64::from(after.effect_slots) * (banks - skipped),
+                "block {block}, units {}..={}: {skipped} of {banks} chains skipped",
+                after.first_unit,
+                after.last_unit
+            );
+            a_chain_skipped += u32::from(skipped > 0);
+            total += runs;
+        }
+        every_chain_ran += u32::from(total == bound.bound_banks);
+        previous = now;
+    }
+    assert!(
+        every_chain_ran > 0 && a_chain_skipped > 0,
+        "the schedule reaches both an all-running block ({every_chain_ran}) and a skipped chain \
+         ({a_chain_skipped})"
+    );
 }
 
 // ---- Gate 1 -------------------------------------------------------------------------------------

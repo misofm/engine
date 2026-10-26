@@ -1,0 +1,4129 @@
+{
+  "schema_version": 1,
+  "session_id": "console.mix",
+  "revision": "0",
+  "sample_rate_hz": 48000,
+  "quantum_frames": 128,
+  "render_profile": {
+    "id": "native",
+    "mode": "single_thread"
+  },
+  "output_profile": {
+    "id": "main",
+    "channels": 2,
+    "sample_format": "f32_planar"
+  },
+  "sources": [
+    {
+      "id": "src.ch00",
+      "content": "blake3:1c3a9d654b6f042277efdcb822afba64bf8a10571fde156a37f2c1a6dcda0bce",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch01",
+      "content": "blake3:9f2f45d0f1148be1430d86e9b906382e4e832ce238e645f863bb578d8ba5666a",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch02",
+      "content": "blake3:f5af5d3eeda31d9acc274ed01b6da9257c2e10ebcf4b054c4c6d3a883d015dc6",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch03",
+      "content": "blake3:9c8b2ae53a3d0e8997402980cffd4f0a41b9336fe526388b63c51ca27faa0a47",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch04",
+      "content": "blake3:774db30f06539ec7e23d087bd1449a1fa2227483a343579012da2636f3a316b4",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch05",
+      "content": "blake3:9c707f3984b2314ee72cd2284db73eed337f319d9053e48f6e0d5e07b89f36dd",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch06",
+      "content": "blake3:ba6a5f32f95d92c8e0e8667089ee09e090af65e6771a99717045442c540bcce8",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch07",
+      "content": "blake3:ffa13a4cb4c8a439996b0e85dc6c9ff908b4ca3aa2e26a17d6f43d408a2f305e",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch08",
+      "content": "blake3:1238a05234b27183777f40666966c0a1b543e5eb760430f587d7efa942ca2068",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch09",
+      "content": "blake3:eb52795ef99c445fc219eb47076d400857512e3a10c1b0f9c1e3091ff590ffb6",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch10",
+      "content": "blake3:4445d843fc629761e1a6692628434906faa771fe732094372613c8588d8f91e2",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch11",
+      "content": "blake3:02cd2b67d5f460ee096f8f8bda4557bfd9806ffb2261f71ddd4c4698905c37ee",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch12",
+      "content": "blake3:a3a78e1e6f4b99337800a8e530073344e8bdd5c3918574ff93721d67fbccb31b",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch13",
+      "content": "blake3:cf3c689bfc51c22357afa5333ce167461dc7d9466c4e1849f6b82d5cb3c46c84",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch14",
+      "content": "blake3:08d53918bad7544a73d1f3a3eaffffe9bcc3f9e3ebe5d8c3812f6781bb92c3ca",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    },
+    {
+      "id": "src.ch15",
+      "content": "blake3:4630e1754b1f5c08af40b680f42f62a22af6f9bb4a8081def545d82b259fcb17",
+      "channels": 2,
+      "bit_depth": 24,
+      "frames": "8640000"
+    }
+  ],
+  "console": {
+    "pre_insert": [
+      {
+        "slot": "gate",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.gate-expander"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      },
+      {
+        "slot": "eq",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.parametric-eq"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      },
+      {
+        "slot": "comp",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.compressor"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      }
+    ],
+    "post_insert": [
+      {
+        "slot": "drive",
+        "identity": {
+          "kind": "native",
+          "effect_id": "miso.soft-clip"
+        },
+        "quality": "normal",
+        "link_mode": "dual_mono"
+      }
+    ]
+  },
+  "tracks": [
+    {
+      "id": "ch00",
+      "source_id": "src.ch00",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch01",
+      "source_id": "src.ch01",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch02",
+      "source_id": "src.ch02",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch03",
+      "source_id": "src.ch03",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch04",
+      "source_id": "src.ch04",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch05",
+      "source_id": "src.ch05",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch06",
+      "source_id": "src.ch06",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch07",
+      "source_id": "src.ch07",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch08",
+      "source_id": "src.ch08",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch09",
+      "source_id": "src.ch09",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch10",
+      "source_id": "src.ch10",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch11",
+      "source_id": "src.ch11",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch12",
+      "source_id": "src.ch12",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch13",
+      "source_id": "src.ch13",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch14",
+      "source_id": "src.ch14",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "ch15",
+      "source_id": "src.ch15",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ],
+  "submixes": [
+    {
+      "id": "aux.a",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "delay",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.delay"
+            },
+            "quality": "normal",
+            "bypass": false,
+            "link_mode": "dual_mono",
+            "params": [
+              {
+                "parameter_id": 4,
+                "channel": "both",
+                "unit": "linear",
+                "value": 1.0
+              }
+            ],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "aux.b",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "group.drums",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "group.fx",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "group.music",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "group.vox",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    },
+    {
+      "id": "master",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "gate",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "eq",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        },
+        {
+          "slot": "drive",
+          "bypass": true,
+          "link_mode": "slot",
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": [
+          {
+            "id": "limiter",
+            "identity": {
+              "kind": "native",
+              "effect_id": "miso.true-peak-limiter"
+            },
+            "quality": "normal",
+            "bypass": true,
+            "link_mode": "maximum",
+            "params": [],
+            "sidechain": {
+              "kind": "none"
+            }
+          }
+        ]
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": -1.0,
+        "right": 1.0,
+        "smoothing_samples": 0
+      }
+    }
+  ],
+  "vcas": [],
+  "control_smoothing": {
+    "kind": "default"
+  },
+  "outputs": [
+    {
+      "id": "main"
+    }
+  ],
+  "routes": [
+    {
+      "id": "aux.a.to.master",
+      "source": {
+        "kind": "submix",
+        "submix_id": "aux.a",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "aux.b.to.master",
+      "source": {
+        "kind": "submix",
+        "submix_id": "aux.b",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch00.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch00",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch00.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch00",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch00.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch00",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch00.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch00",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch00.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch00",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch00.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch00",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch00.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch00",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch01.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch01",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch01.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch01",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch01.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch01",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch01.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch01",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch01.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch01",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch01.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch01",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch01.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch01",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch02.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch02",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch02.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch02",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch02.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch02",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch02.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch02",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch02.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch02",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch02.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch02",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch02.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch02",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch03.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch03",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch03.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch03",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch03.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch03",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch03.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch03",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch03.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch03",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch03.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch03",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch03.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch03",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch04.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch04",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch04.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch04",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch04.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch04",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch04.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch04",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch04.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch04",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch04.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch04",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch04.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch04",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch05.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch05",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch05.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch05",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch05.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch05",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch05.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch05",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch05.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch05",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch05.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch05",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch05.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch05",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch06.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch06",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch06.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch06",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch06.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch06",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch06.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch06",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch06.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch06",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch06.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch06",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch06.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch06",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch07.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch07",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch07.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch07",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch07.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch07",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch07.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch07",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch07.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch07",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch07.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch07",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch07.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch07",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch08.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch08",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch08.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch08",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch08.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch08",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch08.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch08",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch08.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch08",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch08.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch08",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch08.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch08",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch09.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch09",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch09.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch09",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch09.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch09",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch09.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch09",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch09.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch09",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch09.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch09",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch09.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch09",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch10.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch10",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch10.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch10",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch10.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch10",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch10.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch10",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch10.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch10",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch10.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch10",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch10.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch10",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch11.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch11",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch11.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch11",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch11.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch11",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch11.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch11",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch11.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch11",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch11.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch11",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch11.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch11",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch12.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch12",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch12.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch12",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch12.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch12",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch12.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch12",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch12.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch12",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch12.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch12",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch12.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch12",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch13.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch13",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch13.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch13",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch13.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch13",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch13.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch13",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch13.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch13",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch13.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch13",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch13.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch13",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch14.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch14",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch14.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch14",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch14.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch14",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch14.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch14",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch14.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch14",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch14.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch14",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch14.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch14",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch15.send.aux.a",
+      "source": {
+        "kind": "track",
+        "track_id": "ch15",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.a"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch15.send.aux.b",
+      "source": {
+        "kind": "track",
+        "track_id": "ch15",
+        "tap": "post_fader"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "aux.b"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": -144.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch15.to.group.drums",
+      "source": {
+        "kind": "track",
+        "track_id": "ch15",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.drums"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch15.to.group.fx",
+      "source": {
+        "kind": "track",
+        "track_id": "ch15",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.fx"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "ch15.to.group.music",
+      "source": {
+        "kind": "track",
+        "track_id": "ch15",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.music"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch15.to.group.vox",
+      "source": {
+        "kind": "track",
+        "track_id": "ch15",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "group.vox"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "ch15.to.master",
+      "source": {
+        "kind": "track",
+        "track_id": "ch15",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": true,
+      "follows_mute": true
+    },
+    {
+      "id": "group.drums.to.master",
+      "source": {
+        "kind": "submix",
+        "submix_id": "group.drums",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "group.fx.to.master",
+      "source": {
+        "kind": "submix",
+        "submix_id": "group.fx",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "group.music.to.master",
+      "source": {
+        "kind": "submix",
+        "submix_id": "group.music",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "group.vox.to.master",
+      "source": {
+        "kind": "submix",
+        "submix_id": "group.vox",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "submix_input",
+        "submix_id": "master"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": true
+    },
+    {
+      "id": "master.to.main",
+      "source": {
+        "kind": "submix",
+        "submix_id": "master",
+        "tap": "post_pan"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0,
+      "mute": false,
+      "follows_mute": false
+    }
+  ],
+  "automation": []
+}
