@@ -69,12 +69,18 @@ acyclic, and the test below checks it on random graphs rather than assuming it.
 2. `the_banked_console_arena_equals_the_bank_unaware_arena` (graph-compiler) unchanged and
    green; the one-time `to_bits` comparison of the console fixtures' output is PR evidence.
 3. `crates/graph` unit test: on every standing fixture the contracted order equals today's unit
-   order (moved count 0). Red on a key that sinks a same-level bank past a consumer. Test value:
-   red when the new order moves a unit that did not need to move.
+   order (moved count 0), **and `test_only_pack_groups` on the C1-16 fixture is unchanged (same
+   chains, same rows)**: #2142's `LaneMap::discover` builds lane chains and pack groups from unit
+   adjacency and order (`group_layout_holds`: a plain unit inside a group's span sits between two
+   whole rows; resident pairing needs adjacency), so a moved unit is also a changed pack group. Red
+   on a key that sinks a same-level bank past a consumer. Test value: red when the new order moves
+   a unit that did not need to move.
 
 ## Paths
 
-`crates/graph/src/runtime.rs` (`units_of`, `build_sequential`, `cohort_runs`),
+`crates/graph/src/runtime.rs` (`units_of` at about `:9169`, `build_sequential` `:9658`,
+`cohort_runs` `:13878` and its "a successor is always later in unit order" sentence at about
+`:13870`, `op_dataflow` `:13720`, `taps_by_op` `:9142`, all on the #2142 branch),
 `crates/graph/src/program.rs` (colouring over the executed order, `render_bounds`, the #169 doc
 section), `crates/graph/src/program/tests.rs`, `docs/rulings/` (a short ruling: "a bank is
 placed at one level its members share; the executor order is the contracted topological order;
@@ -82,4 +88,12 @@ placed at one level its members share; the executor order is the contracted topo
 
 ## Dependencies
 
-None. Unblocks slice 6b (#2136). Independent of #2131 and slice 4 (#2133) (disjoint files).
+None (#2131, #2133 and #2142 are merged). Unblocks slice 6b (#2136). Runs immediately before #2136 in the same stream, after #2135; never alone (it changes no production plan).
+
+
+## Amendment (finish map, 2026-10-26; tree main `26d8f97c8` + #2142 PR #2154 `4f5d448eb`)
+
+- Dependencies refreshed: #2131, #2133, #2142 merged. Gate 3 gains the pack-group clause (above),
+  because #2142 made unit order a pack-group input. Line cites refreshed to the #2142 branch.
+- Value statement: no production plan changes shape in this slice; it is worth doing only as
+  #2136's precondition. Schedule: stream A step 3, after #2135.

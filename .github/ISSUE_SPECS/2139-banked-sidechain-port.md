@@ -42,4 +42,11 @@ every such strip per node.
 
 ## Dependencies
 
-Slice 6b (#2136). After the finish line.
+Slice 6b (#2136). After the finish line; not in the 2026-10-26 finish program. #2131 is merged.
+
+
+## Amendment (finish map, 2026-10-26; tree main `26d8f97c8` + #2142 PR #2154 `4f5d448eb`)
+
+- Deferred as filed. It adds a contract surface (`effect-contract`, `rack`'s second tile, two
+  effect crates' bank kernels) for one shape that one fixture (the irregular row's `ch05`) exercises.
+  Reopen after the finish line with a measured session that has many sidechained strips.
