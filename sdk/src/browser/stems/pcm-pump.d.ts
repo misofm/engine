@@ -61,8 +61,10 @@ export class CanonicalPcmPumpError extends Error {
 }
 
 /**
- * Bounded-window pump from canonical PCM Blobs into MSB1 rings. Only one read-ahead window per
- * source is resident; the pump never fetches or decodes.
+ * Bounded-window pump from canonical PCM Blobs into MSB1 rings. At most two windows per source are
+ * resident (the one being written and the next, read ahead), and at most eight window reads are in
+ * flight across all sources. A seek during a read never commits the pre-seek window. The pump never
+ * fetches or decodes.
  */
 export class CanonicalPcmPump {
   constructor(options: CanonicalPcmPumpOptions);

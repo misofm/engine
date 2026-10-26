@@ -19,6 +19,7 @@ printf 'RUSTUP_TOOLCHAIN=%s RUSTFLAGS=%s %s\n' "${RUSTUP_TOOLCHAIN-}" "${RUSTFLA
 if [[ $1 == build ]]; then
   case " $* " in
     *" -p host-web "*) artifact=host_web ;;
+    *" -p blake3-web "*) artifact=blake3_web ;;
     *) echo "unexpected cargo build invocation" >&2; exit 1 ;;
   esac
   output="$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/$artifact.wasm"
@@ -131,6 +132,7 @@ check_builder() {
   case "$builder" in
     build-web-audioworklet.sh)
       grep -aqx 'host_web fixture' "$output/miso-engine-v1-audio-worklet.simd128.wasm"
+      grep -aqx 'blake3_web fixture' "$output/miso-engine-v1-blake3.simd128.wasm"
       cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" \
         "$output/miso-engine-v1-audio-worklet.js"
       cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
@@ -208,7 +210,7 @@ cmp -s "$full/$module_name" "$module/$module_name" || {
   exit 1
 }
 [[ $(grep -c . "$scratch/module-only.log") == 1 ]] &&
-  cmp -s "$scratch/module-only.log" <(grep ' build ' "$scratch/module-full.log") || {
+  cmp -s "$scratch/module-only.log" <(grep ' build .* -p host-web$' "$scratch/module-full.log") || {
   echo "--module-only did not run exactly the delivery build's cargo line, and only it" >&2
   exit 1
 }
@@ -337,10 +339,12 @@ rm -f "$mock_bin/cargo.log"
   echo "--print-toolchain did not print the [browser-artifact] dated nightly, or built" >&2
   exit 1
 }
-# The delivery build's cargo line (logged by the mock above) runs on that channel, with std rebuilt.
-grep ' build ' "$scratch/module-full.log" | grep -q -- \
-  "^RUSTUP_TOOLCHAIN=$channel RUSTFLAGS=.* build --locked --release -Zbuild-std=std,panic_abort " || {
-  echo "the shipped cargo line does not run on the [browser-artifact] channel with -Zbuild-std" >&2
+# The delivery build's cargo lines (logged by the mock above) -- the worklet module's and, since
+# #2111, the BLAKE3 module's -- run on that channel, with std rebuilt and simd128 on.
+[[ $(grep -c ' build ' "$scratch/module-full.log") == 2 &&
+  $(grep ' build ' "$scratch/module-full.log" | grep -c -- \
+    "^RUSTUP_TOOLCHAIN=$channel RUSTFLAGS=-C target-feature=+simd128 .* build --locked --release -Zbuild-std=std,panic_abort .*--target wasm32-unknown-unknown -p \(host-web\|blake3-web\)$") == 2 ]] || {
+  echo "a shipped cargo line does not run on the [browser-artifact] channel with -Zbuild-std and simd128" >&2
   exit 1
 }
 toolchain_copy="$scratch/toolchain-copy"

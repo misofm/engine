@@ -1280,6 +1280,10 @@ pub struct SessionState<A: ControlAdapter> {
     /// snapshot, and no change of it advances the revision. Every plan is prepared with its
     /// configuration.
     pub(crate) spectrum: crate::spectrum::SpectrumMonitor,
+    /// The control half of the session's output loudness meter (#2115): host-local monitor
+    /// state, never saved and in no revision, drained by [`Self::service`] and before every
+    /// `LOUDNESS` reply.
+    pub(crate) loudness: crate::loudness::LoudnessMonitor,
     /// The output meter's reader and gate (#1581 D4) until the adapter takes them: the browser's
     /// render half does. `None` from boot when the session serves the meter batches itself
     /// ([`Self::meters`]).
@@ -3913,6 +3917,8 @@ where
     /// already displaced; a committed revision's plan is never among them.
     pub fn service(&mut self) -> Result<(), CommandError> {
         self.fold_observation_pending();
+        // #2115: at most the record queue's depth of hops.
+        self.loudness.drain();
         self.synchronize_plan_epochs()?;
         self.poll_response_capture();
         self.refresh_provider_counters();
@@ -4470,6 +4476,25 @@ where
             protocol::SessionCommand::SpectrumStream(request) => {
                 let outcome = self.spectrum_stream(request);
                 return self.complete_spectrum_stream(prepared, outcome);
+            }
+            protocol::SessionCommand::Loudness(request) => {
+                let render_sample = self.shared.render_sample.load(Ordering::Acquire);
+                return match self.loudness.apply(*request, render_sample) {
+                    Ok(reply) => self
+                        .controller
+                        .complete_session_command(
+                            prepared,
+                            protocol::SessionCommandReply::Loudness(reply),
+                            &mut self.response_scratch,
+                        )
+                        .map_err(map_command_process_error),
+                    // #2115: a start while armed changes nothing.
+                    Err(crate::loudness::LoudnessActive) => self.complete_spectrum_refusal(
+                        prepared,
+                        protocol::StatusCode::ValidationFailed,
+                        "loudness.active",
+                    ),
+                };
             }
         };
         let outcome = self.spectrum_configure(request, plan);

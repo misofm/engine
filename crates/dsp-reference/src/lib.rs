@@ -18,6 +18,7 @@ mod dynamic_band;
 mod dynamic_eq;
 mod gate_expander;
 mod link_glide;
+pub mod loudness;
 mod lr4;
 mod parametric_eq;
 mod processor;

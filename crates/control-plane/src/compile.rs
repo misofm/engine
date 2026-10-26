@@ -353,6 +353,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     let replay = ReplayCache::resource_report_for_config(replay_config)
         .map_err(|_| failure(ResourceFault::Arithmetic))?;
     let output_meter = output_meter_rows()?;
+    let loudness = loudness_rows()?;
     let exchange = plan_exchange_resource_report(PlanExchangeConfig {
         retirement_capacity: retirement_capacity(),
     })
@@ -446,6 +447,15 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         output_meter[0],
         output_meter[1],
         output_meter[2],
+        // #2115: the session's output loudness meter (`loudness_rows`), exact.
+        loudness[0],
+        loudness[1],
+        loudness[2],
+        loudness[3],
+        loudness[4],
+        loudness[5],
+        loudness[6],
+        loudness[7],
         // #1583: the requested gate word of an adapter whose control plane serves the meter
         // batches (`output_peak_gate_relay`), one `Arc<AtomicU64>`; none otherwise. The delivery's
         // output-only tables allocate nothing. #1588 R1: a render-half fold's adapter keeps the
@@ -1636,6 +1646,28 @@ fn output_meter_rows() -> Result<[u64; 3], CompileFailure> {
     ])
 }
 
+/// The exact allocations of the session's output loudness meter (#2115,
+/// [`crate::loudness::loudness_meter`]): its two shared words (`Arc<AtomicU64>` each), its record
+/// queue's ring header and slots, and the analysis's ring and histograms
+/// ([`::loudness::LoudnessAnalysis::ALLOCATION_BYTES`]).
+fn loudness_rows() -> Result<[u64; 8], CompileFailure> {
+    let queue = crate::loudness::loudness_queue_payload()
+        .map_err(|_| failure(ResourceFault::Arithmetic))?;
+    let row = |bytes: usize| u64::try_from(bytes).map_err(|_| failure(ResourceFault::Platform));
+    let [ring, count, energy, range_count, range_energy] =
+        ::loudness::LoudnessAnalysis::ALLOCATION_BYTES;
+    Ok([
+        checked_layout::<SharedArcAllocation<AtomicU64>>(2)?,
+        row(queue.ring_header_bytes)?,
+        row(queue.slot_payload_bytes)?,
+        row(ring)?,
+        row(count)?,
+        row(energy)?,
+        row(range_count)?,
+        row(range_energy)?,
+    ])
+}
+
 /// The output meter's bytes, as the meter-bytes cap charges them.
 fn output_meter_bytes() -> Result<u64, CompileFailure> {
     checked_sum(&output_meter_rows()?)
@@ -2202,6 +2234,10 @@ where
     let window_frames = output_meter_window_frames(store.compiled(), window_blocks)?;
     let (output_observer, output_reader, output_gate) = host_core::output_peak_meter(window_frames)
         .map_err(|_| failure(ResourceFault::Allocation))?;
+    // #2115: the session's one output loudness meter at the session rate, made with its first
+    // plan and part of no plan; charged in the fixed rows (`loudness_rows`).
+    let (loudness_tap, loudness) = crate::loudness::loudness_meter(resources.sample_rate_hz)
+        .ok_or_else(|| failure(ResourceFault::Allocation))?;
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
     // #1577 D5: the session's one response capture channel, its server beside the plan.
     let (mut capture_client, capture_server) =
@@ -2279,6 +2315,8 @@ where
             // spectrum through them advertises them.
             provider_features: ProviderFeatures {
                 spectrum: A::SPECTRUM,
+                // #2115: every session serves the output loudness meter.
+                loudness: true,
                 // #1586 R2: `OBSERVATION_READ` and bit 15 follow the `Observe` edit, so the
                 // adapter that serves one serves both; #1589 R1: only with the queues it needs.
                 observation: A::OBSERVE_EDIT && preparer.observation_queues(),
@@ -2362,6 +2400,7 @@ where
         send_moves: None,
         spectrum,
         output_meter,
+        loudness,
         meters: session_meters,
         response_ready: None,
         warm,
@@ -2386,7 +2425,14 @@ where
     .ok_or_else(|| failure(ResourceFault::Arithmetic))?;
     Ok(CompiledChildren {
         session,
-        plan: PlanState::new(owner, shared, output_observer, output_gate, capture_server),
+        plan: PlanState::new(
+            owner,
+            shared,
+            output_observer,
+            output_gate,
+            capture_server,
+            loudness_tap,
+        ),
     })
 }
 

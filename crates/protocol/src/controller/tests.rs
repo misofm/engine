@@ -4490,6 +4490,8 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
         assert_eq!(decoded.flags.0 & (1 << 14) != 0, commands.contains(&14));
         assert_eq!(decoded.flags.0 & (1 << 16) != 0, commands.contains(&0x0010));
         assert_eq!(decoded.flags.0 & (1 << 15) != 0, commands.contains(&0x000f));
+        // #2115: bit 17 tracks `LOUDNESS`.
+        assert_eq!(decoded.flags.0 & (1 << 17) != 0, commands.contains(&0x0014));
         (commands, decoded.flags.0 & (1 << 7) != 0)
     };
     let mut endpoint = controller(8);
@@ -4497,7 +4499,7 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
         ids(&mut endpoint, 1),
         (
             vec![
-                1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x000f, 0x0010, 0x0011, 0x0012
+                1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 0x000f, 0x0010, 0x0011, 0x0012, 0x0014
             ],
             true
         )
@@ -4505,6 +4507,7 @@ fn the_capability_registry_lists_the_control_messages_and_not_the_retired_ones()
     endpoint.set_provider_features(ProviderFeatures {
         controls: false,
         spectrum: false,
+        loudness: false,
         observation: false,
         ..ProviderFeatures::ALL
     });

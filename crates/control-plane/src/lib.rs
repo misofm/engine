@@ -59,6 +59,7 @@ mod compile;
 mod control;
 mod document;
 mod error;
+mod loudness;
 mod plan;
 mod spectrum;
 

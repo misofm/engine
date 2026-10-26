@@ -20,3 +20,14 @@ export function blake3Stream(
     readonly onChunk?: (bytes: number) => void;
   },
 ): Promise<{ bytes: number; hex: string }>;
+
+/**
+ * Load the WebAssembly SIMD BLAKE3 (issue #2111) so that every later `IncrementalBlake3` and
+ * `blake3Stream` hashes in it. The default URL is the package's
+ * `dist/assets/miso-engine-v1-blake3.simd128.wasm`; pass `url` when a bundler moves it.
+ * A successful load is cached per URL for the realm; a failed one is not, so a later call retries. Resolves `"simd128"` when the module loaded, and
+ * `"javascript"` when the fetch, the compile (no WebAssembly SIMD) or the instantiation failed; it
+ * never rejects, and hashing then stays in JavaScript with the same digests. `blake3Stream` awaits
+ * it itself; call it before `new IncrementalBlake3()` to hash in the module.
+ */
+export function prepareBlake3(options?: { readonly url?: string | URL } | null): Promise<"simd128" | "javascript">;

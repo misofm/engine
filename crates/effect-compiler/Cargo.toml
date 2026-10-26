@@ -31,6 +31,11 @@ lane.workspace = true
 # The catalog lattice sweep checks the builtin strip rows alongside the effect rows: they are
 # one shipped controllable surface even though they are two descriptor tables.
 builtins.workspace = true
+# Issue #2131 gate 2: `tests/reset_lane.rs` counts `reset_lane`'s heap calls with the audited
+# global allocator's thread-scoped counters, so the test binary installs it.
+bench-support.workspace = true
+# `tests/reset_lane.rs` draws its fixture signal with the cross-target deterministic math (D6).
+math.workspace = true
 
 [features]
 default = []

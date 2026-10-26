@@ -21,15 +21,16 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     test_only_bank_meter_passes, test_only_bank_sample_peak_passes, test_only_carry_payload_bytes,
-    test_only_disable_bank_skip, test_only_meter_input_counts, test_only_meter_input_reset,
-    test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
-    test_only_reset_carry_payload_bytes, test_only_resident_input_counts,
-    test_only_resident_input_reset, test_only_route_activity_built, test_only_route_drain_calls,
-    test_only_route_drain_snapshots, test_only_route_drained_counts, test_only_route_mix_counts,
-    test_only_route_mix_reset, test_only_set_bank_meter_declined,
-    test_only_set_bank_sample_peak_declined, test_only_set_route_fold_declined,
-    test_only_set_scatter_redirect_declined, test_only_set_source_in_place_declined,
-    test_only_source_plane_counts, test_only_source_plane_reset,
+    test_only_disable_bank_skip, test_only_disable_lane_packing, test_only_meter_input_counts,
+    test_only_meter_input_reset, test_only_observation_dispatch_counts,
+    test_only_observation_dispatch_reset, test_only_reset_carry_payload_bytes,
+    test_only_resident_input_counts, test_only_resident_input_reset,
+    test_only_route_activity_built, test_only_route_drain_calls, test_only_route_drain_snapshots,
+    test_only_route_drained_counts, test_only_route_mix_counts, test_only_route_mix_reset,
+    test_only_set_bank_meter_declined, test_only_set_bank_sample_peak_declined,
+    test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
+    test_only_set_source_in_place_declined, test_only_source_plane_counts,
+    test_only_source_plane_reset,
 };
 
 use core::cell::Cell;
@@ -6264,6 +6265,59 @@ pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
         })
 }
 
+/// One pack group's bank-slot runs since bind (issue #2132), or one bank unit's that is in no
+/// pack group. Evidence, read off the render thread.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestOnlyBankSlotRuns {
+    /// The group's first runtime unit.
+    pub first_unit: u32,
+    /// Its last runtime unit, inclusive: `first_unit` for a unit in no group.
+    pub last_unit: u32,
+    /// The lanes per unit, `W`.
+    pub width: u32,
+    /// The effect slots of each unit of the group (builtin stages are not counted): one program,
+    /// so one count for every unit of a group.
+    pub effect_slots: u32,
+    /// Bank-slot runs: one per unit per effect slot executed, none for a skipped chain.
+    pub runs: u64,
+    /// Blocks the group's chains skipped whole (issue #1107), summed over its units.
+    pub skips: u64,
+}
+
+/// Every pack group's bank-slot runs (issue #2132), then, in unit order among them, every bank
+/// unit in no group that has an effect slot; empty for any other plan. Read between renders, on
+/// the render thread's side of a block boundary.
+///
+/// Not gated on `test-support`, unlike the other `test_only_` readers: the console bench reads it
+/// (`bench console --bank-report`), and building the bench with `test-support` would put that
+/// feature's render-path switches into the binary it measures. It reads counters every build
+/// keeps (each chain's round trips and whole-chain skips) and adds no render-path state.
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_slot_runs(plan: &mut PreparedRenderPlan) -> Vec<TestOnlyBankSlotRuns> {
+    let narrow = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .map_or_else(Vec::new, |executor| {
+            executor
+                .runtime
+                .bank_slot_runs()
+                .into_iter()
+                .map(
+                    |[first, last, width, effect_slots, runs, skips]| TestOnlyBankSlotRuns {
+                        first_unit: narrow(first),
+                        last_unit: narrow(last),
+                        width: narrow(width),
+                        effect_slots: narrow(effect_slots),
+                        runs,
+                        skips,
+                    },
+                )
+                .collect()
+        })
+}
+
 /// Test-only (issue #1782a): `(first unit, last unit, width)` of each pack group of a graph plan,
 /// in unit order; empty for any other plan.
 #[cfg(any(test, feature = "test-support"))]
@@ -6288,6 +6342,39 @@ pub fn test_only_swap_bank_lanes(
     plan.executor_any_mut()
         .and_then(|any| any.downcast_mut::<GraphExecutor>())
         .is_some_and(|executor| executor.runtime.swap_bank_lanes(a, b).is_ok())
+}
+
+/// Test-only (issue #1981): the lane moves the per-block packer made in a graph plan, packing or
+/// homing; zero for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_lane_moves(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| executor.runtime.lane_moves())
+}
+
+/// Test-only (issue #1981): the swaps the per-block packer attempted in a graph plan, made or
+/// refused; zero for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_bank_pack_attempts(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| executor.runtime.pack_attempts())
+}
+
+/// Test-only (issue #1981): the strips of a graph plan's pack groups not at their home lane; zero
+/// for any other plan and under the identity map.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_displaced_strips(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| executor.runtime.displaced_strips())
 }
 
 /// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
@@ -7012,6 +7099,10 @@ impl PreparedPlanExecutor for GraphExecutor {
                 block_time.jump_lengths(),
             );
         }
+        // Issue #1981: pack each pack group's running strips into fewer banks, once, before any
+        // unit runs (never between units: `observe_unit` interleaves with `execute`). One load
+        // per group when nothing is packable or displaced; nothing in a plan with no group.
+        runtime.pack_lanes();
         // Issue #936: only the units bind found to do work. An inert unit's `execute` and
         // `observe_unit` return at once, so skipping it moves no bit.
         #[cfg(any(test, feature = "test-support"))]

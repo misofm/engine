@@ -8,7 +8,7 @@ Split from #1107 (D5 item 3, 2026-10-23). The design sketch is #1107's D5 item 3
 
 ## Split (root, 2026-10-24)
 
-This issue is split in two (scope note R1): **#1782a**, here, is the lane map, the move and the fold on a displaced group; **#1981** (#1782b) is the per-block packing decision (`R`, `B`, the packable test, the differential with packing on and off, and the native and V8 console runs). Nothing in production moves a lane until #1981.
+This issue is split in two (scope note R1; #1981's decision record and evidence are in its own spec): **#1782a**, here, is the lane map, the move and the fold on a displaced group; **#1981** (#1782b) is the per-block packing decision (`R`, `B`, the packable test, the differential with packing on and off, and the native and V8 console runs). Nothing in production moves a lane until #1981.
 
 ## Smallest closable slice (whole issue; #1782a's part is recorded below)
 

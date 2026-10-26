@@ -36,9 +36,10 @@ const DEPENDENCY_FIELDS = ["artifact", "sha256"]
 const PRIMARY_ARTIFACT = "incremental-blake3.js"
 const PRIMARY_DEPENDENCY = "../hex-lower.js"
 const ALGORITHM_AUTHORITY = "BLAKE3 specification, 32-byte default output"
-const IMPLEMENTATION = "repository-owned independent JavaScript implementation"
+const IMPLEMENTATION =
+  "repository-owned independent JavaScript implementation, and the blake3 crate's WebAssembly SIMD build (hosts/blake3-web, miso-engine-v1-blake3.simd128.wasm) once prepareBlake3 loads it"
 const REASON =
-  "Canonical-PCM stems exceed one-shot digest RAM budgets, so the browser ships an incremental BLAKE3-256 implementation. No zero-shipped-code claim is made."
+  "Canonical-PCM stems exceed one-shot digest RAM budgets, so the browser ships an incremental BLAKE3-256 implementation. Issue #2111 adds the WebAssembly SIMD module for speed and keeps this JavaScript as its fallback. No zero-shipped-code claim is made."
 
 // Wall-clock budget assertions in the stem-store test files (cold-open/verify-open latency, the
 // fallback-write abort deadline) are opt-in via `--budgets`, so this gate stays hermetic and
@@ -226,7 +227,7 @@ async function runMutationLedger() {
       name: "match one access-handle contention error name",
       file: "web/stem-store/opfs-store.js",
       search:
-        '    return access?.mode === "read-only"\n  } catch {\n    // Do not inspect the error name: WebKit and Blink/Gecko disagree on it.\n    return false',
+        '    return access?.mode === "read-only"\n  } catch {\n    // Do not inspect the error name: WebKit and Blink disagree on it.\n    return false',
       replace:
         '    return access?.mode === "read-only"\n  } catch (error) {\n    if (error?.name === "NoModificationAllowedError") return false\n    throw error',
       test: "stem-store-core-v1.mjs",

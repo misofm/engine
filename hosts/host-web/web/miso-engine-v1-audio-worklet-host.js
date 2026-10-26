@@ -86,6 +86,8 @@ const SESSION_SEEK_FIELDS = ["generation", "frame"];
 const ANCHORED_SESSION_SEEK_FIELDS = ["generation", "frame", "anchorSample"];
 // Issue #1297a: an anchored source seek, a seek report request, and the report's words.
 const SEEK_AT_FIELDS = ["sourceId", "generation", "sourceFrame", "anchorSample"];
+// Issue #2116: the plan latency reply's words, as the C ABI's plan resource report carries them.
+const PLAN_LATENCY_FIELDS = ["samples", "tailKind", "tailSamples"];
 const SEEK_REPORT_FIELDS = [
   "generation", "firstSample", "sourceFrame", "cumulativeUnderrunFrames", "cumulativeHeldFrames",
 ];
@@ -350,6 +352,8 @@ class MisoAudioWorkletHost {
   #statusRead = null;
   #statusFollow = null;
   #inFlightRenderAllocations = 0;
+  /// Issue #2116: one plan latency read may be unsettled at a time.
+  #inFlightPlanLatency = 0;
   #inFlightControl = 0;
   #inFlightLease = new Set();
   #ringBlocks;
@@ -458,6 +462,8 @@ class MisoAudioWorkletHost {
       }
     } else if (pending.response === "renderAllocations") {
       this.#inFlightRenderAllocations -= 1;
+    } else if (pending.response === "planLatency") {
+      this.#inFlightPlanLatency -= 1;
     } else if (pending.response === "control") {
       this.#inFlightControl -= 1;
     } else if (pending.response === "lease" || pending.response === "sessionMap") {
@@ -619,6 +625,8 @@ class MisoAudioWorkletHost {
           ? ["tag", "requestId", "result", "generation"]
         : pending.response === "seekReport"
           ? ["tag", "requestId", "result", "report"]
+        : pending.response === "planLatency"
+          ? ["tag", "requestId", "result", "latency"]
         : ["tag", "requestId", "result"];
     const expectedTag = pending.response === "status"
       ? "miso.status.v1"
@@ -632,6 +640,8 @@ class MisoAudioWorkletHost {
                   ? "miso.session-seek.v1"
                 : pending.response === "seekReport"
                   ? "miso.seek-report.v1"
+                : pending.response === "planLatency"
+                  ? "miso.plan-latency.v1"
         : "miso.ack.v1";
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
@@ -681,10 +691,19 @@ class MisoAudioWorkletHost {
         ? hasExactFields(message.report, SEEK_REPORT_FIELDS)
           && SEEK_REPORT_FIELDS.every((field) => validU64(message.report[field]))
         : message.report === null);
+    // Issue #2116: an OK carries the latency and a tail kind of 0 (finite) or 1 (unbounded, zero
+    // samples); a refusal carries none.
+    const validPlanLatency = pending.response !== "planLatency"
+      || (message.result === RESULT_OK
+        ? hasExactFields(message.latency, PLAN_LATENCY_FIELDS)
+          && PLAN_LATENCY_FIELDS.every((field) => validU64(message.latency[field]))
+          && (message.latency.tailKind === 0n
+            || (message.latency.tailKind === 1n && message.latency.tailSamples === 0n))
+        : message.latency === null);
     if (message.tag !== expectedTag || !hasExactFields(message, expectedFields)
         || !validRequestId(message.requestId) || !validResult(message.result)
         || !validSourcePlanes || !validStatus || !validRenderAllocations || !validControl || !validSessionMap
-        || !validSessionSeek || !validSeekReport) {
+        || !validSessionSeek || !validSeekReport || !validPlanLatency) {
       this.#fail(webError(255, message.requestId));
       return;
     }
@@ -711,6 +730,7 @@ class MisoAudioWorkletHost {
     const follow = this.#statusFollow;
     this.#statusFollow = null;
     this.#inFlightRenderAllocations = 0;
+    this.#inFlightPlanLatency = 0;
     this.#inFlightControl = 0;
     for (const pending of unsettled) pending.reject(error);
     follow?.reject(error);
@@ -726,6 +746,7 @@ class MisoAudioWorkletHost {
     if (response === "sessionSeek") return this.#inFlightSessionSeeks >= 1;
     if (response === "seekReport") return this.#inFlightSeekReports.has(sourceId);
     if (response === "renderAllocations") return this.#inFlightRenderAllocations >= 1;
+    if (response === "planLatency") return this.#inFlightPlanLatency >= 1;
     if (response === "control") return this.#inFlightControl >= MAXIMUM_CONTROL_IN_FLIGHT;
     if (response === "lease" || response === "sessionMap") {
       return this.#inFlightLease.has(sourceId);
@@ -744,6 +765,8 @@ class MisoAudioWorkletHost {
       this.#inFlightSeekReports.add(sourceId);
     } else if (response === "renderAllocations") {
       this.#inFlightRenderAllocations += 1;
+    } else if (response === "planLatency") {
+      this.#inFlightPlanLatency += 1;
     } else if (response === "control") {
       this.#inFlightControl += 1;
     } else if (response === "lease" || response === "sessionMap") {
@@ -871,6 +894,16 @@ class MisoAudioWorkletHost {
       undefined,
       sourceId,
     );
+  }
+
+  /// Read the output latency and tail of the plan that renders now (issue #2116): the engine's
+  /// result and, for an OK, the words of the C ABI's plan resource report (`latency_samples`,
+  /// `tail_kind`, `tail_samples`); `null` otherwise. A rebuild's successor shows from the first
+  /// read after the block that adopts it. One read may be unsettled at a time; a second is refused
+  /// locally with `RESULT_BACKPRESSURE`. The worklet answers in its message handler, never in
+  /// `process()`.
+  planLatency() {
+    return this.#request({ tag: "miso.plan-latency.v1" }, [], "planLatency");
   }
 
   /// @internal Seek the timeline and every source to `frame` under one new `generation`, all or

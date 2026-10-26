@@ -489,6 +489,15 @@ impl<L: Lane> Default for Env<L> {
     }
 }
 
+impl<L: Lane> Env<L> {
+    /// Lane `lane`'s two words back to `+0.0`, every other lane bit-unchanged: a reset's and the
+    /// D7 recovery's envelope action for one lane.
+    fn clear_lane(&mut self, lane: usize) {
+        self.fast = replace_lane(self.fast, lane, 0.0);
+        self.slow = replace_lane(self.slow, lane, 0.0);
+    }
+}
+
 /// The three ramped parameters of one channel, packed across lanes for one frame.
 #[derive(Clone, Copy)]
 struct Params<L: Lane> {
@@ -846,22 +855,16 @@ impl<const W: usize> Ramps<W> {
         }
     }
 
-    /// The parameter ramps re-seeded from the defaults. The link weights are the shaper's to
-    /// re-seat at each lane's mode ([`Shaper::reset`]).
-    fn full_reset(&mut self) {
-        let links = self.links;
-        *self = Self::new(self.defaults);
-        self.links = links;
+    /// Lane `lane`'s parameter ramps re-seeded from its defaults, at rest. The link weights are
+    /// the shaper's to re-seat at the lane's mode ([`Shaper::reset_lane`]).
+    fn full_reset_lane(&mut self, lane: usize) {
+        self.ramps[lane] = self.defaults[lane].map(LinearRamp::fixed);
     }
 
-    /// Every ramp snapped to its target, a link glide included: it lands on the lane's mode.
-    fn snap(&mut self) {
-        for ramp in self
-            .ramps
-            .iter_mut()
-            .flatten()
-            .chain(self.links.iter_mut().flatten())
-        {
+    /// Lane `lane`'s ramps snapped to their targets, a link glide included: it lands on the
+    /// lane's mode.
+    fn snap_lane(&mut self, lane: usize) {
+        for ramp in self.ramps[lane].iter_mut().chain(&mut self.links[lane]) {
             ramp.snap();
         }
     }
@@ -998,20 +1001,33 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        self.left_env = Env::default();
-        self.right_env = Env::default();
+        for lane in 0..W {
+            self.reset_lane(lane, kind);
+        }
+    }
+
+    /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
+    /// [`reset`](Self::reset) on both channels, and nothing of any other lane. Its envelope words
+    /// clear; a full reset reseeds its ramps from its defaults and seats its link weights at rest
+    /// at its mode, a discontinuity snaps its ramps and link weights. The shaper has no clocks
+    /// and no cached bank flag (the rest claim is read from state), and `collapsed` stays as the
+    /// whole-bank reset leaves it. A lane past the width changes nothing. Bounded by one lane.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if lane >= W {
+            return;
+        }
+        self.left_env.clear_lane(lane);
+        self.right_env.clear_lane(lane);
         match kind {
             ResetKind::FullToDefaults => {
-                self.left.full_reset();
-                self.right.full_reset();
+                self.left.full_reset_lane(lane);
+                self.right.full_reset_lane(lane);
                 // Issue #1370: the lane keeps its mode, its weights at rest.
-                for lane in 0..W {
-                    self.rest_links(lane);
-                }
+                self.rest_links(lane);
             }
             ResetKind::DiscontinuityKeepParameters => {
-                self.left.snap();
-                self.right.snap();
+                self.left.snap_lane(lane);
+                self.right.snap_lane(lane);
             }
         }
     }
@@ -1184,10 +1200,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             for word in right.iter_mut().skip(lane).step_by(W) {
                 *word = 0.0;
             }
-            for env in [&mut self.left_env, &mut self.right_env] {
-                env.fast = replace_lane(env.fast, lane, 0.0);
-                env.slow = replace_lane(env.slow, lane, 0.0);
-            }
+            self.left_env.clear_lane(lane);
+            self.right_env.clear_lane(lane);
         }
         let charged = failed & self.active;
         if charged != 0 {
@@ -1975,6 +1989,9 @@ impl PreparedNativeEffect for PreparedTransientShaper {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        self.shaper.reset_lane(lane, kind);
+    }
     /// Every field is inline: this instance owns no heap (#1074).
     fn retained_bytes(&self) -> u64 {
         0

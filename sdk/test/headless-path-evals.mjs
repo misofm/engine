@@ -44,7 +44,7 @@ const wasmPath = Buffer.concat([
 ]);
 const wasm = readFileSync(wasmPath);
 assert.equal(WebAssembly.validate(wasm), true, "fixture must be a valid minimal Wasm module");
-assert.deepEqual(process.argv.slice(2), ["--test", "test/*-evals.mjs"]);
+assert.deepEqual(process.argv.slice(2), ["--test", "test/*-evals.mjs", "../hosts/host-web/tests/stem-store-hash-v1.mjs"]);
 process.exit(Number(process.env.SDK_PATH_NODE_STATUS ?? "0"));
 `, "utf8");
 await writeFile(fakeNode, `#!/usr/bin/env bash

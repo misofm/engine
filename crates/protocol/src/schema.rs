@@ -1011,6 +1011,73 @@ pub(crate) mod spectrum_stream_reply {
     };
 }
 
+/// `LOUDNESS` (`0x0014`, #2115): one operation on the session's output loudness meter.
+pub(crate) mod loudness_request {
+    use super::*;
+    /// Start `1`, read `2`, reset `3`, stop `4`.
+    pub(crate) const OP: FieldSpec = FieldSpec::req(1, Wire::U8);
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "LoudnessRequest",
+        fields: &[OP],
+    };
+}
+
+/// The `LOUDNESS` reply (#2115): the meter's state after the operation. Every level is optional,
+/// absent until it is defined, and finite at or above the -120 floor.
+pub(crate) mod loudness_reply {
+    use super::*;
+    pub(crate) const OBSERVED_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
+    pub(crate) const ARMED: FieldSpec = FieldSpec::req(2, Wire::Bool);
+    pub(crate) const INTEGRATING_SINCE: FieldSpec = FieldSpec::opt(3, Wire::U64);
+    pub(crate) const HOPS_DROPPED: FieldSpec = FieldSpec::req(4, Wire::U64);
+    pub(crate) const SANITIZED_SAMPLES: FieldSpec = FieldSpec::req(5, Wire::U64);
+    pub(crate) const GATED_BLOCK_COUNT: FieldSpec = FieldSpec::req(6, Wire::U64);
+    pub(crate) const MOMENTARY_LUFS: FieldSpec = FieldSpec::opt(7, Wire::F32);
+    pub(crate) const SHORT_TERM_LUFS: FieldSpec = FieldSpec::opt(8, Wire::F32);
+    pub(crate) const INTEGRATED_LUFS: FieldSpec = FieldSpec::opt(9, Wire::F32);
+    pub(crate) const LOUDNESS_RANGE_LU: FieldSpec = FieldSpec::opt(10, Wire::F32);
+    pub(crate) const MOMENTARY_MAX_LUFS: FieldSpec = FieldSpec::opt(11, Wire::F32);
+    pub(crate) const SHORT_TERM_MAX_LUFS: FieldSpec = FieldSpec::opt(12, Wire::F32);
+    pub(crate) const TRUE_PEAK_LEFT_DBTP: FieldSpec = FieldSpec::opt(13, Wire::F32);
+    pub(crate) const TRUE_PEAK_RIGHT_DBTP: FieldSpec = FieldSpec::opt(14, Wire::F32);
+    pub(crate) const HOP_TRUE_PEAK_LEFT_DBTP: FieldSpec = FieldSpec::opt(15, Wire::F32);
+    pub(crate) const HOP_TRUE_PEAK_RIGHT_DBTP: FieldSpec = FieldSpec::opt(16, Wire::F32);
+    /// The optional levels, in tag order.
+    pub(crate) const LEVELS: [FieldSpec; 10] = [
+        MOMENTARY_LUFS,
+        SHORT_TERM_LUFS,
+        INTEGRATED_LUFS,
+        LOUDNESS_RANGE_LU,
+        MOMENTARY_MAX_LUFS,
+        SHORT_TERM_MAX_LUFS,
+        TRUE_PEAK_LEFT_DBTP,
+        TRUE_PEAK_RIGHT_DBTP,
+        HOP_TRUE_PEAK_LEFT_DBTP,
+        HOP_TRUE_PEAK_RIGHT_DBTP,
+    ];
+    pub(crate) static SPEC: MessageSpec = MessageSpec {
+        name: "LoudnessReply",
+        fields: &[
+            OBSERVED_SAMPLE,
+            ARMED,
+            INTEGRATING_SINCE,
+            HOPS_DROPPED,
+            SANITIZED_SAMPLES,
+            GATED_BLOCK_COUNT,
+            MOMENTARY_LUFS,
+            SHORT_TERM_LUFS,
+            INTEGRATED_LUFS,
+            LOUDNESS_RANGE_LU,
+            MOMENTARY_MAX_LUFS,
+            SHORT_TERM_MAX_LUFS,
+            TRUE_PEAK_LEFT_DBTP,
+            TRUE_PEAK_RIGHT_DBTP,
+            HOP_TRUE_PEAK_LEFT_DBTP,
+            HOP_TRUE_PEAK_RIGHT_DBTP,
+        ],
+    };
+}
+
 pub(crate) mod transport_get {
     use super::MessageSpec;
     pub(crate) static SPEC: MessageSpec = MessageSpec {
@@ -2325,6 +2392,8 @@ mod tests {
             &spectrum_capture_reply::SPEC,
             &spectrum_stream_request::SPEC,
             &spectrum_stream_reply::SPEC,
+            &loudness_request::SPEC,
+            &loudness_reply::SPEC,
             &transport_get::SPEC,
             &transport_set::SPEC,
             &transport_set::RETIRED,

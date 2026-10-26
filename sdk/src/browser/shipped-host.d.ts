@@ -504,6 +504,24 @@ export interface MisoSeekReportReply {
   readonly report: MisoSeekReport | null;
 }
 
+/// The output latency and tail of the plan that renders now (issue 2116): the words of the C ABI's
+/// plan resource report. `tailKind` is `0n` for a tail of `tailSamples`, `1n` for an unbounded tail
+/// (`tailSamples` is then `0n`).
+export interface MisoPlanLatency {
+  readonly samples: bigint;
+  readonly tailKind: bigint;
+  readonly tailSamples: bigint;
+}
+
+/// The reply to one plan latency read (issue 2116): the engine's result and, for `0`, the latency;
+/// `null` otherwise.
+export interface MisoPlanLatencyReply {
+  readonly tag: "miso.plan-latency.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly latency: MisoPlanLatency | null;
+}
+
 export interface MisoAudioWorkletHost {
   readonly node: AudioWorkletNode;
   readonly backend: MisoWebBackend;
@@ -536,6 +554,10 @@ export interface MisoAudioWorkletHost {
   /// Read the allocator calls this instance made in the exports its processor calls on the render
   /// thread after boot (issue 1333 D3). Read it on each host before that host's `dispose()`.
   renderAllocationCount(): Promise<MisoRenderAllocations>;
+  /// Read the output latency and tail of the plan that renders now (issue 2116). A rebuild's
+  /// successor shows from the first read after the block that adopts it. One read may be unsettled
+  /// at a time; a second rejects locally with result `6`.
+  planLatency(): Promise<MisoPlanLatencyReply>;
   /// Send one command frame to the engine's control plane (issue 1562a D1): the frames the C ABI's
   /// `miso_engine_v1_submit_command` accepts, a `SESSION_TRANSACTION_APPLY` of `SET_CONTROL` and
   /// `Observe` edits, `OBSERVATION_READ`, `CONTROL_LIST_GET`, `CONTROL_STATE_GET`, `SESSION_SNAPSHOT_GET`, counters and capabilities.

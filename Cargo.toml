@@ -16,6 +16,7 @@ members = [
     "crates/de-esser",
     "crates/dynamic-eq",
     "crates/true-peak-limiter",
+    "crates/loudness",
     "crates/soft-clip",
     "crates/transient-shaper",
     "crates/delay",
@@ -35,6 +36,7 @@ members = [
     "crates/dsp-reference",
     "crates/conformance",
     "hosts/host-web",
+    "hosts/blake3-web",
     "tools/bench-support",
     "tools/bench",
     "tools/console-workload",
@@ -78,6 +80,7 @@ gate-expander = { path = "crates/gate-expander", version = "0.1.0" }
 de-esser = { path = "crates/de-esser", version = "0.1.0" }
 dynamic-eq = { path = "crates/dynamic-eq", version = "0.1.0" }
 true-peak-limiter = { path = "crates/true-peak-limiter", version = "0.1.0" }
+loudness = { path = "crates/loudness", version = "0.1.0" }
 soft-clip = { path = "crates/soft-clip", version = "0.1.0" }
 transient-shaper = { path = "crates/transient-shaper", version = "0.1.0" }
 delay = { path = "crates/delay", version = "0.1.0" }
@@ -98,6 +101,9 @@ wasm-gate-guest = { path = "tools/wasm-gate-guest", version = "0.1.0" }
 sha2 = { version = "=0.11.0", default-features = false }
 wide = { version = "=1.6.1", default-features = false }
 microfft = { version = "=0.6.0", default-features = false, features = ["size-2048"] }
+# Issue #2111: the browser stem-identity hash (`hosts/blake3-web`). `pure` keeps native builds C-free;
+# `wasm32_simd` turns on the crate's `v128` kernels on wasm32 (the builder adds `+simd128`).
+blake3 = { version = "=1.8.7", default-features = false, features = ["pure", "wasm32_simd"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -137,3 +143,9 @@ debug = 1
 # Benchmarks measure the shipped profile, never a separately tuned one.
 [profile.bench]
 inherits = "release"
+
+# #2115: the workspace debug job runs `crates/loudness`'s conformance tests, and the production
+# render half's generic lane/`wide` code is instantiated in this crate, where unoptimised it runs
+# about 30x slower. Only the optimisation level changes: debug assertions and overflow checks stay on.
+[profile.dev.package.loudness]
+opt-level = 3

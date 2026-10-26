@@ -232,6 +232,8 @@ pub(crate) fn bind_rack_banks_indexed(
         },
         bound_slots: Vec::new(),
         chains,
+        utilisation: BankUtilisation::default(),
+        utilisation_by_rack: RackLocation::ALL.map(|rack| (rack, BankUtilisation::default())),
     };
     let Some(width) = BankWidth::for_backend(dispatch) else {
         return Ok((Vec::new(), empty(dispatch, chains)));
@@ -454,6 +456,16 @@ pub(crate) fn bind_rack_banks_indexed(
     {
         return Err(diagnostic);
     }
+    // Issue #2132: the plan's lane use, from the plan itself.
+    let fold_targets = route_fold_targets(model);
+    let lanes = width.lanes() as usize;
+    let utilisation = BankUtilisation::of(&plan.groups, &bound_slots, lanes, &fold_targets, None);
+    let utilisation_by_rack = RackLocation::ALL.map(|rack| {
+        (
+            rack,
+            BankUtilisation::of(&plan.groups, &bound_slots, lanes, &fold_targets, Some(rack)),
+        )
+    });
     Ok((
         banks,
         GraphRackBankReport {
@@ -461,8 +473,36 @@ pub(crate) fn bind_rack_banks_indexed(
             plan,
             bound_slots,
             chains,
+            utilisation,
+            utilisation_by_rack,
         },
     ))
+}
+
+/// Strip ID -> the sorted destination IDs of its routes (issue #2132): the fold target
+/// [`BankUtilisation::of`] compares. Every route counts, muted or not, because a muted route keeps
+/// its edge.
+fn route_fold_targets(model: &session::SessionModel) -> BTreeMap<String, Vec<String>> {
+    let mut targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for route in &model.routes {
+        let source = match &route.source {
+            session::RouteSource::Track { track_id, .. } => track_id,
+            session::RouteSource::Submix { submix_id, .. } => submix_id,
+        };
+        let destination = match &route.destination {
+            session::RouteDestination::SubmixInput { submix_id } => submix_id,
+            session::RouteDestination::OutputInput { output_id } => output_id,
+        };
+        targets
+            .entry(source.as_str().to_owned())
+            .or_default()
+            .push(destination.as_str().to_owned());
+    }
+    for destinations in targets.values_mut() {
+        destinations.sort();
+        destinations.dedup();
+    }
+    targets
 }
 
 /// The mono-class tracks the trial `plan` strands (issue #971): every effect group each one sits in

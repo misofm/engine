@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.5.0
+npm install @misofm/engine@0.6.0
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -359,6 +359,11 @@ host's next render sample, and calculates `frame = sourceFrame + (atSample - fir
 frames rendered since. The frame does not move while the context is suspended. You do not need
 the meters to calculate a position.
 
+`engine.planLatency()` resolves with `{ samples, tailSamples }` on both engines: the output latency
+and tail of the plan that renders now, in samples, as the C ABI's plan resource report gives them
+(`tailSamples` is `null` for an unbounded tail). Use it to align meters, the playhead and visuals
+with the audio. After a rebuild, it changes at the block that adopts the new plan.
+
 `engine.play()` resumes the context and then sets the transport to `playing`. `engine.stop()`
 suspends the context and then sets the transport to `stopped`. Each call starts the context step
 at once, and sets the transport after that step settles, in call order. Each resolves with the
@@ -485,13 +490,21 @@ export async function localStem(file: File) {
 
 Call `pump.pumpUntilFull()` before `context.resume()` and again as the ring drains, and pass the
 pump to `engine.seek(frame, { producers: [pump] })`: it repositions every ring it writes after
-the engine accepted the seek. The pump holds one read-ahead window per source (`windowFrames`,
-4096 by default), never the whole stem. `readWavHeader` refuses with a `WavFormatError`, whose
+the engine accepted the seek. The pump holds at most two windows per source, the resident one and
+the next one read ahead (`windowFrames`, 4096 by default), never the whole stem; it reads the
+sources' windows concurrently, at most eight at a time. `readWavHeader` refuses with a `WavFormatError`, whose
 `code` names the cause: a float WAV (`wav.float_unsupported`: export 16- or 24-bit PCM), more than
 two channels (`wav.channels`), and a rate other than 44.1, 48, 88.2 or 96 kHz (`wav.sample_rate`).
 A `data` size larger than the file is read to the file's end. The pump and the hash are the
 engine's own code, copied into the package unchanged; `IncrementalBlake3` is the same hash for
 bytes you already hold.
+
+The hash runs in a WebAssembly SIMD module, `dist/assets/miso-engine-v1-blake3.simd128.wasm` (about 1.5 GB/s per core in Chromium, against about 65 MB/s for the JavaScript fallback).
+`blake3Stream` loads it itself; call `await prepareBlake3()` once before `new IncrementalBlake3()`
+to hash in it, and pass `prepareBlake3({ url })` if your bundler moves the file. It resolves
+`"simd128"`, or `"javascript"` when the module cannot load (no WebAssembly SIMD, a failed fetch);
+it never rejects, and the digests are the same either way. To hash many stems at once, run one
+`blake3Stream` per Worker: each Worker loads its own copy of the module.
 
 ## Change a mix and read the core's answer
 
@@ -682,6 +695,7 @@ instead of growing with stem duration.
 | Live EQ/filter response | `queryTrackResponse()` or `subscribeTrackResponse()`. `capturedSample` marks capture of applied target state at a block boundary. The curve is a stationary EQ/input-filter subtotal; fader, pan, routing, and unsupported processors are excluded. |
 | Spectrum | Browser `querySpectrum()`; headless `armSpectrum()`, explicit renders, then `readSpectrum()`. Each result covers 2,048 captured PCM samples, `[capturedSample, endSample)`, with dBFS bins and a graph-wide source-underrun flag. |
 | Continuous spectrum | `subscribeSpectrum()` retains one managed stream. Metadata carries the capture span, hop, epochs, drops, and smoothing history. The default 100 ms power smoothing includes earlier windows; set `smoothingMs: 0` for unsmoothed analysis. |
+| Master loudness | `subscribeLoudness()` starts the session's one output loudness meter and returns a handle with `readLatest()`, `pump()`, `reset()` and `close()`. A `LoudnessReading` gives BS.1770-5 momentary, short-term and integrated LUFS, the EBU Tech 3342 range in LU, their maxima, and the Annex-2 true peak in dBTP of the rendered master pair; `observedSample` ends the last 10 ms hop it covers. |
 | Render telemetry | Browser `subscribeTelemetry()` reports CPU/deadline measurements. It has no audio sample span. |
 
 For spectrum, pass either `spectrum` for one boundary or `spectrumCollection` for several
@@ -710,6 +724,19 @@ again, up to `requestDeadlineMs` and at most 8 resends (one render drains the ta
 another writer keeps refilling it), and then ends in typed `backpressure`. Resident effect taps
 need no boot option: every plan binds every declared tap (issue #1590).
 
+`subscribeLoudness()` measures the rendered master pair. Momentary loudness (M) is the last 400 ms,
+short-term (S) the last 3 s, integrated (I) the gated mean since the last start or reset, and the
+loudness range (LRA) the spread of the short-term values since then; true peak (TP) is the 4x
+oversampled peak per channel. The engine updates the meter every 10 ms hop; the handle reads it about
+every 100 ms (the browser on a timer, the headless engine at each `pump()` between your renders).
+A level is absent until its window holds enough audio, and silence reads -120. `reset()` restarts
+I, LRA, the maxima and TP from the next hop boundary (`integratingSince`); M and S run on.
+`hopsDropped` counts the hops the engine lost over the session's whole life: subtract two readings
+to see a loss between them. The meter is one per session: a second `subscribeLoudness()` while a
+handle is open is refused with `MisoEngineError` (`diagnosticCode` `loudness.active`). After
+`close()` the handle keeps its last reading and refuses `pump()` and `reset()`. A timed read that
+fails goes to the request's `onError`; the readings stop advancing until a read lands.
+
 Use the recorded sample spans to compare observations with the first block after a transaction. A window crossing
 the command boundary can contain both states. A later window may still contain filter settling
 or smoothing history. Response subscriptions suppress unchanged state and retain its original
@@ -737,8 +764,9 @@ resolution, transport-byte verification, decoding, and seek coordination belong 
 There is no implicit sample-rate conversion. The control protocol carries commands, never PCM.
 
 `BUNDLED_ENGINE_ASSETS` locates the installed release's assets. Its
-`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the six engine
-artifacts, including Wasm, host, processor, host declaration, metadata, and ABI layout.
+`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the seven engine
+artifacts: the engine Wasm, host, processor, host declaration, metadata, ABI layout, and the BLAKE3
+Wasm.
 `loadBundledEngineAsset()` verifies the Wasm length and digest before compilation; boot checks
 the exported ABI version. Browser package-relative URLs bind deployment locations but do not
 constitute runtime digest verification. Custom delivery must preserve the matching artifact set;
@@ -746,7 +774,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.5.0 release record](https://github.com/misofm/engine/issues/2110) contains the accepted artifact
+[0.6.0 release record](https://github.com/misofm/engine/issues/2121) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -772,6 +800,24 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.5.0
+
+0.6.0 adds to the 0.5.0 API and removes nothing.
+
+- New: `prepareBlake3()` (`./browser`) loads the WebAssembly SIMD BLAKE3 module before
+  `new IncrementalBlake3()`; it resolves `"simd128"` or `"javascript"` and never rejects.
+- New: `engine.planLatency()` resolves `{ samples, tailSamples }` on both engines.
+- Changed: `blake3Stream` and `IncrementalBlake3` hash in WebAssembly SIMD when the module loads;
+  the JavaScript fallback allocates nothing per chunk. The digests do not change.
+- Changed: `CanonicalPcmPump` reads windows concurrently (at most eight in flight) and reads one
+  window ahead per source.
+- Fixed: a seek during a window read no longer commits the pre-seek window at the post-seek frame.
+- Unchanged: a window read shorter than its declared range is refused, as before, with
+  `RangeError("PCM window is truncated")`, and the pump calls `onError` once.
+- The delivery closure has a seventh file, `miso-engine-v1-blake3.simd128.wasm` (in `dist/assets`).
+  Custom delivery must serve it, or pass `prepareBlake3({ url })`; without it the hash falls back
+  to JavaScript.
 
 ## Upgrading from 0.4.3
 
