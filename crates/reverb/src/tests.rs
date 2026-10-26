@@ -252,8 +252,12 @@ const ORACLE_SECONDS: f64 = 0.75;
 /// a rounding committed at one sample is not amplified: it decays with the tail. The difference
 /// is then a sum of `O(u)` errors weighted by the decaying response, of the order of `u` times the
 /// wet level times the number of trips a word has made, plus a slow `O(n u)` drift of the pole
-/// positions times the response envelope. At these settings (decay 1.8 s, 0.75 s rendered) the
-/// measured worst is `1.4e-7` (about `2.4 u`) of the input peak; the bound is about seven times
+/// positions times the response envelope. The error does not grow with the line count: a slot
+/// adds one butterfly stage per doubling (one rounding of `u` relative per word), the output and
+/// gain words carry one more rounding each (`S = fl32(1 / sqrt 32)`, `c_j = fl32(g_j / sqrt 32)`),
+/// and an orthogonal mix of more independent per-line errors keeps their `l2` sum, not their
+/// count. At these settings (decay 1.8 s, 0.75 s rendered) the measured worst is `1.39e-7` (about
+/// `2.3 u`) of the input peak with 32 lines (`1.4e-7` with 16); the bound is about seven times
 /// that. Any algorithmic departure (a wrong tap, sign, gain, filter coefficient, matrix entry,
 /// output tap or mix law) gives an error of the order of the wet signal, `1e-3` or more.
 ///
@@ -281,6 +285,8 @@ fn kernel_matches_the_f64_oracle() {
         dark[DIFFUSION] = 0.2;
         cases.push((sample_rate, dark));
     }
+    // The matrix normalisation constant is `1 / sqrt 32` to the last `f64` bit.
+    assert_eq!(INV_SQRT_LINES, 1.0 / (LINES as f64).sqrt());
     let mut worst = 0.0_f64;
     for (sample_rate, values) in cases {
         let mut effect = prepare_at(&values, sample_rate);
@@ -411,8 +417,9 @@ fn common_factor(lengths: &[u32; LINES]) -> Option<(usize, usize)> {
         .find(|&(i, j)| gcd(lengths[i], lengths[j]) != 1)
 }
 
-/// The sixteen line lengths are pairwise coprime (the Schroeder/Jot criterion: no two lines
-/// share a mode series) at every `size` an event or an initial value can set, at all four rates.
+/// The thirty-two line lengths are pairwise coprime (all 496 pairs; the Schroeder/Jot criterion:
+/// no two lines share a mode series) at every `size` an event or an initial value can set, at all
+/// four rates.
 ///
 /// Exhaustive, not a sweep. The control is any `f32` in `[0.25, 2.0]` (`parameter_value_valid`),
 /// and each length is a non-decreasing step function of it: widening to `f64` is exact,

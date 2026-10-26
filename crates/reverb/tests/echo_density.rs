@@ -66,8 +66,9 @@ fn mixing_time(eta: &[(f64, f64)]) -> f64 {
 /// echo density reaches 0.9 by 150 ms at diffusion 0.7 and by 200 ms at diffusion 0 (48 kHz,
 /// size 1, decay 1.8 s, damping 6 kHz, pre-delay 0, other controls at their defaults; one second
 /// rendered). At diffusion 0 the allpasses are pure delays, so that setting measures the feedback
-/// matrix alone. The note's `f64` model measured 104 ms and 193 ms; a Gaussian-noise reference's
-/// 50 ms mean never falls below 0.946.
+/// matrix alone. The note's `f64` model of the 32-line design measured 60 ms and 130 ms (the
+/// 16-line design 104 ms and 193 ms); a Gaussian-noise reference's 50 ms mean never falls below
+/// 0.946.
 ///
 /// Red for: a feedback matrix or slot permutation that under-mixes (the note's candidates B, C,
 /// Householder-16 and N = 8 take 228-341 ms at diffusion 0), a butterfly stage dropped or

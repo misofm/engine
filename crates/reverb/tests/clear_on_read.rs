@@ -12,27 +12,27 @@ const RATE: u32 = 48_000;
 
 /// The impulse reaches the lines through the four diffusers, pure delays at diffusion 0:
 /// `229 + 173 + 613 + 449` samples plus the three pipeline registers. It is written into lines
-/// 0-7 at this sample.
+/// 0-15 (the left channel's lines) at this sample.
 const INJECTED: usize = 1_467;
 
 /// Line 0's length at size 0.25 and 2.0 at 48 kHz (`Prime(953 s + 0.5)`); line 0 has the
 /// smallest base, so `LONG_0 - SHORT_0` is the smallest size-2-minus-size-0.25 difference of the
-/// sixteen lines.
+/// thirty-two lines.
 const SHORT_0: usize = 239;
 const LONG_0: usize = 1_907;
 
 /// The crossfade length.
 const FADE: usize = 128;
 
-/// The size decrease (2 to 0.25): its crossfade, `[DOWN, DOWN + 128)`, is when lines 0, 1 and 2
-/// (short lengths 239, 293, 359) first read the impulse, through the new tap. `DOWN - 239` is
+/// The size decrease (2 to 0.25): its crossfade, `[DOWN, DOWN + 128)`, is when lines 0-4 (short
+/// lengths 239, 263, 293, 317 and 353) first read the impulse, through the new tap. `DOWN - 239` is
 /// the impulse sample, so every word the decrease skips (written in `[DOWN + 128 - long_i,
 /// DOWN - short_i)`) predates the impulse and is `+0.0`.
 const DOWN: usize = INJECTED + SHORT_0;
 
 /// The size increase (0.25 to 2), after the decrease's crossfade and early enough that lines
-/// 0-2 would replay the impulse word (at `INJECTED + long_i`: 3,374, 3,808 and 4,328) inside
-/// [`window`].
+/// 0-4 would replay the impulse word (at `INJECTED + long_i`: 3,374, 3,596, 3,800, 4,024 and
+/// 4,286) inside [`window`].
 const UP: usize = 2_600;
 
 /// The samples after the increase's crossfade where every tap reads a word that an earlier tap
@@ -55,7 +55,7 @@ fn span(sample: usize, value: f32) -> PreparedAutomationSpan {
 
 /// With clear-on-read, every ring word is read into the loop at most once. The probe: an impulse
 /// at size 2 and diffusion 0, a size decrease to 0.25 whose crossfade's new taps read the impulse
-/// on lines 0-2, then a size increase back to 2 at sample 2,600. For 1,668 samples after the
+/// on lines 0-4, then a size increase back to 2 at sample 2,600. For 1,668 samples after the
 /// increase's crossfade every tap of every line reads a word that was read before (by the steady
 /// short taps, by the decrease's new taps, or by the increase's old taps in its crossfade), or
 /// one written before the impulse arrived. Those words were cleared, so every tap reads `+0.0`

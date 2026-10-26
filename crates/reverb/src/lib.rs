@@ -1,16 +1,18 @@
-//! `miso.reverb`: a 16-line feedback-delay-network stereo reverb (#2114).
+//! `miso.reverb`: a 32-line feedback-delay-network stereo reverb (#2114).
 //!
 //! # Shape
 //!
 //! The design is `dsp-research/reverb.md` ("Algorithm and equations", R1-R12): a pre-delay per
 //! channel, four pipelined Schroeder allpass diffusers per channel (one 8-lane group, outside the
-//! loop), sixteen delay lines read with clear-on-read taps, a TPT one-pole low-pass (damping) and
-//! a TPT first-order high-pass (low cut) per slot, the feedback matrix `diag(g) (H16 / 4) P` as a
-//! fixed four-stage butterfly, two output taps, and an explicit smoothed M/S width matrix.
+//! loop), thirty-two delay lines read with clear-on-read taps, a TPT one-pole low-pass (damping)
+//! and a TPT first-order high-pass (low cut) per slot, the feedback matrix
+//! `diag(g) (H32 / sqrt 32) P` as a fixed five-stage butterfly (the `1 / sqrt 32` folded into each
+//! line gain), two output taps scaled by `fl32(1 / sqrt 32)`, and an explicit smoothed M/S width
+//! matrix.
 //!
-//! The kernel (`PreparedReverb::render`) is one body generic over [`lane::Lane`]: the sixteen
-//! slot values are `16 / W` vectors, the diffusers `8 / W`. The butterfly runs its stages in the
-//! fixed order 3, 2, 1, 0 and re-lays the vectors out through a 16-word stack scratch whenever a
+//! The kernel (`PreparedReverb::render`) is one body generic over [`lane::Lane`]: the thirty-two
+//! slot values are `32 / W` vectors, the diffusers `8 / W`. The butterfly runs its stages in the
+//! fixed order 4, 3, 2, 1, 0 and re-lays the vectors out through a 32-word stack scratch whenever a
 //! stage's bit is a lane bit, so `W = 1`, `4` and `8` compute the same `f32` values (a re-layout
 //! moves words and rounds nothing). Ring reads and writes are scalar per line, because every line
 //! has its own length; the slot permutation `P` is applied at the read for free. Production runs
@@ -22,7 +24,7 @@
 //!
 //! * Multiply-add is `Lane::fma`, two roundings on every target; never the standard library's
 //!   fused form.
-//! * Denormals: `lane::flush` on the 16 line writes, the 32 filter states and the 8 diffuser
+//! * Denormals: `lane::flush` on the 32 line writes, the 64 filter states and the 8 diffuser
 //!   writes, once per sample (D7). Nothing else is classified per value.
 //! * Finiteness: once per block over both outputs, every ring's write window, the filter states
 //!   and the pipeline registers. A failing block zeroes both outputs, drops all signal history
@@ -53,7 +55,10 @@ mod tests;
 pub use tail::tail_bound_at;
 
 /// Number of feedback lines.
-pub const LINES: usize = 16;
+pub const LINES: usize = 32;
+/// Butterfly stages: `log2(LINES)`.
+const STAGES: usize = LINES.trailing_zeros() as usize;
+const _: () = assert!(1 << STAGES == LINES);
 /// Number of input diffusers: four per channel.
 const DIFFUSERS: usize = 8;
 const PARAMETER_COUNT: usize = 8;
@@ -64,10 +69,32 @@ const TRANSITION_SAMPLES: u32 = 128;
 /// Ring words beyond the longest tap, as the note's capacity rule (`D_i(2, fs) + 128`).
 const RING_SLACK: u32 = 128;
 
-/// Line base lengths at 48 kHz and size 1 (the note's `BASE`, line 0..15).
+/// Line base lengths at 48 kHz and size 1 (the note's `BASE`, line 0..31): `RANKED[k] =
+/// Prime(floor(960 * 4.5^(k / 31) + 1/2))`, line `i < 16` takes `RANKED[2 i]` and line `16 + i`
+/// takes `RANKED[2 i + 1]` (R3).
 const BASE: [u32; LINES] = [
-    953, 1171, 1433, 1753, 2141, 2617, 3203, 3907, 1061, 1297, 1583, 1933, 2371, 2897, 3533, 4327,
+    953, 1061, 1163, 1283, 1409, 1559, 1721, 1889, 2087, 2297, 2531, 2791, 3079, 3389, 3733, 4111,
+    1009, 1109, 1223, 1361, 1487, 1637, 1801, 1987, 2179, 2411, 2659, 2927, 3229, 3557, 3919, 4327,
 ];
+
+/// The shortest and the longest base length.
+const BASE_MIN: u32 = const_min_max(&BASE).0;
+const BASE_MAX: u32 = const_min_max(&BASE).1;
+
+const fn const_min_max(values: &[u32; LINES]) -> (u32, u32) {
+    let (mut low, mut high) = (values[0], values[0]);
+    let mut i = 1;
+    while i < LINES {
+        if values[i] < low {
+            low = values[i];
+        }
+        if values[i] > high {
+            high = values[i];
+        }
+        i += 1;
+    }
+    (low, high)
+}
 
 /// Diffuser lengths at 48 kHz: lanes 0-3 are the left channel's stages 0-3, lanes 4-7 the right's.
 const DIFFUSER_BASE: [u32; DIFFUSERS] = [229, 173, 613, 449, 233, 179, 617, 457];
@@ -75,16 +102,36 @@ const DIFFUSER_BASE: [u32; DIFFUSERS] = [229, 173, 613, 449, 233, 179, 617, 457]
 /// Input gain per line (the note's `B`, exact).
 const INPUT_GAIN: f32 = 0.5;
 
+/// `1 / sqrt(32)` in `f64`, the matrix normalisation.
+const INV_SQRT_LINES: f64 = 0.176_776_695_296_636_87;
+
+/// The output scale `S = fl32(1 / sqrt 32)` (R8): with `B = 1/2` it keeps the 16-line design's wet
+/// level. Not a power of two, so it rounds once.
+const OUTPUT_SCALE: f32 = INV_SQRT_LINES as f32;
+
 /// Butterfly output index the left output taps (R8). A named constant so the pair can change
 /// without touching the kernel.
 const OUTPUT_LEFT: usize = 14;
 /// Butterfly output index the right output taps (R8).
 const OUTPUT_RIGHT: usize = 15;
 
-/// The slot a line feeds: `pi(i) = (14 - i) mod 16`, an involution (R4).
-const fn slot_of_line(line: usize) -> usize {
-    (14 + LINES - line) % LINES
+/// The line slot `j` holds: `pi(j) = (29 j + 31) mod 32` (R4).
+const fn line_of_slot(slot: usize) -> usize {
+    (29 * slot + 31) % LINES
 }
+
+/// The slot a line feeds: `pi^-1(i) = (21 i + 21) mod 32` (`21 = 29^-1 mod 32`).
+const fn slot_of_line(line: usize) -> usize {
+    (21 * line + 21) % LINES
+}
+
+const _: () = {
+    let mut j = 0;
+    while j < LINES {
+        assert!(slot_of_line(line_of_slot(j)) == j);
+        j += 1;
+    }
+};
 
 /// `0.45 * 44_100`, the damping cap shared with the delay (#1374).
 const DAMPING_MAX_CUTOFF_HZ: f64 = 19_845.0;
@@ -362,7 +409,7 @@ const fn pre_delay_capacity(sample_rate: u32) -> u32 {
 }
 
 /// Words of the common state header (see `state.rs`).
-const COMMON_HEADER_WORDS: usize = 180;
+const COMMON_HEADER_WORDS: usize = 324;
 /// Words of one channel's state header (see `state.rs`).
 const LANE_HEADER_WORDS: usize = 8;
 
@@ -434,7 +481,7 @@ const fn geometry(sample_rate: u32) -> Geometry {
     }
 }
 
-/// State payload sizes at `sample_rate`: the common section holds the sixteen line rings, each
+/// State payload sizes at `sample_rate`: the common section holds the thirty-two line rings, each
 /// channel section its pre-delay ring and its four diffuser rings.
 const fn state_sizes(sample_rate: u32) -> StatePayloadSizes {
     let g = geometry(sample_rate);
@@ -583,7 +630,7 @@ fn line_length(line: usize, size: f32, sample_rate: u32, sieve: &Sieve) -> Optio
     sieve.nearest_prime(scaled as usize)
 }
 
-/// All sixteen line lengths at `size`.
+/// All thirty-two line lengths at `size`.
 fn line_lengths(size: f32, sample_rate: u32, sieve: &Sieve) -> Option<[u32; LINES]> {
     let mut lengths = [0; LINES];
     for (line, length) in lengths.iter_mut().enumerate() {
@@ -592,7 +639,8 @@ fn line_lengths(size: f32, sample_rate: u32, sieve: &Sieve) -> Option<[u32; LINE
     Some(lengths)
 }
 
-/// The per-line gains `c_i = fl32(g_i) / 4`, `g_i = exp(-3 ln(10) D_i / (fs T))`.
+/// The per-line gains `c_i = fl32(g_i / sqrt 32)`, `g_i = exp(-3 ln(10) D_i / (fs T))`, `g_i` and
+/// the quotient in `f64`, rounded once (D2).
 fn line_gains(lengths: &[u32; LINES], decay_ms: f32, sample_rate: u32) -> [f32; LINES] {
     let t = f64::from(decay_ms) / 1000.0;
     let mut gains = [0.0; LINES];
@@ -600,7 +648,7 @@ fn line_gains(lengths: &[u32; LINES], decay_ms: f32, sample_rate: u32) -> [f32; 
         let g = math::exp(
             -3.0 * core::f64::consts::LN_10 * f64::from(*length) / (f64::from(sample_rate) * t),
         );
-        *gain = (g as f32) * 0.25;
+        *gain = (g / (LINES as f64).sqrt()) as f32;
     }
     gains
 }
@@ -664,8 +712,8 @@ impl Design {
     }
 }
 
-/// The sixteen per-line gain ramps: one shared length, because every event that moves one of
-/// them (`decay_ms`, `size`) moves all sixteen. Same law as [`LinearRamp`] elementwise.
+/// The thirty-two per-line gain ramps: one shared length, because every event that moves one of
+/// them (`decay_ms`, `size`) moves all of them. Same law as [`LinearRamp`] elementwise.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct GainRamps {
     current: [f32; LINES],
@@ -738,7 +786,7 @@ pub struct PreparedReverb {
     /// `geometry.history_cap`. A tap at delay `d` reads `+0.0` unless `d <= history`.
     history: u32,
 
-    /// The sixteen line rings, concatenated.
+    /// The thirty-two line rings, concatenated.
     lines: Box<[f32]>,
     line_cursor: [u32; LINES],
     line_active: [u32; LINES],
@@ -797,7 +845,7 @@ impl NativeEffectFactory for ReverbFactory {
         for member in request.requests.iter().copied() {
             let _ = validate_inputs(member)?;
         }
-        // The reverb's SIMD runs across its own sixteen lines, inside one instance; there is no
+        // The reverb's SIMD runs across its own thirty-two lines, inside one instance; there is no
         // cross-instance bank kernel. Every validated request stays an ordered scalar member, and
         // a padded request is declined like every other one (decision 12, "Eligibility").
         Ok(None)
@@ -849,8 +897,8 @@ fn prepare_reverb(
     let (metadata, targets) = validate_inputs(request)?;
     let sample_rate = metadata.sample_rate;
     let geometry = geometry(sample_rate);
-    let largest = (f64::from(BASE[LINES - 1]) * 2.0 * f64::from(sample_rate) / 48_000.0 + 0.5)
-        .floor() as usize;
+    let largest =
+        (f64::from(BASE_MAX) * 2.0 * f64::from(sample_rate) / 48_000.0 + 0.5).floor() as usize;
     let sieve = Sieve::new(largest + 2 * PRIME_SEARCH as usize);
     let min_lengths = line_lengths(0.25, sample_rate, &sieve).ok_or(resource_error())?;
     let max_lengths = line_lengths(2.0, sample_rate, &sieve).ok_or(resource_error())?;

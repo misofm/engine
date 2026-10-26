@@ -16,14 +16,25 @@ certificate for the rate, the rate-follower walk for the filter states.
 
 | rate | `T` = `tail_every_peak` = `R` (samples) | seconds | certified `delta` | `a = 3 ln 10 / (fs T60)` | `delta / a` |
 |---|---|---|---|---|---|
-| 44.1 kHz | 17,114,518 | 388.1 | 7.5623e-6 | 7.8319e-6 | 0.966 |
-| 48 kHz | 18,656,990 | 388.7 | 6.9416e-6 | 7.1956e-6 | 0.965 |
-| 88.2 kHz | 34,595,085 | 392.2 | 3.7613e-6 | 3.9160e-6 | 0.961 |
-| 96 kHz | 37,711,916 | 392.8 | 3.4527e-6 | 3.5978e-6 | 0.960 |
+| 44.1 kHz | 17,160,903 | 389.1 | 7.5620e-6 | 7.8319e-6 | 0.966 |
+| 48 kHz | 18,707,536 | 389.7 | 6.9414e-6 | 7.1956e-6 | 0.965 |
+| 88.2 kHz | 34,688,379 | 393.3 | 3.7612e-6 | 3.9160e-6 | 0.960 |
+| 96 kHz | 37,813,549 | 393.9 | 3.4526e-6 | 3.5978e-6 | 0.960 |
 
 `rest` is `RestBound::Bounded` with both peaks equal to `R` (the bound does not depend on the
 input). `composition` is `CompositionBound::Unstated` (OQ1). The settled loop decays at least as
 fast as `r = 1 - delta` per sample; `a` is the designed rate at decay 20 s (`r0 = e^(-a)`).
+
+The network has `N_L = 32` lines (#2114 attempt 5). Against the 16-line design the bound moved by
+0.1-0.3 % (`T` 17,114,518 / 18,656,990 / 34,595,085 / 37,711,916 before): the shortest line, and so
+`g_max`, `D_min` and the worst design, are unchanged (base 953, line 0); the rate pays one more
+rounding (eight, S3); and the start value `K` grows with the twice-as-many ring words.
+
+**State and ring bytes.** The common section is `(324 + sum_i (D_i(2, fs) + 128)) * 4` bytes: a
+324-word header and the 32 line rings (`D_i(2, fs) + 128` words each). Ring words 136,124 /
+147,834 / 268,248 / 291,576 at 44.1 / 48 / 88.2 / 96 kHz; common section 545,792 / 592,632 /
+1,074,288 / 1,167,600 bytes, each channel section 50,108 / 54,492 / 99,672 / 108,436 bytes
+(unchanged: pre-delay and diffusers). The 16-line design held 586,960 ring bytes at 96 kHz.
 
 ## Why the bound does not start from the input peak
 
@@ -35,13 +46,13 @@ high-pass state at 500 Hz, ramps to 20 Hz, flips the input sign and releases for
 repeated. Its output energy is 1.63 times its input energy. The loop's margin per trip is only
 `1 - g_max^2 = 0.34 %` (`g_max = 0.99828`, decay 20 s, size 0.25, the shortest line), so any filter
 `l2` gain above 1.0017 breaks the argument, and an `l-inf` argument fails on the matrix (row sum
-`4 g_max`). No peak bound linear in the input `X` is proved under every history, and none is
+`sqrt(32) g_max`). No peak bound linear in the input `X` is proved under every history, and none is
 stated. The bound below starts instead from the block check, which holds under every history.
 
 ## B. The block invariant (every history, every input)
 
 The block check (`PreparedReverb::block_is_finite`) tests, once per block, both outputs, every word
-each ring received in the block (16 lines, 8 diffusers, 2 pre-delay rings), the 32 filter states
+each ring received in the block (32 lines, 8 diffusers, 2 pre-delay rings), the 64 filter states
 and the 8 pipeline registers against `|x| < L = BLOCK_LIMIT = 1e30`. A failing block zeroes both
 outputs, zeroes the filter states and registers and sets `history = 0`. A tap at delay `d` reads a
 word only when `d <= history`, which is a word written after the last drop. Call such a word
@@ -62,7 +73,7 @@ A restored payload is assumed to be a snapshot this engine wrote at a block boun
 assumption #1374 makes), so it also satisfies 2.
 
 **Settle.** Control events land at block starts before `N`. Every ramp (the five coefficient ramps
-and the sixteen gain ramps) takes 64 samples. A line or pre-delay crossfade takes 128, and one in
+and the thirty-two gain ramps) takes 64 samples. A line or pre-delay crossfade takes 128, and one in
 flight plus the one queued behind it end within 256 (`kernel.rs` starts the queued fade on the
 first sample after the running one ends). So from `t0 = N + 256` every coefficient is exactly its
 design, every tap is one ring word at a fixed `D_i`, and the pre-delay reads one word at a fixed
@@ -91,23 +102,27 @@ Psi_j  = Gamma_2c^2 theta_1c a_j^2 + theta_2c b_j^2
 `k = D_i`, weight 1; clear-on-read and the history rule make an unread word count once), `a_j`,
 `b_j` are slot `j`'s low-pass and high-pass states, and the constants are S2-S3's. One sample
 shifts every pending word one step closer to its read (weight times `r^2`), removes the read word,
-and adds the sixteen new words with weight `r^(-2 (D_i - 1))`. So `Phi[n+1] <= r^2 Phi[n]`
+and adds the thirty-two new words with weight `r^(-2 (D_i - 1))`. So `Phi[n+1] <= r^2 Phi[n]`
 (no injection) follows from
 
 ```text
 (*)  sum_i r^(-2 (D_i - 1)) u_i^2 + gamma_c^2 sum_j Psi'_j <= r^2 (||t||^2 + gamma_c^2 sum_j Psi_j)
 ```
 
-`u_i = c_i w_i` with `w = H16 F` and `||H16 F|| = 4 ||F||`, so the left ring part is at most
-`r^2 gamma^2 ||F||^2` with `gamma = max_i g_i r^(-D_i)`. Every design's gain is
-`g_i = fl32(e^(-a_T D_i)) <= e^(-a D_i) (1 + u)(1 + EVAL)` (`a_T >= a`, the decay at most 20 s), so
+`u_i = c_i w_i` with `w = H32 F` and `||H32 F|| = sqrt(32) ||F||` (the unnormalised Hadamard
+matrix, `H32^T H32 = 32 I`), so the left ring part is at most `r^2 gamma^2 ||F||^2` with
+`gamma = max_i g_i r^(-D_i)`. The kernel folds the normalisation into the gain word:
+`c_i = fl32(g_i / sqrt 32)`, `g_i = e^(-a_T D_i)` and the quotient in `f64`, rounded once to `f32`.
+So `sqrt(32) c_i <= e^(-a D_i) (1 + u)(1 + EVAL)` (`a_T >= a`, the decay at most 20 s; `EVAL`
+covers the `f64` `exp`, `sqrt` and division, a few `2^-53` each), so
 for `r > e^(-a)` the maximum is at the shortest line, `D_min` (line 0 at size 0.25: 223, 239, 439,
 479 samples). `(*)` then needs, per slot, the `r`-scaled dissipation of the filter cascade with gain
 `1 / gamma`.
 
 At the start, `sqrt(Phi[t0]) <= L sqrt(sum_i (r^(-2 D_i) - 1) / (r^(-2) - 1)) + 4 sqrt(Gamma_2c^2
-theta_1c S_a^2 + theta_2c S_b^2)`, the `D_i` at size 2 and the `theta` at their maxima: 3.5e32 at
-48 kHz, 5.0e32 at 96 kHz.
+theta_1c S_a^2 + theta_2c S_b^2)` (the `4` is `sqrt(32)` now, the `l2` norm over 32 slots of a
+per-slot bound), the `D_i` at size 2 and the `theta` at their maxima: 5.0e32 at 48 kHz, 7.0e32 at
+96 kHz (3.5e32 and 5.0e32 with 16 lines).
 
 ## S2. The r-scaled TPT section
 
@@ -158,9 +173,9 @@ and the rounding brings it back to at most `r`. Every coefficient rises with `g`
 taken at the top of each range with `theta` at its range's extremes: `lambda_1 = 7.2e-7` (12.1u),
 `lambda_2 = 3.6e-7` (6.0u) at 48 kHz.
 
-**The loop path.** The butterfly's four stages each round every word by at most `u` in `l2`
-(`(1 + u)^4`), the gain product and the injection add round once each, and the gain word's `f32`
-rounding is one more: `gamma_c = (1 + u)^7 (1 + EVAL) e^(D_min (nu+(delta) - a))`,
+**The loop path.** The butterfly's five stages each round every word by at most `u` in `l2`
+(`(1 + u)^5`), the gain product and the injection add round once each, and the gain word's `f32`
+rounding `fl32(g_i / sqrt 32)` is one more: `gamma_c = (1 + u)^8 (1 + EVAL) e^(D_min (nu+(delta) - a))`,
 `nu+(delta) = delta + delta^2 / (1 - delta) >= -ln r`.
 
 **The certificate.** `gamma_c Gamma_1c Gamma_2c <= 1`, with
@@ -175,18 +190,23 @@ certified rate is 3.4-4.0 % slower than `a` (table).
 ## S4. The loop with injection and underflow
 
 The new words are `u_i = flush(fl(fl(c_i w_i) + q_i))`. Collecting S3 and the absolute terms
-(the butterfly's `U` per word and stage: `4 (1 + sqrt 2 + 2 + 2 sqrt 2) (1 + u)^3 U` in `l2`), each
-sample gives
+(the butterfly's `U` per word and stage, in `l2`: the last stage's `sqrt(32) U`, each earlier
+stage's carried by the later ones at `sqrt 2 (1 + u)` per stage, so
+`sqrt(32) (1 + sqrt 2 + 2 + 2 sqrt 2 + 4) (1 + u)^4 U`; through `c_i <= g_i / sqrt 32` the factor
+`sqrt 32` cancels), each sample gives
 
 ```text
 sqrt(Phi[n+1]) <= r sqrt(Phi[n]) + C_q |q[n]| + C_U
-C_q = (1 + u) sqrt(sum_i r^(-2 (D_i - 1))),   C_U = (4 gamma_c N_slot + A_U) U
+C_q = (1 + u) sqrt(sum_i r^(-2 (D_i - 1))),   C_U = (sqrt(32) gamma_c N_slot + A_U) U
 ```
 
 (`r^2 Z + (r sqrt(Y) + C)^2 <= (r sqrt(Z + Y) + C)^2` joins the shifted and the new parts).
-`C_q` = 4.13 at decay 20 s. The output reads `w_14`, `w_15` of the same butterfly:
-`|o| <= (1 + u)^4 ||f|| + ...` and `||f|| <= sqrt(Phi) / gamma_c + 4 N_slot U`; width and mix
-(dry `+-0.0` after `N`) add `2 (1 + u)^5`. So `|y[n]| <= (2 (1+u)^9 / gamma_c) sqrt(Phi[n]) + A_out U`.
+`C_q` = 5.84 at decay 20 s (4.13 with 16 lines: twice the sum). The output is
+`o = fl(S w_14)`, `fl(S w_15)` of the same butterfly with `S = fl32(1 / sqrt 32) <= (1 + u) / sqrt 32`
+(inexact: `1 / sqrt 32` is irrational): `|w_a| <= (1 + u)^5 sqrt(32) ||f||` (a row of `H32` has norm
+`sqrt 32`), so `|o| <= (1 + u)^7 ||f|| + ...`, the product's rounding adding one `U`; and
+`||f|| <= sqrt(Phi) / gamma_c + sqrt(32) N_slot U`. Width and mix (dry `+-0.0` after `N`) add
+`2 (1 + u)^5`. So `|y[n]| <= (2 (1+u)^12 / gamma_c) sqrt(Phi[n]) + A_out U`.
 
 ## S5. The pre-delay drain and the diffusers
 
@@ -198,7 +218,7 @@ before its flush, and, from the allpass form `y* = (1 - k^2) d - k a`,
 taken at `k_max = fl32(0.7)`. The injection `q = fl(0.5 e)` is at most `0.5 Y_3 + U`, and
 
 ```text
-sqrt(Phi[t_p]) <= sqrt(Phi[t0]) + (floor(fs/4) - 256)(C_q Q_A + C_U)     (8.0e35 at 48 kHz)
+sqrt(Phi[t_p]) <= sqrt(Phi[t0]) + (floor(fs/4) - 256)(C_q Q_A + C_U)     (1.14e36 at 48 kHz)
 ```
 
 **Phase B, from `t_p`.** Stage 0's input is zero. With a rate `rho_d = 1 - delta_d`, every stage
@@ -213,15 +233,15 @@ Phi_U = (C_q Q_U + C_U) / delta
 ```
 
 `delta_d` is tried at 64 fractions of its feasible range and the smallest result is kept (each is a
-valid bound). At decay 20 s the best is `delta_d` = 2.26e-4 (48 kHz), `K = 1.52e36`; the loop rate
-`delta` decides.
+valid bound). At decay 20 s the best is `delta_d` = 2.26e-4 (48 kHz), `K = 2.15e36` (1.52e36 with
+16 lines); the loop rate `delta` decides.
 
 ## S6. The tail
 
 From `t_p`, `|y| <= (2 (1+u)^9 / gamma_c)(max(r, rho_d)^m K + Phi_U) + A_out U`. The audible tail is
 `T_maj = floor(fs/4) + m`, `m` the first with the decaying part below the absolute part, which then
-gives `|y| < P eps` for `P >= P* = 2 (absolute part) / eps` (8.0e-23 at 48 kHz). `T_maj` =
-21,932,254 at 48 kHz, longer than the rest bound `R` of S7: from `N + R` the output is exactly
+gives `|y| < P eps` for `P >= P* = 2 (absolute part) / eps` (1.1e-22 at 48 kHz). `T_maj` =
+21,932,857 at 48 kHz, longer than the rest bound `R` of S7: from `N + R` the output is exactly
 `+-0.0`, below `P eps` for every `P > 0`. So the stated `T = min(T_maj, R) = R`, and
 `tail_every_peak = max(T, R(P*)) = R`.
 
@@ -250,8 +270,8 @@ ramps and crossfade state are not signal state.
 5. **Pre-delay.** Every word holds an input word written at or after `N` by `N + pre_len`.
 
 `R = max(t_p + m_d + M_max + 4, t_p + m_w + max(line ring, D_max + walks), N + pre_len) - N`.
-At decay 20 s, `m_w` decides (18,636,207 of 18,656,990 at 48 kHz): the ring decays from `K` near
-`1e36` to `1e-20` at `delta`.
+At decay 20 s, `m_w` decides (18,686,753 of 18,707,536 at 48 kHz): the ring decays from `K` near
+`2e36` to `1e-20` at `delta`.
 
 ## Histories the bound covers
 
@@ -267,14 +287,15 @@ wrote at a block boundary. Not covered, by the contract: a control event at or a
    diffusion 1, low cut 20 Hz, pre-delay 250 ms, 5 s of noise at `P = 1`, then zeros to `T`; a
    second run moves all six controls 32 samples before `N` from decay 10 s, size 1, damping 6 kHz,
    diffusion 0.5, low cut 500 Hz, pre-delay 0, so crossfades and ramps are in flight at `N`. The last
-   2 s before `T` are below `eps P`. Record (2026-10-26): the last sample at or above `eps P` is
-   2,183,474 (45.5 s) and 2,082,101 (in flight) at 48 kHz, 4,412,872 (46.0 s) and 4,267,583 at
-   96 kHz, against `T` = 388.7 s and 392.8 s (slack 8.5 times).
+   2 s before `T` are below `eps P`. Record (2026-10-26, 32 lines): the last sample at or above
+   `eps P` is 2,197,456 (45.8 s) and 2,081,333 (in flight) at 48 kHz, 4,423,392 (46.1 s) and
+   4,215,919 at 96 kHz, against `T` = 389.7 s and 393.9 s (slack 8.5 times; 16 lines: 45.5 s and
+   46.0 s against 388.7 s and 392.8 s).
 2. **Rest**, both profiles, 48 kHz, the decay domain restricted to 100 ms
-   (`tail_bound_at(48_000, 100.0)`, `R` = 264,636): diffusion 1, pre-delay 250 ms, damping 1 kHz,
+   (`tail_bound_at(48_000, 100.0)`, `R` = 265,062): diffusion 1, pre-delay 250 ms, damping 1 kHz,
    low cut 20 Hz, size 0.25 and 2, 1 s of noise at `P = 1e29`, then zeros. By `R` the output is
    `+-0.0` and every signal-state word of the payload equals a fresh instance's; at size 2 not at
-   80 % of `R`. Record: at rest after 209,920 (79.3 %) and 216,828 samples (81.9 %).
+   80 % of `R`. Record (32 lines): at rest after 209,920 (79.2 %) and 217,169 samples (81.9 %).
 
 The stated values are not re-derived in a test: soundness and the 80 % non-vacuity check hold them.
 

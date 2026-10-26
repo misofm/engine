@@ -1,7 +1,7 @@
 //! The state payload (#1278): every word a continuation reads, rings whole.
 //!
-//! The common section holds the control state, the sixteen line taps, the gain ramps, the filter
-//! states and the sixteen line rings. Each channel section holds that channel's diffuser cursors
+//! The common section holds the control state, the thirty-two line taps, the gain ramps, the filter
+//! states and the thirty-two line rings. Each channel section holds that channel's diffuser cursors
 //! and pipeline registers, its pre-delay ring and its four diffuser rings, so a left-only input
 //! changes no word of the right section until it has crossed the loop (the dual-mono isolation
 //! probe). A ring word the history counter makes unreadable is written as `+0.0`, so the payload is

@@ -22,9 +22,9 @@ use effect_contract::{CompositionBound, NodeTailBound, RestBound, RestSamples, T
 use effect_runtime::tail::{RestSnap, rate_follower_rest_samples};
 
 use crate::{
-    BASE, DAMPING, DIFFUSION, LOW_CUT, RAMP_SAMPLES, REVERB_PARAMETERS, RING_SLACK, SIZE,
-    TRANSITION_SAMPLES, const_nearest_prime, damping_coefficient, diffusion_coefficient, geometry,
-    low_cut_coefficient,
+    BASE_MIN, DAMPING, DIFFUSION, LINES, LOW_CUT, RAMP_SAMPLES, REVERB_PARAMETERS, RING_SLACK,
+    SIZE, TRANSITION_SAMPLES, const_nearest_prime, damping_coefficient, diffusion_coefficient,
+    geometry, low_cut_coefficient,
 };
 
 /// The `f32` unit roundoff `u = 2^-24`.
@@ -324,7 +324,7 @@ fn stated_bound(sample_rate: u32, decay_max_ms: f32) -> Option<NodeTailBound> {
 
     // Geometry: the shortest tap over the size domain, the longest tap, rings and pre-delay.
     let size_min = parameter(SIZE).minimum?;
-    let scaled = math::floor(f64::from(BASE[0]) * f64::from(size_min) * fs / 48_000.0 + 0.5);
+    let scaled = math::floor(f64::from(BASE_MIN) * f64::from(size_min) * fs / 48_000.0 + 0.5);
     if !(1.0..=1.0e9).contains(&scaled) {
         return None;
     }
@@ -391,7 +391,9 @@ fn stated_bound(sample_rate: u32, decay_max_ms: f32) -> Option<NodeTailBound> {
         if exponent > 0.0 {
             return None;
         }
-        let gamma = up(grow_pow(7) * (1.0 + EVAL) * exp_up(exponent));
+        // Five butterfly stages, the gain product, the injection add and the gain word's `f32`
+        // rounding: eight roundings (derivation, S3).
+        let gamma = up(grow_pow(8) * (1.0 + EVAL) * exp_up(exponent));
         Some((gamma, gamma1, gamma2))
     };
     let certified = |delta: f64| {
@@ -436,13 +438,18 @@ fn stated_bound(sample_rate: u32, decay_max_ms: f32) -> Option<NodeTailBound> {
         .iter()
         .map(|&d| up(math::expm1(up(2.0 * d * nup))) / down(delta * (2.0 - delta)))
         .sum::<f64>());
+    // The butterfly's absolute terms in l2, per `U` and over `sqrt(LINES)`: the last stage's
+    // `sqrt(LINES) U`, each earlier one carried through the later stages (`sqrt 2 (1 + u)` each).
     let root2 = up(core::f64::consts::SQRT_2);
-    let butterfly =
-        up(4.0
-            * (1.0 + root2 * grow(1.0) + 2.0 * grow(1.0) * grow(1.0) + 2.0 * root2 * grow_pow(3)));
+    let root_lines = up((LINES as f64).sqrt());
+    let butterfly_unit = up(1.0
+        + root2 * grow(1.0)
+        + 2.0 * grow_pow(2)
+        + 2.0 * root2 * grow_pow(3)
+        + 4.0 * grow_pow(4));
     let slot_abs = up(gamma2_c * lp.abs + hp.abs);
-    let write_abs = up(grow(1.0) * grow(1.0) * gamma_c * butterfly / 4.0 + (2.0 + U) * weight);
-    let loop_abs = up(4.0 * gamma_c * slot_abs + write_abs) * UNDERFLOW;
+    let write_abs = up(grow(1.0) * grow(1.0) * gamma_c * butterfly_unit + (2.0 + U) * weight);
+    let loop_abs = up(root_lines * gamma_c * slot_abs + write_abs) * UNDERFLOW;
     let injection = up(grow(1.0) * weight);
 
     // Phi at t0: readable ring words and filter states from the block invariant (S1).
@@ -454,8 +461,8 @@ fn stated_bound(sample_rate: u32, decay_max_ms: f32) -> Option<NodeTailBound> {
     let lp_theta_c = up(lp_theta_max * (1.0 + lp.lambda) * (1.0 + lp.lambda));
     let hp_theta_c = up(hp_theta_max * (1.0 + hp.lambda) * (1.0 + hp.lambda));
     let ring0 = up(LIMIT * up(pending.sqrt()));
-    let filters0 =
-        up(4.0 * up(gamma2_c * gamma2_c * lp_theta_c * lp0 * lp0 + hp_theta_c * hp0 * hp0).sqrt());
+    let filters0 = up(root_lines
+        * up(gamma2_c * gamma2_c * lp_theta_c * lp0 * lp0 + hp_theta_c * hp0 * hp0).sqrt());
     let phi0 = up(ring0 + filters0);
 
     // The diffusers while the pre-delay drains (phase A, S5): l-inf invariants at k_max.
@@ -477,12 +484,15 @@ fn stated_bound(sample_rate: u32, decay_max_ms: f32) -> Option<NodeTailBound> {
     let phi_p = up(phi0 + drain * up(injection * injection_a + loop_abs));
 
     // Phase B: a geometric majorant at rate 1 - delta_d; the best of a few rates is kept.
-    let output_gain = up(2.0 * grow(9.0) / gamma_c);
-    let output_abs = up(
-        2.0 * grow(5.0) * (grow(4.0) * 4.0 * slot_abs + butterfly / 4.0 + 1.0)
-            + 6.0 * grow(1.0)
-            + 1.0,
-    ) * UNDERFLOW;
+    // |o| <= (1 + u)^7 ||f||: five stages, `S <= (1 + u) / sqrt(LINES)` and the product's rounding;
+    // width and mix add 2 (1 + u)^5 (derivation, S4).
+    let output_gain = up(2.0 * grow(12.0) / gamma_c);
+    let output_abs = up(2.0
+        * grow(5.0)
+        * (grow(7.0) * root_lines * slot_abs + grow(1.0) * butterfly_unit + 2.0)
+        + 6.0 * grow(1.0)
+        + 1.0)
+        * UNDERFLOW;
     let lp_start = up(FLUSH / down(gamma_c * down(lp_theta_min.sqrt())));
     let hp_bound = up(FLUSH / down(gamma_c * down(hp_theta_min.sqrt())));
     let lp_walk = rate_follower_rest_samples(

@@ -3,30 +3,35 @@
 //! # Loop shape
 //!
 //! A plain per-sample loop. Each line has its own length, so the delay's chunked copy-out (which
-//! exists to hoist two lanes' tap windows out of the frame loop) would need sixteen windows per
+//! exists to hoist two lanes' tap windows out of the frame loop) would need thirty-two windows per
 //! chunk and buys nothing here: the ring reads and writes are scalar per line in either shape. A
 //! wrap is one compare-and-subtract. The only per-sample branches are on control state (a
 //! crossfade or a ramp in flight), never on a sample value.
 //!
 //! # The butterfly and the re-layout
 //!
-//! Position `p` of the 16-word slot vector set is lane `p % W` of vector `p / W`. A layout maps
+//! Position `p` of the 32-word slot vector set is lane `p % W` of vector `p / W`. A layout maps
 //! each position bit `b` to the slot bit `tau[b]` it carries. Stage `k` pairs the slots that
 //! differ in bit `k`: when bit `k` sits on a vector bit, that is a pair of whole vectors and the
 //! stage is `W`-wide add/sub. When it sits on a lane bit, the kernel first stores the vectors to a
-//! 16-word stack array and reloads them in a layout that puts every remaining stage bit on the
+//! 32-word stack array and reloads them in a layout that puts every remaining stage bit on the
 //! highest position bits. A re-layout only moves words, and every stage computes
 //! `(w_j + w_m, w_j - w_m)` on the same two words at every width, so every `W` gives the same bits.
-//! `W = 1` never re-lays out, `W = 4` once (before stage 1) and `W = 8` before each of stages 2, 1
-//! and 0, as the note states. The schedule is a `const` per width.
+//! The stages run in the order 4, 3, 2, 1, 0. `W = 1` never re-lays out, `W = 4` once (before
+//! stage 1) and `W = 8` twice (before stages 2 and 0), as the note states. The schedule is a
+//! `const` per width.
 
 use lane::kernels::ramp_toward;
 use lane::{Lane, flush};
 
 use crate::{
-    DIFFUSERS, INPUT_GAIN, LINES, OUTPUT_LEFT, OUTPUT_RIGHT, PreparedReverb, RAMP_DAMPING,
-    RAMP_DIFFUSION, RAMP_LOW_CUT, RAMP_MIX, RAMP_WIDTH, TRANSITION_SAMPLES, slot_of_line,
+    DIFFUSERS, INPUT_GAIN, LINES, OUTPUT_LEFT, OUTPUT_RIGHT, OUTPUT_SCALE, PreparedReverb,
+    RAMP_DAMPING, RAMP_DIFFUSION, RAMP_LOW_CUT, RAMP_MIX, RAMP_WIDTH, STAGES, TRANSITION_SAMPLES,
+    slot_of_line,
 };
+
+/// The highest slot bit.
+const TOP: usize = STAGES - 1;
 
 /// One butterfly stage of the schedule.
 #[derive(Clone, Copy)]
@@ -42,27 +47,27 @@ struct Stage {
 /// The butterfly schedule of one lane width.
 #[derive(Clone, Copy)]
 pub(crate) struct Schedule {
-    stages: [Stage; 4],
+    stages: [Stage; STAGES],
     /// After the last stage: the matrix output (line) index at each position.
     slot_of_position: [u8; LINES],
     /// After the last stage: the position of each matrix output (line) index.
     position_of_slot: [u8; LINES],
 }
 
-const fn slot_at(tau: &[u8; 4], position: usize) -> usize {
+const fn slot_at(tau: &[u8; STAGES], position: usize) -> usize {
     let mut slot = 0;
     let mut b = 0;
-    while b < 4 {
+    while b < STAGES {
         slot |= ((position >> b) & 1) << tau[b];
         b += 1;
     }
     slot
 }
 
-const fn position_of(tau: &[u8; 4], slot: usize) -> usize {
+const fn position_of(tau: &[u8; STAGES], slot: usize) -> usize {
     let mut position = 0;
     let mut b = 0;
-    while b < 4 {
+    while b < STAGES {
         position |= ((slot >> tau[b]) & 1) << b;
         b += 1;
     }
@@ -73,32 +78,37 @@ const fn position_of(tau: &[u8; 4], slot: usize) -> usize {
 pub(crate) const fn matrix_schedule(width: usize) -> Schedule {
     let lane_bits = width.trailing_zeros() as usize;
     assert!(width == 1 << lane_bits && lane_bits <= 3);
-    let mut tau: [u8; 4] = [0, 1, 2, 3];
+    let mut tau: [u8; STAGES] = [0; STAGES];
+    let mut t = 0;
+    while t < STAGES {
+        tau[t] = t as u8;
+        t += 1;
+    }
     let empty = Stage {
         relayout: false,
         gather: [0; LINES],
         stride: 0,
     };
-    let mut stages = [empty; 4];
+    let mut stages = [empty; STAGES];
     let mut index = 0;
-    while index < 4 {
-        let k = 3 - index;
+    while index < STAGES {
+        let k = TOP - index;
         let mut b = 0;
         while tau[b] as usize != k {
             b += 1;
         }
         let mut stage = empty;
         if b < lane_bits {
-            // Remaining stage bits k, k-1, .., 0 go to position bits 3, 2, ..; the done bits to the
-            // lowest position bits.
-            let mut next: [u8; 4] = [0; 4];
+            // Remaining stage bits k, k-1, .., 0 go to position bits TOP, TOP - 1, ..; the done
+            // bits to the lowest position bits.
+            let mut next: [u8; STAGES] = [0; STAGES];
             let mut r = 0;
             while r <= k {
-                next[3 - r] = (k - r) as u8;
+                next[TOP - r] = (k - r) as u8;
                 r += 1;
             }
             let mut d = 0;
-            while d < 3 - k {
+            while d < TOP - k {
                 next[d] = (k + 1 + d) as u8;
                 d += 1;
             }
@@ -109,7 +119,7 @@ pub(crate) const fn matrix_schedule(width: usize) -> Schedule {
             }
             stage.relayout = true;
             tau = next;
-            b = 3;
+            b = TOP;
         }
         stage.stride = 1 << (b - lane_bits);
         stages[index] = stage;
@@ -346,7 +356,7 @@ impl PreparedReverb {
                     slots[slot] = new;
                 }
             }
-            // The size crossfade's blend, one vector pass over all sixteen slots: every line
+            // The size crossfade's blend, one vector pass over all thirty-two slots: every line
             // shares one alpha. The last update (`line_fade == 1`) is the new word exactly,
             // which `slots` already holds.
             if self.line_fade > 1 {
@@ -372,7 +382,7 @@ impl PreparedReverb {
                 x[v] = l.sub(m);
             }
 
-            // R7: the butterfly, stages 3, 2, 1, 0.
+            // R7: the butterfly, stages 4, 3, 2, 1, 0.
             for stage in &schedule.stages {
                 if stage.relayout {
                     for v in 0..vectors {
@@ -399,8 +409,9 @@ impl PreparedReverb {
             for v in 0..vectors {
                 x[v].store(&mut scratch[v * w..]);
             }
-            let out_left = 0.25 * scratch[schedule.position_of_slot[OUTPUT_LEFT] as usize];
-            let out_right = 0.25 * scratch[schedule.position_of_slot[OUTPUT_RIGHT] as usize];
+            let out_left = OUTPUT_SCALE * scratch[schedule.position_of_slot[OUTPUT_LEFT] as usize];
+            let out_right =
+                OUTPUT_SCALE * scratch[schedule.position_of_slot[OUTPUT_RIGHT] as usize];
             let q_left = L::splat(injected_left);
             let q_right = L::splat(injected_right);
             for v in 0..vectors {

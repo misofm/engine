@@ -201,9 +201,14 @@ fn the_kernel_decays_within_the_stated_tail() {
     }
 }
 
-/// The signal-state words of a payload (`src/state.rs`): the 32 filter states that end the
-/// 180-word common header and the line rings after it; each channel's four pipeline registers
-/// (words 4-7 of its 8-word header) and its pre-delay and diffuser rings after it. A ring cell
+/// Words of the payload's common header (`src/state.rs`): sixteen control words, five four-word
+/// ramps and nine words per line.
+const COMMON_HEADER_WORDS: usize = 16 + 5 * 4 + 9 * reverb::LINES;
+
+/// The signal-state words of a payload (`src/state.rs`): the `2 * LINES` filter states that end
+/// the [`COMMON_HEADER_WORDS`]-word common header and the line rings after it; each channel's
+/// four pipeline registers (words 4-7 of its 8-word header) and its pre-delay and diffuser rings
+/// after it. A ring cell
 /// the history counter makes unreadable is written `+0.0`. Cursors, taps, the history counter,
 /// ramps and crossfade state are not signal state.
 fn signal_words(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> Vec<f32> {
@@ -223,7 +228,7 @@ fn signal_words(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> 
             .map(|word| f32::from_le_bytes(*word))
             .collect()
     };
-    let mut words = floats(&common)[180 - 32..].to_vec();
+    let mut words = floats(&common)[COMMON_HEADER_WORDS - 2 * reverb::LINES..].to_vec();
     for lane in [&left, &right] {
         words.extend_from_slice(&floats(lane)[4..]);
     }

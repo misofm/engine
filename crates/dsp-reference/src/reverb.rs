@@ -1,15 +1,20 @@
-//! Independent offline `f64` oracle for the `miso.reverb` 16-line feedback delay network (#2114).
+//! Independent offline `f64` oracle for the `miso.reverb` 32-line feedback delay network (#2114).
 //!
 //! Written from `dsp-research/reverb.md` ("Algorithm and equations" R1-R12 and "Coefficients and
-//! update rules") and nothing else: the oracle imports no production code. It models the
+//! update rules"), generalised to the 32-line design of attempt 5 (lengths, gains, scales, slot
+//! permutation and output rows), and nothing else: the oracle imports no production code. It models the
 //! *settled* kernel only, with static parameters, so it has no ramps and no crossfades (R12 and the
 //! crossfade forms of R1 and R3 are identities at static parameters).
 //!
 //! Independence choices, so that a disagreement with the kernel points at the kernel:
 //!
-//! - The feedback matrix is the dense 16 x 16 product `H16 P / 4`, built from the closed form
-//!   `H16[i][j] = (-1)^popcount(i & j)` and the permutation `(P f)_j = f_{(14 - j) mod 16}`, and
-//!   applied as a matrix-vector product. It is deliberately not the kernel's four-stage butterfly.
+//! - The feedback matrix is the dense, unnormalised 32 x 32 product `H32 P`, built from the closed
+//!   form `H32[i][j] = (-1)^popcount(i & j)` and the permutation `(P f)_j = f_{pi(j)}`,
+//!   `pi(j) = (29 j + 31) mod 32`, and applied as a matrix-vector product: `A[i][pi(j)] = H32[i][j]`
+//!   and `w = A f`. It is deliberately not the kernel's five-stage butterfly.
+//! - The normalisation `1 / sqrt(32)` is folded into the per-line feedback gain
+//!   `c_i = g_i / sqrt(32)` and the output scale `S = 1 / sqrt(32)`, both in `f64` (the kernel
+//!   rounds `fl32(g_i / sqrt(32))` and uses `fl32(1 / sqrt(32))`).
 //! - The filter states are indexed by line, not by slot. Both filters are elementwise with shared
 //!   coefficients, so filtering a line and then permuting it into its slot is the same map.
 //! - Every coefficient is computed in `f64` from the `f64` parameters. Only the values that the
@@ -18,9 +23,18 @@
 
 use crate::FLUSH_EPS;
 
-/// The 16 base line lengths at 48 kHz and size 1, line order 0..15 (the note's `BASE`).
-const BASE: [u32; 16] = [
-    953, 1171, 1433, 1753, 2141, 2617, 3203, 3907, 1061, 1297, 1583, 1933, 2371, 2897, 3533, 4327,
+/// The number of feedback delay lines.
+const LINES: usize = 32;
+
+/// Lines `0..HALF` take the left injection, lines `HALF..LINES` the right.
+const HALF: usize = LINES / 2;
+
+/// The 32 base line lengths at 48 kHz and size 1, line order 0..31 (attempt 5's `BASE32`):
+/// `RANKED32[k] = Prime(floor(960 * 4.5^(k / 31) + 0.5))`, line `i` takes `RANKED32[2 i]` and line
+/// `16 + i` takes `RANKED32[2 i + 1]`.
+const BASE: [u32; LINES] = [
+    953, 1061, 1163, 1283, 1409, 1559, 1721, 1889, 2087, 2297, 2531, 2791, 3079, 3389, 3733, 4111,
+    1009, 1109, 1223, 1361, 1487, 1637, 1801, 1987, 2179, 2411, 2659, 2927, 3229, 3557, 3919, 4327,
 ];
 
 /// Left diffuser lengths at 48 kHz, stages 0..3 (the note's `DIFF_L`).
@@ -32,8 +46,13 @@ const DIFF_R: [u32; 4] = [233, 179, 617, 457];
 /// Input gain per line (the note's `B`).
 const INPUT_GAIN: f64 = 0.5;
 
-/// The matrix output rows that feed the left and right outputs (the note's `OUT`).
+/// The matrix output rows that feed the left and right outputs (`o_L = S w_14`, `o_R = S w_15`).
 const OUTPUT_ROWS: (usize, usize) = (14, 15);
+
+/// `sqrt(32)`, the norm of every row of `H32`.
+fn matrix_norm() -> f64 {
+    (LINES as f64).sqrt()
+}
 
 /// The damping cutoff cap in hertz (#1374; the second term of `min(19,845, fs / 4)`).
 const DAMPING_CAP_HZ: f64 = 19_845.0;
@@ -134,17 +153,19 @@ pub struct ReferenceReverb {
     pipeline: [[f64; 3]; 2],
     allpass_k: f64,
     /// R3: line `i`, ring of `D_i(2.0, fs) + 128` words.
-    line_rings: [Ring; 16],
-    lengths: [usize; 16],
+    line_rings: [Ring; LINES],
+    lengths: [usize; LINES],
     /// R5 and R6: the low-pass and high-pass states, indexed by line.
-    low_pass_states: [f64; 16],
-    high_pass_states: [f64; 16],
+    low_pass_states: [f64; LINES],
+    high_pass_states: [f64; LINES],
     low_pass_g: f64,
     high_pass_g: f64,
-    /// Jot's absorption gain `g_i` per line.
-    gains: [f64; 16],
-    /// The dense feedback matrix `H16 P / 4`, row `i` writes line `i`.
-    matrix: [[f64; 16]; 16],
+    /// The per-line feedback gain `c_i = g_i / sqrt(32)`, with `g_i` Jot's absorption gain.
+    feedback_gains: [f64; LINES],
+    /// The output scale `S = 1 / sqrt(32)`.
+    output_scale: f64,
+    /// The dense unnormalised feedback matrix `H32 P`, row `i` writes line `i`.
+    matrix: [[f64; LINES]; LINES],
 }
 
 impl ReferenceReverb {
@@ -178,11 +199,13 @@ impl ReferenceReverb {
             allpass_k: 0.7 * parameters.diffusion,
             line_rings: capacities.map(|capacity| Ring::new(capacity + TRANSITION_SAMPLES)),
             lengths,
-            low_pass_states: [0.0; 16],
-            high_pass_states: [0.0; 16],
+            low_pass_states: [0.0; LINES],
+            high_pass_states: [0.0; LINES],
             low_pass_g: one_pole_g(damping_cutoff_hz(parameters.damping_hz, fs), fs),
             high_pass_g: one_pole_g(parameters.low_cut_hz, fs),
-            gains: absorption_gains(&lengths, fs, parameters.decay_ms),
+            feedback_gains: absorption_gains(&lengths, fs, parameters.decay_ms)
+                .map(|gain| gain / matrix_norm()),
+            output_scale: 1.0 / matrix_norm(),
             matrix: feedback_matrix(),
         })
     }
@@ -222,23 +245,23 @@ impl ReferenceReverb {
             injection[channel] = outputs[3];
         }
 
-        // R3: the 16 taps, each read once and cleared.
-        let mut taps = [0.0; 16];
+        // R3: the 32 taps, each read once and cleared.
+        let mut taps = [0.0; LINES];
         for (line, tap) in taps.iter_mut().enumerate() {
             *tap = self.line_rings[line].read_and_clear(self.lengths[line]);
         }
 
         // R4-R6: the TPT low-pass, then the TPT high-pass (low-pass input minus its low-pass), per
         // line. R4's slot permutation lives in the matrix.
-        let mut filtered = [0.0; 16];
-        for line in 0..16 {
+        let mut filtered = [0.0; LINES];
+        for line in 0..LINES {
             let low = tpt_low_pass(taps[line], self.low_pass_g, &mut self.low_pass_states[line]);
             let low_of_low = tpt_low_pass(low, self.high_pass_g, &mut self.high_pass_states[line]);
             filtered[line] = low - low_of_low;
         }
 
-        // R7: the dense product (H16 P / 4) F. Row i is the value written to line i.
-        let mut mixed = [0.0; 16];
+        // R7: the dense unnormalised product w = (H32 P) F. Row i is the value written to line i.
+        let mut mixed = [0.0; LINES];
         for (row, value) in self.matrix.iter().zip(mixed.iter_mut()) {
             *value = row
                 .iter()
@@ -247,15 +270,15 @@ impl ReferenceReverb {
                 .sum();
         }
 
-        // R8: the two output rows, before the absorption gains.
-        let wet_left = mixed[OUTPUT_ROWS.0];
-        let wet_right = mixed[OUTPUT_ROWS.1];
+        // R8: the two output rows, scaled by S, before the feedback gains.
+        let wet_left = self.output_scale * mixed[OUTPUT_ROWS.0];
+        let wet_right = self.output_scale * mixed[OUTPUT_ROWS.1];
 
-        // R9: gain on the written line, plus the injection of its half.
+        // R9: c_i w_i on the written line, plus the injection of its half.
         let q = [INPUT_GAIN * injection[0], INPUT_GAIN * injection[1]];
         for (line, (ring, value)) in self.line_rings.iter_mut().zip(mixed).enumerate() {
-            let half = usize::from(line >= 8);
-            ring.write(flush(self.gains[line] * value + q[half]));
+            let half = usize::from(line >= HALF);
+            ring.write(flush(self.feedback_gains[line] * value + q[half]));
             ring.advance();
         }
 
@@ -278,9 +301,9 @@ impl ReferenceReverb {
         (out[0], out[1])
     }
 
-    /// The 16 line lengths D_i in samples (note: nearest-prime rule), line order 0..15.
+    /// The 32 line lengths D_i in samples (note: nearest-prime rule), line order 0..31.
     #[must_use]
-    pub fn line_lengths(&self) -> [usize; 16] {
+    pub fn line_lengths(&self) -> [usize; LINES] {
         self.lengths
     }
 }
@@ -441,7 +464,7 @@ fn as_control(value: f64) -> f64 {
 
 /// `D_i(size, fs) = Prime(floor(BASE_i * size * fs / 48000 + 0.5))`, evaluated left to right in
 /// `f64` as the note writes it, so a size at a rounding breakpoint gives the kernel's integer.
-fn line_lengths_at(size: f64, sample_rate: u32) -> [usize; 16] {
+fn line_lengths_at(size: f64, sample_rate: u32) -> [usize; LINES] {
     let size = as_control(size);
     let fs = f64::from(sample_rate);
     BASE.map(|base| {
@@ -494,7 +517,7 @@ fn is_prime(n: usize) -> bool {
 }
 
 /// Jot: `g_i = exp(-3 ln(10) D_i / (fs T))`, `T = decay_ms / 1000`.
-fn absorption_gains(lengths: &[usize; 16], fs: f64, decay_ms: f64) -> [f64; 16] {
+fn absorption_gains(lengths: &[usize; LINES], fs: f64, decay_ms: f64) -> [f64; LINES] {
     let decay_seconds = decay_ms / 1000.0;
     lengths.map(|length| {
         (-3.0 * core::f64::consts::LN_10 * length as f64 / (fs * decay_seconds)).exp()
@@ -534,22 +557,22 @@ fn flush(value: f64) -> f64 {
     }
 }
 
-/// The note's permutation `pi(j) = (14 - j) mod 16`: slot `j` holds line `pi(j)`.
+/// Attempt 5's slot permutation `pi(j) = (29 j + 31) mod 32`: slot `j` holds line `pi(j)`.
 fn slot_source(slot: usize) -> usize {
-    (14 + 16 - slot) % 16
+    (29 * slot + 31) % LINES
 }
 
-/// The dense `H16 P / 4`: entry `(i, l)` is `H16[i][j] / 4` for the slot `j` that holds line `l`.
-fn feedback_matrix() -> [[f64; 16]; 16] {
-    let mut matrix = [[0.0; 16]; 16];
+/// The dense unnormalised `H32 P`: `A[i][pi(j)] = H32[i][j] = (-1)^popcount(i & j)`.
+fn feedback_matrix() -> [[f64; LINES]; LINES] {
+    let mut matrix = [[0.0; LINES]; LINES];
     for (row, entries) in matrix.iter_mut().enumerate() {
-        for slot in 0..16 {
+        for slot in 0..LINES {
             let sign = if (row & slot).count_ones() % 2 == 0 {
                 1.0
             } else {
                 -1.0
             };
-            entries[slot_source(slot)] += sign * 0.25;
+            entries[slot_source(slot)] += sign;
         }
     }
     matrix
@@ -575,11 +598,11 @@ mod tests {
     #[test]
     fn feedback_matrix_is_orthogonal_and_not_an_involution() {
         let a = feedback_matrix();
-        let product = |left: &[[f64; 16]; 16], right_transposed: bool| {
-            let mut out = [[0.0; 16]; 16];
-            for i in 0..16 {
-                for j in 0..16 {
-                    out[i][j] = (0..16)
+        let product = |left: &[[f64; LINES]; LINES], right_transposed: bool| {
+            let mut out = [[0.0; LINES]; LINES];
+            for i in 0..LINES {
+                for j in 0..LINES {
+                    out[i][j] = (0..LINES)
                         .map(|k| left[i][k] * if right_transposed { a[j][k] } else { a[k][j] })
                         .sum();
                 }
@@ -590,27 +613,28 @@ mod tests {
         let square = product(&a, false);
         for (i, row) in gram.iter().enumerate() {
             for (j, &entry) in row.iter().enumerate() {
-                assert_eq!(entry, if i == j { 1.0 } else { 0.0 }, "A A^T at {i},{j}");
+                let expected = if i == j { LINES as f64 } else { 0.0 };
+                assert_eq!(entry, expected, "A A^T = 32 I at {i},{j}");
             }
         }
         assert!(
-            (0..16).any(|i| square[i][i] != 1.0),
-            "A^2 = I would be the plain-H16 structure the note rejects"
+            (0..LINES).any(|i| square[i][i] != LINES as f64),
+            "A^2 = 32 I would be the plain-H32 structure the note rejects"
         );
     }
 
     #[test]
     fn base_lengths_follow_the_ranked_rule_and_are_the_size_one_lengths() {
-        let ranked: Vec<usize> = (0..16)
+        let ranked: Vec<usize> = (0..32)
             .map(|k| {
-                nearest_prime((960.0 * 4.5f64.powf(f64::from(k) / 15.0) + 0.5).floor() as usize)
+                nearest_prime((960.0 * 4.5f64.powf(f64::from(k) / 31.0) + 0.5).floor() as usize)
             })
             .collect();
-        let expected: [usize; 16] = core::array::from_fn(|i| {
-            if i < 8 {
+        let expected: [usize; LINES] = core::array::from_fn(|i| {
+            if i < HALF {
                 ranked[2 * i]
             } else {
-                ranked[2 * (i - 8) + 1]
+                ranked[2 * (i - HALF) + 1]
             }
         });
         assert_eq!(BASE.map(|base| base as usize), expected);
@@ -627,7 +651,7 @@ mod tests {
         let mut reverb = ReferenceReverb::new(48_000, parameters).expect("in domain");
         let expected = 480
             + 3
-            + reverb.line_lengths()[..8]
+            + reverb.line_lengths()[..HALF]
                 .iter()
                 .min()
                 .copied()
