@@ -6302,14 +6302,15 @@ pub fn test_only_route_destination_silence(plan: &PreparedRenderPlan) -> Vec<boo
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TestOnlyBankSlotRuns {
-    /// The group's first runtime unit.
+    /// The row's first runtime unit. A row is one row of a pack group's lane chains (issue
+    /// #2142), its units adjacent among the effect banks, or one unit in no group.
     pub first_unit: u32,
     /// Its last runtime unit, inclusive: `first_unit` for a unit in no group.
     pub last_unit: u32,
     /// The lanes per unit, `W`.
     pub width: u32,
-    /// The effect slots of each unit of the group (builtin stages are not counted): one program,
-    /// so one count for every unit of a group.
+    /// The effect slots of each unit of the row (builtin stages are not counted): one program,
+    /// so one count for every unit of a row.
     pub effect_slots: u32,
     /// Bank-slot runs: one per unit per effect slot executed, none for a skipped chain.
     pub runs: u64,
@@ -6356,15 +6357,35 @@ pub fn test_only_bank_slot_runs(plan: &mut PreparedRenderPlan) -> Vec<TestOnlyBa
         })
 }
 
-/// Test-only (issue #1782a): `(first unit, last unit, width)` of each pack group of a graph plan,
-/// in unit order; empty for any other plan.
+/// Test-only (issue #1782a; lane chains, issue #2142): one pack group of a graph plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestOnlyPackGroup {
+    /// Lanes per unit.
+    pub width: u32,
+    /// The group's lane chains in order: `chains[c][j]` is unit `j` of chain `c`, so every chain
+    /// has the group's units per chain and position `p` is lane `p % width` of chain `p / width`
+    /// in every row.
+    pub chains: Vec<Vec<u32>>,
+}
+
+/// Test-only (issue #1782a): each pack group of a graph plan, in unit order; empty for any other
+/// plan.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[must_use]
-pub fn test_only_pack_groups(plan: &PreparedRenderPlan) -> Vec<(u32, u32, u32)> {
+pub fn test_only_pack_groups(plan: &PreparedRenderPlan) -> Vec<TestOnlyPackGroup> {
     plan.executor_any()
         .and_then(|any| any.downcast_ref::<GraphExecutor>())
-        .map_or_else(Vec::new, |executor| executor.runtime.pack_groups())
+        .map_or_else(Vec::new, |executor| {
+            executor
+                .runtime
+                .pack_groups()
+                .into_iter()
+                .map(|(width, chains)| TestOnlyPackGroup { width, chains })
+                .collect()
+        })
 }
 
 /// Test-only (issue #1782a): trade the strips at `(unit, lane)` `a` and `b` of one pack group, as
