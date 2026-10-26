@@ -303,12 +303,13 @@ impl ReferenceReverb {
 ///    `|B(f_k)|^2 f_k`; the factor `f_k` is the density `df` of the log-spaced grid, so the sum is
 ///    a rectangle-rule integral over linear frequency.
 /// 4. The predicted energy envelope is `env[n] = sum_k w_k 10^(-6 n / (fs T(f_k)))` for
-///    `n = 0 .. floor(L fs) - 1`, with the measurement length `L = max(1.5, 0.8 T + 0.4)` seconds
-///    and `T = decay_ms / 1000`.
+///    `n = 0 .. floor((0.2 + 2 T) fs) - 1` (about 120 dB of decay past the earliest start, so the
+///    EDC truncation does not bias the fit), `T = decay_ms / 1000`.
 /// 5. The fit is the measured one: Schroeder backward integration of `env`, the EDC normalised to
-///    its first value in dB, a start index `i5 = max(first n with EDC <= -5 dB, floor(0.15 fs))`,
-///    an end index `i25 =` first `n` with `EDC <= EDC[i5] - 20 dB`, a least-squares line of EDC
-///    against `n / fs` over `i5 .. i25` (end excluded), and `RT60 = -60 / slope`.
+///    its first value in dB, a start index `i0 = max(first n with EDC <= -5 dB, floor(0.2 fs))`
+///    (0.2 s is the mixing time, the note's test 2 at diffusion 0 rounded up), an end index
+///    `i1 =` first `n` with `EDC <= EDC[i0] - 40 dB` (T40), a least-squares line of EDC against
+///    `n / fs` over `i0 .. i1` (end excluded), and `RT60 = -60 / slope`.
 ///
 /// # Panics
 ///
@@ -357,8 +358,7 @@ pub fn reference_reverb_rt60_seconds(
         ratios[k] = 10f64.powf(-6.0 / (fs * decay_seconds));
     }
 
-    let seconds = (0.8 * parameters.decay_ms / 1000.0 + 0.4).max(1.5);
-    let frames = (seconds * fs).floor() as usize;
+    let frames = ((0.2 + 2.0 * parameters.decay_ms / 1000.0) * fs).floor() as usize;
     let mut envelope = vec![0.0; frames];
     let mut powers = [1.0; POINTS];
     for value in &mut envelope {
@@ -383,12 +383,12 @@ pub fn reference_reverb_rt60_seconds(
     }
 
     let minus_five = edc.iter().position(|&level| level <= -5.0).unwrap_or(0);
-    let start = minus_five.max((0.15 * fs).floor() as usize);
-    let target = edc[start] - 20.0;
+    let start = minus_five.max((0.2 * fs).floor() as usize);
+    let target = edc[start] - 40.0;
     let end = edc
         .iter()
         .position(|&level| level <= target)
-        .expect("the EDC falls 20 dB below its start inside the measurement length");
+        .expect("the EDC falls 40 dB below its start inside the measurement length");
     least_squares_rt60(&edc[start..end], start, fs)
 }
 
