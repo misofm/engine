@@ -66,31 +66,53 @@ checkVectors("javascript")
 
 // A module that cannot load leaves hashing in JavaScript: the preparation resolves, never rejects.
 assert.equal(await prepareBlake3({ url: new URL("./missing-blake3.wasm", import.meta.url) }), "javascript")
+assert.equal(await prepareBlake3(null), "javascript", "a null options object neither throws nor rejects")
 assert.equal(new IncrementalBlake3().update(vectors[1][0]).digestHex(), vectors[1][1], "the digest after a failed load")
 
 const artifactsHex = process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX
 if (artifactsHex !== undefined) {
   const module = join(Buffer.from(artifactsHex, "hex").toString(), "miso-engine-v1-blake3.simd128.wasm")
   // Node's fetch has no file: scheme; serve the one module file the way a web server would.
+  // The first fetch of the module fails, so the retry below is the load.
+  let failNextModuleFetch = true
   const networkFetch = globalThis.fetch
-  globalThis.fetch = async (url, init) =>
-    new URL(String(url)).protocol === "file:"
-      ? new Response(await readFile(new URL(String(url))), { headers: { "content-type": "application/wasm" } })
-      : networkFetch(url, init)
-  // Count the module's update calls, so a hash that silently stays in JavaScript turns red.
+  globalThis.fetch = async (url, init) => {
+    if (new URL(String(url)).protocol !== "file:") return networkFetch(url, init)
+    if (failNextModuleFetch) {
+      failNextModuleFetch = false
+      return new Response(null, { status: 503 })
+    }
+    return new Response(await readFile(new URL(String(url))), { headers: { "content-type": "application/wasm" } })
+  }
+  // Count the module's update and free calls, so a hash that silently stays in JavaScript, or a
+  // failed stream that keeps its hasher, turns red.
   const instantiate = WebAssembly.instantiate
   let moduleUpdates = 0
+  let moduleFrees = 0
   WebAssembly.instantiate = async (...args) => {
     const result = await instantiate(...args)
-    const update = result.instance?.exports.miso_engine_blake3_v1_update
+    const { miso_engine_blake3_v1_update: update, miso_engine_blake3_v1_free: free } = result.instance?.exports ?? {}
     if (update === undefined) return result // Node's own HTTP parser module.
-    const exports = { ...result.instance.exports, miso_engine_blake3_v1_update: (...call) => ((moduleUpdates += 1), update(...call)) }
+    const exports = {
+      ...result.instance.exports,
+      miso_engine_blake3_v1_update: (...call) => ((moduleUpdates += 1), update(...call)),
+      miso_engine_blake3_v1_free: (handle) => ((moduleFrees += 1), free(handle)),
+    }
     return { instance: { exports } }
   }
-  assert.equal(await prepareBlake3({ url: pathToFileURL(module) }), "simd128")
+  assert.equal(await prepareBlake3({ url: pathToFileURL(module) }), "javascript", "the failed first fetch")
+  assert.equal(await prepareBlake3({ url: pathToFileURL(module) }), "simd128", "a failed load is retried, not cached")
   WebAssembly.instantiate = instantiate
   checkVectors("simd128")
   assert.ok(moduleUpdates > 0, "the simd128 run hashed in the module")
+  const freesBefore = moduleFrees
+  const failing = new ReadableStream({
+    pull(controller) {
+      controller.error(new Error("read failed"))
+    },
+  })
+  await assert.rejects(blake3Stream(failing), /read failed/)
+  assert.equal(moduleFrees, freesBefore + 1, "a failed stream frees its Wasm hasher at once")
 }
 
 const fixture = new Uint8Array(512 * 1024 + 31)

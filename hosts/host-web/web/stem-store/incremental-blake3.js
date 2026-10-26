@@ -218,7 +218,6 @@ class JavaScriptBlake3 {
 }
 
 const DIGEST_BYTES = 32
-const MODULE_NAME = "miso-engine-v1-blake3.simd128.wasm"
 const EXPORTS = ["memory", "new", "input", "input_capacity", "update", "finalize", "free"]
 
 /**
@@ -233,16 +232,18 @@ const preparations = new Map()
  * Load the WebAssembly SIMD BLAKE3 so that every later `IncrementalBlake3` and
  * `blake3Stream` hashes in it. The default URL is the SDK package's layout: this
  * file is `dist/browser/stems/incremental-blake3.js` and the module is the gated
- * closure's copy, `dist/assets/miso-engine-v1-blake3.simd128.wasm`. Idempotent: one load per URL per realm. Resolves
- * `"simd128"` when the module is loaded, and `"javascript"` when the fetch,
- * the compile (a browser without simd128) or the instantiation fails; it never
- * rejects, and hashing then stays in JavaScript.
+ * closure's copy, `dist/assets/miso-engine-v1-blake3.simd128.wasm`. A successful
+ * load is cached per URL for the realm; a failed one is not, so a later call
+ * retries. Resolves `"simd128"` when the module is loaded, and `"javascript"`
+ * when the fetch, the compile (a browser without simd128) or the instantiation
+ * fails; it never rejects or throws, and hashing then stays in JavaScript.
  *
- * @param {{ url?: string | URL }} [options]
+ * @param {{ url?: string | URL } | null} [options]
  * @returns {Promise<"simd128" | "javascript">}
  */
-export function prepareBlake3(options = {}) {
-  const url = String(options.url ?? new URL(`../../assets/${MODULE_NAME}`, import.meta.url))
+export function prepareBlake3(options) {
+  // A static literal: bundlers detect and copy only a `new URL("...", import.meta.url)` string.
+  const url = String(options?.url ?? new URL("../../assets/miso-engine-v1-blake3.simd128.wasm", import.meta.url))
   let preparation = preparations.get(url)
   if (preparation === undefined) {
     preparation = load(url).then(
@@ -250,7 +251,11 @@ export function prepareBlake3(options = {}) {
         loaded = module
         return "simd128"
       },
-      () => "javascript",
+      () => {
+        // A failure is not cached: the next call retries. A success stays cached.
+        if (preparations.get(url) === preparation) preparations.delete(url)
+        return "javascript"
+      },
     )
     preparations.set(url, preparation)
   }
@@ -316,6 +321,14 @@ class WasmBlake3 {
     }
   }
 
+  /** Free the hasher's Wasm memory now if it was never digested. */
+  release() {
+    if (this.#finished) return
+    this.#finished = true
+    this.#module.registry?.unregister(this)
+    this.#module.free(this.#handle)
+  }
+
   digest() {
     if (this.#finished) throw new Error("BLAKE3 digest is already finalized")
     this.#finished = true
@@ -332,8 +345,11 @@ class WasmBlake3 {
  * A bounded-memory incremental BLAKE3-256. It hashes in the WebAssembly SIMD
  * module when `prepareBlake3` has loaded it, and in JavaScript otherwise.
  */
+/** The engine a new hash takes: the module once one has loaded, JavaScript otherwise. */
+const newEngine = () => (loaded === undefined ? new JavaScriptBlake3() : new WasmBlake3(loaded))
+
 export class IncrementalBlake3 {
-  #engine = loaded === undefined ? new JavaScriptBlake3() : new WasmBlake3(loaded)
+  #engine = newEngine()
 
   /** @param {ArrayBuffer | ArrayBufferView} input */
   update(input) {
@@ -367,9 +383,10 @@ function asBytes(input) {
  */
 export async function blake3Stream(stream, options = {}) {
   await prepareBlake3()
-  const hash = new IncrementalBlake3()
+  const hash = newEngine()
   const reader = stream.getReader()
   let bytes = 0
+  let hex
   try {
     while (true) {
       throwIfAborted(options.signal)
@@ -380,11 +397,14 @@ export async function blake3Stream(stream, options = {}) {
       bytes += chunk.byteLength
       options.onChunk?.(bytes)
     }
+    hex = hexLower(hash.digest())
   } finally {
+    // An aborted or failed stream frees its Wasm hasher now, not at garbage collection.
+    if (hex === undefined) hash.release?.()
     if (options.signal?.aborted) await reader.cancel(options.signal.reason).catch(() => {})
     reader.releaseLock()
   }
-  return { bytes, hex: hash.digestHex() }
+  return { bytes, hex }
 }
 
 /** @param {AbortSignal | undefined} signal */

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "artifact": "incremental-blake3.js",
-  "sha256": "0903d7c95080d3b534d4a689ea19fc3eeeb8c99703d4878a74f01ac74ea890e0",
+  "sha256": "051c39c28ef475a6f44076eca9f6aaa8bfa6797dcde56114dd76ab6755a5b4fe",
   "dependencies": [
     {
       "artifact": "../hex-lower.js",

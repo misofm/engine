@@ -168,10 +168,10 @@ export function blake3Stream(
 
 /**
  * Load the WebAssembly SIMD BLAKE3 (`miso-engine-v1-blake3.simd128.wasm`, by default at the SDK
- * package's `../../assets/` from `incremental-blake3.js`) so later hashes take it. Idempotent per URL; resolves "javascript",
- * never rejects, when the module cannot load.
+ * package's `../../assets/` from `incremental-blake3.js`) so later hashes take it. A success is cached per URL; a failure is
+ * not, so a later call retries. Resolves "javascript", never rejects, when the module cannot load.
  */
-export function prepareBlake3(options?: { url?: string | URL }): Promise<"simd128" | "javascript">
+export function prepareBlake3(options?: { url?: string | URL } | null): Promise<"simd128" | "javascript">
 
 export class Msb1RingWriter {
   constructor(shared: SharedArrayBuffer)
