@@ -19,7 +19,7 @@ import type { BrowserBootPolicy } from "./policy.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
 import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
 import { createMeasurementFeeds } from "./measurement.ts";
-import { linkFeedEngine } from "./pcm-feed.ts";
+import { linkFeedEngine, prepareEngineFeed } from "./pcm-feed.ts";
 import type {
   MeterListener,
   TelemetryListener,
@@ -143,6 +143,10 @@ export interface AudioContextLike {
   readonly renderQuantumSize?: number;
   readonly state: string;
   close(): Promise<void>;
+  /** Starts rendering; `BrowserEngine.play` calls it. A real `AudioContext` has it. */
+  resume?(): Promise<void>;
+  /** Stops rendering; `BrowserEngine.stop` calls it. A real `AudioContext` has it. */
+  suspend?(): Promise<void>;
   readonly audioWorklet: { addModule(url: string): Promise<void> };
 }
 
@@ -203,6 +207,14 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
     readonly workletModuleUrl: string;
   }) => Promise<MisoAudioWorkletHost>;
   readonly policy?: BrowserBootPolicy;
+  /**
+   * Load the PCM feed's worklet prelude before the engine worklet (#2100), so that
+   * `attachEngineFeed` can attach rings to this engine. Off by default. `true` loads the bundled
+   * prelude; `{ moduleUrl }` loads it from that URL. `createEngine` awaits `prepareEngineFeed` once
+   * the context is verified and before `createHost`; a prelude that does not load rejects with
+   * `PcmFeedError` (`moduleLoad`) and closes the context.
+   */
+  readonly pcmFeed?: boolean | { readonly moduleUrl?: string | URL };
   /** How many construct-verify-close-retry rounds to allow. */
   readonly contextAttempts?: number;
 }
@@ -222,6 +234,16 @@ export interface BrowserSeekOptions {
   readonly generation?: bigint;
   /** The producers to reposition, in order, after the engine accepted the seek. */
   readonly producers?: readonly SessionSeekProducer[];
+}
+
+/** Where the timeline playhead is (#2100): the answer of `BrowserEngine.position`. */
+export interface BrowserPosition {
+  /** The timeline frame that the next rendered block starts at. */
+  readonly frame: bigint;
+  /** The timeline generation of that frame: the newest session seek, or the boot's. */
+  readonly generation: bigint;
+  /** The absolute render sample of that next block (the host's `nextAbsoluteSample`). */
+  readonly atSample: bigint;
 }
 
 export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioContext> {
@@ -368,6 +390,37 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    */
   seek(frame: bigint, options?: BrowserSeekOptions): Promise<{ readonly generation: bigint }>;
   /**
+   * The timeline playhead (#2100), read from the host: the timeline's seek report and the next
+   * render sample, so `frame = sourceFrame + (atSample - firstSample)`. A seek that this engine
+   * sent and that no block has rendered yet is in effect at the next block, so it reports the
+   * seek's frame and generation. The host's status is read before the report, so a block that
+   * renders between the two reads cannot mix an old anchor with a new sample. The frame does not
+   * move while the context is suspended. A report that stays busy rejects with `MisoEngineError`
+   * `backpressure`; a closed engine throws `MisoUsageError`.
+   */
+  position(): Promise<BrowserPosition>;
+  /**
+   * Resume the context, then set the transport to `playing` (#2100), in one call; resolves with
+   * the new transport state. `setTransport` alone gates nothing: the transport state is a stored
+   * label (#1635), and in the browser the context is what renders or stops. The context's
+   * `resume()` is called at once; the transport is set after it settles, in call order with
+   * other `play()` and `stop()` calls. A browser holds `resume()` until a user gesture: a later
+   * `play()` or `stop()` does not wait for it, and this call then rejects with `MisoUsageError`.
+   * A refused transport rejects; if this is still the newest call and the context was suspended
+   * before it, the context is suspended again. A context with no `resume()` or `suspend()`, or a
+   * closed engine (also one closed while the call waits), rejects with `MisoUsageError`.
+   */
+  play(): Promise<TransportSnapshot>;
+  /**
+   * Suspend the context at once, then set the transport to `stopped` (#2100), in one call;
+   * resolves with the new transport state. The playhead holds where the last block ended. A
+   * refused transport rejects and leaves the context suspended while the transport label still
+   * says `playing`. A call that a newer call supersedes before its context step settles rejects
+   * with `MisoUsageError`. A context with no `resume()` or `suspend()`, or a closed engine,
+   * rejects with `MisoUsageError`.
+   */
+  stop(): Promise<TransportSnapshot>;
+  /**
    * Apply one structural transaction (`transaction(base)...build()`) at the committed revision
    * (#1296 D1), and resolve with the revision it committed and the path the core chose: `live` (the
    * running plan ramps to the new values), `model_only` (nothing renders differently) or `rebuild`
@@ -431,6 +484,12 @@ function reportListenerError(error: unknown): void {
       throw error;
     });
 }
+
+/** #2100: the reserved source ID whose seek report is the session timeline's. */
+const TIMELINE_REPORT_ID = "$timeline";
+/** #2100: the host's result for a busy report read, and how many reads `position()` makes. */
+const RESULT_BACKPRESSURE = constantValue("resultCodes", "backpressure");
+const POSITION_READ_ATTEMPTS = 4;
 
 /** How often a browser engine reads its host's status while a track response query is pending. */
 const TRACK_RESPONSE_HOST_POLL_MS = 20;
@@ -635,6 +694,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
   if (preparedSpectrum !== undefined && preparedSpectrumCollection !== undefined) {
     throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
   }
+  const pcmFeed = options.pcmFeed;
+  if (pcmFeed !== undefined && typeof pcmFeed !== "boolean" && (typeof pcmFeed !== "object" || pcmFeed === null
+    || (pcmFeed.moduleUrl !== undefined && typeof pcmFeed.moduleUrl !== "string" && !(pcmFeed.moduleUrl instanceof URL)))) {
+    throw new MisoUsageError("pcmFeed must be a boolean or { moduleUrl?: string | URL }");
+  }
   const document = documentBytes(options.document);
   // The document as booted, kept apart from the one the scratch boot and the host are handed, for
   // `withSession()` to hold a builder to.
@@ -706,6 +770,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
 
   // 5. The worklet boot, with the physical shape required.
   try {
+    // #2100: the feed prelude wraps `registerProcessor`, so it loads before the engine worklet.
+    if (pcmFeed === true) await prepareEngineFeed(context);
+    else if (typeof pcmFeed === "object") await prepareEngineFeed(context, pcmFeed.moduleUrl);
     const createHost = options.createHost ?? ((request) => createDefaultHost({
       ...request,
       ...(options.hostModuleUrl === undefined ? {} : { hostModuleUrl: options.hostModuleUrl }),
@@ -760,6 +827,132 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     // Issue #1644 D3: the largest generation a session seek of this object has used; every source
     // and the timeline start at 1.
     let highestSeekGeneration = 1n;
+    // #2100: the newest session seek this engine sent that the host accepted. A timeline report
+    // below its generation means no block has rendered it yet.
+    let lastSessionSeek: { readonly generation: bigint; readonly frame: bigint } | undefined;
+    // #2100: `position()` reads one at a time (the host refuses a second unsettled report read),
+    // and `play()`/`stop()` run one at a time, so their two halves never interleave.
+    let positionChain: Promise<unknown> = Promise.resolve();
+    let transportChain: Promise<unknown> = Promise.resolve();
+    const serialized = <T>(chain: "position" | "transport", run: () => Promise<T>): Promise<T> => {
+      const previous = chain === "position" ? positionChain : transportChain;
+      const next = previous.then(run, run);
+      const settledNext = next.catch(() => undefined);
+      if (chain === "position") positionChain = settledNext;
+      else transportChain = settledNext;
+      return next;
+    };
+    // #2100: the newest `play()`/`stop()` call, and the wake of the one call that waits for its
+    // context step. A newer call or `close()` wakes it, so a `resume()` the browser holds until a
+    // user gesture never blocks a later call.
+    let transportCalls = 0;
+    let wakeTransportWait: (() => void) | undefined;
+    const transportClosed = () => new MisoUsageError("the browser engine is closed");
+    const transportCall = (target: "playing" | "stopped"): Promise<TransportSnapshot> => {
+      const name = target === "playing" ? "play" : "stop";
+      if (closed) return Promise.reject(transportClosed());
+      const { resume, suspend } = context;
+      if (typeof resume !== "function" || typeof suspend !== "function") {
+        return Promise.reject(new MisoUsageError(`${name}() needs an AudioContext with resume() and suspend()`));
+      }
+      const before = context.state;
+      const call = (transportCalls += 1);
+      // The context step starts at once, outside the chain: the context orders its own calls.
+      let contextStep: Promise<void>;
+      try {
+        contextStep = Promise.resolve((target === "playing" ? resume : suspend).call(context));
+      } catch (error) {
+        contextStep = Promise.reject(error);
+      }
+      let stepSettled = false;
+      let wake!: () => void;
+      const woken = new Promise<"woken">((resolve) => {
+        wake = () => { if (!stepSettled) resolve("woken"); };
+      });
+      const stepDone = contextStep.then(
+        () => { stepSettled = true; return "done" as const; },
+        (error: unknown) => { stepSettled = true; throw error; },
+      );
+      // An abandoned step's rejection is not this call's failure once a later call took over.
+      stepDone.catch(() => undefined);
+      const previousWake = wakeTransportWait;
+      wakeTransportWait = wake;
+      previousWake?.();
+      return serialized("transport", async () => {
+        let waited: "done" | "woken";
+        try {
+          waited = await Promise.race([stepDone, woken]);
+        } catch (error) {
+          if (closed) throw transportClosed();
+          throw error;
+        }
+        if (closed) throw transportClosed();
+        if (waited === "woken") {
+          throw new MisoUsageError(`${name}() was superseded by a later call before its context step settled`);
+        }
+        try {
+          return await engine.setTransport({ state: target });
+        } catch (error) {
+          // A refused play does not leave the audio running when it was suspended before. A later
+          // call owns the context, so only the newest call restores it. A refused stop keeps the
+          // context suspended (the transport label stays `playing`).
+          if (target === "playing" && call === transportCalls && before === "suspended") {
+            try { await suspend.call(context); } catch { /* the transport refusal is the failure to report */ }
+          }
+          throw error;
+        }
+      });
+    };
+    const readTimelineReport = async () => {
+      for (let attempt = 0; attempt < POSITION_READ_ATTEMPTS; attempt += 1) {
+        // One macrotask between reads, so a report read in flight (a feed's alignment) can settle.
+        if (attempt !== 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        let result: number;
+        let report: Awaited<ReturnType<MisoAudioWorkletHost["seekReport"]>>["report"] = null;
+        try {
+          ({ result, report } = await host.seekReport(TIMELINE_REPORT_ID));
+        } catch (error) {
+          const code = (error as { readonly result?: unknown }).result;
+          if (typeof code !== "number" || !Number.isSafeInteger(code) || code < 0) throw error;
+          result = code;
+        }
+        if (result === RESULT_BACKPRESSURE) continue;
+        if (result !== constantValue("resultCodes", "ok") || report === null) {
+          throw new MisoEngineError("the browser host refused the timeline report", {
+            phase: "source",
+            code: resultName(result, "call"),
+            result,
+          });
+        }
+        return report;
+      }
+      return undefined;
+    };
+    const readPosition = async (): Promise<BrowserPosition> => {
+      for (let attempt = 0; attempt < POSITION_READ_ATTEMPTS; attempt += 1) {
+        // The status first, then the report: a block that renders between them can only make the
+        // report newer than the status. A generation that began at the status's next block is the
+        // one that block plays; one that began later cannot be placed, so the reads are made again.
+        const { nextAbsoluteSample } = await host.status();
+        const report = await readTimelineReport();
+        if (report === undefined) break;
+        if (nextAbsoluteSample < report.firstSample) continue;
+        const pending = lastSessionSeek !== undefined && lastSessionSeek.generation > report.generation
+          ? lastSessionSeek : undefined;
+        return Object.freeze(pending === undefined
+          ? {
+            frame: report.sourceFrame + (nextAbsoluteSample - report.firstSample),
+            generation: report.generation,
+            atSample: nextAbsoluteSample,
+          }
+          : { frame: pending.frame, generation: pending.generation, atSample: nextAbsoluteSample });
+      }
+      throw new MisoEngineError("the timeline report stayed busy", {
+        phase: "source",
+        code: resultName(RESULT_BACKPRESSURE, "call"),
+        result: RESULT_BACKPRESSURE,
+      });
+    };
     // Issue #1297b: the PCM feeds whose `engine` is this one. A feed's anchored start takes its
     // generation from the same sequence as `seek`, so a later session seek is always above it.
     const feedRetirement = linkFeedEngine(host, () => {
@@ -1317,6 +1510,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         }
         if (reply.result !== constantValue("resultCodes", "ok")) throw refused(reply.result);
         if (generation > highestSeekGeneration) highestSeekGeneration = generation;
+        lastSessionSeek = { generation, frame };
         for (const [index, producer] of producers.entries()) {
           try {
             await producer.seek(Number(frame), generation);
@@ -1326,6 +1520,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         }
         return Object.freeze({ generation });
       },
+      position: () => {
+        if (closed) return Promise.reject(new MisoUsageError("the browser engine is closed"));
+        return serialized("position", readPosition);
+      },
+      play: () => transportCall("playing"),
+      stop: () => transportCall("stopped"),
       apply: async (transaction: SessionTransaction) => {
         if (closed) throw new MisoUsageError("the browser engine is closed");
         const outcome = await (await protocolClient()).applyTransaction(transaction);
@@ -1391,6 +1591,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       },
       close: () => {
         closed = true;
+        wakeTransportWait?.();
         stopWatermark();
         appliedLedger.rejectAll(new MisoUsageError("the browser engine is closed"));
         editQueue?.close();
