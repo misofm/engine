@@ -574,6 +574,20 @@ fn the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly() {
         pair.push(lane, bypass(false, 0));
         let _ = pair.step(&quiet);
     }
+    // Issue #2129 D6: a settled-bypassed lane whose run of the line still holds signal does not
+    // rest; once the line has taken a whole run of `+0.0`, it does.
+    for lane in (0..LANES - 1).filter(|&lane| POLES[lane] == 0.0) {
+        let _ = pair.step(&signal_ending_silent(&mut rng));
+        pair.push(lane, bypass(true, 0));
+        assert_eq!(
+            pair.step(&quiet),
+            ALL & !(1 << lane),
+            "the line still holds signal"
+        );
+        assert_eq!(pair.step(&quiet), ALL, "the line holds only +0.0");
+        pair.push(lane, bypass(false, 0));
+        let _ = pair.step(&quiet);
+    }
     // The random schedule.
     let mut active = [0_usize; LANES];
     for _ in 0..4_000 {
