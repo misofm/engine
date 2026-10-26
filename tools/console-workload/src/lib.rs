@@ -3140,10 +3140,14 @@ mod tests {
             graph::test_only_source_plane_reset();
             audit::warm_up();
             audit::reset();
+            // The claim is the feed, so every bank with an audible lane gathers: the per-block
+            // lane packing (issue #1981) is off, which would let the sparse rows' banks skip.
+            graph::test_only_disable_lane_packing(true);
             for block in 0..BLOCKS {
                 runtime.await_live_feed(block);
                 runtime.render(block).expect("console render");
             }
+            graph::test_only_disable_lane_packing(false);
             let forbidden = audit::snapshot().total();
             let planes = graph::test_only_source_plane_counts();
             if live {
