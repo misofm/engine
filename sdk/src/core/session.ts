@@ -1346,16 +1346,31 @@ function normalizeFader(raw: TrackSpec["fader"], path: string): ModelRecord {
 /**
  * The `pan`-or-`matrix` variant, and the key it is written under.
  *
- * Both spellings occupy schema field 10; a track carries one or the other, never both. An absent
- * `pan` takes the `pan` builtin's own catalog default for each lane rather than a number this
- * file invented -- the SDK holds no default the engine does not publish.
+ * Both spellings occupy schema field 10; a strip carries one or the other, never both. An absent
+ * `pan` is the identity `matrix`, from the `matrix_*` builtins' own catalog defaults (#2101): the
+ * strip passes each lane through unchanged, so a stereo source keeps its image and a mono source
+ * plays at exactly its stereo dual-mono twin's level. The catalog `pan` default (0 on each lane)
+ * would instead fold both lanes to the centre. The SDK holds no default the engine does not
+ * publish.
  */
 function normalizeMatrixOrPan(
   raw: TrackSpec["pan"],
   path: string,
 ): { readonly key: "pan" | "matrix"; readonly value: ModelRecord } {
   const smoothing = integer(raw?.smoothingSamples ?? 0, `${path}.smoothingSamples`, 0, 0xffff_ffff);
-  if (raw !== undefined && "matrix" in raw) {
+  if (raw === undefined) {
+    return {
+      key: "matrix",
+      value: freeze({
+        ll: builtinDefaultNumber("matrix_ll"),
+        lr: builtinDefaultNumber("matrix_lr"),
+        rl: builtinDefaultNumber("matrix_rl"),
+        rr: builtinDefaultNumber("matrix_rr"),
+        smoothing_samples: smoothing,
+      }),
+    };
+  }
+  if ("matrix" in raw) {
     const coefficient = (key: "ll" | "lr" | "rl" | "rr"): number =>
       builtinNumber(`matrix_${key}`, raw.matrix[key], `${path}.matrix.${key}`);
     return {
@@ -1372,12 +1387,8 @@ function normalizeMatrixOrPan(
   return {
     key: "pan",
     value: freeze({
-      left: raw === undefined
-        ? builtinDefaultNumber("pan")
-        : builtinNumber("pan", raw.left, `${path}.left`),
-      right: raw === undefined
-        ? builtinDefaultNumber("pan")
-        : builtinNumber("pan", raw.right, `${path}.right`),
+      left: builtinNumber("pan", raw.left, `${path}.left`),
+      right: builtinNumber("pan", raw.right, `${path}.right`),
       smoothing_samples: smoothing,
     }),
   };

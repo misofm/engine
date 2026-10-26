@@ -132,6 +132,12 @@ export interface TrackSpec {
   /** The per-track insert chain, in signal order: full effect declarations from `effect()`. */
   readonly inserts?: readonly EffectDecl[];
   readonly fader?: FaderSpec;
+  /**
+   * The strip's per-lane pan or its 2x2 matrix. Omitted, it is the identity matrix (`ll = rr = 1`,
+   * `lr = rl = 0`, the `matrix_*` catalog defaults; #2101): each lane passes through unchanged, so
+   * a stereo source keeps its image and a mono source plays at its stereo dual-mono twin's level.
+   * A submix spec takes the same default.
+   */
   readonly pan?: PanSpec;
 }
 
@@ -139,7 +145,8 @@ export interface TrackSpec {
  * A submix strip: a track's strip without its source fields (owner decision 13).
  *
  * Every field follows the track's rules and defaults, and `console` is checked against the session
- * console exactly as a track's is, so a submix with a spec follows `console()`. A submix declared
+ * console exactly as a track's is, so a submix with a spec follows `console()`; a spec without
+ * `pan` is the identity matrix, as a track's is. A submix declared
  * with no spec at all is the transparent strip instead: the identity input section, no inserts, a
  * 0 dB unmuted fader, the identity matrix and every console slot bypassed. Its latency is still paid.
  */
