@@ -415,8 +415,9 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * Suspend the context at once, then set the transport to `stopped` (#2100), in one call;
    * resolves with the new transport state. The playhead holds where the last block ended. A
    * refused transport rejects and leaves the context suspended while the transport label still
-   * says `playing`. A context with no `resume()` or `suspend()`, or a closed engine, rejects with
-   * `MisoUsageError`.
+   * says `playing`. A call that a newer call supersedes before its context step settles rejects
+   * with `MisoUsageError`. A context with no `resume()` or `suspend()`, or a closed engine,
+   * rejects with `MisoUsageError`.
    */
   stop(): Promise<TransportSnapshot>;
   /**

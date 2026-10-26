@@ -232,8 +232,8 @@ plays:
   source with `start: { frameAt, prime }`. `feed.ready()` reads the engine's next render sample
   once and sets the anchor `A` to that sample plus the ring's capacity in frames, rounded up to a
   quantum. It calls `frameAt(A)` once (`frameAt` is your mapping from anchor to source frame;
-  `engine.position()` gives the timeline frame now), publishes the anchored seek in the ring, awaits `prime({ generation, frame,
-  anchorSample })`, and then sends the seek to the engine. Write the stem's PCM from `frame` at
+  `engine.position()` gives the timeline frame now), publishes the anchored seek in the ring,
+  awaits `prime({ generation, frame, anchorSample })`, and then sends the seek to the engine. Write the stem's PCM from `frame` at
   `generation` in `prime`, and do not seek the ring there. The drain reads none of that ring's
   chunks until the engine applied the seek. If the audio reaches `A` before that, the engine
   starts the stem at the frame plus the lateness and reports it in the source's seek report; the
@@ -300,7 +300,8 @@ at once, and sets the transport after that step settles, in call order. Each res
 new transport state. `engine.setTransport()` alone does not start or stop the audio: the
 transport state is a label that the core keeps (#1635). In the browser, the context is what
 renders. A browser holds `resume()` until a user gesture: a later `play()` or `stop()` does not
-wait for it, and the earlier `play()` rejects with `MisoUsageError`. If the core refuses the
+wait for it, and the earlier `play()` rejects with `MisoUsageError`. A call that a newer call
+supersedes before its context step settles rejects with `MisoUsageError`. If the core refuses the
 transport, `play()` rejects and, if it is the newest call and the context was suspended before
 it, suspends the context again. If the core refuses the transport for `stop()`, `stop()` rejects
 and the context stays suspended, but the transport label still says `playing`.

@@ -1127,8 +1127,8 @@ describe("browser session edits", () => {
     // Red if `stop()` only suspends the context or only stops the transport (the two halves
     // drift apart), if `play()` leaves the transport stopped or the context suspended, if a
     // `resume()` the browser holds blocks a later `stop()`, if a refused play leaves the context
-    // running when it was suspended or suspends it when it was running, or if `close()` leaves a
-    // waiting call pending.
+    // running when it was suspended or suspends it when it was running, if a refused play that a
+    // newer play overtook restores the context, or if `close()` leaves a waiting call pending.
     const { engine, host } = await boot(base());
     const within = (promise) => Promise.race([promise, new Promise((_, reject) => {
       setTimeout(() => reject(new Error("the call did not settle")), 2_000).unref();
@@ -1155,6 +1155,17 @@ describe("browser session edits", () => {
       await assert.rejects(engine.play(), (error) => error === refusal);
       assert.equal(engine.context.state, "suspended", "a refused play from suspended suspends again");
       host.control = control;
+      // Only the newest call restores: a refused play that a newer play overtook leaves it running.
+      let release;
+      const slow = new Promise((resolve) => { release = resolve; });
+      host.control = async () => { host.control = control; await slow; throw refusal; };
+      const overtaken = engine.play();
+      const newest = engine.play();
+      release();
+      await assert.rejects(overtaken, (error) => error === refusal);
+      assert.equal((await newest).state, "playing");
+      assert.equal(engine.context.state, "running", "an overtaken refusal does not suspend the newest play");
+      assert.equal((await engine.transport()).state, "playing");
       assert.equal((await engine.play()).state, "playing");
       host.control = async () => { throw refusal; };
       await assert.rejects(engine.play(), (error) => error === refusal);
