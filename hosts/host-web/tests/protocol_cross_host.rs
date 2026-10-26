@@ -707,12 +707,14 @@ fn capabilities_plus(reply: &[u8], added: &[u16], flags: u64) -> Vec<u8> {
 /// render activity (no telemetry events, a wrong `effective_sample`), if the two hosts are built
 /// with different protocol limits, or if the browser answers an `Observe` arm or an
 /// `OBSERVATION_READ` otherwise than the C ABI (#1589 D6: a reader render does not publish to, or
-/// an index that does not reach the browser's readers).
+/// an index that does not reach the browser's readers), or if a `LOUDNESS` reply differs between the
+/// hosts or delivers no hop (#2115).
 #[test]
 fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
     let mut legs = Legs::new();
 
-    // 1. CAPABILITIES_GET. Both hosts serve `SESSION_REPLACE` (`0x0013`, #1697), the three
+    // 1. CAPABILITIES_GET. Both hosts serve `LOUDNESS` (`0x0014`) with flag bit 17 (#2115),
+    // `SESSION_REPLACE` (`0x0013`, #1697), the three
     // spectrum commands (`0x0010`-`0x0012`) with flag bit 16 (#1596) and, since #1589a,
     // `OBSERVATION_READ` (`0x000f`) with flag bit 15 (#1586 R2), and size their lossy meter lane
     // to one whole meter batch (#1587a, #1588). The whole reply is byte-equal.
@@ -1042,6 +1044,42 @@ fn the_browser_and_the_c_abi_give_the_same_bytes_for_one_script() {
         3,
         "step 8's three METER_BATCH events in {kinds:04x?}"
     );
+
+    // 20. The output loudness meter (#2115): a `LOUDNESS` start, sixteen render blocks (four
+    // 10 ms hops), then a read: the same bytes on both legs, so both hosts serve one core meter.
+    let start = legs.command(
+        "20 loudness start",
+        CommandPayload::Loudness(protocol::LoudnessRequest::Start),
+    );
+    for block in next + 20..next + 36 {
+        legs.block(block);
+    }
+    let read = legs.command(
+        "20 loudness read",
+        CommandPayload::Loudness(protocol::LoudnessRequest::Read),
+    );
+    let loudness = |step: &str, frame: &[u8]| {
+        let mut fields = [0_u16; 64];
+        match ProtocolCodec::default()
+            .decode_typed_response(frame, &mut protocol::DecodeScratch::new(&mut fields))
+        {
+            Ok(protocol::DecodedTypedResponseFrame::Success {
+                payload: protocol::DecodedSuccessResponsePayload::Loudness(reply),
+                ..
+            }) => reply,
+            _ => panic!("{step}: a loudness reply"),
+        }
+    };
+    let (start, read) = (
+        loudness("20 loudness start", &start),
+        loudness("20 loudness read", &read),
+    );
+    assert!(
+        read.armed && read.observed_sample >= start.observed_sample + 4 * 480,
+        "20 loudness read: vacuous without delivered hops"
+    );
+
+    legs.drain("after 20");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1163,13 +1201,17 @@ fn assert_render_never_allocates(
 }
 
 /// Test value: red if the moved peak scan, or the browser's call to it, allocates on the render
-/// thread. Telemetry is configured, so the scan runs on every block.
+/// thread. Telemetry is configured, so the scan runs on every block. #2115: the output loudness
+/// meter is armed on both legs, so every measured block runs its render half and its hops close
+/// and are pushed; red if that path allocates or frees.
 #[test]
 fn the_render_call_never_allocates_with_telemetry_configured() {
     assert_installed();
 
     let mut browser = Browser::new(REALTIME_FRAMES);
     let (result, _) = browser.send(&telemetry_frame(1, browser.host.committed_revision()));
+    assert_eq!(result, RESULT_OK);
+    let (result, _) = browser.send(&loudness_frame(2, protocol::LoudnessRequest::Start));
     assert_eq!(result, RESULT_OK);
     browser.drain();
     browser.service();
@@ -1197,6 +1239,13 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
         served.get() >= 1,
         "vacuous: the measured blocks served no METER_BATCH"
     );
+    assert_loudness_delivered(
+        "browser",
+        &host
+            .borrow_mut()
+            .send(&loudness_frame(3, protocol::LoudnessRequest::Read))
+            .1,
+    );
 
     let limits = host
         .borrow()
@@ -1205,6 +1254,8 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
         .expect("the control half's limits");
     let mut c = CAbi::new(REALTIME_FRAMES, limits);
     let (code, _) = c.send(&telemetry_frame(1, host.borrow().host.committed_revision()));
+    assert_eq!(code, C_RESULT_OK);
+    let (code, _) = c.send(&loudness_frame(2, protocol::LoudnessRequest::Start));
     assert_eq!(code, C_RESULT_OK);
     c.drain();
     c.service();
@@ -1219,6 +1270,39 @@ fn the_render_call_never_allocates_with_telemetry_configured() {
             c.service();
             c.drain();
         },
+    );
+    assert_loudness_delivered(
+        "miso_engine_v1_render_f32_planar",
+        &c.borrow_mut()
+            .send(&loudness_frame(3, protocol::LoudnessRequest::Read))
+            .1,
+    );
+}
+
+fn loudness_frame(request: u64, operation: protocol::LoudnessRequest) -> Vec<u8> {
+    frame(
+        request,
+        ExpectedRevision::Any,
+        CommandPayload::Loudness(operation),
+    )
+}
+
+/// The armed meter's hops reached the read: the measured blocks ran the render half's hop pushes.
+fn assert_loudness_delivered(leg: &str, response: &[u8]) {
+    let mut fields = [0_u16; 64];
+    let Ok(protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::Loudness(reply),
+        ..
+    }) = ProtocolCodec::default()
+        .decode_typed_response(response, &mut protocol::DecodeScratch::new(&mut fields))
+    else {
+        panic!("{leg}: a loudness reply")
+    };
+    // The measured blocks alone are 64 x 128 frames, 17 hops of 480.
+    let measured = MEASURED_BLOCKS * u64::from(QUANTUM);
+    assert!(
+        reply.armed && reply.hops_dropped == 0 && reply.observed_sample >= measured,
+        "{leg}: vacuous without hops closed in the measured blocks: {reply:?}"
     );
 }
 

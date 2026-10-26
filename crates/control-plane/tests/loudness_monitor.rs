@@ -27,8 +27,8 @@ const HOP: u64 = 480;
 /// Blocks per 1,920 samples, the least common multiple of the hop and the quantum.
 const ALIGNED_BLOCKS: u64 = 15;
 
-/// One track playing the stereo source at unity (trim 0, fader 0, left hard left and right hard right, identity route) into
-/// the one output, with no effect.
+/// One track playing the stereo source at unity (trim 0, fader 0, the left channel panned hard
+/// left and the right hard right, an identity route) into the one output, with no effect.
 const SESSION: &str = r#"{
   "schema_version": 1,
   "session_id": "loudness.session",

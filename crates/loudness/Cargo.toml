@@ -15,8 +15,6 @@ math.workspace = true
 true-peak-limiter.workspace = true
 
 [dev-dependencies]
-# The workspace's one audited global allocator: the render half's zero-allocation gate.
-bench-support.workspace = true
 # The independent f64 oracle and the EBU Tech 3341/3342 signal generators.
 dsp-reference.workspace = true
 
