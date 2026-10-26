@@ -82,16 +82,9 @@ devtools session that loads the twin instead of the shipped module prints the na
 ## Between releases
 
 Nothing re-pins the pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`),
-`results.json` or `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` between releases. From the first
-release PR under #1061 on, they describe the last release. **Until then they do not:**
-
-- They hold the last per-change re-pin, made at a batch boundary before #1061, and its
-  three-browser record: `git log -1 -- <pin file>` names it.
-- That is not the module release 0.4.3 shipped, whose digest is `npm-publish.yml`'s
-  `EXPECTED_WORKLET_SHA256`.
-- So while the two differ, `npm-publish.yml`'s first step ("Assert the worklet sha256 pin matches
-  its source-of-truth file") refuses on `main`. That predates #1061, and the next release PR clears
-  it.
+`results.json` or `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` between releases. They describe
+the last release, 0.5.0 (#2110): the pin is `npm-publish.yml`'s `EXPECTED_WORKLET_SHA256`, and
+`results.json` is that module's two-browser record.
 
 The browser legs still check every browser row, the Playwright version and the generated matrix
 against `results.json` on every PR (`--check-matrix`). Re-record the matrix when Playwright or a
