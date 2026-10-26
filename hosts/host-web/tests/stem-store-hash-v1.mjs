@@ -15,15 +15,15 @@ assert.equal(
   "000123456789abcdefff",
 )
 
-const fixture = new Uint8Array(512 * 1024 + 31)
-for (let index = 0; index < fixture.length; index += 1) fixture[index] = index * 31
-const fixtureHex = "37dd28058dfeeb01cdba9b4f7f04d990980353eeae9fb4998e975e301350d67b"
-
 const vectors = [
   [new Uint8Array(), "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"],
   [new TextEncoder().encode("abc"), "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"],
   [new Uint8Array(1_000_000).fill("a".charCodeAt(0)), "616f575a1b58d4c9797d4217b9730ae5e6eb319d76edef6549b46f4efe31ff8b"],
-  [fixture, fixtureHex],
+  // Issue #2111: the official BLAKE3 test vectors' input pattern (byte i is i mod 251) at
+  // 300,000 bytes, past the WebAssembly module's 256 KiB staging buffer with bytes that differ
+  // across the refill (a period of 256, like the two inputs above, would hide a refill that
+  // re-copies). The digest is the blake3 crate 1.8.7's native build's, and the JavaScript class's.
+  [Uint8Array.from({ length: 300_000 }, (_, index) => index % 251), "6cc9dce05d4cff8c5bef5c5a24681e42b13f03e34a0bc5e66f65a91d48c944fa"],
 ]
 
 // Independent BLAKE3-256 KATs from hash-wasm 4.12.0. Their endings exercise a partial final
@@ -37,8 +37,8 @@ const irregularEndingVectors = [
 // Issue #2111: the same loops run through each engine `IncrementalBlake3` can take. The
 // JavaScript run is first, before any preparation; the WebAssembly SIMD run follows when
 // MISO_ENGINE_SDK_ARTIFACTS_HEX names a built artifact directory (hex of its path, as
-// scripts/check-sdk-headless.sh spells it). The one-update runs of the two vectors above 256 KiB
-// cross the module's staging-buffer refill, the fixture's with bytes that differ across it.
+// scripts/check-sdk-headless.sh spells it). A one-update run of a vector above 256 KiB crosses the
+// module's staging-buffer refill.
 function checkVectors(engine) {
   for (const [length, expected] of irregularEndingVectors) {
     const bytes = new Uint8Array(length)
@@ -93,6 +93,9 @@ if (artifactsHex !== undefined) {
   assert.ok(moduleUpdates > 0, "the simd128 run hashed in the module")
 }
 
+const fixture = new Uint8Array(512 * 1024 + 31)
+for (let index = 0; index < fixture.length; index += 1) fixture[index] = index * 31
+const fixtureHex = "37dd28058dfeeb01cdba9b4f7f04d990980353eeae9fb4998e975e301350d67b"
 const identity = `blake3:${fixtureHex}`
 const resolver = new MemoryStemResolver({ [identity]: fixture }, { chunkBytes: 8191 })
 const resolved = await resolver.resolve(identity)
