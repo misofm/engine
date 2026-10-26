@@ -394,13 +394,13 @@ mod tests {
         BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, OPS_PER_CYCLE, floor_row, lane_samples_per_block,
     };
     use console_workload::{
-        BUS_SEND_WORKLOADS, CONSOLE_STRIP_WORKLOADS, PACKING_WORKLOADS, Workload,
+        BUS_SEND_WORKLOADS, BYPASS_WORKLOADS, CONSOLE_STRIP_WORKLOADS, PACKING_WORKLOADS, Workload,
         native_session_rows,
     };
 
     /// The rows the table states no floor for: the uninventoried nine-track fixture, the metered
-    /// row, the bus-and-send row (issue #1227), the console-strip rows (issue #1085) and the packing
-    /// rows (issue #1783).
+    /// row, the bus-and-send row (issue #1227), the console-strip rows (issue #1085), the packing
+    /// rows (issue #1783) and the bypass-skip row (issue #2129).
     fn underived(workload: Workload) -> bool {
         matches!(
             workload,
@@ -408,6 +408,7 @@ mod tests {
         ) || BUS_SEND_WORKLOADS.contains(&workload)
             || CONSOLE_STRIP_WORKLOADS.contains(&workload)
             || PACKING_WORKLOADS.contains(&workload)
+            || BYPASS_WORKLOADS.contains(&workload)
     }
 
     fn rust_floor_table() -> String {

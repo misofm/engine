@@ -187,6 +187,9 @@ def floor_pins:
     "sixty_four_track_console_toggle":
       [null, 1, "none", "not_derived"],
     "sixty_four_track_console_one_per_bank":
+      [null, 1, "none", "not_derived"],
+    # #2129: the bypassed sixteen-track row renders shunt copies, which no inventory counts.
+    "sixteen_track_strip_bypassed":
       [null, 1, "none", "not_derived"]
   };
 
@@ -227,12 +230,13 @@ def floor_shape:
    end);
 
 
-# The twenty-five session workloads, sorted: `WORKLOADS`'s fourteen (in emission order), the
+# The twenty-six session workloads, sorted: `WORKLOADS`'s fourteen (in emission order), the
 # gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`), its
 # live-producer twin (#938, `LIVE_FED_WORKLOADS`), the metered console row (#881, `METERED_WORKLOADS`), the bus-and-send
 # row (#1227, `BUS_SEND_WORKLOADS`), the five console-strip rows (#1085,
-# `CONSOLE_STRIP_WORKLOADS`), and the two packing rows it emits last (#1783, `PACKING_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_one_per_bank","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_console_toggle","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_live","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
+# `CONSOLE_STRIP_WORKLOADS`), the two packing rows (#1783, `PACKING_WORKLOADS`), and the
+# bypass-skip row it emits last (#2129, `BYPASS_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixteen_track_strip_bypassed","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_one_per_bank","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_console_toggle","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_live","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
 
 # #928, #965: how a session row's track inputs reach the graph. `played_planes` is a prepared
 # source set whose driver copies each claim's block on request and lends its played planes in
@@ -443,11 +447,15 @@ def session_kind_shape:
   # nine-track row is, so every one is synthetic and states the standing strip. Together with the
   # nine- and sixty-four-track rows they are the remainders the console strip's padding moves: two,
   # five, and none (two full banks).
+  # #2129: the bypassed sixteen-track row is the sixteen-track row with every console slot
+  # bypassed, so it states the same facts.
   elif .workload_kind == "ten_track_ragged_strip" or
        .workload_kind == "thirteen_track_ragged_strip" or
-       .workload_kind == "sixteen_track_strip" then
+       .workload_kind == "sixteen_track_strip" or
+       .workload_kind == "sixteen_track_strip_bypassed" then
     .tracks == ({"ten_track_ragged_strip": 10, "thirteen_track_ragged_strip": 13,
-                 "sixteen_track_strip": 16}[.workload_kind]) and
+                 "sixteen_track_strip": 16,
+                 "sixteen_track_strip_bypassed": 16}[.workload_kind]) and
     .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and
     .strip_layout == intended_layout and .input_signal == "tone" and

@@ -3892,6 +3892,7 @@ mod tests {
         for workload in console_workload::CONSOLE_STRIP_WORKLOADS
             .into_iter()
             .chain(console_workload::PACKING_WORKLOADS)
+            .chain(console_workload::BYPASS_WORKLOADS)
         {
             let measured = SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS);
             assert_eq!(measured.render_errors, 0, "{}", workload.kind());
@@ -4034,6 +4035,7 @@ mod tests {
             (Workload::TenTrackRaggedStrip, 10),
             (Workload::ThirteenTrackRaggedStrip, 13),
             (Workload::SixteenTrackStrip, 16),
+            (Workload::SixteenTrackStripBypassed, 16),
         ] {
             let record = record_of(workload);
             assert!(record.contains(&format!("\"tracks\":{tracks},")));

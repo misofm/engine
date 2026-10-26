@@ -713,7 +713,8 @@ pub const BYPASS_WORKLOADS: [Workload; 1] = [Workload::SixteenTrackStripBypassed
 
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
 /// [`DRIVER_FED_WORKLOADS`], then [`LIVE_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then
-/// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`].
+/// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`], then
+/// [`BYPASS_WORKLOADS`].
 pub fn native_session_rows() -> impl Iterator<Item = Workload> {
     WORKLOADS
         .into_iter()
@@ -723,6 +724,7 @@ pub fn native_session_rows() -> impl Iterator<Item = Workload> {
         .chain(BUS_SEND_WORKLOADS)
         .chain(CONSOLE_STRIP_WORKLOADS)
         .chain(PACKING_WORKLOADS)
+        .chain(BYPASS_WORKLOADS)
 }
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
@@ -3462,6 +3464,7 @@ mod tests {
             .chain(BUS_SEND_WORKLOADS)
             .chain(CONSOLE_STRIP_WORKLOADS)
             .chain(PACKING_WORKLOADS)
+            .chain(BYPASS_WORKLOADS)
         {
             assert!(!workload.web_meters(), "{}", workload.kind());
         }
@@ -3475,6 +3478,7 @@ mod tests {
                 + BUS_SEND_WORKLOADS.len()
                 + CONSOLE_STRIP_WORKLOADS.len()
                 + PACKING_WORKLOADS.len()
+                + BYPASS_WORKLOADS.len()
         );
         assert!(
             rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + LIVE_FED_WORKLOADS.len())
@@ -3897,11 +3901,14 @@ mod tests {
             );
         }
         let rows: Vec<Workload> = native_session_rows().collect();
-        let strip_end = rows.len() - PACKING_WORKLOADS.len();
+        let strip_end = rows.len() - PACKING_WORKLOADS.len() - BYPASS_WORKLOADS.len();
+        let packing_end = strip_end + PACKING_WORKLOADS.len();
         assert!(
             rows[strip_end - STRIP_ROWS.len()..strip_end] == STRIP_ROWS
-                && rows[strip_end..] == PACKING_WORKLOADS,
-            "the console-strip rows are emitted last but for the packing rows (#1783)"
+                && rows[strip_end..packing_end] == PACKING_WORKLOADS
+                && rows[packing_end..] == BYPASS_WORKLOADS,
+            "the console-strip rows are emitted last but for the packing rows (#1783) and the \
+             bypass-skip row (#2129)"
         );
         let mut kinds: Vec<&str> = rows.iter().map(|row| row.kind()).collect();
         kinds.sort_unstable();
@@ -3913,6 +3920,11 @@ mod tests {
                 BypassCensus {
                     bypassed_tracks: 21,
                     pattern: BypassPattern::IndexMod3Is2,
+                }
+            } else if row == Workload::SixteenTrackStripBypassed {
+                BypassCensus {
+                    bypassed_tracks: 16,
+                    pattern: BypassPattern::Other,
                 }
             } else {
                 BypassCensus {

@@ -1,12 +1,12 @@
-# Aggregate validator: twenty-five session workloads (fourteen standing rows, the gain/pan row,
+# Aggregate validator: twenty-six session workloads (fourteen standing rows, the gain/pan row,
 # #928 and #956, its live-producer twin, #938, the metered console row, #881, the bus-and-send
 # row, #1227, the five
-# console-strip rows, #1085, and the two packing rows, #1783, every one fed through a prepared
+# console-strip rows, #1085, the two packing rows, #1783, and the bypass-skip row, #2129, every one fed through a prepared
 # source set since #965), two hoist
 # workloads, one meters arm, one observation arm, one
 # placement row-pair, one automation-active row, one mono row-pair, one mixing-automation row
 # (#1003), one fader-ride row (#1750) and five product-lane arms (#1758, #1763), each in rounds
-# one and two -- seventy-eight records. #956 retired the builtins-less plumbing
+# one and two -- eighty records. #956 retired the builtins-less plumbing
 # row and re-based the driver-fed row, two records fewer than the fifty before it; #1003's row
 # brought the count back to fifty, #1085's five rows, emitted after the metered row, took it to
 # sixty, and #1227's bus-and-send row, emitted between the metered row and the console-strip rows,
@@ -15,15 +15,15 @@
 # emitted after that, to seventy-four. #965 fed every row through a source set and retired the
 # bound-feed `gain_pan_only` twin, two records fewer: seventy-two. #938's live-producer row, emitted
 # after the ring row, takes it to seventy-four, and #1783's two packing rows, emitted after the
-# console-strip rows, to seventy-eight.
+# console-strip rows, to seventy-eight. #2129's bypass-skip row, emitted last, takes it to eighty.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 78 and
+(type == "array") and length == 80 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
   == ["nine_track_ragged_strip","sixty_four_track_console"] and
-([.[] | select(.record == "console_session")] | length) == 50 and
+([.[] | select(.record == "console_session")] | length) == 52 and
 ([.[] | select(.record == "console_hoist")] | length) == 4 and
 ([.[] | select(.record == "console_meters")] | length) == 2 and
 ([.[] | select(.record == "console_observation")] | length) == 2 and
@@ -41,7 +41,7 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_fader_ride") | .workload_kind] | unique)
   == ["sixty_four_track_console_fader_ride"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 78 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 80 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
