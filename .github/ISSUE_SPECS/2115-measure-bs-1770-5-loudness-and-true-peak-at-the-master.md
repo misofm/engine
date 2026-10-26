@@ -192,3 +192,33 @@ start.
   - `lint-checks.sh --self-tests`.
   - The implementer ran the Chromium browser qualification once (`--check-matrix --self-test-mutations --sdk-root
     sdk`): every gate passed, with 0 render allocations.
+
+## S3 attempt 2 (after the review found two MAJOR host-stall defects)
+- **Handle states.** A handle is `open`, then `closing`, then `closed`.
+  - At most one timed read is in flight. A tick is skipped while that read is pending. A failed timed read goes to
+    `onError`, and `observedSample` stops advancing until a read lands.
+  - `close()` stops the timer. A read or reset whose turn comes while the handle is closing is not sent; it rejects.
+    The stop therefore waits only behind the frame already in flight.
+  - If the stop fails, the handle reopens, the timer restarts, and `close()` rejects and can be called again.
+  - A start that fails in transport (deadline, abort, lost reply) queues a quiet `stop` on the owner's chain, as the
+    spectrum stream does. A typed core refusal sends none.
+  - A reply is delivered only if the handle is not closed when it comes back.
+- **New evals, and what each catches:**
+  - (5) One decoder row per reply rule: a decoder that accepts a reply the Rust codec refuses.
+  - (7) A stuck host, from the verifier's `stuck.mjs`: the timer queue grows, close waits behind skipped reads, a read
+    is sent after close, or a timed-read failure is lost.
+  - (8) A start that lands after the deadline (the frames must be start, stop, start): a lost start that leaves the
+    meter armed with no handle.
+  - (9) A stop that fails: a dead handle afterwards.
+  - (10) Capability bit 17 clear: a dropped capability check.
+- **Red evidence.**
+  - On attempt 1's `loudness.ts`, evals 7, 8 and 9 are red; close sent about 30 reads after the call.
+  - Mutants: bit-17 check dropped (10); each decoder rule dropped or the floor moved (5); in-flight guard removed (7);
+    reads allowed while closing (7); the quiet stop after a failed start removed (8); no timer restart after a failed
+    stop (9); `onError` never called (7).
+  - The closed check before deliver has no eval.
+- **Eval-file defect, fixed.** A top-level `await` registered tests late, so a run without artifacts registered only
+  the live tests. CI sets the artifacts, so CI was not affected.
+- **Gates** (the stream coordinator re-ran them on d4653cc56): `check-sdk-types`, `check-sdk-headless` (682/682),
+  `check-sdk-deletions.py`, `sdk-package.sh check` and `lint-checks.sh`. The timing evals passed 12 of 12 concurrent
+  runs under load.
