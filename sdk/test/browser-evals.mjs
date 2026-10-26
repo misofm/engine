@@ -10,6 +10,8 @@
 
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
+import { readFile } from "node:fs/promises";
+import vm from "node:vm";
 
 import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
@@ -33,8 +35,9 @@ import {
   scratchBootOptions,
   workletBootOptions,
 } from "../src/browser/index.ts";
+import { toWebBootOptions } from "../src/browser/host-mirror.ts";
 import { onEndpointIds } from "./control-support.mjs";
-import { moduleBytes, sessionDocument } from "./support.mjs";
+import { effectEntry, moduleBytes, sessionDocument } from "./support.mjs";
 
 /** A policy with every shared word set to something distinctive, so a dropped word shows. */
 const POLICY = Object.freeze({
@@ -527,6 +530,75 @@ describe("the browser open sequence", () => {
       await engine.close();
     }
     await assert.rejects(engine.position(), MisoUsageError);
+  });
+
+  test("#2116: planLatency() reads the real worklet's plan latency, 486 samples for a limiter at 48 kHz", async () => {
+    // Red if the worklet reads the wrong record word or skips the read, if the host drops or
+    // misvalidates the reply, or if the SDK decodes it differently from the headless engine. The
+    // shipped host and worklet run for real over the real module; only the port is a stand-in.
+    const workletSource = await readFile(new URL("../../hosts/host-web/web/miso-engine-v1-audio-worklet.js", import.meta.url), "utf8");
+    const { createMisoAudioWorkletHost } = await import("../../hosts/host-web/web/miso-engine-v1-audio-worklet-host.js");
+    const deliver = (target, data, transfer = []) => {
+      const cloned = structuredClone(data, { transfer });
+      queueMicrotask(() => target.onmessage?.({ data: cloned }));
+    };
+    let processorPort;
+    class AudioWorkletProcessor {
+      constructor() { this.port = processorPort; }
+    }
+    const registrations = new Map();
+    const sandbox = vm.createContext({
+      // The main realm's constructors, so the worklet's `instanceof` checks see the posted views.
+      AudioWorkletProcessor, WebAssembly, TextEncoder, TextDecoder, ArrayBuffer, DataView,
+      Uint8Array, Uint32Array, Int32Array, Float32Array, BigInt64Array, BigUint64Array,
+      sampleRate: 48_000, renderQuantumSize: 128,
+      registerProcessor: (name, constructor) => { registrations.set(name, constructor); },
+    });
+    vm.runInContext(workletSource, sandbox);
+    class AudioWorkletNode {
+      constructor(_context, name, options) {
+        const nodePort = { onmessage: null, postMessage: (data, transfer) => deliver(processorPort, data, transfer) };
+        processorPort = { onmessage: null, postMessage: (data, transfer) => deliver(nodePort, data, transfer) };
+        this.port = nodePort;
+        this.onprocessorerror = null;
+        new (registrations.get(name))(structuredClone(options));
+      }
+      disconnect() {}
+    }
+    const module = new WebAssembly.Module(bytes);
+    const engine = await createEngine({
+      document: sessionDocument({ effects: { inserts: [effectEntry("limit", "miso.true-peak-limiter")] } }),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "suspended",
+        close: async () => {},
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async (request) => {
+        const previous = globalThis.AudioWorkletNode;
+        globalThis.AudioWorkletNode = AudioWorkletNode;
+        try {
+          return await createMisoAudioWorkletHost({
+            ...request, options: toWebBootOptions(request.options), preparedModule: module,
+          });
+        } finally {
+          globalThis.AudioWorkletNode = previous;
+        }
+      },
+    });
+    try {
+      const [latency, again] = await Promise.all([engine.planLatency(), engine.planLatency()]);
+      assert.equal(latency.samples, 486);
+      assert.deepEqual(again, latency, "a second read waits for the first instead of being refused");
+      assert.ok(latency.tailSamples === null || latency.tailSamples >= latency.samples, "the tail includes the latency");
+    } finally {
+      await engine.close();
+    }
+    await assert.rejects(engine.planLatency(), MisoUsageError);
   });
 
   test("close disposes the worklet before its context and is idempotent", async () => {

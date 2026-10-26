@@ -5,6 +5,7 @@ import { MAXIMUM_DOCUMENT_BYTES, WasmBoundary } from "../core/boundary.ts";
 import type {
   ControlEvent,
   EngineCallResult,
+  PlanLatency,
   EngineStatus,
   MeterFrame,
   SessionMap,
@@ -576,6 +577,16 @@ export class OfflineEngine {
     const snapshot = this.#boundary.readWatermark();
     this.#applied.settle(snapshot);
     return snapshot;
+  }
+
+  /**
+   * The output latency and tail of the plan that renders now (#2116), read now: the words of the C
+   * ABI's plan resource report, in samples at the session rate. While a rebuild's successor is
+   * pending this is still the running plan's; the successor shows from the first read after the
+   * `render()` that adopts it. A disposed or failed engine rejects.
+   */
+  async planLatency(): Promise<PlanLatency> {
+    return this.#boundary.readPlanLatency();
   }
 
   /**

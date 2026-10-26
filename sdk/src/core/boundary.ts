@@ -247,6 +247,42 @@ export interface EngineStatus {
 }
 
 /** One copied decimated meter window. No field retains a view onto mutable Wasm memory. */
+/**
+ * The output latency and tail of the plan that renders now (#2116): the words of the C ABI's plan
+ * resource report (`latency_samples`, `tail_kind`, `tail_samples`), the same on both hosts.
+ */
+export interface PlanLatency {
+  /** The plan's output latency in samples at the session rate. */
+  readonly samples: number;
+  /** The plan's output tail in samples (it includes the latency); `null` for an unbounded tail. */
+  readonly tailSamples: number | null;
+}
+
+/** The record words of a plan latency read as a `PlanLatency`; both engines decode through this. */
+export function planLatencyOf(samples: bigint, tailKind: bigint, tailSamples: bigint): PlanLatency {
+  const count = (name: string, value: bigint): number => {
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new MisoEngineError(`the plan's ${name} ${value} is above Number.MAX_SAFE_INTEGER`, {
+        phase: "lifecycle",
+        code: "internal",
+        result: constantValue("resultCodes", "internal"),
+      });
+    }
+    return Number(value);
+  };
+  if (tailKind !== 0n && tailKind !== 1n) {
+    throw new MisoEngineError(`the plan latency record has tail kind ${tailKind}`, {
+      phase: "lifecycle",
+      code: "internal",
+      result: constantValue("resultCodes", "internal"),
+    });
+  }
+  return Object.freeze({
+    samples: count("latency", samples),
+    tailSamples: tailKind === 1n ? null : count("tail", tailSamples),
+  });
+}
+
 export interface MeterFrame {
   readonly tag: "miso.meter.v1";
   readonly sequence: bigint;
@@ -1139,6 +1175,29 @@ export class WasmBoundary {
       Number(this.#exports.miso_engine_web_v1_watermark_ptr(handle)),
     );
     return watermarkSnapshot(record.u64("revision"), record.u64("firstSample"), record.u64("outcomeFlags"));
+  }
+
+  /**
+   * The output latency and tail of the plan that renders now (#2116): `plan_latency_read` copies
+   * the control plane's row into its fixed record, read here at `plan_latency_ptr`. A rebuild's
+   * successor shows from the first read after the `render()` that adopts it.
+   */
+  readPlanLatency(): PlanLatency {
+    const handle = this.#live();
+    const result = Number(this.#exports.miso_engine_web_v1_plan_latency_read(handle));
+    if (result !== constantValue("resultCodes", "ok")) {
+      throw new MisoEngineError("the engine refused to read its plan latency", {
+        phase: "lifecycle",
+        code: resultName(result, "call"),
+        result,
+      });
+    }
+    const record = new StructView(
+      this.#exports.memory,
+      "planLatency",
+      Number(this.#exports.miso_engine_web_v1_plan_latency_ptr(handle)),
+    );
+    return planLatencyOf(record.u64("latencySamples"), record.u64("tailKind"), record.u64("tailSamples"));
   }
 
   /**

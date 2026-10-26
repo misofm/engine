@@ -1,7 +1,8 @@
 import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { WasmBoundary } from "../core/boundary.ts";
-import type { EngineCallResult, SessionShape } from "../core/boundary.ts";
+import { planLatencyOf } from "../core/boundary.ts";
+import type { EngineCallResult, PlanLatency, SessionShape } from "../core/boundary.ts";
 import { MisoEngineError, MisoUsageError, SessionSeekProducerError, resultName } from "../core/errors.ts";
 import type { SdkTimeoutCode } from "../core/errors.ts";
 import { constantValue } from "../core/abi.ts";
@@ -399,6 +400,14 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
    * `backpressure`; a closed engine throws `MisoUsageError`.
    */
   position(): Promise<BrowserPosition>;
+  /**
+   * The output latency and tail of the plan that renders now (#2116), read from the host: the
+   * words of the C ABI's plan resource report, in samples at the session rate, the same as the
+   * headless engine's. While a rebuild's successor is pending this is still the running plan's; the
+   * successor shows from the first read after the block that adopts it. Calls are read one at a
+   * time. A refused read rejects with `MisoEngineError`; a closed engine with `MisoUsageError`.
+   */
+  planLatency(): Promise<PlanLatency>;
   /**
    * Resume the context, then set the transport to `playing` (#2100), in one call; resolves with
    * the new transport state. `setTransport` alone gates nothing: the transport state is a stored
@@ -927,6 +936,27 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         return report;
       }
       return undefined;
+    };
+    // #2116: the host refuses a second unsettled latency read, so this engine sends one at a time.
+    let planLatencyChain: Promise<unknown> = Promise.resolve();
+    const readPlanLatency = async (): Promise<PlanLatency> => {
+      let result: number;
+      let latency: Awaited<ReturnType<MisoAudioWorkletHost["planLatency"]>>["latency"] = null;
+      try {
+        ({ result, latency } = await host.planLatency());
+      } catch (error) {
+        const code = (error as { readonly result?: unknown }).result;
+        if (typeof code !== "number" || !Number.isSafeInteger(code) || code < 0) throw error;
+        result = code;
+      }
+      if (result !== constantValue("resultCodes", "ok") || latency === null) {
+        throw new MisoEngineError("the browser host refused the plan latency read", {
+          phase: "lifecycle",
+          code: resultName(result, "call"),
+          result,
+        });
+      }
+      return planLatencyOf(latency.samples, latency.tailKind, latency.tailSamples);
     };
     const readPosition = async (): Promise<BrowserPosition> => {
       for (let attempt = 0; attempt < POSITION_READ_ATTEMPTS; attempt += 1) {
@@ -1523,6 +1553,12 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       position: () => {
         if (closed) return Promise.reject(new MisoUsageError("the browser engine is closed"));
         return serialized("position", readPosition);
+      },
+      planLatency: () => {
+        if (closed) return Promise.reject(new MisoUsageError("the browser engine is closed"));
+        const next = planLatencyChain.then(readPlanLatency, readPlanLatency);
+        planLatencyChain = next.catch(() => undefined);
+        return next;
       },
       play: () => transportCall("playing"),
       stop: () => transportCall("stopped"),
