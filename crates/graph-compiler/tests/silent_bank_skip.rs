@@ -796,47 +796,82 @@ fn a_skipping_block_allocates_nothing() {
     assert!(before.lane_moves() > 0, "the packer moved lanes");
 }
 
+/// Which tracks play a signal.
+type Playing = fn(usize) -> bool;
+
 /// Issue #1981: a pack shape the chains refuse, whose facts do not change, is attempted once and
 /// not again. `ch00` keeps the collapse-armed mono bank running with packable lanes beside it, and
-/// `ch17` runs in the padded stereo bank; the only lower bank that runs is the mono one, and the
+/// stereo strips run in higher banks; the only lower bank that runs is the mono one, and the
 /// chains refuse a move between differently armed banks. No ride: the second bank rests and does
-/// not run.
+/// not run. Two shapes: `ch17` alone, whose refusals stay below the attempt budget, and enough
+/// running stereo strips that one step's refusals reach the group's span (`ch16..ch20` on eight
+/// lanes, 4 x 7 attempts against 24; `ch12..ch20` on four, 8 x 3 against 20).
 ///
 /// Test value: red when the packer retries a refused move every block although nothing it decides
-/// on changed (the `PackGroup::dirty` bit), a standing render cost no bit shows.
+/// on changed (the `PackGroup::dirty` bit), a standing render cost no bit shows, including when the
+/// refusals use up the step's attempt budget.
 #[test]
 fn a_refused_pack_is_not_retried() {
     let blocks = 200;
-    let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
-        .map(|track| {
-            let kind = if track == 0 || track == 17 {
-                Block::Signal(0.1)
-            } else {
-                Block::Silence
-            };
-            vec![kind; blocks].into()
-        })
+    let silent: Vec<Arc<[Block]>> = (0..TRACKS)
+        .map(|_| vec![Block::Silence; blocks].into())
         .collect();
-    let mut model = session(first_sixteen);
-    model.automation.clear();
-    resting_second_bank(&mut model);
-    let mut bound = bind(&model, &schedules, false);
-    let mut pcm = vec![0.0_f32; bound.frames * 2];
-    let mut settled = 0;
-    for block in 0..blocks as u64 {
-        if block == 60 {
-            settled = graph::test_only_bank_pack_attempts(&bound.plan);
+    let probe = bind(&session(first_sixteen), &silent, false);
+    let groups = graph::test_only_pack_groups(&probe.plan);
+    assert_eq!(groups.len(), 1, "one pack group: {groups:?}");
+    let (first, last, lanes) = groups[0];
+    let span = u64::from(last - first + 1) * u64::from(lanes);
+    drop(probe);
+    let wide: Playing = if lanes == 8 {
+        |track| track == 0 || track >= 16
+    } else {
+        |track| track == 0 || track >= 12
+    };
+    let shapes: [(&str, Playing, bool); 2] = [
+        ("ch17", |track| track == 0 || track == 17, false),
+        ("the span", wide, true),
+    ];
+    for (name, playing, reaches_span) in shapes {
+        let schedules: Vec<Arc<[Block]>> = (0..TRACKS)
+            .map(|track| {
+                let kind = if playing(track) {
+                    Block::Signal(0.1)
+                } else {
+                    Block::Silence
+                };
+                vec![kind; blocks].into()
+            })
+            .collect();
+        let mut model = session(first_sixteen);
+        model.automation.clear();
+        resting_second_bank(&mut model);
+        let mut bound = bind(&model, &schedules, false);
+        let mut pcm = vec![0.0_f32; bound.frames * 2];
+        let (mut settled, mut peak) = (0, 0);
+        for block in 0..blocks as u64 {
+            if block == 60 {
+                settled = graph::test_only_bank_pack_attempts(&bound.plan);
+            }
+            let before = graph::test_only_bank_pack_attempts(&bound.plan);
+            bound.render(block, true, &mut pcm);
+            peak = peak.max(graph::test_only_bank_pack_attempts(&bound.plan) - before);
         }
-        bound.render(block, true, &mut pcm);
+        let attempts = graph::test_only_bank_pack_attempts(&bound.plan);
+        eprintln!(
+            "{name}: attempts by block 60 {settled}, by the end {attempts}, peak step {peak}"
+        );
+        assert!(settled > 0, "{name}: the packer tried the refused move");
+        assert_eq!(bound.lane_moves(), 0, "{name}: every move was refused");
+        if reaches_span {
+            assert_eq!(peak, span, "{name}: a step's refusals reach the span");
+        } else {
+            assert!(peak < span, "{name}: the refusals stay below the span");
+        }
+        assert_eq!(
+            attempts, settled,
+            "{name}: no attempt after the shape settled: the same facts make the same refusal"
+        );
     }
-    let attempts = graph::test_only_bank_pack_attempts(&bound.plan);
-    eprintln!("attempts by block 60 {settled}, by the end {attempts}");
-    assert!(settled > 0, "the packer tried the refused move");
-    assert_eq!(bound.lane_moves(), 0, "every move was refused");
-    assert_eq!(
-        attempts, settled,
-        "no attempt after the shape settled: the same facts make the same refusal"
-    );
 }
 
 /// Give the second bank (`ch08..ch16`) the 0 dB compressor threshold the other banks have, so its

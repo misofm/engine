@@ -7980,6 +7980,29 @@ mod tests {
                 (expected & !1) | 0b10,
                 "scalar {scalar}: block 2"
             );
+            // The collapsed cohort's gather reads the left plane only. Lane 0 silent on its left
+            // plane, audible on its right; lane 1 every left word `-0.0`; lane 2 one left word in
+            // the tail; lane 3 inactive; lanes 4.. (eight lanes) seeded, one silent.
+            for lane in 0..lanes {
+                planes.left[lane] = (0..frames).map(|_| seeded(&mut state)).collect();
+                planes.right[lane] = (0..frames).map(|_| seeded(&mut state)).collect();
+            }
+            for lane in 0..4 {
+                planes.left[lane] = vec![0.0; frames_used];
+            }
+            planes.left[1] = vec![-0.0; frames_used];
+            planes.left[2][frames_used - 1] = f32::from_bits(1);
+            let mut collapsed = 0b0001_u32;
+            if lanes == 8 {
+                planes.left[5] = vec![0.0; frames_used];
+                collapsed |= 1 << 5;
+            }
+            chain.gather_mono(&planes, frames);
+            assert_eq!(
+                chain.input_silent_lanes(),
+                collapsed,
+                "scalar {scalar}: the collapsed gather"
+            );
         }
     }
 

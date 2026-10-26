@@ -9606,9 +9606,8 @@ pub(crate) struct PackGroup {
     /// (issue #1981: idle for [`PACK_IDLE_BLOCKS`] blocks or more). Zero, with `displaced` zero,
     /// lets [`Runtime::pack_lanes`] pass the group by at the cost of one load.
     packable: u32,
-    /// Something the packer decides on changed since its last step, or that step spent its whole
-    /// budget (issue #1981): a strip's idle count crossed [`PACK_IDLE_BLOCKS`] either way, a
-    /// strip moved, or the plan is new. Clear, the same facts would make the same refused
+    /// Something the packer decides on changed since its last step (issue #1981): a strip's idle
+    /// count crossed [`PACK_IDLE_BLOCKS`] either way, a strip moved, or the plan is new. Clear, the same facts would make the same refused
     /// attempts, so [`Runtime::pack_lanes`] passes the group by.
     dirty: bool,
 }
@@ -10453,7 +10452,8 @@ impl Runtime {
     ///
     /// A group with no packable strip and no displaced one, or whose facts have not changed since
     /// its last step (`PackGroup::dirty`), is passed by at one load. Bounded and
-    /// allocation-free: per group, at most `W` moves and `span` attempts ([`Self::pack_group`]).
+    /// allocation-free: per group, at most `W` moves and `span` attempts, and a scan quadratic in
+    /// the group's span at worst ([`Self::pack_group`]).
     pub(crate) fn pack_lanes(&mut self) {
         #[cfg(any(test, feature = "test-support"))]
         if TEST_ONLY_LANE_PACKING_DISABLED.with(std::cell::Cell::get) {
@@ -10536,14 +10536,27 @@ impl Runtime {
     ///
     /// Budget: at most `W` moves (`B`, one bank's state per block, the worst swap cost) and
     /// `span` attempts per group per block. A step runs only while the group's `dirty` bit is set:
-    /// a refused shape whose facts do not change is attempted once, not every block.
+    /// a refused shape whose facts do not change is attempted once, not every block, also when its
+    /// refusals spend the attempt budget (a move sets the bit, so a step that moved continues next
+    /// block; one that moved nothing would repeat itself exactly).
+    ///
+    /// Cost: the budget bounds moves and attempts, not the scan. Each running position the pack
+    /// loop examines either spends an attempt or ends the loop, so it examines at most `span + 1`
+    /// of them, and each walks the positions below it twice at most (the run test of each lower
+    /// unit, then the targets of a running one). So a step makes at most `2 * span * (span + 1)`
+    /// class reads plus `O(span)` for the rest of the pack loop and the homing pass: quadratic in
+    /// the group's span in the worst case. On the all-active steady state the first running
+    /// position finds no candidate and the step is one scan, and with no fact changed no step
+    /// runs.
     fn pack_group(&mut self, group: usize, pack: PackGroup) {
         let width = pack.width as usize;
         let units = (pack.last as usize + 1).saturating_sub(pack.first as usize);
         let span = units * width;
         let budget = width;
         let (mut moves, mut attempts) = (0_usize, 0_usize);
-        // A move sets the bit again (`LaneMap::record_swap`), and so does a spent budget below.
+        // A move sets the bit again (`LaneMap::record_swap`). A step that moved nothing leaves it
+        // clear even when its refusals spent the attempt budget: the scan is deterministic, so
+        // the same facts would make the same refusals and stop at the same place.
         if let Some(group) = self.lane_map.groups.get_mut(group) {
             group.dirty = false;
         }
@@ -10617,12 +10630,6 @@ impl Runtime {
                     moves += 1;
                 }
             }
-        }
-        // A spent budget may have left work: look again next block.
-        if (moves >= budget || attempts >= span)
-            && let Some(group) = self.lane_map.groups.get_mut(group)
-        {
-            group.dirty = true;
         }
     }
 }
