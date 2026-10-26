@@ -527,7 +527,6 @@ fn host_caps(limits: &CompileLimits) -> host_core::HostPrepareCaps {
     host_core::HostPrepareCaps {
         shape: host_core::HostShapePolicy::AnyLaunchRate,
         source_ring_frames: limits.source_ring_frames,
-        maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
         maximum_tracks: limits.maximum_tracks,
         maximum_submixes: if limits.maximum_submixes == 0 {
             limits.maximum_tracks
@@ -1577,6 +1576,28 @@ const REFERENCE_EFFECT_CONTROL_BUDGET: u64 = 13_632;
 
 /// Sets one C cap row.
 type SetCap = fn(&mut CompileLimits, u64);
+
+/// A host's obsolete span limit cannot inflate the prepared graph's retained resources.
+#[test]
+fn reference_graph_rows_do_not_follow_the_callers_span_limit() {
+    let rows = [128, 4_096].map(|spans| {
+        let mut compile_limits = limits();
+        compile_limits.maximum_automation_spans_per_block = spans;
+        // SAFETY: Handles are uniquely owned and destroyed after the resource query.
+        unsafe {
+            let (session, plan) = compile_c(SESSION, &compile_limits);
+            let report = resources_c(plan);
+            miso_engine_v1_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
+            (
+                report.graph_session_plus_plan_bytes,
+                report.graph_incremental_plan_bytes,
+                report.graph_metadata_bytes,
+            )
+        }
+    });
+    assert_eq!(rows[0], rows[1]);
+}
 
 #[test]
 fn reference_session_retained_rows_stay_within_their_budgets() {

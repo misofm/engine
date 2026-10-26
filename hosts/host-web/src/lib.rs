@@ -2986,22 +2986,12 @@ fn prepare_caps(
     } else {
         options.require_quantum_frames
     };
-    let automation_spans = compiled
-        .normalized_model()
-        .automation
-        .iter()
-        .try_fold(0_u32, |total, lane| {
-            total.checked_add(u32::try_from(lane.segments.len()).ok()?)
-        })
-        .unwrap_or(u32::MAX)
-        .max(1);
     HostPrepareCaps {
         shape: HostShapePolicy::Exact {
             sample_rate_hz,
             quantum_frames,
         },
         source_ring_frames,
-        maximum_automation_spans_per_block: automation_spans,
         maximum_tracks: u64::MAX,
         maximum_submixes: u64::MAX,
         maximum_vcas: MAXIMUM_VCAS_BOUNDED,
@@ -3032,7 +3022,7 @@ fn prepare_caps(
 fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
     ControlLimits {
         source_ring_frames: caps.source_ring_frames,
-        maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
+        maximum_automation_spans_per_block: 0,
         maximum_document_bytes: u64::from(MAXIMUM_DOCUMENT_BYTES),
         maximum_diagnostic_bytes: u64::from(DIAGNOSTIC_BYTES),
         maximum_tracks: caps.maximum_tracks,

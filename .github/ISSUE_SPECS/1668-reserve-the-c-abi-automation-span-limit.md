@@ -158,3 +158,17 @@ Checked against `12d4a4f9d`.
   `:172`; `prepare_caps` is `crates/control-plane/src/compile.rs:596` over `ControlLimits`
   (`crates/control-plane/src/adapter.rs:33`). The browser's S derivation
   (`hosts/host-web/src/lib.rs:4447-4455`) is #1306 D3's.
+
+## Current-source brief amendment (root-approved, 2026-10-26)
+
+At `8f32d1673`, `miso_engine_v1_compile_session` clears both writable output
+locations before argument validation (`crates/capi/src/ffi.rs:355-366`), preserving
+its frozen atomic-publication rule. Gate 1 therefore requires both output handles
+to be null on refusal, rather than preserving nonnull sentinels. No handle is
+published; the diagnostics descriptor and payload remain untouched, and invalid
+limits are refused before document or diagnostics dereference. This slice does
+not change the existing failure-publication contract.
+
+Authorize the obsolete `ControlLimits` literal field removal in
+`hosts/host-web/src/lib.rs` as well. #1306 and #1668 are sequential checkpoints
+with independent review, delivered in one coherent PR.

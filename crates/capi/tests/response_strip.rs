@@ -394,7 +394,6 @@ fn composed(document: &str, strip: &str) -> TrackResponse {
     let caps = HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: 1_024,
-        maximum_automation_spans_per_block: 128,
         maximum_tracks: 16,
         maximum_submixes: 16,
         maximum_vcas: 16,

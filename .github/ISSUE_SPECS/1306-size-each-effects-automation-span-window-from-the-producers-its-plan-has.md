@@ -260,3 +260,55 @@ Root's ruling on finding F23 of the stored-automation check (`docs/handoffs/stor
 - **Dependencies.** #1611 (landed) and #1621 (the per-node window; this issue lands after it). #1629
   (batch P1) removes S's protocol read; this issue and #1668 form batch P2, after P1. The #1058
   rendering slices no longer depend on this issue.
+
+## Current-source implementation record (2026-10-26, attempt 1)
+
+Root approved the amended D3 slice on `8f32d1673`; the user requested Astra
+for implementation and root retains independent adversarial review. #1629 is
+closed; #1306 and #1668 are delivered as sequential reviewed checkpoints in one PR.
+Both host-core preparation paths (main preparation and the arrivals-only compile)
+now pass the independent effect ceiling `u32::MAX`. The effect compiler derives
+`max(1, descriptor live parameter cells)` and refuses an insufficient ceiling with
+`effect.resource.limit`. Response-preview limits retain their existing purpose.
+
+All `HostPrepareCaps` literals lose S, including the current-source literals in
+`crates/capi/tests/response_strip.rs`, `tools/bench/src/swap.rs` and host-core's
+response fixture (root-approved inventory additions). The browser no longer counts
+stored segments; its obsolete, now unread `ControlLimits` S field temporarily
+receives zero until #1668 removes the field in the next checkpoint.
+
+Root approved the test-ownership refinement: the temporary CAPI parity test
+compares actual FFI graph rows at S = 128 and 4,096. PreparedHost intentionally
+exposes no prepared-effect metadata inspector, so per-instance capacity is tested
+only by the existing effect-compiler owner test, rewritten in place. No production
+inspection API or duplicate preparation test is added. That owner test covers all
+ten launch descriptors, exact versus generous ceilings, zero and cells-minus-one
+refusals, every-cell staging, and a no-live-cell descriptor's minimum capacity 1.
+The metadata-forgery and native-session fixtures use sufficient ceilings, preserving
+their original diagnostic claims.
+
+Test value: the owner test fails if caller capacity inflates descriptor capacity,
+if insufficient ceilings are accepted, if the minimum becomes zero, or if a dirty
+cell cannot fit in its lane's window; the temporary CAPI row fails if caller S
+changes host graph resources. #1668 deletes the temporary parity test when S is
+reserved. No rendered-output digest is committed as a test.
+
+Baseline `audit capi` (`8f32d1673`): `pcm_digest=bffc21e857b5e134`, 100,000
+render calls, zero errors and zero allocations, deallocations, locks, syscalls or
+other realtime violations. Local evidence is `/tmp/issue1668-base-audit.json`.
+The historical policy command names `scripts/check-realtime-policy.sh` and
+`test-realtime-policy.sh`, which no longer exist; this is recorded rather than
+creating substitute scripts. The current replacement is `cargo run --locked
+--release -p realtime-policy` plus `cargo test --locked -p realtime-policy`
+(running at this checkpoint). Host-core and workspace policy checks and mutation
+suites pass.
+
+Focused validation passed: capi's complete test suite; effect-compiler and
+host-core complete suites (including doctests); the rewritten owner test;
+`cargo fmt --all -- --check`; and `git diff --check`. The initial effect-compiler
+run exposed old fixture ceilings below EQ's 44 cells; correcting only those
+fixtures restored their intended metadata/diagnostic tests.
+Head `audit capi` matches baseline `bffc21e857b5e134`, all violation counters zero.
+Eight-lane reference graph rows: session-plus-plan 374,654; incremental 374,414;
+metadata 114,049. Existing resource ceilings pass unchanged. Broader portability,
+browser and workspace qualification run on the coherent #1306/#1668 boundary.
