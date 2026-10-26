@@ -149,3 +149,66 @@ None. Unblocks the finish-line measurement for every later slice.
 - Gate 2, `bank_slot_runs_follow_the_skips`: count a skipped chain's block as a run (transposes +
   skips) -> red at block 54, units 20..=22 (9 against 6); count builtin stages as effect slots ->
   red (18 slot-units against 9 bound banks).
+- Gate 3, `every_row_is_fed_through_a_source_set_and_gathered_in_place` (now over
+  `native_session_rows()` and `BANK_REPORT_WORKLOADS`): map the 32-track C1 row to the 16-track
+  fixture -> red (the row's model is not C1-32; its toggle row panics finding `ch00`'s gate
+  channel).
+
+### Gates run
+
+- `cargo test --locked -p graph -p graph-compiler -p console-workload`, and `cargo test --locked
+  --release -p bench -p console-workload`: all pass.
+- `cargo clippy --locked -p graph -p graph-compiler -p console-workload -p bench --all-targets
+  --all-features -- -D warnings`: clean. `scripts/check-workspace-policy.sh`,
+  `scripts/check-graph-policy.sh`, `scripts/check-bench-policy.sh`: ok. `realtime_policy`: ok
+  (233 marked regions in 43 files).
+
+### Measurement (W=8 native, `artifacts/steps/bank-design-0/`)
+
+One invocation of `bench console --bank-report` at `a4fd432`, pinned with `taskset -c 31`, one
+warmup and two measured rounds of 1000 blocks per row (`bank-report.jsonl`; preflight output,
+host load before and after beside it). The host was shared with other agents (load average 8.5 at
+the start), so the p50 column is uncontrolled and descriptive only; the counters are exact.
+`render_errors` and forbidden operations are 0 on every row. Round 2:
+
+| row | banks | pairs | lane use | BSR static | BSR/block | ideal | p50 us |
+|---|---|---|---|---|---|---|---|
+| c1 16 load | 10 | 0 | 57.5 % | 20 | 20.00 | 0 | 125.2 |
+| c1 16 typical | 10 | 0 | 57.5 % | 20 | 20.00 | 9 | 125.1 |
+| c1 16 all active | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 96.9 |
+| c1 16 sparse | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 96.4 |
+| c1 16 toggle | 10 | 0 | 57.5 % | 20 | 16.66 | 16 | 98.4 |
+| c1 32 load | 14 | 0 | 69.6 % | 28 | 28.00 | 0 | 184.6 |
+| c1 32 typical | 14 | 0 | 69.6 % | 28 | 28.00 | 17 | 179.6 |
+| c1 32 all active | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 146.3 |
+| c1 32 sparse | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 148.1 |
+| c1 32 toggle | 14 | 0 | 69.6 % | 28 | 24.66 | 24 | 146.5 |
+| c1 64 load | 22 | 0 | 80.7 % | 44 | 44.00 | 0 | 304.0 |
+| c1 64 typical | 22 | 0 | 80.7 % | 44 | 44.00 | 28 | 302.0 |
+| c1 64 all active | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 247.3 |
+| c1 64 sparse | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 245.0 |
+| c1 64 toggle | 22 | 0 | 80.7 % | 44 | 40.66 | 40 | 247.1 |
+| irregular | 23 | 0 | 46.4 % | 38 | 38.00 | 38 | 266.1 |
+
+Against the design's "today" column (section 7, finish line), W=8:
+
+| tracks | BSR predicted | BSR measured | lane use predicted | lane use measured |
+|---|---|---|---|---|
+| 16 | 21 | 20 | 55 % | 57.5 % |
+| 32 | 29 | 28 | 67 % | 69.6 % |
+| 64 | 45 | 44 | 79 % | 80.7 % |
+
+The track banks match the design (`tracks / 8` banks x 4 slots). The submixes bind 12 BSR, not
+13: {4 groups, aux B} pre (3) and drive (1), aux A pre (3) and drive (1), master pre (3) and drive
+(1). Findings for the later slices: no C1 track bank is in a pack group (every track unit is its
+own row); mergeable pairs are 0 on every row, as the one-level rule makes them structurally; in
+the load state every BSR runs and nothing skips, while all-active skips 3.34 BSR per block (the
+silent aux A's banks, whose sends are muted); typical and load cost the same as each other and
+about 30 % more than all-active (the bypassed lanes run wet and never rest).
+
+**W=4 (V8) is not measured.** The V8 runner (`scripts/run-web-mixing-automation-benchmark.sh`)
+times documents in the shipped `host_web.wasm`, which exports no bank-slot reader, and its
+document list and validator are frozen outside this slice's paths. This x86 host cannot run a
+native four-lane build (the console refuses a foreign width, `console.slot.foreign_width`). The
+W=4 rows (counters and p50) are a successor: a wasm guest of `console-workload` under the
+wasm-gates `wasmtime` runner, or a reader export on the web host.
