@@ -997,7 +997,12 @@ pub enum ConformanceDecoder {
 /// `command.telemetry_configure` and `response.telemetry` carry a third entry, the master's gain
 /// reduction. Only those two frames move; the 57 others are byte-equal. Re-pinned from
 /// `cb8db815ed0103a0`; the frame count stays 59.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xdea6_50f7_e506_833e;
+/// #2115 adds `LOUDNESS` (`0x0014`): the corpus gains `command.loudness` (a start) and
+/// `response.loudness` (an armed read with every optional level present). The static capabilities
+/// frame does not list `0x0014`, with bit 17 clear, which the bit-17 invariant allows. The 59
+/// earlier frames are byte-equal: their hash is the old pin. Re-pinned from `dea650f7e506833e`;
+/// the frame count is 61.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xde7d_7cf5_04ca_191a;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
@@ -1225,6 +1230,11 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
             smoothing_ms: Some(150.0),
         })
     );
+    // #2115: a start (the request's one field is the op).
+    command!(
+        "command.loudness",
+        CommandPayload::Loudness(LoudnessRequest::Start)
+    );
     // #1586: a console slot's tap with the left lane and an insert's with the right, so both
     // sections and two lane sets are present.
     let observation_read = ObservationReadRequest {
@@ -1430,6 +1440,26 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
                 left_db: Some(left_db.as_slice().into()),
                 right_db: None,
             }),
+        })
+    );
+    // #2115: an armed read with every optional level present, after two dropped hops.
+    success!(
+        "response.loudness",
+        SuccessResponsePayload::Loudness(LoudnessReply {
+            observed_sample: 192_000,
+            armed: true,
+            integrating_since: Some(48_480),
+            hops_dropped: 2,
+            sanitized_samples: 3,
+            gated_block_count: 290,
+            momentary_lufs: Some(-23.25),
+            short_term_lufs: Some(-22.5),
+            integrated_lufs: Some(-23.0),
+            loudness_range_lu: Some(4.5),
+            momentary_max_lufs: Some(-18.0),
+            short_term_max_lufs: Some(-20.75),
+            true_peak_dbtp: Some([-1.5, -2.25]),
+            hop_true_peak_dbtp: Some([-6.0, -120.0]),
         })
     );
     // #1586: a ready row with both lanes, a pending armed row and an unarmed one, so every row

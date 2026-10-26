@@ -382,6 +382,8 @@ dependencies = [
  "engine",
  "host-core",
  "lane",
+ "loudness",
+ "math",
  "protocol",
  "session",
  "sha2 0.11.0",
@@ -1449,7 +1451,6 @@ dependencies = [
 name = "loudness"
 version = "0.1.0"
 dependencies = [
- "bench-support",
  "dsp-reference",
  "lane",
  "math",

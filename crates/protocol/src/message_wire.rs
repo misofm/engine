@@ -64,7 +64,10 @@ impl CapabilityFlags {
     /// `OBSERVATION_READ` and the `Observe` edit (#1586 D6): set exactly when `0x000f` is listed,
     /// which rides the session family.
     pub const OBSERVATION: Self = Self(1 << 15);
-    const KNOWN: u64 = (((1 << 15) - 1) & !(1 << 5)) | Self::OBSERVATION.0 | Self::SPECTRUM.0;
+    /// The output loudness meter `LOUDNESS` (#2115): set exactly when `0x0014` is listed.
+    pub const LOUDNESS: Self = Self(1 << 17);
+    const KNOWN: u64 =
+        (((1 << 15) - 1) & !(1 << 5)) | Self::OBSERVATION.0 | Self::SPECTRUM.0 | Self::LOUDNESS.0;
 }
 
 /// All 23 fields of a successful `CAPABILITIES_GET` response.
@@ -441,6 +444,10 @@ pub use response::{
     TrackResponseCapture, response_ready_encoded_bound, response_result_encoded_len,
 };
 pub(crate) use response::{write_response_ready, write_response_request, write_response_result};
+
+mod loudness;
+pub use loudness::{LOUDNESS_LEVEL_FLOOR, LoudnessReply, LoudnessRequest};
+pub(crate) use loudness::{write_loudness_reply, write_loudness_request};
 
 mod spectrum;
 pub use spectrum::{
@@ -4575,6 +4582,8 @@ fn check_capabilities_invariants(value: CapabilityInvariantView<'_>) -> Result<(
         || ((value.flags.0 & CapabilityFlags::SPECTRUM.0 != 0) != has_command(0x0010))
         || (has_command(0x0010) != has_command(0x0011))
         || (has_command(0x0010) != has_command(0x0012))
+        // `LOUDNESS` and bit 17 together (#2115).
+        || ((value.flags.0 & CapabilityFlags::LOUDNESS.0 != 0) != has_command(0x0014))
         // `SESSION_REPLACE` rides the session family and has no flag bit of its own (#1386).
         || (has_command(0x0013) && !session_family)
         || (has_command(0x0003) != has_event(0x8001))
@@ -4601,8 +4610,8 @@ fn allocated_id(id: u16, event: bool) -> bool {
         // `0x0004`, `0x0005` and `0x0006` are retired: never allocated again, never advertised.
         // `0x000f` is `OBSERVATION_READ` (#1586), `0x0010` is `SPECTRUM_CONFIGURE` (#1594),
         // `0x0011` and `0x0012` are `SPECTRUM_CAPTURE` and `SPECTRUM_STREAM` (#1595) and `0x0013`
-        // is `SESSION_REPLACE` (#1386).
-        matches!(id, 1..=0x0013) && !crate::wire::is_retired_message_id(id)
+        // is `SESSION_REPLACE` (#1386). `0x0014` is `LOUDNESS` (#2115).
+        matches!(id, 1..=0x0014) && !crate::wire::is_retired_message_id(id)
     }
 }
 

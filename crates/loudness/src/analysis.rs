@@ -181,6 +181,34 @@ impl LoudnessAnalysis {
         }
     }
 
+    /// The byte size of each heap allocation [`Self::new`] makes, once: the record ring and the
+    /// two histograms' count and energy arrays. An owner charges exactly these.
+    pub const ALLOCATION_BYTES: [usize; 5] = [
+        SHORT_TERM_HOPS * core::mem::size_of::<HopRecord>(),
+        HISTOGRAM_BINS * core::mem::size_of::<u64>(),
+        HISTOGRAM_BINS * core::mem::size_of::<f64>(),
+        HISTOGRAM_BINS * core::mem::size_of::<u64>(),
+        HISTOGRAM_BINS * core::mem::size_of::<f64>(),
+    ];
+
+    /// Returns to the state [`Self::new`] makes, integrating from sample 0, without allocating:
+    /// the ring, the windows, the gap tracking, the histograms, the true peak and the maxima are
+    /// all cleared, so the next record starts M and S afresh whatever it continues.
+    pub fn restart(&mut self) {
+        self.ring.fill(EMPTY);
+        self.held = 0;
+        self.previous_end = None;
+        self.reset_at = 0;
+        self.since = None;
+        self.run = 0;
+        self.integrated.clear();
+        self.range.clear();
+        self.true_peak = [0.0; 2];
+        self.sanitized = 0;
+        self.momentary_max = None;
+        self.short_term_max = None;
+    }
+
     /// Takes one hop record, in render order.
     pub fn ingest(&mut self, record: &HopRecord) {
         if self.previous_end != Some(record.first_sample) {

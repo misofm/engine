@@ -117,8 +117,11 @@ bounded SPSC producer and reports exact sample windows, per-lane peak, energy, R
 interval/cumulative clipping and sanitization counts, discontinuities, and dropped snapshots.
 Queue-full drops one snapshot and increments a saturating counter; it never blocks or retries.
 Raw energy/RMS observations are only *loudness-ready*: they are not BS.1770 K-weighted, gated,
-LUFS/LKFS, true-peak, or certified loudness measurements. [ITU-BS1770-5] and [EBU-R128] delimit
-those explicitly out-of-scope claims.
+LUFS/LKFS or true-peak measurements. Those come from the session's one output loudness meter
+(#2115) at the rendered master pair: [ITU-BS1770-5] momentary, short-term and integrated
+loudness, EBU Tech 3342 loudness range and Annex-2 true peak, read with `LOUDNESS` (`0014`,
+[semantics](CONTROL_PROTOCOL_SEMANTICS.md)); `dsp-research/loudness.md` has the method. A
+per-strip or per-submix loudness meter is not provided.
 
 ## Effect observation (issue #143)
 

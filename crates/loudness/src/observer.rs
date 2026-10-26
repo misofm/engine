@@ -206,7 +206,14 @@ impl LoudnessObserver {
         while done < frames {
             let room = (hop - state.filled) as usize;
             let take = room.min(frames - done);
-            state.run(&left[done..done + take], &right[done..done + take], fir);
+            // `get`, never an index: the slices always exist (`take <= frames - done`), and no
+            // checked index (a `slice_index_fail` trap) joins a host's render call graph.
+            let (Some(left), Some(right)) =
+                (left.get(done..done + take), right.get(done..done + take))
+            else {
+                return;
+            };
+            state.run(left, right, fir);
             done += take;
             state.filled += take as u32;
             if state.filled == hop {

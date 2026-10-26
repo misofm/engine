@@ -69,3 +69,84 @@ S1 attempt 1 (implementer; root's verifier has not reviewed it yet).
   production percentile rank rule, the histogram ceiling raised to +30 LUFS, the REALTIME_POLICY region extended over
   `State::rest`, and corrections to the research note (a silent window reads -120 LUFS; subnormal states are flushed at the
   hop end). The S2 note about a non-monotone absolute sample is left for S2.
+
+## S2 decision record (root, 2026-10-26; core wiring and the `LOUDNESS` command)
+- **Placement.** The render half (`control_plane::loudness`, gate word plus the observer plus a record queue) is a field
+  of the session's one `PlanState`, called in `observe_rendered_block`. The control half stays in `SessionState` on
+  both hosts, and nothing crosses a plan swap: `PlanState` lives for the whole session and the swap continues the
+  clock. While disarmed, render pays one `Acquire` load per block. Records carry their arming's word, so a hop pushed
+  during stop-then-start is discarded.
+- **Queue.** Depth 512 hop records (5.12 s at 100 records/s). The service step drains it on both hosts (C ABI
+  `miso_engine_v1_service` and every session call; the browser worklet services after each message and on a host tick),
+  and each read and reset also drains first. A full queue drops the hop and counts it exactly (lossy telemetry,
+  AGENTS). `hops-dropped` counts over the session's life, so a reader diffs it. A drop is a gap for the analysis.
+- **Acked-batch answer.** No ack can come before a drop. `start` acknowledges arming, never delivery. A read drains
+  before it answers and reports only drained hops, together with the exact drop count.
+- **Monotone sample.** On both hosts the rendered absolute sample is strictly continuous: `render_contiguous` refuses a
+  block off the clock, an adopted plan continues the clock, and observation runs only after a successful block. A
+  session seek moves source time, not the render clock, so integration continues across a seek; a host that wants
+  otherwise resets. So `LoudnessAnalysis` needs no backward-step case; any non-continuation is already a gap.
+- **Ops.** start (a full `LoudnessAnalysis::restart`, then arm), read, reset, stop. A start while armed is refused
+  with `VALIDATION_FAILED` `loudness.active`. Every session serves the command (`ProviderFeatures::ALL`), and
+  capability bit 17 is set exactly when 0x0014 is listed.
+- **Cost.** About 71 KB per session at boot (the analysis 46 KB, the queue 24 KB), charged exactly. The C ABI and
+  browser resource ceilings are raised from measurements.
+- **Parity.** One host row only: the byte-equal script row in `protocol_cross_host`, which drives both hosts through
+  their real entries. A second C ABI row would test the same claim twice, so `capi/src/runtime/tests.rs` gets only the
+  forced capability re-pins.
+- **Extra paths (beyond the scope note), needed by the spectrum pattern and the gates:**
+  - protocol: `message_wire.rs`, `message_wire/loudness.rs` (new), `controller.rs`, and their tests;
+  - `control-plane/Cargo.toml`, `control-plane/tests/loudness_monitor.rs` (new), `Cargo.lock`;
+  - `fuzz/corpus/complete-schema-manifest.md`;
+  - `tools/realtime-policy/src/policy.rs`;
+  - `capi/tests/resource_lifecycle.rs`;
+  - `hosts/host-web/tests/browser-v1/expected.json`;
+  - the S1 crate (`restart()`; `tests/allocation.rs` deleted, because the armed meter joins the cross-host render
+    zero-allocation test).
+
+## S2 evidence (attempt 1, on the merged tree dd739e007)
+Root accepts the S2 decision record as written: the one cross-host parity row, the 512-deep queue, and the restart on
+start.
+- **Charge.** `loudness_rows()` charges 75,432 B per session exactly: the queue 256 + 28,728, two `Arc` words 48, and
+  the analysis 14,400 + 4 x 8,000.
+- **Ceilings (measured; the meter is preallocated in every session):**
+  - C ABI `capi_retained_bytes`: measured 340,878 before and 418,934 after, on x86-64. The ceiling goes from 344,192 to
+    460,864 (+10 %, rounded up to 64).
+  - Browser `bridgeMetadataBytes`: 496,495 before, 573,439 after; the ceiling goes from 546,176 to 630,784.
+  - Browser `bridgeRetainedBytes`: 533,603 before, 610,547 after; the ceiling goes from 587,008 to 671,616.
+  - `memoryBytesCeiling` stays at 2,097,152. The peak went from 1,900,544 to 1,966,080 (one page), which leaves 2
+    pages free.
+- **Bytes** (request ID 7, revision `Any`):
+  - The start request (64 B) is
+    `4d49534f43544c000100000030000101140000001000000007000000000000000000000000000000010000000000000001000101010000000100000000000000`.
+    Read, reset and stop are the same bytes with the op byte at offset 56 set to `02`, `03` or `04`.
+  - A read reply with every field present (levels -23, LRA 0, `integrating-since` 384, 47 gated blocks; 304 B):
+    `4d49534f43544c0001000000300002001400000000010000070000000000000000000000000000001000000000000000010004010800000000ab0300000000000200080101000000010000000000000003000400080000008001000000000000040004010800000000000000000000000500040108000000000000000000000006000401080000002f0000000000000007000600040000000000b8c10000000008000600040000000000b8c10000000009000600040000000000b8c1000000000a0006000400000000000000000000000b000600040000000000b8c1000000000c000600040000000000b8c1000000000d000600040000000000b8c1000000000e000600040000000000b8c1000000000f000600040000000000b8c10000000010000600040000000000b8c100000000`.
+  - The corpus hash goes from dea650f7e506833e to de7d7cf504ca191a, with 61 frames. The 59 old frames still hash to
+    the old pin.
+- **Tests and their test value:**
+  - (a) `loudness_monitor::start_read_reset_and_stop_measure_the_master`: a meter not wired to the master, a start from
+    the wrong sample or not refused while armed, a reset off the hop boundary, a stop that stays armed, or an arming
+    that does not restart the windows or the hop grid.
+  - (b) `a_full_record_queue_drops_and_counts_exactly` (640 hops with no service step, exactly 128 dropped): a full
+    queue that blocks, panics, overwrites or miscounts.
+  - (c) the armed meter in `protocol_cross_host::the_render_call_never_allocates_with_telemetry_configured`, on both
+    hosts, with a check that a hop was delivered: an allocation in the armed render half.
+    `crates/loudness/tests/allocation.rs` is deleted.
+  - (d) the corpus rows `command.loudness` and `response.loudness`: a moved tag, type or field order.
+  - (d2) `loudness_reply_rules_hold_both_ways_and_an_unknown_op_is_refused`: a non-finite or below-floor level, a
+    negative range, a true peak without `integrating-since`, or an op outside 1-4 crossing the wire.
+  - (e) step 20 of the cross-host script: the two hosts answer with different bytes.
+  - (f) the bit-17 assertions in the codec and in the controller.
+- **Mutants:** 13 of 15 went red. The two that survived:
+  - "read does not drain" is equivalent: the service step drains before every command.
+  - "the arming tag is ignored" is a known gap: a stale record needs a block in flight on another thread across a stop
+    and a start, which the single-thread rig cannot produce.
+- **Gates** (the stream coordinator re-ran them all on dd739e007, and the implementer ran them too):
+  - cargo test: loudness, protocol, conformance, control-plane `--features test-support`, capi, host-web
+    `--features test-support`, plus host-web, protocol and control-plane with CI's feature set (476 passed);
+  - fmt, clippy `-D warnings`, the aarch64 `--tests` check and the `-D warnings` release check, the avx2/fma release
+    build, rustdoc `-D warnings`;
+  - realtime-policy (233 regions in 43 files), check-workspace-policy, `lint-checks.sh --self-tests`;
+  - `build-web-audioworklet.sh`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`
+    (fresh; self-test 43 red mutations).
