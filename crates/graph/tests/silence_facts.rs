@@ -75,8 +75,8 @@ fn estimate() -> GraphResourceEstimate {
 
 /// Two tracks, each sending through a live route into one submix input, which feeds the output.
 /// `silent[t]` lists the blocks in which track `t`'s input is `+0.0`. Returns the plan and the
-/// first route's producer.
-fn prepared(silent: [u32; 2]) -> (realtime::PreparedRenderPlan, GraphRouteControlProducer) {
+/// two routes' producers.
+fn prepared(silent: [u32; 2]) -> (realtime::PreparedRenderPlan, Vec<GraphRouteControlProducer>) {
     let envelope = RenderEnvelope {
         sample_rate: SampleRateHz(48_000),
         quantum: QuantumFrames(FRAMES as u32),
@@ -202,7 +202,7 @@ fn prepared(silent: [u32; 2]) -> (realtime::PreparedRenderPlan, GraphRouteContro
         builtin_banks: vec![],
         observers: vec![],
     });
-    let mut producers = graph
+    let producers = graph
         .attach_route_controls(&realtime::LiveValuesSuperseded::new())
         .expect("both routes into the submix are live");
     assert_eq!(producers.len(), 2);
@@ -220,31 +220,47 @@ fn prepared(silent: [u32; 2]) -> (realtime::PreparedRenderPlan, GraphRouteContro
             observers: vec![],
         })
         .unwrap_or_else(|failure| panic!("bind {}", failure.code));
-    (plan, producers.remove(0))
+    (plan, producers)
 }
 
 /// Gate 2. Track 1 is silent until block 5. Track 0 plays from block 1, and a mute ramping over
 /// [`RAMP`] frames is published on its route before block 2, so the route mixes blocks 2 and 3 on
-/// its way down and is inactive (settled) from block 4. The submix input is flagged exactly in
-/// blocks 0 (both sources silent) and 4 (track 0 muted and settled, track 1 silent).
+/// its way down and is inactive (settled) from block 4. Track 1 is silent again from block 6, and
+/// its route is retargeted while it is: before block 6 to a left row of `-1.0` and `-0.0`, which
+/// mixes its silence to `-0.0`; before block 8 to a left row of `1.0` and `1.0`; before block 9 to
+/// a ramp of both left columns over [`RAMP`] frames to a `+0.0` target, whose coefficients can
+/// pass the target. The submix input is flagged exactly in blocks 0 (both sources silent), 4
+/// (track 0 muted and settled, track 1 silent) and 8 (a positive row).
 ///
 /// Test value: red when a submix is flagged silent while a route still carries signal: a route
 /// counted by its mute bit instead of its settled activity (blocks 2 and 3), a destination that
-/// leaves no muted route out (block 4 not set), or a sum that ignores one of its inputs (blocks 1
-/// and 5).
+/// leaves no muted route out (block 4 not set), a sum that ignores one of its inputs (blocks 1 and
+/// 5), a route whose row is negative on both columns counted silent (blocks 6 and 7), or a ramp
+/// whose row moves on both columns counted silent (blocks 9 and 10).
 #[test]
 fn a_submix_input_is_silent_iff_every_route_into_it_is() {
-    const BLOCKS: usize = 6;
-    let (mut plan, mut producer) = prepared([1 << 0, 0b1_1111]);
+    const BLOCKS: usize = 11;
+    test_only_state_every_silence_fact(true);
+    let (mut plan, mut producers) = prepared([1 << 0, 0b111_1101_1111]);
     let mut gate = plan.take_revision_gate().expect("a fresh plan's gate");
-    let mute = RouteControlRecord::new([0.0; 4], true, RAMP).expect("a legal ramped mute");
+    let record = |target, mute, length| {
+        RouteControlRecord::new(target, mute, length).expect("a legal route record")
+    };
+    let writes = [
+        (2, 0, record([0.0; 4], true, RAMP)),
+        (6, 1, record([-1.0, -0.0, 0.0, 1.0], false, 0)),
+        (8, 1, record([1.0, 1.0, 0.0, 1.0], false, 0)),
+        (9, 1, record([0.0, 0.0, 0.0, 1.0], false, RAMP)),
+    ];
     let mut flags = Vec::new();
     for block in 0..BLOCKS {
-        if block == 2 {
-            let revision = gate.last_published() + 1;
-            let stamp = gate.stamp(revision).expect("a legal revision");
-            producer.write(stamp, mute);
-            gate.publish(revision);
+        for &(at, route, write) in &writes {
+            if at == block {
+                let revision = gate.last_published() + 1;
+                let stamp = gate.stamp(revision).expect("a legal revision");
+                producers[route].write(stamp, write);
+                gate.publish(revision);
+            }
         }
         let mut pcm = vec![1.0_f32; 2 * FRAMES];
         plan.render(
@@ -258,9 +274,13 @@ fn a_submix_input_is_silent_iff_every_route_into_it_is() {
         .expect("render");
         flags.push(test_only_route_destination_silence(&plan));
     }
+    test_only_state_every_silence_fact(false);
     assert_eq!(
         flags,
-        [true, false, false, false, true, false].map(|flag| vec![flag]),
+        [
+            true, false, false, false, true, false, false, false, true, false, false
+        ]
+        .map(|flag| vec![flag]),
         "the submix input's flag, block by block"
     );
 }

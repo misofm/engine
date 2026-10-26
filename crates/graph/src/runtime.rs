@@ -63,6 +63,17 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     static TEST_ONLY_LANE_PACKING_DISABLED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    static TEST_ONLY_EVERY_SILENCE_FACT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Make (`true`) every op on this thread state its full silence fact (issue #2133), whether or
+/// not a lane packer reads it, so a test can read a fact no bank of its plan consumes; `false`
+/// restores the bind-time reader table. Test-support only.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_state_every_silence_fact(every: bool) {
+    TEST_ONLY_EVERY_SILENCE_FACT.with(|value| value.set(every));
 }
 
 /// Forbid (`true`) or allow (`false`) every bank chain's whole-bank silent skip (issue #1107) on
@@ -4749,6 +4760,11 @@ pub(crate) struct Runtime {
     /// its silence is the AND of theirs: an `Identity` op that is neither the session Output (the
     /// host's planes) nor a fold master (whose words the folding chains wrote). Bind-time.
     silent_sum: Box<[bool]>,
+    /// Issue #2133: unit -> whether some reader uses its op's silence fact: the walk back from
+    /// each grouped bank's lane inputs through the routes and sums that feed them
+    /// ([`Self::bind_silence_readers`]). An op outside it states `false` without computing its
+    /// fact, which is always sound. Empty (every op computes) until bind builds it.
+    silent_readers: Box<[bool]>,
 }
 
 // The plan's retained-bytes walk (#1074): control thread only, from lengths and capacities, never
@@ -4829,6 +4845,7 @@ impl Runtime {
             .saturating_add(self.lane_map.retained_bytes())
             .saturating_add(slice(&self.silent))
             .saturating_add(slice(&self.silent_sum))
+            .saturating_add(slice(&self.silent_readers))
     }
 }
 
@@ -5130,6 +5147,7 @@ impl Runtime {
         Self {
             silent,
             silent_sum,
+            silent_readers: Box::default(),
             arena,
             delays: delays.into_boxed_slice(),
             track_delays: track_delays.into_boxed_slice(),
@@ -5295,6 +5313,7 @@ impl Runtime {
             lane_map,
             silent,
             silent_sum,
+            silent_readers,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -5351,10 +5370,21 @@ impl Runtime {
                 // Issue #2133: the op states its output's silence fact after writing it. A claim's
                 // input op wrote nothing (the source set stated its fact at the block top), and the
                 // session Output writes the host's planes, which no fact describes.
+                // A fact no reader uses (`silent_readers`) is stated `false` without computing it.
                 if !matches!(op.kind, NodeKind::SourceInput) && *output_unit != Some(index) {
+                    let read = silent_readers.get(index).copied().unwrap_or(true);
+                    #[cfg(any(test, feature = "test-support"))]
+                    let read = read || TEST_ONLY_EVERY_SILENCE_FACT.with(std::cell::Cell::get);
                     let sum = silent_sum.get(index).copied().unwrap_or(false);
-                    let fact =
-                        op_output_silent(op, arena, silent, route_activity.as_deref(), index, sum);
+                    let fact = read
+                        && op_output_silent(
+                            op,
+                            arena,
+                            silent,
+                            route_activity.as_deref(),
+                            index,
+                            sum,
+                        );
                     state_op_silence(silent, op, fact);
                 }
                 // Issue #1899: an admitted per-node effect op, after its block. Its left and right
@@ -5433,16 +5463,6 @@ impl Runtime {
                 // Issue #1981: a grouped unit's packer fact is read after its chain runs (one load
                 // for an ungrouped unit); the skip counter says whether the chain skipped.
                 let grouped = lane_map.group(index).map(|(group, _)| group);
-                // Issue #2133: the packer's input fact, from each lane's propagated flag: the
-                // played block's record for a lane gathering a claim in place, its buffer's flag
-                // otherwise. No word is read; an ungrouped unit, whose fact nothing reads, states
-                // none.
-                let input_silent = if grouped.is_some() {
-                    lane_input_silence(&gather, silent, &bank_inputs[..lanes])
-                } else {
-                    0
-                };
-                chain.set_input_silent_lanes(input_silent);
                 let mut planes = ArenaMembers {
                     arena: &mut *arena,
                     inputs: &bank_inputs[..lanes],
@@ -5481,6 +5501,21 @@ impl Runtime {
                 // A folded lane writes no output of its own, and its master's words are the
                 // folding chains', whose fact is `false` (its sum is not a plain reduction).
                 let skipped = chain.silent_skips() != skips;
+                // Issue #2133: the packer's input fact, read only after a block that ran (a skip
+                // proved every lane itself), and before this unit states its outputs' flags, one
+                // of which may be a lane's input (a member that reduced in place): from each
+                // lane's propagated flag, the played block's record for a lane gathering a claim
+                // in place, its buffer's flag otherwise. No word is read; the played planes are
+                // held until the next block's top. An ungrouped unit, whose fact nothing reads,
+                // states none.
+                if !skipped {
+                    let input_silent = if grouped.is_some() {
+                        lane_input_silence(&gather, silent, &bank_inputs[..lanes])
+                    } else {
+                        0
+                    };
+                    chain.set_input_silent_lanes(input_silent);
+                }
                 let folded = chain.fold_lanes();
                 for (lane, &buffer) in bank_outputs[..lanes].iter().enumerate() {
                     let fact = skipped && !folded.get(lane).copied().unwrap_or(false);
@@ -5827,14 +5862,19 @@ fn mix_keeps_positive_zero(c: [f32; 4]) -> bool {
 }
 
 /// Issue #2133: [`mix_keeps_positive_zero`] for every frame a live route's indexed ramp can mix.
-/// A ramping column's coefficient `fma(k, step, start)` is only bounded near its target, not
-/// signed (`IndexedRamp`'s subnormal-step note), so a column counts while ramping only when it
-/// does not move (`step` a zero, which leaves `start`); the settled frames mix by `target`.
+/// A settled ramp mixes by `target` alone. A ramping column's coefficient `fma(k, step, start)` is
+/// only bounded near its target, not signed (`IndexedRamp`'s subnormal-step note), so a column
+/// counts while ramping only when it does not move (`step` a zero, which leaves `start`) and keeps
+/// `+0.0` at both ends.
 #[inline]
 fn ramp_keeps_positive_zero(ramp: &IndexedRamp) -> bool {
+    if ramp.length == 0 {
+        return mix_keeps_positive_zero(ramp.target);
+    }
     let column = |c: usize| {
         keeps_positive_zero(ramp.target[c])
-            && (ramp.length == 0 || (ramp.step[c] == 0.0 && keeps_positive_zero(ramp.start[c])))
+            && ramp.step[c] == 0.0
+            && keeps_positive_zero(ramp.start[c])
     };
     (column(0) || column(1)) && (column(2) || column(3))
 }
@@ -9854,6 +9894,7 @@ pub(crate) fn build_sequential(
         &runtime.identity,
     );
     runtime.bind_lane_map();
+    runtime.bind_silence_readers();
     (
         runtime,
         BindIdentities {
@@ -10413,6 +10454,55 @@ impl Runtime {
         if !self.lane_map.groups.is_empty() && !self.block_end_units.is_empty() {
             self.block_end_units = widen_block_end_units(&self.block_end_units, &self.lane_map);
         }
+    }
+
+    /// Issue #2133: build [`Self::silent_readers`] once the pack groups are known. The only
+    /// consumer of a fact is a grouped bank's lane input, so the walk runs back from the end: a
+    /// grouped bank wants the flags of its first-slot members' inputs; an op whose output is
+    /// wanted is a reader-feeding op, and then wants its own inputs; a writer satisfies the want
+    /// on what it writes, so an earlier writer of the same buffer is not one. A bank states its
+    /// final lanes' flags whatever this says. Pack-group lane moves trade members between peer
+    /// units only, whose inputs all come from before the group, so they move no want. Bind-time;
+    /// allocates.
+    fn bind_silence_readers(&mut self) {
+        let mut wanted = vec![false; self.silent.len()];
+        let mut readers = vec![false; self.units.len()];
+        for index in (0..self.units.len()).rev() {
+            let read = match &self.units[index] {
+                RuntimeUnit::Op(op) => wanted.get(op.output as usize).copied().unwrap_or(false),
+                RuntimeUnit::Bank { .. } => false,
+            };
+            let mut want = |buffer: u32, value: bool| {
+                if let Some(flag) = wanted.get_mut(buffer as usize) {
+                    *flag = value;
+                }
+            };
+            match &self.units[index] {
+                RuntimeUnit::Op(op) => {
+                    want(op.output, false);
+                    if read && !matches!(op.kind, NodeKind::SourceInput) {
+                        readers[index] = true;
+                        for &input in &op.inputs {
+                            want(input, true);
+                        }
+                    }
+                }
+                RuntimeUnit::Bank { members, lanes, .. } => {
+                    let last = members.len().saturating_sub(*lanes);
+                    for member in &members[last..] {
+                        want(member.output, false);
+                    }
+                    if self.lane_map.group(index).is_some() {
+                        for member in &members[..*lanes] {
+                            for &input in &member.inputs {
+                                want(input, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.silent_readers = readers.into_boxed_slice();
     }
 
     /// `(first unit, last unit, width)` of each pack group, in unit order. Off the render thread.

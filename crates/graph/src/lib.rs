@@ -30,7 +30,7 @@ pub use runtime::{
     test_only_set_bank_meter_declined, test_only_set_bank_sample_peak_declined,
     test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
     test_only_set_source_in_place_declined, test_only_source_plane_counts,
-    test_only_source_plane_reset,
+    test_only_source_plane_reset, test_only_state_every_silence_fact,
 };
 
 use core::cell::Cell;

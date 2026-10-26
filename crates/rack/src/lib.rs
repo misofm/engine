@@ -5149,8 +5149,8 @@ impl BankChain {
     /// The active lanes whose input this chain's last block was known to be exact `+0.0` (raw
     /// bits zero) on every word of both planes, bit `l` for lane `l` (issue #1981, the lane
     /// packer's input fact). Since issue #2133 the chain never computes it from the words it
-    /// moves: the caller states it before the block ([`Self::set_input_silent_lanes`]) from facts
-    /// propagated where the inputs were written, and a skipped block reports every active lane
+    /// moves: the caller states it for a block that ran ([`Self::set_input_silent_lanes`]) from
+    /// facts propagated where the inputs were written, and a skipped block reports every active lane
     /// (its own input test proved them). A clear bit means "not known silent", never "audible".
     /// Zero before the first block.
     #[must_use]
@@ -5158,7 +5158,8 @@ impl BankChain {
         self.input_silent
     }
 
-    /// State this block's [`Self::input_silent_lanes`] before [`Self::run`] (issue #2133): bit
+    /// State the last block's [`Self::input_silent_lanes`] after a [`Self::run`] that did not skip
+    /// (issue #2133; a skip states its own): bit
     /// `l` set only when lane `l`'s input is known, from how it was produced, to be exact `+0.0`
     /// on every word of both planes. Masked to the active lanes. The fact feeds the lane packer
     /// alone: the whole-bank skip keeps its own input test, so a wrong bit can cost a move but
