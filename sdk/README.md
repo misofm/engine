@@ -736,6 +736,88 @@ specified; stdout output contains only the document. It does not download or dec
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
 
+## Upgrading from 0.4.3
+
+0.5.0 breaks the 0.4.3 API. Each line is one change; the sections above give the details.
+
+### Removed exports
+
+- Root (`./headless` too for `EngineConsole` and `CommandReport`): `EngineConsole`, `ConsoleWriter`, `CommandReport`, `CommandKindName`,
+  `CommandReasonName`, `commandReasonName`, `AbiCommandField`, `encodeLaneEdits`, `LaneEdit`,
+  `WriterOptions`, `SemanticWriterOptions`, `ConsoleRack`, `ConsoleChannel`, `ConsoleSubmit`,
+  `ConsoleBeforeSubmit`, `ConsoleEdits` and `AutomationRack` are removed.
+- `./browser`: `createBrowserConsole` is removed; use `createBrowserLiveControls`.
+- Every entry: the observation-record helpers `decodeObservationRows`, `enrichObservationMap`,
+  `resolveObservationAddressesWithTracks`, `observationRackValue`, `observationChannelsValue`,
+  `ObservationAddress`, `RawObservationRow` and `RawObservationBinding` are removed.
+- `Catalog` loses `commandRecordBytes`, `maximumCommandRecords`, `commandKinds` and
+  `commandReasons`; `AbiLayout` loses `commandRecord`.
+
+### Live values: console -> liveControls
+
+- `engine.console()` becomes `engine.liveControls()` (`EngineLiveControls`); `ConsoleWriter`
+  becomes `LiveControlWriter` (`controls.writer`).
+- A report is `ControlReport` (`{ ok, revision, path, appliedOperations }`), not
+  `{ appliedAtSample }`; a refusal rejects with `MisoControlRefusal`.
+- An effect is addressed by its slot ID: `track.console(slot, effectId)` or
+  `track.insert(slot, effectId)`, not `track.effect("simd1", index, effectId)`.
+- `submitCommands()` is removed. Send value edits as `SET_CONTROL` transactions
+  (`liveControls().submit`, or headless `controlFrame` and `controlTransactions()`), and structural
+  edits with `engine.apply(transaction(base)...build())` or `engine.replaceSession(document)`.
+- `EffectEdits.observe` is removed; use `subscribeObservations()`.
+
+### Observation: records -> handles and callbacks
+
+- A `subscribeObservations()` handle and its receipt report `armed`, not `appliedAtSample`.
+- Pass `onEnd` to learn which selections a commit ended (`handle.ended`); a subscription with no
+  selection left closes.
+- The subscription bounds lose `maximumCommandRecords`, and bounds and limits lose
+  `maximumBindings` and `maximumWindowBlocks`.
+
+### Session types
+
+- `TrackSpec` `simd1`, `dynamic` and `simd2` become `console` entries (one for each session slot)
+  and `inserts`; the session declares its slots with `console({ preInsert, postInsert })`.
+- `Rack` and `ObservationRack` are `"console" | "inserts"`, not `"simd1" | "dynamic" | "simd2"`.
+- A console slot declares its `linkMode` (`dual_mono`, `maximum` or `average`); a strip entry can
+  override it, and `slot` (the default) takes the slot's mode.
+- Send taps: `post_input_builtins` -> `post_input`, `post_simd1` -> `insert_send`,
+  `post_dynamic` -> `insert_return`, `post_simd2_pre_fader` -> `pre_fader`,
+  `post_matrix` -> `post_pan`.
+- The route source `{ kind: "submix_output", submixId }` becomes `{ kind: "submix", submixId, tap }`.
+- `AutomationTarget` is a control address (`owner`, `section`, `control`, `lane`), not
+  `{ trackId, rack, slotId, parameter, channel }`.
+- Spectrum targets: `trackPostInputBuiltins` -> `trackPostInput`, `trackPostMatrix` -> `trackPostPan`.
+
+### Boot options
+
+- `console: { commandQueueRecords, meterBlocks, observationTaps, masterTrackPlusOne }` becomes
+  `liveControls: { meterBlocks }` (in `BootOptions`, `OfflineEngineOptions` and the browser
+  `policy`).
+- The command-queue, master-track and observation-taps boot words are retired: `reserved1`,
+  `reserved2` and `reserved3`, always zero. Every plan binds every declared observation tap.
+- `liveControls.observationTaps` is refused with `MisoUsageError`, never ignored.
+
+### Behaviour and license
+
+- A track or submix built without `pan` now gets the identity matrix, not pan 0 on each lane, so a
+  stereo source keeps its image. A live `pan(...)` on such a strip needs `matrixMode("pan")` in the
+  same transaction.
+- The license changes from Apache-2.0 to FSL-1.1-ALv2.
+
+### New APIs
+
+- Live controls and transactions: `engine.liveControls()`, `engine.controls()`,
+  `engine.controlState()`, `transaction()`, `engine.apply()`, `engine.replaceSession()`,
+  `engine.watermark()`, `engine.applied()`, and the generated `CONTROLS` catalog.
+- Session: submix strips, `vcas`, `controlSmoothing`, route `mute` and `followsMute`, automation
+  `offset`.
+- Browser playback: `createEngine({ pcmFeed })`, `engine.position()`, `engine.play()`,
+  `engine.stop()` and `engine.seek()`.
+- Local WAV stems (`./browser`): `readWavHeader`, `CanonicalPcmPump` and `blake3Stream`.
+- Protocol reads: `capabilities()`, `committedDocument()`, `transport()`, `setTransport()`,
+  `counters()`, `diagnostics()`, `configureTelemetry()` and `onEvent()`.
+
 ## Boundaries and contributing
 
 This package does not provide a DAW/timeline UI, delivery codecs, an unbounded media cache,
