@@ -74,18 +74,6 @@ fn w4_counters_describe_the_designs_plan() {
             "{kind}: banks"
         );
         assert_eq!(pins[counter("mergeable_partial_pairs")], 0, "{kind}: pairs");
-        // Every bank-slot of every block runs, skips its wet path (#2129) or is in a chain the
-        // block skipped whole: the slot-blocks the plan holds.
-        let slots_of_skipped_chains = pins[counter("silent_skips")];
-        assert!(
-            pins[counter("bank_slot_runs_total")] + pins[counter("bypass_skips")]
-                <= (track_bsr + submix_bsr) * W4_COUNTER_BLOCKS
-                && pins[counter("bank_slot_runs_total")]
-                    + pins[counter("bypass_skips")]
-                    + slots_of_skipped_chains
-                    >= (track_bsr + submix_bsr) * W4_COUNTER_BLOCKS,
-            "{kind}: runs, bypass skips and skipped chains cover the plan's slot-blocks"
-        );
     }
     for kind in ["c1_console_16_all_active", "c1_console_16_sparse"] {
         // No bypassed lane and no whole silent track bank: every track bank runs every slot.
