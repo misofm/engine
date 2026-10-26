@@ -6283,6 +6283,21 @@ pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
         })
 }
 
+/// Blocks the plan's per-node live effects skipped their wet path settled bypassed (issue #2129
+/// D7), summed over every op; zero for any other plan.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_node_bypass_skips(plan: &PreparedRenderPlan) -> u64 {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or(0, |executor| {
+            executor.runtime.units.iter().fold(0_u64, |total, unit| {
+                total.saturating_add(unit.bypass_skips())
+            })
+        })
+}
+
 /// Test-only (issue #2133): the silence flag the last rendered block left on each route
 /// destination that is a plain sum (a submix input), in unit order; empty for any other plan. The
 /// session Output writes the host's planes and has no flag.
@@ -11172,8 +11187,8 @@ mod tests {
     /// Live bypass returns the dry signal delayed by exactly the effect's declared latency, so
     /// every PDC route timing the compiler derived from that latency stays correct.
     ///
-    /// Red mutation: delete the `live.shunt.capture(..)` call -> the dry buffer keeps its
-    /// initial zeros and a bypassed block renders silence instead of the delayed input.
+    /// Red mutation: delete the settled-bypass skip's `live.shunt.passthrough(..)` call (#2129
+    /// D7) -> a bypassed block renders its input undelayed.
     #[test]
     fn live_bypass_is_latency_preserving_and_reversible() {
         const LATENCY: u64 = 2;
@@ -11219,6 +11234,53 @@ mod tests {
             &restored[4..],
             &[-10.0, -11.0, -12.0, -13.0],
             "the uncommanded right lane keeps its unity wet path at the declared latency"
+        );
+    }
+
+    /// #2129 D7: a per-node live effect skips its wet path on exactly the blocks it begins settled
+    /// bypassed with nothing staged: not while its crossfade into bypass runs, and not on a block
+    /// that stages a span. (The skipped block's words are `live_bypass_is_latency_preserving_and_
+    /// reversible`'s.)
+    ///
+    /// Red mutations: the skip reads the lane's `bypassed()` without `bypass_ramping()` -> the two
+    /// ramp blocks count; the skip ignores `staged.staged` -> the parameter block counts; the mix
+    /// runs only when `needs_dry && !settled_bypassed` -> the span block emits wet.
+    #[test]
+    fn a_settled_bypassed_per_node_effect_skips_only_blocks_without_work() {
+        let (writer, control) = control_pair();
+        let mut plan = live_control_effect_plan(2, Some(control), Box::new(SampleIndexSource));
+        let mut producer = LiveControl::new(writer, &mut plan);
+        producer.push(effect_contract::EffectControlRecord::Bypass(
+            effect_contract::BypassSwitch {
+                bypassed: true,
+                ramp_samples: 6,
+            },
+        ));
+        render_live_control_blocks(&mut plan, 0, 2);
+        assert_eq!(
+            test_only_node_bypass_skips(&plan),
+            0,
+            "a crossfade into bypass runs the wet path"
+        );
+        render_live_control_blocks(&mut plan, 2, 3);
+        assert_eq!(test_only_node_bypass_skips(&plan), 3, "settled blocks skip");
+        producer.push(effect_contract::EffectControlRecord::Parameter {
+            parameter_index: 0,
+            channel: ParameterChannel::Left,
+            value: 0.5,
+        });
+        let span_block = render_live_control_blocks(&mut plan, 5, 2);
+        // The span block runs the wet path (gain 0.5 on the left) and still emits the dry input
+        // delayed by the declared latency, on both channels.
+        assert_eq!(
+            &span_block[..8],
+            &[18.0, 19.0, 20.0, 21.0, -18.0, -19.0, -20.0, -21.0],
+            "a settled-bypassed block that runs the wet path emits the delayed dry input"
+        );
+        assert_eq!(
+            test_only_node_bypass_skips(&plan),
+            4,
+            "the block that stages a span runs the wet path, the next skips"
         );
     }
 

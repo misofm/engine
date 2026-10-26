@@ -3095,6 +3095,8 @@ pub(crate) struct LiveControlEffect {
     /// The frames the lane holds dry when it leaves settled bypass: the effect's
     /// `warmup_samples` of its declared latency, read at bind (issue #2129 D3).
     warmup: u32,
+    /// Blocks this instance skipped its wet path settled bypassed (issue #2129 D7). Evidence.
+    bypass_skips: u64,
 }
 
 impl LiveControlEffect {
@@ -3254,6 +3256,7 @@ impl LiveControlEffect {
             control,
             layout,
             observe_carry: false,
+            bypass_skips: 0,
         }
     }
 }
@@ -3697,6 +3700,19 @@ impl RuntimeUnit {
         match self {
             Self::Op(_) => 0,
             Self::Bank { chain, .. } => chain.silent_skips(),
+        }
+    }
+
+    /// Blocks this op's per-node live effect skipped its wet path settled bypassed (issue #2129
+    /// D7); `0` for any other op and for a bank, whose slots count their own.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn bypass_skips(&self) -> u64 {
+        match self {
+            Self::Op(op) => match &op.kind {
+                NodeKind::LiveControlEffect(live) => live.bypass_skips,
+                _ => 0,
+            },
+            Self::Bank { .. } => 0,
         }
     }
 
@@ -6289,6 +6305,33 @@ fn execute_op(
             // #2129 D5: decided before the mix advances the lane, as the bank decides it.
             let settled_bypassed = live.control.settled_bypassed();
             let capture_dry = needs_dry || live.shunt.feeds_line();
+            // #2129 D7: a settled-bypassed block with no span, no prepared target and no armed tap
+            // that needs the wet path emits only the latency-matched dry block, so it runs neither
+            // `capture` nor `process`: the line is exchanged on the planes in place, which is the
+            // words `capture` and the settled select leave there. No D7 check runs on such a
+            // block (decision 15 E4); the resume reset in `stage` clears a tripped ring.
+            if settled_bypassed
+                && staged.staged == 0
+                && live.control.prepared_targets().is_empty()
+                && !live
+                    .observation
+                    .as_deref()
+                    .is_some_and(ObservationLane::any_armed_computed)
+            {
+                let (out_left, out_right) = output_planes(arena, &mut host, output);
+                live.shunt.passthrough(out_left, out_right);
+                live.bypass_skips = live.bypass_skips.saturating_add(1);
+                if let Some(observation) = live.observation.as_deref_mut() {
+                    publish_observations(
+                        observation,
+                        live.effect.processor.as_ref(),
+                        true,
+                        first_sample,
+                        arena.frames() as u64,
+                    );
+                }
+                return Ok(());
+            }
             let effect = &mut live.effect;
             for target in live.control.prepared_targets() {
                 effect
