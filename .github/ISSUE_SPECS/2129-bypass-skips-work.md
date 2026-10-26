@@ -311,3 +311,27 @@ Findings for the rebrief:
   through the hold at this fixture); gate 4 is the reset's red row.
 - Not started: gate 6 CPU row (the workload variant exists, not yet emitted by `tools/bench`),
   the rulings amendments, the realtime-policy tool run.
+
+## Decision record amendment (root, 2026-10-26): per-lane staleness; split into S1a and S1b
+
+- **Finding (design review, BLOCKER B1):** under D2/D3 as first ruled, a lane is stale only when
+  its whole bank skipped. So whether an un-bypassed lane gets the reset and the hold depends on
+  whether its bank mates were bypassed and on its cohort, and its bits depend on its bank mates.
+  That breaks AGENTS.md's "banking couples cost, never bits".
+- **D2 and D3 amended.** Staleness is a per-lane (per-strip) fact. Every un-bypass from settled
+  bypass resets that lane alone (`reset_lane(lane, DiscontinuityKeepParameters)`, #2131) and holds
+  dry for `W`, whether or not its bank ran while it was bypassed. A bypassed lane in a running bank
+  still computes, but its state is discarded at un-bypass. The whole-bank skip of D1 is unchanged;
+  it is now purely a cost decision.
+- **Per-lane state travels.** The stale flag and the hold counter move with the lane in every lane
+  swap (#1782a, #1981's packing, cross-stage swaps included; `swap_stale_bits` today drops the bit
+  across stages) and in the plan-swap carry.
+- **Limiter warm-up.** The S1 implementer showed that the ceiling bound holds from `s_B + T`: after
+  a reset the box ring holds only post-reset values once `n >= s_B + Wb`, and `Wb <= N + 1 <= T`.
+  So `W = T + N` is about 10 ms longer than needed. Ruling: `W` is the least value that the stated
+  derivation proves, recorded in the module docs, with the gate's red row at `W - 1` where that row
+  can be made red. If no row can, the derivation is the record.
+- **Slices.** S1a is #2131 (`reset_lane` on every banking effect; it lands first). S1b is this
+  branch: the skip, per-lane staleness, travelling state, and the remaining S1 gates (the CPU row,
+  the rulings amendments, the realtime-policy tool, the zero-allocation render test). S1b merges
+  main after #2131 and #1981 (PR #2130) land. S2, the per-node delay, is unchanged.
