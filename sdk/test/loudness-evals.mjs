@@ -310,10 +310,18 @@ test("a stuck host holds at most one timed read, and close sends no read and set
   await sleep(300);
   const reads = core.sent.filter((operation) => operation === "read").length;
   assert.ok(reads <= Math.ceil(300 / DEADLINE) + 1, `${reads} timed reads were sent against a host that answers none`);
+  // A pump waits behind the one timed read in flight at most, not behind every tick since.
+  const pumped = Date.now();
+  await assert.rejects(handle.pump(), /deadline/);
+  assert.ok(Date.now() - pumped <= 2 * DEADLINE + 40, `a pump waited ${Date.now() - pumped} ms`);
+  await sleep(20);
   const before = core.sent.length;
+  // A pump queued when close is called is not sent: the stop is the next frame.
+  const late = handle.pump();
   const started = Date.now();
   await handle.close();
   const took = Date.now() - started;
+  await assert.rejects(late, MisoUsageError);
   assert.deepEqual(core.sent.slice(before), ["stop"], "close sends its stop and nothing else");
   assert.ok(took <= DEADLINE + 40, `close took ${took} ms`);
   await sleep(30);
