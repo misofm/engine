@@ -339,3 +339,73 @@ Findings for the rebrief:
 ## Owner decision (2026-10-26): un-bypass from rest
 
 Root asked: "When you turn a bypassed effect back on, it starts fresh ("from rest"). It does not continue from where it was. [...] Reply yes or no." The owner answered, verbatim: "Yes". This approves the per-lane un-bypass law in the amendment above (every un-bypass from settled bypass resets that lane and holds dry for `W`, then crossfades). It is class B against E5 (#1341), where a bypassed lane kept computing and un-bypass continued warm.
+
+### S1b attempt 2 (2026-10-26), on the amended D2/D3
+
+Branch `codex/batch-b13-bypassskip`, with origin/main merged twice (8f32d1673 for #2131's
+`reset_lane`, then 7e824290f for #2145 and #2133/#2146). The final head is the one pushed with this
+record.
+
+Implementation:
+
+- **Per-lane staleness (amended D2/D3).** `EffectControlLane::stage` flags a switch out of
+  **settled** bypass (`rest_pending`; a reversal before the crossfade toward bypass settles does
+  not). The rack's drain (`read_cells`) then calls `reset_lane(lane, DiscontinuityKeepParameters)`
+  on that lane alone and `begin_hold(W)`, before the block's targets and spans, whether or not its
+  bank skipped. The whole-bank `resume`, the stage's `stale` mask, `swap_stale_bits` and
+  `settle_for_carry` are removed. The flag and the hold live in the control lane, so they move with
+  the lane in `swap_lanes` (same-stage and cross-stage, #1981's packing included) and in
+  `carry_from`.
+- **Per-node parity.** `runtime::LiveControlEffect` takes the same law (the instance's `reset`,
+  then the hold through `BypassShunt::crossfade_held`), and folds a settled-bypassed instance's
+  declared tap value (D5), so a placement change moves no bit. `bank_equals_node` holds with the
+  hold active (the limiter's 486-frame hold ends inside a block).
+- **Limiter `W = T`** (the trait default, the declared latency); derivation in the crate's module
+  docs. Soft clip `W = 60`, derivation in `soft_clip::warmup_samples`.
+- **M1.** Every `reset_lane` trait body and the per-lane helpers it calls, in the nine banking
+  effects, and every per-node `reset` (ten effects) sit in `REALTIME_POLICY` regions: the tool
+  reports 234 regions on main 7e824290f and 283 on this branch.
+- **M3** (optional limiter oracle) not done.
+- `Runtime::bank_slot_runs` subtracts `BankChain::bypass_skips`.
+
+Red evidence (each red on the named mutant, then green on revert):
+
+| Gate | Test | Mutants |
+|---|---|---|
+| B1 | `bypass_skip_warmup::a_lanes_un_bypass_does_not_depend_on_its_bank_mates` | red on the tree before the amendment (compressor, sample 2048: `-0.0066666724` after a skipped bank against `-0.0066666515` after a running one); red with the drain's reset and hold disabled |
+| 4 | `rack/tests/bypass_skip.rs::a_lane_leaving_settled_bypass_is_reset_alone_keeping_parameters` | no lane reset; `FullToDefaults`; a whole-bank reset in its place; the rest flagged on every switch to wet (a reversal resets) |
+| 5 | `bypass_skip_warmup::a_resumed_lane_holds_dry_for_its_warmup_then_crossfades_onto_the_reference` (exact bits, ramp and step legs) | limiter `W = T - 1`; soft clip `W = 58`; no hold; the bank crossfade ignores the hold |
+| 5 | `...a_resumed_limiter_keeps_its_ceiling_from_the_first_wet_frame` | no hold; the bank crossfade ignores the hold |
+| runs | `silent_bank_skip::bank_slot_runs_follow_the_skips` (bypassed-slot leg) | red before the subtraction (9 runs counted where 6 banks ran) |
+
+Gates 1, 3 and the D6 rows are unchanged from attempt 1 and pass. `W - 1` for the soft clip (59)
+cannot be made red by any output word: the reset word the frame still reads is weighted by the
+product of the two outermost half-band taps (about `1.7e-9`), below half an `f32` ulp; `W - 2` is
+red, so the derivation is the record. The limiter's ceiling row is not red at `T - 1` (its extra
+frame is the ring's reset `+0.0`); the crossfade row is.
+
+The C ABI's `a_live_bypass_crossfades_over_the_session_mute_ramp...` lift rows are rewritten: a
+lift resets the effect, so no never-bypassed control is its target; they now hold `D` through the
+warm-up and require the per-node and banked lifts to agree bit for bit. `graph`'s
+`live_bypass_is_latency_preserving_and_reversible` expects the two held dry frames.
+
+Gate 6, CPU row (descriptive; `SessionMeasurement::run_for` at the frozen 1000 observations, one
+warmup and two measured rounds, pinned to one core, x86-64 AVX2, through a scratch uncommitted
+test; "before" is origin/main 7e824290f with only the workload variant added):
+
+| Row | Before p50 / p95 ns per block | After p50 / p95 ns per block |
+|---|---|---|
+| `sixteen_track_strip` (round 1, round 2) | 23475 / 29286, 23696 / 29486 | 23765 / 24086, 23765 / 24076 |
+| `sixteen_track_strip_bypassed` (round 1, round 2) | 30498 / 36559, 30539 / 36630 | 6492 / 6573, 6453 / 6532 |
+
+Every row: 0 render errors and 0 forbidden render operations (the bench's audited allocator). Output
+digests before and after are identical (`sixteen_track_strip` 00b84736...4988,
+`sixteen_track_strip_bypassed` 6841e080...a2fa5): the one-time bit identity of the bypassed render.
+`tools/bench console` now emits the row (80 records; the validators and the runner know the kind).
+
+Gates run: the lint job's every step (fmt, clippy, doc with `-D warnings`, workspace policy and its
+mutation tests, lane policy, unfused seal, rack, effect-runtime and the other hermetic scripts,
+the three lane-guard builds); the realtime-policy tool; CI's workspace debug test step with its
+features (host-web's render-lock probe and host-core's zero-allocation render tests included);
+the DSP crates, graph-compiler, bench and console-workload in release;
+`scripts/test-console-benchmark.sh`.
