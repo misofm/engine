@@ -10552,7 +10552,9 @@ impl Runtime {
     /// chain's lane mask (`bank_chain_with_fold`), so a block the chain renders runs every slot and
     /// a block it skips whole runs none: a unit's runs are its effect slots times its completed
     /// round trips ([`BankChain::transposes`], one per rendered block and none per skipped one).
-    /// No render-path state is added for it. A per-slot skip (#2129) subtracts its own count here.
+    /// No render-path state is added for it. A slot that skipped its wet path because every lane was
+    /// settled bypassed (#2129, [`BankChain::bypass_skips`]) ran no bank, and its count is
+    /// subtracted.
     pub(crate) fn bank_slot_runs(&mut self) -> Vec<[u64; 6]> {
         let mut rows: Vec<[u64; 6]> = Vec::new();
         for index in 0..self.units.len() {
@@ -10566,7 +10568,10 @@ impl Runtime {
             if effect_slots == 0 {
                 continue;
             }
-            let runs = effect_slots.saturating_mul(chain.transposes());
+            // #2129: a slot that skipped its wet path ran no bank on that block.
+            let runs = effect_slots
+                .saturating_mul(chain.transposes())
+                .saturating_sub(chain.bypass_skips());
             let skips = chain.silent_skips();
             let width = u64::from(chain.width().lanes());
             let unit = index as u64;
