@@ -2703,6 +2703,12 @@ struct FrozenSourceDriver {
     toggled: Box<[FrozenGraphSource]>,
     /// Whether this block serves [`Self::toggled`].
     in_toggled_phase: bool,
+    /// Issue #2133: whether claim `i`'s first-phase block is exact `+0.0` on both planes, decided
+    /// here where the blocks are written, so render answers `played_block_silent` by one load as
+    /// the engine's own ring does.
+    claims_silent: Box<[bool]>,
+    /// The same for [`Self::toggled`].
+    toggled_silent: Box<[bool]>,
 }
 
 impl FrozenSourceDriver {
@@ -2735,8 +2741,23 @@ impl FrozenSourceDriver {
         } else {
             Box::default()
         };
+        let silent = |blocks: &[FrozenGraphSource]| -> Box<[bool]> {
+            blocks
+                .iter()
+                .map(|block| {
+                    block
+                        .left
+                        .iter()
+                        .chain(&block.right)
+                        .all(|word| word.to_bits() == 0)
+                })
+                .collect()
+        };
+        let claims = phase(0);
         Self {
-            claims: phase(0),
+            claims_silent: silent(&claims),
+            toggled_silent: silent(&toggled),
+            claims,
             toggled,
             in_toggled_phase: false,
         }
@@ -2756,8 +2777,10 @@ impl FrozenSourceDriver {
     /// Charged as overhead (source-plane storage) and not as PCM already charged by the session
     /// declaration, because no session declaration charges the benchmark's frozen tone.
     fn resource_report(&self) -> GraphSourceSetResourceReport {
-        let bytes =
-            (core::mem::size_of_val(&*self.claims) + core::mem::size_of_val(&*self.toggled)) as u64;
+        let bytes = (core::mem::size_of_val(&*self.claims)
+            + core::mem::size_of_val(&*self.toggled)
+            + core::mem::size_of_val(&*self.claims_silent)
+            + core::mem::size_of_val(&*self.toggled_silent)) as u64;
         GraphSourceSetResourceReport {
             pcm_payload_already_charged_bytes: 0,
             overhead_bytes: bytes,
@@ -2768,11 +2791,13 @@ impl FrozenSourceDriver {
 }
 
 // REALTIME_POLICY_BEGIN
-// The five methods below run on the render thread: no allocation, lock, syscall or panic path.
+// The methods below run on the render thread: no allocation, lock, syscall or panic path.
 impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
     fn retained_bytes(&self) -> u64 {
         effect_contract::retained::slice(&self.claims)
             + effect_contract::retained::slice(&self.toggled)
+            + effect_contract::retained::slice(&self.claims_silent)
+            + effect_contract::retained::slice(&self.toggled_silent)
     }
 
     fn claim_count(&self) -> usize {
@@ -2818,6 +2843,17 @@ impl GraphPreparedSourceSetDriver for FrozenSourceDriver {
         self.served()
             .get(claim_index)
             .map(|claim| (&claim.left[..], &claim.right[..]))
+    }
+
+    /// Whether claim `claim_index`'s served block is all `+0.0`, as [`FrozenSourceDriver::new`]
+    /// recorded it (issue #2133).
+    fn played_block_silent(&self, claim_index: usize) -> bool {
+        let silent = if self.in_toggled_phase {
+            &self.toggled_silent
+        } else {
+            &self.claims_silent
+        };
+        silent.get(claim_index).copied().unwrap_or(false)
     }
 }
 // REALTIME_POLICY_END

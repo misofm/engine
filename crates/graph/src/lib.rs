@@ -3591,6 +3591,18 @@ pub trait GraphPreparedSourceSetDriver: Send {
     fn played_planes(&self, _claim_index: usize) -> Option<(&[f32], &[f32])> {
         None
     }
+    /// Whether every word claim `claim_index`'s planes hold this quantum, as `copy_track_input`
+    /// writes them or `played_planes` lends them, is exact `+0.0` (raw bits zero) on both planes
+    /// (issue #2133). Asked after `begin_block`, on the render thread: an `O(1)` answer from facts
+    /// the driver recorded where its PCM was written, never a pass over the words. The engine's
+    /// own ring driver learns it on the control thread as the host's chunk is copied in.
+    ///
+    /// `false` (the default) is always sound: it only costs the lane packer an opportunity. A
+    /// `true` must be exact, and it moves no rendered bit even when it is not, because every skip
+    /// keeps its own input test. Realtime: no allocation, lock or syscall.
+    fn played_block_silent(&self, _claim_index: usize) -> bool {
+        false
+    }
     /// This driver as `Any`, so a successor's [`Self::adopt_sources`] can downcast its
     /// predecessor to the concrete type it knows how to take sources from. `None` (the default)
     /// offers nothing.
@@ -3699,6 +3711,8 @@ pub(crate) trait GraphSourcePlanes {
     /// [`GraphPreparedSourceSetDriver::played_planes`] after the set's own claim and length
     /// checks.
     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])>;
+    /// [`GraphPreparedSourceSetDriver::played_block_silent`] after the set's own claim check.
+    fn played_block_silent(&self, claim_index: usize) -> bool;
 }
 
 /// A graph-owned, coordinator-only source-set capability.
@@ -3812,6 +3826,10 @@ impl GraphSourcePlanes for GraphPreparedSourceSet {
         self.driver
             .played_planes(claim_index)
             .filter(|(left, right)| left.len() == quantum && right.len() == quantum)
+    }
+
+    fn played_block_silent(&self, claim_index: usize) -> bool {
+        claim_index < self.claims.len() && self.driver.played_block_silent(claim_index)
     }
 }
 // REALTIME_POLICY_END
@@ -6265,6 +6283,20 @@ pub fn test_only_bank_silent_skips(plan: &PreparedRenderPlan) -> u64 {
         })
 }
 
+/// Test-only (issue #2133): the silence flag the last rendered block left on each route
+/// destination that is a plain sum (a submix input), in unit order; empty for any other plan. The
+/// session Output writes the host's planes and has no flag.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_route_destination_silence(plan: &PreparedRenderPlan) -> Vec<bool> {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or_else(Vec::new, |executor| {
+            executor.runtime.route_destination_silence()
+        })
+}
+
 /// Test-only (issue #1782a): `(first unit, last unit, width)` of each pack group of a graph plan,
 /// in unit order; empty for any other plan.
 #[cfg(any(test, feature = "test-support"))]
@@ -7002,6 +7034,8 @@ impl PreparedPlanExecutor for GraphExecutor {
                     host.silence();
                     return Err(error);
                 }
+                // Issue #2133: the copied claim's silence, from the driver's own record.
+                runtime.set_buffer_silent(buffer, source_set.played_block_silent(claim));
             }
             source_set.observation_validity()
         } else {
