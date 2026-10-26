@@ -990,15 +990,44 @@ impl<L: Lane, const CONNECTED: bool> DeEsser<L, CONNECTED> {
                 armed_after,
                 coef: (&self.coef[0], &self.coef[1]),
                 state: (state_left, state_right),
-                shelf,
             };
-            match (ramping, armable, ramping && glide) {
-                (true, true, true) => segment::<L, CONNECTED, true, MONO, true, true>(args),
-                (true, false, true) => segment::<L, CONNECTED, true, MONO, false, true>(args),
-                (true, true, false) => segment::<L, CONNECTED, true, MONO, true, false>(args),
-                (true, false, false) => segment::<L, CONNECTED, true, MONO, false, false>(args),
-                (false, true, _) => segment::<L, CONNECTED, false, MONO, true, false>(args),
-                (false, false, _) => segment::<L, CONNECTED, false, MONO, false, false>(args),
+            match (ramping, armable, ramping && glide, shelf) {
+                (true, true, true, false) => {
+                    segment::<L, CONNECTED, true, MONO, true, true, false>(args);
+                }
+                (true, false, true, false) => {
+                    segment::<L, CONNECTED, true, MONO, false, true, false>(args);
+                }
+                (true, true, false, false) => {
+                    segment::<L, CONNECTED, true, MONO, true, false, false>(args);
+                }
+                (true, false, false, false) => {
+                    segment::<L, CONNECTED, true, MONO, false, false, false>(args);
+                }
+                (false, true, _, false) => {
+                    segment::<L, CONNECTED, false, MONO, true, false, false>(args);
+                }
+                (false, false, _, false) => {
+                    segment::<L, CONNECTED, false, MONO, false, false, false>(args);
+                }
+                (true, true, true, true) => {
+                    segment::<L, CONNECTED, true, MONO, true, true, true>(args);
+                }
+                (true, false, true, true) => {
+                    segment::<L, CONNECTED, true, MONO, false, true, true>(args);
+                }
+                (true, true, false, true) => {
+                    segment::<L, CONNECTED, true, MONO, true, false, true>(args);
+                }
+                (true, false, false, true) => {
+                    segment::<L, CONNECTED, true, MONO, false, false, true>(args);
+                }
+                (false, true, _, true) => {
+                    segment::<L, CONNECTED, false, MONO, true, false, true>(args);
+                }
+                (false, false, _, true) => {
+                    segment::<L, CONNECTED, false, MONO, false, false, true>(args);
+                }
             }
         };
         if split > 0 {

@@ -16,7 +16,7 @@
 //! SVF's own poles cannot be for `Q > 1/sqrt 2` (`dsp-research/de-esser.md`). The shelf SVF steps
 //! only on a lane that is live (split mode and the high-pass detector, each word nonzero) and
 //! holds an exact `+0.0` state everywhere else; a block in which no lane can be live skips it
-//! ([`Args::shelf`]). A switch onto the path starts it cold, from `+0.0`.
+//! ([`segment`]'s `SHELF`). A switch onto the path starts it cold, from `+0.0`.
 
 use effect_runtime::dynamic_band::WordRamp;
 use effect_runtime::dynamic_band::{
@@ -124,11 +124,6 @@ pub struct Args<'a, L: Lane> {
     pub coef: (&'a Coef<L>, &'a Coef<L>),
     /// Left and right state.
     pub state: (&'a mut Chan<L>, &'a mut Chan<L>),
-    /// Whether any lane of the segment can be live on the shelf path this block: its mode and
-    /// detector words are each nonzero or ramping. `false` skips the shelf step; every lane then
-    /// already holds a `+0.0` shelf state (a lane that is not live writes `+0.0`), so the bits are
-    /// the same.
-    pub shelf: bool,
 }
 
 /// One channel's main-input taps for the back half.
@@ -139,7 +134,7 @@ struct Taps<L: Lane> {
     /// The unity-peak band-pass tap `k v1`, the band cut's.
     band: L,
     /// The shelf SVF's low-pass output, `+0.0` on a lane that is not live; `None` in a block that
-    /// skips the shelf ([`Args::shelf`]), where every lane's split arm is the band cut's bits (its
+    /// skips the shelf ([`segment`]'s `SHELF`), where every lane's split arm is the band cut's bits (its
     /// detector word is `+0.0` all block, or its mode word is and the split arm is not read).
     shelf: Option<L>,
 }
@@ -175,7 +170,7 @@ fn filter<L: Lane, const ARMABLE: bool>(
 }
 
 /// One channel's front half: the ramps, the main taps and the detector tap. With `shelf` set
-/// (block-constant), the shelf SVF steps on the main input with the main input's own flush
+/// (`segment`'s const `SHELF`), the shelf SVF steps on the main input with the main input's own flush
 /// threshold (#1328), and a lane that is not live (mode or detector word `+0.0`) keeps an exact
 /// `+0.0` state and output, so its bits never depend on its bank neighbours.
 #[inline(always)]
@@ -321,6 +316,13 @@ fn back<L: Lane, const GLIDE: bool>(
 ///
 /// `GLIDE` (issue #1969) runs a detector link glide in flight (`detector_level`): only a
 /// `RAMPING` segment that has a glide to advance takes it; every other body is the one before.
+///
+/// `SHELF` (#1984) is set when any lane of the segment can be live on the shelf path this block:
+/// its mode and detector words are each nonzero or ramping. Without it the shelf step and the
+/// shelf arm are not compiled in; every lane then already holds a `+0.0` shelf state (a lane that
+/// is not live writes `+0.0`) and its split arm is the band cut's, so the bits are the same. It is
+/// a const parameter, not a runtime flag: a per-frame branch on it measured about 9 % on the
+/// modes that never read the shelf.
 #[inline(always)]
 pub fn segment<
     L: Lane,
@@ -329,6 +331,7 @@ pub fn segment<
     const MONO: bool,
     const ARMABLE: bool,
     const GLIDE: bool,
+    const SHELF: bool,
 >(
     args: Args<'_, L>,
 ) {
@@ -339,7 +342,6 @@ pub fn segment<
         armed_after,
         coef: (coef_left, coef_right),
         state: (state_left, state_right),
-        shelf,
     } = args;
     let width = L::WIDTH;
     let empty: &[f32] = &[];
@@ -353,7 +355,7 @@ pub fn segment<
         let x_left = L::load(&left[span.clone()]);
         if MONO {
             let (taps, detector) =
-                front::<L, RAMPING, false, ARMABLE>(&mut l, x_left, x_left, armed_after, shelf);
+                front::<L, RAMPING, false, ARMABLE>(&mut l, x_left, x_left, armed_after, SHELF);
             back::<L, GLIDE>(coef_left, &mut l, detector, detector, x_left, taps)
                 .store(&mut left[span]);
             continue;
@@ -368,9 +370,9 @@ pub fn segment<
             (x_left, x_right)
         };
         let (taps_l, det_l) =
-            front::<L, RAMPING, CONNECTED, ARMABLE>(&mut l, x_left, s_left, armed_after, shelf);
+            front::<L, RAMPING, CONNECTED, ARMABLE>(&mut l, x_left, s_left, armed_after, SHELF);
         let (taps_r, det_r) =
-            front::<L, RAMPING, CONNECTED, ARMABLE>(&mut r, x_right, s_right, armed_after, shelf);
+            front::<L, RAMPING, CONNECTED, ARMABLE>(&mut r, x_right, s_right, armed_after, SHELF);
         let out_left = back::<L, GLIDE>(coef_left, &mut l, det_l, det_r, x_left, taps_l);
         let out_right = back::<L, GLIDE>(coef_right, &mut r, det_r, det_l, x_right, taps_r);
         out_left.store(&mut left[span.clone()]);
