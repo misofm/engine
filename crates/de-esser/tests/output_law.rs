@@ -125,13 +125,15 @@ fn split_mode_cuts_the_band_and_leaves_an_out_of_band_tone() {
 }
 
 /// Renders `frames` of `main` on both channels through a scalar de-esser at `rate` with `values`
-/// and a connected sidechain carrying `side`; returns the left channel.
+/// and a connected sidechain carrying `side`, each of `spans` in the 128-frame block it starts;
+/// returns the left channel.
 fn render_connected(
     values: &support::Values,
     rate: u32,
     frames: usize,
     main: impl Fn(usize) -> f32,
     side: impl Fn(usize) -> f32,
+    spans: &[effect_contract::PreparedAutomationSpan],
 ) -> Vec<f32> {
     use effect_contract::{
         EffectProcessBlock, NativeEffectFactory, PortId, PreparedPorts, PreparedSidechainPort,
@@ -157,12 +159,17 @@ fn render_connected(
     let sidechain: Vec<f32> = (0..frames).map(side).collect();
     for start in (0..frames).step_by(128) {
         let end = (start + 128).min(frames);
+        let block_spans: Vec<_> = spans
+            .iter()
+            .filter(|span| span.sample == start as u64)
+            .copied()
+            .collect();
         let block = EffectProcessBlock::new(
             &mut left[start..end],
             &mut right[start..end],
             Some((&sidechain[start..end], &sidechain[start..end])),
             start as u64,
-            &[],
+            &block_spans,
             128,
         )
         .expect("block");
@@ -218,7 +225,7 @@ fn split_with_the_high_pass_detector_is_a_shelf_without_boost() {
         for octave in [-2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0] {
             let frequency = CENTRE * 2.0_f64.powf(octave);
             let main = sine(frequency, 1.0e-3);
-            let ours = render_connected(&values, RATE_96, FRAMES_96, main, sine(CENTRE, 1.0));
+            let ours = render_connected(&values, RATE_96, FRAMES_96, main, sine(CENTRE, 1.0), &[]);
             let dry: Vec<f32> = (0..FRAMES_96).map(&main).collect();
             let got = 20.0 * (magnitude(&ours, frequency) / magnitude(&dry, frequency)).log10();
             let w = prewarp(frequency) / prewarp(CENTRE);
@@ -237,6 +244,48 @@ fn split_with_the_high_pass_detector_is_a_shelf_without_boost() {
     }
 }
 
+/// A detector switch in split mode never boosts (#1984): with a sidechain holding the range
+/// (-20 dB, `g = 0.1`), Q 4 at 96 kHz, a 6.5 kHz main tone at `1e-3` and the band detector settled,
+/// the switch to the high-pass detector crossfades the band cut `x - (1 - g) b` into the high
+/// shelf over 64 samples; every output sample of that ramp is at most the dry peak, because each
+/// arm has `|H| <= 1` (a cut on the crossfaded tap would reach about +2.2 dB near `D = 0.6`).
+#[test]
+fn a_detector_switch_in_split_mode_never_boosts() {
+    const RATE_96: u32 = 96_000;
+    const CENTRE: f64 = 6_500.0;
+    const SWITCH: usize = 38 * 128;
+    let sine = |amplitude: f64| {
+        move |n: usize| {
+            let phase = core::f64::consts::TAU * CENTRE * n as f64 / f64::from(RATE_96);
+            (amplitude * math::sin(phase)) as f32
+        }
+    };
+    let mut values = defaults();
+    for (parameter, value) in [
+        (1, 4.0),
+        (2, -60.0),
+        (3, 20.0),
+        (4, 20.0),
+        (5, 0.1),
+        (6, 500.0),
+        (7, 2.0),
+        (8, 1.0),
+    ] {
+        set(&mut values, parameter, value);
+    }
+    let main = sine(1.0e-3);
+    let spans = support::spans_both(8, 2.0, SWITCH as u64);
+    let ours = render_connected(&values, RATE_96, 2 * SWITCH, main, sine(1.0), &spans);
+    let ramp = SWITCH..SWITCH + 64;
+    let dry = ramp.clone().map(|n| main(n).abs()).fold(0.0_f32, f32::max);
+    let peak = ours[ramp].iter().map(|y| y.abs()).fold(0.0_f32, f32::max);
+    assert!(
+        peak <= dry,
+        "the switch ramp peaks at {:.2} dB over the dry tone",
+        20.0 * f64::from(peak / dry).log10()
+    );
+}
+
 /// With the sidechain connected, a steady -10 dBFS 1 kHz main tone (below the threshold through
 /// the band) is reduced only while the 8 kHz burst plays on the sidechain: the wideband output is
 /// `g x` with `g` the reference's change for the **sidechain** input, within `1e-5`.
@@ -246,7 +295,7 @@ fn a_connected_sidechain_alone_drives_the_detector() {
     set(&mut values, 7, 1.0);
     let main = |n: usize| tone(1_000.0, n, 0.316);
     let side = |n: usize| input(n) - tone(1_000.0, n, 0.0316);
-    let left = render_connected(&values, RATE, FRAMES, main, side);
+    let left = render_connected(&values, RATE, FRAMES, main, side, &[]);
     let law = ReferenceDynamicBandLaw {
         threshold_db: -20.0,
         ratio: 4.0,
