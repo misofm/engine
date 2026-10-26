@@ -1001,18 +1001,41 @@ impl<L: Lane, const W: usize> Side<L, W> {
     fn full_reset(&mut self) {
         self.discontinuity_reset();
         for track in 0..W {
-            self.crossover_hz[track] = self.defaults[track][0];
-            for index in 0..RAMP_COUNT {
-                self.ramps[track][index] = LinearRamp::fixed(self.defaults[track][index + 1]);
-            }
-            for rate in 0..RATE_COUNT {
-                self.ramps[track][rate_slot(rate)] =
-                    LinearRamp::fixed(self.prepared_rates[track][rate]);
-            }
-            for word in 0..CROSSOVER_WORDS {
-                self.ramps[track][crossover_slot(word)] =
-                    LinearRamp::fixed(self.prepared_designed[track][word]);
-            }
+            self.seed_lane_defaults(track);
+        }
+    }
+
+    /// Lane `track`'s crossover target and every ramp of its track at the prepared values: the
+    /// per-lane half of [`full_reset`](Self::full_reset), which [`reset_lane`](Self::reset_lane)
+    /// shares (issue #2131).
+    fn seed_lane_defaults(&mut self, track: usize) {
+        self.crossover_hz[track] = self.defaults[track][0];
+        for index in 0..RAMP_COUNT {
+            self.ramps[track][index] = LinearRamp::fixed(self.defaults[track][index + 1]);
+        }
+        for rate in 0..RATE_COUNT {
+            self.ramps[track][rate_slot(rate)] =
+                LinearRamp::fixed(self.prepared_rates[track][rate]);
+        }
+        for word in 0..CROSSOVER_WORDS {
+            self.ramps[track][crossover_slot(word)] =
+                LinearRamp::fixed(self.prepared_designed[track][word]);
+        }
+    }
+
+    /// The whole-side reset of `kind` on lane `track` alone (issue #2131): the D7 recovery's
+    /// words ([`discontinuity_reset_lane`](Self::discontinuity_reset_lane)), then the lane's link
+    /// glide snapped to its target as [`discontinuity_reset`](Self::discontinuity_reset) snaps
+    /// it, and for `FullToDefaults` the lane's prepared values
+    /// ([`seed_lane_defaults`](Self::seed_lane_defaults)). The link weights at rest are the
+    /// instance's to re-seat, as for the whole reset. Every other lane's words are unchanged.
+    fn reset_lane(&mut self, track: usize, kind: ResetKind) {
+        self.discontinuity_reset_lane(track);
+        for ramp in &mut self.links[track] {
+            ramp.snap();
+        }
+        if kind == ResetKind::FullToDefaults {
+            self.seed_lane_defaults(track);
         }
     }
 }
@@ -1159,6 +1182,22 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             for lane in 0..W {
                 self.rest_links(lane);
             }
+        }
+    }
+
+    /// [`reset`](Self::reset) for lane `lane` alone (issue #2131): both sides' words of that lane
+    /// ([`Side::reset_lane`]), and for `FullToDefaults` its link weights at rest at its mode. A
+    /// lane past the width changes nothing. The silence counters are per lane; the bank's silent
+    /// claim is the caller's to withdraw.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if lane >= W {
+            return;
+        }
+        for side in &mut self.sides {
+            side.reset_lane(lane, kind);
+        }
+        if kind == ResetKind::FullToDefaults {
+            self.rest_links(lane);
         }
     }
 }
@@ -2750,6 +2789,15 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBank<L, W> {
+    /// Issue #2131: [`Instance::reset_lane`], withdrawing the silent claim as
+    /// [`reset`](PreparedNativeEffectBank::reset) withdraws it.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
+        if lane >= W {
+            return;
+        }
+        self.silent_fixed_point = false;
+        self.instance.reset_lane(lane, kind);
+    }
     /// Every field is inline: this instance owns no heap (#1074).
     fn retained_bytes(&self) -> u64 {
         0

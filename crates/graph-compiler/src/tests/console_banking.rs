@@ -1454,6 +1454,7 @@ impl PreparedNativeEffectBank for PassBank {
         0
     }
     fn reset(&mut self, _kind: effect_contract::ResetKind) {}
+    fn reset_lane(&mut self, _lane: usize, _kind: effect_contract::ResetKind) {}
     fn process_bank(
         &mut self,
         block: effect_contract::EffectBankProcessBlock<'_>,

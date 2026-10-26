@@ -2427,6 +2427,28 @@ pub trait PreparedNativeEffect: Send {
 /// rides beside it in [`PreparedEffectBank`] (issue #1461).
 pub trait PreparedNativeEffectBank: Send {
     fn reset(&mut self, kind: ResetKind);
+    /// Resets **one lane** exactly as [`reset`](Self::reset) would reset it, and nothing else
+    /// (issue #2131).
+    ///
+    /// After `reset_lane(lane, kind)`, lane `lane`'s state on both channels is bit for bit the
+    /// state that lane would hold after a whole-bank `reset(kind)` at the same block boundary, and
+    /// every other lane's state is untouched. So every later output word of every other lane is the
+    /// word a run without the call renders, and lane `lane`'s later words are the words a run that
+    /// reset the whole bank renders for that lane. Banking couples cost, never bits: a lane's bits
+    /// after the call cannot depend on its bank mates.
+    ///
+    /// The bank's shared bookkeeping stays true: its rest claim
+    /// ([`lanes_at_rest`](Self::lanes_at_rest)), any bank-wide fast-path or elision flag, any
+    /// silence counter and any shared cursor describe the bank after the call as they would for
+    /// any bank holding that state. A flag that is a conjunction over lanes is withdrawn or
+    /// recomputed, never left claiming something the reset lane no longer satisfies.
+    ///
+    /// A lane outside the bank's width changes nothing. A padded lane resets like any other.
+    ///
+    /// On the render thread at a block boundary: allocation-free, lock-free and syscall-free, and
+    /// bounded by one lane's state size (plus the lane count, for a bank-wide flag it
+    /// recomputes). Required, so a new banking effect cannot omit it.
+    fn reset_lane(&mut self, lane: usize, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
     /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
     /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
