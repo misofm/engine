@@ -343,12 +343,12 @@ fn blocks(
                 _ => (13.0, -53.0),
             };
             let levels: Vec<f32> = (0..lanes)
-                .map(|_| 10_f32.powf(rng.signed().mul_add(spread, centre) / 20.0))
+                .map(|_| math::powf(10.0, rng.signed().mul_add(spread, centre) / 20.0))
                 .collect();
             for frame in 0..frames as usize {
                 let t = (sample + frame as u64) as f32;
                 for (lane, (&(period, noise), &level)) in shapes.iter().zip(&levels).enumerate() {
-                    let tone = (core::f32::consts::TAU * t / period).sin();
+                    let tone = math::sin(f64::from(core::f32::consts::TAU * t / period)) as f32;
                     left[frame * lanes + lane] =
                         level * (tone * (1.0 - noise) + noise * rng.signed());
                     right[frame * lanes + lane] =

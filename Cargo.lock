@@ -700,6 +700,7 @@ dependencies = [
  "engine",
  "gate-expander",
  "lane",
+ "math",
  "multiband-compressor",
  "parametric-eq",
  "session",

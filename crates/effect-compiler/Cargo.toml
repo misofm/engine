@@ -33,6 +33,8 @@ builtins.workspace = true
 # Issue #2131 gate 2: `tests/reset_lane.rs` counts `reset_lane`'s heap calls with the audited
 # global allocator's thread-scoped counters, so the test binary installs it.
 bench-support.workspace = true
+# `tests/reset_lane.rs` draws its fixture signal with the cross-target deterministic math (D6).
+math.workspace = true
 
 [features]
 default = []
