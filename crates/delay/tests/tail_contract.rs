@@ -436,7 +436,8 @@ fn signal_words(
 /// **Gate 3: exact rest by the stated bound, real kernel**, at 48 kHz with both taps at 1 ms
 /// (`D = 48` samples), so the bound is [`delay::tail_bound_at`] at `D = 48` (the function the
 /// descriptor evaluates at `2 fs`): the in-phase constant `P = 10^(24/20)` for 2 s at feedback
-/// 0.95, cross feedback 1, mix 1, damping 0 and 0.995, then zeros. By the bound the output is
+/// 0.95, mix 1, cross feedback 0 and 1 (each lane's own ring, and the ping-pong through the other
+/// lane's), damping 0 and 0.995, then zeros. By the bound the output is
 /// `+-0.0` and every ring word and damping state equals a freshly prepared delay's (`+0.0`) under
 /// `==`, and one more block leaves them there. At damping 0.995, the slowest design, the state is
 /// not yet at rest at 80 % of the bound.
@@ -454,8 +455,13 @@ fn the_state_rests_by_the_stated_bound() {
     let peak = 10.0_f32.powf(24.0 / 20.0);
     let damping_max = DELAY_PARAMETERS[DAMPING].maximum.unwrap();
     let feedback_max = DELAY_PARAMETERS[FEEDBACK].maximum.unwrap();
-    for damping in [0.0, damping_max] {
-        let parameters = values(1.0, feedback_max, damping, 1.0, 1.0);
+    for (cross, damping) in [
+        (0.0, 0.0),
+        (0.0, damping_max),
+        (1.0, 0.0),
+        (1.0, damping_max),
+    ] {
+        let parameters = values(1.0, feedback_max, damping, 1.0, cross);
         let (mut effect, sizes) = prepare(rate, &parameters);
         let (fresh, _) = prepare(rate, &parameters);
         let rest = signal_words(fresh.as_ref(), sizes, ring);
@@ -480,7 +486,7 @@ fn the_state_rests_by_the_stated_bound() {
             if silent == probe && damping == damping_max {
                 assert!(
                     !at_rest(effect.as_ref()),
-                    "damping {damping}: already at rest at 80 % of the bound {bound}: the gate is vacuous"
+                    "cross {cross} damping {damping}: already at rest at 80 % of the bound {bound}: the gate is vacuous"
                 );
             }
             if silent == bound {
@@ -501,7 +507,7 @@ fn the_state_rests_by_the_stated_bound() {
         }
         assert!(
             at_rest(effect.as_ref()),
-            "damping {damping}: not at rest after the bound {bound}"
+            "cross {cross} damping {damping}: not at rest after the bound {bound}"
         );
         let mut left = vec![0.0_f32; QUANTUM];
         let mut right = vec![0.0_f32; QUANTUM];
@@ -514,14 +520,14 @@ fn the_state_rests_by_the_stated_bound() {
         );
         assert!(
             left.iter().chain(&right).all(|y| *y == 0.0),
-            "damping {damping}: non-zero output after the bound"
+            "cross {cross} damping {damping}: non-zero output after the bound"
         );
         assert!(
             at_rest(effect.as_ref()),
-            "damping {damping}: the rest state moved"
+            "cross {cross} damping {damping}: the rest state moved"
         );
         eprintln!(
-            "48000 Hz D = 48 damping {damping}: at rest after {} samples, bound {bound}",
+            "48000 Hz D = 48 cross {cross} damping {damping}: at rest after {} samples, bound {bound}",
             reached.expect("reached")
         );
     }
