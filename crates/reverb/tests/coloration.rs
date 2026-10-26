@@ -111,16 +111,18 @@ fn coloration(h: &[f32], fs: u32) -> (f64, f64) {
 
 /// The late tail has no strong modal ringing: over the four paths (L to L, L to R, R to L,
 /// R to R) the mean of the 1/24-octave peak-to-median is at most 3.5 dB and every path's
-/// standard deviation at most 1.6 dB (48 kHz, size 1, decay 1.8 s, damping 20 kHz, i.e. the
+/// standard deviation at most 1.5 dB (48 kHz, size 1, decay 1.8 s, damping 20 kHz, i.e. the
 /// `fs / 4` cap, low cut 20 Hz, diffusion 0.7, pre-delay 0 as the note's model, other controls
 /// at their defaults). The bound is on the mean because one path's peak-to-median is noisy: a
 /// Gaussian-noise reference spans 1.63-2.82 dB over eight seeds. The note's model measured a
 /// 2.85 dB mean and a 1.44 dB worst std.
 ///
-/// Red for: a modal-density collapse, for example lines whose lengths coincide or share factors,
-/// a feedback matrix that leaves lines uncoupled, or the plain `H16` without the slot
-/// permutation (the note's controls: N = 4 Householder 5.26 / 3.06 dB, plain `H16` 4.67 / 1.69,
-/// circulant C 4.72 / 1.65). No other test looks at the tail's spectral fine structure.
+/// Red for: a modal-density collapse of the feedback structure, for example the plain `H16`
+/// without the slot permutation (4.63 dB). Coprime line lengths are a separate claim, held by
+/// `line_lengths_are_pairwise_coprime_at_every_size_and_rate` (one duplicated base length passes
+/// this test). The 3.5 / 1.5 dB bounds are the note's attempt-1 values, not yet derived from a
+/// stated rule: root's diffuse-noise rule (#2114 attempt 2) fails the design, and the bound is
+/// open for root's ruling.
 #[test]
 fn late_tail_coloration_is_within_the_bounds() {
     let mut values = defaults();
@@ -143,5 +145,5 @@ fn late_tail_coloration_is_within_the_bounds() {
     let worst_std = figures.iter().map(|f| f.1).fold(0.0, f64::max);
     println!("mean peak-to-median {mean:.2} dB, worst std {worst_std:.2} dB");
     assert!(mean <= 3.5, "mean peak-to-median {mean} dB");
-    assert!(worst_std <= 1.6, "worst std {worst_std} dB");
+    assert!(worst_std <= 1.5, "worst std {worst_std} dB");
 }

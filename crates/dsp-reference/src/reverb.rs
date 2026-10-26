@@ -439,10 +439,14 @@ fn as_control(value: f64) -> f64 {
     f64::from(value as f32)
 }
 
-/// `D_i(size, fs) = Prime(floor(BASE_i * size * fs / 48000 + 0.5))`.
+/// `D_i(size, fs) = Prime(floor(BASE_i * size * fs / 48000 + 0.5))`, evaluated left to right in
+/// `f64` as the note writes it, so a size at a rounding breakpoint gives the kernel's integer.
 fn line_lengths_at(size: f64, sample_rate: u32) -> [usize; 16] {
-    let scale = as_control(size) * f64::from(sample_rate) / BASE_RATE_HZ;
-    BASE.map(|base| nearest_prime((f64::from(base) * scale + 0.5).floor() as usize))
+    let size = as_control(size);
+    let fs = f64::from(sample_rate);
+    BASE.map(|base| {
+        nearest_prime((f64::from(base) * size * fs / BASE_RATE_HZ + 0.5).floor() as usize)
+    })
 }
 
 /// `M_{c,s}(fs) = floor(DIFF * fs / 48000 + 0.5)`; the diffusers do not scale with size.
@@ -555,8 +559,6 @@ fn feedback_matrix() -> [[f64; 16]; 16] {
 mod tests {
     use super::*;
 
-    const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
-
     fn defaults() -> ReferenceReverbParameters {
         ReferenceReverbParameters {
             pre_delay_ms: 20.0,
@@ -614,25 +616,6 @@ mod tests {
         assert_eq!(BASE.map(|base| base as usize), expected);
         let reverb = ReferenceReverb::new(48_000, defaults()).expect("defaults");
         assert_eq!(reverb.line_lengths(), expected);
-    }
-
-    #[test]
-    fn lengths_are_sixteen_distinct_primes_over_the_size_sweep_at_every_rate() {
-        for rate in RATES {
-            for step in 250..=2_000 {
-                let size = f64::from(step) / 1_000.0;
-                let lengths = line_lengths_at(size, rate);
-                assert!(
-                    lengths.iter().all(|&length| is_prime(length)),
-                    "{rate} {size}"
-                );
-                for i in 0..16 {
-                    for j in i + 1..16 {
-                        assert_ne!(lengths[i], lengths[j], "{rate} {size} lines {i} {j}");
-                    }
-                }
-            }
-        }
     }
 
     #[test]

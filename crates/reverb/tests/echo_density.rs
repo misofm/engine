@@ -63,7 +63,7 @@ fn mixing_time(eta: &[(f64, f64)]) -> f64 {
 }
 
 /// The L-to-L impulse response becomes Gaussian-dense quickly: the 50 ms mean of the normalised
-/// echo density reaches 0.9 by 150 ms at diffusion 0.7 and by 215 ms at diffusion 0 (48 kHz,
+/// echo density reaches 0.9 by 150 ms at diffusion 0.7 and by 200 ms at diffusion 0 (48 kHz,
 /// size 1, decay 1.8 s, damping 6 kHz, pre-delay 0, other controls at their defaults; one second
 /// rendered). At diffusion 0 the allpasses are pure delays, so that setting measures the feedback
 /// matrix alone. The note's `f64` model measured 104 ms and 193 ms; a Gaussian-noise reference's
@@ -75,7 +75,7 @@ fn mixing_time(eta: &[(f64, f64)]) -> f64 {
 /// tests measure energy decay and the relation of the two outputs, never the arrival density.
 #[test]
 fn echo_density_reaches_gaussian_within_the_mixing_time_bounds() {
-    for (diffusion, bound) in [(0.7_f32, 0.150_f64), (0.0, 0.215)] {
+    for (diffusion, bound) in [(0.7_f32, 0.150_f64), (0.0, 0.200)] {
         let mut values = defaults();
         values[SIZE] = 1.0;
         values[DECAY] = 1_800.0;

@@ -396,3 +396,74 @@ fn nonfinite_input_recovers_both_channels_per_block() {
         );
     }
 }
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// The first pair of lines whose lengths share a factor, if any.
+fn common_factor(lengths: &[u32; LINES]) -> Option<(usize, usize)> {
+    (0..LINES)
+        .flat_map(|i| (i + 1..LINES).map(move |j| (i, j)))
+        .find(|&(i, j)| gcd(lengths[i], lengths[j]) != 1)
+}
+
+/// The sixteen line lengths are pairwise coprime (the Schroeder/Jot criterion: no two lines
+/// share a mode series) at every `size` an event or an initial value can set, at all four rates.
+///
+/// Exhaustive, not a sweep. The control is any `f32` in `[0.25, 2.0]` (`parameter_value_valid`),
+/// and each length is a non-decreasing step function of it: widening to `f64` is exact,
+/// `BASE_i * size` is exact (13 + 24 significant bits), each further correctly rounded product,
+/// quotient and the `+ 1/2` are monotone, and so are `floor` and the nearest prime. So if the
+/// production [`line_lengths`] gives the same vector at two `f32` sizes, it gives that vector at
+/// every `f32` between them. The test bisects the domain's `f32` bit patterns until each interval
+/// either has equal ends or ends at two adjacent `f32`s, so it evaluates the vector on both sides
+/// of every breakpoint of every line, through the prepared instance's own sieve, and checks every
+/// distinct vector with `gcd`.
+///
+/// Red for: two base lengths that coincide or round to a common prime at some size or rate, a
+/// nearest-prime search or sieve that returns a composite, or a length rule that loses the prime
+/// step. The spectral coloration test sees none of these: a duplicated base length passes it.
+#[test]
+fn line_lengths_are_pairwise_coprime_at_every_size_and_rate() {
+    for sample_rate in [44_100_u32, 48_000, 88_200, 96_000] {
+        let effect = prepare_at(&defaults(), sample_rate);
+        let at = |bits: u32| {
+            let size = f32::from_bits(bits);
+            let lengths = line_lengths(size, sample_rate, &effect.sieve).expect("size in domain");
+            if let Some((i, j)) = common_factor(&lengths) {
+                panic!(
+                    "{sample_rate} Hz, size {size:e}: lines {i} and {j} have lengths {} and {}",
+                    lengths[i], lengths[j]
+                );
+            }
+            lengths
+        };
+        let (low, high) = (0.25_f32.to_bits(), 2.0_f32.to_bits());
+        let mut stack = vec![(low, at(low), high, at(high))];
+        let mut breakpoints = 0_u32;
+        while let Some((a, lengths_a, b, lengths_b)) = stack.pop() {
+            if lengths_a == lengths_b {
+                continue;
+            }
+            if b - a == 1 {
+                breakpoints += 1;
+                continue;
+            }
+            let middle = a + (b - a) / 2;
+            let lengths_middle = at(middle);
+            assert!(
+                (0..LINES).all(|line| lengths_a[line] <= lengths_middle[line]
+                    && lengths_middle[line] <= lengths_b[line]),
+                "a length is not monotone in size at {sample_rate} Hz"
+            );
+            stack.push((a, lengths_a, middle, lengths_middle));
+            stack.push((middle, lengths_middle, b, lengths_b));
+        }
+        println!("{sample_rate} Hz: {breakpoints} breakpoints");
+        assert!(breakpoints > 0);
+    }
+}

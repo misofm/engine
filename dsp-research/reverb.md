@@ -382,7 +382,7 @@ The real `f32` kernel is expected within the stated margins.
    divided by `erfc(1 / sqrt 2)`, on a 1 ms hop. Settings: L impulse, L output, 48 kHz, size 1,
    decay 1.8 s, damping 6 kHz, pre-delay 0. Time counts from the impulse at `n = 0`. **Bound:** the
    50 ms moving mean of `eta` reaches 0.9 by 150 ms at diffusion 0.7 (measured 104 ms) and by
-   215 ms at diffusion 0 (measured 193 ms). At diffusion 0, R2's allpasses are pure delays, so the
+   200 ms at diffusion 0 (measured 193 ms). At diffusion 0, R2's allpasses are pure delays, so the
    wet path starts `sum M + 3 = 1,467` samples (30.6 ms) later than with no diffusers. Diffusion 0
    isolates the matrix: B 324 ms, C 228 ms, Householder-16 279 ms, N = 8 341 ms and N = 4
    Householder 740 ms all fail it. Plain H16 passes (181 ms); it is rejected on coloration
@@ -402,9 +402,11 @@ The real `f32` kernel is expected within the stated margins.
    from 0.2 to 1.7 s and multiply it by `10^(3 t / T)`. Compute the power spectrum, average it in
    1/24-octave bands from 200 Hz to 8 kHz, and divide by the 1-octave average at the same centre.
    **Bounds:** the mean over the four paths of the peak-to-median is `<= 3.5 dB`, and every
-   path's std is `<= 1.6 dB`. Measured: peak-to-median 2.15 / 4.31 / 3.12 / 1.80, mean 2.85; std
-   0.99 / 1.11 / 1.44 / 1.04. One path's peak-to-median is noisy: the Gaussian-noise reference gives
-   1.63-2.82 and 0.64-0.89 over eight seeds, so the bound is on the mean. The controls fail it:
+   path's std is `<= 1.5 dB` (commit bd48100ff moved this to 1.6 dB after the measurement; attempt
+   2 restored it; the diffuse-reference rule in the spec's evidence is to replace it). Measured:
+   peak-to-median 2.15 / 4.31 / 3.12 / 1.80, mean 2.85; std 0.99 / 1.11 / 1.44 / 1.04. One
+   path's peak-to-median is noisy: the Gaussian-noise reference gives 1.63-2.82 and 0.64-0.89
+   over eight seeds, so the bound is on the mean. The controls fail it:
    N = 4 Householder 5.26 / 3.06 (mean / std max), plain H16 4.67 / 1.69, C 4.72 / 1.65. This
    gates only size 1; size 0.25 is a gap.
 5. **Tail contract** (`tests/tail_contract.rs`, the delay's file as template), at decay 20 s,
@@ -561,7 +563,9 @@ No listening claim is made in this note.
   filter-free control is within 1.7 %. Each earlier fit was off by up to 8.8 % (`probe_rt5.py`,
   `probe_rt6.py`, `probe_rt7.py`; `out_rt60_v3.txt`, `out_rt60_v4.txt`, `out_rt60_prop.txt`).
 - **M7, length rule:** plain rounding gave 120 of 120 pairs with a common factor at size 2. The
-  nearest-prime rule gives 0 at every rate and size checked.
+  nearest-prime rule gives 0 at every rate and size checked. Attempt 2 checks every `f32` size of
+  the domain at the four rates on the production rule (`gcd`, unit test
+  `line_lengths_are_pairwise_coprime_at_every_size_and_rate`): 0 pairs.
 - **M8, output pair (revision).** 56 pairs are admissible (`a xor b` in 1..7). First screen over all
   56, on 9 correlation cells and 8 coloration cases: the best by worst-case coloration were (13, 14),
   (3, 7), (14, 15), (13, 15), (6, 7), (4, 7), (12, 14), (12, 15). Re-scored on test 3's full grid

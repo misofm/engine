@@ -1,4 +1,4 @@
-//! The reverb's cross-target corpus can fail: every case is finite, alive and distinct.
+//! The reverb's cross-target corpus can fail: every case is finite and alive.
 //!
 //! The corpus's cross-target claim -- one pinned digest per case, at every width, natively and
 //! under wasmtime -- has one owner, gate G5 (issue #1048): `g5_native_digests_match_pins` in
@@ -8,13 +8,13 @@
 
 use reverb::corpus;
 
-/// A digest of silence, of NaN payloads, or of two identical cases would pass vacuously. None of
-/// those is what the corpus renders.
+/// A digest of silence or of NaN payloads would pass vacuously. Neither is what the corpus renders.
+/// That the two cases differ is `g5_case_digests_are_distinct`'s claim, not this test's.
 ///
-/// Claim: a corpus change that makes a case emit NaN or an infinity, silences it, collapses it to
-/// few words, or makes the two cases the same computation turns this red.
+/// Claim: a corpus change that makes a case emit NaN or an infinity, silences it, or collapses it
+/// to few words turns this red.
 #[test]
-fn corpus_cases_are_finite_distinct_and_alive() {
+fn corpus_cases_are_finite_and_alive() {
     let cases: Vec<Vec<u32>> = (0..corpus::CASE_COUNT)
         .map(|case| {
             let mut words = vec![0_u32; corpus::POINTS];
@@ -22,8 +22,6 @@ fn corpus_cases_are_finite_distinct_and_alive() {
             words
         })
         .collect();
-    // Compare every ordered word before sorting; sorting only serves the distinct-word count.
-    assert!(cases[0] != cases[1], "the two corpus cases are identical");
     for (case, mut words) in cases.into_iter().enumerate() {
         assert!(
             words.iter().all(|word| f32::from_bits(*word).is_finite()),
