@@ -121,6 +121,7 @@ impl LoudnessObserver {
     }
 }
 
+// REALTIME_POLICY_BEGIN: #2115 S1, the loudness meter's render half.
 impl State {
     fn rest(weighting: &KWeighting, at_sample: u64) -> Self {
         Self {
@@ -136,7 +137,6 @@ impl State {
     }
 }
 
-// REALTIME_POLICY_BEGIN: #2115 S1, the loudness meter's render half.
 impl Biquad {
     fn rest(coefficients: [f64; 5]) -> Self {
         Self {
@@ -276,6 +276,30 @@ mod tests {
         let mut out = Vec::new();
         observer.observe(left, right, 0, &mut |record| out.push(record));
         out
+    }
+
+    #[test]
+    fn a_block_that_does_not_continue_the_last_restarts_the_observer() {
+        let block = |offset: usize, frames: usize| -> Vec<f32> {
+            (0..frames)
+                .map(|n| (((n + offset) * 13) % 64) as f32 / 64.0 - 0.5)
+                .collect()
+        };
+        let first = block(0, 700);
+        let second = block(3, 960);
+        let mut observer = LoudnessObserver::new(48_000).expect("launch rate");
+        let mut out = Vec::new();
+        observer.observe(&first, &first, 0, &mut |record| out.push(record));
+        out.clear();
+        observer.observe(&second, &second, 10_000, &mut |record| out.push(record));
+        let mut fresh = LoudnessObserver::new(48_000).expect("launch rate");
+        let mut expected = Vec::new();
+        fresh.observe(&second, &second, 10_000, &mut |record| {
+            expected.push(record)
+        });
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].first_sample, 10_000);
+        assert_eq!(out, expected);
     }
 
     #[test]

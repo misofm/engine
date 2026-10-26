@@ -15,9 +15,13 @@ pub const LOUDNESS_FLOOR_LUFS: f64 = -120.0;
 pub const HISTOGRAM_FLOOR_LUFS: f64 = -70.0;
 /// Bins per LU.
 pub const BINS_PER_LU: f64 = 10.0;
-/// Histogram bins: 0.1 LU each over `[-70, +10)` LUFS; a block at or above +10 LUFS lands in the
+/// Histogram bins: 0.1 LU each over `[-70, +30)` LUFS; a block at or above +30 LUFS lands in the
 /// top bin.
-pub const HISTOGRAM_BINS: usize = 800;
+///
+/// The ceiling sits well above full scale because the engine's master is `f32` and may run above
+/// 0 dBFS before any limiter: a full-scale stereo sine reads about +3 LUFS, and a master 20 dB
+/// over still has bins of its own.
+pub const HISTOGRAM_BINS: usize = 1_000;
 
 /// The level of a mean square: `-0.691 + 10 log10 z` LUFS (both channel weights 1).
 fn level(mean_square: f64) -> f64 {
@@ -33,7 +37,8 @@ fn floored_level(mean_square: f64) -> f64 {
     }
 }
 
-/// Block levels in 0.1 LU bins, each with its exact block count and exact sum of block mean squares.
+/// Block levels in 0.1 LU bins, each with its exact block count and the rounded `f64` sum of its
+/// block mean squares.
 ///
 /// Bounded memory for any programme length. A bin's *mean level* is the level of its energy sum
 /// over its count, which is exact for every block in a bin of equal blocks and within the bin
@@ -111,7 +116,7 @@ impl Histogram {
 /// # Integrated loudness (BS.1770-5)
 ///
 /// Gating blocks with level `l > -70` go into a 0.1 LU histogram. The relative gate is
-/// `gamma_r = -0.691 + 10 log10(mean z of those blocks) - 10`, exact from the bin sums. A bin is
+/// `gamma_r = -0.691 + 10 log10(mean z of those blocks) - 10`, from the bins' `f64` sums. A bin is
 /// above `gamma_r` when its mean level is: the one bin that straddles `gamma_r` is taken or left
 /// whole by that rule, which is the meter's only approximation and is bounded by the oracle test.
 /// I is the level of the mean `z` over the bins above `gamma_r`.
@@ -378,13 +383,13 @@ mod tests {
 
     const HOP: u64 = 480;
 
-    /// Hop `k` of a 48 kHz run: energy `z` per sample per channel, true peak `1000 - k`.
+    /// Hop `k` of a 48 kHz run: energy `z` per sample per channel, true peak `1000 - k` (0 past 1000).
     fn hop(k: u64, z: f64) -> HopRecord {
         HopRecord {
             first_sample: k * HOP,
             end_sample: (k + 1) * HOP,
             energy: [z * HOP as f64; 2],
-            true_peak: [(1_000 - k) as f32; 2],
+            true_peak: [1_000_u64.saturating_sub(k) as f32; 2],
             sanitized: 0,
         }
     }
@@ -415,6 +420,24 @@ mod tests {
         // Nine kept hops: no momentary window lies wholly in them yet, though M itself runs on.
         assert_eq!(analysis.momentary_max(), None);
         assert!(analysis.momentary().is_some());
+    }
+
+    #[test]
+    fn loudness_range_ranks_round_half_away_from_zero() {
+        // Eleven short-term blocks at -30, -29, ..., -20 LUFS, one per run of 300 hops between
+        // gaps. With n = 11 the P95 rank is round(10 * 0.95 + 1) = round(10.5) = 11, where a
+        // floor would pick 10; the P10 rank is 2. So LRA = -20 - (-29) = 9 LU exactly.
+        let mut analysis = LoudnessAnalysis::new();
+        for block in 0..11_u64 {
+            let level = -30.0 + block as f64;
+            let z = math::pow(10.0, (level + 0.691) / 10.0) / 2.0;
+            let start = block * 400;
+            for offset in 0..300 {
+                analysis.ingest(&hop(start + offset, z));
+            }
+        }
+        let range = analysis.loudness_range().expect("LRA");
+        assert!((range - 9.0).abs() < 1e-9, "LRA {range}, expected 9");
     }
 
     #[test]
