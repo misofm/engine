@@ -402,6 +402,23 @@ fn blocks(
                     &mut rng,
                 );
             }
+            // On the middle lane only, which is a picked lane: every switch on, on the full block
+            // before the primed one, so each switched section settles away from identity; then
+            // every switch off on the primed block, so each is ramping to identity across the
+            // call. Resetting that lane ends its ramp at identity, which flips its dry bit in each
+            // dedicated cut (the EQ's HPF and LPF). No other lane ramps those sections, so nothing
+            // but the reset itself re-derives the flags, and a stale one meets the EQ's debug
+            // check of its flags on the next stationary block.
+            if let Some(preparation) = preparation
+                && lane == lanes / 2
+            {
+                if primed == Some(index + 1) {
+                    targets[lane] = switch(fixture, preparation, &mut candidates[lane], true);
+                } else if prime {
+                    let off = switch(fixture, preparation, &mut candidates[lane], false);
+                    targets[lane].extend(off);
+                }
+            }
             // A link glide on the primed block, long enough to be in flight across the call.
             if prime && !link_modes.is_empty() {
                 links[lane] = Some((link_modes[rng.below(link_modes.len())], 4096));
@@ -432,13 +449,45 @@ fn target(
 ) -> Vec<PreparedEffectTarget> {
     let parameter = automatable[rng.below(automatable.len())].parameter_index;
     let values = &fixture.lattices[parameter as usize];
+    let value = values[rng.below(values.len())];
+    design(preparation, candidate, &mut |slot| {
+        (slot.parameter_index == parameter).then_some(value)
+    })
+}
+
+/// Sets every switch (a boolean `*_enabled` parameter) of `candidate` to `on` and designs its
+/// targets: every section a switch governs ramps to or from the identity words.
+fn switch(
+    fixture: &Fixture,
+    preparation: &dyn NativeEffectTargetPreparation,
+    candidate: &mut Vec<InitialParameterValue>,
+    on: bool,
+) -> Vec<PreparedEffectTarget> {
+    let descriptor = fixture.descriptor;
+    design(preparation, candidate, &mut |slot| {
+        let parameter = &descriptor.parameters[slot.parameter_index as usize];
+        (parameter.automatable && live(parameter) && parameter.name.ends_with("_enabled"))
+            .then_some(if on { 1.0 } else { 0.0 })
+    })
+}
+
+/// Applies `change` to every slot of `candidate` it names and designs the targets of the result.
+/// A refused design keeps the candidate and returns no target.
+fn design(
+    preparation: &dyn NativeEffectTargetPreparation,
+    candidate: &mut Vec<InitialParameterValue>,
+    change: &mut dyn FnMut(&InitialParameterValue) -> Option<f32>,
+) -> Vec<PreparedEffectTarget> {
     let mut next = candidate.clone();
     let mut changed = vec![false; next.len()];
     for (slot, touched) in next.iter_mut().zip(&mut changed) {
-        if slot.parameter_index == parameter {
-            slot.value = values[rng.below(values.len())];
+        if let Some(value) = change(slot) {
+            slot.value = value;
             *touched = true;
         }
+    }
+    if !changed.contains(&true) {
+        return Vec::new();
     }
     let mut out = vec![
         PreparedEffectTarget {
