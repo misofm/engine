@@ -218,3 +218,20 @@ positive control, C/C++ fixtures, shared/static links and drift mutations.
 Implementation evidence is preserved outside the worktree under
 `/home/bl/misofm/engine-work-evidence/1668/astra/`. Final shared qualification
 follows integration of the newest main.
+
+Final qualification on merged `1508be064` caught two missed CompileLimits
+fixture literals in `hosts/host-web/tests/control_parity.rs` and
+`hosts/host-web/tests/protocol_cross_host.rs`. Both now set `reserved1: 0`; no
+production behavior or test claim changes. These files join the authorized
+routine-literal inventory. Initial failed debug-a/clippy logs are retained.
+Browser qualification follows the current #2092 owner ruling and workflow:
+Chromium and WebKit; Firefox's retired leg is not run.
+
+The provisional component PASS above is superseded by **attempt 1 final
+integration FAIL**: debug-a/clippy could not compile the two omitted browser
+fixtures. Root authorized **attempt 2**, bounded to those two literal corrections
+and this evidence record. No hidden extra retry or production change. Focused
+host-web parity tests pass (`cargo test --locked -p host-web --features
+test-support,render-lock-probe --test control_parity --test protocol_cross_host`);
+only failed broad gates will be rerun, while
+independent production/browser/audit/cross-target results remain applicable.

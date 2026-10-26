@@ -313,7 +313,7 @@ fn compile_limits(limits: ControlLimits) -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
         source_ring_frames: limits.source_ring_frames,
-        maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
+        reserved1: 0,
         reserved0: 0,
         maximum_document_bytes: limits.maximum_document_bytes,
         maximum_diagnostic_bytes: limits.maximum_diagnostic_bytes,
