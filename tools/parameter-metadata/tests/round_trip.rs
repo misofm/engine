@@ -534,7 +534,10 @@ fn every_published_sidechain_port_prepares_and_an_unpublished_one_does_not() {
             rows += 1;
         }
     }
-    assert_eq!(rows, 24, "ten effects, four of which declare a sidechain");
+    assert_eq!(
+        rows, 26,
+        "eleven effects, four of which declare a sidechain"
+    );
     assert_eq!(
         sidechains,
         vec![

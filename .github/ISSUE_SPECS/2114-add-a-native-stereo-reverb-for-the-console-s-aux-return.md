@@ -17,6 +17,15 @@ Equations, coefficient rules, the stability and tail proof, fixtures, objective 
 - Controls (all `Shared`, block-rate, live, automatable; no rebuild row): 1 `pre_delay_ms` 0-250 (20), 2 `decay_ms` 100-20,000 log (1,800), 3 `size` 0.25-2.0 (1.0), 4 `damping_hz` 1,000-20,000 log (6,000), 5 `low_cut_hz` 20-500 log (20), 6 `diffusion` 0-1 (0.7), 7 `width` 0-1 (1.0), 8 `mix` 0-1 (1.0).
 - Owner questions, answered by root 2026-10-26: Q1 one continuous design, no mode enum; Q2 no freeze, decay capped at 20 s (the tail proof needs every loop gain below 1); Q3 these eight controls are the curated set.
 - Slices: S1 research note; S2 kernel and f64 oracle; S3 descriptor, registry, tail derivation, never-banked list, schema doc; S4 remaining tests, corpus, qualification rows, benchmark, listening; S5 SDK and metadata. Attempt 1 covers S1-S3.
+- 2026-10-26, root rulings after attempt 1 (S1-S3):
+  - Paths authorized (count and list updates only): `crates/effect-compiler/tests/native_session.rs`, `crates/controls/tests/common/mod.rs` (`LAUNCH_EFFECTS`), `tools/parameter-metadata/tests/round_trip.rs` (rows 24 -> 26).
+  - Accepted, because measured and recorded: the width-independent butterfly matrix, output rows (14, 15), nearest-prime lengths, pipelined diffusers, modulation dropped (provisional until the listening record).
+  - Accepted: the `check-effect-runtime-policy.sh` ratchet raises (`state_error` 9, `apply_automation` 7, `discontinuity_reset` 5).
+  - OQ1: the composition values stay `Unstated`. Reason (measured): under `damping_hz` / `low_cut_hz` ramps the TPT storage weight `1/(2G)` moves and an adversarial ramp gains 1.63 in energy against a 0.34 % per-trip loop margin, so no peak gain linear in the input is proved. Reopen on a proof under ramps.
+  - OQ2: the certified 6.5-minute `T` is accepted (the delay's class).
+  - OQ2b: clear-on-read is KEPT. After a large size increase a short gap reads as a dip, the gentler artifact; replaying stale ring audio would sound like a ghost echo. S4 adds the test that the surviving mutant turns red; the S4 listening record confirms or reopens the choice.
+  - The unconfirmed AES numbers are marked "from listings" in the bibliography.
+  - Continue on the same branch with S4 and S5; not pushed until root publishes SDK 0.6.0 (the browser module changes).
 
 ## Evidence
 - 2026-10-26, S1 (`dsp-research/reverb.md`, measured): the feedback matrix is `diag(g) (H16/4) P`, `P` the slot map `j -> (14 - j) mod 16`, computed as a fixed four-stage butterfly (stage order 3, 2, 1, 0) so that W = 1, 4 and 8 give the same bits. The scope note's `H_{N/W} (x) I_W` depends on the lane width (two different reverbs at W = 4 and W = 8), and the plain `H16/4` is an involution that colours the tail (peak-to-median 5.67 dB against 1.93 dB for the chosen matrix). Line lengths are the nearest primes to the scaled base lengths (plain rounding loses mutual primality at size != 1). The four diffusers per channel are pipelined (one 8-lane vector; +3 samples on the wet path). Modulation is dropped (no measured coloration or echo-density benefit), provisional until the S4 listening record.

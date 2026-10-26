@@ -52,9 +52,8 @@ done
 # `apply_automation` (effect-runtime has no shared span pass; each effect's pass commits into its
 # own ramp layout, so a shared one is the #95 sweep, not one effect's change) by one each.
 # #17 S1 (the dynamic EQ) raised the same two rows by one each, for the same two reasons.
-# #2114 (the reverb) raised the same two rows by one each, for the same two reasons, and
-# `discontinuity_reset` by one: like the delay's, it clears the effect's own ring and filter layout,
-# which has no shared shape in effect-runtime.
+# #2114 (the reverb) raised the same two rows by one each, for the same two reasons.
+# #2114 raised `discontinuity_reset` 4 -> 5: the reverb's reset clears its own 16 line rings, 8 diffuser rings and 32 filter states, a layout effect-runtime has no shared reset for (as the delay's).
 #
 #   pattern                          count  owner
 duplicated_helper_manifest() {
