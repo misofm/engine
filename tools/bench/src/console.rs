@@ -443,7 +443,7 @@ pub(crate) fn main() {
 /// Timed blocks per bank-report row and round (issue #2132).
 const BANK_REPORT_OBSERVATIONS: u64 = 1_000;
 
-/// Untimed blocks before a bank-report row's clock starts: two of [`C1_TOGGLE_BLOCKS`]'s turns, so
+/// Untimed blocks before a bank-report row's clock starts: two of [`console_workload::C1_TOGGLE_BLOCKS`]'s turns, so
 /// the toggle row has written a bypass and an un-bypass before it is timed.
 const BANK_REPORT_WARMUP_BLOCKS: u64 = 2 * console_workload::C1_TOGGLE_BLOCKS;
 
