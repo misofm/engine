@@ -159,14 +159,31 @@ pub struct Report {
     /// Not a digest and not pinned, for the same reason: it is the wasm execution of issue #950's
     /// kernel differential (see `wasm_gate_corpus::meter_block_mismatches`).
     pub meter_block_mismatches: u32,
+    /// The W=4 console rows' bank counters this leg read (issue #2143): every row of
+    /// `console_workload::W4_COUNTER_WORKLOADS` on the wasm leg and on a four-lane native build,
+    /// none on an eight-lane native build, which cannot bank C1's console at four lanes
+    /// (`console.slot.foreign_width`, #1694).
+    pub console_counters: Vec<ConsoleCounters>,
+    /// Every console counter that did not equal its pin in [`W4_CONSOLE_COUNTERS`].
+    pub console_mismatches: Vec<String>,
 }
 
 impl Report {
+    /// Whether every comparison of this leg agreed.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.mismatches.is_empty()
+            && self.minmax_lowering_mismatches == 0
+            && self.f64_lane_mismatches == 0
+            && self.meter_block_mismatches == 0
+            && self.console_mismatches.is_empty()
+    }
+
     /// One machine-readable evidence line, in the shape the other audit tools emit.
     #[must_use]
     pub fn json(&self) -> String {
         let mut output = format!(
-            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"f64_lane_mismatches\":{},\"meter_block_mismatches\":{},\"mismatches\":[",
+            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"f64_lane_mismatches\":{},\"meter_block_mismatches\":{},\"console_rows\":{},\"console_mismatches\":{},\"mismatches\":[",
             self.leg,
             WASMTIME_VERSION,
             self.backend,
@@ -175,6 +192,8 @@ impl Report {
             self.minmax_lowering_mismatches,
             self.f64_lane_mismatches,
             self.meter_block_mismatches,
+            self.console_counters.len(),
+            self.console_mismatches.len(),
         );
         for (index, mismatch) in self.mismatches.iter().enumerate() {
             if index > 0 {
@@ -194,6 +213,113 @@ impl Report {
         output.push_str("]}");
         output
     }
+}
+
+/// One W=4 console row's bank counters (issue #2143), in `console_workload::BANK_COUNTER_NAMES`
+/// order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsoleCounters {
+    /// The row's workload kind, the name the console bench gives it.
+    pub row: &'static str,
+    /// Its counters after `console_workload::W4_COUNTER_BLOCKS` blocks.
+    pub counters: [u64; 7],
+}
+
+/// The W=4 console rows' bank counters (issue #2143), one per row of
+/// `console_workload::W4_COUNTER_WORKLOADS`, in `console_workload::BANK_COUNTER_NAMES` order, after
+/// `console_workload::W4_COUNTER_BLOCKS` blocks.
+///
+/// Exact counts, because a count is the claim: both legs must reproduce them integer for integer,
+/// the wasm leg under wasmtime (`wasm_gates <guest.wasm>`) and the four-lane native one on arm64
+/// (`w4_counters_match_between_wasm_and_native_simd4`), so a bank decision that differs between the
+/// `simd128` module and native `Simd4` fails one of them. `w4_counters_describe_the_designs_plan`
+/// holds the table to the plan the banking design's W=4 finish line is stated for. A deliberate
+/// plan change re-pins from both legs' printed rows, never from one.
+pub const W4_CONSOLE_COUNTERS: [[u64; 7]; 4] = [
+    // c1_console_16_load: every console slot bypassed, so every bank skips its wet path (#2129).
+    // #2142: the track banks are one pack group of lane chains (pack_groups 1); nothing packs.
+    [15, 0, 0, 0, 260, 7164, 1],
+    // c1_console_16_typical: the banks whose drawn lanes are all bypassed skip (#2129)
+    [15, 0, 3584, 2304, 260, 3580, 1],
+    // c1_console_16_all_active
+    [15, 0, 7165, 4096, 259, 0, 1],
+    // c1_console_16_sparse: the silent strips' gate rests only after about 348 blocks, past
+    // W4_COUNTER_BLOCKS, so the group is bound but no strip packs within the run (#2142)
+    [15, 0, 7165, 4096, 259, 0, 1],
+];
+
+/// Every counter of `rows` that differs from its pin, or a row count that differs, as text.
+fn console_mismatches(rows: &[ConsoleCounters]) -> Vec<String> {
+    let mut mismatches = Vec::new();
+    if rows.len() != W4_CONSOLE_COUNTERS.len() {
+        mismatches.push(format!(
+            "{} console rows read, {} pinned",
+            rows.len(),
+            W4_CONSOLE_COUNTERS.len()
+        ));
+    }
+    for (row, pins) in rows.iter().zip(&W4_CONSOLE_COUNTERS) {
+        for ((name, actual), expected) in console_workload::BANK_COUNTER_NAMES
+            .iter()
+            .zip(row.counters)
+            .zip(pins)
+        {
+            if actual != *expected {
+                mismatches.push(format!(
+                    "{} {name}: expected {expected}, got {actual}",
+                    row.row
+                ));
+            }
+        }
+    }
+    mismatches
+}
+
+/// The W=4 console rows read in this process (issue #2143), or `None` on a build whose own width is
+/// not four lanes: the counters describe the plan at `Backend::current()`, and an eight-lane build
+/// cannot bank C1's console at four (`console.slot.foreign_width`, #1694).
+#[must_use]
+pub fn native_console_counters() -> Option<Vec<ConsoleCounters>> {
+    (lane::Backend::current().width() == 4).then(|| {
+        console_workload::W4_COUNTER_WORKLOADS
+            .iter()
+            .map(|workload| ConsoleCounters {
+                row: workload.kind(),
+                counters: console_workload::bank_counters(
+                    *workload,
+                    console_workload::W4_COUNTER_BLOCKS,
+                ),
+            })
+            .collect()
+    })
+}
+
+/// The `w4-counters.json` evidence file (issue #2143): `{ "source", "blocks", "counters" (the
+/// names), "rows": [{ "row", "counters" }] }`, which `bench console --bank-report-w4` joins with
+/// the V8 timing rows by row name.
+#[must_use]
+pub fn console_counters_json(source: &str, rows: &[ConsoleCounters]) -> String {
+    let names: Vec<String> = console_workload::BANK_COUNTER_NAMES
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect();
+    let rows: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let counters: Vec<String> = row.counters.iter().map(u64::to_string).collect();
+            format!(
+                "{{\"row\":\"{}\",\"counters\":[{}]}}",
+                row.row,
+                counters.join(",")
+            )
+        })
+        .collect();
+    format!(
+        "{{\"schema_version\":1,\"kind\":\"w4_counters\",\"issue\":2143,\"source\":\"{source}\",\"width\":4,\"blocks\":{},\"counters\":[{}],\"rows\":[{}]}}\n",
+        console_workload::W4_COUNTER_BLOCKS,
+        names.join(","),
+        rows.join(",")
+    )
 }
 
 /// Lowercase hexadecimal of a digest.
@@ -229,6 +355,7 @@ fn native_backend_code() -> u32 {
 /// this fails, the wasm leg has nothing meaningful to compare against.
 #[must_use]
 pub fn native_report() -> Report {
+    let console_counters = native_console_counters();
     let mut mismatches = Vec::new();
     let mut comparisons = 0;
     for case in 0..corpus::CASE_COUNT {
@@ -260,6 +387,10 @@ pub fn native_report() -> Report {
         meter_block_mismatches: (0..corpus::WIDTHS)
             .map(corpus::meter_block_mismatches)
             .sum(),
+        console_mismatches: console_counters
+            .as_deref()
+            .map_or_else(Vec::new, console_mismatches),
+        console_counters: console_counters.unwrap_or_default(),
     }
 }
 
@@ -275,6 +406,10 @@ struct Guest {
     f64_lane_mismatches: TypedFunc<u32, u32>,
     /// `miso_gate_meter_block_mismatches(width) -> u32`.
     meter_block_mismatches: TypedFunc<u32, u32>,
+    /// `miso_gate_console_row_count() -> u32` (issue #2143).
+    console_row_count: TypedFunc<(), u32>,
+    /// `miso_gate_console_counter(row, counter) -> u64` (issue #2143).
+    console_counter: TypedFunc<(u32, u32), u64>,
     /// What `miso_gate_backend()` reported.
     backend: u32,
     /// What `miso_gate_case_count()` reported.
@@ -314,6 +449,10 @@ impl Guest {
             instance.get_typed_func(&mut store, "miso_gate_f64_lane_mismatches")?;
         let meter_block_mismatches: TypedFunc<u32, u32> =
             instance.get_typed_func(&mut store, "miso_gate_meter_block_mismatches")?;
+        let console_row_count: TypedFunc<(), u32> =
+            instance.get_typed_func(&mut store, "miso_gate_console_row_count")?;
+        let console_counter: TypedFunc<(u32, u32), u64> =
+            instance.get_typed_func(&mut store, "miso_gate_console_counter")?;
 
         let backend = backend.call(&mut store, ())?;
         let cases = case_count.call(&mut store, ())? as usize;
@@ -340,6 +479,8 @@ impl Guest {
             minmax_lowering_mismatches,
             f64_lane_mismatches,
             meter_block_mismatches,
+            console_row_count,
+            console_counter,
             backend,
             cases,
             widths: guest_widths,
@@ -378,6 +519,33 @@ impl Guest {
                 .call(&mut self.store, width as u32)?;
         }
         Ok(total)
+    }
+
+    /// Reads every W=4 console row's bank counters out of the guest (issue #2143), in the order
+    /// `console_workload::W4_COUNTER_WORKLOADS` names them.
+    fn console_counters(&mut self) -> wasmtime::Result<Vec<ConsoleCounters>> {
+        let rows = self.console_row_count.call(&mut self.store, ())? as usize;
+        if rows != console_workload::W4_COUNTER_WORKLOADS.len() {
+            wasmtime::bail!(
+                "guest reports {rows} console rows, this host {}: the two were built from \
+                 different sources",
+                console_workload::W4_COUNTER_WORKLOADS.len()
+            );
+        }
+        let mut read = Vec::with_capacity(rows);
+        for (row, workload) in console_workload::W4_COUNTER_WORKLOADS.iter().enumerate() {
+            let mut counters = [0_u64; 7];
+            for (counter, value) in counters.iter_mut().enumerate() {
+                *value = self
+                    .console_counter
+                    .call(&mut self.store, (row as u32, counter as u32))?;
+            }
+            read.push(ConsoleCounters {
+                row: workload.kind(),
+                counters,
+            });
+        }
+        Ok(read)
     }
 
     /// Reads one digest out of the guest, eight little-endian words at a time.
@@ -459,6 +627,8 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
     let f64_lane_mismatches = guest.f64_lane_mismatches()?;
     let meter_block_mismatches = guest.meter_block_mismatches()?;
     guest.out_of_range_words_trap()?;
+    // Issue #2143: after the digest legs, so the new exports add nothing to the digest path.
+    let console_counters = guest.console_counters()?;
 
     Ok(Report {
         leg: "wasm",
@@ -469,6 +639,8 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
         minmax_lowering_mismatches,
         f64_lane_mismatches,
         meter_block_mismatches,
+        console_mismatches: console_mismatches(&console_counters),
+        console_counters,
     })
 }
 

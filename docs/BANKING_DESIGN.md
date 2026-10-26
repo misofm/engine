@@ -104,8 +104,13 @@ the owner's 2026-10-26 bypass decision (section 8).
 - **Lane chain**: the ordered bank units that render the same strips at the same positions,
   linked by resident pairing or a bank producer row (a strip split by a send, a stage meter or a
   sidechain tap). **Pack group**: a run of peer lane chains of one program, one width, one fold
-  target and one collapse arming (`LaneMap::discover`, `runtime.rs:9484`; slice 5a (#2142)). A lane moves
+  target and one collapse arming (`LaneMap::discover`; slice 5a (#2142)). A lane moves
   only inside its pack group, and a move trades a strip in every unit of its lane chain at once.
+  A group also needs a **layout** that keeps every permutation exact (`group_layout_holds`): the
+  group's written buffers are distinct, no first-row input is among them, and a plain unit inside
+  the group's span sits between two whole rows. The colouring may recycle an earlier chain's
+  inputs into a later chain's outputs (C1 with its sends at `post_input` does at W=8); such chains
+  form no group.
 - **Lane use**: `strip-slots that need to run / (BSR x W)`.
 - **Activity pattern** of a strip: `silent_at_rest: bool` and `bypassed[slot]: bool` (settled
   bypass), plus `automated: bool` (a bind-time bit).
@@ -332,6 +337,16 @@ cannot be promised together with convergence to the sort, because the sorted ord
 the layout of least cost (the demand sum is an OR per slot, not a function the lexicographic
 order minimises); the sort is chosen because its cost is *provably bounded*, and the transient is
 a cost of at most a few banks for a few blocks after a toggle, never a bit.
+
+**The move over lane chains (#2142).** A position names a lane chain and a lane, the same in every
+row. `swap_bank_lanes(a, b)` checks every row's lanes and chains first
+(`BankChain::lane_swap_check`), then trades the two strips row by row (chain state, member ops,
+fold entries, source bits, observation rows), then records the move once. Resident pairing and
+bank producer rows need no translation: lane `l` of row `j + 1` still gathers lane `l` of row `j`.
+The one translated read is a per-node op's producer row (#1899): the op asks the unit that renders
+its strip now (`LaneMap::producer_unit`). Only a chain's first row states the packer's idle fact;
+a later row's input silence is stated only when its predecessor skipped, so its fact would hide
+every strip whose bank mates run, and it costs cost, never bits.
 
 **Homing.** Within the sorted target, strips of one pattern are placed in home order, so when
 every strip has one pattern (an all-active episode) the target is the identity map and the fused

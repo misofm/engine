@@ -703,6 +703,7 @@ dependencies = [
  "math",
  "multiband-compressor",
  "parametric-eq",
+ "reverb",
  "session",
  "soft-clip",
  "transient-shaper",
@@ -1917,6 +1918,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "reverb"
+version = "0.1.0"
+dependencies = [
+ "bench-support",
+ "conformance",
+ "dsp-reference",
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2473,6 +2487,7 @@ dependencies = [
  "math",
  "multiband-compressor",
  "parametric-eq",
+ "reverb",
  "sha2 0.11.0",
  "soft-clip",
  "transient-shaper",
@@ -2483,6 +2498,7 @@ dependencies = [
 name = "wasm-gate-guest"
 version = "0.1.0"
 dependencies = [
+ "console-workload",
  "lane",
  "wasm-gate-corpus",
 ]
@@ -2495,6 +2511,7 @@ dependencies = [
  "bench-support",
  "builtins",
  "compressor",
+ "console-workload",
  "effect-runtime",
  "gate-expander",
  "graph",

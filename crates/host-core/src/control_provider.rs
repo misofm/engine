@@ -3906,7 +3906,7 @@ mod tests {
             .descriptors()
             .map(|descriptor| descriptor.id.as_str().to_owned())
             .collect::<Vec<_>>();
-        assert_eq!(descriptor_ids.len(), 10, "complete launch registry");
+        assert_eq!(descriptor_ids.len(), 11, "complete launch registry");
         let eligible = descriptor_ids
             .iter()
             .filter(|id| effect_compiler::CONSOLE_ELIGIBLE_EFFECTS.contains(&id.as_str()))

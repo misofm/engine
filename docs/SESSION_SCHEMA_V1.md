@@ -238,8 +238,9 @@ fader/mute -> pan/matrix -> routes`.
 
 **Eligibility.** A console slot must be one of the seven effects that always bank:
 `miso.parametric-eq`, `miso.compressor`, `miso.gate-expander`, `miso.soft-clip`,
-`miso.transient-shaper`, `miso.true-peak-limiter` and `miso.multiband-compressor`. The delay never
-banks. The de-esser is an insert only until the owner rules on its console eligibility (#1920),
+`miso.transient-shaper`, `miso.true-peak-limiter` and `miso.multiband-compressor`. The delay and
+the reverb never bank, so each is an insert only: `miso.reverb` (#2114) is a 16-line
+feedback-delay-network stereo reverb, meant for an aux-return submix's inserts. The de-esser is an insert only until the owner rules on its console eligibility (#1920),
 and the dynamic EQ is an insert only at launch (#17 S2). The schema checks the identity's syntax only; the list
 is enforced where native identities resolve, by effect preparation, which refuses any other slot
 with `console.slot.ineligible_effect` at `$.console.<section>[slot=<id>].identity`.
@@ -549,7 +550,7 @@ fails preparation. Those three refusals are the authority and are unmoved. What 
 stands in front of them: issue #275 recorded that the generated SDK catalog published each
 effect's parameters and observations but no port table, so `portId` was the one session field an
 SDK builder could not check before boot. Issue #278 closed that gap by publishing the declared
-`ports` per effect -- id, role, `required` and lane layout, for all ten launch effects, of which
+`ports` per effect -- id, role, `required` and lane layout, for all eleven launch effects, of which
 exactly `miso.compressor`, `miso.de-esser`, `miso.dynamic-eq` and `miso.gate-expander` declare an
 optional `sidechain-in`. `effect()`
 now resolves `portId` against that table and refuses a misspelling, a non-sidechain port and a

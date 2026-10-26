@@ -76,8 +76,9 @@ answered the amendments on 2026-09-29. Ruling:
 - **Bypass.** Bypass is per lane, through the existing `BypassShunt`, so a bypassed track stays in
   its bank: a session `bypass` lowers to prepared `bypass = false` plus the lane's initial shunt
   state, and the shunt is built whenever any lane is bypassed (H1, amendment 1). A bypassed lane
-  runs the wet path; that cost is accepted. Latency is always paid: a bypassed slot still carries
-  its fixed latency on every track (L4).
+  runs the wet path while its bank has a lane that needs it; a bank whose every lane is settled
+  bypassed skips its wet path and emits the shunt's dry words (amendment 15). Latency is always
+  paid: a bypassed slot still carries its fixed latency on every track (L4).
 - **Coupling rule.** Banking may couple lanes' cost, never their bits. Every whole-bank decision
   (fast-path gates, D7 recovery, shunt selection) must be bit-neutral per lane (M2, amendment 7).
 - **Eligibility.** A console slot may be the parametric EQ, compressor, gate/expander, soft-clip,
@@ -88,8 +89,8 @@ answered the amendments on 2026-09-29. Ruling:
   so the multiband compressor is console-eligible; #1893 gave it the padded bind this list requires.
 - **Silence.** Accepted trade-off: the silent fast path is bank-wide, so one active track keeps its
   bank-mates processing (M4). The baseline measures it with a sparse-activity row; a per-lane
-  silence skip is a later issue if the measurement warrants it. An all-lanes-bypassed skip stays
-  out of scope and would still have to feed latency lines (amendment 11).
+  silence skip is a later issue if the measurement warrants it. The all-lanes-bypassed skip, out of
+  scope under amendment 11, is in scope since amendment 15; it feeds the latency lines.
 - **Naming** (M6, amendment 13).
   - **The owner's decision.** The session key is `console`, and the engine's internal live-console
     names are renamed, for example to "live controls". The question the owner answered listed the
@@ -136,6 +137,20 @@ answered the amendments on 2026-09-29. Ruling:
   banks" objective measures nothing (M3). The banking slice chooses between restating the objective
   (for example, minimise planes x banks) and retiring the demotion for console slots, and records
   why (amendment 10).
+- **Amendment 15 (owner decision, 2026-10-26, issue #2129).** The owner: "If we can't apply the
+  transparent passthrough default for all effects, let's not apply that to any effect and go with
+  actual bypass requirement for transparency." So bypass is real passthrough. A bank whose every
+  active lane is settled bypassed, with no span, no prepared target and no armed tap that needs a
+  computed reading, skips its wet path for the block and emits the latency-matched dry words it
+  emitted before, bit for bit; the shunt's latency lines stay fed. Every un-bypass from settled
+  bypass resumes that lane from rest: the lane alone is reset (`reset_lane`,
+  `DiscontinuityKeepParameters`) and holds dry for its effect's warm-up before the session ramp,
+  whether or not its bank skipped, so a lane's bits never depend on its bank mates (owner decision
+  of 2026-10-26, "un-bypass from rest", class B against #1341's warm continuation). An armed
+  gain-reduction tap of a settled-bypassed lane publishes its declared bypass value (`0`), and a
+  settled-bypassed lane whose latency line holds only `+0.0` counts at rest for the silence skip.
+  Effect parameter defaults do not change. This amends the bypass clause above and lifts amendment
+  11's exclusion.
 - **The app.** The problem statement is corrected (M8, amendment 12): the app compiles EQ ->
   compressor onto every track's dynamic rack and marks unselected tracks `bypass`. The baseline's
   app-shaped row is "every track carries EQ -> compressor, a subset bypassed". The app moves the

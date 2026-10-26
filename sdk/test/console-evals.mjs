@@ -1031,6 +1031,7 @@ const AUDIBLE = Object.freeze({
   "miso.gate-expander": { threshold: -3, ratio: 20, hold: 0, hysteresis: 0, release: 5 },
   "miso.multiband-compressor": { low_threshold: -40, low_ratio: 8, high_threshold: -40, high_ratio: 8 },
   "miso.parametric-eq": { "band-1-enabled": true, "band-1-gain": 9, "band-1-frequency": 1_000 },
+  "miso.reverb": { "pre-delay": 0, mix: 1 },
   "miso.soft-clip": { drive: 24 },
   "miso.transient-shaper": { "attack amount": 1, "sustain amount": -1 },
   "miso.true-peak-limiter": { ceiling: -12 },
@@ -1051,24 +1052,46 @@ function oneInsert(effectId, bypassed) {
 }
 
 describe("a live bypass edit is a SET_CONTROL on control 0 of the instance (#1563B)", () => {
-  test("lifting a session bypass reaches the render, live or by a plan rebuild", async () => {
+  test("lifting a session bypass reaches the render live, from rest after the effect's warm-up", async () => {
     // The SDK holds no list of effects that keep a prepared bypass any more (#1563 D3): it sends
     // the lift and the core judges it. The core lifts it live on every effect (the delay's since
-    // #1339, the multiband's since #1340), so the render is the unbypassed session's.
-    // Red mutation: a core that acknowledges the lift of any effect and renders the bypassed session.
+    // #1339, the multiband's since #1340). A lift resumes the effect from rest and holds the dry
+    // signal for the effect's warm-up `W` (#2129, owner decision "un-bypass from rest"), so the
+    // live render is the bypassed session's before `W` and the unbypassed session's from `W` on:
+    // the lift lands at the first sample, the hard switch has no ramp, and the effect starts from
+    // the same rest a session authored unbypassed starts from.
+    // Red mutation: a core that acknowledges the lift of any effect and renders the bypassed
+    // session (the live render misses the unbypassed one from `W` on).
     assert.deepEqual(Object.keys(AUDIBLE).sort(), CATALOG.effects.map((row) => row.id).sort());
     for (const { id } of CATALOG.effects) {
       const bypassed = await renderBlocks(oneInsert(id, true));
       const enabled = await renderBlocks(oneInsert(id, false));
-      assert.notDeepEqual(bypassed, enabled, `${id}: the fixture must hear the bypass`);
       const rendered = await renderBlocks(
         oneInsert(id, true),
         (controls) => controls.edit.track("t").insert("fx", id).bypass(false),
       );
-      assert.deepEqual(rendered, enabled, `${id}: the engine's lift`);
+      const warmup = WARMUP_FRAMES[id] ?? 0;
+      const from = (planes) => planes.map((plane, index) => {
+        const first = Math.floor(index / 2) * plane.length;
+        return plane.filter((_, frame) => first + frame >= warmup);
+      });
+      const before = (planes) => planes.map((plane, index) => {
+        const first = Math.floor(index / 2) * plane.length;
+        return plane.filter((_, frame) => first + frame < warmup);
+      });
+      assert.notDeepEqual(from(bypassed), from(enabled), `${id}: the fixture must hear the bypass after W`);
+      assert.deepEqual(before(rendered), before(bypassed), `${id}: the engine's lift holds dry before W`);
+      assert.deepEqual(from(rendered), from(enabled), `${id}: the engine's lift from W`);
     }
   });
 });
+
+/**
+ * Each effect's warm-up `W` at 48 kHz (#2129 D3), the frames a lift holds dry: the soft clip's
+ * latency plus its tail and the true-peak limiter's latency `T = 48_000 / 100 + 6`; every other
+ * catalog effect's is `0`.
+ */
+const WARMUP_FRAMES = Object.freeze({ "miso.soft-clip": 60, "miso.true-peak-limiter": 486 });
 
 /**
  * Issue #1205: submix strips and bus taps, authored through the SDK and held to the engine.

@@ -491,7 +491,10 @@ fn a_session_bypass_lowers_to_an_enabled_effect_and_a_bypassed_lane() {
             "an enabled instance holds no lane"
         );
     }
-    assert_eq!(effect_compiler::NEVER_BANKED_EFFECTS, ["miso.delay"]);
+    assert_eq!(
+        effect_compiler::NEVER_BANKED_EFFECTS,
+        ["miso.delay", "miso.reverb"]
+    );
 }
 
 /// Issue #1087: a live-control lane starts from the session bypass, not the prepared one.
@@ -673,7 +676,7 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
         checked += 1;
         with_many_cells += usize::from(cells > 1);
     }
-    assert_eq!(checked, 10, "the ten launch effects");
+    assert_eq!(checked, 11, "the eleven launch effects");
     assert!(with_many_cells > 0);
     // A descriptor with no live producer still gets the effect contract's minimum window.
     static NO_CELLS: EffectDescriptor = EffectDescriptor {

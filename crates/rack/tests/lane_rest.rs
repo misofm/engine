@@ -2,7 +2,8 @@
 //!
 //! `LiveControlEffectBankStage::lanes_at_rest` is the effect's own mask minus every lane with work
 //! of its own in the block: a staged span, a staged prepared target, a lane that reads the dry
-//! shunt (bypassed or crossfading) and an armed observation tap. Its `advance_clocks` forwards the
+//! shunt while crossfading, or settled bypassed with a word that is not `+0.0` in its run of the
+//! latency line (issue #2129 D6), and an armed observation tap. Its `advance_clocks` forwards the
 //! effect's clocks and feeds the dry shunt's latency line the skipped `+0.0` block.
 //!
 //! The effect is a stand-in with an honest predicate: per lane and channel a one-pole state word
@@ -28,7 +29,7 @@ use effect_contract::{
 use engine::realtime::{
     GatePin, LiveValuesSuperseded, ObservationReader, RevisionGate, observation_slot,
 };
-use rack::{BankBlock, BankStage, LiveControlEffectBankStage};
+use rack::{BankBlock, BankStage, LanePeerMut, LiveControlEffectBankStage};
 
 const LANES: usize = 4;
 const ALL: u32 = (1 << LANES) - 1;
@@ -193,6 +194,15 @@ impl PreparedNativeEffectBank for MockBank {
     ) -> Result<(), StatePayloadError> {
         Ok(())
     }
+
+    /// No prepared per-lane defaults, so a lane swap moves only the stage's per-lane parts.
+    fn lane_default_bytes(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn exchange_lane_defaults(&mut self, _lane: usize, _bytes: &mut [u8]) -> bool {
+        true
+    }
 }
 
 const fn tap() -> ObservationDescriptor {
@@ -208,6 +218,7 @@ const fn tap() -> ObservationDescriptor {
         channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
+        bypass_observation: Some(0.0),
     }
 }
 static TAPS: [ObservationDescriptor; 1] = [tap()];
@@ -372,6 +383,12 @@ impl Pair {
         self.skipping.push(lane, record);
     }
 
+    /// Move lanes in both twins alike, between blocks.
+    fn move_lane(&mut self, mut action: impl FnMut(&mut World)) {
+        action(&mut self.rendered);
+        action(&mut self.skipping);
+    }
+
     /// One block of `input` (`(left, right)` interleaved, `WORDS` each) in both worlds. Returns
     /// the mask after the drain.
     fn step(&mut self, input: &(Vec<f32>, Vec<f32>)) -> u32 {
@@ -458,6 +475,28 @@ fn signal_ending_silent(rng: &mut Rng) -> (Vec<f32>, Vec<f32>) {
     planes
 }
 
+/// [`signal_ending_silent`] on lane `lane` alone (its pole must be `0`) and on its right plane
+/// alone, from a seeded generator: a line that holds signal on one plane only.
+fn signal_on(lane: usize, seed: u64) -> (Vec<f32>, Vec<f32>) {
+    let mut rng = Rng(seed);
+    let mut planes = (vec![0.0; WORDS], vec![0.0; WORDS]);
+    for frame in 0..QUANTUM as usize - 1 {
+        planes.1[frame * LANES + lane] = rng.signed();
+    }
+    planes
+}
+
+/// A world whose lane 0 is settled bypassed with signal in its run of the latency line: the
+/// lane a carry or a cross-stage swap moves into a pair's twin.
+fn donor() -> World {
+    let mut world = World::new();
+    world.push(0, bypass(true, 0));
+    let (mut left, mut right) = signal_on(0, 0x2129);
+    let _ = world.begin();
+    world.finish(&mut left, &mut right, false);
+    world
+}
+
 fn gain(lane: usize, value: f32) -> EffectControlRecord {
     EffectControlRecord::Parameter {
         parameter_index: 0,
@@ -498,9 +537,11 @@ const fn observe(armed: bool) -> EffectControlRecord {
 
 /// Gates 1 and 2 for the live-control effect bank stage (issue #1781).
 ///
-/// Scripted, each term on its own: a staged span, a staged prepared target, a bypass (crossfading
-/// and settled) and an armed tap each clear exactly their lane's bit for exactly the blocks they
-/// hold; a block of signal whose last frame is silent leaves the effect at rest with signal in
+/// Scripted, each term on its own: a staged span, a staged prepared target, a bypass crossfade and
+/// an armed tap each clear exactly their lane's bit for exactly the blocks they hold, and a
+/// settled bypass on silence clears none (issue #2129 D6), and a bypassed lane moved by a swap in
+/// the stage, a cross-stage swap or a carry keeps its line's zero run, so it does not rest while
+/// the line it brought still holds signal (red with any of the three zero-run copies removed); a block of signal whose last frame is silent leaves the effect at rest with signal in
 /// the latency line, the next silent block is skipped, and a step bypass after it renders the
 /// line's words exactly as the twin that rendered the skipped block. Then a random schedule of
 /// signal, silence, spans, targets, bypass switches and tap subscriptions on every lane. Every
@@ -534,8 +575,20 @@ fn the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly() {
     assert_eq!(pair.step(&quiet), ALL, "the tap was disarmed");
     // A bypass crossfade over 40 frames, then the settled bypass, then back to wet.
     pair.push(1, bypass(true, 40));
-    for _ in 0..5 {
-        assert_eq!(pair.step(&quiet), ALL & !(1 << 1), "a bypassed lane");
+    for _ in 0..3 {
+        assert_eq!(pair.step(&quiet), ALL & !(1 << 1), "a crossfading lane");
+    }
+    // Issue #2129 D6: settled, its run of the latency line all `+0.0`, the bypassed lane rests on
+    // silence and the bank skips. Red on the #1781 predicate, which kept every lane that reads
+    // dry rendering.
+    for _ in 0..2 {
+        let skips = pair.skips;
+        assert_eq!(pair.step(&quiet), ALL, "a settled-bypassed lane on silence");
+        assert_eq!(
+            pair.skips,
+            skips + 1,
+            "the bank with a bypassed lane skipped"
+        );
     }
     pair.push(1, bypass(false, 20));
     assert_eq!(
@@ -558,6 +611,20 @@ fn the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly() {
         assert_eq!(pair.skips, skips + 1, "the silent block was skipped");
         pair.push(lane, bypass(true, 0));
         let _ = pair.step(&quiet);
+        pair.push(lane, bypass(false, 0));
+        let _ = pair.step(&quiet);
+    }
+    // Issue #2129 D6: a settled-bypassed lane whose run of the line still holds signal does not
+    // rest; once the line has taken a whole run of `+0.0`, it does.
+    for lane in (0..LANES - 1).filter(|&lane| POLES[lane] == 0.0) {
+        let _ = pair.step(&signal_ending_silent(&mut rng));
+        pair.push(lane, bypass(true, 0));
+        assert_eq!(
+            pair.step(&quiet),
+            ALL & !(1 << lane),
+            "the line still holds signal"
+        );
+        assert_eq!(pair.step(&quiet), ALL, "the line holds only +0.0");
         pair.push(lane, bypass(false, 0));
         let _ = pair.step(&quiet);
     }
@@ -593,6 +660,62 @@ fn the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly() {
     eprintln!("skips {}, refusals {}", pair.skips, pair.refused);
     assert!(pair.skips > 100, "too few skipped blocks ({})", pair.skips);
     assert!(pair.refused > 100, "too few refusals ({})", pair.refused);
+    // Issue #2129 D6 across lane moves: the zero run moves with the lane's run of the line. Lane 1,
+    // settled bypassed with an all-`+0.0` line, takes a bypassed lane whose line still holds
+    // signal -- lane 0's by a swap in the stage, a donor stage's lane 0 by a cross-stage swap and
+    // by a plan swap's carry -- and is not at rest until its line has taken a run of `+0.0`.
+    // Last in the test: after the cross-stage swap, the twins' lane 1 holds a donor's cells.
+    for (what, step) in [
+        ("a swap in the stage", 0),
+        ("a carry", 2),
+        ("a cross-stage swap", 1),
+    ] {
+        for lane in [0, 1] {
+            pair.push(lane, observe(false));
+            pair.push(lane, bypass(true, 0));
+        }
+        let _ = pair.step(&signal_on(0, 0x2129));
+        pair.move_lane(|world| {
+            let mut scratch = vec![0_u8; world.stage.lane_swap_scratch_bytes()];
+            let moved = match step {
+                0 => world
+                    .stage
+                    .swap_lanes(1, LanePeerMut::Same(0), &mut scratch),
+                1 => world.stage.swap_lanes(
+                    1,
+                    LanePeerMut::Other(&mut donor().stage, 0),
+                    &mut scratch,
+                ),
+                _ => {
+                    world.stage.install_carry_slots(1);
+                    world
+                        .stage
+                        .carry_lane_from(1, &donor().stage, 0, &mut scratch)
+                }
+            };
+            assert!(moved, "{what}: the lane moved");
+        });
+        assert_eq!(
+            pair.step(&quiet) & (1 << 1),
+            0,
+            "{what}: the moved line still holds signal"
+        );
+        assert_ne!(
+            pair.step(&quiet) & (1 << 1),
+            0,
+            "{what}: the moved line holds only +0.0"
+        );
+        if step == 0 {
+            pair.move_lane(|world| {
+                let mut scratch = vec![0_u8; world.stage.lane_swap_scratch_bytes()];
+                assert!(
+                    world
+                        .stage
+                        .swap_lanes(1, LanePeerMut::Same(0), &mut scratch)
+                );
+            });
+        }
+    }
 }
 
 /// Issue #1107 (the #1781 verifier's F1): the plain effect bank stage forwards the effect's rest

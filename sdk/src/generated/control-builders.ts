@@ -1156,6 +1156,48 @@ export const EFFECT_PARAMETER_ROWS: Readonly<Record<string, Readonly<Record<stri
         "choices": []
       }
     },
+    "miso.reverb": {
+      "pre-delay": {
+        "control": "pre_delay_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "decay": {
+        "control": "decay_ms",
+        "kind": "continuous",
+        "choices": []
+      },
+      "size": {
+        "control": "size",
+        "kind": "continuous",
+        "choices": []
+      },
+      "damping": {
+        "control": "damping_hz",
+        "kind": "continuous",
+        "choices": []
+      },
+      "low cut": {
+        "control": "low_cut_hz",
+        "kind": "continuous",
+        "choices": []
+      },
+      "diffusion": {
+        "control": "diffusion",
+        "kind": "continuous",
+        "choices": []
+      },
+      "width": {
+        "control": "width",
+        "kind": "continuous",
+        "choices": []
+      },
+      "mix": {
+        "control": "mix",
+        "kind": "continuous",
+        "choices": []
+      }
+    },
     "miso.soft-clip": {
       "drive": {
         "control": "drive_db",

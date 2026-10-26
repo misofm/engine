@@ -50,7 +50,7 @@ const QUANTUM: u32 = 128;
 const BLOCKS: u64 = 16;
 
 /// Every launch effect, by registry id.
-const EFFECTS: [&str; 10] = [
+const EFFECTS: [&str; 11] = [
     "miso.parametric-eq",
     "miso.compressor",
     "miso.gate-expander",
@@ -61,6 +61,7 @@ const EFFECTS: [&str; 10] = [
     "miso.delay",
     "miso.de-esser",
     "miso.dynamic-eq",
+    "miso.reverb",
 ];
 
 fn width() -> BankWidth {
@@ -391,7 +392,11 @@ fn patterns(lanes: usize) -> Vec<Vec<bool>> {
 /// * the shunt built only when a lane has a live channel (`has_channel()` without
 ///   `|| bypassed()`) -> no shunt, and a bypassed lane renders wet;
 /// * `BypassShunt::capture` stops feeding its latency line -> the limiter's and the soft clip's
-///   bypassed lanes emit undelayed words.
+///   bypassed lanes emit undelayed words;
+/// * issue #2129: the all-bypassed pattern renders every block through the stage's skip (the
+///   count is asserted), so `BypassShunt::passthrough` writing the stale dry staging in place of
+///   the line's words, adding `+0.0` to each word (a `-0.0` run comes out `+0.0`), or feeding the
+///   right line the left plane each fail the limiter's and the soft clip's rows.
 #[test]
 fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
     let registry = launch_native_effect_registry().expect("launch registry");
@@ -512,6 +517,19 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
                         assert_bits(&format!("{what} right"), &members.right[lane], &right[lane]);
                     }
                 }
+                // Issue #2129 gate 1: the all-bypassed pattern renders through the skip on every
+                // block, so the rows above hold the skip's words; a bank with an enabled lane
+                // never skips.
+                let expected_skips = if bypassed.iter().all(|bypassed| *bypassed) {
+                    BLOCKS
+                } else {
+                    0
+                };
+                assert_eq!(
+                    chain.bypass_skips(),
+                    expected_skips,
+                    "{effect_id} {case:?} pattern {pattern_index}: bypass skips"
+                );
             }
         }
         if bound {
@@ -543,7 +561,8 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
 /// today's dry block. (The session-level twin, through the real graph, is
 /// `bypass_cohorts::a_session_bypass_renders_todays_bits`.) The delay lowers its bypass too
 /// (#1339) but is left out: on a block its ring trips, its shunt passes the dry block where its
-/// prepared bypass zeroed it (#1339 D4), which `bypass_cohorts` holds.
+/// prepared bypass zeroed it (#1339 D4), which `bypass_cohorts` holds. The reverb (#2114) never
+/// banks either and is left out with every other member of `NEVER_BANKED_EFFECTS`.
 ///
 /// Red mutation: `BypassShunt::capture` stops feeding its latency line -> the limiter's and the
 /// soft clip's dry output is undelayed.
@@ -614,8 +633,8 @@ fn a_shunt_bypassed_per_node_instance_is_bit_identical_to_prepared_bypass() {
 /// of default members at the host's width, and every launch effect is in the registry this file
 /// walks.
 ///
-/// Red mutations: add a banking effect to the list, or remove the delay. (The list no longer
-/// decides a bypass: since #1339 the delay lowers its bypass to a per-node shunt, which
+/// Red mutations: add a banking effect to the list, or remove the delay or the reverb. (The list
+/// no longer decides a bypass: since #1339 the delay lowers its bypass to a per-node shunt, which
 /// `bypass_cohorts::a_bypassed_delay_passes_its_dry_block_when_its_ring_trips` holds.)
 #[test]
 fn the_never_banked_list_is_exactly_the_launch_effects_that_decline_a_bank() {
@@ -1150,6 +1169,15 @@ fn bank_equals_node(effect_id: &str, backend: Backend) {
         for (lane, node) in nodes.iter_mut().enumerate() {
             let (left, right) = (&mut expected_left[lane], &mut expected_right[lane]);
             node.control.stage(&mut [], first_sample, gate.snapshot());
+            // #2129 D2, D3 (as amended): leaving settled bypass resumes from rest, as
+            // `runtime::LiveControlEffect::stage` does.
+            if node.control.take_rest() {
+                node.effect
+                    .reset(effect_contract::ResetKind::DiscontinuityKeepParameters);
+                let latency = u32::try_from(latency).expect("latency fits");
+                let warmup = node.effect.warmup_samples(latency);
+                node.control.begin_hold(warmup);
+            }
             let needs_dry = node.control.needs_dry();
             if needs_dry || node.shunt.feeds_line() {
                 node.shunt.capture(left, right);

@@ -635,6 +635,7 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
         channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
+        bypass_observation: Some(0.0),
     }];
 
     let unobserved = LiveControlEffectBankStage::new(
@@ -938,6 +939,7 @@ fn each_lanes_subscriptions_reach_that_lanes_taps_in_order() {
             channels: ObservationChannels::PerLane,
             minimum: 0.0,
             maximum: 100.0,
+            bypass_observation: Some(0.0),
         }
     }
     static TWO_TAPS: [ObservationDescriptor; 2] = [tap(1), tap(2)];

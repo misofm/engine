@@ -43,10 +43,10 @@
 //! and are indexed there -- move up by one. The original layout ends with the compressor family of issue #88.
 //! Issue #213 appends two builtin cases after that family, preserving the original eight-case
 //! builtin block and every later index. Issue #1637 appends the scalar [`automation::corpus`]
-//! block after those two builtin cases, and issue #952 appends the [`graph::corpus`] resident-fold
-//! block after that, the last block, so no earlier index moves.
-//! `tools/wasm-gates/tests/g5_native_corpus.rs` checks the preserved layout, the two builtin cases
-//! after it, the automation block and the graph block at the end.
+//! block after those two builtin cases, issue #952 appends the [`graph::corpus`] resident-fold
+//! block after that, and issue #2114 appends the [`reverb::corpus`] block last, so no earlier
+//! index moves. `tools/wasm-gates/tests/g5_native_corpus.rs` checks the preserved layout, the two
+//! builtin cases after it, then the automation, graph and reverb blocks at the end.
 
 use automation::corpus as automation_corpus;
 use builtins::corpus as builtins_corpus;
@@ -65,6 +65,7 @@ use math::corpus as math_corpus;
 use math::{exp2_lane, log2_lane};
 use multiband_compressor::corpus as multiband_corpus;
 use parametric_eq::corpus as parametric_eq_corpus;
+use reverb::corpus as reverb_corpus;
 use sha2::{Digest, Sha256};
 use soft_clip::corpus as soft_clip_corpus;
 use transient_shaper::corpus as transient_shaper_corpus;
@@ -263,6 +264,16 @@ pub const AUTOMATION_CASE_COUNT: usize = automation_corpus::CASE_COUNT;
 /// earlier index moves; their pins live in that crate.
 pub const GRAPH_FOLD_CASE_COUNT: usize = graph_corpus::CASE_COUNT;
 
+/// Cases delegated to [`reverb::corpus`] (issue #2114), replayed under wasm.
+///
+/// A whole prepared reverb per case, through the history-filling start and the full-history
+/// kernel: the pre-delay and tap crossfades (one queued behind another in the automated case),
+/// the eight pipelined allpasses, the in-loop TPT filters with their D7 flush, the sixteen-line
+/// butterfly with its re-layouts, and the width and mix stages. Lane generic -- the lanes are the
+/// sixteen lines of one instance, not a bank -- so digested at every width. Appended after the
+/// graph block, so no earlier index moves; their pins live in that crate.
+pub const REVERB_CASE_COUNT: usize = reverb_corpus::CASE_COUNT;
+
 /// Total cases the guest exports.
 pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + MATH_CASE_COUNT
@@ -277,7 +288,8 @@ pub const CASE_COUNT: usize = LANE_CASE_COUNT
     + LIMITER_CASE_COUNT
     + COMPRESSOR_CASE_COUNT
     + AUTOMATION_CASE_COUNT
-    + GRAPH_FOLD_CASE_COUNT;
+    + GRAPH_FOLD_CASE_COUNT
+    + REVERB_CASE_COUNT;
 
 /// The block kernels the corpus drives, in pin order.
 const KERNELS: [Kernel; 13] = [
@@ -494,6 +506,8 @@ enum Case {
     Automation(usize),
     /// One case of the `graph` resident-fold corpus.
     GraphFold(usize),
+    /// One case of the `reverb` G5 corpus.
+    Reverb(usize),
 }
 
 /// Decodes a case index. This order is part of the pin.
@@ -575,7 +589,11 @@ fn case_of(index: usize) -> Case {
     if index < AUTOMATION_CASE_COUNT {
         return Case::Automation(index);
     }
-    Case::GraphFold(index - AUTOMATION_CASE_COUNT)
+    let index = index - AUTOMATION_CASE_COUNT;
+    if index < GRAPH_FOLD_CASE_COUNT {
+        return Case::GraphFold(index);
+    }
+    Case::Reverb(index - GRAPH_FOLD_CASE_COUNT)
 }
 
 /// `true` when the case has a lane instantiation, so its digest must be identical at all three
@@ -652,6 +670,7 @@ pub fn case_name(index: usize) -> String {
         }
         Case::Automation(case) => automation_corpus::CASE_NAMES[case].to_string(),
         Case::GraphFold(case) => format!("graph/{}", graph_corpus::CASE_NAMES[case]),
+        Case::Reverb(case) => format!("effect/reverb/{}", reverb_corpus::CASE_NAMES[case]),
     }
 }
 
@@ -1182,6 +1201,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
         Case::Compressor(case) => compressor_corpus::C1_DIGESTS[case],
         Case::Automation(case) => automation_corpus::G5_DIGESTS[case],
         Case::GraphFold(case) => graph_corpus::DIGESTS[case],
+        Case::Reverb(case) => reverb_corpus::G5_DIGESTS[case],
     }
 }
 
@@ -1212,6 +1232,7 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
         Case::Compressor(case) => at_width!(width, |L| digest_compressor::<L>(case)),
         Case::Automation(case) => digest_words(automation_corpus::run_case(case)),
         Case::GraphFold(case) => at_width!(width, |L| digest_graph_fold::<L>(case)),
+        Case::Reverb(case) => at_width!(width, |L| digest_reverb::<L>(case)),
     }
 }
 
@@ -1297,7 +1318,8 @@ fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES
         | Case::Limiter(_)
         | Case::Compressor(_)
         | Case::Automation(_)
-        | Case::GraphFold(_) => {
+        | Case::GraphFold(_)
+        | Case::Reverb(_) => {
             panic!("case {index} is not a lane-kernel case")
         }
     }
@@ -1847,6 +1869,14 @@ fn digest_transient_shaper(case: usize, width: usize) -> [u8; 32] {
 fn digest_delay(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; delay_corpus::POINTS];
     delay_corpus::run_case(case, &mut out);
+    digest_words(out.iter().copied())
+}
+
+/// Digests one `reverb` G5 case at width `L::WIDTH`: SHA-256 over the little-endian result words
+/// of that crate's `corpus::run_case`, the form its `G5_DIGESTS` pins take.
+fn digest_reverb<L: Lane>(case: usize) -> [u8; 32] {
+    let mut out = vec![0_u32; reverb_corpus::POINTS];
+    reverb_corpus::run_case::<L>(case, &mut out);
     digest_words(out.iter().copied())
 }
 

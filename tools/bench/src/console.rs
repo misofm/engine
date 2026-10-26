@@ -310,9 +310,21 @@ pub(crate) fn main() {
             bank_report(true);
             return;
         }
+        // Issue #2143: the W=4 counters the wasm guest wrote, joined with V8's timing rows.
+        [flag, counters, v8 @ ..] if flag == "--bank-report-w4" && v8.len() <= 1 => {
+            let read = |path: &std::ffi::OsString| {
+                std::fs::read_to_string(path)
+                    .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+            };
+            print!(
+                "{}",
+                bank_report_w4(&read(counters), v8.first().map(read).as_deref())
+            );
+            return;
+        }
         _ => panic!(
-            "benchmark accepts no arguments but --preflight, --bank-report or \
-             --bank-report-preflight"
+            "benchmark accepts no arguments but --preflight, --bank-report, \
+             --bank-report-preflight or --bank-report-w4 <w4-counters.json> [<v8-records.jsonl>]"
         ),
     }
     let round = round_from_runner();
@@ -584,6 +596,82 @@ fn bank_report(preflight: bool) {
             );
         }
     }
+}
+
+/// The text after `"key":` in `text`, from `from`, or `None` when the key is absent.
+fn json_after<'a>(text: &'a str, key: &str, from: usize) -> Option<(usize, &'a str)> {
+    let needle = format!("\"{key}\":");
+    let at = text[from..].find(&needle)? + from + needle.len();
+    Some((at, &text[at..]))
+}
+
+/// The leading unsigned integer of `text`.
+fn leading_u64(text: &str) -> Option<u64> {
+    let end = text
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(text.len());
+    text[..end].parse().ok()
+}
+
+/// The leading JSON string of `text`, without its quotes (no escapes: every name here is plain).
+fn leading_string(text: &str) -> Option<&str> {
+    let text = text.strip_prefix('"')?;
+    Some(&text[..text.find('"')?])
+}
+
+/// `bench console --bank-report-w4` (issue #2143): one table that carries the W=4 bank counters
+/// `wasm_gates --w4-counters` wrote (wasmtime, the `simd128` guest) beside the W=4 timing of V8's
+/// document of the same name (`p50_ns` of `scripts/run-web-mixing-automation-benchmark.sh`'s
+/// `documents`), each column labelled with its source. A row V8 has no document for says so; no
+/// number is made up for it. Untimed: it reads two files and times nothing.
+fn bank_report_w4(counters: &str, v8: Option<&str>) -> String {
+    use std::fmt::Write as _;
+    let source = json_after(counters, "source", 0)
+        .and_then(|(_, rest)| leading_string(rest))
+        .expect("w4-counters.json names its source");
+    let blocks = json_after(counters, "blocks", 0)
+        .and_then(|(_, rest)| leading_u64(rest))
+        .filter(|blocks| *blocks > 0)
+        .expect("w4-counters.json names its block count");
+    let mut table = String::from(
+        "| row | banks | mergeable pairs | BSR/block | track BSR/block | silent skips | bypass skips \
+         | pack groups | counters | p50 us | timing |\n|---|---|---|---|---|---|---|---|---|---|---|\n",
+    );
+    let mut from = 0;
+    while let Some((at, rest)) = json_after(counters, "row", from) {
+        let row = leading_string(rest).expect("a row name");
+        let (at, rest) = json_after(counters, "counters", at).expect("the row's counters");
+        let list = &rest[1..rest.find(']').expect("a counter list")];
+        let values: Vec<u64> = list
+            .split(',')
+            .map(|value| value.trim().parse().expect("a counter"))
+            .collect();
+        assert_eq!(values.len(), 7, "{row}: seven counters");
+        let per_block = |runs: u64| format_f64(runs as f64 / blocks as f64);
+        let p50 = v8.and_then(|records| {
+            let key = format!("\"workload_kind\":\"{row}\"");
+            let at = records.rfind(&key)?;
+            json_after(records, "p50_ns", at).and_then(|(_, rest)| leading_u64(rest))
+        });
+        let (p50, timing) = match p50 {
+            Some(ns) => (format_f64(ns as f64 / 1_000.0), "V8"),
+            None => ("-".to_owned(), "not measured: no V8 document of this name"),
+        };
+        writeln!(
+            table,
+            "| {row} | {} | {} | {} | {} | {} | {} | {} | {source} | {p50} | {timing} |",
+            values[0],
+            values[1],
+            per_block(values[2]),
+            per_block(values[3]),
+            values[4],
+            values[5],
+            values[6],
+        )
+        .expect("write into a string");
+        from = at;
+    }
+    table
 }
 
 /// `bench console --preflight`: the mixing-automation row's premises, untimed, with what they
@@ -4050,6 +4138,7 @@ mod tests {
         for workload in console_workload::CONSOLE_STRIP_WORKLOADS
             .into_iter()
             .chain(console_workload::PACKING_WORKLOADS)
+            .chain(console_workload::BYPASS_WORKLOADS)
         {
             let measured = SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS);
             assert_eq!(measured.render_errors, 0, "{}", workload.kind());
@@ -4192,6 +4281,7 @@ mod tests {
             (Workload::TenTrackRaggedStrip, 10),
             (Workload::ThirteenTrackRaggedStrip, 13),
             (Workload::SixteenTrackStrip, 16),
+            (Workload::SixteenTrackStripBypassed, 16),
         ] {
             let record = record_of(workload);
             assert!(record.contains(&format!("\"tracks\":{tracks},")));

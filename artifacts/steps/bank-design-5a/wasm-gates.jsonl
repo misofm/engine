@@ -1,0 +1,2 @@
+{"schema_version":1,"kind":"wasm_gates","leg":"native","runtime":"wasmtime 47.0.3","backend":2,"cases":157,"comparisons":391,"minmax_lowering_mismatches":0,"f64_lane_mismatches":0,"meter_block_mismatches":0,"console_rows":0,"console_mismatches":0,"mismatches":[]}
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm","runtime":"wasmtime 47.0.3","backend":1,"cases":157,"comparisons":274,"minmax_lowering_mismatches":0,"f64_lane_mismatches":0,"meter_block_mismatches":0,"console_rows":4,"console_mismatches":0,"mismatches":[]}

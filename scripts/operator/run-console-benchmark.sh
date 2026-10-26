@@ -24,7 +24,7 @@
 # `bench` in release and refuses again when an admissibility precondition below is unmet. An
 # admitted run pins the process to the benchmark core and the live-producer row's core (#938, a core
 # of its L3 that is not its SMT sibling; none is a refusal), takes one untimed warmup and exactly
-# two measured rounds, validates the 78 records
+# two measured rounds, validates the 80 records
 # with `console-benchmark-validator.jq`, and promotes them to the accepted file beside a
 # disposition.
 # `scripts/operator/preflight-console-benchmark.sh --step NAME` checks everything that can fail
@@ -65,7 +65,7 @@ artifact_dir="$root/artifacts/$step_directory"
 if [[ "$subject" == swap ]]; then
     artifact=swap-benchmark records_required=2 disposition_issue=1286
 else
-    artifact=console-benchmark records_required=78 disposition_issue=149
+    artifact=console-benchmark records_required=80 disposition_issue=149
 fi
 raw="$artifact_dir/$artifact.raw.jsonl"
 accepted="$artifact_dir/$artifact.accepted.jsonl"

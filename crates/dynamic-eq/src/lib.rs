@@ -506,6 +506,7 @@ const fn observation(id: u32, display_name: &'static str) -> ObservationDescript
         channels: ObservationChannels::PerLane,
         minimum: -RANGE_MAX_DB,
         maximum: RANGE_MAX_DB,
+        bypass_observation: Some(0.0),
     }
 }
 
@@ -963,6 +964,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         self.active & (1 << lane) != 0
     }
 
+    // REALTIME_POLICY_BEGIN
     /// `ResetKind::FullToDefaults` for one lane and channel, and the D7 recovery: the prepared
     /// values are committed again, every signal word is `+0.0` and every ramp rests at its design.
     fn reset_lane_full(&mut self, channel: usize, lane: usize) {
@@ -979,7 +981,9 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         }
         set_lane_words(&mut self.state[channel], lane, &words);
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// `ResetKind::DiscontinuityKeepParameters` for one lane and channel: the signal words clear,
     /// every ramp snaps to its target, the committed values stay.
     fn reset_lane_discontinuity(&mut self, channel: usize, lane: usize) {
@@ -991,6 +995,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         }
         set_lane_words(&mut self.state[channel], lane, &words);
     }
+    // REALTIME_POLICY_END
 
     fn reset(&mut self, kind: ResetKind) {
         for lane in 0..L::WIDTH {
@@ -999,6 +1004,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
         self.ramp_frames_left = 0;
     }
 
+    // REALTIME_POLICY_BEGIN
     /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
     /// [`reset`](Self::reset) on both channels, its silence clocks included, and nothing of any
     /// other lane. The bank-level `ramp_frames_left` stays: it only chooses where a block's
@@ -1026,6 +1032,7 @@ impl<L: Lane, const CONNECTED: bool> DynamicEq<L, CONNECTED> {
             self.rest_link(lane);
         }
     }
+    // REALTIME_POLICY_END
 
     /// Clears the frozen integrators of every settled identity band on the first `channels`
     /// channels, once per block before its automation.
@@ -1639,9 +1646,11 @@ impl<const CONNECTED: bool> PreparedNativeEffect for DynamicEq<f32, CONNECTED> {
         0
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         DynamicEq::reset(self, kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut reports = [ProcessReport::default(); MAX_WIDTH];

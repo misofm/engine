@@ -2332,6 +2332,7 @@ fn a_computed_tap_is_refused_and_an_undeclared_tap_is_unknown() {
             channels: ObservationChannels::Shared,
             minimum: 0.0,
             maximum: 100.0,
+            bypass_observation: Some(0.0),
         }
     }
     static MENU: [ObservationDescriptor; 2] = [

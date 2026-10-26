@@ -159,8 +159,10 @@ an **owner decision**, dated 2026-10-26, under the ruling's amendment 15.
   state is tracked by a bounded per-lane counter of trailing `+0.0` samples fed by capture and
   passthrough, not by a scan. Gate: one `crates/rack` row, a bank with one bypassed lane on
   silence reaches `silent_skips > 0`; red on today's predicate.
-- **D7. The delay (S2).** `LiveControlEffect` (`graph/src/runtime.rs:3054`, `:5890-5945`) takes the
-  same rule with one lane: skip when settled-bypassed with no span, target or armed `None` tap; at zero
+- **D7. The two never-banked effects, `miso.delay` and `miso.reverb` (S2)** (`NEVER_BANKED_EFFECTS`,
+  `crates/effect-compiler/src/prepare.rs:295`). `LiveControlEffect` (`graph/src/runtime.rs:3076`,
+  rendered in the `NodeKind::LiveControlEffect` arm of `execute`, about `:6271-6345` on the #2142
+  branch) takes the same rule with one lane: skip when settled-bypassed with no span, target or armed `None` tap; at zero
   latency no capture and no apply; `stale` and the resume `reset(DiscontinuityKeepParameters)` on
   the `PreparedNativeEffect`; the hold through the same `EffectControlLane` logic S1 builds (the
   delay's `W` is 0, so the hold is a no-op and the first echo starts at un-bypass). A per-node
@@ -173,7 +175,8 @@ an **owner decision**, dated 2026-10-26, under the ruling's amendment 15.
   hold, shunt passthrough, trait warm-up with the two overrides, the identity row, the counter
   tests, the warm-up gate, the CPU row, the rulings. Closable in half a day of implementation
   plus one review.
-- **S2 (successor, filed at S1's close): the per-node delay skip** (D7), reusing S1's lane hold.
+- **S2 (this issue's last slice): the per-node skip for the delay and the reverb** (D7), reusing
+  S1b's lane hold. S2 closes #2129.
 - Not in scope: a per-lane silence skip (a bank skips as a whole), any change to
   effect parameter defaults, any change to the bypass classification or ramp length.
 
@@ -339,3 +342,137 @@ Findings for the rebrief:
 ## Owner decision (2026-10-26): un-bypass from rest
 
 Root asked: "When you turn a bypassed effect back on, it starts fresh ("from rest"). It does not continue from where it was. [...] Reply yes or no." The owner answered, verbatim: "Yes". This approves the per-lane un-bypass law in the amendment above (every un-bypass from settled bypass resets that lane and holds dry for `W`, then crossfades). It is class B against E5 (#1341), where a bypassed lane kept computing and un-bypass continued warm.
+
+### S1b attempt 2 (2026-10-26), on the amended D2/D3
+
+Branch `codex/batch-b13-bypassskip`, with origin/main merged twice (8f32d1673 for #2131's
+`reset_lane`, then 7e824290f for #2145 and #2133/#2146). The final head is the one pushed with this
+record.
+
+Implementation:
+
+- **Per-lane staleness (amended D2/D3).** `EffectControlLane::stage` flags a switch out of
+  **settled** bypass (`rest_pending`; a reversal before the crossfade toward bypass settles does
+  not). The rack's drain (`read_cells`) then calls `reset_lane(lane, DiscontinuityKeepParameters)`
+  on that lane alone and `begin_hold(W)`, before the block's targets and spans, whether or not its
+  bank skipped. The whole-bank `resume`, the stage's `stale` mask, `swap_stale_bits` and
+  `settle_for_carry` are removed. The flag and the hold live in the control lane, so they move with
+  the lane in `swap_lanes` (same-stage and cross-stage, #1981's packing included) and in
+  `carry_from`.
+- **Per-node parity.** `runtime::LiveControlEffect` takes the same law (the instance's `reset`,
+  then the hold through `BypassShunt::crossfade_held`), and folds a settled-bypassed instance's
+  declared tap value (D5), so a placement change moves no bit. `bank_equals_node` holds with the
+  hold active (the limiter's 486-frame hold ends inside a block).
+- **Limiter `W = T`** (the trait default, the declared latency); derivation in the crate's module
+  docs. Soft clip `W = 60`, derivation in `soft_clip::warmup_samples`.
+- **M1.** Every `reset_lane` trait body and the per-lane helpers it calls, in the nine banking
+  effects, and every per-node `reset` (ten effects) sit in `REALTIME_POLICY` regions: the tool
+  reports 234 regions on main 7e824290f and 283 on this branch.
+- **M3** (optional limiter oracle) not done.
+- `Runtime::bank_slot_runs` subtracts `BankChain::bypass_skips`.
+
+Red evidence (each red on the named mutant, then green on revert):
+
+| Gate | Test | Mutants |
+|---|---|---|
+| B1 | `bypass_skip_warmup::a_lanes_un_bypass_does_not_depend_on_its_bank_mates` | red on the tree before the amendment (compressor, sample 2048: `-0.0066666724` after a skipped bank against `-0.0066666515` after a running one); red with the drain's reset and hold disabled |
+| 4 | `rack/tests/bypass_skip.rs::a_lane_leaving_settled_bypass_is_reset_alone_keeping_parameters` | no lane reset; `FullToDefaults`; a whole-bank reset in its place; the rest flagged on every switch to wet (a reversal resets) |
+| 5 | `bypass_skip_warmup::a_resumed_lane_holds_dry_for_its_warmup_then_crossfades_onto_the_reference` (exact bits, ramp and step legs) | limiter `W = T - 1`; soft clip `W = 58`; no hold; the bank crossfade ignores the hold |
+| 5 | `...a_resumed_limiter_keeps_its_ceiling_from_the_first_wet_frame` | no hold; the bank crossfade ignores the hold |
+| runs | `silent_bank_skip::bank_slot_runs_follow_the_skips` (bypassed-slot leg) | red before the subtraction (9 runs counted where 6 banks ran) |
+
+Gates 1, 3 and the D6 rows are unchanged from attempt 1 and pass. `W - 1` for the soft clip (59)
+cannot be made red by any output word: the reset word the frame still reads is weighted by the
+product of the two outermost half-band taps (about `1.7e-9`), below half an `f32` ulp; `W - 2` is
+red, so the derivation is the record. The limiter's ceiling row is not red at `T - 1` (its extra
+frame is the ring's reset `+0.0`); the crossfade row is.
+
+The C ABI's `a_live_bypass_crossfades_over_the_session_mute_ramp...` lift rows are rewritten: a
+lift resets the effect, so no never-bypassed control is its target; they now hold `D` through the
+warm-up and require the per-node and banked lifts to agree bit for bit. `graph`'s
+`live_bypass_is_latency_preserving_and_reversible` expects the two held dry frames.
+
+Gate 6, CPU row (descriptive; `SessionMeasurement::run_for` at the frozen 1000 observations, one
+warmup and two measured rounds, pinned to one core, x86-64 AVX2, through a scratch uncommitted
+test; "before" is origin/main 7e824290f with only the workload variant added):
+
+| Row | Before p50 / p95 ns per block | After p50 / p95 ns per block |
+|---|---|---|
+| `sixteen_track_strip` (round 1, round 2) | 23475 / 29286, 23696 / 29486 | 23765 / 24086, 23765 / 24076 |
+| `sixteen_track_strip_bypassed` (round 1, round 2) | 30498 / 36559, 30539 / 36630 | 6492 / 6573, 6453 / 6532 |
+
+Every row: 0 render errors and 0 forbidden render operations (the bench's audited allocator). Output
+digests before and after are identical (`sixteen_track_strip` 00b84736...4988,
+`sixteen_track_strip_bypassed` 6841e080...a2fa5): the one-time bit identity of the bypassed render.
+`tools/bench console` now emits the row (80 records; the validators and the runner know the kind).
+
+Gates run: the lint job's every step (fmt, clippy, doc with `-D warnings`, workspace policy and its
+mutation tests, lane policy, unfused seal, rack, effect-runtime and the other hermetic scripts,
+the three lane-guard builds); the realtime-policy tool; CI's workspace debug test step with its
+features (host-web's render-lock probe and host-core's zero-allocation render tests included);
+the DSP crates, graph-compiler, bench and console-workload in release;
+`scripts/test-console-benchmark.sh`.
+
+### S1b attempt 3 (2026-10-26): the review's two test gaps, the counter walk, the W=4 re-pin
+
+- **MAJOR 1, C ABI lift rows** (`capi` `a_live_bypass_crossfades_over_the_session_mute_ramp...`):
+  each lift row now requires words past `W` plus the ramp that are not the dry control's. Red on
+  an acked lift that stays dry (the lane's `stage` ignoring a switch to wet), run per effect: the
+  compressor, the soft clip, the delay and the multiband each fail "the lift was acked but its
+  output stayed dry"; green on revert.
+- **MAJOR 2, D6 across lane moves** (`lane_rest::the_live_stage_rests_only_lanes_with_no_work_and_skips_exactly`,
+  extended): a bypassed lane whose line holds signal (right plane only) is moved into lane 1 by a
+  swap in the stage, a carry from a donor stage and a cross-stage swap, and is not at rest until its
+  line holds only `+0.0`. Removing each of the three zero-run copies (carry, same-stage swap,
+  cross-stage swap) is red at the row's "claimed at rest, but a silent block wrote" check: the tail
+  drop itself.
+- **MINOR**: `note_line_input` walks frame-major over the contiguous interleaved block from its end
+  and stops when no lane counts or after `latency` frames (the run saturates there). The lane
+  vocabulary has no bitwise lane test (its `eq` takes `-0.0` as `+0.0`), so the fold is over `u32`
+  words. A counter that reads one plane only is red (the move rows feed the right plane alone).
+- **#2143's successor action** (after #2149 merged): `Runtime::bank_slot_runs` carries each row's
+  bypass skips, `TestOnlyBankSlotRuns::bypass_skips` exposes them, and
+  `console_workload::bank_counters` reports them in place of the constant 0. New W=4 pins, from the
+  wasm leg (the native `Simd4` leg runs on arm64 in CI and has not read them yet):
+  `c1_console_16_load` `[15, 0, 0, 0, 260, 7164, 0]`, `c1_console_16_typical`
+  `[15, 0, 3584, 2304, 260, 3580, 0]`; `all_active` and `sparse` unchanged. The plan gate holds
+  every row's runs, bypass skips and skipped chains to the plan's slot-blocks, the two unbypassed
+  rows to the full track runs, and `Load` to no run.
+- Gates: `scripts/run-wasm-gates.sh` (both legs, then the V8 spill gate) ok; every lint-job step;
+  `cargo test` for rack, graph-compiler, bench, console-workload, wasm-gates and capi.
+
+
+## Amendment (finish map, 2026-10-26; tree main `26d8f97c8` + #2142 PR #2154 `4f5d448eb`)
+
+### S2 scope after S1b (PR #2150) and #2142 (PR #2154)
+
+Already done by S1b on the per-node path, and **not to be rebuilt**: the un-bypass law
+(`LiveControlEffect::stage`: `take_rest()` -> `processor.reset(DiscontinuityKeepParameters)` ->
+`begin_hold(warmup)`), the D5 fold of a settled-bypassed instance's declared tap value, and the
+`settled_bypassed` read before the mix. D7's "`stale` and the resume reset" clause is therefore
+superseded by the per-lane law: there is no per-node `stale`.
+
+What S2 adds, in the arm only:
+
+- Skip iff `settled_bypassed && staged.staged == 0 && prepared_targets() is empty && no armed tap
+  whose bypass value is None`. On a skipped block: at zero latency no `capture` and no `process`
+  (the planes already hold the dry words; `apply_bypass` is not needed either, since `needs_dry`
+  selects dry = the plane); at nonzero latency exchange the block through the line
+  (`BypassShunt::passthrough`, built by S1b) and no `process`. The words equal today's
+  `capture` + `process` + `apply_bypass` for a settled-bypassed lane by construction (the wet
+  words are discarded by the select).
+- `bypass_skips: u64` on `LiveControlEffect`, exposed through `NodeKind::bypass_skips()` beside
+  `silent_skips()` (about `:3696`). Not added to `console_workload::bank_counters` (the W=4 table's
+  `bypass_skips` is the bank counter; its pins stay).
+- The reverb's `W` is the trait default (declared latency 0, `crates/reverb/src/lib.rs:514`); the
+  delay's likewise; the hold is a no-op for both. Decision 15 E4's rule stands: no D7 check on a
+  skipped block.
+
+Gates (minimal): one row in `crates/graph-compiler/tests/bypass_shunt_identity.rs` (the delay and
+the reverb per node, settled-bypassed for `N` blocks: words equal the oracle by `to_bits`,
+`bypass_skips == N`; a block with a span, a target or an armed `None` tap skips none; red on a
+skip that reads `bypassed()` without `bypass_ramping()` or drops the line exchange); one-time
+`to_bits` of C1-16 `Load` and `Toggle` (600 blocks) against main as PR evidence; no CPU row (#2147
+measures the reverb). Realtime: the arm is inside its `REALTIME_POLICY` region; record the count.
+Paths: `crates/graph/src/runtime.rs`, the test file, this spec. The module bytes move: the
+release-window rule applies.

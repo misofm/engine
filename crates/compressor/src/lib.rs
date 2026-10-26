@@ -468,6 +468,7 @@ pub const COMPRESSOR_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDesc
     channels: ObservationChannels::PerLane,
     minimum: 0.0,
     maximum: 100.0,
+    bypass_observation: Some(0.0),
 }];
 
 /// Immutable launch compressor descriptor.
@@ -748,6 +749,7 @@ impl<L: Lane> Instance<L> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset`](Self::reset) for lane `lane` alone (issue #2131): both channels of the lane take
     /// the words the whole reset writes there (`kernel::Channel::full_reset_lane`,
     /// `kernel::Channel::discontinuity_reset_lane`), and a full reset seats the lane's link weights
@@ -774,6 +776,7 @@ impl<L: Lane> Instance<L> {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     /// Renders one block and applies the section 4.4 boundary policy to each channel.
     ///
@@ -1391,9 +1394,11 @@ impl PreparedNativeEffect for PreparedCompressor {
         })
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         self.instance.reset(kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         // #163 phase 4 item 1, as in `process_bank`.
@@ -1461,10 +1466,12 @@ impl PreparedNativeEffect for PreparedCompressor {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
+    // REALTIME_POLICY_BEGIN
     /// Issue #2131: see `Instance::reset_lane`.
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
         self.instance.reset_lane(lane, kind);
     }
+    // REALTIME_POLICY_END
     /// Every field is inline: this instance owns no heap (#1074).
     fn retained_bytes(&self) -> u64 {
         0
