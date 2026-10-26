@@ -227,7 +227,7 @@ async function runMutationLedger() {
       name: "match one access-handle contention error name",
       file: "web/stem-store/opfs-store.js",
       search:
-        '    return access?.mode === "read-only"\n  } catch {\n    // Do not inspect the error name: WebKit and Blink/Gecko disagree on it.\n    return false',
+        '    return access?.mode === "read-only"\n  } catch {\n    // Do not inspect the error name: WebKit and Blink disagree on it.\n    return false',
       replace:
         '    return access?.mode === "read-only"\n  } catch (error) {\n    if (error?.name === "NoModificationAllowedError") return false\n    throw error',
       test: "stem-store-core-v1.mjs",
