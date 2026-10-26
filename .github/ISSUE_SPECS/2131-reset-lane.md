@@ -71,3 +71,31 @@ The conformance test file.
 - #1981 (PR #2130) is in rack and graph only, so it does not overlap.
 - The reverb #2114 is a new crate; see contract item 5.
 - The module bytes change, so the release-window rule applies.
+
+## Attempt 1 evidence (2026-10-26)
+
+- **Trait.** `crates/effect-contract/src/lib.rs`, `PreparedNativeEffectBank::reset_lane`, required, no default. Test
+  doubles forward or no-op as their `reset` does; the conformance reference bank resets the one lane.
+- **Conformance host.** `crates/effect-compiler/tests/reset_lane.rs`: effect-compiler already hosts the cross-effect
+  bank tests (`symmetry_designed_words.rs`) and binds every launch bank through the registry. One driver, one row per
+  banking effect, and `every_banking_effect_has_a_row` holds the rows to the launch effects outside
+  `NEVER_BANKED_EFFECTS`. Each row binds a full native-width bank (8 lanes on AVX2) with per-lane lattice draws of
+  every live parameter, per-block level dynamics, spans, EQ prepared targets, link glides in flight across the call
+  and a 420-block quiet passage (longer than the gate's 1000 ms hold). For both kinds, lanes 0, 4 and 7, and a running
+  and a resting schedule, it compares output words, every lane's payload and every rest bit against an untouched twin
+  (other lanes) and a whole-reset twin (the reset lane), and counts each call's heap calls (0).
+- **Limiter payload.** The limiter's lane payload carries the bank's shared ring cursors, which the whole-bank reset
+  rewinds and `reset_lane` must leave (item 3). Its row judges the reset lane by output words and rest bits only;
+  every other lane's payload is still byte-compared. The output claim holds on every case.
+- **Single source.** Gate, de-esser, dynamic EQ, soft clip and transient shaper: whole-bank `reset` is now
+  `reset_lane` over every lane plus the shared part. Compressor: the whole resets loop over the new per-lane
+  kernel helpers. EQ, multiband, limiter: per-lane resets from the D7 and lane helpers; whole resets kept.
+- **Mutants** (applied in the per-lane path only; every one red at 63ba35a81 except as noted): each effect's
+  forget-one-word mutant (gate gain, ramps, hold and link words; de-esser gain and link; dynamic EQ silence clock and
+  link; soft clip ramps; transient shaper ramps and link; compressor envelope and link glide; EQ silence counter and
+  settle/targets; multiband seed defaults and link glide; limiter limit/release snap, runtime clear and link snap) and
+  each effect's neighbour-lane mutant. Green: the EQ's stale `refresh_identity` mutant, because no section flag
+  changes at the call in this fixture (debug builds assert `identity_flags_agree` on every stationary block).
+- **Gates.** All 10 rows pass. `cargo test -p` for the 16 touched crates passes. Workspace clippy
+  (`--all-targets --all-features -D warnings`), `cargo fmt --check`, `scripts/check-workspace-policy.sh`,
+  `scripts/check-bench-policy.sh` and `realtime_policy` (233 regions in 43 files) are clean.
