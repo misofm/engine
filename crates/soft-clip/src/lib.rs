@@ -273,6 +273,24 @@ const fn tail_samples() -> u64 {
     (last - kernel::DRY_DELAY) as u64
 }
 
+/// The frames a lane renders from a reset before its output is the output a never-reset lane
+/// renders on the same input (issue #2129 D3): `latency + T = 31 + 29 = 60`.
+///
+/// The wet output at `n` reads `e[n-1] .. e[n-30]`, and each `e[m]` reads `X[m-1] .. X[m-30]`
+/// ([`tail_samples`]' layout), so the output reads input back to `n - 60`; the odd phase and the
+/// dry path read `x[n-31]`. A lane reset at `s` holds `+0.0` for every input before `s`, so from
+/// `s + 60` its output reads only post-reset input. The exact-rest bound ([`rest_samples`], 62) is
+/// longer because it covers every stored row of each ring, its mirrors included, and an output
+/// sample reads only the 30 ages per ring. A ramp holds no input-driven state.
+///
+/// `W - 1` cannot be made red by any output word: the one reset word the frame `s + 59` still reads
+/// is `X[s - 1]`, weighted by the product of the two outermost half-band taps (about `1.7e-9`, below
+/// half an `f32` ulp of the frame's other terms), so it rounds away; `W - 2` is red. The
+/// derivation is the record.
+const fn warmup_samples(declared_latency: u32) -> u32 {
+    declared_latency + tail_samples() as u32
+}
+
 /// The exact-rest bound `R` beyond the latency, in samples (#1376 D2), from the ring layout.
 ///
 /// The histories are FIR delay lines of [`LIVE_ROWS`] live rows (each mirrored), and the ramps
@@ -594,6 +612,7 @@ impl<L: Lane> Channel<L> {
         self.history.pos = 0;
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Zeroes one lane's rows of every history, leaving every other lane bit-unchanged.
     ///
     /// The shared cursor is not moved. It need not be: every row of the lane is zero, so the ring
@@ -611,7 +630,9 @@ impl<L: Lane> Channel<L> {
             }
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset_full`](Self::reset_full) for one lane (issue #2131): its rows of every history are
     /// zeroed and its ramps rest at `defaults`, and every other lane and the shared cursor are left
     /// bit-unchanged, as in [`reset_lane_discontinuity`](Self::reset_lane_discontinuity).
@@ -622,7 +643,9 @@ impl<L: Lane> Channel<L> {
             set_lane(self.state.field_mut(parameter), lane, value);
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset_discontinuity`](Self::reset_discontinuity) for one lane: its rows of every history
     /// are zeroed and its ramps snapped, and every other lane is left bit-unchanged (issue #1092).
     /// The shared cursor is not moved ([`clear_lane_rows`](Self::clear_lane_rows)), so this is
@@ -634,6 +657,7 @@ impl<L: Lane> Channel<L> {
             set_lane(self.state.field_mut(parameter), lane, ramp.current);
         }
     }
+    // REALTIME_POLICY_END
 
     /// Renders one AoSoA block, splitting it wherever a D11 ramp reaches its target.
     ///
@@ -1228,6 +1252,7 @@ impl<L: Lane> SoftClip<L> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
     /// [`reset`](Self::reset) on both channels, and nothing of any other lane. Each channel's
     /// shared cursor stays where it is, as the D7 recovery leaves it: the lane's rows are all zero,
@@ -1249,6 +1274,7 @@ impl<L: Lane> SoftClip<L> {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     /// Renders one block of both channels and applies the master plan §4.4 boundary check.
     ///
@@ -1680,13 +1706,20 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
 }
 
 impl PreparedNativeEffect for PreparedSoftClip {
+    /// Issue #2129 D3: the latency plus the tail, [`warmup_samples`].
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        warmup_samples(declared_latency)
+    }
+
     fn retained_bytes(&self) -> u64 {
         self.inner.heap_bytes()
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         self.inner.reset(kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
@@ -1744,9 +1777,16 @@ impl PreparedNativeEffect for PreparedSoftClip {
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
+    /// Issue #2129 D3: the latency plus the tail, [`warmup_samples`].
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        warmup_samples(declared_latency)
+    }
+
+    // REALTIME_POLICY_BEGIN
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
         self.inner.reset_lane(lane, kind);
     }
+    // REALTIME_POLICY_END
     fn retained_bytes(&self) -> u64 {
         self.inner.heap_bytes()
     }

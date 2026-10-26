@@ -887,7 +887,20 @@ pub struct ObservationDescriptor {
     pub minimum: f32,
     /// Declared inclusive upper bound of the published value.
     pub maximum: f32,
+    /// The value this tap publishes, in its transport [`unit`](Self::unit), for a block whose lane
+    /// emitted its settled-bypassed dry signal, or `None` when no such value exists and the tap
+    /// must be computed from a running wet path (issue #2129 D5).
+    ///
+    /// An observed value describes the block emitted. A settled-bypassed lane emitted the dry
+    /// signal, so the effect applied no gain at all: every launch tap declares `Some(0.0)`, which
+    /// is "no reduction" in both transport units a [`ObservationKind::GainReductionDb`] tap uses
+    /// (decibels, or the true-peak limiter's linear reduction `d` of `gain = 1 - d`) and "no
+    /// change" for a [`ObservationKind::GainChangeDb`] tap. A bypassed lane's armed tap folds it
+    /// whether its bank's wet path ran or was skipped, so a lane's observation never depends on its
+    /// bank-mates. `None` keeps an armed tap's bank running while its lane is bypassed.
+    pub bypass_observation: Option<f32>,
 }
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QualityDescriptor {
     pub quality: EffectQuality,
@@ -1544,8 +1557,15 @@ pub struct PreparedEffectMetadata {
 /// prepared `bypass = false` plus the initial state of that lane's [`BypassShunt`], carried by an
 /// [`EffectControlLane`] (`EffectControlLane::without_channel` when no live controls are attached):
 ///
-/// * **The wet path still runs.** A bypassed lane's state stays continuous, so un-bypassing does
-///   not click, and the cohort does not split. That cost is accepted (decision 12).
+/// * **The wet path runs while any lane needs it.** A bypassed lane keeps its bank, so the cohort
+///   does not split, and in a bank with an enabled, ramping or warming lane its wet path runs with
+///   the others. A bank whose every lane is settled bypassed, with no span, no prepared target and
+///   no armed tap that needs a computed value, skips its wet path for the block and emits the same
+///   latency-matched dry words. Every lane that leaves settled bypass is reset alone
+///   ([`reset_lane`](PreparedNativeEffectBank::reset_lane), keeping parameters) and holds dry for
+///   the effect's [`warmup_samples`](PreparedNativeEffectBank::warmup_samples) before its
+///   crossfade, whether or not its bank skipped (owner decisions of 2026-10-26, issue #2129,
+///   amending decision 12).
 /// * **A per-lane bitwise select, never an arithmetic identity.** The rack's shunt copies the
 ///   delayed dry words into exactly the bypassed lanes. `fma(0, wet, dry)` is **not** equivalent:
 ///   `-0.0 + 0.0` is `+0.0`.
@@ -2229,6 +2249,18 @@ pub enum ParameterAccessError {
 /// [`PreparedEffect`], and every reader reads it there, on the control side (issue #1461).
 pub trait PreparedNativeEffect: Send {
     fn reset(&mut self, kind: ResetKind);
+    /// The frames this instance renders from a reset before its output can be crossfaded
+    /// in for a lane whose bypass ends (issue #2129 D3): a lane that leaves settled bypass is reset
+    /// and holds the dry signal for this many frames before its crossfade runs. `declared_latency` is the instance's [`PreparedEffectMetadata::latency`]; it is the
+    /// default, because a lane whose output reads only its latency line is exact once the line
+    /// holds post-reset input. An effect whose output reads more history than its latency (a FIFO
+    /// detector or a FIR past its group delay) returns that history, so the first crossfaded frame
+    /// reads no word of the reset. A zero-latency effect whose rest state is a fixed point keeps
+    /// `0`. Read once, at bind, off the render thread.
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        declared_latency
+    }
+
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
     /// The heap bytes this value retains (#1074), exclusive of the value itself: every `Box`,
     /// `Vec`, `String` and `Arc` allocation reachable through its fields, a `Vec` or `String` at
@@ -2427,6 +2459,18 @@ pub trait PreparedNativeEffect: Send {
 /// rides beside it in [`PreparedEffectBank`] (issue #1461).
 pub trait PreparedNativeEffectBank: Send {
     fn reset(&mut self, kind: ResetKind);
+    /// The frames a lane of this bank renders from a reset before its output can be crossfaded
+    /// in for a lane whose bypass ends (issue #2129 D3): a lane that leaves settled bypass is reset
+    /// and holds the dry signal for this many frames before its crossfade runs. `declared_latency` is the bank's [`PreparedEffectMetadata::latency`]; it is the
+    /// default, because a lane whose output reads only its latency line is exact once the line
+    /// holds post-reset input. An effect whose output reads more history than its latency (a FIFO
+    /// detector or a FIR past its group delay) returns that history, so the first crossfaded frame
+    /// reads no word of the reset. A zero-latency effect whose rest state is a fixed point keeps
+    /// `0`. Read once, at bind, off the render thread.
+    fn warmup_samples(&self, declared_latency: u32) -> u32 {
+        declared_latency
+    }
+
     /// Resets **one lane** exactly as [`reset`](Self::reset) would reset it, and nothing else
     /// (issue #2131).
     ///

@@ -490,12 +490,14 @@ impl<L: Lane> Default for Env<L> {
 }
 
 impl<L: Lane> Env<L> {
+    // REALTIME_POLICY_BEGIN
     /// Lane `lane`'s two words back to `+0.0`, every other lane bit-unchanged: a reset's and the
     /// D7 recovery's envelope action for one lane.
     fn clear_lane(&mut self, lane: usize) {
         self.fast = replace_lane(self.fast, lane, 0.0);
         self.slow = replace_lane(self.slow, lane, 0.0);
     }
+    // REALTIME_POLICY_END
 }
 
 /// The three ramped parameters of one channel, packed across lanes for one frame.
@@ -855,11 +857,13 @@ impl<const W: usize> Ramps<W> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Lane `lane`'s parameter ramps re-seeded from its defaults, at rest. The link weights are
     /// the shaper's to re-seat at the lane's mode ([`Shaper::reset_lane`]).
     fn full_reset_lane(&mut self, lane: usize) {
         self.ramps[lane] = self.defaults[lane].map(LinearRamp::fixed);
     }
+    // REALTIME_POLICY_END
 
     /// Lane `lane`'s ramps snapped to their targets, a link glide included: it lands on the
     /// lane's mode.
@@ -1006,6 +1010,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// `PreparedNativeEffectBank::reset_lane` (issue #2131): lane `lane`'s part of
     /// [`reset`](Self::reset) on both channels, and nothing of any other lane. Its envelope words
     /// clear; a full reset reseeds its ramps from its defaults and seats its link weights at rest
@@ -1031,6 +1036,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     /// Renders one block in place and applies the master plan §4.4 boundary check.
     ///
@@ -1936,9 +1942,11 @@ impl PreparedNativeEffect for PreparedTransientShaper {
         0
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         self.0.reset(kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
@@ -1989,9 +1997,11 @@ impl PreparedNativeEffect for PreparedTransientShaper {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
+    // REALTIME_POLICY_BEGIN
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
         self.shaper.reset_lane(lane, kind);
     }
+    // REALTIME_POLICY_END
     /// Every field is inline: this instance owns no heap (#1074).
     fn retained_bytes(&self) -> u64 {
         0

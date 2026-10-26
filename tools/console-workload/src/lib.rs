@@ -517,6 +517,13 @@ pub enum Workload {
     ///
     /// Not in [`WORKLOADS`]: see [`PACKING_WORKLOADS`].
     SixtyFourTrackConsoleToggle,
+    /// The standing strip at sixteen tracks with every console slot bypassed on every track
+    /// (issue #2129 gate 6): [`Self::SixteenTrackStrip`]'s two full eight-lane banks per slot,
+    /// each of whose lanes is settled bypassed, so every bank skips its wet path and renders the
+    /// shunt's latency-matched dry words. Read against [`Self::SixteenTrackStrip`].
+    ///
+    /// Not in [`WORKLOADS`]: see [`BYPASS_WORKLOADS`].
+    SixteenTrackStripBypassed,
     /// One active lane per bank (issue #1783): the standing console with one track per bank fed
     /// the tone and every other track exact zeros ([`InputSignal::OneTrackPerBank`]).
     ///
@@ -773,6 +780,11 @@ pub const PACKING_WORKLOADS: [Workload; 2] = [
     Workload::SixtyFourTrackConsoleOnePerBank,
 ];
 
+/// The bypass-skip row the native bench emits after [`PACKING_WORKLOADS`] (issue #2129 gate 6):
+/// the sixteen-track strip with every console slot bypassed, read against
+/// [`Workload::SixteenTrackStrip`]. Descriptive; it states no floor.
+pub const BYPASS_WORKLOADS: [Workload; 1] = [Workload::SixteenTrackStripBypassed];
+
 /// The bank-utilisation rows (issue #2132): the C1 shape at 16, 32 and 64 tracks in each
 /// [`C1State`], then the irregular graph. `bench console --bank-report` measures them; no standing
 /// record carries them, so the standing record set and its validator are unchanged.
@@ -843,9 +855,8 @@ pub const BANK_COUNTER_NAMES: [&str; 7] = [
 /// 3. `bank_slot_runs_track_group`: the runs of the rows (pack groups, or units in none) that hold
 ///    a track's lane, so `2 - 3` is the submixes' runs;
 /// 4. `silent_skips`: the whole-chain skips of the same rows, in unit-blocks;
-/// 5. `bypass_skips`: zero. No bank-slot skip exists before #2129, so a bypassed slot never skips;
-///    #2129's reader replaces this entry, and the `Load` row's runs, which then fall to zero, turn
-///    `wasm-gates`' plan gate red until it does;
+/// 5. `bypass_skips`: the slot-blocks the same rows' banks skipped their wet path because every
+///    lane was settled bypassed (issue #2129); `2` already leaves them out;
 /// 6. `pack_groups`: the rows that are pack groups (a group spans two units or more).
 ///
 /// Built at [`Backend::current()`], so it describes a four-lane plan only on a four-lane build (the
@@ -892,7 +903,7 @@ pub fn bank_counters(workload: Workload, blocks: u64) -> [u64; 7] {
             .map(|row| row.runs)
             .sum(),
         rows.iter().map(|row| row.skips).sum(),
-        0,
+        rows.iter().map(|row| row.bypass_skips).sum(),
         rows.iter()
             .filter(|row| row.last_unit > row.first_unit)
             .count() as u64,
@@ -901,7 +912,8 @@ pub fn bank_counters(workload: Workload, blocks: u64) -> [u64; 7] {
 
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
 /// [`DRIVER_FED_WORKLOADS`], then [`LIVE_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then
-/// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`].
+/// [`BUS_SEND_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`], then [`PACKING_WORKLOADS`], then
+/// [`BYPASS_WORKLOADS`].
 pub fn native_session_rows() -> impl Iterator<Item = Workload> {
     WORKLOADS
         .into_iter()
@@ -911,6 +923,7 @@ pub fn native_session_rows() -> impl Iterator<Item = Workload> {
         .chain(BUS_SEND_WORKLOADS)
         .chain(CONSOLE_STRIP_WORKLOADS)
         .chain(PACKING_WORKLOADS)
+        .chain(BYPASS_WORKLOADS)
 }
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
@@ -1017,6 +1030,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleSparse => "sixty_four_track_console_sparse",
             Self::SixtyFourTrackConsoleToggle => "sixty_four_track_console_toggle",
             Self::SixtyFourTrackConsoleOnePerBank => "sixty_four_track_console_one_per_bank",
+            Self::SixteenTrackStripBypassed => "sixteen_track_strip_bypassed",
             Self::C1Console { tracks, state } => {
                 use C1State::{AllActive, Load, Sparse, Toggle, Typical};
                 use C1Tracks::{Sixteen, SixtyFour, ThirtyTwo};
@@ -1047,7 +1061,7 @@ impl Workload {
             Self::NineTrackBaseline | Self::NineTrackRaggedStrip => 9,
             Self::TenTrackRaggedStrip => 10,
             Self::ThirteenTrackRaggedStrip => 13,
-            Self::SixteenTrackStrip => 16,
+            Self::SixteenTrackStrip | Self::SixteenTrackStripBypassed => 16,
             Self::OneTwentyEightTrackStretch => 128,
             Self::C1Console { tracks, .. } => tracks.count(),
             Self::IrregularGraph => 24,
@@ -1433,6 +1447,12 @@ fn console_model(workload: Workload) -> SessionModel {
         synthesise_tracks(&mut model, workload.tracks() as usize);
     }
     apply_strip(&mut model, workload.strip());
+    if workload == Workload::SixteenTrackStripBypassed {
+        // Issue #2129 gate 6: every console slot bypassed on every track.
+        for entry in model.tracks.iter_mut().flat_map(|track| &mut track.console) {
+            entry.bypass = true;
+        }
+    }
     if let Workload::C1Console { state, .. } = workload {
         apply_c1_state(&mut model, state);
     }
@@ -4092,6 +4112,7 @@ mod tests {
             .chain(BUS_SEND_WORKLOADS)
             .chain(CONSOLE_STRIP_WORKLOADS)
             .chain(PACKING_WORKLOADS)
+            .chain(BYPASS_WORKLOADS)
         {
             assert!(!workload.web_meters(), "{}", workload.kind());
         }
@@ -4105,6 +4126,7 @@ mod tests {
                 + BUS_SEND_WORKLOADS.len()
                 + CONSOLE_STRIP_WORKLOADS.len()
                 + PACKING_WORKLOADS.len()
+                + BYPASS_WORKLOADS.len()
         );
         assert!(
             rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + LIVE_FED_WORKLOADS.len())
@@ -4527,11 +4549,14 @@ mod tests {
             );
         }
         let rows: Vec<Workload> = native_session_rows().collect();
-        let strip_end = rows.len() - PACKING_WORKLOADS.len();
+        let strip_end = rows.len() - PACKING_WORKLOADS.len() - BYPASS_WORKLOADS.len();
+        let packing_end = strip_end + PACKING_WORKLOADS.len();
         assert!(
             rows[strip_end - STRIP_ROWS.len()..strip_end] == STRIP_ROWS
-                && rows[strip_end..] == PACKING_WORKLOADS,
-            "the console-strip rows are emitted last but for the packing rows (#1783)"
+                && rows[strip_end..packing_end] == PACKING_WORKLOADS
+                && rows[packing_end..] == BYPASS_WORKLOADS,
+            "the console-strip rows are emitted last but for the packing rows (#1783) and the \
+             bypass-skip row (#2129)"
         );
         let mut kinds: Vec<&str> = rows.iter().map(|row| row.kind()).collect();
         kinds.sort_unstable();
@@ -4543,6 +4568,11 @@ mod tests {
                 BypassCensus {
                     bypassed_tracks: 21,
                     pattern: BypassPattern::IndexMod3Is2,
+                }
+            } else if row == Workload::SixteenTrackStripBypassed {
+                BypassCensus {
+                    bypassed_tracks: 16,
+                    pattern: BypassPattern::Other,
                 }
             } else {
                 BypassCensus {

@@ -451,6 +451,13 @@ when a dependency forces the order, and then sequence the correct solution.
   bypass is a rebuild with a D15-9 transition.
 - **E5 (F7):** the bypass switch crossfades over the session ramp, and is bit-identical after the
   ramp (#1341; the browser command #1393; stream E).
+  - **Note (2026-10-26, #2129, owner decision "un-bypass from rest").** A switch out of settled
+    bypass resets its lane alone, keeping parameters, and holds the latency-matched dry signal for
+    the effect's warm-up `W` before the crossfade: the true-peak limiter's latency `T`, the soft
+    clip's `latency + tail` (60), `0` for every other launch effect. The switch applies at its
+    block `B` and the watermark covers it there, as before; the output is dry over `[s_B, s_B + W)`
+    and the crossfade runs from `s_B + W`, so un-bypass is first audible at `s_B + W + 1`. A
+    reversal before the crossfade toward bypass settles keeps E5's warm continuation.
 - **F9:** VCA membership is live on the C ABI (D15-6, #1247).
 
 **D15-14. Meter, observation and spectrum state carry** across swaps for unchanged owners, under

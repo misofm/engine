@@ -524,57 +524,71 @@ fn fold_nan(word: u32) -> u32 {
 
 /// Issue #2132 gate 2: a pack group's bank-slot runs per block are its banks times its effect slots
 /// when every chain renders, and none for a chain the block skipped; over the plan, a block every
-/// chain renders runs exactly the effect banks the compile bound.
+/// chain renders runs exactly the effect banks the compile bound. With a console slot bypassed on
+/// every track (issue #2129), that slot's banks skip their wet path and run nothing.
 ///
 /// Test value: red when the counter and the skips disagree -- a run counted for a skipped chain,
-/// or a builtin stage counted as an effect slot -- which the skip differential (gate 1) cannot see,
-/// because a counter moves no output bit.
+/// a builtin stage counted as an effect slot, or a bypass-skipped slot counted as a run -- which
+/// the skip differential (gate 1) cannot see, because a counter moves no output bit.
 #[test]
 fn bank_slot_runs_follow_the_skips() {
-    let blocks = TAIL + 8;
-    let schedules = schedules(blocks, 0x2132);
-    let mut bound = bind(&session(first_sixteen), &schedules, false);
-    let mut pcm = vec![0.0_f32; bound.frames * 2];
-    let mut previous = graph::test_only_bank_slot_runs(&mut bound.plan);
-    assert!(!previous.is_empty(), "the console has bank units");
-    let per_block: u64 = previous
-        .iter()
-        .map(|group| {
-            u64::from(group.effect_slots) * u64::from(group.last_unit - group.first_unit + 1)
-        })
-        .sum();
-    assert_eq!(
-        per_block, bound.bound_banks,
-        "every bound effect bank is one slot of one unit, and no builtin stage is counted"
-    );
-    let [mut every_chain_ran, mut a_chain_skipped] = [0_u32; 2];
-    for block in 0..blocks as u64 {
-        bound.render(block, true, &mut pcm);
-        let now = graph::test_only_bank_slot_runs(&mut bound.plan);
-        assert_eq!(now.len(), previous.len());
-        let mut total = 0;
-        for (before, after) in previous.iter().zip(&now) {
-            let banks = u64::from(after.last_unit - after.first_unit + 1);
-            let skipped = after.skips - before.skips;
-            let runs = after.runs - before.runs;
-            assert_eq!(
-                runs,
-                u64::from(after.effect_slots) * (banks - skipped),
-                "block {block}, units {}..={}: {skipped} of {banks} chains skipped",
-                after.first_unit,
-                after.last_unit
-            );
-            a_chain_skipped += u32::from(skipped > 0);
-            total += runs;
-        }
-        every_chain_ran += u32::from(total == bound.bound_banks);
-        previous = now;
+    // Issue #2129: with the compressor slot bypassed on every track, every bank of that slot
+    // skips its wet path on every block its chain renders, and runs nothing.
+    let mut bypassed = session(first_sixteen);
+    for track in &mut bypassed.tracks {
+        track.console[1].bypass = true;
     }
-    assert!(
-        every_chain_ran > 0 && a_chain_skipped > 0,
-        "the schedule reaches both an all-running block ({every_chain_ran}) and a skipped chain \
-         ({a_chain_skipped})"
-    );
+    for (model, skipped_slots) in [(session(first_sixteen), 0), (bypassed, 1)] {
+        let blocks = TAIL + 8;
+        let schedules = schedules(blocks, 0x2132);
+        let mut bound = bind(&model, &schedules, false);
+        let mut pcm = vec![0.0_f32; bound.frames * 2];
+        let mut previous = graph::test_only_bank_slot_runs(&mut bound.plan);
+        assert!(!previous.is_empty(), "the console has bank units");
+        let per_block: u64 = previous
+            .iter()
+            .map(|group| {
+                u64::from(group.effect_slots) * u64::from(group.last_unit - group.first_unit + 1)
+            })
+            .sum();
+        assert_eq!(
+            per_block, bound.bound_banks,
+            "every bound effect bank is one slot of one unit, and no builtin stage is counted"
+        );
+        let units: u64 = previous
+            .iter()
+            .map(|group| u64::from(group.last_unit - group.first_unit + 1))
+            .sum();
+        let [mut every_chain_ran, mut a_chain_skipped] = [0_u32; 2];
+        for block in 0..blocks as u64 {
+            bound.render(block, true, &mut pcm);
+            let now = graph::test_only_bank_slot_runs(&mut bound.plan);
+            assert_eq!(now.len(), previous.len());
+            let mut total = 0;
+            for (before, after) in previous.iter().zip(&now) {
+                let banks = u64::from(after.last_unit - after.first_unit + 1);
+                let skipped = after.skips - before.skips;
+                let runs = after.runs - before.runs;
+                assert_eq!(
+                    runs,
+                    (u64::from(after.effect_slots) - skipped_slots) * (banks - skipped),
+                    "block {block}, units {}..={}: {skipped} of {banks} chains skipped, \
+                     {skipped_slots} slot(s) bypassed",
+                    after.first_unit,
+                    after.last_unit
+                );
+                a_chain_skipped += u32::from(skipped > 0);
+                total += runs;
+            }
+            every_chain_ran += u32::from(total == bound.bound_banks - skipped_slots * units);
+            previous = now;
+        }
+        assert!(
+            every_chain_ran > 0 && a_chain_skipped > 0,
+            "the schedule reaches both an all-running block ({every_chain_ran}) and a skipped \
+             chain ({a_chain_skipped})"
+        );
+    }
 }
 
 // ---- Gate 1 -------------------------------------------------------------------------------------

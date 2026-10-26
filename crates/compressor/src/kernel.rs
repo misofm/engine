@@ -157,12 +157,14 @@ impl<L: Lane> Channel<L> {
         self.seed_from_defaults(sample_rate);
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`full_reset`](Self::full_reset) for lane `lane` alone (issue #2131): the same words at
     /// that lane, and no other lane's.
     pub(crate) fn full_reset_lane(&mut self, lane: usize, sample_rate: u32) {
         self.clear_lane_state(lane);
         self.seed_lane_from_defaults(lane, sample_rate);
     }
+    // REALTIME_POLICY_END
 
     /// Discontinuity reset: clear the envelope and snap ramps to their targets.
     pub(crate) fn discontinuity_reset(&mut self, sample_rate: u32) {
@@ -172,11 +174,13 @@ impl<L: Lane> Channel<L> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`discontinuity_reset`](Self::discontinuity_reset) for lane `lane` alone (issue #2131).
     pub(crate) fn discontinuity_reset_lane(&mut self, lane: usize, sample_rate: u32) {
         self.clear_lane_state(lane);
         self.snap_lane(lane, sample_rate);
     }
+    // REALTIME_POLICY_END
 
     /// The per-lane half of a discontinuity reset: lane `lane`'s ramps snapped to their targets
     /// and its coefficient words designed from them.
@@ -199,6 +203,7 @@ impl<L: Lane> Channel<L> {
         self.gain_reduction_db = L::zero();
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`clear_state`](Self::clear_state) for lane `lane` alone: its envelope word to `+0.0`.
     fn clear_lane_state(&mut self, lane: usize) {
         let mut words = [0.0_f32; MAX_WIDTH];
@@ -206,6 +211,7 @@ impl<L: Lane> Channel<L> {
         words[lane] = 0.0;
         self.gain_reduction_db = L::load(&words[..L::WIDTH]);
     }
+    // REALTIME_POLICY_END
 
     pub(crate) fn current_values(&self, lane: usize) -> [f32; RAMP_COUNT] {
         core::array::from_fn(|parameter| self.ramps[parameter][lane].current)

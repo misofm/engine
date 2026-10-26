@@ -1581,6 +1581,7 @@ impl PreparedNativeEffect for PreparedDelay {
         self.designed_channel_symmetry()
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         self.cursor = 0;
         match kind {
@@ -1596,6 +1597,7 @@ impl PreparedNativeEffect for PreparedDelay {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();

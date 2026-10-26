@@ -2009,6 +2009,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`discontinuity_reset`](Self::discontinuity_reset) for lane `track` alone (issue #2131):
     /// the lane's integrators and silence counter cleared and every section's ramp ended at its
     /// target, through the lane's own mask. Every other lane keeps every word; each section's
@@ -2028,7 +2029,9 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             self.refresh_identity(section);
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// A full reset of lane `track` alone (issue #2131): the lane's prepared bands and designed
     /// words settled with no ramp in flight ([`settle`](Self::settle), which re-derives each
     /// section's flags), and its integrators and silence counter cleared, as
@@ -2045,7 +2048,9 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             self.settle(section, track, words);
         }
     }
+    // REALTIME_POLICY_END
 
+    // REALTIME_POLICY_BEGIN
     /// Lane `track`'s cross-frame words to `+0.0`: both integrators of every section and the
     /// silence counter.
     fn clear_lane_runtime(&mut self, track: usize) {
@@ -2056,6 +2061,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         }
         lane_put(&mut self.silence, mask, 0.0);
     }
+    // REALTIME_POLICY_END
 }
 
 /// Runs both channels' six-section cascades over one block.
@@ -3566,6 +3572,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN
     /// [`reset_state`](Self::reset_state) for lane `lane` alone (issue #2131): both channels of
     /// the lane take the words the whole reset writes there, every other lane keeps every word,
     /// and each section's `identity` flag and `dry` mask are re-derived. The silent claim is
@@ -3589,6 +3596,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             }
         }
     }
+    // REALTIME_POLICY_END
 
     /// Restores every band of both channels to the parameters preparation was given.
     fn reset_to_defaults(&mut self) {
@@ -4097,9 +4105,11 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         self.apply_target_lane(0, target)
     }
 
+    // REALTIME_POLICY_BEGIN
     fn reset(&mut self, kind: ResetKind) {
         self.reset_state(kind);
     }
+    // REALTIME_POLICY_END
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
@@ -4153,10 +4163,12 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<L, W> {
+    // REALTIME_POLICY_BEGIN
     /// Issue #2131: see [`reset_lane_state`](PreparedParametricEq::reset_lane_state).
     fn reset_lane(&mut self, lane: usize, kind: ResetKind) {
         self.reset_lane_state(lane, kind);
     }
+    // REALTIME_POLICY_END
     fn retained_bytes(&self) -> u64 {
         self.heap_bytes()
     }
