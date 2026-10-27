@@ -172,3 +172,8 @@ while 8 per-node renders become banked lanes; the row is 11.3 % faster.
 - **Minor 6:** the two `src/lib.rs` tests assert the chain pass's groups only again.
 - **Not covered:** bypass and un-bypass on a strip split between a chain bank and a leftover bank
   (low risk: no runtime change; the bank's shunt is per lane as for any bank).
+- **Rows checked after the change:** W=8 bank-report preflight, all 17 rows: banks, pairs (0),
+  lane use and static BSR equal to attempt 1. W=4: the C1 counter pins pass (wasm leg); the
+  irregular row (W=4 probe) 1 -> 0 pairs, banks 24 unchanged; every `bank_levels.rs` session 0
+  pairs. Bit identity, 17 rows against `bf05356df`: identical. The plans did not move, so the
+  attempt-1 bench record stands.
