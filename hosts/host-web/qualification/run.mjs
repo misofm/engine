@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, webkit } from "playwright";
+import { qualifySuspendedPcmFeed } from "./pcm-feed-suspended.mjs";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
 import {
@@ -234,6 +235,16 @@ async function buildSdkBundle(sdkRoot) {
       target: "es2022",
       legalComments: "inline",
     });
+    await build({
+      entryPoints: [path.join(HERE, "pcm-feed-suspended-entry.ts")],
+      plugins: useDistribution ? [shippedSdk] : [],
+      outfile: path.join(bundle, "pcm-feed-suspended-client.js"),
+      bundle: true, format: "esm", platform: "browser", target: "es2022",
+    });
+    await cp(useDistribution
+      ? path.join(distribution, "assets", "miso-engine-v1-pcm-feed-worklet.js")
+      : path.join(sourceRoot, "browser-assets", "miso-engine-v1-pcm-feed-worklet.js"),
+    path.join(bundle, "miso-engine-v1-pcm-feed-worklet.js"));
     await build({
       entryPoints: [useDistribution
         ? path.join(distribution, "browser", "response-worker.js")
@@ -1821,7 +1832,7 @@ async function main() {
   );
   const artifacts = option("--artifacts");
   if (artifacts === null) {
-    throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--check-matrix|--record-matrix --candidate-commit 40_HEX] [--self-test-mutations]");
+    throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--check-matrix|--record-matrix --candidate-commit 40_HEX] [--self-test-mutations] [--pcm-feed-suspended-only]");
   }
   const browserOption = option("--browser") ?? "all";
   const browserNames = browserOption === "all" ? Object.keys(ENGINES) : [browserOption];
@@ -1831,6 +1842,10 @@ async function main() {
   const checkMatrix = process.argv.includes("--check-matrix");
   const recordMatrix = process.argv.includes("--record-matrix");
   const proveMutations = process.argv.includes("--self-test-mutations");
+  const feedOnly = process.argv.includes("--pcm-feed-suspended-only");
+  if (feedOnly && (recordMatrix || checkMatrix || proveMutations)) {
+    throw new Error("--pcm-feed-suspended-only cannot record/check the full matrix or its mutations");
+  }
   if (recordMatrix && browserOption !== "all") {
     throw new Error("--record-matrix requires --browser all");
   }
@@ -1864,9 +1879,15 @@ async function main() {
     ? JSON.parse(await readFile(RESULTS_PATH, "utf8"))
     : null;
   const server = await startQualificationServer({ artifacts, sdkBundle });
+  const feedServer = sdkRoot !== null || feedOnly
+    ? await startQualificationServer({ artifacts, sdkBundle, isolated: true }) : undefined;
   try {
     const rows = [];
     for (const browserName of browserNames) {
+      if (feedServer !== undefined) {
+        await qualifySuspendedPcmFeed(browserName, ENGINES[browserName], feedServer.origin);
+      }
+      if (feedOnly) continue;
       const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, proveMutations, sdkRoot !== null,
         (protocol) => headlessProtocolReference(headlessEntry, artifacts, protocol),
         (edit) => structuralEditReferences(artifacts, edit));
@@ -1897,6 +1918,7 @@ async function main() {
     }
   } finally {
     await server.close();
+    await feedServer?.close();
     if (sdkBundle !== undefined) await rm(sdkBundle, { recursive: true, force: true });
   }
 }
