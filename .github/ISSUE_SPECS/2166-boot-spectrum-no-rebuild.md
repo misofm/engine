@@ -87,4 +87,44 @@ rebuild.
 
 ## Evidence
 
-(filled in by the implementing attempt)
+Attempt 1, branch `codex/issue-2166-boot-spectrum` (from `main` `0d326c5c8`, merged with
+`origin/main` `3374b21a0` after the 0.8.0 release).
+
+- **Change.** `crates/control-plane/src/compile.rs` (`compile_children_with_boot_command`,
+  `boot_command_spectrum`, the boot preparation and monitor adoption in `compile_children_warm`);
+  `crates/control-plane/src/control.rs` (`checked_spectrum_configuration`, shared by
+  `spectrum_configure` and `boot_spectrum_configuration`); `hosts/host-web/src/lib.rs`
+  (`AudioWorkletEngineHost::boot_with_command`, `compile_ready`); `hosts/host-web/src/ffi.rs`
+  (`miso_engine_web_v1_boot_command_ptr`, `BootStaging::command`); the worklet and its host
+  (`bootCommand`); `sdk/src/core/boundary.ts` (`bootSpectrumCommand`, staging in `stage`);
+  `sdk/src/browser/engine.ts` (`createHost`'s `bootCommand`, `requireBootSpectrumCapability`).
+- **Red on named mutants** (each restored after):
+  - Gate 1 is red on the defect itself (the host boots plain, then runs the frame through the
+    command entry before the first block): `the boot rebuilt nothing`, left `1`.
+  - Gate 1 is red when the boot drops the configuration (`boot_spectrum` filtered to `None`) and
+    when the monitor skips the boot adoption: the stream start is refused.
+  - Gate 2 is red when `run_control` counts a rebuild only when the committed revision changed:
+    left `0`. `hosts/host-web/tests/control_parity.rs` stays green on that mutant, so no existing
+    test catches it.
+  - Gate 3 (SDK) is red when the browser engine leaves `bootCommand` out of the `createHost`
+    request: the parity row and the five other served-core spectrum evals fail.
+- **Parity rows.** `scripts/test-web-audioworklet.mjs`: the host hands the worklet a private copy
+  of `bootCommand` and refuses an empty or non-`Uint8Array` one; the processor stages it through
+  `boot_command_ptr` before `boot`. `sdk/test/boot-evals.mjs`: the headless boot's and reboot's
+  boot command carries the hop, and no `SPECTRUM_CONFIGURE` frame follows the boot.
+- **Gates run on the merged tree, all green:** `cargo fmt --all -- --check`; `cargo clippy
+  --locked --workspace --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings'
+  cargo doc --locked --workspace --no-deps`; every policy script of the lint job, including
+  `check-lane-policy.sh`; the workspace debug tests and doctests with the job's excludes and
+  features; `cargo build --release -p realtime-policy && ./target/release/realtime_policy`;
+  `scripts/run-wasm-gates.sh`; `check-web-audioworklet.sh --without-metadata-regeneration` (export
+  set, call graph and vector roster), `check-browser-expected-resources.py --artifacts`,
+  `check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`; the SDK job
+  (`check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`,
+  `check-sdk-headless.sh`, `sdk-package.sh check`) and the source-only asset tests.
+- **Not run locally:** the three-browser qualification and the AArch64 jobs. The release pin
+  `miso-engine-v1-audio-worklet-artifact.sha256` is left at 0.8.0's: the module changes (one new
+  export), and the 0.8.1 release re-pins it (docs/RELEASE.md).
+- **SDK surface.** Additive only: `CreateEngineOptions.createHost`'s request and the shipped
+  host's `CreateMisoAudioWorkletHostOptions` gain the optional `bootCommand`; the generated ABI
+  export list gains `miso_engine_web_v1_boot_command_ptr`. No public call changes.
