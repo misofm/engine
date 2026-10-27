@@ -641,3 +641,23 @@ NL green is the case's reference: its pin is the words of the pre-#990 behaviour
 here; the session test's "equal" check (`ch16`) still owns it at every width. E0 is green at
 `Simd8` because lanes 0 and 7 unlink in the same block, so the eight-lane bank unlinks through
 lane 7; the session test's `ch48` row still owns E0 and EL at `Simd8`.
+
+## Issue #988 — stationary whole-bank detector screen (2026-10-27)
+
+Each mutation was applied alone to the production source and reverted after the focused owning-
+crate tests ran. The external logs are under `engine-work-evidence/easy3-20261027/988/`; no output
+hash or compiled-artifact pin was added. Both focused tests compare actual detector arithmetic or
+rendered/state words rather than source text.
+
+| Mutation | Actual red gate | Discriminating failure |
+|---|---|---|
+| `SCREEN_FACTOR = 0.51` | `screen_bound_covers_the_attaining_phase_patterns`; `screen_preserves_every_word_and_refuses_unproven_blocks` | rounded phase bound 1.0316426872816336; attaining phase pattern changes retained state |
+| Omit all history taps from `taps_below` | `screen_preserves_every_word_and_refuses_unproven_blocks` | quiet input following a loud/nonfinite history incorrectly admits the whole bank |
+| Use maximum instead of minimum of L/R limits | same differential | exact threshold under ceilings twelve dB apart incorrectly admits the whole bank |
+| Omit both screened history assignments | same differential | retained state differs after warmed screened input, before delayed output exposes it |
+| Admit the screened body while coefficients ramp | same differential | moving-coefficient witness reaches the screened body's stationary assertion in dev |
+
+Test value: the bound/attaining-pattern test rejects an unsafe factor or rounding proof that the
+existing FIR conformance tests cannot see; the differential rejects wrong skipped-detector state,
+channel-limit admission, out-of-domain admission or an allocation in a screened render, none of
+which the old loud/automated allocation and FIR/gain-law corpora exercise.
