@@ -351,6 +351,26 @@ context and before it creates the host, so you do not wrap `createHost`. `pcmFee
 default. If the prelude does not load, `createEngine` rejects with `PcmFeedError` (`moduleLoad`)
 and closes the context.
 
+On a cross-origin-isolated page, attach the session's sources while the context is suspended and
+await `ready()` before prefilling or playing:
+
+```ts
+import { attachEngineFeed, createEngine } from "@misofm/engine/browser";
+
+const engine = await createEngine({ document, pcmFeed: true });
+const feed = attachEngineFeed({
+  engine,
+  context: engine.context,
+  sources: [{ sourceId: "stem", channels: 2 }], // A source declared in document.
+  quantumFrames: engine.shape.quantumFrames,
+});
+await feed.ready(); // Default attachment deadline: 2 seconds; audio stays suspended.
+```
+
+Attachment does not require audio to render. Keep the context suspended until the rings are
+prefilled and playback is requested; `ready()` needs no resume/suspend or compensating seek.
+Close the feed with `feed.close()` when it is no longer needed.
+
 The engine has one timeline playhead. `engine.position()` resolves with `{ frame, generation,
 atSample }`: `frame` is the timeline frame that the next rendered block starts at, and `atSample`
 is the absolute render sample of that block. The SDK reads the timeline's seek report and the
