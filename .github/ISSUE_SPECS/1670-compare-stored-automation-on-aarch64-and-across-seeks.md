@@ -141,3 +141,51 @@ batch 20 amendment).
   fader-row paragraph). A pre-seek unmute ramp still running at the seek carries across it, as
   documented. Read "five pin tests" in gate 1 and the hazards as four. The LANE-3 compressor and
   limiter hazard does not apply: the narrowed fixture has no insert.
+
+
+## Amendment (easy fixes batch 2, 2026-10-27)
+
+Baseline `3ef18112fe639ddc0109b77f1c922b07e38dd4d0`. Sol implements by the owner's explicit
+selection for this batch; independent verification follows before delivery.
+
+- Read-only GitHub checks confirm #1669 closed on 2026-10-17 and #1019 closed on 2026-10-19.
+  The stale dependency hold and LANE-3 exception proposal above no longer apply. No new known
+  defect row is authorized or needed by this slice.
+- D1 has exactly four existing owner tests: identity, SET_CONTROL timeline, observation timeline,
+  and `native_automation_timeline_digest_pins_the_wasm_parity`. Both profiles reuse their existing
+  pins. The no-silent-backend-skip scan includes `hosts/host-web` now that this leg runs it.
+- D2 retains #1669's fixture, seek target 30,000, generation 2, integer-formula PCM and 7,168
+  post-seek frames (the transcript's blocks 40..96). Pre-seek PCM is silent. Its configurations
+  are `(quantum, arrival)` = `(128, 5120)`, `(128, 5248)`, `(100, 5100)`, `(100, 5200)`.
+  Plain seeks apply at block entries, so two quantum-128 arrivals necessarily differ by a
+  multiple of 64; the cross-quantum arrival difference of 20 and the quantum-100 difference of
+  100 change that phase. All four outputs compare from relative sample 1,440, the existing
+  narrowed bound. Source seek reports prove the generation, arrival and target alignment.
+- The compared window must contain nonzero audio in each plane and differ from the same fixture
+  with its automation removed. No fixture or digest owner is added.
+
+Test value: the one new C ABI regression fails if settled stored automation depends on absolute
+render time or block partitioning; the existing C ABI seek regression uses only quantum 128 and
+a fader ride flat around the seek target. The reused pin tests need no new tests or pins.
+
+Verification evidence and the independent verdict will be appended before delivery. This x86-64
+host has no `qemu-aarch64`; native debug/release results do not substitute for the required NEON
+legs or their one-ulp mutation evidence.
+
+
+### Attempt 1 implementation checkpoint
+
+- The focused C ABI owner regression passes on x86-64-v3: `cargo test --locked -p capi
+  stored_automation_after_a_seek_is_invariant_to_arrival_and_quantum_on_the_c_abi -- --nocapture`
+  (one owner test, all four configurations; 0.50 s). Raw log is preserved outside the checkout
+  under `engine-work-evidence/easy2-20261027/1670/capi-focused.log`.
+- The first execution exposed a test setup constraint: shared `limits()` uses a 1,024-frame
+  source ring, which is not divisible by quantum 100. D2 now uses one quantum per source ring,
+  matching #1669's existing native/browser transcript. Its original rejection log is retained;
+  this was no engine discrepancy and required no production edit or comparison-bound change.
+- The shared serial runner used a separate worktree target, two Cargo jobs and one test thread.
+  The offline compiler was paused while another engine stream compiled, and resumed only after
+  its engine workloads were quiet. No test was paused and no unrelated process was signaled.
+- Remaining evidence: full C ABI suite, formatting and script checks, fresh independent review,
+  and the real AArch64 debug/release controls, actual-script one-ulp failures and final required
+  qualification. No adversarial PASS or remotely synchronized completion is claimed here.
