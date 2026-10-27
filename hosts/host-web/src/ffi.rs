@@ -421,6 +421,9 @@ pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
         let Ok(mut staging) = staging.try_borrow_mut() else {
             return 0;
         };
+        // #2166: a staged boot command belongs to its document; staging a document frees any
+        // command staged before it, so the page stages the command after the document.
+        *staging.command = Vec::new();
         if live {
             staging.result = RESULT_REFUSED_LIFECYCLE;
             staging.diagnostic_bytes = 0;
@@ -454,8 +457,8 @@ pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
 /// `SPECTRUM_CONFIGURE` command frame, which the control plane applies before it prepares the first
 /// plan ([`control_plane::compile_children_with_boot_command`]), so the boot's spectrum taps are
 /// that plan's and the boot counts no blocking rebuild. Optional: a boot with none staged has no
-/// taps. Call it after `document_ptr` and before `boot`; the boot takes the frame whatever its
-/// outcome, and dispose frees one no boot took.
+/// taps. Call it after `document_ptr` (which frees a command staged before it) and before `boot`;
+/// the boot takes the frame whatever its outcome, and dispose frees one no boot took.
 ///
 /// Returns the buffer's address, or zero, with nothing staged, while a host is live, for a `len`
 /// that is zero or over the control frame ceiling, or for a failed reservation. Every call first
@@ -1449,6 +1452,26 @@ pub(crate) fn test_stage_document(bytes: &[u8]) {
         staging.result = RESULT_OK;
         staging.diagnostic_bytes = 0;
     })
+}
+
+/// Stage `bytes` as the boot command, as the worklet does through
+/// [`miso_engine_web_v1_boot_command_ptr`] (#2166); `false` when the staging refused them.
+#[cfg(test)]
+pub(crate) fn test_stage_boot_command(bytes: &[u8]) -> bool {
+    let Ok(length) = u32::try_from(bytes.len()) else {
+        return false;
+    };
+    if stage_boot_command(length).is_null() {
+        return false;
+    }
+    BOOT_STAGING.with(|staging| staging.borrow_mut().command.copy_from_slice(bytes));
+    true
+}
+
+/// The staged boot command's length (#2166).
+#[cfg(test)]
+pub(crate) fn test_staged_boot_command_bytes() -> usize {
+    BOOT_STAGING.with(|staging| staging.borrow().command.len())
 }
 
 #[cfg(test)]

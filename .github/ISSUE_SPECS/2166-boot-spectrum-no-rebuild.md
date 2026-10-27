@@ -41,6 +41,17 @@ rebuild.
   (`bootSpectrumCommand`); the browser engine hands it to its host as `createHost`'s optional
   `bootCommand`, which the shipped worklet host copies and the worklet stages. Neither sends a
   boot `SPECTRUM_CONFIGURE`; both keep the `CAPABILITIES_GET` bit-16 check after boot.
+  (Attempt 2, verify MAJOR: `createHost` is public, so an app's own host can drop `bootCommand`.
+  The browser engine therefore sends the same `SPECTRUM_CONFIGURE` after boot as a confirmation:
+  when the boot carried the taps it is the equal configuration, `rebuild` false at epochs 1/1, and
+  counts no rebuild; a reply that rebuilt or whose epochs differ fails `createEngine` with a
+  `boot` error naming `bootCommand`, diagnostic `sdk.boot.command`. The headless boundary stages
+  its own command, so no injected host can drop it there.)
+- **D6. Behaviour change.** A boot spectrum configuration the engine refuses now fails the boot
+  (`refusedDocument`/`refusedBudget`, with the spectrum code as the diagnostic) instead of the
+  spectrum refusal error. The browser host carries only the result code. Recorded in
+  `sdk/README.md` "Upgrading from 0.8.0"; mapping it back was not small (a code-to-status table
+  on two paths, and no diagnostics on the browser path).
 - **D4. The counter is unchanged.** `run_control` still counts every published plan, so a running
   `configureSpectrum` counts one blocking rebuild. A counter exception ("an epoch adopted before
   the first block is not a rebuild") was rejected: it would hide a second plan preparation the boot
@@ -122,6 +133,18 @@ Attempt 1, branch `codex/issue-2166-boot-spectrum` (from `main` `0d326c5c8`, mer
   `check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`; the SDK job
   (`check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`,
   `check-sdk-headless.sh`, `sdk-package.sh check`) and the source-only asset tests.
+- **Attempt 2** (verify of `0e2af089e`: one MAJOR, three MINORs).
+  - MAJOR: the browser confirmation (D3). `spectrum-browser-evals.mjs` "a host that drops the boot
+    command fails the boot, naming bootCommand" is red on `0e2af089e`'s `engine.ts` and on the
+    mutant that skips the rebuild/epoch check. Gate 1 now also sends the confirmation and asserts
+    `rebuild` false, epochs (1, 1) and `blocking_rebuilds() == 0`.
+  - MINOR 1: `control-plane/tests/spectrum_monitor.rs`
+    `a_boot_command_that_is_not_a_spectrum_configure_refuses_the_boot` (malformed and wrong-kind
+    frames refuse with `control.boot.command`), red on the wrong-kind `else` arm returning
+    `Ok(None)`; `host-web` `a_refused_boot_takes_the_staged_boot_command`, red on moving the
+    `mem::take` below the document check.
+  - MINOR 2: `miso_engine_web_v1_document_ptr` frees a staged command.
+  - MINOR 3: recorded as D6.
 - **Not run locally:** the three-browser qualification and the AArch64 jobs. The release pin
   `miso-engine-v1-audio-worklet-artifact.sha256` is left at 0.8.0's: the module changes (one new
   export), and the 0.8.1 release re-pins it (docs/RELEASE.md).

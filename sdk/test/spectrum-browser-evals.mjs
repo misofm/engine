@@ -42,7 +42,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
  * next frame after `harness.holdAfter` more (the core has served it) until that promise settles.
  * `reply(response)` may change a served reply, and `harness.disposed` counts host disposals.
  */
-async function served({ spectrum, spectrumCollection, policy, afterCall, reply, harness: given, requestDeadlineMs } = {}) {
+async function served({ spectrum, spectrumCollection, policy, afterCall, reply, harness: given, requestDeadlineMs, dropBootCommand = false } = {}) {
   const document = sessionDocument({ frames: 64 * 2_048 });
   const harness = Object.assign(given ?? {}, {
     frames: 0, messages: [], hold: undefined, holdAfter: 0, hostOptions: undefined, bootCommand: undefined, disposed: 0,
@@ -102,7 +102,8 @@ async function served({ spectrum, spectrumCollection, policy, afterCall, reply, 
         await candidateAsset(),
         new TextEncoder().encode(document),
         {},
-        request.bootCommand,
+        // An app's own `createHost` that builds its request field by field drops the command.
+        dropBootCommand ? undefined : request.bootCommand,
       );
       forward = onEndpointIds(core.controlRequestIds, (frame) => core.controlFrame(frame));
       return host;
@@ -138,8 +139,8 @@ async function nextReady(subscription, render, seen = []) {
 
 test("the browser boot hands its taps and the policy's hop to the host as the boot command", SKIP, async (t) => {
   // #2166 parity row. Red if the taps or the hop do not reach the core in the boot command (the
-  // core here is booted with nothing else, so the stream would be refused or run at the default
-  // hop), if the boot still sends a SPECTRUM_CONFIGURE (a plan rebuild before the first block), if
+  // core here is booted with nothing else, so the boot's confirming SPECTRUM_CONFIGURE would rebuild
+  // and the boot would be refused, or the stream would run at the default hop), if
   // a boot word carries the hop, if a policy changed after `createEngine` was called changes it,
   // or if a published metadata's nested target can be changed.
   t.mock.timers.enable({ apis: ["setInterval"] });
@@ -152,7 +153,7 @@ test("the browser boot hands its taps and the policy's hop to the host as the bo
   try {
     assert.equal(harness.hostOptions.spectrumHopFrames, undefined, "the boot words carry no hop");
     assert.ok(harness.bootCommand instanceof Uint8Array, "the host was handed the boot command");
-    assert.ok(!harness.messages.includes(0x0010), "the boot sent no SPECTRUM_CONFIGURE");
+    assert.equal(harness.messages.filter((id) => id === 0x0010).length, 1, "one confirming SPECTRUM_CONFIGURE");
     const subscription = await engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0, cadenceMs: 1 });
     assert.equal(subscription.bounds.hopFrames, 256);
     const ready = await nextReady(subscription, render);
@@ -162,6 +163,21 @@ test("the browser boot hands its taps and the policy's hop to the host as the bo
   } finally {
     await engine.close();
   }
+});
+
+test("a host that drops the boot command fails the boot, naming bootCommand", SKIP, async () => {
+  // #2166. Red if `createEngine` returns an engine whose host booted without the taps (an app's
+  // own `createHost` that leaves `bootCommand` out): its spectrum reads would answer Unprepared
+  // later instead of the boot failing now.
+  const dropped = {};
+  await assert.rejects(served({ spectrum: OUTPUT, dropBootCommand: true, harness: dropped }), (error) => {
+    assert.ok(error instanceof MisoEngineError);
+    assert.equal(error.phase, "boot");
+    assert.match(error.message, /bootCommand/);
+    assert.equal(error.diagnosticCode, "sdk.boot.command");
+    return true;
+  });
+  assert.equal(dropped.disposed, 1, "the refused boot disposed its host");
 });
 
 test("a run-time configure that adds a tap keeps the stream on the kept tap (#1596 gate 4)", SKIP, async (t) => {

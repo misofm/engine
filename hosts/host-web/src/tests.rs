@@ -4030,6 +4030,23 @@ fn a_boot_spectrum_tap_is_the_first_plans_and_streams_with_no_rebuild() {
     let configure = spectrum_configure_frame(protocol::SpectrumTargetKind::Output, "main-out");
     let mut host = bus_meter_host_booted(QUANTUM, false, 2, 64, Some(&configure));
     assert_eq!(host.blocking_rebuilds(), 0, "the boot rebuilt nothing");
+    // The SDK's confirmation: the same configuration again is equal, so it rebuilds nothing.
+    let (rebuild, epochs) = spectrum_command(&mut host, &configure, |payload| match payload {
+        protocol::DecodedSuccessResponsePayload::SpectrumConfigured(reply) => {
+            (reply.rebuild, (reply.configured_epoch, reply.adopted_epoch))
+        }
+        _ => panic!("a configure reply"),
+    });
+    assert_eq!(
+        (rebuild, epochs),
+        (false, (1, 1)),
+        "the confirmation is a no-op"
+    );
+    assert_eq!(
+        host.blocking_rebuilds(),
+        0,
+        "the confirmation rebuilt nothing"
+    );
     let start = spectrum_frame(
         2,
         protocol::CommandPayload::SpectrumStream(&protocol::SpectrumStreamRequest::Start {
@@ -4058,6 +4075,25 @@ fn a_boot_spectrum_tap_is_the_first_plans_and_streams_with_no_rebuild() {
         assert!(bins.left_db.is_some() && bins.right_db.is_some());
     });
     assert_eq!(host.blocking_rebuilds(), 0, "rendering rebuilt nothing");
+}
+
+/// #2166: a refused boot takes the staged command with it, so the next boot does not carry a
+/// command staged for another document.
+///
+/// Red if the boot takes the command only after its document check passes: a boot refused there
+/// would leave the frame for the next boot.
+#[test]
+fn a_refused_boot_takes_the_staged_boot_command() {
+    let configure = spectrum_configure_frame(protocol::SpectrumTargetKind::Output, "main-out");
+    let document = b"{}";
+    crate::ffi::test_stage_document(document);
+    assert!(crate::ffi::test_stage_boot_command(&configure));
+    // A length that is not the staged document's: refused at the document check.
+    assert_eq!(
+        crate::ffi::miso_engine_web_v1_boot(document.len() as u32 + 1),
+        0
+    );
+    assert_eq!(crate::ffi::test_staged_boot_command_bytes(), 0);
 }
 
 /// Issue #2166 claim (b): a `SPECTRUM_CONFIGURE` that changes the taps of a running session is a
