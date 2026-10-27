@@ -189,3 +189,35 @@ legs or their one-ulp mutation evidence.
 - Remaining evidence: full C ABI suite, formatting and script checks, fresh independent review,
   and the real AArch64 debug/release controls, actual-script one-ulp failures and final required
   qualification. No adversarial PASS or remotely synchronized completion is claimed here.
+
+
+### Local qualification evidence (attempt 1)
+
+Implementation checkpoint `64eac0ec9a764c0e713ab84ed574675cf80705b8`:
+
+- `cargo test --locked -p capi`: PASS, 188 unit tests and 42 integration tests, including the new
+  owner; the unit suite took 155.12 s with one test thread. Existing realtime/resource and
+  concurrent plan-swap gates remain green. Log: `engine-work-evidence/easy2-20261027/1670/capi-full.log`.
+- `cargo fmt --all -- --check`: PASS; `bash -n scripts/run-aarch64-tests.sh`: PASS;
+  `python3 -B scripts/check-script-reachability.py`: PASS.
+- A PR-only fake-Cargo probe invokes the actual runner in both modes, records and checks its
+  exact argv, and returns a deliberate failure at its first Cargo invocation. Both modes reach
+  exactly the four existing host-web owner names, with `--release` only in release, and abort
+  before any workspace matrix. The runner's real no-silent-backend-skip scan also passes with
+  `hosts/host-web` included. This is command-wiring evidence only: no AArch64 build or execution.
+  Probe and log: `engine-work-evidence/easy2-20261027/1670/verify-aarch64-wiring.py` and
+  `aarch64-wiring.log` in that directory. All checks used the shared serial wrapper.
+
+Root will run the actual AArch64 one-ulp proof on a temporary, unmerged evidence branch. External
+PR-only artifacts in the same evidence directory are `value-at-one-ulp.patch`,
+`judge-arm-mutation.py` and `arm-mutation-proof.md`. The patch moves only a `value_at` linear
+result to its adjacent f32; mute steps are untouched. Green controls run the four pins in debug
+and release first. The mutated actual `run-aarch64-tests.sh debug` and `release` must each exit
+101 with the automation owner failing at the frozen native/browser digest assertion and the
+other three pins passing, with no later suite. The exact patch is then reversed. No mutant
+source, extra pins or new corpus owner enters the delivered branch.
+
+Still pending: fresh independent adversarial verdict, those real AArch64 controls and mutation
+failures, the full unmutated AArch64 legs in required qualification, and the integrated batch's
+workspace Clippy gate. Local x86 evidence does not substitute for any pending gate. GitHub
+synchronization and closure remain root's delivery responsibility after upstream evidence.
