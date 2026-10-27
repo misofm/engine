@@ -1356,9 +1356,6 @@ thread_local! {
     /// Routes [`limiter_block_linkable`] to the test module's current per-frame reference for the
     /// oracle arm of the block differential.
     static REFERENCE_KERNEL: Cell<bool> = const { Cell::new(false) };
-    /// Issue #988: test-only admission control and whole-bank engagement witness.
-    static FORCE_UNSCREENED: Cell<bool> = const { Cell::new(false) };
-    static SCREENED_ENGAGEMENTS: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Issue #1014 gate 2: what the stationary walk's segments were, on this thread.
@@ -1788,95 +1785,6 @@ impl<L: Lane> History<L> {
         self.t1 = self.t0;
         self.t0 = x;
     }
-}
-
-/// A conservative Annex-2 bound: `0.49 * max_phase_l1 * (1 + gamma_13) * (1 + u)`
-/// is below 0.9915, where `u = 2^-24` and `gamma_13 = 13*u/(1-13*u)`.
-/// Even adding `64 * f32::MIN_POSITIVE` for underflow/FTZ is below every valid
-/// stationary limit (at least `10^(-25/20)`). See issue #988 for the derivation.
-const SCREEN_FACTOR: f32 = 0.49;
-
-/// Ordered comparisons reject a NaN or infinity in any lane, history tap or input frame.
-/// The predicate covers the whole channel before in-place output can overwrite its input.
-#[inline(always)]
-fn taps_below<L: Lane>(history: &History<L>, io: &[f32], threshold: L) -> bool {
-    let mut ok = L::zero().eq(L::zero());
-    for tap in [
-        history.t0,
-        history.t1,
-        history.t2,
-        history.t3,
-        history.t4,
-        history.t5,
-        history.t6,
-        history.t7,
-        history.t8,
-        history.t9,
-        history.t10,
-        history.t11,
-    ] {
-        ok = L::mask_and(ok, tap.abs().lt(threshold));
-    }
-    if L::mask_any(L::mask_not(ok)) {
-        return false;
-    }
-    for (frame, input) in io.chunks_exact(L::WIDTH).enumerate() {
-        ok = L::mask_and(ok, L::load(input).abs().lt(threshold));
-        if frame % 16 == 15 && L::mask_any(L::mask_not(ok)) {
-            return false;
-        }
-    }
-    !L::mask_any(L::mask_not(ok))
-}
-
-/// Exactly the newest-first history left by shifting every input, including a short block.
-#[inline(always)]
-fn history_after<L: Lane>(history: History<L>, io: &[f32]) -> History<L> {
-    let frames = io.len() / L::WIDTH;
-    if frames >= HISTORY_WORDS {
-        let tap = |index: usize| L::load(&io[(frames - 1 - index) * L::WIDTH..]);
-        History {
-            t0: tap(0),
-            t1: tap(1),
-            t2: tap(2),
-            t3: tap(3),
-            t4: tap(4),
-            t5: tap(5),
-            t6: tap(6),
-            t7: tap(7),
-            t8: tap(8),
-            t9: tap(9),
-            t10: tap(10),
-            t11: tap(11),
-        }
-    } else {
-        let mut after = history;
-        for input in io.chunks_exact(L::WIDTH) {
-            after.shift(L::load(input));
-        }
-        after
-    }
-}
-
-/// One threshold per lane, conservative for either channel under Maximum linking.
-#[inline(always)]
-fn block_below_detector_limit<L: Lane>(
-    left: &ChannelState,
-    right: &ChannelState,
-    left_io: &[f32],
-    right_io: &[f32],
-) -> bool {
-    #[cfg(test)]
-    if FORCE_UNSCREENED.with(Cell::get) {
-        return false;
-    }
-    let mut limits = [0.0; MAXIMUM_WIDTH];
-    for (lane, limit) in limits.iter_mut().enumerate().take(L::WIDTH) {
-        *limit = left.limit[lane].current.min(right.limit[lane].current);
-    }
-    let threshold = L::load(&limits).mul(L::splat(SCREEN_FACTOR));
-    taps_below(&History::<L>::load(left), left_io, threshold)
-        && taps_below(&History::<L>::load(right), right_io, threshold)
 }
 
 /// Shifts the history and returns `P[n] = max(|h[6]|, |v0|, |v1|, |v2|, |v3|)`.
@@ -2652,7 +2560,7 @@ fn segment(
 /// seven lane-wide operations and no bookkeeping.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn channel_frame_uniform<const SCREENED: bool, L: Lane>(
+fn channel_frame_uniform<L: Lane>(
     io_frame: &mut [f32],
     x: L,
     peak: L,
@@ -2666,11 +2574,7 @@ fn channel_frame_uniform<const SCREENED: bool, L: Lane>(
 ) {
     let one = L::splat(1.0);
 
-    let required = if SCREENED {
-        one
-    } else {
-        L::select(peak.gt(limit), limit.div(peak), one)
-    };
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
     store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
 
     let minimum = sliding_minimum_uniform::<L>(
@@ -2725,7 +2629,7 @@ fn channel_frame_uniform<const SCREENED: bool, L: Lane>(
 /// input, with the one gain `g = 1 - d`.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn linked_frame_uniform<const SCREENED: bool, L: Lane>(
+fn linked_frame_uniform<L: Lane>(
     left_frame: &mut [f32],
     right_frame: &mut [f32],
     x_left: L,
@@ -2742,11 +2646,7 @@ fn linked_frame_uniform<const SCREENED: bool, L: Lane>(
 ) {
     let one = L::splat(1.0);
 
-    let required = if SCREENED {
-        one
-    } else {
-        L::select(peak.gt(limit), limit.div(peak), one)
-    };
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
     store_ring_lane::<L>(left.required_ring, slots.ring_cursor, required);
     store_ring_lane::<L>(right.required_ring, slots.ring_cursor, required);
 
@@ -3228,11 +3128,7 @@ fn limiter_block_linkable<L: Lane>(
     // right one takes the per-lane path on both, which is the conservative direction and keeps the
     // decision one branch rather than two.
     if lanes_uniform(left) && lanes_uniform(right) {
-        if stationary && block_below_detector_limit::<L>(left, right, left_io, right_io) {
-            limiter_block_screened::<L>(
-                left_io, right_io, frames, coef, shape, left, right, cursors, linked,
-            );
-        } else if stationary {
+        if stationary {
             limiter_block_uniform::<DISPATCH_STATIONARY, L>(
                 left_io, right_io, frames, coef, shape, left, right, cursors, true, linked,
             );
@@ -3277,139 +3173,6 @@ fn limiter_block_runtime_oracle<L: Lane>(
             left_io, right_io, frames, coef, shape, left, right, cursors, stationary,
         );
     }
-}
-
-/// Issue #988: a separate stationary uniform body whose required gains are proven one.
-/// The unscreened two-pass/stream body stays separate. All seven frozen frame-law steps
-/// after the required-gain calculation still run, including linked mirrored writes.
-/// History is computed from the original input before the first output store.
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn limiter_block_screened<L: Lane>(
-    left_io: &mut [f32],
-    right_io: &mut [f32],
-    frames: usize,
-    coef: &LimiterCoef<L>,
-    shape: &Shape,
-    left: &mut ChannelState,
-    right: &mut ChannelState,
-    cursors: &mut Cursors,
-    linked: bool,
-) {
-    debug_assert!(dual_stationary(left, right));
-    debug_assert!(lanes_uniform(left) && lanes_uniform(right));
-    debug_assert_eq!(left_io.len(), frames * L::WIDTH);
-    debug_assert_eq!(right_io.len(), frames * L::WIDTH);
-    let mut hot_left = HotChannel::<L>::load_stationary(left);
-    let mut hot_right = HotChannel::<L>::load_stationary(right);
-    hot_left.history = history_after(hot_left.history, left_io);
-    hot_right.history = history_after(hot_right.history, right_io);
-    #[cfg(test)]
-    {
-        SCREENED_ENGAGEMENTS.with(|count| count.set(count.get().saturating_add(1)));
-        observe_dispatch::<DISPATCH_STATIONARY>(DispatchRoute::DualUniform);
-        if linked {
-            LINKED_ENGAGEMENTS.with(|count| count.set(count.get().saturating_add(1)));
-        }
-    }
-    let all = L::zero().eq(L::zero());
-    let bypass = if coef.bypass { all } else { L::mask_not(all) };
-    let mut ring_cursor = cursors.ring as usize;
-    let mut main_cursor = cursors.main as usize;
-    let (left_prefix, left_phase, right_prefix, right_phase) = {
-        let mut uniform_left = UniformHot::<L>::new(left, shape);
-        let mut uniform_right = UniformHot::<L>::new(right, shape);
-        let mut frame = 0;
-        while frame < frames {
-            let walk = segment(
-                shape,
-                ring_cursor,
-                main_cursor,
-                frames - frame,
-                uniform_left.offsets,
-                uniform_right.offsets,
-            );
-            for step in 0..walk.run {
-                let base = (frame + step) * L::WIDTH;
-                let left_frame = &mut left_io[base..base + L::WIDTH];
-                let right_frame = &mut right_io[base..base + L::WIDTH];
-                let x_left = L::load(left_frame);
-                let x_right = L::load(right_frame);
-                if linked {
-                    linked_frame_uniform::<true, L>(
-                        left_frame,
-                        right_frame,
-                        x_left,
-                        x_right,
-                        L::zero(),
-                        hot_left.limit.current,
-                        hot_left.release.current,
-                        &mut hot_left,
-                        &mut uniform_left,
-                        &mut uniform_right,
-                        shape.ring,
-                        walk.left.advanced(step),
-                        bypass,
-                    );
-                } else {
-                    channel_frame_uniform::<true, L>(
-                        left_frame,
-                        x_left,
-                        L::zero(),
-                        hot_left.limit.current,
-                        hot_left.release.current,
-                        &mut hot_left,
-                        &mut uniform_left,
-                        shape.ring,
-                        walk.left.advanced(step),
-                        bypass,
-                    );
-                    channel_frame_uniform::<true, L>(
-                        right_frame,
-                        x_right,
-                        L::zero(),
-                        hot_right.limit.current,
-                        hot_right.release.current,
-                        &mut hot_right,
-                        &mut uniform_right,
-                        shape.ring,
-                        walk.right.advanced(step),
-                        bypass,
-                    );
-                }
-            }
-            frame += walk.run;
-            ring_cursor = wrapped(ring_cursor + walk.run, shape.ring);
-            main_cursor = wrapped(main_cursor + walk.run, shape.main);
-        }
-        if linked {
-            (
-                uniform_left.prefix,
-                uniform_left.phase,
-                uniform_left.prefix,
-                uniform_left.phase,
-            )
-        } else {
-            (
-                uniform_left.prefix,
-                uniform_left.phase,
-                uniform_right.prefix,
-                uniform_right.phase,
-            )
-        }
-    };
-    left_prefix.store(&mut left.prefix);
-    left.phase.fill(left_phase);
-    right_prefix.store(&mut right.prefix);
-    right.phase.fill(right_phase);
-    if linked {
-        hot_right.box_sum = hot_left.box_sum;
-        hot_right.reduction = hot_left.reduction;
-    }
-    hot_left.store_stationary(left);
-    hot_right.store_stationary(right);
-    cursors.main = main_cursor as u32;
-    cursors.ring = ring_cursor as u32;
 }
 
 /// One channel's detector pass over one chunk: `span` peaks from `span` input frames.
@@ -3820,7 +3583,7 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
                             let x_left = L::load(left_frame);
                             let x_right = L::load(right_frame);
 
-                            linked_frame_uniform::<false, L>(
+                            linked_frame_uniform::<L>(
                                 left_frame,
                                 right_frame,
                                 x_left,
@@ -3869,7 +3632,7 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
                         let x_left = L::load(left_frame);
                         let x_right = L::load(right_frame);
 
-                        channel_frame_uniform::<false, L>(
+                        channel_frame_uniform::<L>(
                             left_frame,
                             x_left,
                             peak_left,
@@ -3881,7 +3644,7 @@ fn limiter_block_uniform<const DISPATCH: u8, L: Lane>(
                             walk.left.advanced(step),
                             bypass,
                         );
-                        channel_frame_uniform::<false, L>(
+                        channel_frame_uniform::<L>(
                             right_frame,
                             x_right,
                             peak_right,
@@ -6308,7 +6071,7 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
 
                     let x_left = L::load(left_frame);
 
-                    channel_frame_uniform::<false, L>(
+                    channel_frame_uniform::<L>(
                         left_frame,
                         x_left,
                         peak_left,
@@ -6345,8 +6108,6 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
 
 #[cfg(test)]
 mod tests {
-    #[path = "../screen_tests.rs"]
-    mod screen_tests;
     use super::*;
 
     mod glide;

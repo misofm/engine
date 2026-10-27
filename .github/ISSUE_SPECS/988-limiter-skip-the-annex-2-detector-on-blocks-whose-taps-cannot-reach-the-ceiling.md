@@ -170,3 +170,13 @@ Quiet timing input is an exactly representable integer triangle-wave table at 0.
 sine, so native/V8 share every input bit. Frozen hot noise and near-miss semantics remain as above.
 Driver preflight, current codegen comparison, single A/B timing invocation and root target gates
 remain. Production source is still exactly the shipping-source change at `ae4d1d094`.
+
+## Attempt 1 delivery verdict — FAIL; implementation withheld (2026-10-27)
+
+The frozen, single A/B timing invocation in [remote evidence run 40471281487](https://github.com/misofm/engine/actions/runs/40471281487), proof commit `7f14f6fbf88c1ecb438976d63a1599e6dddf6d50`, source `21c38051cba9abeb706fcaa1622485cb267da702`, completed all nine rows. The runner reached the actual hard performance comparison; this was not an acquisition, compilation or harness failure.
+
+Near-miss candidate/base duration ratios were **1.057276655 at native W8**, **1.058081299 at native W4**, and **1.041003851 at V8 W4**. All exceed the frozen maximum **1.01**. Hot rows passed (approximately 0.9982, 0.9934, 0.9874), and quiet ratios were approximately 0.4814, 0.4109 and 0.3990, but a quiet improvement does not satisfy the worst-case gate. These are results of this one experiment, not universal performance claims.
+
+Root decision: **FAIL attempt 1. Do not ship this screen.** Restore the entire limiter production/test directory to current main in the batch, retain the failed implementation and all local checkpoints in Git history and on the pushed unmerged proof branch, and leave #988 OPEN. No timing retry, workload/tolerance change or speculative optimization follows this failure. A subsequent attempt needs a newly bounded brief addressing the near-miss screen cost before implementation. The original no-regression requirement stands.
+
+The failure does not block the independent held-meter and official ITU loudness slices: their targeted proofs ran before this timing failure and are independently checked by the fresh reviewer. The final reduced product tree must pass normal required qualification before those issues close. No release publication is performed by this batch.
