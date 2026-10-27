@@ -417,3 +417,81 @@ Notes for S5/S6:
 - The control exports still read the render half's `status` (state, quantum, clock) and the
   shared staging `buffers` (control request, diagnostic, source staging). In worker mode the
   Worker needs its own copies.
+
+## S5 evidence (2026-10-27): every control-to-render signal crosses two threads
+
+Slice S5 of the #1332 build plan (#1332(a1')), branch `codex/issue-1332-cross-thread` from S4,
+with main `02630e950` merged. No export, ABI, JS or SDK change.
+
+- **Per-plan words.** Each plan carries its own words (`PlanShape::words`, an engine seqlock
+  record `[master + 1, structure epoch]`). The control plane calls the new
+  `RuntimePreparer::stamp_before_publication` (default: nothing) just before
+  `reservation.commit`, with the committed session, the master and the structure epoch; the
+  browser preparer publishes them through the writer the plan's preparation left in the record.
+  After the call the control half keeps that writer and writes the plan's words again only after
+  a later call that publishes no plan (a live or monitor commit). The render half reads the
+  plan's own words at adoption and before every block. The only global words are the successor
+  record `[newest epoch, successor header]`, written by the control half (seqlock, `Release`) and
+  read by the render half (`Acquire`), which names the waiting replacement's header (#1290d1).
+  `ControlWords` and `receive_words` are gone. The single instance still applies the words at
+  once after each control call, so the header names them before the next block, as before.
+- **Retired tables.** The adopting block parks the retired tables in `RenderReady::parked`. The
+  next block, before it renders, pushes them into a bounded SPSC hand-back ring
+  (`RETIRED_SHAPES = 4`, render end in `RenderReady`, control end in `ControlHalf`). The service
+  step pops the ring and drops them on the control thread. So the tables live at least until the
+  adopting block's `process()` has returned. The bound is exact: three retirement credits after
+  a service step, plus the one shape still parked at it (or, before the first block, the in-place
+  `SPECTRUM_CONFIGURE` adoption). A full ring keeps the tables parked, and the next retired
+  tables drop with their plan on the control thread. The pop is in the realtime-policy
+  control-side allowlist (`ControlHalf::reclaim_shapes`).
+- **No control call reads render memory.** The control half owns its staging (control request,
+  diagnostic, source ID and PCM, plane references). A shared lifecycle word (`Arc<AtomicU32>`)
+  carries a sticky failure both ways: a control failure sets it and the render half silences from
+  its next block; a render failure sets it and every control call refuses. Control calls check
+  the word, read the quantum from the boot report, and lend the render plan only while it is on
+  the same thread. A render failure's fixed diagnostic stays in the render half; the single
+  instance copies it into the control diagnostic after the call, so the page reads one buffer.
+- **Rust API for S6.** `AudioWorkletEngineHost::release_render() -> Option<RenderHost>` and
+  `adopt_render(RenderHost)` (refuses a foreign or second half). `RenderHost` has `render_next`,
+  `poll_meters`, `status`, `output_pcm`, `meter_header` and `diagnostic`.
+- **Accounting.** The bridge rows add the plan's words record, the successor record, the
+  lifecycle word and the ring (`cross_thread_bytes`); a replacement's rows add its words record.
+
+Test: `hosts/host-web/tests/worker_admission_realtime.rs` now holds the two-thread form. The
+control thread boots, designates a master, releases the render half and then commits 13 muted-track
+rebuilds (some back to back, so supersession runs) and 39 live edits, feeds the source and runs the
+service step while the render thread renders 360 blocks inside the render-locked window. Asserts:
+render-locked allocator calls `0`; every block's header shows the words of the plan that rendered
+it (track count, master `= track count`, structure epoch of its commit); the bits equal the
+single-thread run of the same script. 200 consecutive runs: 200 green. The strip-fader
+single-thread test was deleted (superseded); the every-owner-kind single-thread test stays (its
+session has inserts, console slots, sends and a VCA, which the swap-carrying session cannot have).
+Red evidence: plan not stamped before publication: red at the first adoption (`(11, 0, 0)` for
+`(11, 11, 3)`), and three unit tests red; retired tables dropped on the render thread: red (589
+render-locked allocator calls); hand-back at the adopting block (no delay): the unit test
+`a_strip_count_change_publishes_the_successors_frame_from_the_adoption_block` red. Not made red:
+the S4 form (master and structure from a global epoch-gated word) fails only if render adopts a
+plan within the very block a later commit publishes; 0 of 20 runs hit it. A `Relaxed` load where
+`Acquire` is needed is not observable on x86-64.
+
+Gates: `cargo test -p host-web -p control-plane -p capi --all-targets` with their test-support
+features (500 passed); clippy `-D warnings` workspace; fmt; `cargo doc -D warnings`; every
+lint-job policy script including `check-lane-policy.sh`; `realtime_policy` (286 regions) and its
+tests; `build-web-audioworklet.sh`, `check-web-audioworklet.sh` (render closure 38 members, 11
+indirect sites, no allocation, `atomic_waits=0`; the pinned sites moved by inlining only:
+`RenderReady::adopt_shape` 2 + `RenderHalf::render_next` 2 for the host's 4, and
+`RenderHalf::poll_meters` 2 for the host's 2), `test-web-audioworklet.sh`,
+`check-browser-expected-resources.py --artifacts`; both local browser legs (Chromium 151, WebKit
+26.5, null PulseAudio sink): all qualification gates passed.
+
+No bit moved (PR evidence): `direct-oracle.mjs` print mode over main `02630e950` (module
+`98634c73…`) and S5 (`e35bf9e0…`): every PCM digest, status snapshot and timeline equal; only
+`bridgeMetadataBytes` and `bridgeRetainedBytes` grew, by 368 B, within their ceilings.
+
+S6 still has to do: the exports (`host_release`, `host_adopt`, `instance_reserve`) over
+`release_render`/`adopt_render`; the Worker's status export (the released host keeps a status
+shell) and the worklet's diagnostic export (`RenderHost::diagnostic`); `OBSERVATION_READ` and the
+in-place `SPECTRUM_CONFIGURE` adoption from the Worker (with the render half away the command runs
+without a lent plan, as on the C ABI, so the plan's readers are not reached); `seek_source`
+without the render plan (routing only); the lease export on the worklet side; per-instance
+`RENDER_ALLOCATIONS`.

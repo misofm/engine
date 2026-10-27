@@ -4,7 +4,7 @@
 //! The file keeps the name of the full issue's integration binary (`plan_exchange_threads`). Its
 //! first slice runs the one instance of today's module (decision 17, "single instance first"), so
 //! the control half and the render half are one thread, which is gate 4's form; the two-thread
-//! form arrives with the Worker (#1332, #1387). Reader pairing across a swap is #1381b's, so a
+//! form is `worker_admission_realtime.rs` (#1332 S5). Reader pairing across a swap is #1381b's, so a
 //! swap here asserts the clock, the bits, the allocation counts and the reclaim, and nothing about
 //! the meters', observations' or spectrum's continuity.
 //!
