@@ -958,7 +958,7 @@ fn bridge_resource_rows_are_exact() {
         AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
             panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
         });
-    let ready = host.ready.as_ref().expect("ready ownership");
+    let ready = host.test_render();
     assert_eq!(
         ready.shape.effect_instances.len(),
         1,
@@ -975,9 +975,7 @@ fn bridge_resource_rows_are_exact() {
     // cache, the plan's inventory and the superseded count) is charged once, and holds the
     // rows an independent preparation of the same session reports.
     let control_retained = host
-        .ready
-        .as_ref()
-        .expect("ready ownership")
+        .test_control()
         .queries
         .resources()
         .control_retained_bytes;
@@ -1062,7 +1060,7 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     };
     let baseline =
         AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("baseline boot");
-    let ready = baseline.ready.as_ref().expect("ready ownership");
+    let ready = baseline.test_render();
     let dense_effect_table_bytes = size_of_val(ready.shape.effect_instances.as_ref()) as u64;
     assert_eq!(
         ready.shape.effect_instances.len(),
@@ -1457,21 +1455,22 @@ fn output_mismatch_and_disposal_are_sticky_and_idempotent() {
 /// `checked_add` on the block start time (`RenderError::TimeOverflow`). Driving it proves the
 /// property the call-graph gate asserts statically — nothing reachable from `render_next` frees.
 ///
-/// Red mutation: restore `self.ready = None;` as the first line of `fail` → the
-/// `host.ready.is_some()` assertion fails.
+/// Red mutation: restore `self.ready = None;` as the first line of `RenderHalf::fail` → the
+/// `host.render.ready.is_some()` assertion fails.
 #[test]
 fn render_failure_retains_ownership_and_silences() {
     let mut host = prepared_host(128);
-    host.buffers
+    host.render
+        .buffers
         .as_mut()
         .expect("prepared buffers")
         .output_pcm
         .fill(-1.0);
-    host.status.next_absolute_sample = u64::MAX;
+    host.render.status.next_absolute_sample = u64::MAX;
 
     assert_eq!(host.render_next(), RESULT_RENDER_REJECTED);
     assert!(
-        host.ready.is_some(),
+        host.render.ready.is_some() && host.control.is_some(),
         "a render failure must never drop the plan, session or source rings on the audio thread"
     );
     assert_eq!(host.status().state, STATE_FAILED);
@@ -1486,13 +1485,13 @@ fn render_failure_retains_ownership_and_silences() {
 
     assert_eq!(host.render_next(), RESULT_WRONG_STATE);
     assert!(
-        host.ready.is_some(),
+        host.render.ready.is_some() && host.control.is_some(),
         "the retirement slot survives re-entry"
     );
 
     assert_eq!(host.dispose(), RESULT_OK);
     assert!(
-        host.ready.is_none(),
+        host.render.ready.is_none() && host.control.is_none(),
         "dispose is the single control-path reclamation point"
     );
     assert_eq!(host.status().state, STATE_DISPOSED);
@@ -2374,8 +2373,11 @@ mod serde_pin {
 /// committed model, the one an `Observe` edit and an `OBSERVATION_READ` resolve against; an index
 /// the model does not have names an ID it does not have either.
 fn key_at(host: &AudioWorkletEngineHost, track: u32, rack: u8, effect: u32) -> (Vec<u8>, Vec<u8>) {
-    let ready = host.ready.as_ref().expect("ready");
-    let model = ready.control.committed_session().normalized_model();
+    let model = host
+        .test_control()
+        .control
+        .committed_session()
+        .normalized_model();
     let strip = track as usize;
     let inserts = model
         .tracks
@@ -3147,9 +3149,7 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
 
     feed_and_render(&mut host, 1, 1, 0.2);
     assert!(
-        host.ready
-            .as_mut()
-            .expect("ready")
+        host.test_render_mut()
             .meters
             .test_only_output_mut()
             .windows_mut()
@@ -3185,10 +3185,9 @@ fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
     let published_header = *host.meter_header();
 
     feed_and_render(&mut host, 1, 1, 0.2);
-    let (Some(ready), Some(plan)) = (host.ready.as_mut(), host.plan.as_mut()) else {
-        panic!("a ready host");
-    };
-    let companions = plan
+    let ready = host.test_render_mut();
+    let companions = ready
+        .plan
         .active_attachment_mut::<RenderCompanions>()
         .expect("companions");
     for (meter, pending) in companions
@@ -3665,7 +3664,7 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
     for block in 0..8 {
         feed_and_render_tracks(&mut host, block, 0.25);
     }
-    let ready = host.ready.as_ref().expect("ready ownership");
+    let ready = host.test_render();
     assert_eq!(ready.shape.tracks, [Box::from("t0"), Box::from("t1")]);
     assert_eq!(
         ready.shape.submixes,
@@ -3823,10 +3822,9 @@ fn meter_gap_on_one_meter_leaves_no_backlog_at_one_block_windows() {
     let mut host = bus_meter_host_with(128, true, 1, 64);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     let backlog = |host: &mut AudioWorkletEngineHost| -> usize {
-        let (Some(ready), Some(plan)) = (host.ready.as_ref(), host.plan.as_mut()) else {
-            panic!("a ready host");
-        };
-        let companions = plan
+        let ready = host.test_render_mut();
+        let companions = ready
+            .plan
             .active_attachment_mut::<RenderCompanions>()
             .expect("companions");
         companions
@@ -4185,12 +4183,7 @@ fn bus_meters_render_and_poll_without_allocating() {
     );
     // #1581 gate 7: the measured block folds the core output meter, whose gate the lease opened.
     assert!(
-        host.ready
-            .as_ref()
-            .expect("ready")
-            .meters
-            .output_gate_from()
-            <= host.status.next_absolute_sample,
+        host.test_render().meters.output_gate_from() <= host.status().next_absolute_sample,
         "the output meter's gate is open for the measured block"
     );
     let ((render, windows), allocations, deallocations) =
@@ -4213,14 +4206,14 @@ fn bus_meters_render_and_poll_without_allocating() {
 /// The dense effect slot and the tap index of the tap at `tap`, through the plan's observation
 /// index (#1586 D3, the epoch's since #1589 R2), so a test reaches the reader the read reads.
 fn resolve_observation(host: &AudioWorkletEngineHost, tap: &TapAt) -> Option<(usize, usize)> {
-    let ready = host.ready.as_ref()?;
+    let ready = host.render.ready.as_ref()?;
     let (strip, effect) = key_at(host, tap.track_index, tap.rack, tap.effect_index);
     let rack = if tap.rack == RACK_CONSOLE {
         LiveEffectRack::Console
     } else {
         LiveEffectRack::Inserts
     };
-    let entry = ready.observation_index()?.find(
+    let entry = host.observation_index()?.find(
         core::str::from_utf8(&strip).ok()?,
         rack,
         core::str::from_utf8(&effect).ok()?,
@@ -4590,9 +4583,7 @@ fn with_bound_tag(
         tap_id: *tap_id,
     };
     let arm_tag = host
-        .ready
-        .as_mut()
-        .expect("ready")
+        .test_control_mut()
         .control
         .observation_bindings()
         .binding(&key)
@@ -4684,14 +4675,15 @@ fn apply_observe(
 /// only: every caller is in a `test-support` module.
 #[cfg(feature = "test-support")]
 fn armed_mask(host: &mut AudioWorkletEngineHost, strip_id: &str, insert_id: &str) -> Option<u32> {
-    let ready = host.ready.as_ref().expect("ready");
-    let reader = ready
+    let reader = host
         .observation_index()?
         .find(strip_id, LiveEffectRack::Inserts, insert_id)?
         .handle?;
     let companions = host
-        .plan
+        .render
+        .ready
         .as_mut()?
+        .plan
         .active_attachment_mut::<RenderCompanions>()?;
     let handle = companions.effect_observations.get(reader as usize)?;
     Some(
@@ -5785,7 +5777,7 @@ fn tap_gain_reduction(host: &mut AudioWorkletEngineHost, effect_index: u32) -> f
     let (Some(left), Some(right)) = (rows[0].left, rows[0].right) else {
         panic!("the tap has no published window: {:?}", rows[0].status);
     };
-    let ready = host.ready.as_ref().expect("ready");
+    let ready = host.test_render();
     let tap = ready.shape.effect_instances[effect_index as usize]
         .as_ref()
         .filter(|instance| instance.reader.is_some())
@@ -6591,13 +6583,7 @@ mod structural_apply {
 
         /// Whether a committed replacement waits for the block that adopts it.
         fn pending(&self) -> bool {
-            self.host
-                .ready
-                .as_ref()
-                .expect("ready")
-                .control
-                .newest_plan_epoch()
-                != self.epoch()
+            self.host.test_control().control.newest_plan_epoch() != self.epoch()
         }
 
         fn watermark(&mut self) -> WebPlanWatermark {
@@ -6913,9 +6899,7 @@ mod structural_apply {
         // The strip index of each observed effect in the plan's tables, which the meter frame's
         // gain-reduction fold reads.
         let binding_tracks = |host: &AudioWorkletEngineHost| {
-            host.ready
-                .as_ref()
-                .expect("ready")
+            host.test_render()
                 .shape
                 .observation_tracks
                 .iter()
@@ -7051,15 +7035,7 @@ mod structural_apply {
                 track_id: model.tracks[0].id.clone(),
             },
         ];
-        let latency = |rig: &Rig| {
-            rig.host
-                .ready
-                .as_ref()
-                .expect("ready")
-                .queries
-                .resources()
-                .latency_samples
-        };
+        let latency = |rig: &Rig| rig.host.test_control().queries.resources().latency_samples;
         assert_eq!(
             crate::ffi::miso_engine_web_v1_declare_discontinuity(u32::MAX),
             RESULT_INVALID_ARGUMENT
@@ -7095,9 +7071,7 @@ mod structural_apply {
 
         let document = canonical_session_json(
             rig.host
-                .ready
-                .as_ref()
-                .expect("ready")
+                .test_control()
                 .control
                 .committed_session()
                 .normalized_model(),
@@ -7223,14 +7197,7 @@ mod structural_apply {
                 );
             }
             let counted = rig.host.blocking_rebuilds();
-            let newest = |rig: &Rig| {
-                rig.host
-                    .ready
-                    .as_ref()
-                    .expect("ready")
-                    .control
-                    .newest_plan_epoch()
-            };
+            let newest = |rig: &Rig| rig.host.test_control().control.newest_plan_epoch();
             let before = newest(&rig);
 
             const FRAME: u64 = 1_280;
@@ -7242,25 +7209,13 @@ mod structural_apply {
                 counted + 1,
                 "swap {swap}: the successor is counted"
             );
-            {
-                let ready = rig.host.ready.as_ref().expect("ready");
-                let waiting: Vec<_> = ready
-                    .pending_shapes
-                    .iter()
-                    .filter(|entry| !entry.adopted)
-                    .collect();
-                assert_eq!(
-                    waiting.len(),
-                    1,
-                    "swap {swap}: the successor's tables, and no superseded candidate's"
-                );
-                assert_eq!(waiting[0].epoch, successor, "swap {swap}");
-                assert_eq!(
-                    rig.host.meter_successor_address(),
-                    core::ptr::from_ref(&waiting[0].shape.meter_header).addr(),
-                    "swap {swap}: the rendering plan names the successor's header"
-                );
-            }
+            // The rendering plan names the successor's header (#1332 S4: the successor's own, which
+            // its plan carries), checked at the adoption below.
+            let named = rig.host.meter_successor_address();
+            assert_ne!(
+                named, 0,
+                "swap {swap}: the rendering plan names a successor"
+            );
             assert_eq!(rig.host.status().state, STATE_READY, "swap {swap}");
 
             let quantum = u64::from(QUANTUM);
@@ -7282,20 +7237,24 @@ mod structural_apply {
                 successor,
                 "swap {swap}: the next block adopts it"
             );
+            assert_eq!(
+                core::ptr::from_ref(rig.host.meter_header()).addr(),
+                named,
+                "swap {swap}: the header named before the block is the one it adopted"
+            );
             assert_eq!(rig.host.status().state, STATE_READY, "swap {swap}");
             assert_eq!(rig.host.service(), RESULT_OK);
         }
     }
 
     /// #1310 on a paused page (batch 15a review fold B1): eight structural edits with no render
-    /// between them each commit, each superseding the candidate before it, as on the C ABI. The
-    /// host keeps one table entry per candidate the core holds, so the fifth edit finds room;
-    /// then the next block adopts the newest plan, which holds all eight edits, and from that
-    /// block on the output equals a fresh boot of the committed model.
+    /// between them each commit, each superseding the candidate before it, as on the C ABI. Each
+    /// candidate carries its own tables (#1332 S4), so a superseded one's drop with it and no
+    /// edit waits for room; then the next block adopts the newest plan, which holds all eight
+    /// edits, and from that block on the output equals a fresh boot of the committed model.
     ///
-    /// Test value: red if the host keeps a superseded candidate's tables until a later adoption
-    /// (the fifth paused edit is refused with `BACKPRESSURE`, as before the fold), or if the
-    /// adopted plan misses an edit.
+    /// Test value: red if a paused structural edit is refused (with `BACKPRESSURE`, as before
+    /// the batch 15a fold), or if the adopted plan misses an edit.
     #[test]
     fn paused_structural_edits_all_commit_and_the_newest_renders_as_a_fresh_boot() {
         const EDITS: u64 = 8;
@@ -7309,9 +7268,7 @@ mod structural_apply {
         for edit in 0..EDITS {
             let committed = rig
                 .host
-                .ready
-                .as_ref()
-                .expect("ready")
+                .test_control()
                 .control
                 .committed_session()
                 .normalized_model()
@@ -7341,15 +7298,9 @@ mod structural_apply {
             "every paused structural edit commits"
         );
         assert_eq!(rig.epoch(), 0, "nothing rendered: the boot plan still runs");
-        assert!(
-            rig.host.ready.as_ref().expect("ready").pending_shapes.len() <= 1,
-            "the host keeps the tables of the one candidate the core holds"
-        );
         let document = canonical_session_json(
             rig.host
-                .ready
-                .as_ref()
-                .expect("ready")
+                .test_control()
                 .control
                 .committed_session()
                 .normalized_model(),
@@ -7800,27 +7751,17 @@ mod structural_apply {
                 revision: base + 1
             }
         );
-        // The candidate's header is named by the one that renders, before the adoption block.
+        // The candidate's header is named by the one that renders, before the adoption block: the
+        // header the candidate's plan carries (#1332 S4), which the adoption block publishes.
+        // Full width: the `u32` word reads 0 for an address above 4 GiB on a native host, so the
+        // check is on the address the commit set beside it.
+        let named = rig.host.meter_successor_address();
+        assert_ne!(named, 0);
         {
-            let ready = rig.host.ready.as_ref().expect("ready");
-            let waiting = ready.pending_shapes.last().expect("the candidate's tables");
-            assert_eq!(waiting.shape.meter_header.track_count, 10);
-            assert_eq!(waiting.shape.meter_frame.len(), 3 * 10 + 3);
-            // Full width: the `u32` word reads 0 for an address above 4 GiB on a native host, so
-            // the check is on the pointer the commit set beside it.
-            assert_ne!(rig.host.meter_successor_address(), 0);
-            assert_eq!(
-                rig.host.meter_successor_address(),
-                core::ptr::from_ref(&waiting.shape.meter_header).addr(),
-                "the rendering plan names the newest candidate's header"
-            );
+            let ready = rig.host.test_render();
             assert_eq!(ready.shape.meter_header.retired, 0);
             // The strip order changed, so the list's structure epoch did: the rendering plan keeps
-            // the epoch of its own list, the replacement carries the newer one (#1562b).
-            assert_eq!(
-                waiting.shape.meter_header.structure_epoch,
-                last.0.structure_epoch + 1
-            );
+            // the epoch of its own list until the adoption block (#1562b).
             assert_eq!(
                 ready.shape.meter_header.structure_epoch,
                 last.0.structure_epoch
@@ -7828,6 +7769,11 @@ mod structural_apply {
         }
         let after = poll_cadence(&mut rig, 1, 1, 0);
         assert_eq!(rig.epoch(), 1);
+        assert_eq!(
+            core::ptr::from_ref(rig.host.meter_header()).addr(),
+            named,
+            "the rendering plan named the candidate's own header"
+        );
         assert_eq!(
             after[0].0.structure_epoch,
             last.0.structure_epoch + 1,
@@ -7875,23 +7821,24 @@ mod structural_apply {
 
         // The header the swap retired says so and names the one that replaced it; the adopted
         // header carries no successor (nothing waits).
-        let ready = rig.host.ready.as_ref().expect("ready");
+        let ready = rig.host.test_render();
         let retired = ready
-            .pending_shapes
+            .retired_shapes
             .iter()
-            .find(|entry| entry.adopted)
+            .flatten()
+            .next()
             .expect("the retired tables wait for the service step");
-        assert_eq!(retired.shape.meter_header.retired, 1);
-        assert_eq!(retired.shape.meter_header.track_count, 9);
-        assert_ne!(retired.shape.successor_address, 0);
+        assert_eq!(retired.meter_header.retired, 1);
+        assert_eq!(retired.meter_header.track_count, 9);
+        assert_ne!(retired.successor_address, 0);
         assert_eq!(
-            retired.shape.successor_address,
+            retired.successor_address,
             core::ptr::from_ref(&ready.shape.meter_header).addr(),
             "the retired header names the adopted one"
         );
         assert_ne!(
-            retired.shape.successor_address,
-            core::ptr::from_ref(&retired.shape.meter_header).addr()
+            retired.successor_address,
+            core::ptr::from_ref(&retired.meter_header).addr()
         );
         assert_eq!(ready.shape.meter_header.retired, 0);
         assert_eq!(ready.shape.meter_header.successor_pointer, 0);
@@ -8174,7 +8121,7 @@ mod structural_apply {
     }
 
     fn meter_loss(rig: &Rig) -> u64 {
-        rig.host.ready.as_ref().expect("ready").meters.loss_count()
+        rig.host.test_render().meters.loss_count()
     }
 
     /// Telemetry is dropped only with a count. The windows the predecessor closed before a swap
@@ -8197,16 +8144,12 @@ mod structural_apply {
         for _ in 0..4 {
             rig.step();
         }
-        let waiting = rig
-            .host
-            .ready
-            .as_mut()
-            .expect("ready")
-            .meters
-            .output_windows_queued() as u64;
+        let waiting = rig.host.test_render_mut().meters.output_windows_queued() as u64;
         assert!(waiting > 0, "the render side closed windows nobody polled");
-        let ready = rig.host.ready.as_mut().expect("ready");
-        ready.meters.test_only_set_loss_count(5);
+        rig.host
+            .test_render_mut()
+            .meters
+            .test_only_set_loss_count(5);
         let base = rig.host.committed_revision();
         assert_eq!(
             rig.apply(&add_muted_track(&model, ADDED), 1),
@@ -8263,7 +8206,7 @@ mod structural_apply {
     #[test]
     fn a_rebuild_whose_tables_cannot_reach_the_host_is_refused_before_the_commit() {
         let refused = assert_refusal_changes_nothing(options(), |rig, model| {
-            let record = Arc::clone(&rig.host.ready.as_ref().expect("ready").record);
+            let record = Arc::clone(&rig.host.test_control().record);
             let poisoner = std::thread::spawn(move || {
                 let _guard = record.lock().expect("the record is free");
                 panic!("poison the record");
@@ -8740,9 +8683,9 @@ mod structural_apply {
         // generation.
         let queued = |rig: &mut Rig| {
             rig.host
+                .test_render_mut()
                 .plan
-                .as_mut()
-                .and_then(|plan| plan.active_attachment_mut::<RenderCompanions>())
+                .active_attachment_mut::<RenderCompanions>()
                 .expect("companions")
                 .meters[0]
                 .consumer
@@ -8754,10 +8697,9 @@ mod structural_apply {
             }
             assert_eq!(rig.host.render_next(), RESULT_OK);
         }
-        let (Some(ready), Some(plan)) = (rig.host.ready.as_mut(), rig.host.plan.as_mut()) else {
-            panic!("a ready host");
-        };
-        let companions = plan
+        let ready = rig.host.test_render_mut();
+        let companions = ready
+            .plan
             .active_attachment_mut::<RenderCompanions>()
             .expect("companions");
         let mut snapshot = companions.meters[0]
@@ -9010,15 +8952,15 @@ mod structural_apply {
         assert_eq!(PLAN_LATENCY_BYTES, 64);
 
         // A host that is not ready refuses and leaves the record alone.
-        rig.host.status.state = STATE_FAILED;
+        rig.host.render.status.state = STATE_FAILED;
         assert_eq!(rig.host.read_plan_latency(), RESULT_WRONG_STATE);
         assert_eq!(*rig.host.plan_latency(), WebPlanLatency::default());
-        rig.host.status.state = STATE_READY;
+        rig.host.render.status.state = STATE_READY;
 
         // After boot the record holds the boot plan's row, copied.
         assert_eq!(rig.host.read_plan_latency(), RESULT_OK);
         let boot = *rig.host.plan_latency();
-        let row = rig.host.ready.as_ref().expect("ready").queries.resources();
+        let row = rig.host.test_control().queries.resources();
         assert_eq!(boot.struct_size, PLAN_LATENCY_BYTES);
         assert_eq!(boot.reserved0, 0);
         assert_eq!(boot.reserved, [0; 4]);

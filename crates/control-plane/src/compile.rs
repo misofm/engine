@@ -23,8 +23,12 @@ pub(crate) struct PreparedRuntime {
     pub(crate) meter_tables: host_core::MeterTables,
     /// The plan's meter frame ring (#1588 D2) for an adapter whose render half folds the meters
     /// ([`ControlAdapter::RENDER_METER_FOLD`]): frames of the plan's strip count. `None` for any
-    /// other adapter.
-    pub(crate) meter_frames: Option<host_core::MeterFrameRing>,
+    /// other adapter. The control half, and the render half unless the preparer moved it into the
+    /// plan ([`RuntimePreparer::keep_meter_frame_producer`], #1332).
+    pub(crate) meter_frames: Option<(
+        host_core::MeterFrameConsumer,
+        Option<host_core::MeterFrameProducer>,
+    )>,
     /// The plan's effect observation readers (#1584 D7), one per observed effect instance in
     /// `HostLiveControlHandles::effect_observations` order: kept, not dropped. Empty for a host
     /// whose preparer takes them for itself (the browser's).
@@ -1769,6 +1773,21 @@ pub trait RuntimePreparer: Send {
     fn observation_queues(&self) -> bool {
         true
     }
+
+    /// Keep the render half of the plan's meter frame ring (#1588 D2) in `plan`, before the plan
+    /// is published (#1332): a preparer whose plan's attachment carries what its render half
+    /// reads moves `producer` there and returns `None`, so the ring reaches the render half with
+    /// the plan, through the exchange, on whatever thread renders it. The default returns it, and
+    /// the epoch keeps it for [`crate::SessionState::take_meter_frame_producer`]. Control thread,
+    /// before publication; only an adapter with [`ControlAdapter::RENDER_METER_FOLD`] has a ring.
+    fn keep_meter_frame_producer(
+        &self,
+        plan: &mut engine::realtime::PreparedRenderPlan,
+        producer: host_core::MeterFrameProducer,
+    ) -> Option<host_core::MeterFrameProducer> {
+        let _ = plan;
+        Some(producer)
+    }
 }
 
 /// The epoch's meter rows (#1587a R2, #1588 D2): its meter tables, and the frame ring of
@@ -2013,6 +2032,15 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
             std::sync::Arc::clone(record),
         )));
     }
+    // #1332: the ring's render half rides the plan itself when the preparer keeps it there, so
+    // the plan carries it through the exchange to whichever thread renders it.
+    let meter_frames = meter_frames.map(|ring| {
+        let host_core::MeterFrameRing { producer, consumer } = ring;
+        (
+            consumer,
+            preparer.keep_meter_frame_producer(&mut plan, producer),
+        )
+    });
     let revision_gate = plan
         .take_revision_gate()
         .expect("a freshly prepared plan hands out its revision gate");
