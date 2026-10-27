@@ -108,7 +108,7 @@ mono left + zero right preserves exactly that measurement without a gain transfo
 6. Fresh adversarial review (root owns Astra review), maximum five coherent attempts.
 
 Test-value claim: authentic, spectrally/time-varying published PCM catches K-weighting,
-gating and percentile errors that the existing synthetic-tone recipes can agree on while
+and gating errors that the existing synthetic-tone recipes can agree on while
 mis-measuring real programme material; published frequency/sweep and gate edge cases
 also hold those algorithms to independent official byte-level stimuli and expected values.
 No new production DSP, benchmark, listening panel, target matrix or realtime path is
@@ -143,9 +143,28 @@ Largest absolute error: absolute-gate case 0.04845 LKFS; relative-gate error
 0.02880 LKFS; authentic mono/stereo programme errors 0.00644–0.02700 LKFS.
 `cargo fmt -p loudness` passed. Exact wrapper command and all case readings are in
 external `2127/attempt1-qualified.log`; the shared serial log records no overlapping
-batch CPU work. Broader crate/lint and acquisition failure checks remain pending.
+batch CPU work. Broader crate/lint and acquisition failure checks passed as recorded below.
 
 Test value, `itu_bs2217_published_mono_stereo_files`: wrong channel power handling,
 spectral K-weighting or gating on authentic time-varying programme PCM and the
 published near-threshold gate files turns this red where recipe-only sine cases
 cannot establish the published programme/file-based readings.
+
+Attempt 1 proportional verification (2026-10-27): PASS. All commands ran
+sequentially under the shared serial wrapper in this worktree:
+
+- `python3 .../2127/acquisition-preflight.py`: five expected refusals (missing official
+  archive, missing WAV, corrupt existing WAV, corrupt existing archive, unexpected
+  archive member). Corrupt data remained unchanged; no network used in failure checks.
+- `python3 crates/loudness/tests/data/fetch-official-loudness.py <private corpus> --verify`:
+  all 19 archive/WAV identities and metadata verified offline.
+- `cargo fmt -p loudness --check`: PASS.
+- `cargo test -p loudness -- --test-threads=1`: all 11 ordinary tests PASS, explicit
+  official-data test visibly ignored as designed (its separate 19-file run passed above).
+- `cargo clippy -p loudness --tests -- -D warnings`: PASS.
+
+External `2127/attempt1-proportional.log` preserves output and the serial log preserves
+queue execution. These checks add no committed harness tests or production changes.
+Author stream is complete with a clean checkpoint; fresh adversarial review, integration
+and GitHub synchronization remain root's delivery work. No upstream push or issue
+closure has been made by this stream, and no EBU/multichannel compliance is claimed.
