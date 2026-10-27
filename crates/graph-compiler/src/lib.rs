@@ -10552,7 +10552,6 @@ mod tests {
     ///   peak meters instead.
     /// * **#943's `SAMPLE_PEAK` fixture** runs no full pass: its meters have no energy, so no lane
     ///   answers a seed.
-    /// * **Ballistics.** `ALL` meters with an eight-frame peak hold never accept the pass.
     #[test]
     fn the_full_meter_pass_stays_off_where_no_meter_can_commit_it() {
         const BLOCKS: u64 = 24;
@@ -10631,32 +10630,6 @@ mod tests {
             (0, BLOCKS * cohorts, METER_CONSOLE_TRACKS * BLOCKS, 0),
             "SAMPLE_PEAK: no full pass, #943's pass and merges"
         );
-
-        // Ballistics.
-        let held: Vec<SelectedMeterRequest> =
-            post_matrix_meter_requests(&intended, MeterMetricSet::ALL, 512)
-                .into_iter()
-                .map(|mut meter| {
-                    meter.request.config.peak_hold_frames = 8;
-                    meter
-                })
-                .collect();
-        let held = arms(&held);
-        assert_full_meter_arms_equal(&held[0], &held[1], "ballistics");
-        assert!(
-            held[0]
-                .rendered
-                .4
-                .iter()
-                .any(|frame| frame.left.held_peak != 0.0)
-        );
-        for arm in &held {
-            assert_eq!(
-                (arm.passes, arm.peak_passes, arm.commits),
-                (0, 0, 0),
-                "ballistics: a held peak with a hold never banks"
-            );
-        }
     }
 
     /// Issue #950 attempt 2 (Sol finding 1): a bank whose lanes disagree -- different periods,
@@ -10666,8 +10639,8 @@ mod tests {
     ///
     /// One lane's seed makes the pass run, and every other lane's meter is then handed
     /// `meter: Some` and must commit or refuse on its own terms: a block that crosses its window is
-    /// refused by `commit_banked`'s window check, and a meter without an energy commits with no
-    /// seed to check. The tracks cycle through eight meters:
+    /// refused by `commit_banked`'s window check, and the non-energy rows without held ballistics
+    /// commit with no state seed to check. The tracks cycle through eight meters:
     ///
     /// | track % 8 | metrics | period | what it does with the pass |
     /// |---|---|---:|---|
@@ -10676,13 +10649,13 @@ mod tests {
     /// | 2 | `SAMPLE_PEAK \| HELD_PEAK` | 129 | as 1, with the held merge |
     /// | 3 | `ENERGY_RMS \| COUNTS` | 100 | every block crosses its window: never seeds, refuses |
     /// | 4 | `SAMPLE_PEAK` | 384 | merges the pass's peak through issue #943's call |
-    /// | 5 | `ALL`, hold 5 | 512 | never accepts: the sample loop |
+    /// | 5 | `ALL`, hold 5 | 512 | seeds energy and held state, commits every block |
     /// | 6 | `ENERGY_RMS` | 1536 | seeds every block, commits every block |
     /// | 7 | `COUNTS \| HELD_PEAK` | 64 | every block crosses its window: refuses, no seed |
     ///
     /// On this fixture a bank is consecutive tracks, so every bank holds a lane that seeds every
     /// block (0 or 6), the pass runs once per cohort per block, and the commits are exactly those of
-    /// tracks 0, 1, 2 and 6 in every block their windows hold: the non-energy meters 1 and 2 commit
+    /// tracks 0, 1, 2, 5 and 6 in every block their windows hold: the non-energy meters 1 and 2 commit
     /// beside the energy lanes. A different grouping would change the pass and commit counts and
     /// turn this test red, not vacuous. Deleting the window check (mutation S-2) commits a
     /// crossing block for tracks 1, 3 and 7 and is red here.
@@ -10728,8 +10701,14 @@ mod tests {
         let inside = |period: u32| blocks_inside_a_window(u64::from(period), BLOCKS, 128);
         // The console repeats the eight-meter pattern this many times.
         let eights = METER_CONSOLE_TRACKS / 8;
-        // Per eight tracks: the committing meters 0, 1, 2 and 6, and the merging meter 4.
-        let commits_per_eight = inside(512) + inside(300) + inside(129) + inside(1536);
+        // Every row except SAMPLE_PEAK commits each block its window holds. This includes
+        // track 5's seeded held recurrence; tracks 3 and 7 contribute zero because 128 frames
+        // cannot fit in their 100/64-frame windows. Track 4 uses the separate peak merge.
+        let commits_per_eight: u64 = pattern
+            .iter()
+            .filter(|&&(metrics, _, _)| metrics != M::SAMPLE_PEAK)
+            .map(|&(_, period, _)| inside(period))
+            .sum();
         let non_energy_commits_per_eight = inside(300) + inside(129);
         assert!(non_energy_commits_per_eight > 0 && inside(300) < BLOCKS && inside(129) < BLOCKS);
         let windows: u64 = pattern
@@ -10794,7 +10773,7 @@ mod tests {
             assert_eq!(
                 on.commits,
                 eights * commits_per_eight,
-                "{context}: tracks 0, 1, 2 and 6 commit every block their windows hold, \
+                "{context}: tracks 0, 1, 2, 5 and 6 commit every block their windows hold, \
                  the non-energy tracks 1 and 2 included"
             );
             assert_eq!(
