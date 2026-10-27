@@ -221,3 +221,40 @@ Still pending: fresh independent adversarial verdict, those real AArch64 control
 failures, the full unmutated AArch64 legs in required qualification, and the integrated batch's
 workspace Clippy gate. Local x86 evidence does not substitute for any pending gate. GitHub
 synchronization and closure remain root's delivery responsibility after upstream evidence.
+
+
+## Independent review — attempt 1 PASS (2026-10-27)
+
+Fresh Astra verified that both actual Arm script modes run the same four existing digest owners
+before their profile branches, without new pins or expected-failure exceptions. The C ABI owner
+compares settled generation-2 output at timeline 30,000 across all four frozen quantum/arrival
+configurations, proves source alignment, and guards against silence and absent automation.
+The author's full C ABI suite passed 230 tests; the independent integrated policy gates and
+workspace Clippy passed, including Clippy after the newer main was integrated.
+
+Native Arm proof [run 40452370315](https://github.com/misofm/engine/actions/runs/40452370315)
+passed on `aarch64-unknown-linux-gnu`, Rust 1.99.1. Both debug and release controls passed all
+four exact owners. With the temporary one-ULP linear `value_at` mutation, both actual
+`run-aarch64-tests.sh` modes exited 101: exactly three other owners passed and the automation
+owner failed at its frozen native/browser digest assertion. Each failed invocation reported one
+test suite, so neither continued into the full matrix. The strict judge rejected other failure
+shapes; the workflow reversed the patch and verified a clean source diff before recording PASS.
+
+Fresh review downloaded the artifact and checked its runner, compiler, logs, judge bytes and
+provenance. The unmerged evidence commit `b4b7aaa6adf009e233c67c2853221e1333add38b` differs
+from the reviewed production source only in its dispatch-only qualification workflow. Neither
+that workflow nor the fault is merged into product source. Raw artifacts and independent
+validation remain in `engine-work-evidence/easy2-20261027/fresh-astra/arm-proof/` and
+`arm-proof-validation.txt`.
+
+Test value: the one new C ABI regression turns red when settled stored automation depends on
+absolute render arrival or block partitioning, which the existing quantum-128 flat-target seek
+row cannot detect. Reusing the existing four digest owners adds real NEON/profile execution
+without a second corpus; the one-ULP experiment proves that their Arm wiring detects an actual
+arithmetic change.
+
+All local verification used the shared serial runner (two Cargo jobs, one Rust test thread).
+The final combined production source is `24000af983207d5f18aecb2aece5d1a3466741c1`.
+Full required PR `qualification`, including both unmutated AArch64 legs and both standard
+browser matrices with their mutations, remains mandatory before delivery and issue closure.
+Those full browser rows were deliberately deferred to required CI, not reported as local PASS.

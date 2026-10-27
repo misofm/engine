@@ -95,3 +95,45 @@ The owner pauses at this compiling, focused-green tranche for an exact-path loca
 All commands used the serial wrapper. Verification initially waited for external engine tests/release builds. During this full suite an external engine Wasm probe began compiling only after our offline compilation had finished and our tests were running; no owned offline compiler subtree remained to pause, and running tests were not suspended. These results are correctness evidence, not timing or benchmark measurements.
 
 Implementation is locally checkpointed and full focused verification is green. Fresh independent Astra review, proportional batch qualification, upstream delivery and matching GitHub synchronization remain root's responsibility. No PASS or remote completion is inferred from implementation evidence alone.
+
+
+## Independent review — attempt 1 PASS (2026-10-27)
+
+Fresh Astra reviewed the committed origin metadata, event ordering and resource accounting.
+The value-time helper preserves the previous evaluation arithmetic. A merged held event moves
+only the heard origin; the non-held target retains its own origin, independently of output
+holds. Reindexing preserves the cursor's held/deferred event state. Changed layout, node arrival,
+prepared offsets or prepared own value cannot enter the preservation shortcut. Cursor storage
+is charged through `Composed::bytes` and its `size_of` calculation, including graph callers;
+builtin aggregate accounting also follows live sizes. No render allocation, lock or syscall is
+introduced. The W4/W8 carry gate is appropriate: the scalar oracle has no carried bank and
+supplies no stage gain; existing scalar/shared-event arithmetic coverage remains in force.
+
+The author's automation/builtins suites passed 102 tests with three documented ignores, and the
+owning regression is red on baseline production and green on the fix. Independent workspace
+Clippy passed before and after integration of the newer main; formatting, workspace/builtins
+policies, unfused seal and realtime dependency-leak gates passed.
+
+Two temporary independent experiments in the finished author worktree add bounded PR evidence.
+Removing only the new 100-frame restriction made both moving-entry rows also adopt at 1,152
+with quantum 128: the owner passed, so the analytical after-step concern produced no new defect.
+A selective successor curve then matched the carried heard value at 1,151 while changing the
+older target at 959. The candidate correctly retained the changed-table entry landing. Ignoring
+only the target-origin comparison made that assertion fail (exit 101, Simd8 target words
+3247039040 versus 3246792512). Both touched files were restored byte for byte and the worktree
+was clean. These experiments remain external PR evidence, not another permanent test owner.
+
+Test value: the folded moving-own entry-step row catches the audible no-op adoption mismatch
+invisible to the former static-own row; its prior-jump variant catches substituting output
+completion for component origins or losing held/deferred state; the changed-table assertion
+catches an overbroad shortcut that preserves a genuinely changed curve. Existing held/free,
+repeated-adoption, on/off-grid and genuine entry-jump claims remain in the same owning test.
+Evidence lives in `engine-work-evidence/easy2-20261027/fresh-astra/after-step.log`,
+`selective-origin-control.log`, `selective-origin-ignore-target-origin.log`, their replay scripts
+and patch, and `final-clippy.log`.
+
+All local verification used the shared serial runner (two Cargo jobs, one Rust test thread).
+The final combined production source is `24000af983207d5f18aecb2aece5d1a3466741c1`.
+Full required PR `qualification`, including both unmutated AArch64 legs and both standard
+browser matrices with their mutations, remains mandatory before delivery and issue closure.
+Those full browser rows were deliberately deferred to required CI, not reported as local PASS.

@@ -37,3 +37,41 @@ Implementation checkpoint: `8890792627e9eb1abf49f8626403d9016fad8cc8` (verified 
 - Test value of the rewritten checkout mutation: losing the identity job's full-history checkout still turns its owning routing test red after the new download step is inserted; without this check, a shallow checkout could make every report unable to find its base.
 
 Evidence directory for all paths above: `/home/bl/misofm/engine-work-evidence/easy2-20261027/`. `2117/blake3-lineage-record.log` records the successful lineage run. No full audio matrix, Rust build, release dispatch, npm publication, or upstream push was performed in this worktree. Fresh independent Astra review and integration verification remain required, followed by root-owned GitHub synchronization and delivery. Local gates are green; this implementation author does not claim the independent verdict.
+
+
+## Independent review — attempt 1 PASS (2026-10-27)
+
+Fresh Astra independently reviewed the implementation and its release-policy boundary: a
+BLAKE3-only pin update leaves worklet release checks intact, while a worklet pin/environment
+or package-version change still invokes the existing worklet requirements. The identity job
+checks the downloaded closure before reading its BLAKE3 module; npm qualification executes
+both the source-pin and built-byte checks.
+
+The final integrated closure was built once successfully. Its BLAKE3 module remains
+`ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1`, matching the committed
+pin. Fresh Chromium 151.0.7922.34 and WebKit 26.5 scoped runs each used the raw host module's
+default URL, reported `simd128`, and matched all six existing canonical PCM identities.
+Independent identity self-tests, npm behavioral mutations, CI routing, workspace/builtins
+policies, unfused seal, realtime dependency-leak gate, formatting and workspace Clippy passed;
+Clippy also passed after integration of the newer main. The first artifact command was refused
+before compilation because the output directory did not exist; that setup rejection is preserved,
+the directory was created, and the subsequent actual closure build passed. A separately queued
+build was canceled before execution during main synchronization.
+
+Test value: the Worker row catches a missing default asset or browser-specific Wasm failure
+that Node and browser JavaScript fallback permit; npm mutations catch altered BLAKE3 bytes or
+missing/stale pin/environment while the worklet still matches; identity self-tests catch stale
+BLAKE3 qualification, non-SIMD completion, malformed candidate or toolchain disagreement; the
+updated routing mutation continues to reject a shallow identity checkout after insertion of the
+download step. These reuse the existing corpus and workflow owners.
+
+Evidence is retained under `engine-work-evidence/easy2-20261027/fresh-astra/`:
+`artifact-build.log`, `artifact-directory-preflight-rejection.log`, `artifact-sha256.txt`,
+`blake3-both.log`, `integrated-policies.log`, and `final-clippy.log`. No release or npm publication
+was performed.
+
+All local verification used the shared serial runner (two Cargo jobs, one Rust test thread).
+The final combined production source is `24000af983207d5f18aecb2aece5d1a3466741c1`.
+Full required PR `qualification`, including both unmutated AArch64 legs and both standard
+browser matrices with their mutations, remains mandatory before delivery and issue closure.
+Those full browser rows were deliberately deferred to required CI, not reported as local PASS.
