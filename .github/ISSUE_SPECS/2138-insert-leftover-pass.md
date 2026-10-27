@@ -131,8 +131,8 @@ The W=4 irregular row also moves `mergeable_partial_pairs` 0 -> 1 and
 `bank_slot_runs_track_group` 8704 -> 8960. The C1 rows have no track inserts, so their plans
 do not move (every bank-report counter and output digest is equal), and their p50 deltas are
 run-to-run noise on one plan. The irregular row's 46.4 % lane use in the spec is #2132's figure;
-#2136 had already raised it to 62.9 %. Pass 2 adds two padded leftover banks there (the
-de-essers and transient shapers the ragged chains left per node), so lane use falls a little
+#2136 had already raised it to 62.9 %. Pass 2 adds two padded leftover banks there (which
+effects they hold was not recorded), so lane use falls a little
 while 8 per-node renders become banked lanes; the row is 11.3 % faster.
 
 ### Not done
