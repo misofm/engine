@@ -267,3 +267,26 @@ different depths are one cohort per pool. `mergeable_partial_pairs` is 0 on ever
   earlier op's output.
 - Ruling point 10 records the accepted trade: a merge that saves a static bank may still run more
   banks on a silent-heavy block; the #2135 packer groups by state at run time.
+
+## Attempt 4 (2026-10-27, after the third verify's FAIL)
+
+- **Cause removed:** the bank count no longer has a key of its own. `place_over_windows` takes a
+  `banks_of(set)` callback (`crates/rack-compiler/src/lib.rs`, the stab's merge decision) and keeps
+  every placed node per level; the graph compiler's callback (`crates/graph-compiler/src/banks.rs`
+  `placement_levels`, `PlannedNode`) counts every node a planner will group, keyed as the planner
+  keys it -- a rack chain's first slot as the rack planner's `CohortCandidate` (rack, program,
+  class, from the shared `rack_chains`), a builtin strip stage by (stage, class) -- through
+  `plan_bank_groups` itself, followers placed through the `None` branch included. Invariant
+  (ruling point 9): the set counted at (planner key, level) is the members the planner groups
+  there, minus nodes later stabs place.
+- **Invariant test:** `bank_levels.rs` `assert_placement_counts_the_plan` on every compile in that
+  file (so the randomized console corpus, every seed) and
+  `the_placement_counts_the_planners_groups_on_c1` (C1-16, C1-64, irregular). Red on the
+  attempt-3 counting (keyed nodes only): `builtin member ... is not counted`.
+- **`a_merge_that_saves_no_bank_is_refused`** now has four cases at W=4 and W=8: no gain (case 1),
+  nodes already placed (case 2), followers (case 3), two programs in one placement class (case 4).
+  Red on attempt 3's counting: placement-key-only counting fails case 3 (`case 3, W=4: x keeps its
+  floor ...`, left (2, 2), right (1, 2)); counting by placement key instead of program fails case 4
+  (`case 4, W=4 ...`, same values).
+- Plans: identical on all 17 bank-report rows (banks, pairs, static BSR, every pack group's units),
+  so no pin, record or benchmark moved.

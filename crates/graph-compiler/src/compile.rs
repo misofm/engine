@@ -13,7 +13,7 @@
 use super::*;
 use crate::banks::{
     PlacementLevels, bind_rack_banks_placed, checked_add_effect_banks, effect_bank_resource,
-    placement_levels,
+    placement_levels, rack_chains,
 };
 use crate::canonical::{
     Sha256Writer, canonical_parts, dot, hex_digest, hex_sha256, reductions_of, write_canonical,
@@ -520,13 +520,18 @@ impl GraphCompiler {
             .filter(|(entry, _)| rack::BankSlotKey::blocks_banking(&entry.metadata.program_key()))
             .filter_map(|(_, id)| id.clone())
             .collect();
+        let candidates = match rack_chains(&effects, &prepared, &effect_ids) {
+            Ok(value) => value,
+            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+        };
         let placement = match placement_levels(
             &nodes,
             &edges,
             &levels,
             &pool_classes,
             &per_node,
-            BankWidth::for_backend(dispatch).map_or(1, |width| width.lanes() as usize),
+            &candidates,
+            BankWidth::for_backend(dispatch),
         ) {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
