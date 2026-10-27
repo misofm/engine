@@ -249,6 +249,14 @@ and re-offers it as a one-slot candidate with its own window, grouped by `Effect
 padded from the same threshold, bound as a one-slot chain. A node still unbanked renders per node.
 Eligibility stays #163 phase 1's (the kernel contract); only placement widens.
 
+As built (#2138, `leftover_pass` in `crates/graph-compiler/src/banks.rs`): a candidate's window is
+the levels it may take with every graph neighbour where the placement put it, so a move keeps
+every edge strictly upward and the graph contracted by bank acyclic. Per (key, pool class) the
+candidates are swept earliest deadline first; a stab is merged across levels only when the merge
+leaves fewer nodes per node than the level plan of the same members, or as many in fewer banks
+(the #2136 rule: a merge that saves no bank costs only silence skips). Otherwise each member is
+bucketed at its own level.
+
 ### 2.5 Mono and stereo pooling
 
 The pool class stays a class, decided once per compile. The planner gains a cost rule for the
