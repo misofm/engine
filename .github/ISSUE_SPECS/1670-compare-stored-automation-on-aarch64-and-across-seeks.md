@@ -264,3 +264,9 @@ Those full browser rows were deliberately deferred to required CI, not reported 
 PASS for attempt1 after independent Astra checkpoint `a666b967fa5e8ae5b816542d6d48c194c59cd62b`. Four existing digest owners execute in each Arm profile, without a new fixture or digest owner. The C ABI test distinguishes real post-seek automation and nonzero output across valid block-boundary arrival/quantum combinations. Real Arm green controls and adjacent-f32 mutation prove both literal scripts execute and catch the automation owner before their broader suites.
 
 Implementation and local/native proof are complete. The full required batch qualification remains mandatory before merged delivery and verified GitHub closure. This record does not claim that pending gate has passed.
+
+## Final main integration (2026-10-27)
+
+Required qualification run [40456242475](https://github.com/misofm/engine/actions/runs/40456242475) passed all jobs for corrected head `f67d212b57f7da344c8699111292e8569ee96c11`. Before delivery, independently qualified main `d45e728f160b0d5b86757602c72905da7fb5b0d3` was integrated at `5e9d1271cf1f7bca174d9ab0fbb106039c2513f7`; the closed #2138 spec was retired in the following checkpoint.
+
+Fresh Astra bounded static integration review PASS at `aac808e22f8c6fa60a36265329c27784c8a9e1b4`: automation, builtins-compiler, host-web Rust sources, browser fixtures, Arm runner and known-defect inputs remain byte-identical to native proof source `24000af983207d5f18aecb2aece5d1a3466741c1`. Graph and rack compiler sources match main exactly, with no merge adaptation. Native mutation evidence remains applicable. Complete required qualification on this final combined tree is still mandatory before merge and verified closure. No additional local build or test ran concurrently.
