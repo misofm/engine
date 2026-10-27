@@ -6,7 +6,7 @@ Successor of #2115, filed 2026-10-26. Qualify the shipped stereo-output loudness
 against the complete mono/stereo-applicable ITU-R BS.2217-2 file subset, at the
 files' native 48 kHz rate. The original request also covered authentic EBU Tech
 3341 cases 7–8 / Tech 3342 cases 5–6; root split that blocked fixture acquisition
-into a stateless successor before implementation (cross-link pending root number).
+into [#2167](https://github.com/misofm/engine/issues/2167) before implementation.
 Existing recipe/true-peak tests remain the owners of their cases.
 
 Root's final scope ruling (2026-10-27): do not expand production into multichannel
@@ -123,3 +123,29 @@ separate EBU successor. No EBU placeholders or unverified hashes belong in this 
 All 19 ITU archives were successfully obtained directly from the official catalogue;
 actual metadata confirms 48 kHz 16-bit PCM. The two −24 LKFS programme files use
 WAVE_FORMAT_EXTENSIBLE PCM; the test reader must validate the PCM subtype GUID.
+
+2026-10-27 root approved exact corpus-header compatibility: the official −24 LKFS
+mono/stereo programme files (0038/0040) declare a RIFF size eight bytes short.
+Archive and WAV hashes pass; individual fmt/data chunk sizes span physical EOF.
+The manifest pins delta 8 only there and 0 elsewhere, with no sample modification.
+Both verifiers require the pinned delta and complete bounded chunks/aligned frames.
+The first acquisition run refused strict RIFF equality before any DSP ran; evidence
+`2127/attempt1-official.log` records this source-header defect, not a meter failure.
+
+Attempt 1 implementation checkpoint (2026-10-27): sole TSV inventory contains all
+48 catalogue resources (aggregate + 19 required + 28 outside stereo contract).
+The standard-library downloader verifies both archive/WAV hashes and PCM headers;
+the explicit ignored integration test verifies the entire private cache offline,
+then measures all 19 native PCM files through the shipped observer/analysis.
+
+Focused gate: PASS, 19/19 within ±0.1 LKFS, with no skip and no production changes.
+Largest absolute error: absolute-gate case 0.04845 LKFS; relative-gate error
+0.02880 LKFS; authentic mono/stereo programme errors 0.00644–0.02700 LKFS.
+`cargo fmt -p loudness` passed. Exact wrapper command and all case readings are in
+external `2127/attempt1-qualified.log`; the shared serial log records no overlapping
+batch CPU work. Broader crate/lint and acquisition failure checks remain pending.
+
+Test value, `itu_bs2217_published_mono_stereo_files`: wrong channel power handling,
+spectral K-weighting or gating on authentic time-varying programme PCM and the
+published near-threshold gate files turns this red where recipe-only sine cases
+cannot establish the published programme/file-based readings.
