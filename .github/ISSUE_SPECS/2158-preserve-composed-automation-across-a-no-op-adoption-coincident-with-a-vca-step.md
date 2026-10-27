@@ -46,3 +46,106 @@ This is Class B because it corrects audible words in the defective case. Root's 
 ## Dependency
 
 #2096 supplies the expanded regression. This issue does not block its bounded no-ramp correction.
+
+
+## Approved brief and attempt 1 (2026-10-27)
+
+Root approved the product ordering before implementation, under #1716 fix D and #2096's same-node-time continuity rule: a table-only/no-op Reposition at node time T preserves the ordinary merged walk's arithmetic and event precedence on a running own ride. The real VCA step at T is processed once, at its existing ordering and prospective completion target. Adoption must introduce neither a second mismatched retarget nor suppression of B17-R13's genuine boundary jump.
+
+The smallest slice is the composed fader adoption adapter and shared adoption rule in `crates/builtins-compiler`, plus one row in its existing carry owner. No DSP algorithm, rounding, automation core, host interface or fixture framework change is intended. This is Class B: rendered words may move in the defective running-composed coincident case only. The user requested Sol 6.1 high for implementation; root coordinates fresh independent Astra review, GitHub synchronization and batch delivery.
+
+The existing `entry-step` row retains its static own curve. The added `entry-step-running` row uses the same VCA step with the moving own ride, so the carry owner continues to defend both B17-R13 and no-op running continuity, as well as #2096's held/free, repeated-adoption and on/off-grid cases.
+
+Test value: a running composed no-op adoption that replaces the genuine VCA boundary event with a landing targeting every curve at the jump's completion now fails the existing audible sample comparison; its former static-own entry row cannot reveal that arithmetic change.
+
+Verification uses `/home/bl/misofm/engine-work-evidence/easy2-20261027/run-serial.sh` exclusively, separate worktree targets, Cargo jobs two and test threads one. Evidence is retained outside the worktree at `/home/bl/misofm/engine-work-evidence/easy2-20261027/2158/`. Local implementation and review do not claim upstream synchronization or completion.
+
+
+### Attempt 1 implementation and supported paths
+
+Root refined attempt 1 before its independent verdict after identifying that a previous jump can leave each component with a different target origin from the composed output's completion. A T - 1/output-completion comparison is insufficient and was discarded before verification. The approved implementation records each composed cursor's heard-value origin and last non-held target origin. Held grid events can advance the first without advancing the second; output holds may overwrite ramp completion without changing either.
+
+For a free running composed Reposition with a discontinuity at T, evaluate each successor curve at both carried origins. When every component agrees, retain its heard value and full held/deferred/event state, reindex only its discontinuity cursor in the successor table, and let the ordinary merged walk process the real T step once. A changed component value keeps the existing entry-landing path. A changed cursor layout or unapplied prepared offset/own-value backstop cannot take the preservation path. This uses fixed preallocated metadata and bounded table reads; the existing size-based cursor and composite accounting charges the new words. No DSP arithmetic, host, schema or wire change is introduced.
+
+Root approved the correction to the original scalar gate: the production carry owner exercises W4 and W8. `VcaRig` requires a bank width, which `Backend::Scalar` does not have; the scalar oracle passes `stage_gain: None` and has no supported carried-bank adoption comparison. The existing scalar/shared-event arithmetic suites remain required, without introducing unsupported scalar swap plumbing.
+
+The existing carry owner also changes the successor's own table in the moving-entry-step case and checks one entry jump of length 480 targeting the changed curve at sample 1,579. This catches an overbroad no-op shortcut that would preserve an actually changed table instead of retaining its existing entry landing. No additional test function or corpus owner is introduced.
+
+
+### Additional bounded prior-jump row
+
+The same carry owner adds `entry-step-running-prior-jump`: VCA steps from -3 to -6 at sample 900, then to -12 at adoption 1,100 while the earlier jump and own ride are running. This catches treating the output's ramp completion as every component's origin, or resetting its held/deferred event state. Both moving-entry rows use the issue's coincident 100-frame layout; every previous 128-frame/on-grid row remains. An analytical after-step/1,152 observation is retained externally in `after-step-observation.md` for fresh independent review; it is not claimed as a measured separate defect.
+
+Baseline production plus only the extended owner is RED: `cargo test --locked -p builtins-compiler a_carried_automated_lane_renders_the_uninterrupted_bits`, exit 101, `entry-step-running`, composed true, continued 0, Simd8, 100-frame blocks. `baseline-red.log` records the failing audible comparison. The corrected implementation remains awaiting focused green and independent review.
+
+
+### Focused green and recovery checkpoint
+
+`cargo test --locked -p builtins-compiler a_carried_automated_lane_renders_the_uninterrupted_bits` is GREEN on the principled implementation (exit 0, one owner passed, 35 filtered out; `focused-green.log`). This runs both W4 and W8 across the preserved cases, the moving entry step inside a grid ramp and an earlier jump, and the changed-table landing guard. The same owner is RED on unchanged baseline production (`baseline-red.log`, replayable `baseline-only.patch`). Formatting of automation and builtins-compiler and `git diff --check` passed.
+
+Both known origins are copied during carry. The existing origin-free `set_heard(value)` API remains compatible with graph callers and explicitly makes provenance unknown; it cannot establish equivalence. Prepared values have the known held origin at node time zero. The original value evaluation still uses the same clipped target-time arithmetic, now factored to retain that time as metadata. Composed cursor storage is charged by `Composed::bytes`, builtin sizes use the live `size_of` report, and graph route-cursor accounting calls that same composition helper; no hardcoded byte charge was introduced.
+
+The owner pauses at this compiling, focused-green tranche for an exact-path local checkpoint. Full automation/builtins-compiler suites, independent adversarial verdict and upstream synchronization remain pending. No remote completion is claimed.
+
+
+### Full focused suites (implementation checkpoint `9aa721bea`)
+
+`cargo test --locked -p automation -p builtins-compiler --features builtins-compiler/test-support` passed once with exit 0: 102 tests passed, three pre-existing tests ignored, zero failures; both crates' doc-tests passed (`full-green.log`). This includes the existing composed/cell event differentials, scalar/bank arithmetic parity, checked resource reports and realtime allocation gates, including `a_builtin_lane_swap_allocates_nothing`. No duplicate full workspace or target matrix was run locally.
+
+All commands used the serial wrapper. Verification initially waited for external engine tests/release builds. During this full suite an external engine Wasm probe began compiling only after our offline compilation had finished and our tests were running; no owned offline compiler subtree remained to pause, and running tests were not suspended. These results are correctness evidence, not timing or benchmark measurements.
+
+Implementation is locally checkpointed and full focused verification is green. Fresh independent Astra review, proportional batch qualification, upstream delivery and matching GitHub synchronization remain root's responsibility. No PASS or remote completion is inferred from implementation evidence alone.
+
+
+## Independent review — attempt 1 PASS (2026-10-27)
+
+Fresh Astra reviewed the committed origin metadata, event ordering and resource accounting.
+The value-time helper preserves the previous evaluation arithmetic. A merged held event moves
+only the heard origin; the non-held target retains its own origin, independently of output
+holds. Reindexing preserves the cursor's held/deferred event state. Changed layout, node arrival,
+prepared offsets or prepared own value cannot enter the preservation shortcut. Cursor storage
+is charged through `Composed::bytes` and its `size_of` calculation, including graph callers;
+builtin aggregate accounting also follows live sizes. No render allocation, lock or syscall is
+introduced. The W4/W8 carry gate is appropriate: the scalar oracle has no carried bank and
+supplies no stage gain; existing scalar/shared-event arithmetic coverage remains in force.
+
+The author's automation/builtins suites passed 102 tests with three documented ignores, and the
+owning regression is red on baseline production and green on the fix. Independent workspace
+Clippy passed before and after integration of the newer main; formatting, workspace/builtins
+policies, unfused seal and realtime dependency-leak gates passed.
+
+Two temporary independent experiments in the finished author worktree add bounded PR evidence.
+Removing only the new 100-frame restriction made both moving-entry rows also adopt at 1,152
+with quantum 128: the owner passed, so the analytical after-step concern produced no new defect.
+A selective successor curve then matched the carried heard value at 1,151 while changing the
+older target at 959. The candidate correctly retained the changed-table entry landing. Ignoring
+only the target-origin comparison made that assertion fail (exit 101, Simd8 target words
+3247039040 versus 3246792512). Both touched files were restored byte for byte and the worktree
+was clean. These experiments remain external PR evidence, not another permanent test owner.
+
+Test value: the folded moving-own entry-step row catches the audible no-op adoption mismatch
+invisible to the former static-own row; its prior-jump variant catches substituting output
+completion for component origins or losing held/deferred state; the changed-table assertion
+catches an overbroad shortcut that preserves a genuinely changed curve. Existing held/free,
+repeated-adoption, on/off-grid and genuine entry-jump claims remain in the same owning test.
+Evidence lives in `engine-work-evidence/easy2-20261027/fresh-astra/after-step.log`,
+`selective-origin-control.log`, `selective-origin-ignore-target-origin.log`, their replay scripts
+and patch, and `final-clippy.log`.
+
+All local verification used the shared serial runner (two Cargo jobs, one Rust test thread).
+The final combined production source is `24000af983207d5f18aecb2aece5d1a3466741c1`.
+Full required PR `qualification`, including both unmutated AArch64 legs and both standard
+browser matrices with their mutations, remains mandatory before delivery and issue closure.
+Those full browser rows were deliberately deferred to required CI, not reported as local PASS.
+
+## Root co-review and delivery status (2026-10-27)
+
+PASS for attempt1 after independent Astra checkpoint `a666b967fa5e8ae5b816542d6d48c194c59cd62b`. The comparison uses each carried component’s actual heard/target origins and retains its event state only under semantic/arrival/layout/value backstops. Size accounting follows the cursor type. Native owner and independent selective-origin/after-step controls defend no-op continuity and genuine changed-table landing without suppressing the step; no render allocation or new DSP arithmetic is introduced.
+
+Implementation and local/native proof are complete. The full required batch qualification remains mandatory before merged delivery and verified GitHub closure. This record does not claim that pending gate has passed.
+
+## Final main integration (2026-10-27)
+
+Required qualification run [40456242475](https://github.com/misofm/engine/actions/runs/40456242475) passed all jobs for corrected head `f67d212b57f7da344c8699111292e8569ee96c11`. Before delivery, independently qualified main `d45e728f160b0d5b86757602c72905da7fb5b0d3` was integrated at `5e9d1271cf1f7bca174d9ab0fbb106039c2513f7`; the closed #2138 spec was retired in the following checkpoint.
+
+Fresh Astra bounded static integration review PASS at `aac808e22f8c6fa60a36265329c27784c8a9e1b4`: automation, builtins-compiler, host-web Rust sources, browser fixtures, Arm runner and known-defect inputs remain byte-identical to native proof source `24000af983207d5f18aecb2aece5d1a3466741c1`. Graph and rack compiler sources match main exactly, with no merge adaptation. Native mutation evidence remains applicable. Complete required qualification on this final combined tree is still mandatory before merge and verified closure. No additional local build or test ran concurrently.

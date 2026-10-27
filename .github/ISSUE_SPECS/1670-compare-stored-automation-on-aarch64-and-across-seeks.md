@@ -141,3 +141,132 @@ batch 20 amendment).
   fader-row paragraph). A pre-seek unmute ramp still running at the seek carries across it, as
   documented. Read "five pin tests" in gate 1 and the hazards as four. The LANE-3 compressor and
   limiter hazard does not apply: the narrowed fixture has no insert.
+
+
+## Amendment (easy fixes batch 2, 2026-10-27)
+
+Baseline `3ef18112fe639ddc0109b77f1c922b07e38dd4d0`. Sol implements by the owner's explicit
+selection for this batch; independent verification follows before delivery.
+
+- Read-only GitHub checks confirm #1669 closed on 2026-10-17 and #1019 closed on 2026-10-19.
+  The stale dependency hold and LANE-3 exception proposal above no longer apply. No new known
+  defect row is authorized or needed by this slice.
+- D1 has exactly four existing owner tests: identity, SET_CONTROL timeline, observation timeline,
+  and `native_automation_timeline_digest_pins_the_wasm_parity`. Both profiles reuse their existing
+  pins. The no-silent-backend-skip scan includes `hosts/host-web` now that this leg runs it.
+- D2 retains #1669's fixture, seek target 30,000, generation 2, integer-formula PCM and 7,168
+  post-seek frames (the transcript's blocks 40..96). Pre-seek PCM is silent. Its configurations
+  are `(quantum, arrival)` = `(128, 5120)`, `(128, 5248)`, `(100, 5100)`, `(100, 5200)`.
+  Plain seeks apply at block entries, so two quantum-128 arrivals necessarily differ by a
+  multiple of 64; the cross-quantum arrival difference of 20 and the quantum-100 difference of
+  100 change that phase. All four outputs compare from relative sample 1,440, the existing
+  narrowed bound. Source seek reports prove the generation, arrival and target alignment.
+- The compared window must contain nonzero audio in each plane and differ from the same fixture
+  with its automation removed. No fixture or digest owner is added.
+
+Test value: the one new C ABI regression fails if settled stored automation depends on absolute
+render time or block partitioning; the existing C ABI seek regression uses only quantum 128 and
+a fader ride flat around the seek target. The reused pin tests need no new tests or pins.
+
+Verification evidence and the independent verdict will be appended before delivery. This x86-64
+host has no `qemu-aarch64`; native debug/release results do not substitute for the required NEON
+legs or their one-ulp mutation evidence.
+
+
+### Attempt 1 implementation checkpoint
+
+- The focused C ABI owner regression passes on x86-64-v3: `cargo test --locked -p capi
+  stored_automation_after_a_seek_is_invariant_to_arrival_and_quantum_on_the_c_abi -- --nocapture`
+  (one owner test, all four configurations; 0.50 s). Raw log is preserved outside the checkout
+  under `engine-work-evidence/easy2-20261027/1670/capi-focused.log`.
+- The first execution exposed a test setup constraint: shared `limits()` uses a 1,024-frame
+  source ring, which is not divisible by quantum 100. D2 now uses one quantum per source ring,
+  matching #1669's existing native/browser transcript. Its original rejection log is retained;
+  this was no engine discrepancy and required no production edit or comparison-bound change.
+- The shared serial runner used a separate worktree target, two Cargo jobs and one test thread.
+  The offline compiler was paused while another engine stream compiled, and resumed only after
+  its engine workloads were quiet. No test was paused and no unrelated process was signaled.
+- Remaining evidence: full C ABI suite, formatting and script checks, fresh independent review,
+  and the real AArch64 debug/release controls, actual-script one-ulp failures and final required
+  qualification. No adversarial PASS or remotely synchronized completion is claimed here.
+
+
+### Local qualification evidence (attempt 1)
+
+Implementation checkpoint `64eac0ec9a764c0e713ab84ed574675cf80705b8`:
+
+- `cargo test --locked -p capi`: PASS, 188 unit tests and 42 integration tests, including the new
+  owner; the unit suite took 155.12 s with one test thread. Existing realtime/resource and
+  concurrent plan-swap gates remain green. Log: `engine-work-evidence/easy2-20261027/1670/capi-full.log`.
+- `cargo fmt --all -- --check`: PASS; `bash -n scripts/run-aarch64-tests.sh`: PASS;
+  `python3 -B scripts/check-script-reachability.py`: PASS.
+- A PR-only fake-Cargo probe invokes the actual runner in both modes, records and checks its
+  exact argv, and returns a deliberate failure at its first Cargo invocation. Both modes reach
+  exactly the four existing host-web owner names, with `--release` only in release, and abort
+  before any workspace matrix. The runner's real no-silent-backend-skip scan also passes with
+  `hosts/host-web` included. This is command-wiring evidence only: no AArch64 build or execution.
+  Probe and log: `engine-work-evidence/easy2-20261027/1670/verify-aarch64-wiring.py` and
+  `aarch64-wiring.log` in that directory. All checks used the shared serial wrapper.
+
+Root will run the actual AArch64 one-ulp proof on a temporary, unmerged evidence branch. External
+PR-only artifacts in the same evidence directory are `value-at-one-ulp.patch`,
+`judge-arm-mutation.py` and `arm-mutation-proof.md`. The patch moves only a `value_at` linear
+result to its adjacent f32; mute steps are untouched. Green controls run the four pins in debug
+and release first. The mutated actual `run-aarch64-tests.sh debug` and `release` must each exit
+101 with the automation owner failing at the frozen native/browser digest assertion and the
+other three pins passing, with no later suite. The exact patch is then reversed. No mutant
+source, extra pins or new corpus owner enters the delivered branch.
+
+Still pending: fresh independent adversarial verdict, those real AArch64 controls and mutation
+failures, the full unmutated AArch64 legs in required qualification, and the integrated batch's
+workspace Clippy gate. Local x86 evidence does not substitute for any pending gate. GitHub
+synchronization and closure remain root's delivery responsibility after upstream evidence.
+
+
+## Independent review — attempt 1 PASS (2026-10-27)
+
+Fresh Astra verified that both actual Arm script modes run the same four existing digest owners
+before their profile branches, without new pins or expected-failure exceptions. The C ABI owner
+compares settled generation-2 output at timeline 30,000 across all four frozen quantum/arrival
+configurations, proves source alignment, and guards against silence and absent automation.
+The author's full C ABI suite passed 230 tests; the independent integrated policy gates and
+workspace Clippy passed, including Clippy after the newer main was integrated.
+
+Native Arm proof [run 40452370315](https://github.com/misofm/engine/actions/runs/40452370315)
+passed on `aarch64-unknown-linux-gnu`, Rust 1.99.1. Both debug and release controls passed all
+four exact owners. With the temporary one-ULP linear `value_at` mutation, both actual
+`run-aarch64-tests.sh` modes exited 101: exactly three other owners passed and the automation
+owner failed at its frozen native/browser digest assertion. Each failed invocation reported one
+test suite, so neither continued into the full matrix. The strict judge rejected other failure
+shapes; the workflow reversed the patch and verified a clean source diff before recording PASS.
+
+Fresh review downloaded the artifact and checked its runner, compiler, logs, judge bytes and
+provenance. The unmerged evidence commit `b4b7aaa6adf009e233c67c2853221e1333add38b` differs
+from the reviewed production source only in its dispatch-only qualification workflow. Neither
+that workflow nor the fault is merged into product source. Raw artifacts and independent
+validation remain in `engine-work-evidence/easy2-20261027/fresh-astra/arm-proof/` and
+`arm-proof-validation.txt`.
+
+Test value: the one new C ABI regression turns red when settled stored automation depends on
+absolute render arrival or block partitioning, which the existing quantum-128 flat-target seek
+row cannot detect. Reusing the existing four digest owners adds real NEON/profile execution
+without a second corpus; the one-ULP experiment proves that their Arm wiring detects an actual
+arithmetic change.
+
+All local verification used the shared serial runner (two Cargo jobs, one Rust test thread).
+The final combined production source is `24000af983207d5f18aecb2aece5d1a3466741c1`.
+Full required PR `qualification`, including both unmutated AArch64 legs and both standard
+browser matrices with their mutations, remains mandatory before delivery and issue closure.
+Those full browser rows were deliberately deferred to required CI, not reported as local PASS.
+
+## Root co-review and delivery status (2026-10-27)
+
+PASS for attempt1 after independent Astra checkpoint `a666b967fa5e8ae5b816542d6d48c194c59cd62b`. Four existing digest owners execute in each Arm profile, without a new fixture or digest owner. The C ABI test distinguishes real post-seek automation and nonzero output across valid block-boundary arrival/quantum combinations. Real Arm green controls and adjacent-f32 mutation prove both literal scripts execute and catch the automation owner before their broader suites.
+
+Implementation and local/native proof are complete. The full required batch qualification remains mandatory before merged delivery and verified GitHub closure. This record does not claim that pending gate has passed.
+
+## Final main integration (2026-10-27)
+
+Required qualification run [40456242475](https://github.com/misofm/engine/actions/runs/40456242475) passed all jobs for corrected head `f67d212b57f7da344c8699111292e8569ee96c11`. Before delivery, independently qualified main `d45e728f160b0d5b86757602c72905da7fb5b0d3` was integrated at `5e9d1271cf1f7bca174d9ab0fbb106039c2513f7`; the closed #2138 spec was retired in the following checkpoint.
+
+Fresh Astra bounded static integration review PASS at `aac808e22f8c6fa60a36265329c27784c8a9e1b4`: automation, builtins-compiler, host-web Rust sources, browser fixtures, Arm runner and known-defect inputs remain byte-identical to native proof source `24000af983207d5f18aecb2aece5d1a3466741c1`. Graph and rack compiler sources match main exactly, with no merge adaptation. Native mutation evidence remains applicable. Complete required qualification on this final combined tree is still mandatory before merge and verified closure. No additional local build or test ran concurrently.

@@ -36,5 +36,19 @@
         "sdkResponse": "pass"
       }
     }
-  ]
+  ],
+  "blake3Qualification": {
+    "candidateCommit": "8890792627e9eb1abf49f8626403d9016fad8cc8",
+    "sha256": "ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1",
+    "browsers": [
+      {
+        "browser": "chromium",
+        "backend": "simd128"
+      },
+      {
+        "browser": "webkit",
+        "backend": "simd128"
+      }
+    ]
+  }
 }

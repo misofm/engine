@@ -90,6 +90,34 @@ The browser legs still check every browser row, the Playwright version and the g
 against `results.json` on every PR (`--check-matrix`). Re-record the matrix when Playwright or a
 browser floor changes (step 3 below, without the re-pin); that record names the module it ran.
 
+## BLAKE3 release identity
+
+The shipped `miso-engine-v1-blake3.simd128.wasm` has its own release pin,
+`hosts/host-web/web/miso-engine-v1-blake3-artifact.sha256`, mirrored by
+`npm-publish.yml`'s `EXPECTED_BLAKE3_SHA256`. The identity report always displays its built digest
+and pin. Editing either BLAKE3 fingerprint, or `PACKAGE_VERSION`, requires agreement between the
+built bytes, pin, npm fingerprint/toolchain, and `results.json.blake3Qualification`. That record
+names the candidate commit, SHA256 and successful `simd128` Worker corpus row in both Chromium
+and WebKit. A browser toolchain change also requires that BLAKE3 qualification. Ordinary code
+changes may differ from the last release's pin, as the worklet may. npm `qualify` checks the
+BLAKE3 source pin and built digest before packing; `publish` and `verify` keep using the exact
+qualified archive.
+
+The full `--record-matrix` command below also records BLAKE3. To introduce or update only its pin
+without changing the worklet release lineage, build the closure, read the BLAKE3 file's SHA256,
+update its pin and `EXPECTED_BLAKE3_SHA256`, then run from `hosts/host-web/qualification`:
+
+```sh
+npm run qualify -- --artifacts "$artifacts" --browser all --blake3-only \
+  --record-blake3 --candidate-commit "$(git rev-parse HEAD)"
+```
+
+This updates only `results.json.blake3Qualification`; it leaves the worklet hash, candidate and
+matrix intact. The scoped row needs no audio device. It serves the raw host module at
+`/web/stem-store/incremental-blake3.js`, uses its default `../../assets/` URL, and refuses
+JavaScript fallback before hashing the existing canonical PCM corpus. The server's `/assets/`
+route exposes the same shipped closure as `/artifacts/`. No second digest corpus is introduced.
+
 ## The release PR
 
 One PR, on the tip of `main`, that changes no Rust source, so the bytes it pins are the bytes `main`
@@ -132,7 +160,8 @@ builds once it merges.
 
 4. **Set the release identity.**
    - `.github/workflows/npm-publish.yml`: `PACKAGE_VERSION`, the version in the job name and in the
-     three other literals that carry it (five in all), and `EXPECTED_WORKLET_SHA256: "<digest>"`.
+     three other literals that carry it (five in all), `EXPECTED_WORKLET_SHA256: "<digest>"`,
+     and `EXPECTED_BLAKE3_SHA256` matching the BLAKE3 pin.
      Its `BROWSER_ARTIFACT_TOOLCHAIN` must be the toolchain `qualification.yml`'s `artifact` job
      builds with (`rust-toolchain.toml`'s `[browser-artifact] channel`); `qualify` refuses any
      other, and the release report checks it. `RUSTUP_TOOLCHAIN` is the stable release the SDK

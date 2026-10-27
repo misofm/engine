@@ -16,7 +16,8 @@ release, still parses and reads as a toolchain change. It is what later changes 
 and it does not expire.
 This script reads it:
 
-* ``report --event E [--before SHA] --repository R --built D --toolchain T --twin MODULE`` (the
+* ``report --event E [--before SHA] --repository R --built D --toolchain T --twin MODULE
+  --blake3-module MODULE`` (the
   `artifact-identity` job) prints the Markdown report for the job summary. Its headline compares
   this run's module with **the digest its base's own CI run recorded**, never with a rebuild of the
   base: a base rebuilt inside this run's workflow is built in whatever environment the change
@@ -48,6 +49,10 @@ This script reads it:
     recorded browser qualification does not describe the built bytes: a toolchain bump needs a
     re-recorded two-browser matrix, as a release does.
     `docs/RELEASE.md` is the procedure.
+  - #2117: a BLAKE3 pin or EXPECTED_BLAKE3_SHA256 change checks that module's independent
+    release pin, npm toolchain, and results.json.blake3Qualification (built hash, candidate and
+    both browsers' simd128 Worker row). PACKAGE_VERSION checks both artifacts; a browser
+    toolchain change requires both qualifications. Ordinary changes only report its pin.
 
   A failed status lookup (the API, or ``gh`` itself) is an error (exit 2), not CANNOT TELL: it means
   the job is misconfigured, and a CANNOT TELL that never ends would hide that.
@@ -76,6 +81,7 @@ import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PIN = "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
+BLAKE3_PIN = "hosts/host-web/web/miso-engine-v1-blake3-artifact.sha256"
 NPM_PUBLISH = ".github/workflows/npm-publish.yml"
 RESULTS = "hosts/host-web/qualification/results.json"
 RELEASE_DOC = "docs/RELEASE.md"
@@ -88,6 +94,8 @@ RUST_TOOLCHAIN = "rust-toolchain.toml"
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 RECORD = re.compile(r"([0-9a-f]{64}) rustc (\S+)")
 RELEASE_LINE = re.compile(r'^  (PACKAGE_VERSION|EXPECTED_WORKLET_SHA256): ".*"$', re.MULTILINE)
+BLAKE3_RELEASE_LINE = re.compile(r'^  (PACKAGE_VERSION|EXPECTED_BLAKE3_SHA256): ".*"$', re.MULTILINE)
+EXPECTED_BLAKE3 = re.compile(r'^  EXPECTED_BLAKE3_SHA256: "([^"]*)"$', re.MULTILINE)
 EXPECTED_WORKLET = re.compile(r'^  EXPECTED_WORKLET_SHA256: "([^"]*)"$', re.MULTILINE)
 NPM_TOOLCHAIN = re.compile(r'^  BROWSER_ARTIFACT_TOOLCHAIN: "([^"]*)"$', re.MULTILINE)
 # How far back a base with no record may look for a recorded ancestor it differs from only in
@@ -234,6 +242,48 @@ def release_change(root: pathlib.Path, base: str) -> list[str]:
     return edited
 
 
+def blake3_release_change(root: pathlib.Path, base: str) -> bool:
+    old = show(root, base, NPM_PUBLISH) or ""
+    new = show(root, "HEAD", NPM_PUBLISH) or ""
+    identity = lambda text: sorted(m.group(0) for m in BLAKE3_RELEASE_LINE.finditer(text))
+    return (show(root, base, BLAKE3_PIN) != show(root, "HEAD", BLAKE3_PIN)
+            or identity(old) != identity(new))
+
+
+def blake3_checks(root: pathlib.Path, built: str, toolchain: str, *, release: bool) -> tuple[list[str], bool]:
+    lines, ok = [], True
+    if release:
+        pin = (show(root, "HEAD", BLAKE3_PIN) or "").strip()
+        match = EXPECTED_BLAKE3.search(show(root, "HEAD", NPM_PUBLISH) or "")
+        expected = match.group(1) if match else None
+        if pin != built or expected != pin:
+            ok = False
+            lines.append(f"  - **FAIL** BLAKE3 release pin: built `{built}`, pin `{pin}`, "
+                         f"EXPECTED_BLAKE3_SHA256 `{expected}` must agree")
+        else:
+            lines.append(f"  - BLAKE3 release pin and EXPECTED_BLAKE3_SHA256 match `{built}`")
+        declared = NPM_TOOLCHAIN.search(show(root, "HEAD", NPM_PUBLISH) or "")
+        if declared is None or declared.group(1) != toolchain:
+            ok = False
+            lines.append("  - **FAIL** BLAKE3 release toolchain: BROWSER_ARTIFACT_TOOLCHAIN "
+                         "must match the artifact job's toolchain")
+    try:
+        row = json.loads(show(root, "HEAD", RESULTS) or "null")["blake3Qualification"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        row = {}
+    if (not isinstance(row, dict) or row.get("sha256") != built
+            or COMMIT.fullmatch(str(row.get("candidateCommit", ""))) is None
+            or row.get("browsers") != [{"browser": name, "backend": "simd128"}
+                                       for name in ("chromium", "webkit")]):
+        ok = False
+        lines.append("  - **FAIL** BLAKE3 qualification: record both browsers' SIMD Worker corpus "
+                     "row for the built bytes with a canonical candidateCommit")
+    else:
+        lines.append("  - BLAKE3 qualification records both browsers' SIMD Worker corpus row "
+                     "for the built bytes")
+    return lines, ok
+
+
 def browser_channel(text: str | None) -> str | None:
     """`rust-toolchain.toml`'s `[browser-artifact] channel`, or None."""
     try:
@@ -317,7 +367,7 @@ def qualification_checks(root: pathlib.Path, built: str) -> tuple[list[str], boo
 
 
 def report(root: pathlib.Path, event: str, before: str, repository: str, built: str,
-           toolchain: str, twin_module: pathlib.Path) -> tuple[list[str], bool]:
+           toolchain: str, twin_module: pathlib.Path, blake3_module: pathlib.Path) -> tuple[list[str], bool]:
     if SHA256.fullmatch(built) is None:
         raise Usage(f"--built is not a lowercase sha256: {built!r}")
     if TOOLCHAIN.fullmatch(toolchain) is None:
@@ -326,6 +376,9 @@ def report(root: pathlib.Path, event: str, before: str, repository: str, built: 
         raise Usage(f"--repository is not owner/name: {repository!r}")
     if not twin_module.is_file():
         raise Usage(f"--twin is not a file: {twin_module}")
+    if not blake3_module.is_file():
+        raise Usage(f"--blake3-module is not a file: {blake3_module}")
+    blake3_built = digest(blake3_module)
     head = git(root, "rev-parse", "HEAD").stdout.strip()
     base, why = base_commit(root, event, before)
     if base is None:
@@ -391,6 +444,14 @@ def report(root: pathlib.Path, event: str, before: str, repository: str, built: 
         checked, qualified_ok = qualification_checks(root, built)
         lines += checked
         ok = ok and qualified_ok
+    blake3_pin = (show(root, "HEAD", BLAKE3_PIN) or "").strip()
+    lines.append(f"- BLAKE3 built `{blake3_built}`; release pin `{blake3_pin or 'missing'}`.")
+    blake3_release = base is not None and blake3_release_change(root, base)
+    if blake3_release or moved is not None:
+        lines.append("- BLAKE3 RELEASE:" if blake3_release else "- BLAKE3 TOOLCHAIN:")
+        checked, blake3_ok = blake3_checks(root, blake3_built, toolchain, release=blake3_release)
+        lines += checked
+        ok = ok and blake3_ok
     return lines, ok
 
 
@@ -462,18 +523,24 @@ def run_self_test(scratch: pathlib.Path) -> None:
 
     def commit(message: str, pin: str = a, version: str = "1.0.0", expected: str = a,
                qualified: str = a, candidate: str = "1" * 40, path: str = "src/lib.rs",
-               toolchain: str = N1, channel: str = N1) -> str:
+               toolchain: str = N1, channel: str = N1, blake3_pin: str = a,
+               blake3_expected: str = a, blake3_qualified: str = a,
+               blake3_candidate: str = "1" * 40, blake3_browsers: list | None = None) -> str:
         for name in (PIN, NPM_PUBLISH, RESULTS, path):
             (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / BLAKE3_PIN).write_text(f"{blake3_pin}\n")
         (repo / PIN).write_text(f"{pin}\n")
         (repo / NPM_PUBLISH).write_text(
             f'env:\n  PACKAGE_NAME: "@misofm/engine"\n  PACKAGE_VERSION: "{version}"\n'
-            f'  EXPECTED_WORKLET_SHA256: "{expected}"\n  RUSTUP_TOOLCHAIN: "1.99.1"\n'
+            f'  EXPECTED_BLAKE3_SHA256: "{blake3_expected}"\n  EXPECTED_WORKLET_SHA256: "{expected}"\n  RUSTUP_TOOLCHAIN: "1.99.1"\n'
             f'  BROWSER_ARTIFACT_TOOLCHAIN: "{toolchain}"\n')
         (repo / RUST_TOOLCHAIN).write_text(
             f'[toolchain]\nchannel = "1.99.1"\n\n[browser-artifact]\nchannel = "{channel}"\n')
         (repo / RESULTS).write_text(json.dumps(
-            {"candidateCommit": candidate, "wasmSha256": qualified}, indent=2) + "\n")
+            {"candidateCommit": candidate, "wasmSha256": qualified,
+             "blake3Qualification": {"candidateCommit": blake3_candidate, "sha256": blake3_qualified,
+                 "browsers": blake3_browsers if blake3_browsers is not None else
+                     [{"browser": name, "backend": "simd128"} for name in ("chromium", "webkit")]}}, indent=2) + "\n")
         with (repo / path).open("a") as handle:
             handle.write(f"{message}\n")
         must(git(repo, "add", "-A"))
@@ -505,7 +572,7 @@ def run_self_test(scratch: pathlib.Path) -> None:
              absent: tuple[str, ...] = ()) -> None:
         try:
             lines, observed = report(repo, event, before, REPO_NAME, built, toolchain,
-                                     modules[twin][0])
+                                     modules[twin][0], modules["a"][0])
         except (Usage, LookupFailed) as error:
             failures.append(f"{label}: {type(error).__name__} {error}")
             return
@@ -552,7 +619,7 @@ def run_self_test(scratch: pathlib.Path) -> None:
              absent=("UNCHANGED", "ARTIFACT CHANGED"))
     table_path.write_text("{}")
     try:
-        report(repo, "pull_request", "", REPO_NAME, b, N1, modules["b"][0])
+        report(repo, "pull_request", "", REPO_NAME, b, N1, modules["b"][0], modules["a"][0])
         failures.append("a refused status lookup reported instead of failing")
     except LookupFailed:
         pass
@@ -616,16 +683,44 @@ def run_self_test(scratch: pathlib.Path) -> None:
          toolchain=N2)
     for bad in ("A" * 64, "0" * 63, ""):
         try:
-            report(repo, "pull_request", "", REPO_NAME, bad, N1, modules["a"][0])
+            report(repo, "pull_request", "", REPO_NAME, bad, N1, modules["a"][0], modules["a"][0])
             failures.append(f"malformed --built {bad!r} was accepted")
         except Usage:
             pass
     for bad in ("1.99.1", "nightly", "nightly-2026-8-20", f"{N1}; rm"):
         try:
-            report(repo, "pull_request", "", REPO_NAME, a, bad, modules["a"][0])
+            report(repo, "pull_request", "", REPO_NAME, a, bad, modules["a"][0], modules["a"][0])
             failures.append(f"malformed --toolchain {bad!r} was accepted")
         except Usage:
             pass
+
+    # BLAKE3 has independent release lineage: adding its pin never re-pins the worklet.
+    for label, fields, ok, needle in (
+        ("BLAKE3 pin mismatch", dict(blake3_pin=b), False, "**FAIL** BLAKE3 release pin"),
+        ("BLAKE3 environment mismatch", dict(blake3_expected=b), False, "**FAIL** BLAKE3 release pin"),
+        ("BLAKE3 stale qualification", dict(version="1.1.0", pin=b, expected=b, qualified=b,
+                                            blake3_qualified=b), False, "**FAIL** BLAKE3 qualification"),
+        ("BLAKE3 JS fallback", dict(blake3_pin=a, blake3_expected=a, version="1.1.0", pin=b,
+                                     expected=b, qualified=b, blake3_browsers=[
+                                         {"browser": "chromium", "backend": "javascript"},
+                                         {"browser": "webkit", "backend": "simd128"}]),
+         False, "**FAIL** BLAKE3 qualification"),
+        ("BLAKE3 malformed candidate", dict(version="1.1.0", pin=b, expected=b, qualified=b,
+                                             blake3_candidate="bad"), False, "**FAIL** BLAKE3 qualification"),
+    ):
+        at(base)
+        merge(base, commit(label, **fields))
+        case(label, ok, (needle,))
+
+    at(base)
+    stale_blake3 = commit("old BLAKE3 pin", blake3_pin=b, blake3_expected=b,
+                          blake3_qualified=b)
+    statuses({stale_blake3: record_a})
+    merge(stale_blake3, commit("BLAKE3-only pin update"))
+    case("BLAKE3-only release leaves worklet pin unchanged", True, ("BLAKE3 RELEASE:",),
+         absent=("- RELEASE:",))
+    case("BLAKE3-only release toolchain mismatch", False,
+         ("**FAIL** BLAKE3 release toolchain",), toolchain=N2)
 
     # The base: a pull request's merge commit compares against its first parent, a push against
     # the previous tip, and nothing else has a base.
@@ -646,7 +741,8 @@ def run_self_test(scratch: pathlib.Path) -> None:
     at(pr)
     statuses({base: record_a})
     script = str(pathlib.Path(__file__).resolve())
-    common = ["--event", "pull_request", "--repository", REPO_NAME, "--toolchain", N1]
+    common = ["--event", "pull_request", "--repository", REPO_NAME, "--toolchain", N1,
+              "--blake3-module", str(modules["a"][0])]
     log_path.write_text("")
 
     def cli(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -686,6 +782,7 @@ def main() -> int:
     check.add_argument("--repository", required=True)
     check.add_argument("--built", required=True)
     check.add_argument("--toolchain", required=True)
+    check.add_argument("--blake3-module", required=True, type=pathlib.Path)
     check.add_argument("--twin", required=True, type=pathlib.Path)
     args = parser.parse_args()
 
@@ -695,13 +792,13 @@ def main() -> int:
         self_test()
         print("web AudioWorklet identity self-test passed: the base's recorded digest (matching, "
               "different, missing, malformed, not success, refused, across documentation), "
-              "reproducibility, a toolchain change, seven release mutations and a toolchain "
+              "reproducibility, a toolchain change, independent BLAKE3 release mutations and a toolchain "
               "bump with and without its two-browser record")
         return 0
     try:
         if args.command == "report":
             lines, ok = report(args.root, args.event, args.before, args.repository, args.built,
-                               args.toolchain, args.twin)
+                               args.toolchain, args.twin, args.blake3_module)
             print("\n".join(lines))
             if not ok:
                 print("web-audioworklet-identity: FAIL (see the report above)", file=sys.stderr)

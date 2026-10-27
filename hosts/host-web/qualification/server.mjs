@@ -50,6 +50,10 @@ function routePath(urlPath, artifactDirectory, sdkBundleDirectory) {
   if (urlPath === "/web/hex-lower.js") return path.join(HOST_WEB, "web", "hex-lower.js");
   const routes = [
     ["/artifacts/", artifactDirectory],
+    // The host tree and published SDK both resolve ../../assets from their stems module.
+    ["/assets/", artifactDirectory],
+    ["/web/stem-store/", path.join(HOST_WEB, "web", "stem-store")],
+    ["/stem-identity/", path.join(HOST_WEB, "../../fixtures/stem-identity/v1")],
     ["/fixture/", FIXTURE],
     ["/qualification/", HERE],
     ["/demo/", DEMO],
@@ -59,7 +63,7 @@ function routePath(urlPath, artifactDirectory, sdkBundleDirectory) {
     if (!urlPath.startsWith(prefix)) continue;
     const name = urlPath.slice(prefix.length);
     if (name.length === 0 || name.includes("/") || name === "." || name === "..") return null;
-    if (prefix === "/artifacts/" && !ARTIFACT_NAMES.has(name)) return null;
+    if ((prefix === "/artifacts/" || prefix === "/assets/") && !ARTIFACT_NAMES.has(name)) return null;
     return path.join(directory, name);
   }
   if (sdkBundleDirectory !== undefined && urlPath.startsWith("/sdk/")) {

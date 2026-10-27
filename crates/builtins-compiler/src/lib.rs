@@ -846,6 +846,9 @@ struct FaderComposite {
     /// At an adopted channel until its first block's offsets reads: the `own_db` this plan was
     /// prepared with (the rule of [`AutomatedFaderCell::adopted_sum`]).
     adopted_own_db: Option<f32>,
+    /// Every cursor's history belongs to the carried stage. A changed layout or a preparation
+    /// backstop invalidates it until the first block applies the ordinary adoption rule.
+    cursor_history_valid: bool,
 }
 
 /// The curve of one mute event channel (#1651 D1, #1655 V2).
@@ -902,6 +905,7 @@ impl FaderCurve {
             own_curve: cell.cell.is_some(),
             own_db: cell.own_db,
             adopted_own_db: None,
+            cursor_history_valid: true,
         })))
     }
 }
@@ -948,14 +952,14 @@ fn composed_db(own: f32, offsets_sum: f64, curves: impl Iterator<Item = f32>) ->
 fn carry_cursors<T: automation::Composable>(
     into: &mut automation::Composed<T>,
     from: &automation::Composed<T>,
-) {
+) -> bool {
     if into.cursors().len() != from.cursors().len() {
-        return;
+        return false;
     }
     for (cursor, carried) in into.cursors_mut().iter_mut().zip(from.cursors()) {
-        *cursor.state_mut() = *carried.state();
-        cursor.set_heard(carried.heard());
+        cursor.carry_from(carried);
     }
+    true
 }
 
 impl FaderComposite {
@@ -1016,6 +1020,7 @@ impl FaderComposite {
         offsets_sum: f64,
     ) -> Option<automation::Event> {
         let compose = self.composition(offsets_sum);
+        self.cursor_history_valid = true;
         self.walk
             .next_event(program, compose)
             .map(|event| automation::Event {
@@ -1081,9 +1086,9 @@ impl FaderCurve {
         match (self, from) {
             (Self::Cell { state, .. }, Self::Cell { state: carried, .. }) => *state = *carried,
             (Self::Composed(curve), Self::Composed(carried)) => {
-                if curve.own_curve == carried.own_curve {
-                    carry_cursors(&mut curve.walk, &carried.walk);
-                }
+                curve.cursor_history_valid = curve.own_curve == carried.own_curve
+                    && carry_cursors(&mut curve.walk, &carried.walk)
+                    && carried.cursor_history_valid;
                 curve
                     .walk
                     .set_output(*carried.walk.output_state(), carried.walk.target());
@@ -1094,6 +1099,7 @@ impl FaderCurve {
             }
             (Self::Composed(curve), Self::Cell { state: carried, .. }) => {
                 curve.walk.set_output(*carried, None);
+                curve.cursor_history_valid = false;
             }
             (Self::Cell { state, .. }, Self::Composed(_)) => {
                 *state = automation::CellState::new();
@@ -1368,6 +1374,13 @@ impl LaneFaderAutomation {
                 Some((carried, carried_arrival)) => {
                     cell.curve.carry(&carried.curve);
                     cell.obligation = carried.obligation;
+                    if carried_arrival != arrival
+                        && let FaderCurve::Composed(curve) = &mut cell.curve
+                    {
+                        // A moved node clock needs the adoption rule, even if the unshifted
+                        // successor tables still agree at the old origins.
+                        curve.cursor_history_valid = false;
+                    }
                     cell.adopted_sum = Some(cell.offsets_sum);
                     cell.offsets_sum = carried.offsets_sum;
                     cell.offsets_ramp = carried.offsets_ramp;
@@ -1561,6 +1574,9 @@ impl LaneFaderAutomation {
                     "the adoption rule stands in for a live offsets record"
                 );
                 cell.offsets_sum = sum;
+                if let FaderCurve::Composed(curve) = &mut cell.curve {
+                    curve.cursor_history_valid = false;
+                }
                 cell.adoption = cell.adoption.max(Adoption::Compare);
             }
             // #1655 D3: a composed channel's `own_db` takes the same rule as its `S`.
@@ -1574,6 +1590,7 @@ impl LaneFaderAutomation {
                     "the adoption rule stands in for a live own_db record"
                 );
                 curve.own_db = prepared;
+                curve.cursor_history_valid = false;
                 cell.adoption = cell.adoption.max(Adoption::Compare);
             }
         }
@@ -1812,12 +1829,16 @@ impl AutomatedFaderCell {
 /// `at`, but never past the next discontinuity after `start`, which jumps of its own (the rule of
 /// the cell's own `target_at`).
 fn curve_toward(cell: &automation::CellProgram<'_>, start: i64, at: i64) -> f32 {
+    automation::value_at(cell.segments(), curve_target_time(cell, start, at))
+}
+
+/// The origin of `curve_toward`'s value, also retained when adoption seeds a cursor.
+fn curve_target_time(cell: &automation::CellProgram<'_>, start: i64, at: i64) -> i64 {
     let ahead = cell.discontinuities();
-    let at = match ahead.get(ahead.partition_point(|&time| time <= start)) {
+    match ahead.get(ahead.partition_point(|&time| time <= start)) {
         Some(&next) if next <= at => next - 1,
         _ => at,
-    };
-    automation::value_at(cell.segments(), at)
+    }
 }
 
 /// The node time of sample `offset` of a node block mapped by `span` (`offset` may lie past the
@@ -2747,6 +2768,11 @@ trait AdoptedCurve {
     fn hold_until(&mut self, end: i64);
     /// Whether a curve has a discontinuity (a step of its own) at node time `t`.
     fn steps_at(&self, t: i64) -> bool;
+    /// Keep a running composed entry event's ordinary ordering when the successor agrees at
+    /// every carried component value's origin. A lone cell retains its entry landing.
+    fn continue_entry_step(&mut self, _start: i64) -> bool {
+        false
+    }
     /// The channel's value toward a ramp started at `start` and completing at `at`
     /// ([`curve_toward`]; a composed curve composes each).
     fn toward(&self, start: i64, at: i64) -> f32;
@@ -2818,7 +2844,7 @@ impl AdoptedCurve for ComposedAdoption<'_, '_> {
             let state = cursor.state_mut();
             *state = automation::CellState::new();
             state.reposition(&cell, t);
-            cursor.set_heard(automation::value_at(cell.segments(), t));
+            cursor.set_heard_at(automation::value_at(cell.segments(), t), t);
         }
     }
     fn hold_until(&mut self, end: i64) {
@@ -2830,6 +2856,23 @@ impl AdoptedCurve for ComposedAdoption<'_, '_> {
                 .cell(cursor.cell() as usize)
                 .is_some_and(|cell| cell.discontinuities().binary_search(&t).is_ok())
         })
+    }
+    fn continue_entry_step(&mut self, start: i64) -> bool {
+        if !self.curve.cursor_history_valid
+            || !self.curve.walk.cursors().iter().all(|cursor| {
+                self.program
+                    .cell(cursor.cell() as usize)
+                    .is_some_and(|cell| cursor.values_match(&cell))
+            })
+        {
+            return false;
+        }
+        for cursor in self.curve.walk.cursors_mut() {
+            if let Some(cell) = self.program.cell(cursor.cell() as usize) {
+                cursor.state_mut().reindex(&cell, start);
+            }
+        }
+        true
     }
     fn toward(&self, start: i64, at: i64) -> f32 {
         self.curve.toward(self.program, self.offsets_sum, start, at)
@@ -2843,9 +2886,9 @@ impl AdoptedCurve for ComposedAdoption<'_, '_> {
             let Some(cell) = program.cell(cursor.cell() as usize) else {
                 continue;
             };
-            let heard = curve_toward(&cell, start, at);
-            cursor.state_mut().seed_target(heard);
-            cursor.set_heard(heard);
+            let origin = curve_target_time(&cell, start, at);
+            let heard = automation::value_at(cell.segments(), origin);
+            cursor.seed_at(heard, origin);
         }
         self.curve.walk.seed_target(value);
     }
@@ -2874,8 +2917,10 @@ impl AdoptedCurve for ComposedAdoption<'_, '_> {
 /// at the old cell's last ramp completion (#2096, extending #1716 fix D's amendment of #1648
 /// D2): the node time from which the stage's target was taken, even off the grid or while held.
 /// With no recorded completion it keeps fix D's comparison at the sample before the block.
-/// For a held stage in a mute or unmute ramp, a step of the cell's own at
-/// the block's first sample (B17-R13), or [`Adoption::Compare`], at the block's first sample.
+/// For a running free composed channel with a step at entry, matching values at every carried
+/// cursor's heard and non-held target origins preserve its event state and ordinary merged
+/// entry walk (#2158), even inside an earlier jump. Otherwise, for a held stage in a mute or
+/// unmute ramp, a step at entry (B17-R13), or [`Adoption::Compare`], compare at entry.
 /// Composed with this plan's `S` (`checked_fader_gain(vca_compose_db(curve, S))`, #1648
 /// departure 4), when it differs in bits from the gain the stage aims for (a free
 /// stage's ramp target, #1711 F0; a held stage's fader gain) the block opens with the adoption
@@ -2900,6 +2945,16 @@ fn settle_adoption(
     let mut free = None;
     let mut carried_completion = None;
     if adoption == Adoption::Reposition {
+        if hold.is_some_and(|hold| !hold.held && hold.remaining > 0 && hold.stage_gain.is_some())
+            && curve.steps_at(span.start)
+            && curve.continue_entry_step(span.start)
+        {
+            // #2158: each cursor still hears the same successor value at the origin from which
+            // it was taken. Keep its held/deferred state and reindex only its discontinuities;
+            // the ordinary merged walk processes the real entry step once. A new landing would
+            // advance other riding cursors to this step's completion and change their arithmetic.
+            return false;
+        }
         let completion = curve.ramp_completion();
         curve.reposition(span.start);
         if let Some(ChannelHold { remaining: 0, .. }) = hold
@@ -15108,7 +15163,9 @@ mod tests {
     /// remembers the grid's target at 1,151 with no ramp, adopts again one frame later before
     /// the next grid, then unmutes at 1,120, so a spurious adoption jump changes audible output
     /// (#2096). The exact-set row leaves both runs' free stages at
-    /// their carried targets with no ramp. A table step at adoption still jumps there (B17-R13).
+    /// their carried targets with no ramp. A table step at adoption still jumps there (B17-R13),
+    /// including a VCA step coincident with a running own ride (#2158): the merged walk keeps
+    /// that ride's heard target instead of landing every cursor at the jump's completion.
     ///
     /// Red if a composed channel's carry loses its cursors' or its output's state (a continued
     /// walk restarts), if its reposition compares at another time than the ramp's end (an
@@ -15146,6 +15203,39 @@ mod tests {
                         "entry-step",
                         0,
                         step_table(1_100, -6.0, -12.0, session::ParameterUnit::Db),
+                        false,
+                        false,
+                    ),
+                    (
+                        "entry-step-running",
+                        0,
+                        step_table(1_100, -6.0, -12.0, session::ParameterUnit::Db),
+                        false,
+                        false,
+                    ),
+                    (
+                        "entry-step-running-prior-jump",
+                        0,
+                        vec![
+                            vca_segment(
+                                session::AutomationShape::Step,
+                                (0, 900),
+                                (-3.0, -3.0),
+                                session::ParameterUnit::Db,
+                            ),
+                            vca_segment(
+                                session::AutomationShape::Step,
+                                (900, 1_100),
+                                (-6.0, -6.0),
+                                session::ParameterUnit::Db,
+                            ),
+                            vca_segment(
+                                session::AutomationShape::Step,
+                                (1_100, 100_000),
+                                (-12.0, -12.0),
+                                session::ParameterUnit::Db,
+                            ),
+                        ],
                         false,
                         false,
                     ),
@@ -15195,6 +15285,10 @@ mod tests {
                     // (block frames, blocks before the swap, blocks in all): the swap at 1,100, off
                     // the grid, and at 1,152, on it (#1716 fix D).
                     for (frames, swap, blocks) in [(100, 11, 24), (128, 9, 19)] {
+                        if case.starts_with("entry-step-running") && frames != 100 {
+                            // #2158 exercises the swap coincident with the step, at 1,100.
+                            continue;
+                        }
                         let mut uninterrupted = vca_rig(&model, backend, [480; 4]);
                         let mut predecessor = vca_rig(&model, backend, [480; 4]);
                         let (expected_before, _) = uninterrupted.run(swap, frames);
@@ -15245,6 +15339,51 @@ mod tests {
                             ));
                         }
                         successor.first = predecessor.first;
+                        if case == "entry-step-running" && composed && frames == 100 {
+                            // A genuinely changed own curve must still land at entry. The
+                            // no-op comparison must not preserve the old curve's heard target.
+                            let mut changed_model = model.clone();
+                            changed_model.automation[0].segments = ride_table(4_096, -8.5, -4.0);
+                            let mut changed = vca_rig(&changed_model, backend, [480; 4]);
+                            for lane in 0..changed.lanes {
+                                assert!(changed.processor.adopt_lane(
+                                    lane,
+                                    &predecessor.processor,
+                                    lane,
+                                    0
+                                ));
+                            }
+                            changed.first = predecessor.first;
+                            let (_, events) = changed.run(1, frames);
+                            let entry = events
+                                .iter()
+                                .filter(|event| {
+                                    (event.lane, event.channel, event.sample) == (1, 0, 1_100)
+                                        && !event.mute
+                                        && !event.held
+                                })
+                                .collect::<Vec<_>>();
+                            assert_eq!(entry.len(), 1, "one changed-table entry landing");
+                            assert_eq!(entry[0].kind, automation::EventKind::Jump);
+                            assert_eq!(entry[0].ramp, 480);
+                            let plan = changed.plan.as_ref().expect("automation");
+                            let own = plan.strip("t01").expect("member").fader[0]
+                                .as_ref()
+                                .expect("fader")
+                                .cell
+                                .expect("own curve");
+                            let cell = plan.program.cell(own as usize).expect("own cell");
+                            let expected = composed_db(
+                                automation::value_at(cell.segments(), 1_579),
+                                0.0,
+                                core::iter::once(-12.0),
+                            );
+                            assert_eq!(
+                                entry[0].value.to_bits(),
+                                expected.to_bits(),
+                                "a changed table retains its entry landing target: {backend:?}"
+                            );
+                        }
                         if initially_muted && frames == 100 {
                             let (expected, _) = uninterrupted.run(1, 1);
                             let (actual, _) = successor.run(1, 1);

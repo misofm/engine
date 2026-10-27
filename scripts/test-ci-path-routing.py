@@ -1498,8 +1498,8 @@ def main() -> int:
     )  # a step slipped in before the report
     workflow_mutation_fails(
         "qualification.yml",
-        "        with:\n          fetch-depth: 0\n      # No toolchain in the runner's RUSTUP_HOME",
-        "      # No toolchain in the runner's RUSTUP_HOME",
+        "        with:\n          fetch-depth: 0\n      - name: Download shipped closure for the BLAKE3 release identity",
+        "      - name: Download shipped closure for the BLAKE3 release identity",
     )  # the identity job's full history dropped: no base is reachable
     workflow_mutation_fails(
         "qualification.yml", 'git worktree add --detach "$RUNNER_TEMP/twin" HEAD\n',
