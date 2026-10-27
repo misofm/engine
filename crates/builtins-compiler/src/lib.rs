@@ -2739,6 +2739,8 @@ impl HeldRampObligation {
 /// ([`settle_adoption`]): a lone cell ([`CellAdoption`]) or a composed curve
 /// ([`ComposedAdoption`], #1655 V2), so both take one rule.
 trait AdoptedCurve {
+    /// The old curve's last recorded ramp completion, before a reposition clears its state.
+    fn ramp_completion(&self) -> Option<i64>;
     /// Place the curve at node time `t` in its own table(s) (a reposition, #1637 D4).
     fn reposition(&mut self, t: i64);
     /// Report a ramp of the stage that completes at node time `end` (the grid holds inside it).
@@ -2773,6 +2775,9 @@ struct ComposedAdoption<'p, 's> {
 }
 
 impl AdoptedCurve for CellAdoption<'_, '_, '_> {
+    fn ramp_completion(&self) -> Option<i64> {
+        self.state.ramp_completion()
+    }
     fn reposition(&mut self, t: i64) {
         self.state.reposition(self.program, t);
     }
@@ -2797,6 +2802,9 @@ impl AdoptedCurve for CellAdoption<'_, '_, '_> {
 }
 
 impl AdoptedCurve for ComposedAdoption<'_, '_> {
+    fn ramp_completion(&self) -> Option<i64> {
+        self.curve.walk.output_state().ramp_completion()
+    }
     /// Each cursor is placed afresh in its own cell at `t` and hears its curve there: with no
     /// target of its own, a deferred jump fires and a landing lands on every curve, so the
     /// composed value is the successor's tables' wherever the comparison differs (the cursors'
@@ -2863,9 +2871,10 @@ impl AdoptedCurve for ComposedAdoption<'_, '_> {
 /// `J` as at a discontinuity of its table, so the ramp ends when it was due.
 ///
 /// Then the curve is compared: for a reposition whose stage runs no ramp at all, held or free,
-/// at the sample before the block (#1716 fix D, amending #1648 D2: the node time at which the
-/// old table's last grid ramp took the stage's target, so a table that agrees with the old one
-/// there does not jump); for a held stage in a mute or unmute ramp, a step of the cell's own at
+/// at the old cell's last ramp completion (#2096, extending #1716 fix D's amendment of #1648
+/// D2): the node time from which the stage's target was taken, even off the grid or while held.
+/// With no recorded completion it keeps fix D's comparison at the sample before the block.
+/// For a held stage in a mute or unmute ramp, a step of the cell's own at
 /// the block's first sample (B17-R13), or [`Adoption::Compare`], at the block's first sample.
 /// Composed with this plan's `S` (`checked_fader_gain(vca_compose_db(curve, S))`, #1648
 /// departure 4), when it differs in bits from the gain the stage aims for (a free
@@ -2883,29 +2892,28 @@ fn settle_adoption(
     if adoption == Adoption::None {
         return false;
     }
-    // The node time at which the curve is compared: the block's first sample, the sample before
-    // it when the stage runs no ramp (#1716 fix D), or the end of a ramp the free stage still
-    // runs (U3 fold 2).
+    // Compare where the stage's target was taken: its cell's last completion when no stage
+    // ramp runs (#2096), or the end of the ramp a free stage still runs (U3 fold 2). A step
+    // of the curve at this block's entry keeps the entry-time comparison (B17-R13).
     let mut at = span.start;
     // The free stage's ramp's first free sample, where a moved target's jump is deferred to.
     let mut free = None;
+    let mut carried_completion = None;
     if adoption == Adoption::Reposition {
+        let completion = curve.ramp_completion();
         curve.reposition(span.start);
         if let Some(ChannelHold { remaining: 0, .. }) = hold
             && !curve.steps_at(span.start)
-            && let Some(previous) = span.start.checked_sub(1)
+            && let Some(previous) = completion.or_else(|| span.start.checked_sub(1))
         {
-            // No stage ramp (#1716 fix D, the #1648 D2 amendment): the stage's target is the old
-            // curve where its last ramp completed. When the block starts on the grid, the last
-            // grid ramp has just completed, at the sample before this block; off the grid, a free
-            // stage is still in its ramp (the U3 branch below). So the new curve is compared at
-            // that same node time: an unchanged curve does not jump, and one that moves only from
-            // this block's first sample on is the grid's next ramp, as a plan prepared with this
-            // table renders it. A step at the block's first sample is still compared there
-            // (B17-R13). The `steps_at` guard may be redundant (the cell's own jump at a
-            // discontinuity at `span.start` fires anyway; a mutant without it survived), but it
-            // keeps the B17-R13 compare explicit.
+            // Read before reposition clears the old cell's completion (#2096). Off the grid
+            // a held stage may remember the curve at a completion still ahead of this block;
+            // span.start - 1 is the target's time only at a grid-aligned block. A free stage
+            // with no ramp takes the same comparison. A fresh/exact-set cell has no recorded
+            // ramp, so it keeps fix D's previous-sample fallback. A step at span.start still
+            // jumps there (B17-R13).
             at = previous;
+            carried_completion = completion;
         } else if let Some(ChannelHold {
             held, remaining, ..
         }) = hold
@@ -2933,6 +2941,11 @@ fn settle_adoption(
     if !differs {
         if adoption == Adoption::Reposition {
             curve.seed(span.start, at, value);
+            if let Some(completion) = carried_completion {
+                // The target still belongs to that completion. Keep its history (and grid
+                // hold), so a second no-op adoption before the next grid compares there too.
+                curve.hold_until(completion);
+            }
         }
         return false;
     }
@@ -15085,78 +15098,205 @@ mod tests {
         }
     }
 
-    /// #1648 D2 and #1655 D6 on a composed channel (V2): a plan swap at sample 1,100 that carries
+    /// #1648 D2 and #1655 D6 on composed and lone channels: a plan swap at sample 1,100 that carries
     /// every lane renders, bit for bit, the uninterrupted bank, whether the join continues the
     /// composed cells verbatim (`continued_cells` set) or repositions them (clear), over a VCA
     /// ride that reaches a member with its own ride and one with none (the swap inside a grid
     /// ramp), and continued across a VCA step's jump (1,000 over 480: the own ride's grid stays
     /// held to its end). The same swap at 1,152 with 128-frame blocks starts on the grid, where
-    /// the last grid ramp has just completed (#1716 fix D).
+    /// the last grid ramp has just completed (#1716 fix D). At 1,100, a settled muted stage
+    /// remembers the grid's target at 1,151 with no ramp, adopts again one frame later before
+    /// the next grid, then unmutes at 1,120, so a spurious adoption jump changes audible output
+    /// (#2096). The exact-set row leaves both runs' free stages at
+    /// their carried targets with no ramp. A table step at adoption still jumps there (B17-R13).
     ///
     /// Red if a composed channel's carry loses its cursors' or its output's state (a continued
     /// walk restarts), if its reposition compares at another time than the ramp's end (an
     /// unchanged curve would jump at the swap), or if a reposition with no stage ramp compares at
-    /// the block's first sample: an unchanged curve on a grid-aligned block would jump.
+    /// the block's first sample or the sample before it instead of the old completion: an
+    /// unchanged curve would jump on a grid-aligned block or an off-grid no-ramp adoption.
     #[test]
-    fn a_carried_composed_lane_renders_the_uninterrupted_bits() {
+    fn a_carried_automated_lane_renders_the_uninterrupted_bits() {
         for backend in input_test_backends() {
-            for (continued, vca_table) in [
-                (0b1111_u8, ride_table(8_192, -12.0, 0.0)),
-                (0, ride_table(8_192, -12.0, 0.0)),
-                (
-                    0b1111,
-                    step_table(1_000, -6.0, -12.0, session::ParameterUnit::Db),
-                ),
-            ] {
-                let mut model = vca_model(2);
-                model.vcas = vec![vca_of("v", 0.0, &["t00", "t01"])];
-                model.automation = vec![
-                    stored(
-                        "own-ride",
-                        strip_owner(1),
-                        5,
-                        session::ParameterChannel::Left,
-                        ride_table(4_096, -6.5, -2.0),
+            for composed in [true, false] {
+                for (case, continued, vca_table, initially_muted, settle) in [
+                    (
+                        "continued-ride",
+                        0b1111_u8,
+                        ride_table(8_192, -12.0, 0.0),
+                        false,
+                        false,
                     ),
-                    stored(
-                        "vca-ride",
-                        vca_owner("v"),
-                        1,
-                        session::ParameterChannel::Both,
-                        vca_table,
+                    (
+                        "repositioned-ride",
+                        0,
+                        ride_table(8_192, -12.0, 0.0),
+                        false,
+                        false,
                     ),
-                    stored(
-                        "vca-mute",
-                        vca_owner("v"),
-                        2,
-                        session::ParameterChannel::Both,
-                        step_table(1_500, 0.0, 1.0, session::ParameterUnit::Linear),
+                    (
+                        "settled-ride",
+                        0,
+                        ride_table(8_192, -12.0, 0.0),
+                        false,
+                        true,
                     ),
-                ];
-                // (block frames, blocks before the swap, blocks in all): the swap at 1,100, off
-                // the grid, and at 1,152, on it (#1716 fix D).
-                for (frames, swap, blocks) in [(100, 11, 24), (128, 9, 19)] {
-                    let mut uninterrupted = vca_rig(&model, backend, [480; 4]);
-                    let mut predecessor = vca_rig(&model, backend, [480; 4]);
-                    let (expected, _) = uninterrupted.run(blocks, frames);
-                    let (before, _) = predecessor.run(swap, frames);
-                    assert_eq!(before[..], expected[..swap as usize]);
-                    let mut successor = vca_rig(&model, backend, [480; 4]);
-                    for lane in 0..successor.lanes {
-                        assert!(successor.processor.adopt_lane(
-                            lane,
-                            &predecessor.processor,
-                            lane,
-                            continued
-                        ));
+                    ("muted-ride", 0, ride_table(8_192, -12.0, 0.0), true, false),
+                    (
+                        "entry-step",
+                        0,
+                        step_table(1_100, -6.0, -12.0, session::ParameterUnit::Db),
+                        false,
+                        false,
+                    ),
+                    (
+                        "continued-step",
+                        0b1111,
+                        step_table(1_000, -6.0, -12.0, session::ParameterUnit::Db),
+                        false,
+                        false,
+                    ),
+                ] {
+                    let mut model = vca_model(2);
+                    model.vcas = vec![vca_of("v", 0.0, &["t00", "t01"])];
+                    model.automation = vec![
+                        stored(
+                            "own-ride",
+                            strip_owner(1),
+                            5,
+                            session::ParameterChannel::Left,
+                            ride_table(4_096, -6.5, if case == "entry-step" { -6.5 } else { -2.0 }),
+                        ),
+                        stored(
+                            "vca-ride",
+                            vca_owner("v"),
+                            1,
+                            session::ParameterChannel::Both,
+                            vca_table,
+                        ),
+                        stored(
+                            "vca-mute",
+                            vca_owner("v"),
+                            2,
+                            session::ParameterChannel::Both,
+                            step_table(
+                                if initially_muted { 1_120 } else { 1_500 },
+                                if initially_muted { 1.0 } else { 0.0 },
+                                if initially_muted { 0.0 } else { 1.0 },
+                                session::ParameterUnit::Linear,
+                            ),
+                        ),
+                    ];
+                    if !composed {
+                        model
+                            .automation
+                            .retain(|table| table.id.as_str() != "vca-ride");
                     }
-                    successor.first = predecessor.first;
-                    let (after, _) = successor.run(blocks - swap, frames);
-                    assert_eq!(
-                        after[..],
-                        expected[swap as usize..],
-                        "continued {continued:#b} {backend:?}, {frames}-frame blocks"
-                    );
+                    // (block frames, blocks before the swap, blocks in all): the swap at 1,100, off
+                    // the grid, and at 1,152, on it (#1716 fix D).
+                    for (frames, swap, blocks) in [(100, 11, 24), (128, 9, 19)] {
+                        let mut uninterrupted = vca_rig(&model, backend, [480; 4]);
+                        let mut predecessor = vca_rig(&model, backend, [480; 4]);
+                        let (expected_before, _) = uninterrupted.run(swap, frames);
+                        let (before, _) = predecessor.run(swap, frames);
+                        assert_eq!(before, expected_before);
+                        if settle {
+                            // The same exact stage operation on both runs leaves a free stage with
+                            // no ramp, still at the old cell's target (its recorded completion).
+                            for rig in [&mut uninterrupted, &mut predecessor] {
+                                for lane in 0..rig.lanes {
+                                    for (channel, selector) in
+                                        [BuiltinLaneSelector::Left, BuiltinLaneSelector::Right]
+                                            .into_iter()
+                                            .enumerate()
+                                    {
+                                        let gain = rig
+                                            .processor
+                                            .bank
+                                            .ramp_target(lane, channel)
+                                            .expect("populated lane");
+                                        rig.processor
+                                            .bank
+                                            .apply_fader_operation(
+                                                lane,
+                                                selector,
+                                                builtins::FaderOperation::SetGain { gain },
+                                            )
+                                            .expect("the carried target is a valid gain");
+                                        assert_eq!(
+                                            rig.processor.bank.ramp_remaining(lane, channel),
+                                            Some(0)
+                                        );
+                                        assert_eq!(
+                                            rig.processor.bank.gain_held(lane, channel),
+                                            Some(false)
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        let mut successor = vca_rig(&model, backend, [480; 4]);
+                        for lane in 0..successor.lanes {
+                            assert!(successor.processor.adopt_lane(
+                                lane,
+                                &predecessor.processor,
+                                lane,
+                                continued
+                            ));
+                        }
+                        successor.first = predecessor.first;
+                        if initially_muted && frames == 100 {
+                            let (expected, _) = uninterrupted.run(1, 1);
+                            let (actual, _) = successor.run(1, 1);
+                            assert_eq!(actual, expected);
+                            assert_eq!(
+                                successor.processor.bank.fader_gain(1, 0).map(f32::to_bits),
+                                uninterrupted
+                                    .processor
+                                    .bank
+                                    .fader_gain(1, 0)
+                                    .map(f32::to_bits),
+                                "the first no-ramp swap preserves the held target: composed {composed}, {backend:?}, {frames}-frame blocks"
+                            );
+                            // Adopt once more before the next grid. In a lone cell, reposition
+                            // cleared the completion unless the unchanged comparison restored it.
+                            let mut again = vca_rig(&model, backend, [480; 4]);
+                            for lane in 0..again.lanes {
+                                assert!(again.processor.adopt_lane(
+                                    lane,
+                                    &successor.processor,
+                                    lane,
+                                    0
+                                ));
+                            }
+                            again.first = successor.first;
+                            successor = again;
+                        }
+                        let (expected_after, _) = uninterrupted.run(blocks - swap, frames);
+                        let (after, _) = successor.run(blocks - swap, frames);
+                        if initially_muted {
+                            assert!(
+                                expected_after.last().expect("post-swap blocks")[1][0]
+                                    .iter()
+                                    .any(|&bits| f32::from_bits(bits) > 0.0),
+                                "the unmute must make the bit comparison audible"
+                            );
+                            assert_eq!(
+                                successor.processor.bank.fader_gain(1, 0).map(f32::to_bits),
+                                uninterrupted
+                                    .processor
+                                    .bank
+                                    .fader_gain(1, 0)
+                                    .map(f32::to_bits),
+                                "the repeated swap preserves the held target"
+                            );
+                        }
+                        assert_eq!(
+                            after[..],
+                            expected_after[..],
+                            "{case}, composed {composed}, continued {continued:#b}, muted {initially_muted}, settled {settle}, {backend:?}, {frames}-frame blocks"
+                        );
+                    }
                 }
             }
         }
