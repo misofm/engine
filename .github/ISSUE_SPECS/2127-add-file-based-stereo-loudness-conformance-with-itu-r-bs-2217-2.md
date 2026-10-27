@@ -168,3 +168,30 @@ queue execution. These checks add no committed harness tests or production chang
 Author stream is complete with a clean checkpoint; fresh adversarial review, integration
 and GitHub synchronization remain root's delivery work. No upstream push or issue
 closure has been made by this stream, and no EBU/multichannel compliance is claimed.
+
+## Fresh independent adversarial verdict — conditional PASS (2026-10-27)
+
+Astra, with no implementation role, independently reviewed the official BS.2217-2 report,
+catalogue, copyright terms, the sole manifest, acquisition verifier and PCM reader. The amended
+nineteen-file mono/stereo scope is complete; EBU programmes remain explicitly owned by #2167.
+Both readers enforce the pinned container delta, bounded complete chunks and unmodified PCM;
+mono plus zero right preserves unit channel energy and measurement ends at actual EOF.
+
+[Evidence run 40471281487](https://github.com/misofm/engine/actions/runs/40471281487) tested source
+`21c38051cba9abeb706fcaa1622485cb267da702` through workflow-only proof commit
+`7f14f6fbf88c1ecb438976d63a1599e6dddf6d50`. Fresh private downloads and offline archive/WAV
+verification preceded all nineteen readings; the explicit test passed with zero ignored cases.
+Independent recalculation found maximum absolute error **0.04844452 LKFS**, on the absolute-gate
+file, within the published 0.1 tolerance. No audio or archive was uploaded in the evidence artifact.
+The run's later #988 performance failure does not invalidate this completed gate.
+
+Test value: `itu_bs2217_published_mono_stereo_files` detects disagreement with independently
+authored official programme/frequency/gating PCM and published targets that the synthetic recipe
+tests cannot establish. This is one fixture-identity owner, with no new production dependency.
+
+**Conditional source-review PASS, attempt 1.** The loudness changes are byte-unchanged between the
+proved source and reduced tree `da4f72f60d29bade17cd86b7a299b3d2f8734b9f`; removal of the failed
+limiter screen introduces no loudness edit. Normal required qualification on the final reduced
+product tree remains mandatory before delivery/closure. Raw artifact and independent judgment:
+`engine-work-evidence/easy3-20261027/fresh-astra/remote/result/` and
+`fresh-astra/remote/artifact-judgment.json` outside Git.

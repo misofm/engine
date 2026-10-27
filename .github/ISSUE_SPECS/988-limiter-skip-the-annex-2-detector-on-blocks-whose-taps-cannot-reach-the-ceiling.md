@@ -180,3 +180,36 @@ Near-miss candidate/base duration ratios were **1.057276655 at native W8**, **1.
 Root decision: **FAIL attempt 1. Do not ship this screen.** Restore the entire limiter production/test directory to current main in the batch, retain the failed implementation and all local checkpoints in Git history and on the pushed unmerged proof branch, and leave #988 OPEN. No timing retry, workload/tolerance change or speculative optimization follows this failure. A subsequent attempt needs a newly bounded brief addressing the near-miss screen cost before implementation. The original no-regression requirement stands.
 
 The failure does not block the independent held-meter and official ITU loudness slices: their targeted proofs ran before this timing failure and are independently checked by the fresh reviewer. The final reduced product tree must pass normal required qualification before those issues close. No release publication is performed by this batch.
+
+## Fresh independent adversarial verdict — FAIL attempt 1 (2026-10-27)
+
+Astra independently checked the preserved proof artifact against source
+`21c38051cba9abeb706fcaa1622485cb267da702` and proof
+`7f14f6fbf88c1ecb438976d63a1599e6dddf6d50`: all twelve frozen input hashes, filesystem-only
+portability substitutions, identical baseline/candidate locks, six output/state identity records,
+eighteen warmup records, thirty-six measured records and nine result rows agree. Recomputing
+each ratio from its two measured rounds reproduces the runner's verdict. Exactly one timing
+invocation ran; the first failing acceptance row was native W8 near-miss, and all three near-miss
+rows fail the 1.01 bound. This is a product-gate failure, not a runner defect. No timing retry is
+authorized or needed to classify it.
+
+The release screened-path differential and zero-allocation checks passed. Read-through found the
+finite-precision bound, ordered admission, both-channel minimum ceiling, original-input history
+advancement and retained gain/release/delay operations sound. The nonempty native codegen inventory
+retains the extracted W4/W8 detector and gain floating-point instruction sequences; mono bodies
+have unchanged counts, while dual whole-body counts change from 11,102 to 11,297 (W4) and 11,769
+to 12,005 (W8). Screened bodies have no detector loops. These facts and quiet-row improvements
+do not override the measured near-miss regression.
+
+Test value: `screen_bound_covers_the_attaining_phase_patterns` rejects an unsafe screen factor or
+rounding margin that ordinary FIR conformance never exercises;
+`screen_preserves_every_word_and_refuses_unproven_blocks` rejects unsafe admission, lost original
+history, missing gain-ring state or allocation on the newly admitted screened path, even before
+delayed audio exposes it. The five recorded mutations fail on their intended assertions. These
+tests remain preserved with the failed implementation in history; they are removed with that
+implementation from the reduced product tree, rather than left as redundant scaffolding.
+
+**FAIL attempt 1; no shipping approval.** Root's stop/restore decision is appropriate. Reduced tree
+`da4f72f60d29bade17cd86b7a299b3d2f8734b9f` restores the entire limiter directory to current main.
+This issue remains open and requires a newly bounded brief before any later attempt; no implicit
+attempt 2, tolerance relaxation, retiming or harness repair follows this verdict.

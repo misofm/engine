@@ -186,3 +186,50 @@ existing release native G5 runner, requires its `meter_block_mismatches` to be p
 the exact source, and requires the same runner GREEN. The remote owner must retain the emitted
 JSON and extended census, update this decision record, and obtain the independent Astra verdict
 before the issue can pass or close.
+
+## Fresh independent adversarial verdict — conditional PASS (2026-10-27)
+
+Astra independently reviewed the lane recurrence, exact two-limb u32 borrow/reload, independent
+energy/held seed searches, post-preamble both-channel state/configuration acceptance, bounded
+window fallback, production graph transport and final padded-tail/asymmetric fixture. No new
+allocation, lock, I/O, syscall, cross-lane arithmetic or unbounded render operation was found.
+The final allocation row uses the existing `bench_support::alloc` thread-scoped owner, warms the
+actual positive-hold/decay path, measures full `plan.render`, witnesses a real bank commit and
+checks the published record outside the measured span.
+
+[Evidence run 40471281487](https://github.com/misofm/engine/actions/runs/40471281487), source
+`21c38051cba9abeb706fcaa1622485cb267da702`, proof
+`7f14f6fbf88c1ecb438976d63a1599e6dddf6d50`, completed the previously pending targeted gates:
+
+- Both final resident-meter tests passed, including the padded observed tail and distinct L/R
+  combined hold/decay case; both allocation-owner tests passed, with zero allocations/frees and
+  the actual held bank-commit assertion.
+- Native G5 passed 157 cases/391 comparisons with every mismatch field zero. Omitting the high
+  countdown digit's borrow then executed and failed with **1,409 meter mismatches**, not a compile
+  failure. Exact source restoration and a clean-diff guard preceded the same native GREEN result.
+- The pinned nightly/build-std SIMD128 guest passed 157 cases/274 comparisons with every mismatch
+  field zero. The existing owned meter probe contains one packed f32 multiply and subtraction,
+  while its scalar f32 arithmetic census is zero.
+
+Test value, by changed owner:
+
+- `a_banked_block_commit_publishes_the_scalar_meters_snapshots` now rejects a wrong hold/decay
+  recurrence or either channel's mismatched held state/configuration seed, which previously
+  always declined to scalar.
+- `a_peak_meter_bound_first_leaves_the_seed_to_the_all_meter_behind_it` now rejects suppressing
+  a held-only seed behind another observer or conflating it with the independent energy seed.
+- `resident_meter_accepted_plan_avoids_planar_acquisition_and_matches_decline` rejects missing
+  production held transport, wrong padded-lane selection or swapped L/R state, despite a correct
+  standalone kernel.
+- `a_banked_held_meter_render_allocates_nothing` rejects allocation/free in the real held
+  seed/pass/accept render branch that the previous zero-ballistics and lane-swap cases never ran.
+- The existing cross-target meter differential's added remaining-u32 comparison rejects lost
+  high-digit borrow/reload above f32's integer range before a long hold can affect a snapshot;
+  its existing compiled-code probe rejects scalar decay/countdown lowering on SIMD128.
+
+**Conditional source-review PASS, attempt 1.** All #951 critical source and test paths are unchanged
+between the proved source and reduced tree `da4f72f60d29bade17cd86b7a299b3d2f8734b9f`. The later
+#988 timing failure is independent. Final workspace Clippy/policy checks and required regular
+qualification on the reduced product tree remain mandatory before delivery/closure; no pending
+CI result is represented as passed. Raw artifact and independent judgment are retained under
+`engine-work-evidence/easy3-20261027/fresh-astra/remote/` outside Git.
