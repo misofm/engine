@@ -219,6 +219,7 @@ pub(crate) fn rack_chains(
             let chain = RackChainId {
                 track_id: strip.id.as_str().to_owned(),
                 rack,
+                slot: None,
             };
             let mut nodes = Vec::with_capacity(declared.len());
             let mut slots = Vec::with_capacity(declared.len());
@@ -265,7 +266,7 @@ pub(crate) fn bind_rack_banks_placed(
     dispatch: Backend,
     classes: &mut SessionPoolClasses,
 ) -> Result<(Vec<graph::GraphPreparedEffectBank>, GraphRackBankReport), GraphDiagnostic> {
-    let (chains, programs) = rack_chains(effects, prepared, ids)?;
+    let (mut chains, programs) = rack_chains(effects, prepared, ids)?;
     let model = effects.session.normalized_model();
 
     let empty = |dispatch, chains: BTreeMap<RackChainId, Vec<EffectNodeId>>| GraphRackBankReport {
@@ -280,6 +281,7 @@ pub(crate) fn bind_rack_banks_placed(
         utilisation_by_rack: RackLocation::ALL.map(|rack| (rack, BankUtilisation::default())),
         windows: BTreeMap::new(),
         planned_levels: placement.planned_levels.clone(),
+        leftover_levels: BTreeMap::new(),
     };
     let Some(width) = BankWidth::for_backend(dispatch) else {
         return Ok((Vec::new(), empty(dispatch, chains)));
@@ -502,6 +504,23 @@ pub(crate) fn bind_rack_banks_placed(
             }
         }
     }
+    // Issue #2138: the leftover pass, over the insert nodes the chain pass left per node.
+    let mut windows = windows;
+    let mut leftover_levels = BTreeMap::new();
+    leftover_pass(
+        &mut plan,
+        &mut bound,
+        &mut chains,
+        &mut windows,
+        &programs,
+        placement,
+        classes,
+        effects,
+        prepared,
+        dispatch,
+        width,
+        &mut leftover_levels,
+    )?;
     // Issue #1002: a bank reused from the trial plan carries the index its group had there, and
     // acceptance renumbers it. The report's slot index is gated by a test; the bank's cohort index
     // has no public reader, so it is tied to the same index here.
@@ -561,8 +580,321 @@ pub(crate) fn bind_rack_banks_placed(
             utilisation_by_rack,
             windows,
             planned_levels: placement.planned_levels.clone(),
+            leftover_levels,
         },
     ))
+}
+
+/// The leftover pass (issue #2138, `docs/BANKING_DESIGN.md` slice 8): every insert node the chain
+/// pass left per node is offered again as a one-slot candidate, and the ones that meet in a level
+/// window bind as one-slot banks beside the chain pass's.
+///
+/// A candidate is a node of a [`RackLocation::Dynamic`] chain that no bound bank carries and whose
+/// own key does not block banking (a sidechained slot and the delay stay per node). The candidates
+/// are placed by the same sweep as the chain pass's placement (`rack_compiler::place_over_windows`),
+/// keyed by the planner's own key (program key, pool class) and counted by the planner's own
+/// grouping (`plan_bank_groups` over one-slot candidates, as the chain pass counts its chains),
+/// over a sub-problem: the candidates, and every graph neighbour of one fixed at the level the
+/// placement gave it. A candidate's window is the levels it may take with those neighbours where
+/// they are, so every edge stays strictly upward, every bank (chain, builtin or leftover) still
+/// has its members at one placement level, and the graph contracted by bank is acyclic (#2134).
+/// The chain pass's bound nodes are not in the sub-problem: they sit in its banks, which a
+/// leftover candidate never joins. The placed candidates are then bucketed by level for
+/// [`plan_bank_groups`] and bound through the chain pass's binder; a group below
+/// [`min_padded_insert_members`] does not bind, and its nodes render per node.
+///
+/// Banking regroups lanes only, so a leftover bank renders each lane's own arithmetic: the
+/// per-node bits.
+#[allow(clippy::too_many_arguments)] // The bind's whole context.
+fn leftover_pass(
+    plan: &mut BankPlan<RackChainId>,
+    bound: &mut Vec<BoundGroup>,
+    chains: &mut BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    windows: &mut BTreeMap<RackChainId, (u64, u64)>,
+    programs: &BTreeMap<RackChainId, RackProgram>,
+    placement: &PlacementLevels,
+    classes: &SessionPoolClasses,
+    effects: &EffectPreparedSession,
+    prepared: &PreparedEffectIndex<'_>,
+    dispatch: Backend,
+    width: BankWidth,
+    leftover_levels: &mut BTreeMap<EffectNodeId, u64>,
+) -> Result<(), GraphDiagnostic> {
+    let invariant = || diag("graph.internal.invariant", "$.effects");
+    let banked: BTreeSet<&EffectNodeId> = bound
+        .iter()
+        .flatten()
+        .flat_map(|(_, slot)| slot.members.iter())
+        .collect();
+    // What the key's factory binds at this width, asked once per key with the bind's own request
+    // shape: `(a full bank, a padded bank)`. A factory with no bank kernel (the delay, the
+    // reverb) or none at this width declines both, and its nodes are no candidates; a factory
+    // that has not opted into padding binds only full banks. The probe banks are dropped here, off
+    // the render thread.
+    let mut binds: BTreeMap<effect_contract::EffectProgramKey, (bool, bool)> = BTreeMap::new();
+    let lanes = width.lanes() as usize;
+    let mut probe = |key: &effect_contract::EffectProgramKey,
+                     node: &EffectNodeId|
+     -> Result<(bool, bool), GraphDiagnostic> {
+        if let Some(known) = binds.get(key) {
+            return Ok(*known);
+        }
+        let slot = prepared
+            .get(node.track_id.as_str(), node.rack, node.effect_id.as_str())
+            .ok_or_else(invariant)?;
+        let entry = effects.entries.get(slot.index()).ok_or_else(invariant)?;
+        let requests = vec![entry.bank_preparation.request(); lanes];
+        let binds_with = |active_mask: &[bool]| {
+            entry
+                .factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: dispatch,
+                    width,
+                    requests: &requests,
+                    active_mask,
+                })
+                // An error is a contract violation, never a decline: it refuses the compile,
+                // as the bind's own call does.
+                .map(|bank| bank.is_some())
+                .map_err(|error| diag(error.code, "$.effects"))
+        };
+        let full = binds_with(&vec![true; lanes])?;
+        let padded = full && binds_with(&(0..lanes).map(|lane| lane == 0).collect::<Vec<_>>())?;
+        binds.insert(key.clone(), (full, padded));
+        Ok((full, padded))
+    };
+    // (key, class) -> the candidates of that class, by id.
+    let mut by_class: BTreeMap<
+        (effect_contract::EffectProgramKey, CohortPoolClass),
+        Vec<(RackChainId, EffectNodeId)>,
+    > = BTreeMap::new();
+    for (chain, nodes) in chains.iter() {
+        if chain.rack != RackId::Dynamic || chain.slot.is_some() {
+            continue;
+        }
+        for (rank, node) in nodes.iter().enumerate() {
+            let key = programs[chain].slots.get(rank).ok_or_else(invariant)?;
+            if banked.contains(node) || rack::BankSlotKey::blocks_banking(key) {
+                continue;
+            }
+            let id = RackChainId {
+                slot: Some(rank),
+                ..chain.clone()
+            };
+            by_class
+                .entry((key.clone(), classes.class_of(&chain.track_id)))
+                .or_default()
+                .push((id, node.clone()));
+        }
+    }
+    // A key class with fewer candidates than the padding threshold forms no group that binds, so
+    // it is dropped without asking its factory; every other class is asked once per key.
+    let threshold = min_padded_insert_members(width);
+    let mut kept = BTreeMap::new();
+    for ((key, class), members) in by_class {
+        if members.len() >= threshold && probe(&key, &members[0].1)?.0 {
+            kept.insert((key, class), members);
+        }
+    }
+    let by_class = kept;
+    if by_class.is_empty() {
+        return Ok(());
+    }
+    // The sub-problem the shared sweep (`rack_compiler::place_over_windows`) places: every
+    // candidate, keyed by its planner key (program key, pool class), and every graph neighbour of
+    // one, unkeyed and fixed at its placement level. Candidate-to-candidate edges (two leftover
+    // slots of one chain) are the sweep's own edges.
+    let candidates: Vec<(
+        effect_contract::EffectProgramKey,
+        CohortPoolClass,
+        RackChainId,
+        EffectNodeId,
+    )> = by_class
+        .into_iter()
+        .flat_map(|((key, class), members)| {
+            members
+                .into_iter()
+                .map(move |(id, node)| (key.clone(), class, id, node))
+        })
+        .collect();
+    let mut index_of: BTreeMap<GraphNodeId, usize> = BTreeMap::new();
+    for (index, (_, _, _, node)) in candidates.iter().enumerate() {
+        index_of.insert(GraphNodeId::Effect(node.clone()), index);
+    }
+    let mut fixed: Vec<(GraphNodeId, u64)> = Vec::new();
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for (index, (_, _, _, node)) in candidates.iter().enumerate() {
+        let (producers, consumers) = placement
+            .neighbours
+            .get(node)
+            .map_or((&[][..], &[][..]), |(p, c)| (p.as_slice(), c.as_slice()));
+        for (neighbour, is_producer) in producers
+            .iter()
+            .map(|id| (id, true))
+            .chain(consumers.iter().map(|id| (id, false)))
+        {
+            let other = match index_of.get(neighbour) {
+                Some(other) => *other,
+                None => {
+                    let other = candidates.len() + fixed.len();
+                    let level = placement.level_of(neighbour).ok_or_else(invariant)?;
+                    fixed.push((neighbour.clone(), level));
+                    index_of.insert(neighbour.clone(), other);
+                    other
+                }
+            };
+            // A candidate-to-candidate edge is seen from both ends; keep the producer's view.
+            if is_producer && other >= candidates.len() {
+                edges.push((other, index));
+            } else if !is_producer {
+                edges.push((index, other));
+            }
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    let total = candidates.len() + fixed.len();
+    let level_at = |index: usize| -> Result<u64, GraphDiagnostic> {
+        if index < candidates.len() {
+            placement
+                .level_of(&GraphNodeId::Effect(candidates[index].3.clone()))
+                .ok_or_else(invariant)
+        } else {
+            Ok(fixed[index - candidates.len()].1)
+        }
+    };
+    // Windows: a fixed node is the point it was placed at; a candidate's is `[ASAP, ALAP]` over
+    // the sub-problem, which a fixed point per neighbour bounds. With no recorded neighbours
+    // (`PlacementLevels::single_point`) a candidate's window is its own level.
+    let mut low: Vec<u64> = (0..total).map(level_at).collect::<Result<_, _>>()?;
+    let mut high = low.clone();
+    for index in 0..candidates.len() {
+        if placement.neighbours.contains_key(&candidates[index].3) {
+            low[index] = 0;
+            high[index] = u64::MAX;
+        }
+    }
+    for _ in 0..=candidates.len() {
+        for &(producer, consumer) in &edges {
+            if consumer < candidates.len() {
+                low[consumer] = low[consumer].max(low[producer].saturating_add(1));
+            }
+            if producer < candidates.len() {
+                high[producer] = high[producer].min(high[consumer].saturating_sub(1));
+            }
+        }
+    }
+    let nodes: Vec<
+        rack_compiler::PlacementNode<(effect_contract::EffectProgramKey, CohortPoolClass)>,
+    > = (0..total)
+        .map(|index| rack_compiler::PlacementNode {
+            window: rack_compiler::CohortWindow {
+                asap: low[index],
+                alap: high[index].max(low[index]),
+            },
+            key: candidates
+                .get(index)
+                .map(|(key, class, _, _)| (key.clone(), *class)),
+        })
+        .collect();
+    // The merge counter is the leftover planner's own grouping: `plan_bank_groups` over the
+    // set's one-slot candidates (a fixed neighbour has no key and is not counted).
+    let binding_groups = |set: &[usize]| -> Vec<Vec<usize>> {
+        let candidates: Vec<CohortCandidate<usize>> = set
+            .iter()
+            .filter_map(|index| {
+                let (key, class) = nodes.get(*index)?.key.clone()?;
+                Some(CohortCandidate {
+                    id: *index,
+                    class,
+                    program: RackProgram::new(RackLocation::Dynamic, vec![key]),
+                })
+            })
+            .collect();
+        plan_bank_groups(
+            &[CohortLevel {
+                level: 0,
+                candidates,
+            }],
+            width,
+        )
+        .map_or_else(
+            |_| Vec::new(),
+            |plan| {
+                // Only the groups the bind will bind: full, or padded from the threshold where the
+                // factory pads. Every member of a one-slot group runs its slot, so #96 F7 holds.
+                plan.groups
+                    .iter()
+                    .filter(|group| {
+                        let padded = binds
+                            .get(&group.program[0])
+                            .is_some_and(|(_, padded)| *padded);
+                        group.is_full() || (padded && group.active_count() >= threshold)
+                    })
+                    .map(|group| group.members.iter().flatten().copied().collect())
+                    .collect()
+            },
+        )
+    };
+    let banks_of = |set: &[usize]| -> usize { binding_groups(set).len() };
+    let placed_levels =
+        rack_compiler::place_over_windows(&nodes, &edges, banks_of).map_err(|_| invariant())?;
+    // Every fixed node must stay where it was placed, or the chain pass's banks would move.
+    for (offset, (_, level)) in fixed.iter().enumerate() {
+        if placed_levels[candidates.len() + offset].level != *level {
+            return Err(invariant());
+        }
+    }
+    // What the counter says binds, per level: the report's `leftover_levels`.
+    let mut at_level: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (index, placement) in placed_levels.iter().enumerate().take(candidates.len()) {
+        at_level.entry(placement.level).or_default().push(index);
+    }
+    for (level, set) in &at_level {
+        for index in binding_groups(set).into_iter().flatten() {
+            leftover_levels.insert(candidates[index].3.clone(), *level);
+        }
+    }
+    let mut buckets: BTreeMap<u64, Vec<CohortCandidate<RackChainId>>> = BTreeMap::new();
+    let mut placed: BTreeMap<EffectNodeId, u64> = BTreeMap::new();
+    for (index, (key, class, id, node)) in candidates.into_iter().enumerate() {
+        let level = placed_levels[index].level;
+        windows.insert(
+            id.clone(),
+            (placed_levels[index].floor, nodes[index].window.alap),
+        );
+        chains.insert(id.clone(), vec![node.clone()]);
+        placed.insert(node, level);
+        buckets.entry(level).or_default().push(CohortCandidate {
+            id,
+            class,
+            program: RackProgram::new(RackLocation::Dynamic, vec![key]),
+        });
+    }
+    let levels: Vec<CohortLevel<RackChainId>> = buckets
+        .into_iter()
+        .map(|(level, candidates)| CohortLevel { level, candidates })
+        .collect();
+    let leftover = plan_bank_groups(&levels, width)
+        .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+    let placed: BTreeMap<&EffectNodeId, u64> =
+        placed.iter().map(|(node, level)| (node, *level)).collect();
+    for group in leftover.groups {
+        let index = plan.groups.len();
+        bound.push(bind_group_banks(
+            index,
+            &group,
+            pads(&group, width),
+            chains,
+            &placed,
+            effects,
+            prepared,
+            dispatch,
+            width,
+        )?);
+        plan.groups.push(group);
+    }
+    Ok(())
 }
 
 /// The level every graph node is placed at for bank planning (issue #2136), and each node's
@@ -577,6 +909,10 @@ pub(crate) struct PlacementLevels {
     /// planners' bucketing input, never the graph's schedule.
     levels: Vec<DependencyLevel>,
     by_node: BTreeMap<GraphNodeId, (u64, u64, u64)>,
+    /// Every insert node's graph producers and consumers (issue #2138): the leftover pass moves a
+    /// node only within the levels these leave it. Empty for [`Self::single_point`], where every
+    /// leftover node stays at its level.
+    neighbours: BTreeMap<EffectNodeId, (Vec<GraphNodeId>, Vec<GraphNodeId>)>,
     /// Every node a bank planner groups, at its placement level.
     planned_levels: BTreeMap<GraphNodeId, u64>,
 }
@@ -598,6 +934,7 @@ impl PlacementLevels {
         Self {
             levels: levels.to_vec(),
             by_node,
+            neighbours: BTreeMap::new(),
             planned_levels: BTreeMap::new(),
         }
     }
@@ -871,7 +1208,30 @@ pub(crate) fn placement_levels(
             (placement.level, window.0, window.1),
         );
     }
+    let mut neighbours: BTreeMap<EffectNodeId, (Vec<GraphNodeId>, Vec<GraphNodeId>)> =
+        BTreeMap::new();
+    for &(source, destination) in &ends {
+        if let GraphNodeId::Effect(effect) = &nodes[destination].id
+            && effect.rack == RackId::Dynamic
+        {
+            neighbours
+                .entry(effect.clone())
+                .or_default()
+                .0
+                .push(nodes[source].id.clone());
+        }
+        if let GraphNodeId::Effect(effect) = &nodes[source].id
+            && effect.rack == RackId::Dynamic
+        {
+            neighbours
+                .entry(effect.clone())
+                .or_default()
+                .1
+                .push(nodes[destination].id.clone());
+        }
+    }
     Ok(PlacementLevels {
+        neighbours,
         levels: by_level
             .into_iter()
             .map(|(level, mut nodes)| {
@@ -1190,6 +1550,20 @@ fn bind_group_banks(
     Ok(bound)
 }
 
+/// #96 F7, the one predicate: a slot can be one homogeneous bank only when every member lane runs
+/// it, because the effect contract has no per-lane identity slot. `lanes` are the member lanes'
+/// slot masks over the leader program (padding lanes excluded). Shared by the binder
+/// ([`bindable_slot_members`]) and the utilisation report's merge test
+/// (`BankUtilisation::of`), so the report never counts a merge the binder would refuse.
+pub(crate) fn every_member_runs<'a>(
+    lanes: impl IntoIterator<Item = &'a [bool]>,
+    slot: usize,
+) -> bool {
+    lanes
+        .into_iter()
+        .all(|lane| lane.get(slot).copied().unwrap_or(false))
+}
+
 /// The effect node each member of `group` runs at leader slot `slot`, in lane order, when that
 /// slot can be one homogeneous bank; `None` when it cannot, and its members render per node.
 ///
@@ -1211,12 +1585,15 @@ fn bindable_slot_members(
     // (#96 F7), so a bank some of whose members skip the slot cannot be expressed. A padded lane
     // has no member and no slots, and is the padding contract's, not an identity. (Lanes that
     // disagree only about bypass all run it: issue #1087 carries bypass on the rack's shunt.)
-    if !group
-        .active_slots
-        .iter()
-        .zip(&group.active_mask)
-        .all(|(lane, active)| !*active || lane[slot])
-    {
+    if !every_member_runs(
+        group
+            .active_slots
+            .iter()
+            .zip(&group.active_mask)
+            .filter(|(_, active)| **active)
+            .map(|(lane, _)| &lane[..]),
+        slot,
+    ) {
         return Ok(None);
     }
     // Padding lanes come after every member (`rack_compiler::BankGroup::members`), so the
