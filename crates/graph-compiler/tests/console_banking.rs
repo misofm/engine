@@ -156,7 +156,14 @@ fn the_bank_report_counts_mergeable_pairs() {
     let slots = [bound(0, half), bound(1, lanes - 1 - half)];
     let no_routes = BTreeMap::new();
     let measure = |a: &BankGroup<_>, b: &BankGroup<_>| {
-        BankUtilisation::of(&[a.clone(), b.clone()], &slots, lanes, &no_routes, None)
+        BankUtilisation::of(
+            &[a.clone(), b.clone()],
+            &slots,
+            lanes,
+            &no_routes,
+            &BTreeMap::new(),
+            None,
+        )
     };
     let one_level = measure(&first, &second);
     assert_eq!(
@@ -195,6 +202,7 @@ fn the_bank_report_counts_mergeable_pairs() {
             &slots,
             lanes,
             &routed,
+            &BTreeMap::new(),
             None
         )
         .mergeable_partial_pairs,
@@ -219,6 +227,7 @@ fn the_bank_report_counts_mergeable_pairs() {
             &slots,
             lanes,
             &mixed,
+            &BTreeMap::new(),
             None
         )
         .mergeable_partial_pairs,
@@ -227,16 +236,18 @@ fn the_bank_report_counts_mergeable_pairs() {
     );
 }
 
-/// Issue #2134 gate 3: on every standing session fixture the executor order -- the op order
-/// `graph::program::lower` emits, the graph contracted by bank -- is the canonical schedule minus
-/// its elided nodes: no op moved. Every bank of these plans sits at one dependency level, and on
-/// such a plan the contraction must reproduce today's unit order exactly, because #2142's lane
-/// map builds lane chains and pack groups from unit adjacency and order.
+/// Issue #2134 gate 3: on every standing session fixture whose banks each sit at one dependency
+/// level, the executor order -- the op order `graph::program::lower` emits, the graph contracted
+/// by bank -- is the canonical schedule minus its elided nodes: no op moved. On such a plan the
+/// contraction must reproduce today's unit order exactly, because #2142's lane map builds lane
+/// chains and pack groups from unit adjacency and order. Since #2136 the C1 consoles bank across
+/// levels (their submix `post_insert` cohort), so they are the fixtures this claim leaves out.
 ///
 /// Test value: red when the contracted order moves a unit that did not need to move -- a key that
 /// emits a bank's members together, or one that sinks a one-level bank past a consumer.
 #[test]
-fn the_contracted_order_is_the_schedule_on_every_standing_fixture() {
+fn the_contracted_order_is_the_schedule_on_every_one_level_fixture() {
+    let mut one_level = Vec::new();
     for (name, text) in [
         (
             "parametric-eq-nine-track",
@@ -282,6 +293,36 @@ fn the_contracted_order_is_the_schedule_on_every_standing_fixture() {
     ] {
         let artifact = compile(&parse_session_json(text).expect("the fixture parses"));
         let plan = artifact.graph();
+        let level_of: BTreeMap<&graph::GraphNodeId, u64> = plan
+            .dependency_levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().map(move |node| (node, level.level)))
+            .collect();
+        let effect_banks = artifact
+            .report()
+            .rack_cohorts
+            .bound_slots
+            .iter()
+            .map(|bound| {
+                bound
+                    .members
+                    .iter()
+                    .map(|member| level_of[&graph::GraphNodeId::Effect(member.clone())])
+                    .collect::<Vec<u64>>()
+            });
+        let builtin_banks = artifact.prepared_builtin_banks().map(|bank| {
+            bank.members
+                .iter()
+                .map(|member| level_of[member])
+                .collect::<Vec<u64>>()
+        });
+        let cross_level = effect_banks
+            .chain(builtin_banks)
+            .any(|levels| levels.iter().any(|level| *level != levels[0]));
+        if cross_level {
+            continue;
+        }
+        one_level.push(name);
         let program = plan.program().expect("the plan lowers");
         let canonical: Vec<u32> = plan
             .sequential_schedule
@@ -301,4 +342,117 @@ fn the_contracted_order_is_the_schedule_on_every_standing_fixture() {
             .count();
         assert_eq!(moved, 0, "{name}: the executor order moved {moved} ops");
     }
+    // The consoles without submixes have nothing to place across levels, at any width.
+    for name in [
+        "parametric-eq-nine-track",
+        "console-sixty-four-track",
+        "console-sixty-four-track-intended",
+        "console-sixty-four-track-mono",
+    ] {
+        assert!(one_level.contains(&name), "{name} banks at one level each");
+    }
+}
+
+/// Issue #2136 gate 3: the C1 console at 16, 32 and 64 tracks, planned over level windows.
+///
+/// The four groups take the tracks' post-pan routes and the two aux returns their post-fader
+/// sends, so the auxes' strips start a level earlier than the groups'. Aux A's pre segment feeds
+/// its per-node delay, which puts aux A on the longest path: its `pre_insert` window is a single
+/// level, and it shares its bank with aux B there (as before). Aux B's `post_insert` window
+/// reaches the groups' and aux A's, so the six submix drives are one cohort at one placement level
+/// -- one bank at eight lanes, two at four, where the level plan bound two and three. Each strip's
+/// fader and matrix follow its drive, so those builtin banks hold the same six strips and the
+/// chain still fuses. Static bank-slot runs: `4 ceil(n / W)` for the tracks, 6 for the two submix
+/// `pre_insert` banks, `ceil(6 / W)` for the drives and 4 for the master (19, 27 and 43 at eight
+/// lanes; 28, 44 and 76 at four). No two partial banks of one key have intersecting windows.
+///
+/// Test value: red when two partial banks of one key with intersecting windows are left unmerged
+/// -- a level bucket leaves aux B's drive apart from the others' (20, 28, 44 at eight lanes).
+#[test]
+fn the_c1_submix_drives_are_one_cohort_over_level_windows() {
+    let lanes = width().width() as usize;
+    for (tracks, text) in [
+        (
+            16_usize,
+            include_str!("../../../fixtures/session/v1/console-c1-16.json"),
+        ),
+        (
+            32,
+            include_str!("../../../fixtures/session/v1/console-c1-32.json"),
+        ),
+        (
+            64,
+            include_str!("../../../fixtures/session/v1/console-c1-64.json"),
+        ),
+    ] {
+        let report = report(&parse_session_json(text).expect("the C1 fixture parses"));
+        let submix = |track: &str| track.starts_with("aux.") || track.starts_with("group.");
+        let mut submix_groups: Vec<(graph::RackId, Vec<String>)> = report
+            .plan
+            .groups
+            .iter()
+            .filter(|group| {
+                group
+                    .members
+                    .iter()
+                    .flatten()
+                    .all(|chain| submix(&chain.track_id))
+            })
+            .filter(|group| group.rack != rack::RackLocation::Dynamic)
+            .map(|group| {
+                let members: Vec<String> = group
+                    .members
+                    .iter()
+                    .flatten()
+                    .map(|chain| chain.track_id.clone())
+                    .collect();
+                let rack = group
+                    .members
+                    .iter()
+                    .flatten()
+                    .next()
+                    .expect("a member")
+                    .rack;
+                (rack, members)
+            })
+            .collect();
+        submix_groups.sort();
+        let groups = ["group.drums", "group.fx", "group.music", "group.vox"].map(String::from);
+        let mut drives = vec!["aux.a".to_owned(), "aux.b".to_owned()];
+        drives.extend(groups.iter().cloned());
+        let mut expected = vec![
+            (
+                graph::RackId::Simd1,
+                vec!["aux.a".to_owned(), "aux.b".to_owned()],
+            ),
+            (graph::RackId::Simd1, groups.to_vec()),
+        ];
+        for chunk in drives.chunks(lanes) {
+            expected.push((graph::RackId::Simd2, chunk.to_vec()));
+        }
+        expected.sort();
+        assert_eq!(
+            submix_groups, expected,
+            "C1-{tracks}: the submix console groups"
+        );
+        assert_eq!(
+            report.bound_slots.len(),
+            4 * tracks.div_ceil(lanes) + 6 + 6_usize.div_ceil(lanes) + 4,
+            "C1-{tracks}: static bank-slot runs"
+        );
+        assert_eq!(
+            report.utilisation.mergeable_partial_pairs, 0,
+            "C1-{tracks}: no mergeable pair"
+        );
+    }
+    let irregular = report(
+        &parse_session_json(include_str!(
+            "../../../fixtures/session/v1/irregular-graph.json"
+        ))
+        .expect("the irregular graph parses"),
+    );
+    assert_eq!(
+        irregular.utilisation.mergeable_partial_pairs, 0,
+        "irregular graph: no mergeable pair"
+    );
 }

@@ -2797,17 +2797,11 @@ impl PreparedGraphPlan {
             {
                 return Err(GraphBuiltinBankAttachError::InvalidMembers);
             }
-            let Some(level) = bank
-                .members
-                .first()
-                .and_then(|member| level_by_node.get(member))
-                .copied()
-            else {
-                return Err(GraphBuiltinBankAttachError::IncompatibleMembers);
-            };
+            // Since issue #2134 a bank's members need not share a dependency level: the
+            // executor places the bank by the graph contracted by bank, and a plan with no such
+            // order fails lowering at bind (`graph.scheduler.layout`).
             if bank.members.iter().any(|member| {
-                level_by_node.get(member).copied() != Some(level)
-                    || required.binary_search(&member).is_err()
+                !level_by_node.contains_key(member) || required.binary_search(&member).is_err()
             }) {
                 return Err(GraphBuiltinBankAttachError::IncompatibleMembers);
             }

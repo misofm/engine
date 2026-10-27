@@ -11,7 +11,10 @@
 //! here (#99 F5); see [`GraphCompiler::evidence`].
 
 use super::*;
-use crate::banks::{bind_rack_banks_indexed, checked_add_effect_banks, effect_bank_resource};
+use crate::banks::{
+    PlacementLevels, bind_rack_banks_placed, checked_add_effect_banks, effect_bank_resource,
+    placement_levels,
+};
 use crate::canonical::{
     Sha256Writer, canonical_parts, dot, hex_digest, hex_sha256, reductions_of, write_canonical,
 };
@@ -125,7 +128,8 @@ impl GraphCompiler {
                 });
             }
         };
-        let levels = compiled.graph.dependency_levels.clone();
+        // Issue #2136: the builtin strip banks are bucketed by the placement the rack chains were.
+        let levels = compiled.placement.levels().to_vec();
         // #1647a (R17-2): each builtin bank takes its members' floored input arrivals `a(n)`.
         let arrivals = compiled.report.input_arrivals.clone();
         let mut artifact = builtins.into_graph_artifact_with_banks(
@@ -505,11 +509,27 @@ impl GraphCompiler {
         for (track, witness) in builtins.input_channel_symmetry() {
             pool_classes.conjoin(track, witness);
         }
-        let (banks, rack_cohorts) = match bind_rack_banks_indexed(
+        // Issue #2136: one placement for both bank planners. Chains and strip stages of one key
+        // class whose level windows intersect are bucketed at one placement level; the graph's
+        // own levels and schedule are unchanged, and lowering places each bank by the graph
+        // contracted by bank (#2134).
+        let per_node: BTreeSet<EffectNodeId> = effects
+            .entries
+            .iter()
+            .zip(&effect_ids)
+            .filter(|(entry, _)| rack::BankSlotKey::blocks_banking(&entry.metadata.program_key()))
+            .filter_map(|(_, id)| id.clone())
+            .collect();
+        let placement = match placement_levels(&nodes, &edges, &levels, &pool_classes, &per_node) {
+            Ok(value) => value,
+            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+        };
+        let (banks, rack_cohorts) = match bind_rack_banks_placed(
             &effects,
             &prepared,
             &effect_ids,
             &levels,
+            &placement,
             dispatch,
             &mut pool_classes,
         ) {
@@ -735,7 +755,7 @@ impl GraphCompiler {
             ));
         }
         let Some(scalar_owner_resource) =
-            builtins.graph_scalar_owner_resource(dispatch, &levels, &pool_classes)
+            builtins.graph_scalar_owner_resource(dispatch, placement.levels(), &pool_classes)
         else {
             return Err(failure(
                 effects,
@@ -760,9 +780,11 @@ impl GraphCompiler {
         // The runtime chain retains one slot and one cloned mask per prepared membership.  Fold
         // its conservative coexistence reservation into the published estimate before caps; the
         // builtin payload itself is attached later and must not carry this term a second time.
-        let Some(builtin_bank_resource) =
-            builtins.graph_builtin_bank_resource(rack_cohorts.dispatch, &levels, &pool_classes)
-        else {
+        let Some(builtin_bank_resource) = builtins.graph_builtin_bank_resource(
+            rack_cohorts.dispatch,
+            placement.levels(),
+            &pool_classes,
+        ) else {
             return Err(failure(
                 effects,
                 vec![diag(
@@ -941,6 +963,7 @@ impl GraphCompiler {
         graph.pin_bypass_automated_strips(bypass_automated_strips(model));
         Ok(CompiledGraph {
             pool_classes,
+            placement,
             graph,
             report: GraphCompileReport {
                 output_latency: timing.output_latency,
@@ -968,6 +991,9 @@ struct CompiledGraph {
     /// `PreparedBuiltinsSession::into_graph_artifact_with_banks` reads the same value rather than
     /// re-deriving one. See [`builtins_compiler::SessionPoolClasses`].
     pool_classes: SessionPoolClasses,
+    /// The placement both bank planners bucket by (issue #2136): `bind_rack_banks` read it inside
+    /// the compile, and the builtin strip planner reads the same value.
+    placement: PlacementLevels,
 }
 
 /// A rejected graph half: the prepared effects handed back, and why.

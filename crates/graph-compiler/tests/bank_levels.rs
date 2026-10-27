@@ -1,8 +1,11 @@
 //! Issue #966: bind never refuses a compiled plan for an effect bank that spans dependency levels.
 //!
-//! A bank runs as one unit at its first member's position in the level-major schedule
-//! (`runtime::units_of`), so bind refuses one whose members sit at different dependency levels
-//! (`PreparedGraphPlan::has_valid_structural_layout`, `graph.scheduler.layout`). The rack-bank
+//! A bank runs as one unit at its first member's position in the op order (`runtime::units_of`).
+//! Until #2134 that order was the level-major schedule and bind refused a bank whose members sat
+//! at different dependency levels; since #2134 the op order is the graph contracted by bank, and
+//! since #2136 the planner places cohorts over level windows, so a cross-level bank is a plan the
+//! executor renders, and what this file asserts is that bind accepts the plan and its bits are
+//! the scalar plan's. The rack-bank
 //! binder used to emit exactly that bank whenever a cohort lane skipped an earlier slot of its
 //! leader's program -- one track without the EQ its neighbours carry -- because the identity slot
 //! it runs there has no graph node, so its later slots sit one level early. The binder now leaves
@@ -31,7 +34,7 @@
 //! it: [`compiled_at`].
 //!
 //! Scope: the claim is that bind never refuses a compiled plan for a cross-level *effect* bank.
-//! Builtin banks are pooled by each node's own level, so they cannot form one.
+//! Builtin banks are pooled by the same placement (#2136), and their bits are asserted here too.
 
 use builtins_compiler::{
     BuiltinCompileCaps, prepare_session_builtins, session_structural_symmetry,
@@ -227,8 +230,6 @@ pub struct Outcome {
     pub bind: Option<&'static str>,
     /// Bound effect banks.
     pub effect_banks: usize,
-    /// Bound effect banks whose members span dependency levels. Bind refuses every one.
-    pub cross_level_banks: usize,
     /// Planned full-group slots every lane runs whose members span levels: the shape the fix
     /// leaves unbound. It depends only on the plan, so it also counts shapes a width this build's
     /// factories decline would meet on a build that banks it.
@@ -311,15 +312,10 @@ pub fn compile_bind_render(
         .flat_map(|level| level.nodes.iter().map(move |node| (node, level.level)))
         .collect();
     let effect_level = |node: &graph::EffectNodeId| level_of[&GraphNodeId::Effect(node.clone())];
-    for bank in artifact.graph().effect_bank_members() {
-        outcome.effect_banks += 1;
-        if bank
-            .iter()
-            .any(|member| effect_level(member) != effect_level(&bank[0]))
-        {
-            outcome.cross_level_banks += 1;
-        }
-    }
+    // Since #2134 and #2136 a bound bank may span levels (its members' windows share its
+    // placement level, and the executor places it by the graph contracted by bank), so the claim
+    // is the bind and the rendered bits, not the levels.
+    outcome.effect_banks = artifact.graph().effect_bank_members().count();
     let report = &artifact.report().rack_cohorts;
     let is_console =
         |rack: &graph::RackId| matches!(rack, graph::RackId::Simd1 | graph::RackId::Simd2);
@@ -382,8 +378,11 @@ pub fn compile_bind_render(
                 .iter()
                 .zip(group.active_slots.iter())
                 .map(|(id, active)| {
+                    // Each lane's slot level above its own chain's first slot: a group's chains
+                    // are placed at one level (#2136), whatever level each first slot sits at.
                     let rank = active[..slot].iter().filter(|active| **active).count();
-                    effect_level(&report.chains[id.as_ref().expect("full group")][rank])
+                    let chain = &report.chains[id.as_ref().expect("full group")];
+                    effect_level(&chain[rank]) - effect_level(&chain[0])
                 })
                 .collect();
             let latest = levels.iter().copied().max().unwrap_or_default();
@@ -1121,10 +1120,6 @@ fn assert_binds_and_renders_the_scalar_bits(
             continue;
         }
         assert_eq!(outcome.bind, None, "{name} at {dispatch:?}: bind");
-        assert_eq!(
-            outcome.cross_level_banks, 0,
-            "{name} at {dispatch:?}: a bound effect bank spans levels"
-        );
         assert!(
             outcome.pcm == outcomes[0].pcm,
             "{name} at {dispatch:?}: banking moved a rendered bit"
@@ -1217,8 +1212,9 @@ fn native_bank_count(name: &str, outcomes: &[Outcome], simd4: usize, simd8: usiz
 ///
 /// Before #966 this refused at `Simd8` on a native host and at `Simd4` in the browser. The fix
 /// unbinds exactly one bank: the compressor slot of `ch00`'s mixed group (22 planned at eight
-/// lanes, 21 bound; 46 and 45 at four). Since #1098 `ch00`'s limiter, a level early, binds as a
-/// padded bank of one, and the other 63 limiters' remainder binds padded too: 23 and 47.
+/// lanes, 21 bound; 46 and 45 at four). Since #1098 `ch00`'s limiter, a level early, bound as a
+/// padded bank of one beside the other 63 limiters' padded remainder (23 and 47); since #2136 its
+/// level window places it with them, so the 64 limiters bind `64 / W` full banks: 22 and 46.
 #[test]
 fn the_sixty_four_track_console_less_one_eq_binds_at_every_width() {
     let name = "64-track console less ch00's EQ";
@@ -1228,7 +1224,7 @@ fn the_sixty_four_track_console_less_one_eq_binds_at_every_width() {
     // tracks at eight lanes and with three at four, as lane 0 of both.
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[0]], &[&[0]]);
-    native_bank_count(name, &outcomes, 47, 23);
+    native_bank_count(name, &outcomes, 46, 22);
 }
 
 /// Gate 1 with the ragged lane in the middle of its group. Members sort by active slot count and
@@ -1241,7 +1237,7 @@ fn the_console_less_a_middle_lanes_eq_binds_at_every_width() {
         assert_binds_and_renders_the_scalar_bits(name, &sixty_four_track_console_less_eqs(&[60]));
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[0]], &[&[4]]);
-    native_bank_count(name, &outcomes, 47, 23);
+    native_bank_count(name, &outcomes, 46, 22);
 }
 
 /// Gate 1 with the ragged lane last in its group at both widths (`ch63`: lane 7 of `ch56..=ch63`,
@@ -1253,7 +1249,7 @@ fn the_console_less_a_last_lanes_eq_binds_at_every_width() {
         assert_binds_and_renders_the_scalar_bits(name, &sixty_four_track_console_less_eqs(&[63]));
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[3]], &[&[7]]);
-    native_bank_count(name, &outcomes, 47, 23);
+    native_bank_count(name, &outcomes, 46, 22);
 }
 
 /// The #962 probe's seed-412 shape. Before #966 it refused at `Simd8` natively; the report that it
@@ -1261,8 +1257,9 @@ fn the_console_less_a_last_lanes_eq_binds_at_every_width() {
 ///
 /// Since #1098 the nine-track console binds its `pre_insert` remainder padded, and the tracks'
 /// zero, one and two inserts put the `post_insert` limiter at three levels, each its own padded
-/// group (H2): eight lanes bind the EQ and compressor twice, no soft-clip and three limiters, 7;
-/// four lanes bind them three times, one soft-clip group and four limiters, 11. An `x86-64-v3`
+/// group (H2): eight lanes bound the EQ and compressor twice, no soft-clip and three limiters, 7;
+/// four lanes bound them three times, one soft-clip group and four limiters, 11. Since #2136 the
+/// limiters' level windows place them at one level, `ceil(9 / W)` groups: 6 and 10. An `x86-64-v3`
 /// build cannot bank that console at four lanes and refuses there, so the AArch64 leg holds the
 /// four-lane plan.
 #[test]
@@ -1272,7 +1269,7 @@ fn a_cohort_lane_behind_an_extra_dynamic_eq_binds_at_every_width() {
     // Eight soft-clip lanes: one full group at eight lanes, two at four, and `ch03`'s group is the
     // one whose soft-clip slot is misaligned either way.
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 11, 7);
+    native_bank_count(name, &outcomes, 10, 6);
 }
 
 /// Gate 1 on the mono desk: every track mono-mapped and symmetric, so the rescued plan is one the
@@ -1284,7 +1281,7 @@ fn the_mono_console_less_one_eq_binds_and_collapses_at_every_width() {
     let (outcomes, armed) =
         assert_binds_and_renders_the_scalar_bits(name, &mono_console_less_eqs(&[0]));
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 47, 23);
+    native_bank_count(name, &outcomes, 46, 22);
     let native = &armed[native_index()];
     assert!(
         native.collapse[0] > 0,
@@ -1343,7 +1340,8 @@ fn the_reduced_mono_console_from_the_970_probe_binds_at_every_width() {
 /// compressor at rank 0, the compressors share a level, and that bank still binds. Only the
 /// mixed group holding `ch00` loses its compressor bank. A binder that refused every slot
 /// behind an identity slot, rather than every misaligned one, binds one bank fewer here. Since
-/// #1098 the nine early limiters and the other 55 each bind a padded remainder: 22 and 45.
+/// #1098 the nine early limiters and the other 55 each bound a padded remainder (22 and 45); since
+/// #2136 their level windows place all 64 limiters together: 21 and 44.
 #[test]
 fn lanes_that_skip_the_same_slot_still_bank_it() {
     let name = "64-track console less nine EQs";
@@ -1352,7 +1350,7 @@ fn lanes_that_skip_the_same_slot_still_bank_it() {
         &sixty_four_track_console_less_eqs(&[0, 56, 57, 58, 59, 60, 61, 62, 63]),
     );
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 45, 22);
+    native_bank_count(name, &outcomes, 44, 21);
 }
 
 /// The fix must not over-reach past the misaligned slot either: lanes that realign bank again.
