@@ -35,7 +35,7 @@ copied publication text are committed or distributed by this repository.
 
 ```sh
 python3 crates/loudness/tests/data/fetch-official-loudness.py /private/path/itu-loudness
-MISO_LOUDNESS_FIXTURES=/private/path/itu-loudness \
+MISO_ENGINE_LOUDNESS_FIXTURES=/private/path/itu-loudness \
   cargo test -p loudness --test official_files -- --ignored --exact itu_bs2217_published_mono_stereo_files --nocapture --test-threads=1
 ```
 
