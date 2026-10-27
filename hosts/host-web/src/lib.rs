@@ -29,6 +29,7 @@
 
 use core::mem::{MaybeUninit, size_of};
 use core::num::NonZeroUsize;
+use core::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use builtins_compiler::MeterConsumer;
@@ -36,7 +37,10 @@ use control_plane::{
     CompileFailure, ControlAdapter, ControlLimits, PlanQueries, PlanResources, PlanState,
     SessionSeekFailure, SessionState, SourceFailure, SourceRefusalKind,
 };
-use engine::realtime::{HostAttachment, ObserverCarry, ObserverKind, PlanarBufferMut};
+use engine::realtime::{
+    HostAttachment, ObserverCarry, ObserverKind, PlanarBufferMut, PublishedWordsReader,
+    PublishedWordsWriter, QueueFull, published_words,
+};
 use host_core::{
     CompiledSession, EffectObservationHandle, GainReductionTaps, HostLiveControlRequest,
     HostLiveLanes, HostPrepareCaps, HostPrepareReport, HostShapePolicy, MAXIMUM_VCA_REACH_PAIRS,
@@ -631,15 +635,56 @@ pub struct WebResourceReport {
     pub reserved: [u64; 3],
 }
 
+/// The render half's own buffer (#1332 S5): the block it renders into.
 struct PreparedBuffers {
+    output_pcm: Box<[f32]>,
+}
+
+/// The control half's own staging (#1332 S5): what the page writes for a control call and what a
+/// control call writes for the page, so no control call touches the render half's memory. The
+/// single instance publishes a render failure's diagnostic here too
+/// ([`AudioWorkletEngineHost::render_next`]), so the page reads one diagnostic buffer.
+struct ControlStaging {
     diagnostic: Box<[u8]>,
+    /// The valid prefix of [`Self::diagnostic`].
+    diagnostic_len: usize,
     source_id: Box<[u8]>,
     source_pcm: Box<[f32]>,
-    output_pcm: Box<[f32]>,
     /// One control frame (issue #1562a D1): [`CONTROL_FRAME_BYTES`], the boot's
     /// `maximum_control_frame_bytes`. Staged by the page, read by the control plane in place.
     control_request: Box<[u8]>,
     plane_references: Box<[MaybeUninit<&'static [f32]>]>,
+}
+
+impl ControlStaging {
+    /// No staging: empty boxes, which allocate nothing. The boot replaces it with the allocated
+    /// staging once the session is prepared.
+    fn empty() -> Self {
+        Self {
+            diagnostic: Box::default(),
+            diagnostic_len: 0,
+            source_id: Box::default(),
+            source_pcm: Box::default(),
+            control_request: Box::default(),
+            plane_references: Vec::new().into_boxed_slice(),
+        }
+    }
+
+    /// Copy `diagnostic` into the diagnostic buffer, truncated to its capacity.
+    fn write_diagnostic(&mut self, diagnostic: &[u8]) {
+        let kept = diagnostic.len().min(self.diagnostic.len());
+        if let (Some(target), Some(source)) =
+            (self.diagnostic.get_mut(..kept), diagnostic.get(..kept))
+        {
+            target.copy_from_slice(source);
+        }
+        self.diagnostic_len = kept;
+    }
+
+    /// The valid diagnostic prefix.
+    fn diagnostic(&self) -> &[u8] {
+        self.diagnostic.get(..self.diagnostic_len).unwrap_or(&[])
+    }
 }
 
 type FfiSourceStaging<'a> = (
@@ -701,6 +746,15 @@ struct PlanShape {
     /// The designated master strip index (tracks first, then submixes), or `None` (issue #143
     /// D6, issue #1213 D5).
     master_track: Option<u32>,
+    /// This plan's own words (#1332 S5), `[master + 1, structure epoch]`: the master strip as an
+    /// index into this plan's strip order (`0` for none) and the control list's structure epoch,
+    /// written by the control half, whose writer this plan's preparation left
+    /// ([`PreparedSuccessor`]): stamped before the plan is published
+    /// ([`control_plane::RuntimePreparer::stamp_before_publication`]) and after every control
+    /// call while it is the newest plan. The render half reads them into the header
+    /// ([`RenderReady::publish_words`]), so a plan adopted on another thread after a later commit
+    /// still shows its own master and structure epoch.
+    words: PublishedWordsReader<2>,
     /// The plan's meter delivery tables (#1582 R1): built with the plan, off the render thread,
     /// and handed to the delivery by pointer exchange at the block that adopts the plan. `None`
     /// while the plan renders (the delivery holds them); a retired plan's are back here, for the
@@ -740,40 +794,79 @@ struct PlanMeterRing {
     producer: host_core::MeterFrameProducer,
 }
 
-/// How many retired plans' tables the render half holds for the control side's next service step
-/// (#1290a, #1332 S4). The bound is exact: between two service steps render adopts at most one plan
-/// per retirement credit (a displaced plan holds its credit until the service step reclaims it, and
-/// a full retirement queue defers the swap), and the control plane has three
-/// (`control_plane::compile::RETIREMENT_CAPACITY`), plus the one plan a `SPECTRUM_CONFIGURE` may
-/// adopt in place before the first block (`PlanState::adopt_before_first_block`, through
-/// `SessionState::command_with_plan`): four. A change to either needs a fifth slot. Were they ever
-/// all taken, the retired tables would stay in the adopted plan's companions and drop with that
-/// plan on the control thread when the service step reclaims it, never on the render thread: safe,
-/// only later.
+/// The capacity of the hand-back ring that returns retired plans' tables from the render half to
+/// the control half (#1290a, #1332 S5), which drops them in its service step.
+///
+/// The block that adopts a plan parks the tables it retires in [`RenderReady::parked`], and the
+/// next block, before it renders, pushes them into the ring: so the tables outlive the
+/// `process()` call of the adopting block, in which the worklet's `postMeterFrame` still reads
+/// the retired header (#1290d1), and are freed on the control thread only, one block after
+/// their adoption at the earliest.
+///
+/// The bound is exact. The ring holds what render pushed since the last service step. After that
+/// step render adopts at most one plan per retirement credit (a displaced plan holds its credit
+/// until the next step reclaims it, and a full retirement queue defers the swap): three
+/// (`control_plane::compile::RETIREMENT_CAPACITY`). To their tables add the one shape that was
+/// still parked at the step (its plan was adopted in the block just before it), or, before the
+/// first block, the tables of the one plan a `SPECTRUM_CONFIGURE` may adopt in place
+/// (`PlanState::adopt_before_first_block`), which the first block parks: four. A change to
+/// either needs a fifth slot. Were the ring ever full, the
+/// tables would stay parked, and the tables the next adoption retires would stay in the adopted
+/// plan's companions and drop with that plan on the control thread when the service step
+/// reclaims it, never on the render thread: safe, only later.
 const RETIRED_SHAPES: usize = 4;
 
-/// What the control half decided about the newest committed plan's meter header (#1332 S4): the
-/// words a control call leaves for the render half, which applies them to the tables it renders
-/// with ([`RenderReady::publish_words`]). Words, never tables: the plan carries its tables.
-///
-/// The master and structure words describe the plan of epoch `newest_epoch`, so the render half
-/// applies them only to that plan's tables. A plan that renders while a replacement waits keeps
-/// its own (#1683 review fold, #1562b), and the block that adopts the replacement applies them to
-/// it. While a replacement waits, the rendering plan's header names `successor_header`, so the
-/// page cuts the views over the replacement's frame in the handler that committed it (#1290d1).
-/// The single instance hands them over after each control call, on its one thread.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ControlWords {
-    /// The epoch of the newest committed plan (`SessionState::newest_plan_epoch`).
-    newest_epoch: u64,
-    /// The master strip the core designates, as an index into the newest plan's strip order
-    /// (tracks first, then submixes), or `None` (#1683, #1689).
-    master_track: Option<u32>,
-    /// The structure epoch of the committed control list (#1562b).
-    structure_epoch: u64,
-    /// The address of the newest committed replacement's meter header, which its preparer left
-    /// in the record when it boxed the plan's tables; meaningful while that plan waits.
-    successor_header: usize,
+/// The words of the successor record (#1332 S5), which the control half publishes after every
+/// control call that succeeded and the render half reads before every block: `[newest epoch,
+/// successor header address]`. They are the only global words: while a newer plan waits, the
+/// rendering plan's header names the newest committed replacement's header, so the page cuts its
+/// views over the replacement's frame in advance (#1290d1). Everything that describes one plan
+/// is that plan's own ([`PlanShape::words`]).
+type SuccessorWords = [u64; 2];
+
+/// The words of one plan ([`PlanShape::words`]): its master strip, as `index + 1` in its own
+/// strip order (`0` for none), and the structure epoch of the committed control list.
+fn plan_words(master_track: Option<u32>, structure_epoch: u64) -> [u64; 2] {
+    [
+        master_track.map_or(0, |track| u64::from(track) + 1),
+        structure_epoch,
+    ]
+}
+
+/// The master strip `master` names, as an index into `model`'s strip order (tracks first, then
+/// submixes), or `None` when the model does not hold it (#1683, #1689).
+fn master_index(model: &session::SessionModel, master: Option<&session::StableId>) -> Option<u32> {
+    let id = master?.as_str().as_bytes();
+    // The model's strip lists are in canonical order, which orders by bytes, as
+    // [`strip_index`] searches the plan's own tables.
+    let index = match model
+        .tracks
+        .binary_search_by(|track| track.id.as_str().as_bytes().cmp(id))
+    {
+        Ok(track) => Some(track),
+        Err(_) => model
+            .submixes
+            .binary_search_by(|submix| submix.id.as_str().as_bytes().cmp(id))
+            .ok()
+            .and_then(|submix| model.tracks.len().checked_add(submix)),
+    };
+    index.and_then(|index| u32::try_from(index).ok())
+}
+
+/// The session's lifecycle word (#1332 S5): [`STATE_READY`] until either half records a sticky
+/// failure ([`STATE_FAILED`]). Shared by the two halves, so the control half refuses after a
+/// render failure and the render half silences after a control failure, without either reading
+/// the other's memory. One `Release` store to fail, one `Acquire` load to check.
+type Lifecycle = Arc<AtomicU32>;
+
+/// What a preparation leaves for the commit that may publish its plan (#1290a, #1332 S4, S5).
+struct PreparedSuccessor {
+    /// The address of the plan's meter header, whose tables the plan itself carries. Only an
+    /// address: nothing dereferences it.
+    header: usize,
+    /// The writer of the plan's own words ([`PlanShape::words`]), which the control half keeps
+    /// while the plan is the newest.
+    words: PublishedWordsWriter<2>,
 }
 
 /// The control half of the single instance (#1332 S4): everything one compiled session owns on
@@ -802,8 +895,22 @@ struct ControlHalf {
     /// (#1290a D6), saturating: a rebuild's preparation and publication run on the thread that
     /// also renders, so each one is a blocking rebuild, counted and reported.
     blocking_rebuilds: u32,
-    /// What the last successful control call decided about the newest plan's header (#1332 S4).
-    words: ControlWords,
+    /// The writer of the newest committed plan's own words (#1332 S5, [`PlanShape::words`]):
+    /// the boot plan's, then each published replacement's, which its preparation left.
+    plan_words: PublishedWordsWriter<2>,
+    /// The writer of the successor record ([`SuccessorWords`]), which the render half reads.
+    successor: PublishedWordsWriter<2>,
+    /// The address of the newest committed replacement's meter header, which its preparer left
+    /// in the record; meaningful while that plan waits.
+    successor_header: usize,
+    /// The control end of the hand-back ring (#1332 S5, [`RETIRED_SHAPES`]): the retired plans'
+    /// tables, which the service step drops here, on the control thread.
+    retired_shapes: engine::realtime::Consumer<Box<PlanShape>>,
+    /// The session's lifecycle word, shared with the render half (#1332 S5).
+    lifecycle: Lifecycle,
+    /// The control half's staging (#1332 S5): the control request, the diagnostic and the source
+    /// staging.
+    staging: ControlStaging,
     /// The result code of the last control call this half ran (#1332 S4). The single instance
     /// also publishes it in the status word, unchanged.
     last_result: u32,
@@ -830,22 +937,35 @@ impl ControlHalf {
     /// readers, which the swap block pairs, so the command borrows them, with that plan's epoch,
     /// for an `OBSERVATION_READ`; and before the first block a `SPECTRUM_CONFIGURE` has it adopt
     /// its successor in place (#1597), which the first block then renders with no swap.
+    ///
+    /// With the render half on another thread (#1332 S5) there is no plan to lend: the command
+    /// runs as the C ABI's does, and the S6 Worker routes the two commands that need the plan.
     fn run_command(
         &mut self,
-        plan: &mut WebPlan,
-        request: &[u8],
+        plan: Option<&mut WebPlan>,
+        request_len: usize,
         document: &[u8],
         output_capacity: u64,
     ) -> Result<usize, control_plane::CommandError> {
-        self.run_control(|control| {
-            control.command_with_plan(
+        let Self {
+            control, staging, ..
+        } = self;
+        let request = staging
+            .control_request
+            .get(..request_len)
+            .ok_or(control_plane::CommandError::Invalid)?;
+        let before = control.newest_plan_epoch();
+        let result = match plan {
+            Some(plan) => control.command_with_plan(
                 request,
                 document,
                 output_capacity,
                 plan,
                 observation_handles,
-            )
-        })
+            ),
+            None => control.command_with_document(request, document, output_capacity),
+        };
+        self.after_control(before, result)
     }
 
     /// Declare a discontinuity through the control plane (#1323), the function the C ABI's
@@ -874,30 +994,38 @@ impl ControlHalf {
         self.run_control(|control| control.session_seek(generation, timeline_frame, None))
     }
 
-    /// Run one control-plane call that may publish a replacement plan (#1290a, #1323), then leave
-    /// the words the render half applies (#1332 S4): the successor's header when the call
-    /// published one, and the newest plan's master and structure words after every call that
-    /// succeeded.
+    /// Run one control-plane call that may publish a replacement plan (#1290a, #1323), then
+    /// publish the words the render half reads (#1332 S4, S5): when the call published a plan,
+    /// the control half keeps that plan's word writer and header address, and after every call
+    /// that succeeded it publishes the newest plan's own words and the successor record.
     fn run_control<T, E>(
         &mut self,
         call: impl FnOnce(&mut WebSession) -> Result<T, E>,
     ) -> Result<T, E> {
         let before = self.control.newest_plan_epoch();
         let result = call(&mut self.control);
+        self.after_control(before, result)
+    }
+
+    /// The bookkeeping of [`Self::run_control`] after its call: `before` is the newest plan epoch
+    /// the call started from.
+    fn after_control<T, E>(&mut self, before: u64, result: Result<T, E>) -> Result<T, E> {
         // Whatever the preparer left is taken: a command refused after its preparation leaves an
-        // address nothing will read.
+        // address and a writer nothing will read; the writer drops here, on the control thread.
         let prepared = self
             .record
             .lock()
-            .map_or(None, |mut record| record.successor_header.take());
+            .map_or(None, |mut record| record.successor.take());
         let epoch = self.control.newest_plan_epoch();
         if result.is_ok() && epoch != before {
             // A rebuild commits only after the preparer returned `Ok`, and the preparer returns
-            // `Ok` only once it has left the header's address in the record (it refuses the
-            // preparation, before anything is committed, when it cannot). So a committed rebuild
-            // always has its address, and no refusal can follow a commit.
-            self.words.successor_header =
-                prepared.expect("a committed rebuild's preparer left the plan's header");
+            // `Ok` only once it has left the header's address and the words' writer in the record
+            // (it refuses the preparation, before anything is committed, when it cannot). So a
+            // committed rebuild always has them, and no refusal can follow a commit. The previous
+            // plan's writer drops here: that plan keeps the words it has.
+            let prepared = prepared.expect("a committed rebuild's preparer left the plan's words");
+            self.successor_header = prepared.header;
+            self.plan_words = prepared.words;
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
         }
         if result.is_ok() {
@@ -911,41 +1039,47 @@ impl ControlHalf {
     /// which is the newest plan's (a rebuild prepares the plan from the session it commits, and no
     /// other commit adds, removes or reorders a strip), so a strip added or removed before the
     /// master never moves the reading to another strip; and the structure epoch the control list
-    /// holds now. A plan that does not hold the strip has no master. Control side only.
+    /// holds now. A plan that does not hold the strip has no master. They go to the newest plan's
+    /// own words, and the successor record names the newest epoch and its header (#1332 S5).
+    /// Control side only; each publication is two wait-free record stores.
     fn sync_words(&mut self, newest_epoch: u64) {
-        let model = self.control.committed_session().normalized_model();
-        let master = self.control.master_strip().and_then(|id| {
-            let id = id.as_str().as_bytes();
-            // The model's strip lists are in canonical order, which orders by bytes, as
-            // [`strip_index`] searches the plan's own tables.
-            let index = match model
-                .tracks
-                .binary_search_by(|track| track.id.as_str().as_bytes().cmp(id))
-            {
-                Ok(track) => Some(track),
-                Err(_) => model
-                    .submixes
-                    .binary_search_by(|submix| submix.id.as_str().as_bytes().cmp(id))
-                    .ok()
-                    .and_then(|submix| model.tracks.len().checked_add(submix)),
-            };
-            index.and_then(|index| u32::try_from(index).ok())
-        });
-        self.words.newest_epoch = newest_epoch;
-        self.words.master_track = master;
-        self.words.structure_epoch = self.control.structure_epoch();
+        let master = master_index(
+            self.control.committed_session().normalized_model(),
+            self.control.master_strip(),
+        );
+        self.plan_words
+            .publish(&plan_words(master, self.control.structure_epoch()));
+        let words: SuccessorWords = [newest_epoch, self.successor_header as u64];
+        self.successor.publish(&words);
+    }
+
+    /// Drop the tables of the plans render retired (#1290a, #1332 S5), which it handed back
+    /// through the ring at least one block after it adopted their successors. Control side only:
+    /// it frees. Bounded by the ring's capacity and the pushes render makes meanwhile.
+    fn reclaim_shapes(&mut self) {
+        while let Ok(shape) = self.retired_shapes.try_pop() {
+            drop(shape);
+        }
+    }
+
+    /// Whether the session is ready, as the lifecycle word says (#1332 S5).
+    fn ready(&self) -> bool {
+        self.lifecycle.load(Ordering::Acquire) == STATE_READY
     }
 }
 
 /// The render half of the single instance (#1332 S4): the status the instance publishes, the
-/// staging buffers and, once a session is prepared, what renders it ([`RenderReady`]).
+/// output buffer and, once a session is prepared, what renders it ([`RenderReady`]). Since #1332
+/// S5 it touches no memory of the control half's, and the control half none of its own, so it can
+/// render on another thread ([`RenderHost`]).
 struct RenderHalf {
     /// The status the instance publishes (`miso_engine_web_v1_status_ptr`): the render half's
     /// clock and counters, and the result of the last call.
     status: WebStatus,
     buffers: Option<PreparedBuffers>,
-    /// The valid prefix of the diagnostic buffer.
-    diagnostic_len: usize,
+    /// The diagnostic of the render half's own sticky failure (#1332 S5), always a fixed text,
+    /// until the single instance copies it into the control half's diagnostic.
+    failure: Option<&'static [u8]>,
     /// What renders the session, from boot until [`AudioWorkletEngineHost::dispose`].
     ready: Option<RenderReady>,
 }
@@ -961,12 +1095,16 @@ struct RenderReady {
     shape: Box<PlanShape>,
     /// The epoch of the plan `shape` describes.
     shape_epoch: u64,
-    /// Retired plans' tables, which the block that adopted the next plan exchanged out and the
-    /// control side's next service step drops ([`AudioWorkletEngineHost::service`]). Fixed at
-    /// boot, so the adoption only swaps a slot.
-    retired_shapes: [Option<Box<PlanShape>>; RETIRED_SHAPES],
-    /// The words the control half left last (#1332 S4), applied by [`Self::publish_words`].
-    words: ControlWords,
+    /// The tables the last adoption retired (#1332 S5), parked for one block: the next block
+    /// hands them back to the control half before it renders ([`Self::hand_back_parked`]), so the
+    /// adopting block's `process()` can still read the retired header (#1290d1).
+    parked: Option<Box<PlanShape>>,
+    /// The render end of the hand-back ring ([`RETIRED_SHAPES`]).
+    retired_shapes: engine::realtime::Producer<Box<PlanShape>>,
+    /// The reader of the successor record ([`SuccessorWords`]), which the control half publishes.
+    successor: PublishedWordsReader<2>,
+    /// The session's lifecycle word, shared with the control half (#1332 S5).
+    lifecycle: Lifecycle,
     /// A handle on the session's `live_values_superseded` count (#1312 D2): the one count the
     /// control plane made, which every cell reader of every plan the session prepares adds to,
     /// and which the status reports (#1399).
@@ -1143,7 +1281,7 @@ impl AudioWorkletEngineHost {
         // peak is the one compile's, as it was before.
         drop(session);
         drop(model);
-        let (control, ready, resources) = compile_ready(
+        let (mut control, ready, resources) = compile_ready(
             document,
             &caps,
             options,
@@ -1165,7 +1303,8 @@ impl AudioWorkletEngineHost {
             .queries
             .watermark()
             .map_err(|_| BootFailure::fixed(RESULT_INTERNAL, "web.internal.watermark"))?;
-        let buffers = allocate_buffers(projection)?;
+        let (staging, buffers) = allocate_buffers(projection)?;
+        control.staging = staging;
         let backend = selected_backend();
         Ok(Self {
             options,
@@ -1197,7 +1336,7 @@ impl AudioWorkletEngineHost {
                     watermark_outcome_flags: initial_watermark.outcome_flags,
                 },
                 buffers: Some(buffers),
-                diagnostic_len: 0,
+                failure: None,
                 ready: Some(ready),
             },
         })
@@ -1381,16 +1520,12 @@ impl AudioWorkletEngineHost {
     /// (16 KiB) or the host is not ready. The page writes the frame here and
     /// calls [`Self::control_command`].
     pub fn control_request_mut(&mut self, len: u32) -> Option<&mut [u8]> {
-        if self.render.status.state != STATE_READY
-            || len == 0
-            || u64::from(len) > CONTROL_FRAME_BYTES
-        {
+        if !self.control_ready() || len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
             return None;
         }
-        self.render
-            .buffers
+        self.control
             .as_mut()
-            .map(|buffers| &mut *buffers.control_request)
+            .map(|control| &mut *control.staging.control_request)
     }
 
     /// Run the staged control command frame of `len` bytes through the control plane (issue
@@ -1435,22 +1570,23 @@ impl AudioWorkletEngineHost {
     /// `miso_engine_web_v1_replace_document_ptr` staged. Results as [`Self::control_command`].
     pub fn control_command_with_document(&mut self, len: u32, document: &[u8]) -> u32 {
         self.control_response = ControlResponse::None;
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return self.record(RESULT_WRONG_STATE);
         }
         if len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
             return self.record(RESULT_INVALID_ARGUMENT);
         }
-        let RenderHalf { buffers, ready, .. } = &mut self.render;
-        let (Some(control), Some(buffers), Some(ready)) =
-            (self.control.as_mut(), buffers.as_mut(), ready.as_mut())
-        else {
+        let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let request = &buffers.control_request[..len as usize];
-        let result = control.run_command(&mut ready.plan, request, document, CONTROL_FRAME_BYTES);
-        // #1332 S4: the render half applies what the command decided, between blocks.
-        ready.receive_words(control.words);
+        // #1332 S5: the render half's plan is lent only while it is here, on this thread.
+        let result = control.run_command(
+            self.render.ready.as_mut().map(|ready| &mut ready.plan),
+            len as usize,
+            document,
+            CONTROL_FRAME_BYTES,
+        );
+        self.publish_words_here();
         match result {
             Ok(length) => {
                 self.control_response = ControlResponse::Frame(length);
@@ -1477,15 +1613,14 @@ impl AudioWorkletEngineHost {
     /// [`Self::control_response`]. A refusal changes nothing.
     pub fn declare_discontinuity(&mut self) -> u32 {
         self.control_response = ControlResponse::None;
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return self.record(RESULT_WRONG_STATE);
         }
-        let (Some(control), Some(ready)) = (self.control.as_mut(), self.render.ready.as_mut())
-        else {
+        let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let result = control.declare_discontinuity();
-        ready.receive_words(control.words);
+        self.publish_words_here();
         match result {
             Ok(()) => self.record(RESULT_OK),
             Err(error) => self.refuse_control(&error),
@@ -1495,13 +1630,11 @@ impl AudioWorkletEngineHost {
     /// A refused control call (#1562a D1, #1323): the core's diagnostic into the session
     /// diagnostic and the response, and the result code for `error`.
     fn refuse_control(&mut self, error: &control_plane::CommandError) -> u32 {
-        let Some(buffers) = self.render.buffers.as_mut() else {
+        let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         let diagnostic = error.diagnostic();
-        let kept = diagnostic.len().min(buffers.diagnostic.len());
-        buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
-        self.render.diagnostic_len = kept;
+        control.staging.write_diagnostic(&diagnostic);
         self.control_response = ControlResponse::Diagnostic;
         self.record(match error {
             control_plane::CommandError::Invalid => RESULT_INVALID_ARGUMENT,
@@ -1525,11 +1658,10 @@ impl AudioWorkletEngineHost {
     /// its call records its results. The copy is into preallocated storage, so `submit_source`
     /// calls it from `process()`.
     pub(crate) fn refuse_source(&mut self, failure: SourceFailure) -> u32 {
-        if let Some(buffers) = self.render.buffers.as_mut() {
-            let diagnostic = failure.diagnostic().as_bytes();
-            let kept = diagnostic.len().min(buffers.diagnostic.len());
-            buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
-            self.render.diagnostic_len = kept;
+        if let Some(control) = self.control.as_mut() {
+            control
+                .staging
+                .write_diagnostic(failure.diagnostic().as_bytes());
             self.control_response = ControlResponse::Diagnostic;
         }
         match failure.kind() {
@@ -1569,11 +1701,10 @@ impl AudioWorkletEngineHost {
             EVENT_LANE_LOSSY => control_plane::EventLane::Lossy,
             _ => return RESULT_INVALID_ARGUMENT,
         };
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return RESULT_REFUSED_LIFECYCLE;
         }
-        let Some((buffers, control)) = self.render.buffers.as_mut().zip(self.control.as_mut())
-        else {
+        let Some(control) = self.control.as_mut() else {
             return RESULT_REFUSED_LIFECYCLE;
         };
         match control.control.dequeue_event(lane, CONTROL_FRAME_BYTES) {
@@ -1583,10 +1714,7 @@ impl AudioWorkletEngineHost {
             }
             Ok(None) => RESULT_OK,
             Err(error) => {
-                let diagnostic = error.diagnostic();
-                let kept = diagnostic.len().min(buffers.diagnostic.len());
-                buffers.diagnostic[..kept].copy_from_slice(&diagnostic[..kept]);
-                self.render.diagnostic_len = kept;
+                control.staging.write_diagnostic(&error.diagnostic());
                 match error {
                     control_plane::EventError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
                     control_plane::EventError::Backpressure => RESULT_BACKPRESSURE,
@@ -1601,17 +1729,11 @@ impl AudioWorkletEngineHost {
     /// command. Valid until the next control call.
     #[must_use]
     pub fn control_response(&self) -> &[u8] {
-        match (
-            self.control_response,
-            self.control.as_ref(),
-            self.render.buffers.as_ref(),
-        ) {
-            (ControlResponse::Frame(length), Some(control), _) => {
+        match (self.control_response, self.control.as_ref()) {
+            (ControlResponse::Frame(length), Some(control)) => {
                 control.control.command_response(length)
             }
-            (ControlResponse::Diagnostic, _, Some(buffers)) => {
-                &buffers.diagnostic[..self.render.diagnostic_len]
-            }
+            (ControlResponse::Diagnostic, Some(control)) => control.staging.diagnostic(),
             _ => &[],
         }
     }
@@ -1654,17 +1776,17 @@ impl AudioWorkletEngineHost {
     ///
     /// An epoch failure is sticky: the host fails with the session's diagnostic.
     pub fn service(&mut self) -> u32 {
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return RESULT_WRONG_STATE;
         }
-        let (Some(control), Some(ready)) = (self.control.as_mut(), self.render.ready.as_mut())
-        else {
+        let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         match control.control.service() {
             Ok(()) => {
-                // #1332 S4: the tables of the plans the step reclaimed go with them, here.
-                ready.reclaim_shapes();
+                // #1332 S4, S5: the tables render handed back go with the plans the step
+                // reclaimed, here, on the control thread.
+                control.reclaim_shapes();
                 RESULT_OK
             }
             Err(error) => {
@@ -1680,7 +1802,7 @@ impl AudioWorkletEngineHost {
     /// [`RESULT_BACKPRESSURE`] and leaves the record untouched: a read to retry, never a refused
     /// edit. Like [`Self::service`] it leaves the status's last result alone.
     pub fn read_watermark(&mut self) -> u32 {
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return RESULT_WRONG_STATE;
         }
         let Some(control) = self.control.as_ref() else {
@@ -1710,7 +1832,7 @@ impl AudioWorkletEngineHost {
     /// two-word encoding: a successor's values appear from the first read after the block that
     /// adopts it. Like [`Self::service`] it leaves the status's last result alone.
     pub fn read_plan_latency(&mut self) -> u32 {
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return RESULT_WRONG_STATE;
         }
         let Some(control) = self.control.as_ref() else {
@@ -1746,7 +1868,7 @@ impl AudioWorkletEngineHost {
     /// leaves the record alone. Like [`Self::service`] it leaves the status's last result alone.
     pub fn read_seek_report(&mut self, source_id: &[u8]) -> u32 {
         self.control_response = ControlResponse::None;
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return RESULT_REFUSED_LIFECYCLE;
         }
         let Some(control) = self.control.as_mut() else {
@@ -1977,27 +2099,25 @@ impl AudioWorkletEngineHost {
 
     /// Mutable source-ID staging storage, available only after preparation.
     pub fn source_id_mut(&mut self) -> Option<&mut [u8]> {
-        self.render
-            .buffers
+        self.control
             .as_mut()
-            .map(|value| &mut *value.source_id)
+            .map(|control| &mut *control.staging.source_id)
     }
 
     /// Mutable contiguous planar source PCM staging storage.
     pub fn source_pcm_mut(&mut self) -> Option<&mut [f32]> {
-        self.render
-            .buffers
+        self.control
             .as_mut()
-            .map(|value| &mut *value.source_pcm)
+            .map(|control| &mut *control.staging.source_pcm)
     }
 
-    /// The valid fixed diagnostic prefix.
+    /// The valid fixed diagnostic prefix: the control half's (#1332 S5), into which the single
+    /// instance also copies a render failure's.
     #[must_use]
     pub fn diagnostic(&self) -> &[u8] {
-        self.render
-            .buffers
+        self.control
             .as_ref()
-            .map_or(&[], |value| &value.diagnostic[..self.render.diagnostic_len])
+            .map_or(&[], |control| control.staging.diagnostic())
     }
 
     /// Contiguous dual-mono render output, left plane then right plane.
@@ -2011,25 +2131,27 @@ impl AudioWorkletEngineHost {
     /// Zero means "no such source", and also a staging that cannot hold the ID: staging is sized
     /// for the longest ID the grammar allows, so the second cannot happen for a compiled session.
     pub(crate) fn copy_session_source_id(&mut self, index: u32) -> u32 {
-        let Some(control) = self.control.as_ref() else {
+        let Some(ControlHalf {
+            control, staging, ..
+        }) = self.control.as_mut()
+        else {
             return 0;
         };
         let Some(source) = control
-            .session()
+            .committed_session()
             .normalized_model()
             .sources
             .get(index as usize)
         else {
             return 0;
         };
-        Self::copy_id_into_staging(self.render.buffers.as_mut(), source.id.as_str().as_bytes())
-            .unwrap_or(0)
+        Self::copy_id_into_staging(Some(staging), source.id.as_str().as_bytes()).unwrap_or(0)
     }
 
     /// Copy `bytes` into ID staging and return their length, or why they cannot be staged. Never
     /// panics: this runs inside a render-locked export, where a panic is a trap.
     fn copy_id_into_staging(
-        buffers: Option<&mut PreparedBuffers>,
+        buffers: Option<&mut ControlStaging>,
         bytes: &[u8],
     ) -> Result<u32, IdStagingError> {
         let buffers = buffers.ok_or(IdStagingError::NoStaging)?;
@@ -2041,14 +2163,14 @@ impl AudioWorkletEngineHost {
     }
 
     pub(crate) fn diagnostic_buffer_mut(&mut self) -> Option<&mut [u8]> {
-        self.render
-            .buffers
+        self.control
             .as_mut()
-            .map(|value| &mut *value.diagnostic)
+            .map(|control| &mut *control.staging.diagnostic)
     }
 
     pub(crate) fn ffi_source_staging_mut(&mut self) -> Option<FfiSourceStaging<'_>> {
-        self.render.buffers.as_mut().map(|value| {
+        self.control.as_mut().map(|control| {
+            let value = &mut control.staging;
             (
                 &mut *value.source_pcm,
                 &mut *value.plane_references,
@@ -2078,10 +2200,12 @@ impl AudioWorkletEngineHost {
         end_of_region: bool,
     ) -> u32 {
         self.control_response = ControlResponse::None;
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return self.record(RESULT_WRONG_STATE);
         }
-        if frames > self.render.status.quantum_frames {
+        // The boot's quantum, which the report keeps (#1332 S5: the control half reads no
+        // render-half memory).
+        if frames > self.resources.quantum_frames {
             return self.record(RESULT_INVALID_ARGUMENT);
         }
         let Some(control) = self.control.as_mut() else {
@@ -2115,14 +2239,27 @@ impl AudioWorkletEngineHost {
     /// too, and new PCM can enter even when old queues were full. A seek changes source-content
     /// position while the absolute render clock stays continuous; it therefore neither resets
     /// meter accumulators nor advances the meter publication epoch.
+    ///
+    /// With the render half on another thread (#1332 S5) the plan is not here to prepare: the
+    /// seek goes through the control plane's routing alone, as on the C ABI, and the consumer
+    /// observes it through its command queue.
     pub fn seek_source(&mut self, source_id: &[u8], generation: u64, source_frame: u64) -> u32 {
         self.control_response = ControlResponse::None;
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return self.record(RESULT_WRONG_STATE);
         }
-        let (Some(control), Some(ready)) = (self.control.as_mut(), self.render.ready.as_mut())
-        else {
+        let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        let Some(ready) = self.render.ready.as_mut() else {
+            let code = match control
+                .control
+                .seek_unserviced(source_id, generation, source_frame)
+            {
+                Ok(()) => RESULT_OK,
+                Err(failure) => self.refuse_source(failure),
+            };
+            return self.record(code);
         };
         let plan = &mut ready.plan;
         // #1325: the consumer to prepare is the plan that renders, by its own source rows. Through
@@ -2170,7 +2307,7 @@ impl AudioWorkletEngineHost {
         anchor_sample: u64,
     ) -> u32 {
         self.control_response = ControlResponse::None;
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         }
         let Some(control) = self.control.as_mut() else {
@@ -2208,15 +2345,14 @@ impl AudioWorkletEngineHost {
         anchor_sample: Option<u64>,
     ) -> u32 {
         self.control_response = ControlResponse::None;
-        if self.render.status.state != STATE_READY {
+        if !self.control_ready() {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         }
-        let (Some(control), Some(ready)) = (self.control.as_mut(), self.render.ready.as_mut())
-        else {
+        let Some(control) = self.control.as_mut() else {
             return self.record(RESULT_REFUSED_LIFECYCLE);
         };
         let result = control.session_seek(generation, timeline_frame, anchor_sample);
-        ready.receive_words(control.words);
+        self.publish_words_here();
         match result {
             Ok(()) => self.record(RESULT_OK),
             Err(SessionSeekFailure::Seek(failure)) => {
@@ -2231,9 +2367,17 @@ impl AudioWorkletEngineHost {
 
     // REALTIME_POLICY_BEGIN
     /// Render exactly one prepared quantum at the next absolute sample time: the render half's
-    /// own call (#1332 S4).
+    /// own call (#1332 S4). The single instance then copies a render failure's diagnostic into
+    /// the control half's, the one diagnostic its page reads (#1332 S5): a fixed text into
+    /// preallocated storage.
     pub fn render_next(&mut self) -> u32 {
-        self.render.render_next()
+        let code = self.render.render_next();
+        if let Some(failure) = self.render.failure.take()
+            && let Some(control) = self.control.as_mut()
+        {
+            control.staging.write_diagnostic(failure);
+        }
+        code
     }
 
     /// Drain every finished meter window into the frame buffer (issue #137 D2) and, while the
@@ -2265,6 +2409,9 @@ impl AudioWorkletEngineHost {
             return self.record(RESULT_OK);
         }
         self.render.status.state = STATE_FAILED;
+        if let Some(ready) = self.render.ready.as_ref() {
+            ready.lifecycle.store(STATE_FAILED, Ordering::Release);
+        }
         self.record(RESULT_REPREPARE_REQUIRED)
     }
 
@@ -2273,13 +2420,88 @@ impl AudioWorkletEngineHost {
     /// This runs in the worklet's `port.onmessage` handler, never inside `process()`; it is the
     /// single point where the plan, the compiled session and the source rings are freed: the
     /// control half first, then the render half's session, then the staging.
+    ///
+    /// A render half released to another thread ([`Self::release_render`]) must be adopted back
+    /// first (S6's Worker rejoins before it disposes): what it owns is freed only where it is.
     pub fn dispose(&mut self) -> u32 {
         self.control = None;
         self.render.ready = None;
         self.render.buffers = None;
-        self.render.diagnostic_len = 0;
+        self.render.failure = None;
         self.render.status.state = STATE_DISPOSED;
         self.record(RESULT_OK)
+    }
+
+    /// Release the render half to the thread that will render it (#1332 S5, the Rust form of
+    /// S6's `host_release`): the plan owner, the meter delivery, the output buffer and the status
+    /// it keeps. This host keeps the control half, whose calls from here on touch nothing of the
+    /// render half's: the words and the lifecycle are shared atomics, the retired tables come
+    /// back through the hand-back ring, and the staging is the control half's own. `None` when
+    /// the render half is not here or no session is prepared.
+    ///
+    /// Control path; it allocates nothing. The host's own status stays as it was at the release.
+    pub fn release_render(&mut self) -> Option<RenderHost> {
+        self.render.ready.as_ref()?;
+        let shell = RenderHalf {
+            status: self.render.status,
+            buffers: None,
+            failure: None,
+            ready: None,
+        };
+        Some(RenderHost {
+            half: core::mem::replace(&mut self.render, shell),
+        })
+    }
+
+    /// Take back a render half [`Self::release_render`] released (#1332 S5, the Rust form of
+    /// S6's `host_adopt`), or hand it back unchanged when this host already has one, has no
+    /// control half, or is not the session the render half renders. A render failure recorded
+    /// while it was away becomes this host's diagnostic.
+    ///
+    /// # Errors
+    ///
+    /// The render half itself, untouched, when it cannot be adopted.
+    pub fn adopt_render(&mut self, render: RenderHost) -> Result<(), RenderHost> {
+        let ours = match (self.control.as_ref(), render.half.ready.as_ref()) {
+            (Some(control), Some(ready)) => Arc::ptr_eq(&control.lifecycle, &ready.lifecycle),
+            _ => false,
+        };
+        if !ours || self.render.ready.is_some() {
+            return Err(render);
+        }
+        self.render = render.half;
+        if let Some(failure) = self.render.failure.take()
+            && let Some(control) = self.control.as_mut()
+        {
+            control.staging.write_diagnostic(failure);
+        }
+        Ok(())
+    }
+
+    /// Whether the control half is here and the session is ready, as the lifecycle word says
+    /// (#1332 S5): the check every control call makes, which reads no render-half memory.
+    fn control_ready(&self) -> bool {
+        self.control.as_ref().is_some_and(ControlHalf::ready)
+    }
+
+    /// The single instance's hand-over after a control call (#1332 S5): with the render half
+    /// here, on this thread, it reads the words the call published at once, so the header names
+    /// them before the next block, as before the split. A render half on another thread reads
+    /// them before its next block.
+    fn publish_words_here(&mut self) {
+        if let Some(ready) = self.render.ready.as_mut() {
+            ready.publish_words();
+        }
+    }
+
+    /// Set the lifecycle state of both halves, for the tests that drive a refusal of a host that
+    /// is not ready (#1332 S5).
+    #[cfg(test)]
+    pub(crate) fn set_state_for_test(&mut self, state: u32) {
+        self.render.status.state = state;
+        if let Some(control) = self.control.as_ref() {
+            control.lifecycle.store(state, Ordering::Release);
+        }
     }
 
     /// Every control call returns its result through here, so the status's `blocking_rebuilds`
@@ -2296,56 +2518,73 @@ impl AudioWorkletEngineHost {
         code
     }
 
-    /// Record a sticky failure of a control call without ever releasing ownership: the render
-    /// half's [`RenderHalf::fail`], then the control half's record.
+    /// Record a sticky failure of a control call without ever releasing ownership (#1332 S5): the
+    /// lifecycle word, which a render half on another thread reads before its next block, and
+    /// the control half's diagnostic; with the render half here, its status and silence at once
+    /// ([`RenderHalf::silence`]); then the control half's record.
     fn fail(&mut self, code: u32, diagnostic: &[u8]) -> u32 {
-        self.render.fail(code, diagnostic);
+        if let Some(control) = self.control.as_mut() {
+            control.lifecycle.store(STATE_FAILED, Ordering::Release);
+            control.staging.write_diagnostic(diagnostic);
+        }
+        self.render.silence();
         self.record(code)
     }
 }
 
 impl RenderReady {
-    /// Take the words the control half left (#1332 S4) and apply them at once: the single
-    /// instance hands them over between blocks, after each control call.
-    fn receive_words(&mut self, words: ControlWords) {
-        self.words = words;
-        self.publish_words();
+    // REALTIME_POLICY_BEGIN: #1332 S4, S5, the render half's application of the control half's words.
+    /// Apply the control half's words to the rendering plan's tables (#1332 S4, S5): the plan's
+    /// own master and structure words ([`PlanShape::words`]), and, from the successor record,
+    /// the successor its header names while a newer plan waits, `0` otherwise (#1290d1). Two
+    /// bounded seqlock reads and scalar writes; a read that lands inside a publication on every
+    /// attempt leaves the words as they were, for the next block to read.
+    fn publish_words(&mut self) {
+        let shape = &mut *self.shape;
+        if let Ok([master_plus_one, structure_epoch]) = shape.words.read() {
+            let master = master_plus_one
+                .checked_sub(1)
+                .and_then(|track| u32::try_from(track).ok());
+            shape.master_track = master;
+            shape.meter_header.master_track_plus_one =
+                master.map_or(0, |track| track.saturating_add(1));
+            shape.meter_header.structure_epoch = structure_epoch;
+        }
+        if let Ok([newest_epoch, header]) = self.successor.read() {
+            let successor = if newest_epoch > self.shape_epoch {
+                usize::try_from(header).unwrap_or(0)
+            } else {
+                0
+            };
+            shape.meter_header.successor_pointer = u32::try_from(successor).unwrap_or(0);
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                shape.successor_address = successor;
+            }
+        }
     }
 
-    // REALTIME_POLICY_BEGIN: #1332 S4, the render half's application of the control half's words.
-    /// Apply the control half's words to the rendering plan's tables (#1332 S4): its master and
-    /// structure words when they describe this plan, and the successor its header names while a
-    /// newer plan waits, `0` otherwise (#1290d1). Scalar writes only.
-    fn publish_words(&mut self) {
-        let words = self.words;
-        let shape = &mut *self.shape;
-        if words.newest_epoch == self.shape_epoch {
-            shape.master_track = words.master_track;
-            shape.meter_header.master_track_plus_one = words
-                .master_track
-                .map_or(0, |track| track.saturating_add(1));
-            shape.meter_header.structure_epoch = words.structure_epoch;
+    /// Hand the tables the previous block's adoption parked back to the control half (#1332 S5):
+    /// one push into the hand-back ring, before this block renders, so they are freed on the
+    /// control thread, and never before the adopting block's `process()` has returned. A full
+    /// ring keeps them parked (see [`RETIRED_SHAPES`]). Pointer moves only: it frees nothing.
+    fn hand_back_parked(&mut self) {
+        if self.parked.is_none() || self.retired_shapes.available_capacity() == 0 {
+            return;
         }
-        let successor = if words.newest_epoch > self.shape_epoch {
-            words.successor_header
-        } else {
-            0
+        let Some(shape) = self.parked.take() else {
+            return;
         };
-        shape.meter_header.successor_pointer = u32::try_from(successor).unwrap_or(0);
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            shape.successor_address = successor;
+        if let Err(QueueFull { value, .. }) = self.retired_shapes.try_push(shape) {
+            // Unreachable (the room was checked, and only the control half's pops change it),
+            // and still a move: the tables go back to the empty slot, and what the slot held,
+            // `None`, is forgotten rather than dropped, so no drop glue joins the render call.
+            let mut back = Some(value);
+            core::mem::swap(&mut self.parked, &mut back);
+            core::mem::forget(back);
         }
     }
     // REALTIME_POLICY_END
-
-    /// Drop the tables of the plans render retired (#1290a, #1332 S4), after the service step
-    /// reclaimed their plans. Control side only: it frees.
-    fn reclaim_shapes(&mut self) {
-        for slot in &mut self.retired_shapes {
-            *slot = None;
-        }
-    }
 
     // REALTIME_POLICY_BEGIN: #1588 D1, the render half's application of the meter level word.
     /// Apply the session's meter level word from `next_sample`, the next block's first sample
@@ -2380,8 +2619,8 @@ impl RenderReady {
 
     // REALTIME_POLICY_BEGIN
     /// Take the tables of the plan whose epoch is `epoch` from its companions (#1290a, #1332 S4),
-    /// at the block that adopted it. The tables it retires go to a free slot of
-    /// [`Self::retired_shapes`] for the control side's next service step. Pointer exchanges: it
+    /// at the block that adopted it. The tables it retires are parked in [`Self::parked`] for
+    /// one block (#1332 S5). Pointer exchanges: it
     /// allocates and frees nothing, and indexes nothing, so it adds no trap to the render export.
     ///
     /// The companions' `carried` is the pairing the swap block's attachment hook made (#1381b):
@@ -2406,7 +2645,7 @@ impl RenderReady {
             plan,
             shape,
             meters,
-            retired_shapes,
+            parked,
             ..
         } = self;
         let Some(companions) = plan.active_attachment_mut::<RenderCompanions>() else {
@@ -2485,10 +2724,11 @@ impl RenderReady {
         }
         core::mem::swap(&mut shape.meter_tables, &mut retired.meter_tables);
         // A carried tap's arm state needs no hand-over: it is in the tap's slot, which moves with
-        // the tap (#1585 D6). The retired tables leave the adopted plan's companions for a slot
-        // the control side's next service step empties, by exchange with an empty slot.
-        if let Some(free) = retired_shapes.iter_mut().find(|free| free.is_none()) {
-            core::mem::swap(free, slot);
+        // the tap (#1585 D6). The retired tables leave the adopted plan's companions and are
+        // parked for one block, by exchange with the empty slot (#1332 S5): the next block hands
+        // them back to the control half.
+        if parked.is_none() {
+            core::mem::swap(parked, slot);
         }
         self.publish_words();
     }
@@ -2509,6 +2749,16 @@ impl RenderHalf {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
+        // #1332 S5: a sticky failure the control half recorded, on whatever thread it runs, is
+        // this half's from this block: silence, as the single instance's failure makes it at once.
+        if ready.lifecycle.load(Ordering::Acquire) != STATE_READY {
+            self.silence();
+            return self.record(RESULT_WRONG_STATE);
+        }
+        // #1332 S5: the tables the last block's adoption retired go back to the control half,
+        // and the words the control half published since the last block apply to this one.
+        ready.hand_back_parked();
+        ready.publish_words();
         let Some(buffers) = self.buffers.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.buffers\t$\n");
         };
@@ -2634,16 +2884,104 @@ impl RenderHalf {
     ///
     /// The output block is filled with positive zero so a failed render emits silence rather than
     /// the previous quantum.
-    fn fail(&mut self, code: u32, diagnostic: &[u8]) -> u32 {
+    ///
+    /// The diagnostic is a fixed text the half keeps (#1332 S5): the single instance copies it
+    /// into the control half's diagnostic after the call, and the lifecycle word tells the
+    /// control half, on whatever thread it runs, that the session failed.
+    fn fail(&mut self, code: u32, diagnostic: &'static [u8]) -> u32 {
+        if let Some(ready) = self.ready.as_ref() {
+            ready.lifecycle.store(STATE_FAILED, Ordering::Release);
+        }
+        self.silence();
+        self.failure = Some(diagnostic);
+        self.record(code)
+    }
+
+    /// The sticky failed state and positive-zero silence (#1332 S5), without a diagnostic: what
+    /// a failure of either half leaves in the render half.
+    fn silence(&mut self) {
         self.status.state = STATE_FAILED;
         if let Some(buffers) = self.buffers.as_mut() {
             buffers.output_pcm.fill(0.0);
-            self.diagnostic_len = diagnostic.len().min(buffers.diagnostic.len());
-            buffers.diagnostic[..self.diagnostic_len]
-                .copy_from_slice(&diagnostic[..self.diagnostic_len]);
         }
-        self.record(code)
     }
+}
+
+/// The render half of one running host, released to the thread that renders it (#1332 S5):
+/// [`AudioWorkletEngineHost::release_render`] hands it out and
+/// [`AudioWorkletEngineHost::adopt_render`] takes it back. It owns the plan owner (with the
+/// source consumers and the active attachment), the meter delivery, the output buffer and its
+/// status; the control half keeps everything else. Nothing the two halves share is reached but
+/// through atomics: the plan exchange, the source rings, the plan's own words, the successor
+/// record, the lifecycle word, the meter level word and the hand-back ring.
+///
+/// It must go back to its host before the host disposes, so that what it owns is freed on the
+/// control path (S6's Worker rejoins before it disposes); a render half dropped on its own frees
+/// the plan wherever it is dropped.
+pub struct RenderHost {
+    half: RenderHalf,
+}
+
+impl RenderHost {
+    // REALTIME_POLICY_BEGIN
+    /// [`AudioWorkletEngineHost::render_next`] on this thread: render exactly one prepared
+    /// quantum at the next absolute sample time. A failure's fixed diagnostic stays here
+    /// ([`Self::diagnostic`]) until the host adopts the half back.
+    pub fn render_next(&mut self) -> u32 {
+        self.half.render_next()
+    }
+
+    /// [`AudioWorkletEngineHost::poll_meters`] on this thread.
+    pub fn poll_meters(&mut self) -> u32 {
+        self.half.poll_meters()
+    }
+    // REALTIME_POLICY_END
+
+    /// The render half's status: its clock, its counters and the result of its last call.
+    #[must_use]
+    pub const fn status(&self) -> &WebStatus {
+        &self.half.status
+    }
+
+    /// The block the last render wrote, left plane then right plane.
+    #[must_use]
+    pub fn output_pcm(&self) -> Option<&[f32]> {
+        self.half.buffers.as_ref().map(|value| &*value.output_pcm)
+    }
+
+    /// The rendering plan's meter header (issue #143 D5, #1290d1).
+    #[must_use]
+    pub fn meter_header(&self) -> &WebMeterHeader {
+        self.half
+            .ready
+            .as_ref()
+            .map_or(&EMPTY_METER_HEADER, |ready| &ready.shape.meter_header)
+    }
+
+    /// The fixed diagnostic of the render half's sticky failure, or empty.
+    #[must_use]
+    pub fn diagnostic(&self) -> &[u8] {
+        self.half.failure.unwrap_or(&[])
+    }
+
+    /// The epoch of the plan whose tables the render half holds: the plan that rendered the last
+    /// block. Test support (#1332 S5).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn plan_epoch(&self) -> u64 {
+        self.half
+            .ready
+            .as_ref()
+            .map_or(0, |ready| ready.shape_epoch)
+    }
+}
+
+/// Run `operation` inside the render-locked window (#1333 D1), as the render exports run their
+/// bodies, so a test that drives a [`RenderHost`] on its own thread counts what it allocates in
+/// the render-locked count. Test support (#1332 S5).
+#[cfg(feature = "test-support")]
+pub fn render_locked_for_test<R>(operation: impl FnOnce() -> R) -> R {
+    render_lock::render_locked(operation)
 }
 
 /// One plan's observation taps as the core's gain-reduction fold sees them (#1582 D3): the
@@ -2996,25 +3334,31 @@ fn project_buffers(
     })
 }
 
-fn allocate_buffers(projection: PreparedBufferProjection) -> Result<PreparedBuffers, BootFailure> {
+fn allocate_buffers(
+    projection: PreparedBufferProjection,
+) -> Result<(ControlStaging, PreparedBuffers), BootFailure> {
     let allocation = |_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.allocation");
-    Ok(PreparedBuffers {
+    let staging = ControlStaging {
         diagnostic: boxed_zero_u8(DIAGNOSTIC_BYTES).map_err(allocation)?,
+        diagnostic_len: 0,
         source_id: boxed_zero_u8(
             u32::try_from(projection.report.id_staging_bytes)
                 .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
         )
         .map_err(allocation)?,
         source_pcm: boxed_zero_f32(projection.source_samples).map_err(allocation)?,
-        output_pcm: boxed_zero_f32(u64::from(projection.report.quantum_frames) * 2)
-            .map_err(allocation)?,
         control_request: boxed_zero_u8(CONTROL_FRAME_BYTES as u32).map_err(allocation)?,
         plane_references: boxed_uninit_planes(
             u32::try_from(projection.source_samples / u64::from(projection.report.quantum_frames))
                 .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
         )
         .map_err(allocation)?,
-    })
+    };
+    let buffers = PreparedBuffers {
+        output_pcm: boxed_zero_f32(u64::from(projection.report.quantum_frames) * 2)
+            .map_err(allocation)?,
+    };
+    Ok((staging, buffers))
 }
 
 fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootFailure> {
@@ -3408,11 +3752,12 @@ struct BootRecord {
     superseded: Option<host_core::LiveValuesSuperseded>,
     /// The class of the preparation refusal, so a refused boot keeps its result code.
     rejection: Option<PrepareRejection>,
-    /// The address of the meter header of the plan the preparer prepared last (#1290d1, #1332
-    /// S4), whose tables the plan itself carries: a command that publishes a replacement takes it,
-    /// so the rendering plan's header names the replacement's while it waits; one that fails after
-    /// preparing leaves an address nothing reads. Only an address: nothing dereferences it.
-    successor_header: Option<usize>,
+    /// What the preparer left of the plan it prepared last (#1290d1, #1332 S4, S5): its meter
+    /// header's address and the writer of its own words. A command that publishes a replacement
+    /// takes them, so the rendering plan's header names the replacement's while it waits and the
+    /// control half writes the replacement's words; one that fails after preparing leaves them
+    /// for the next preparation to replace, on the control thread.
+    successor: Option<PreparedSuccessor>,
 }
 
 impl RenderCompanions {
@@ -3603,6 +3948,45 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
             None => Some(producer),
         }
     }
+
+    /// Stamp the plan's own words before it is published (#1332 S5): the master the commit
+    /// leaves, as an index into the plan's strip order, and the structure epoch, through the
+    /// writer the plan's preparation left in the record. Control thread, before publication.
+    fn stamp_before_publication(
+        &self,
+        plan: &mut engine::realtime::PreparedRenderPlan,
+        committed: &CompiledSession,
+        master: Option<&session::StableId>,
+        structure_epoch: u64,
+    ) {
+        let Some(header) = plan
+            .host_attachment_mut::<RenderCompanions>()
+            .and_then(|companions| companions.shape.as_ref())
+            .map(|shape| core::ptr::from_ref(&shape.meter_header).addr())
+        else {
+            return;
+        };
+        let Some(record) = &self.record else {
+            return;
+        };
+        let Ok(mut record) = record.lock() else {
+            return;
+        };
+        // The record names the plan this preparer prepared last, which is the one the commit
+        // publishes: no preparation runs between a commit's preparation and its publication.
+        let Some(successor) = record
+            .successor
+            .as_mut()
+            .filter(|successor| successor.header == header)
+        else {
+            debug_assert!(false, "the published plan is the one prepared last");
+            return;
+        };
+        successor.words.publish(&plan_words(
+            master_index(committed.normalized_model(), master),
+            structure_epoch,
+        ));
+    }
 }
 
 impl WebRuntimePreparer {
@@ -3679,6 +4063,7 @@ impl WebRuntimePreparer {
         );
         // Boxed here, so the meter header's address, which the record leaves for the commit, is
         // the address the page reads for as long as the tables live.
+        let (shape, words) = shape;
         let shape = Box::new(shape);
         let header = core::ptr::from_ref(&shape.meter_header).addr();
         let mut companions = RenderCompanions {
@@ -3713,7 +4098,7 @@ impl WebRuntimePreparer {
                 record.report = Some(host.report);
                 record.superseded = Some(handles.live_values_superseded.clone());
             }
-            record.successor_header = Some(header);
+            record.successor = Some(PreparedSuccessor { header, words });
         }
         Ok((host, handles, spectrum_captures))
     }
@@ -3736,7 +4121,7 @@ fn build_plan_shape(
     producers: &[host_core::EffectControlProducer],
     observations: &[EffectObservationHandle],
     meter_count: usize,
-) -> Result<PlanShape, &'static str> {
+) -> Result<(PlanShape, PublishedWordsWriter<2>), &'static str> {
     let track_count = model.tracks.len();
     let submix_count = model.submixes.len();
     let strip_count = track_count + submix_count;
@@ -3870,7 +4255,9 @@ fn build_plan_shape(
             u32::try_from(strip).map_err(|_| "web.live_controls.observation")?;
         instance.reader = Some(u32::try_from(reader).map_err(|_| "web.live_controls.observation")?);
     }
-    Ok(PlanShape {
+    // #1332 S5: the plan's own words, which its commit stamps before publication.
+    let (words_writer, words) = published_words(plan_words(None, 0));
+    let shape = PlanShape {
         tracks,
         submixes,
         effect_instances: effect_instances.into_boxed_slice(),
@@ -3879,13 +4266,15 @@ fn build_plan_shape(
         // the strip the core's `master` row designates after every control command
         // (`ControlHalf::sync_words`, `RenderReady::publish_words`).
         master_track: None,
+        words,
         meter_tables: Some(meter_tables),
         meter_ring: None,
         meter_frame,
         meter_header,
         #[cfg(any(test, feature = "test-support"))]
         successor_address: 0,
-    })
+    };
+    Ok((shape, words_writer))
 }
 
 /// `3(T + S) + 3` words: two peak lanes and one gain-reduction magnitude per strip, then the
@@ -3925,6 +4314,24 @@ struct ShapeRows {
     meter_tables_largest: u64,
     /// The published meter frame (#1290d1).
     frame_bytes: u64,
+    /// The plan's own words' shared record (#1332 S5).
+    words_bytes: u64,
+}
+
+/// The heap the two halves share for one session beyond its plans (#1332 S5), charged to the
+/// bridge: the successor record, the lifecycle word's shared allocation and the hand-back ring,
+/// whose bytes `ring` is. `None` on overflow.
+fn cross_thread_bytes(ring: u64) -> Option<u64> {
+    // `Arc`'s allocation is `{ strong, weak, data }`, as the engine's mirrors spell it.
+    #[repr(C)]
+    struct SharedWord {
+        strong: usize,
+        weak: usize,
+        word: AtomicU32,
+    }
+    let successor = u64::try_from(engine::realtime::published_words_retained_bytes::<2>()).ok()?;
+    let lifecycle = u64::try_from(size_of::<SharedWord>()).ok()?;
+    successor.checked_add(lifecycle)?.checked_add(ring)
 }
 
 impl PlanShape {
@@ -3954,12 +4361,15 @@ impl PlanShape {
         let frame_bytes = u64::try_from(self.meter_frame.len())
             .ok()?
             .checked_mul(size_of::<f32>() as u64)?;
+        let words_bytes =
+            u64::try_from(engine::realtime::published_words_retained_bytes::<2>()).ok()?;
         Some(ShapeRows {
             instance_table_bytes,
             instance_id_bytes,
             meter_tables_bytes,
             meter_tables_largest,
             frame_bytes,
+            words_bytes,
         })
     }
 
@@ -3972,7 +4382,8 @@ impl PlanShape {
             .checked_add(rows.instance_table_bytes)?
             .checked_add(rows.instance_id_bytes)?
             .checked_add(rows.meter_tables_bytes)?
-            .checked_add(rows.frame_bytes)?;
+            .checked_add(rows.frame_bytes)?
+            .checked_add(rows.words_bytes)?;
         let largest = shell
             .max(rows.instance_table_bytes)
             .max(rows.meter_tables_largest)
@@ -4068,15 +4479,20 @@ fn compile_ready(
         session: mut control,
         mut plan,
     } = compiled.map_err(|failure| boot_refusal(&failure, &record))?;
-    let (engine, live_values_superseded) = {
+    let (engine, live_values_superseded, boot_words) = {
         let mut record = record
             .lock()
             .map_err(|_| fixed_diagnostic("web.internal.boot_record"))?;
         // The boot plan's header address is the render half's own from here on: nothing names it
-        // as a successor.
-        record.successor_header = None;
-        match (record.report.take(), record.superseded.take()) {
-            (Some(engine), Some(superseded)) => (engine, superseded),
+        // as a successor. Its words' writer is the control half's (#1332 S5).
+        match (
+            record.report.take(),
+            record.superseded.take(),
+            record.successor.take(),
+        ) {
+            (Some(engine), Some(superseded), Some(successor)) => {
+                (engine, superseded, successor.words)
+            }
             _ => return Err(fixed_diagnostic("web.internal.boot_record").into()),
         }
     };
@@ -4160,6 +4576,7 @@ fn compile_ready(
     let meter_delivery_bytes = rows
         .meter_tables_bytes
         .checked_add(rows.frame_bytes)
+        .and_then(|bytes| bytes.checked_add(rows.words_bytes))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     report.bridge_metadata_bytes = report
         .bridge_metadata_bytes
@@ -4215,6 +4632,30 @@ fn compile_ready(
         .checked_mul(u64::from(session_quantum_frames))
         .unwrap_or(0);
     shape.meter_header.structure_epoch = structure_epoch;
+    // #1332 S5: the words, the hand-back ring and the lifecycle word the two halves share. The
+    // boot plan's words: no master (#1689) and the boot's structure epoch, which the boot plan's
+    // header already carries; the successor record names no successor.
+    let mut plan_words_writer = boot_words;
+    plan_words_writer.publish(&plan_words(None, structure_epoch));
+    let (successor_writer, successor_reader) = published_words::<2>([0, 0]);
+    let (retired_producer, retired_consumer) =
+        engine::realtime::bounded_spsc_move::<Box<PlanShape>>(
+            NonZeroUsize::new(RETIRED_SHAPES)
+                .ok_or_else(|| fixed_diagnostic("web.internal.retired"))?,
+            engine::realtime::QueueGeneration(0),
+        )
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    let lifecycle: Lifecycle = Arc::new(AtomicU32::new(STATE_READY));
+    let shared_bytes = cross_thread_bytes(retired_consumer.retained_bytes())
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_metadata_bytes = report
+        .bridge_metadata_bytes
+        .checked_add(shared_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_retained_bytes = report
+        .bridge_retained_bytes
+        .checked_add(shared_bytes)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let control = ControlHalf {
         control,
         #[cfg(feature = "test-support")]
@@ -4222,21 +4663,21 @@ fn compile_ready(
         queries,
         record,
         blocking_rebuilds: 0,
-        // The boot plan's words: no master (#1689) and the boot's structure epoch, which the boot
-        // plan's header already carries.
-        words: ControlWords {
-            newest_epoch: 0,
-            master_track: None,
-            structure_epoch,
-            successor_header: 0,
-        },
+        plan_words: plan_words_writer,
+        successor: successor_writer,
+        successor_header: 0,
+        retired_shapes: retired_consumer,
+        lifecycle: Arc::clone(&lifecycle),
+        staging: ControlStaging::empty(),
         last_result: RESULT_OK,
     };
     let ready = RenderReady {
         shape,
         shape_epoch: 0,
-        retired_shapes: Default::default(),
-        words: control.words,
+        parked: None,
+        retired_shapes: retired_producer,
+        successor: successor_reader,
+        lifecycle,
         live_values_superseded,
         meters: MeterDelivery::new(
             output_reader,

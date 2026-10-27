@@ -1788,6 +1788,22 @@ pub trait RuntimePreparer: Send {
         let _ = plan;
         Some(producer)
     }
+
+    /// Stamp `plan` with what the commit that publishes it leaves (#1332 S5): `committed` is the
+    /// session just committed, which the plan was prepared from, `master` the strip the core
+    /// designates now and `structure_epoch` the control list's structure epoch now. Called on the
+    /// control thread after the commit and immediately before the plan is published, so a render
+    /// half on another thread that adopts the plan reads the facts from the plan itself, never
+    /// from a word a later commit may already have replaced. The default stamps nothing.
+    fn stamp_before_publication(
+        &self,
+        plan: &mut engine::realtime::PreparedRenderPlan,
+        committed: &CompiledSession,
+        master: Option<&session::StableId>,
+        structure_epoch: u64,
+    ) {
+        let _ = (plan, committed, master, structure_epoch);
+    }
 }
 
 /// The epoch's meter rows (#1587a R2, #1588 D2): its meter tables, and the frame ring of

@@ -61,7 +61,7 @@ fn boot_options(quantum: u32) -> WebBootOptions {
 #[test]
 fn staging_holds_the_grammars_longest_id_and_widest_source_and_refuses_an_overlong_id() {
     let projection = project_buffers(1, 48_000, 128).expect("bridge projection");
-    let mut buffers = allocate_buffers(projection).expect("staging");
+    let (mut buffers, _) = allocate_buffers(projection).expect("staging");
     assert_eq!(buffers.source_id.len(), session::STABLE_ID_MAXIMUM_BYTES);
     assert_eq!(
         buffers.source_pcm.len(),
@@ -1009,6 +1009,13 @@ fn bridge_resource_rows_are_exact() {
     let instance_bytes =
         (size_of::<Option<EffectInstance>>() + size_of::<u32>()) as u64 + effect_ids;
     let frame_bytes = frame_bytes + instance_bytes;
+    // #1332 S5: the boot plan's own words, and what the two halves share: the successor record,
+    // the lifecycle word (an `Arc`'s two counts and the word, padded to a count's alignment) and
+    // the hand-back ring, whose bytes the ring itself walks.
+    let words = engine::realtime::published_words_retained_bytes::<2>() as u64;
+    let lifecycle = (3 * size_of::<usize>()) as u64;
+    let ring = host.test_control().retired_shapes.retained_bytes();
+    let frame_bytes = frame_bytes + 2 * words + lifecycle + ring;
     let expected_bridge_metadata = projection
         .report
         .bridge_metadata_bytes
@@ -7820,14 +7827,15 @@ mod structural_apply {
         );
 
         // The header the swap retired says so and names the one that replaced it; the adopted
-        // header carries no successor (nothing waits).
+        // header carries no successor (nothing waits). The adopting block parks the retired
+        // tables for one block (#1332 S5): nothing is in the hand-back ring yet, so no service
+        // step on another thread could free the header the page still reads in this block.
+        assert_eq!(rig.host.test_control().retired_shapes.queued_len(), 0);
         let ready = rig.host.test_render();
         let retired = ready
-            .retired_shapes
-            .iter()
-            .flatten()
-            .next()
-            .expect("the retired tables wait for the service step");
+            .parked
+            .as_ref()
+            .expect("the adopting block parks the retired tables");
         assert_eq!(retired.meter_header.retired, 1);
         assert_eq!(retired.meter_header.track_count, 9);
         assert_ne!(retired.successor_address, 0);
@@ -7851,6 +7859,12 @@ mod structural_apply {
         // And the stream goes on in the successor's frame.
         let later = poll_cadence(&mut rig, 3, 1, 0);
         assert!(!later.is_empty());
+        // The next block handed the retired tables back; the service step frees them, on the
+        // control side (#1332 S5).
+        assert!(rig.host.test_render().parked.is_none());
+        assert_eq!(rig.host.test_control().retired_shapes.queued_len(), 1);
+        assert_eq!(rig.host.service(), RESULT_OK);
+        assert_eq!(rig.host.test_control().retired_shapes.queued_len(), 0);
         for (header, frame) in &later {
             assert_eq!(header.track_count, 10);
             assert_eq!(frame.len(), 33);
@@ -8952,10 +8966,10 @@ mod structural_apply {
         assert_eq!(PLAN_LATENCY_BYTES, 64);
 
         // A host that is not ready refuses and leaves the record alone.
-        rig.host.render.status.state = STATE_FAILED;
+        rig.host.set_state_for_test(STATE_FAILED);
         assert_eq!(rig.host.read_plan_latency(), RESULT_WRONG_STATE);
         assert_eq!(*rig.host.plan_latency(), WebPlanLatency::default());
-        rig.host.render.status.state = STATE_READY;
+        rig.host.set_state_for_test(STATE_READY);
 
         // After boot the record holds the boot plan's row, copied.
         assert_eq!(rig.host.read_plan_latency(), RESULT_OK);
