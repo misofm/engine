@@ -231,3 +231,15 @@ The amendment's "20.00" was #2132's static count: main already executes 10/19/29
 17-23); the gap to the key-class ideal is the lexicographic sort itself (compressor-major, so the
 EQ, gate and drive runs split across the compressor boundary), which is the bound the design
 accepts (3.3), not an implementation gap.
+
+### Attempt 1 verdict (bounded opus-high verify, 2026-10-27): PASS
+
+- No BLOCKER or MAJOR finding. The widened rack swap rule (a channel-less bypassed lane trades with an uncontrolled lane) moves every per-lane part with the strip; no bit-moving case was found. An extra verifier mutant (the cross-stage swap leaves the shunt line and `zero_run` behind) turns gate 1's static arm red.
+- The refusal rule terminates: each refusal fixes one new strip, so an episode has at most `span` refusals. Refusals reset only on a new fact.
+- Realtime: the pack, dwell and settle paths allocate nothing and make no syscalls; all tables are boxed at bind.
+- MINORs, recorded and not folded:
+  1. Each visited dirty group is sorted in full, and each refusal re-sorts. The per-block sort work is bounded (at most 4W sorts) but grows with plan size, not only with `B_total`. This goes to the performance pass.
+  2. Gate 1 feeds the same signal to every track; strip diversity comes from the parameters and the draws.
+  3. The `settle_edges` swap in rack `swap_lanes` is dead, because the next drain rewrites it. It is harmless.
+  4. A plan carry during a hold and a displaced group's fold are left to existing tests (#1782a gate 3, #1981 gate 1).
+- Known scope limit: stored effect-bypass automation does not render yet (`controls::automation_row_renders` covers fader, mute and VCA only), so the automated-bypass pin holds only static and live-written bypass. That is conservative: it can cost a pack, never a bit.
