@@ -86,3 +86,12 @@ Baseline production plus only the extended owner is RED: `cargo test --locked -p
 Both known origins are copied during carry. The existing origin-free `set_heard(value)` API remains compatible with graph callers and explicitly makes provenance unknown; it cannot establish equivalence. Prepared values have the known held origin at node time zero. The original value evaluation still uses the same clipped target-time arithmetic, now factored to retain that time as metadata. Composed cursor storage is charged by `Composed::bytes`, builtin sizes use the live `size_of` report, and graph route-cursor accounting calls that same composition helper; no hardcoded byte charge was introduced.
 
 The owner pauses at this compiling, focused-green tranche for an exact-path local checkpoint. Full automation/builtins-compiler suites, independent adversarial verdict and upstream synchronization remain pending. No remote completion is claimed.
+
+
+### Full focused suites (implementation checkpoint `9aa721bea`)
+
+`cargo test --locked -p automation -p builtins-compiler --features builtins-compiler/test-support` passed once with exit 0: 102 tests passed, three pre-existing tests ignored, zero failures; both crates' doc-tests passed (`full-green.log`). This includes the existing composed/cell event differentials, scalar/bank arithmetic parity, checked resource reports and realtime allocation gates, including `a_builtin_lane_swap_allocates_nothing`. No duplicate full workspace or target matrix was run locally.
+
+All commands used the serial wrapper. Verification initially waited for external engine tests/release builds. During this full suite an external engine Wasm probe began compiling only after our offline compilation had finished and our tests were running; no owned offline compiler subtree remained to pause, and running tests were not suspended. These results are correctness evidence, not timing or benchmark measurements.
+
+Implementation is locally checkpointed and full focused verification is green. Fresh independent Astra review, proportional batch qualification, upstream delivery and matching GitHub synchronization remain root's responsibility. No PASS or remote completion is inferred from implementation evidence alone.
