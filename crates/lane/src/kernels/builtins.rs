@@ -2416,7 +2416,8 @@ pub fn meter_held_block<L: Lane>(
     let mut high = [0.0; 8];
     let mut reload_low = [0.0; 8];
     let mut reload_high = [0.0; 8];
-    let mut decay = [1.0; 8];
+    // Every lane read by L::load is overwritten from seeds below; the unused suffix is unread.
+    let mut decay = [0.0; 8];
     for (lane, seed) in seeds[..L::WIDTH].iter().enumerate() {
         held[lane] = seed.held;
         low[lane] = (seed.remaining & 0xffff) as f32;
