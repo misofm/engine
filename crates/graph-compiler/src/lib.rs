@@ -300,6 +300,10 @@ pub struct GraphRackBankReport {
     /// Each chain's level window after placement (issue #2136): `[asap', ALAP]` of its first slot,
     /// the window [`BankUtilisation::of`] intersects. Empty when the backend has no bank width.
     pub windows: BTreeMap<RackChainId, (u64, u64)>,
+    /// Every node a bank planner groups -- a rack chain's first slot, a builtin strip stage -- at
+    /// its placement level (issue #2136): the set the placement's bank count was taken over, so a
+    /// test can hold it to the groups the planners formed.
+    pub planned_levels: BTreeMap<GraphNodeId, u64>,
 }
 
 /// How well a plan's bound banks use their lanes (issue #2132, `docs/BANKING_DESIGN.md`'s

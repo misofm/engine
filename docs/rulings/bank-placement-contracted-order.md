@@ -59,15 +59,23 @@ contraction the consumers move with the unit and nothing is declined.
 8. **The #966 invariant is a window check.** A bankable chain whose slots are not consecutive in
    ASAP still fails the compile; a bank slot still binds only when its members share a placement
    level at that slot.
-9. **A merge that saves no bank is refused** (attempts 2 and 3). The sweep commits a stab's
-   members at one level only when that adds fewer banks to the key than the level plan would. Both
-   sides count over the key's nodes already placed at each level `P`: merged at `M`,
-   `ceil((P_M + n) / W) - ceil(P_M / W)`; split, that difference summed over the members' own
-   floors. Otherwise each member keeps its own floor, as the level plan places it. Nodes a later
-   stab places at those levels are not seen: a limit of the online greedy. A merge that saves no bank only moves lanes between banks: a strip that
-   was alone at its level (a silent aux beside active groups) would run inside a bank of active
-   lanes, with its fader and matrix behind it, instead of skipping with a bank of its own -- more
-   work on silence for nothing (the owner's skip-work-on-silence rule).
+9. **A merge that saves no bank is refused** (attempts 2 to 4). The sweep commits a stab's
+   members at one level only when that adds fewer banks than the level plan would. The count is
+   the bank planners' own: `place_over_windows` takes a `banks_of` callback, and the graph
+   compiler's counts every node a planner will group -- a rack chain's first slot as the rack
+   planner's candidate (rack, program, pool class), a builtin strip stage by (stage, pool class) --
+   through `rack_compiler::plan_bank_groups` itself, whether the sweep keyed the node for
+   placement or placed it as a follower. Merged at `M` the delta is `banks(P_M + members) -
+   banks(P_M)`; split, that delta summed over the members' own floors. **Invariant: the set
+   counted at (planner key, level) is the members the planner will group there, minus the nodes
+   later stabs place at that level** (a limit of the online greedy). The report's
+   `planned_levels` exposes the set and `bank_levels.rs` holds it to the plan on every compile.
+   One more limit: #971 may move a stranded mono track to the stereo pool after placement.
+   Otherwise each member keeps its own floor, as the level plan places it. A merge that saves no
+   bank only moves lanes between banks: a strip that was alone at its level (a silent aux beside
+   active groups) would run inside a bank of active lanes, with its fader and matrix behind it,
+   instead of skipping with a bank of its own -- more work on silence for nothing (the owner's
+   skip-work-on-silence rule).
 10. **Accepted trade: a merge that saves a bank may still run more banks on silence.** At W=4,
     floors holding 3 silent, 3 silent and 2 active nodes merge into 2 banks from 3; if the two
     active lanes land in different banks, executed banks on a silent-heavy block go 1 -> 2. The

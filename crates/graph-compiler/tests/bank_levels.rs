@@ -48,7 +48,9 @@ use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
     GraphRuntimeProcessor, TrackStage,
 };
-use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
+use graph_compiler::{
+    Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
+};
 use session::{
     ChannelMatrix, CompileCaps, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam,
     ParameterChannel, ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionModel,
@@ -305,6 +307,7 @@ pub fn compile_bind_render(
         }
     };
 
+    assert_placement_counts_the_plan(&artifact);
     let level_of: BTreeMap<&GraphNodeId, u64> = artifact
         .graph()
         .dependency_levels
@@ -1830,4 +1833,80 @@ fn the_banked_console_arena_equals_the_bank_unaware_arena() {
         banked, unaware,
         "a merged cohort span must not hold slots past the last run that reads them"
     );
+}
+
+/// Issue #2136's placement invariant, checked on a compiled plan: the set the placement's bank
+/// count was taken over at each level (`GraphRackBankReport::planned_levels`) is exactly the
+/// members the bank planners grouped there -- every rack-chain first slot of every plan group at
+/// the group's level, and every member of every builtin bank, each builtin bank at one level. The
+/// count would then miss no node a planner banks, and count none it does not.
+///
+/// Called on every compile in this file, so the randomized console corpus
+/// (`randomized_consoles_compile_bind_and_render_the_scalar_bits`) holds it on every seed;
+/// [`the_placement_counts_the_planners_groups_on_c1`] names the C1 fixtures.
+fn assert_placement_counts_the_plan(artifact: &PreparedGraphBuiltinsArtifact) {
+    let report = &artifact.report().rack_cohorts;
+    if report.planned_levels.is_empty() {
+        // No bank width: nothing was placed for banking.
+        return;
+    }
+    let mut counted: BTreeMap<u64, BTreeSet<GraphNodeId>> = BTreeMap::new();
+    for (node, level) in &report.planned_levels {
+        counted.entry(*level).or_default().insert(node.clone());
+    }
+    let mut grouped: BTreeMap<u64, BTreeSet<GraphNodeId>> = BTreeMap::new();
+    for group in &report.plan.groups {
+        for chain in group.members.iter().flatten() {
+            let first = report.chains[chain][0].clone();
+            grouped
+                .entry(group.level)
+                .or_default()
+                .insert(GraphNodeId::Effect(first));
+        }
+    }
+    for bank in artifact.prepared_builtin_banks() {
+        let levels: BTreeSet<u64> = bank
+            .members
+            .iter()
+            .map(|member| {
+                *report
+                    .planned_levels
+                    .get(member)
+                    .unwrap_or_else(|| panic!("builtin member {member:?} is not counted"))
+            })
+            .collect();
+        assert_eq!(
+            levels.len(),
+            1,
+            "a builtin bank at one placement level: {levels:?}"
+        );
+        let level = *levels.first().expect("one level");
+        grouped
+            .entry(level)
+            .or_default()
+            .extend(bank.members.iter().cloned());
+    }
+    assert_eq!(
+        counted, grouped,
+        "the placement counted exactly the members the planners grouped at each level"
+    );
+}
+
+/// The placement invariant on the C1 consoles and the irregular graph at the build's width
+/// ([`assert_placement_counts_the_plan`]): the submix faders and matrices follow their drives and
+/// are counted where the builtin planner groups them.
+///
+/// Test value: red when the bank count skips the nodes the sweep places as followers (they are
+/// banked but were not counted, #2136 attempt 3) or counts nodes no planner groups.
+#[test]
+fn the_placement_counts_the_planners_groups_on_c1() {
+    for text in [
+        include_str!("../../../fixtures/session/v1/console-c1-16.json"),
+        include_str!("../../../fixtures/session/v1/console-c1-64.json"),
+        include_str!("../../../fixtures/session/v1/irregular-graph.json"),
+    ] {
+        let model = parse_session_json(text).expect("the fixture parses");
+        let outcome = compile_bind_render(&model, Backend::current(), 1, Collapse::Unarmed);
+        assert_eq!(outcome.compile, None, "the fixture compiles");
+    }
 }
