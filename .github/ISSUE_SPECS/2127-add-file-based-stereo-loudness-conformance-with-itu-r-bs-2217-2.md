@@ -209,3 +209,22 @@ Attempt 1 failed required CI for [PR #2169, run 40475574564](https://github.com/
 Bounded attempt 2, Sol commit `f7707d436e8117ed4bb0ddd957ba753d326405de`, changes exactly three active string occurrences in `official_files.rs` and its data README to `MISO_ENGINE_LOUDNESS_FIXTURES`. There is no alias, vocabulary-table entry, new test, manifest/byte change, DSP change or tolerance change. Historical frozen proof scripts and logs retain the name they actually used.
 
 The exact blocking command `bash scripts/check-env-vocabulary.sh` passed through the shared serial wrapper (63 documented names; one mandatory engine prefix). Evidence: `engine-work-evidence/easy3-20261027/2127/attempt2-env-vocabulary.log`. The author worktree is clean; no local Cargo, test binary or timing workload ran for this correction. The existing vocabulary owner discriminated the defect, so no new test is introduced. Fresh Astra narrow verification and full required qualification on the corrected head remain mandatory before merge/closure.
+
+### Fresh independent bounded attempt 2 verdict — PASS, final CI still required
+
+Astra reviewed author commit `f7707d436e8117ed4bb0ddd957ba753d326405de`, integrated at
+`6209df13285c701d277e9d67b80df9db25932465`. The entire correction is three occurrences in two
+files: the environment lookup, its missing-variable diagnostic and the README command now use
+`MISO_ENGINE_LOUDNESS_FIXTURES`. There is no compatibility alias, manifest, PCM reader,
+measurement, acquisition, tolerance or production change. The frozen remote proof remains an
+accurate record of its original environment spelling and is not rewritten.
+
+The actual `check-env-vocabulary.sh` owner requires the `MISO_ENGINE_` prefix across scanned
+repository files, while its table equality applies only to names used under `tools/` or
+`scripts/`; a crate-only table row would therefore be incorrect. The author ran this unchanged
+owner through the serial wrapper and recorded `env vocabulary: ok (63 names, one MISO_ENGINE_
+prefix)` in `2127/attempt2-env-vocabulary.log`. This directly addresses the observed required-CI
+failure without weakening the gate. No new/rewritten test or duplicate official-corpus run is
+needed for the constant-string correction; the original test-value judgment and nineteen-file
+measurement evidence remain applicable. **PASS this bounded attempt 2 correction**, contingent
+on the mandatory corrected qualification run for final delivery.
