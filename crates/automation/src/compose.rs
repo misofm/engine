@@ -45,7 +45,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::events::target_toward;
+use crate::events::{target_time_toward, target_toward};
 use crate::{CellEvents, CellState, Completion, Event, EventKind, NodeSpan, Program, SeekMode};
 
 /// A composed target whose bits decide change only.
@@ -112,6 +112,10 @@ pub struct ComposeCursor {
     jump: u32,
     /// The value the output has heard from this curve: its last event, held or not (R19-3).
     heard: f32,
+    /// Origins of the heard value and the cell's last non-held target. Output holds may change
+    /// the cell's ramp completion without changing either origin; held events move only heard.
+    heard_at: Option<i64>,
+    target_at: Option<i64>,
     // The walk's scratch, meaningful only inside [`Composed::walk`].
     /// The state before the pull that produced `next`, and the offset that pull started at.
     before: CellState,
@@ -157,9 +161,48 @@ impl ComposeCursor {
         self.heard
     }
 
-    /// Sets the heard value (a carry, a placement).
+    /// Sets the heard value without an origin (an existing caller's carry or placement).
+    /// Such a cursor cannot establish value equivalence until known event origins replace it.
     pub const fn set_heard(&mut self, value: f32) {
         self.heard = value;
+        self.heard_at = None;
+        self.target_at = None;
+    }
+
+    /// Sets the heard value from a known node time (a placement).
+    pub const fn set_heard_at(&mut self, value: f32, at: i64) {
+        self.heard = value;
+        self.heard_at = Some(at);
+    }
+
+    /// Seeds the target and heard value from node time `at` (a placement).
+    pub fn seed_at(&mut self, value: f32, at: i64) {
+        self.state.seed_target(value);
+        self.heard = value;
+        self.heard_at = Some(at);
+        self.target_at = Some(at);
+    }
+
+    /// Carries a predecessor's event state, values and their origins. The successor's cell,
+    /// kind and block jump remain its own.
+    pub fn carry_from(&mut self, carried: &Self) {
+        self.state = carried.state;
+        self.heard = carried.heard;
+        self.heard_at = carried.heard_at;
+        self.target_at = carried.target_at;
+    }
+
+    /// Whether the successor cell agrees at both origins of this cursor's carried values.
+    /// The heard origin can differ from the non-held target's when grid events were held.
+    #[must_use]
+    pub fn values_match(&self, program: &crate::CellProgram<'_>) -> bool {
+        self.heard_at.is_some_and(|at| {
+            crate::value_at(program.segments(), at).to_bits() == self.heard.to_bits()
+        }) && self.state.target().is_none_or(|target| {
+            self.target_at.is_some_and(|at| {
+                crate::value_at(program.segments(), at).to_bits() == target.to_bits()
+            })
+        })
     }
 
     /// Sets the block's jump length for a [`crate::JumpLength::Block`] cell (the caller resolves
@@ -274,6 +317,9 @@ impl<T: Composable> Composed<T> {
                 state,
                 jump: 0,
                 heard: seed,
+                // Before the first nonnegative segment, value_at holds its start value.
+                heard_at: Some(0),
+                target_at: Some(0),
                 before: state,
                 resume: 0,
                 next: None,
@@ -570,7 +616,7 @@ impl<T: Composable> Composed<T> {
             let Some(time) = span.time_at(offset) else {
                 break;
             };
-            let merged = merge(&mut self.cursors, offset);
+            let merged = merge(&mut self.cursors, program, offset, time);
             let landing = span.step_offset() == Some(offset) && (merged.set || merged.jump);
             let event = self.decide(landing, offset, time, merged, &mut compose);
             // R19-3: a gate's jump that retargets the output is a column jump; a seek landing is
@@ -764,7 +810,7 @@ struct Merged {
 /// Take every cursor's event at `offset`: every event is heard (R19-3: a held grid event updates
 /// the heard values and does not retarget the output, so a later gate event or record composes
 /// the grid's value, U2 fold 1), and a held one is also shown to the held-event rule.
-fn merge(cursors: &mut [ComposeCursor], offset: u32) -> Merged {
+fn merge(cursors: &mut [ComposeCursor], program: &Program, offset: u32, time: i64) -> Merged {
     let mut merged = Merged::default();
     for cursor in cursors.iter_mut() {
         let Some(event) = cursor.next.filter(|event| event.offset == offset) else {
@@ -775,11 +821,19 @@ fn merge(cursors: &mut [ComposeCursor], offset: u32) -> Merged {
         cursor.moved = !event.held;
         cursor.shown = event.value;
         cursor.heard = event.value;
+        cursor.heard_at = Some(program.cell(cursor.cell as usize).map_or(time, |cell| {
+            if event.kind == EventKind::Set {
+                time
+            } else {
+                target_time_toward(&cell, &cursor.state, time, event.ramp)
+            }
+        }));
         if event.held {
             merged.held = true;
             merged.held_ramp = merged.held_ramp.max(event.ramp);
             continue;
         }
+        cursor.target_at = cursor.heard_at;
         merged.ramp = merged.ramp.max(event.ramp);
         match event.kind {
             EventKind::Set => merged.set = true,

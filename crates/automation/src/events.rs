@@ -180,10 +180,17 @@ impl CellState {
     /// and an outstanding held event is cleared, so the next retarget to an unchanged value emits
     /// nothing; the current target is kept.
     pub fn reposition(&mut self, program: &CellProgram<'_>, t: i64) {
-        self.cursor = to_cursor(program.discontinuities.partition_point(|&time| time < t));
+        self.reindex(program, t);
         self.ramp_done = IDLE;
         self.deferred = IDLE;
         self.held = false;
+    }
+
+    /// Places only the discontinuity cursor into a successor table, retaining its target,
+    /// held flag, ramp and deferred jump. The caller must first establish that the successor
+    /// agrees at the origins of the carried values; its ordinary events then continue.
+    pub fn reindex(&mut self, program: &CellProgram<'_>, t: i64) {
+        self.cursor = to_cursor(program.discontinuities.partition_point(|&time| time < t));
     }
 
     /// The most recently recorded ramp's completion node time, retained after it ends. A
@@ -347,6 +354,20 @@ pub(crate) fn target_toward(
     start: i64,
     n: u32,
 ) -> f32 {
+    value_at(
+        program.segments,
+        target_time_toward(program, state, start, n),
+    )
+}
+
+/// The node time from which `target_toward` reads its value. Retained by a composed cursor so
+/// adoption can evaluate the successor at the same origin, independently of output holds.
+pub(crate) fn target_time_toward(
+    program: &CellProgram<'_>,
+    state: &CellState,
+    start: i64,
+    n: u32,
+) -> i64 {
     let mut at = completion_of(program.completion, start, n);
     let ahead = program
         .discontinuities
@@ -357,7 +378,7 @@ pub(crate) fn target_toward(
     {
         at = next - 1;
     }
-    value_at(program.segments, at)
+    at
 }
 
 fn to_cursor(index: usize) -> u32 {
