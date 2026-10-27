@@ -31,7 +31,7 @@
 //! by `GraphEdgeId`. A single-input "reduction" was already the identity (`values[0]`), so folding
 //! it into an in-place read is bit-preserving by construction, not by tolerance.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     DependencyLevel, GraphEdgeId, GraphNodeId, GraphPortKind, GraphSpec, InsertedDelay, RackId,
@@ -110,7 +110,9 @@ pub struct Tap {
 /// The executable form of a prepared graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionProgram {
-    /// Level-major, node-id-sorted within a level: the sequential schedule minus elided nodes.
+    /// The executor order (issue #2134): the sequential schedule minus elided nodes, reordered
+    /// only where a bank's members sit at different levels ([`lower`]'s contracted order). On a
+    /// plan whose banks each sit at one level it is level-major, node-id-sorted within a level.
     pub ops: Box<[Op]>,
     pub inputs: Box<[InputRef]>,
     pub delays: Box<[DelaySpec]>,
@@ -164,6 +166,10 @@ pub enum ProgramError {
     ScheduleMismatch,
     /// An edge runs backwards in the schedule.
     NotTopological,
+    /// The bank member lists admit no executor order (issue #2134): the op graph contracted by
+    /// bank is cyclic, or a bank's members feed one another. A bank is one unit, so its members
+    /// must all be ready at once; no placement satisfies such a plan.
+    CohortCycle,
     /// A count did not fit its index type.
     Overflow,
 }
@@ -509,6 +515,110 @@ impl ReleasedSlots {
     }
 }
 
+/// The executor's node order: a topological order of the graph **contracted by bank**, keyed by
+/// canonical schedule position (issue #2134, the banking design's M2 rule).
+///
+/// Each bank is one node of the contracted graph and every other node is its own. Kahn's
+/// algorithm runs with a `BTreeSet` ready set keyed by schedule position. A bank becomes ready
+/// only when every producer of **every** member has been emitted, and then all its members enter
+/// the ready set under their own positions; every other node becomes ready when its own
+/// producers have. So in the returned order a bank's first member follows every member's
+/// producers, which is what `runtime::units_of` needs to place the whole bank there, and every
+/// consumer of a member follows that member: a consumer that the schedule placed before a later
+/// member's producer sinks with the bank instead of reading a value that does not exist yet.
+///
+/// The key reproduces the schedule exactly on every plan whose banks each sit at one dependency
+/// level. The schedule is level-major, so such a bank's members' producers all precede its first
+/// member, every node is ready at its own position, and min-key Kahn over a topological order
+/// returns that order. Only a bank whose members sit at different levels moves anything.
+///
+/// A bank whose members feed one another, or a set of banks whose contraction is cyclic, has no
+/// executor order and is refused with [`ProgramError::CohortCycle`]. An id that is not a node of
+/// this spec is ignored, and a node listed by two banks stays with the first.
+///
+/// `O(nodes + edges + members)` set operations, each `O(log nodes)`.
+fn contracted_order(
+    canonical: &[usize],
+    position: &[usize],
+    ends: &[(usize, usize)],
+    banks: &[Vec<GraphNodeId>],
+    spec: &GraphSpec,
+) -> Result<Vec<usize>, ProgramError> {
+    let node_count = canonical.len();
+    let mut cohort_of: Vec<Option<usize>> = vec![None; node_count];
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    for bank in banks {
+        let mut list: Vec<usize> = Vec::new();
+        for id in bank {
+            let Some(index) = node_index(spec, id).map(|index| index as usize) else {
+                continue;
+            };
+            if cohort_of[index].is_none() && !list.contains(&index) {
+                list.push(index);
+            }
+        }
+        // A bank of one member constrains nothing beyond its own edges.
+        if list.len() > 1 {
+            for index in &list {
+                cohort_of[*index] = Some(members.len());
+            }
+            members.push(list);
+        }
+    }
+    let mut outgoing: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    let mut pending = vec![0usize; node_count];
+    let mut cohort_pending = vec![0usize; members.len()];
+    for &(source, destination) in ends {
+        outgoing[source].push(destination);
+        match cohort_of[destination] {
+            Some(cohort) if cohort_of[source] == Some(cohort) => {
+                return Err(ProgramError::CohortCycle);
+            }
+            Some(cohort) => cohort_pending[cohort] += 1,
+            None => pending[destination] += 1,
+        }
+    }
+    let mut ready: BTreeSet<usize> = BTreeSet::new();
+    for &index in canonical {
+        match cohort_of[index] {
+            Some(cohort) if cohort_pending[cohort] == 0 => {
+                ready.insert(position[index]);
+            }
+            Some(_) => {}
+            None if pending[index] == 0 => {
+                ready.insert(position[index]);
+            }
+            None => {}
+        }
+    }
+    let mut emitted = Vec::with_capacity(node_count);
+    while let Some(next) = ready.pop_first() {
+        let index = canonical[next];
+        emitted.push(index);
+        for &destination in &outgoing[index] {
+            match cohort_of[destination] {
+                Some(cohort) => {
+                    cohort_pending[cohort] -= 1;
+                    if cohort_pending[cohort] == 0 {
+                        ready.extend(members[cohort].iter().map(|member| position[*member]));
+                    }
+                }
+                None => {
+                    pending[destination] -= 1;
+                    if pending[destination] == 0 {
+                        ready.insert(position[destination]);
+                    }
+                }
+            }
+        }
+    }
+    if emitted.len() == node_count {
+        Ok(emitted)
+    } else {
+        Err(ProgramError::CohortCycle)
+    }
+}
+
 /// One logical buffer's lifetime, in op indices.
 struct Lifetime {
     def_op: usize,
@@ -524,25 +634,37 @@ struct Lifetime {
 ///
 /// `banks` is one entry per homogeneous bank this plan will render, each listing that bank's
 /// member nodes in any order and from any rack. It is the *plan's* answer, not a guess from the
-/// node id, and it is used for one thing: the op ranges those banks reorder. Ids that are not
-/// nodes of this spec are ignored -- a stale id can only widen a window, never unsound one.
+/// node id, and it is used for two things: the op order (each bank is one node of the contracted
+/// graph, issue #2134) and the op ranges those banks reorder. Ids that are not nodes of this spec
+/// are ignored -- a stale id can only widen a window, never unsound one.
 ///
-/// ## Banks reorder the schedule, and colouring has to survive it (issue #169)
+/// ## Banks reorder the op order, and colouring has to survive it (issue #169)
+///
+/// Colouring walks the ops in **op order**, and the op order is the executor order (issue #2134):
+/// the topological order of the graph contracted by bank, keyed by canonical schedule position
+/// (`contracted_order`). On a plan whose banks each sit at one dependency level that is the
+/// level-major schedule itself.
 ///
 /// `runtime::units_of` emits a whole bank as **one unit at its first member's op position**, and
 /// that unit gathers every member before the kernel runs. Over the op range from a bank's first
-/// member to its last -- its *window* -- execution is therefore a permutation of the schedule
-/// this function coloured: a member scheduled after the first member runs *earlier*, and a
-/// non-member op scheduled between two members runs *later*.
+/// member to its last -- its *window* -- execution is therefore a permutation of the op order
+/// this function coloured: a member later in op order runs *earlier*, and a non-member op
+/// between two members runs *later*.
 ///
-/// A *single-slot* bank may not cross a dependency level (#96 F12) and ops are level-major, so
-/// every op in such a window sits at one level and no op in it reads another's output. Each op in
-/// the window therefore reads only values produced before the window and is read only after it.
-/// Its inputs are live entering the window and its output is dead until the window ends, so the
-/// whole soundness condition collapses to one sentence:
+/// The contracted order fixes what a window can hold. Every producer of every member precedes
+/// the first member, so a member reads only values produced before the window. A non-member op in
+/// the window reads values produced before the window or by a member, and the whole bank renders
+/// before it in either case; no member reads a non-member's output from inside the window. So a
+/// bank whose members sit at different levels (a cohort placed over a level window, #2136) has
+/// the same hazard as one at a single level, where no op in the window reads another's output at
+/// all: a value can only be overwritten too early, never read too early, and the whole soundness
+/// condition is one sentence:
 ///
 /// > **No physical slot may be recycled inside a bank window**, except to an op proven to render
 /// > after the run that last touched it (the exception is issue #931's, below).
+///
+/// The window is the unit: the sentence keeps its meaning because the positions `render_bounds`
+/// bounds are op positions in the executed order, and runs execute in order of their first op.
 ///
 /// ## A cohort chain's window spans levels, and the sentence still holds (issues #181, #202)
 ///
@@ -614,8 +736,8 @@ struct Lifetime {
 ///   member whose consumer can no longer consume it in place.
 ///
 /// The invariant the doc on `is_dedicated` used to claim for bank members -- "no op may consume
-/// a member's buffer in place" -- is not needed and is not held. A member's consumer sits at a
-/// strictly later dependency level, so it runs after the whole bank unit, including the
+/// a member's buffer in place" -- is not needed and is not held. A member's consumer follows the member in the contracted
+/// op order and is not in its bank, so it runs after the whole bank unit, including the
 /// observers; overwriting a member's output there is safe.
 ///
 /// # Errors
@@ -781,6 +903,12 @@ fn lower_with(
         }
         reads_of[source] += 1;
     }
+
+    // ---- the executor order (issue #2134) ------------------------------------------------------
+    // Ops are emitted in the topological order of the graph contracted by bank, keyed by canonical
+    // schedule position, so a bank's first member in op order follows every member's producers.
+    // On a plan whose banks each sit at one level this is the schedule itself.
+    let order = contracted_order(&order, &position, &ends, banks, spec)?;
 
     // ---- pass 1: ops, logical buffers, aliases ---------------------------------------------
     let mut ops: Vec<Op> = Vec::with_capacity(node_count);

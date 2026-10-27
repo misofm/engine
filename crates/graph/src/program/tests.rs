@@ -1219,7 +1219,9 @@ fn touched(program: &ExecutionProgram, op: &Op) -> (Vec<u32>, Vec<u32>) {
 /// two different values: the schedule-later op recycled the slot. That is sound only if its run
 /// renders after the schedule-earlier op's run has finished, which is what this asserts against
 /// the executor's own run order ([`runs_in_runtime_order`]). An op writing its own input in place
-/// is the one exception, because that is one op, not two.
+/// is one exception, because that is one op, not two. A later slot of one fused run that reads an
+/// earlier slot's output and consumes its buffer in place is the other (issue #2134's cross-level corpus reaches it): the
+/// two are one run, in chain order, and the value passes along the chain.
 fn assert_no_slot_is_recycled_inside_a_bank_window(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -1228,9 +1230,13 @@ fn assert_no_slot_is_recycled_inside_a_bank_window(
 ) {
     let lanes = member_lanes(spec, banks);
     let mut run_of_op = vec![usize::MAX; program.ops.len()];
+    let mut slot_of_op = vec![0usize; program.ops.len()];
     for (position, run) in runs_in_runtime_order(program, &lanes).iter().enumerate() {
-        for op in run.iter().flatten() {
-            run_of_op[*op] = position;
+        for (slot, ops) in run.iter().enumerate() {
+            for op in ops {
+                run_of_op[*op] = position;
+                slot_of_op[*op] = slot;
+            }
         }
     }
     for members in banks {
@@ -1255,8 +1261,19 @@ fn assert_no_slot_is_recycled_inside_a_bank_window(
                         continue;
                     }
                     let (earlier, later) = (here.min(there), here.max(there));
+                    // One fused run, in chain order, the later op reading the earlier one's output:
+                    // the later slot computes over the resident block from the earlier one's
+                    // value, so sharing its buffer (an in-place consumer of the earlier slot) is
+                    // one value passed along the chain. Any other pair in one run is an alias.
+                    let reads_earlier = program
+                        .inputs_of(&program.ops[later])
+                        .iter()
+                        .any(|input| input.buffer == program.ops[earlier].output);
+                    let in_order_in_one_run = run_of_op[later] == run_of_op[earlier]
+                        && slot_of_op[later] > slot_of_op[earlier]
+                        && reads_earlier;
                     assert!(
-                        run_of_op[later] > run_of_op[earlier],
+                        in_order_in_one_run || run_of_op[later] > run_of_op[earlier],
                         "{label}: ops {here} and {there} share buffer {slot} inside a bank \
                          window, and op {later}, which recycled it, does not render in a later \
                          run than op {earlier}"
@@ -2030,4 +2047,336 @@ fn route_fold_shadowed_clauses_over_valid_programs() {
             "hazard {hazard}"
         );
     }
+}
+
+/// Every node's descendants (itself excluded), over every edge of `spec`.
+fn descendants(spec: &GraphSpec) -> Vec<std::collections::BTreeSet<usize>> {
+    let count = spec.nodes.len();
+    let mut outgoing: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for edge in &spec.edges {
+        let source = node_index(spec, &edge.source.node).expect("node") as usize;
+        let destination = node_index(spec, &edge.destination.node).expect("node") as usize;
+        outgoing[source].push(destination);
+    }
+    (0..count)
+        .map(|start| {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut stack = outgoing[start].clone();
+            while let Some(next) = stack.pop() {
+                if seen.insert(next) {
+                    stack.extend(outgoing[next].iter().copied());
+                }
+            }
+            seen
+        })
+        .collect()
+}
+
+/// Whether the graph contracted by `banks` has a cycle: an independent restatement of the
+/// condition [`contracted_order`] refuses, by depth-first search over the contracted nodes.
+fn contraction_is_cyclic(spec: &GraphSpec, banks: &[Vec<GraphNodeId>]) -> bool {
+    let count = spec.nodes.len();
+    let mut group: Vec<usize> = (0..count).collect();
+    for (bank, members) in banks.iter().enumerate() {
+        for id in members {
+            group[node_index(spec, id).expect("member") as usize] = count + bank;
+        }
+    }
+    let mut edges: std::collections::BTreeMap<usize, std::collections::BTreeSet<usize>> =
+        std::collections::BTreeMap::new();
+    for edge in &spec.edges {
+        let source = group[node_index(spec, &edge.source.node).expect("node") as usize];
+        let destination = group[node_index(spec, &edge.destination.node).expect("node") as usize];
+        if source == destination {
+            return true;
+        }
+        edges.entry(source).or_default().insert(destination);
+    }
+    // 0 unvisited, 1 on the stack, 2 finished.
+    let mut state = vec![0u8; count + banks.len()];
+    fn visit(
+        node: usize,
+        edges: &std::collections::BTreeMap<usize, std::collections::BTreeSet<usize>>,
+        state: &mut [u8],
+    ) -> bool {
+        state[node] = 1;
+        for next in edges.get(&node).into_iter().flatten() {
+            if state[*next] == 1 || (state[*next] == 0 && visit(*next, edges, state)) {
+                return true;
+            }
+        }
+        state[node] = 2;
+        false
+    }
+    (0..count + banks.len()).any(|node| state[node] == 0 && visit(node, &edges, &mut state))
+}
+
+/// Issue #2134 gate 1: over seeded graphs with **cross-level cohorts** -- banks whose members sit
+/// at different dependency levels, with routes into submixes and sends hanging off the early
+/// members -- the program renders the value the semantic graph does in the order the executor
+/// runs it, and no slot is recycled inside a bank window.
+///
+/// The cohort former is test support, not a planner: per key (slot index and cohort), it takes
+/// effects in `(ALAP, ASAP, id)` order and adds one to the open bank while the members' level
+/// windows `[ASAP, ALAP]` still share a level and no path joins the newcomer to a member. Windows
+/// alone do not keep the contracted graph acyclic, so some plans are cyclic; for those the
+/// lowering must refuse with [`ProgramError::CohortCycle`] exactly when an independent depth-first
+/// search finds the cycle.
+///
+/// Test value: red when any op renders before one of its producers under a cross-level cohort --
+/// the first-member hoist (lowering in the canonical order) diverges on the moved graphs, and a
+/// sink that leaves a member's consumer at its canonical position fails to lower.
+#[test]
+fn contracted_order_preserves_dataflow_on_random_graphs() {
+    let mut state = 0x2134_6a0c_0de5_eed1_u64;
+    let mut cross_level_graphs = 0usize;
+    let mut moved_graphs = 0usize;
+    let mut cyclic_graphs = 0usize;
+    for graph in 0..1500_u32 {
+        let track_count = (xorshift(&mut state) % 6) as usize + 2;
+        let submix_count = (xorshift(&mut state) % 3) as usize;
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        let mut route_index = 0usize;
+        let mut cohort_of_strip: Vec<usize> = Vec::new();
+        let names: Vec<String> = (0..track_count)
+            .map(|track| format!("t{track:02}"))
+            .chain((0..submix_count).map(|submix| format!("s{submix:02}")))
+            .collect();
+        for (strip, name) in names.iter().enumerate() {
+            let is_submix = strip >= track_count;
+            // A track routes to the output or into one submix; a submix to the output.
+            let into = if is_submix || submix_count == 0 || xorshift(&mut state).is_multiple_of(3) {
+                None
+            } else {
+                Some(format!(
+                    "s{:02}",
+                    (xorshift(&mut state) % submix_count as u64) as usize
+                ))
+            };
+            route_index += 1;
+            let route = format!("r{route_index:02}");
+            let (mut strip_nodes, mut strip_edges) = plain_track(name, &[route.as_str()]);
+            if let Some(submix) = &into {
+                for edge in &mut strip_edges {
+                    if edge.id
+                        == (GraphEdgeId::RouteDestination {
+                            route_id: gid(&route),
+                        })
+                    {
+                        edge.destination = port(
+                            stage_node(submix, TrackStage::Input),
+                            GraphPortKind::MainInput,
+                        );
+                    }
+                }
+            }
+            // A chain of one to three effects, so slot `k` sits at a level that depends on the
+            // strip's own chain length and, for a submix, on how deep its feeds are.
+            let slots = (xorshift(&mut state) % 3) as usize + 1;
+            cohort_of_strip.push((xorshift(&mut state) % 2) as usize);
+            strip_edges.retain(|edge| {
+                edge.id
+                    != GraphEdgeId::TrackMain {
+                        target: stage_node(name, TrackStage::PostDynamic),
+                    }
+            });
+            let mut upstream = stage_node(name, TrackStage::PostSimd1);
+            for slot in 0..slots {
+                let effect = GraphNodeId::Effect(crate::EffectNodeId {
+                    track_id: gid(name),
+                    rack: RackId::Dynamic,
+                    effect_id: gid(&format!("fx{slot}")),
+                });
+                strip_nodes.push(node(effect.clone()));
+                strip_edges.push(main_edge(
+                    GraphEdgeId::TrackMain {
+                        target: effect.clone(),
+                    },
+                    upstream,
+                    effect.clone(),
+                ));
+                // A send straight off the effect: a plain consumer of a member, which the
+                // contracted order must sink with the member's bank.
+                if xorshift(&mut state).is_multiple_of(3) {
+                    route_index += 1;
+                    let send = gid(&format!("r{route_index:02}"));
+                    let send_node = GraphNodeId::Route {
+                        route_id: send.clone(),
+                    };
+                    strip_nodes.push(node(send_node.clone()));
+                    strip_edges.push(main_edge(
+                        GraphEdgeId::RouteSource {
+                            route_id: send.clone(),
+                        },
+                        effect.clone(),
+                        send_node.clone(),
+                    ));
+                    strip_edges.push(main_edge(
+                        GraphEdgeId::RouteDestination { route_id: send },
+                        send_node,
+                        GraphNodeId::Output {
+                            output_id: gid("out"),
+                        },
+                    ));
+                }
+                upstream = effect;
+            }
+            strip_edges.push(main_edge(
+                GraphEdgeId::TrackMain {
+                    target: stage_node(name, TrackStage::PostDynamic),
+                },
+                upstream,
+                stage_node(name, TrackStage::PostDynamic),
+            ));
+            nodes.extend(strip_nodes.into_iter().filter(|candidate| {
+                !matches!(candidate.id, GraphNodeId::Output { .. }) || strip == 0
+            }));
+            edges.extend(strip_edges);
+        }
+        // A submix nothing routes into has a dangling input, which is still a valid graph.
+        let (spec, schedule, levels) = build(nodes, edges);
+        let mut delays: Vec<InsertedDelay> = Vec::new();
+        for edge in &spec.edges {
+            if !xorshift(&mut state).is_multiple_of(7) {
+                continue;
+            }
+            delays.push(InsertedDelay {
+                node: edge.destination.node.clone(),
+                edge_id: edge.id.clone(),
+                samples: LatencySamples(xorshift(&mut state) % 128 + 1),
+            });
+        }
+        // Windows: ASAP is the level, ALAP the reverse longest path anchored at the output.
+        let level_of: Vec<u64> = {
+            let mut level_of = vec![0u64; spec.nodes.len()];
+            for level in &levels {
+                for id in &level.nodes {
+                    level_of[node_index(&spec, id).expect("node") as usize] = level.level;
+                }
+            }
+            level_of
+        };
+        let depth = level_of.iter().copied().max().unwrap_or(0);
+        let mut alap = vec![depth; spec.nodes.len()];
+        for id in schedule.iter().rev() {
+            let index = node_index(&spec, id).expect("node") as usize;
+            for edge in spec.edges.iter().filter(|edge| &edge.source.node == id) {
+                let destination = node_index(&spec, &edge.destination.node).expect("node") as usize;
+                alap[index] = alap[index].min(alap[destination] - 1);
+            }
+        }
+        let reach = descendants(&spec);
+        let mut by_key: std::collections::BTreeMap<(String, usize), Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (index, candidate) in spec.nodes.iter().enumerate() {
+            let GraphNodeId::Effect(effect) = &candidate.id else {
+                continue;
+            };
+            let strip = names
+                .iter()
+                .position(|name| name == effect.track_id.as_str())
+                .expect("strip");
+            by_key
+                .entry((effect.effect_id.as_str().to_owned(), cohort_of_strip[strip]))
+                .or_default()
+                .push(index);
+        }
+        let mut banks: Vec<Vec<GraphNodeId>> = Vec::new();
+        for mut candidates in by_key.into_values() {
+            candidates.sort_by_key(|index| (alap[*index], level_of[*index], *index));
+            let mut open: Vec<usize> = Vec::new();
+            for candidate in candidates {
+                let low = open
+                    .iter()
+                    .chain(core::iter::once(&candidate))
+                    .map(|index| level_of[*index])
+                    .max()
+                    .expect("one");
+                let high = open
+                    .iter()
+                    .chain(core::iter::once(&candidate))
+                    .map(|index| alap[*index])
+                    .min()
+                    .expect("one");
+                let independent = open.iter().all(|member| {
+                    !reach[*member].contains(&candidate) && !reach[candidate].contains(member)
+                });
+                if open.len() < 4 && low <= high && independent {
+                    open.push(candidate);
+                } else {
+                    if open.len() > 1 {
+                        banks.push(
+                            open.iter()
+                                .map(|index| spec.nodes[*index].id.clone())
+                                .collect(),
+                        );
+                    }
+                    open = vec![candidate];
+                }
+            }
+            if open.len() > 1 {
+                banks.push(
+                    open.iter()
+                        .map(|index| spec.nodes[*index].id.clone())
+                        .collect(),
+                );
+            }
+        }
+        for bank in &mut banks {
+            bank.sort();
+        }
+        if !banks.iter().any(|bank| {
+            bank.iter()
+                .map(|id| level_of[node_index(&spec, id).expect("member") as usize])
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1
+        }) {
+            continue;
+        }
+        cross_level_graphs += 1;
+
+        let lowered = lower(&spec, &schedule, &levels, &delays, &banks);
+        if contraction_is_cyclic(&spec, &banks) {
+            cyclic_graphs += 1;
+            assert_eq!(
+                lowered.err(),
+                Some(ProgramError::CohortCycle),
+                "graph {graph}"
+            );
+            continue;
+        }
+        let program = lowered.unwrap_or_else(|error| panic!("graph {graph}: {error:?}"));
+        let canonical: Vec<u32> = schedule
+            .iter()
+            .map(|id| node_index(&spec, id).expect("node"))
+            .filter(|index| program.node_op[*index as usize].is_some())
+            .collect();
+        if program
+            .ops
+            .iter()
+            .map(|op| op.node)
+            .ne(canonical.iter().copied())
+        {
+            moved_graphs += 1;
+        }
+        let lanes = member_lanes(&spec, &banks);
+        assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "cross-level");
+        assert_program_matches_spec(&spec, &schedule, &delays, &program);
+        assert_eq!(
+            divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
+            None,
+            "graph {graph}"
+        );
+    }
+    // Pinned, not bounded, for the reason the #169 eval gives. `moved_graphs` is the non-vacuity
+    // guard: it counts the graphs whose executor order is not the schedule, which are the only
+    // ones a first-member hoist gets wrong.
+    assert_eq!(cross_level_graphs, 416, "the cross-level corpus moved");
+    assert_eq!(
+        moved_graphs, 372,
+        "the number of graphs the contraction reorders moved"
+    );
+    assert_eq!(cyclic_graphs, 14, "the number of cyclic plans moved");
 }

@@ -162,6 +162,7 @@ pub(crate) const fn min_padded_insert_members(width: BankWidth) -> usize {
 /// (issue #971, [`stranded_mono_tracks`]), and the builtin-stage planner reads the map afterwards,
 /// so it pools that track exactly as the rack chains were pooled. A console slot always banks, so a
 /// track that carries one -- in a session with a console, every track -- is never moved (#1098).
+#[cfg(test)]
 pub(crate) fn bind_rack_banks_indexed(
     effects: &EffectPreparedSession,
     prepared: &PreparedEffectIndex<'_>,
@@ -170,6 +171,25 @@ pub(crate) fn bind_rack_banks_indexed(
     dispatch: Backend,
     classes: &mut SessionPoolClasses,
 ) -> Result<(Vec<graph::GraphPreparedEffectBank>, GraphRackBankReport), GraphDiagnostic> {
+    bind_rack_banks_placed(
+        effects,
+        prepared,
+        ids,
+        levels,
+        &PlacementLevels::single_point(levels),
+        dispatch,
+        classes,
+    )
+}
+
+/// Every strip's rack chains, in session slot order, and each chain's program: the rack planner's
+/// candidates (one per `(strip, rack)` whose slots may bank), shared by the bind and by the
+/// placement's bank count ([`placement_levels`]) so the two read one candidate set.
+pub(crate) fn rack_chains(
+    effects: &EffectPreparedSession,
+    prepared: &PreparedEffectIndex<'_>,
+    ids: &[Option<EffectNodeId>],
+) -> Result<RackChains, GraphDiagnostic> {
     let model = effects.session.normalized_model();
     // One chain per (track, bankable rack), in session slot order.
     let mut chains: BTreeMap<RackChainId, Vec<EffectNodeId>> = BTreeMap::new();
@@ -224,6 +244,30 @@ pub(crate) fn bind_rack_banks_indexed(
         }
     }
 
+    Ok((chains, programs))
+}
+
+/// [`rack_chains`]' result: the chains' effect nodes and their programs.
+pub(crate) type RackChains = (
+    BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    BTreeMap<RackChainId, RackProgram>,
+);
+
+/// [`bind_rack_banks_indexed`] with the cohorts bucketed by `placement` (issue #2136,
+/// [`placement_levels`]) rather than by `levels`. `levels` stays the graph's: the path-arithmetic
+/// invariant below (#966) is checked on it, and the diagnostics name it.
+pub(crate) fn bind_rack_banks_placed(
+    effects: &EffectPreparedSession,
+    prepared: &PreparedEffectIndex<'_>,
+    ids: &[Option<EffectNodeId>],
+    levels: &[DependencyLevel],
+    placement: &PlacementLevels,
+    dispatch: Backend,
+    classes: &mut SessionPoolClasses,
+) -> Result<(Vec<graph::GraphPreparedEffectBank>, GraphRackBankReport), GraphDiagnostic> {
+    let (chains, programs) = rack_chains(effects, prepared, ids)?;
+    let model = effects.session.normalized_model();
+
     let empty = |dispatch, chains: BTreeMap<RackChainId, Vec<EffectNodeId>>| GraphRackBankReport {
         dispatch,
         plan: BankPlan {
@@ -234,6 +278,8 @@ pub(crate) fn bind_rack_banks_indexed(
         chains,
         utilisation: BankUtilisation::default(),
         utilisation_by_rack: RackLocation::ALL.map(|rack| (rack, BankUtilisation::default())),
+        windows: BTreeMap::new(),
+        planned_levels: placement.planned_levels.clone(),
     };
     let Some(width) = BankWidth::for_backend(dispatch) else {
         return Ok((Vec::new(), empty(dispatch, chains)));
@@ -287,8 +333,13 @@ pub(crate) fn bind_rack_banks_indexed(
                 return Err(diag("graph.internal.invariant", "$.effects"));
             }
         }
+        // Issue #2136: the cohort is bucketed by the level the placement sweep gave the chain's
+        // first slot, which aligns chains of one key class whose level windows intersect.
+        let Some(placed) = placement.level_of(&GraphNodeId::Effect(first.clone())) else {
+            return Err(diag("graph.internal.invariant", "$.effects"));
+        };
         candidates_by_level
-            .entry(level)
+            .entry(placed)
             .or_default()
             .push(CohortCandidate {
                 id: chain.clone(),
@@ -301,6 +352,25 @@ pub(crate) fn bind_rack_banks_indexed(
                 program: programs[chain].clone(),
             });
     }
+    // Every chain node's placement level: a slot binds when its members share one (#966, on the
+    // placement the cohort was bucketed by).
+    let placed_by_node: BTreeMap<&EffectNodeId, u64> = chains
+        .values()
+        .flatten()
+        .filter_map(|node| {
+            placement
+                .level_of(&GraphNodeId::Effect(node.clone()))
+                .map(|level| (node, level))
+        })
+        .collect();
+    // Each chain's window after placement (`[asap', ALAP]` of its first slot), for the report.
+    let windows: BTreeMap<RackChainId, (u64, u64)> = chains
+        .iter()
+        .filter_map(|(chain, nodes)| {
+            let first = GraphNodeId::Effect(nodes.first()?.clone());
+            Some((chain.clone(), placement.window_of(&first)?))
+        })
+        .collect();
     let mut levels_in: Vec<_> = candidates_by_level
         .into_iter()
         .map(|(level, candidates)| CohortLevel { level, candidates })
@@ -313,7 +383,7 @@ pub(crate) fn bind_rack_banks_indexed(
             group,
             pads(group, width),
             &chains,
-            &level_by_node,
+            &placed_by_node,
             effects,
             prepared,
             dispatch,
@@ -459,11 +529,25 @@ pub(crate) fn bind_rack_banks_indexed(
     // Issue #2132: the plan's lane use, from the plan itself.
     let fold_targets = route_fold_targets(model);
     let lanes = width.lanes() as usize;
-    let utilisation = BankUtilisation::of(&plan.groups, &bound_slots, lanes, &fold_targets, None);
+    let utilisation = BankUtilisation::of(
+        &plan.groups,
+        &bound_slots,
+        lanes,
+        &fold_targets,
+        &windows,
+        None,
+    );
     let utilisation_by_rack = RackLocation::ALL.map(|rack| {
         (
             rack,
-            BankUtilisation::of(&plan.groups, &bound_slots, lanes, &fold_targets, Some(rack)),
+            BankUtilisation::of(
+                &plan.groups,
+                &bound_slots,
+                lanes,
+                &fold_targets,
+                &windows,
+                Some(rack),
+            ),
         )
     });
     Ok((
@@ -475,9 +559,346 @@ pub(crate) fn bind_rack_banks_indexed(
             chains,
             utilisation,
             utilisation_by_rack,
+            windows,
+            planned_levels: placement.planned_levels.clone(),
         },
     ))
 }
+
+/// The level every graph node is placed at for bank planning (issue #2136), and each node's
+/// window after placement. Built once per compile by [`placement_levels`] and read by both bank
+/// planners -- the rack chains here and the builtin strip stages (`builtins-compiler`'s
+/// `planned_strip_banks`, through [`PlacementLevels::levels`]) -- so a strip's builtin stages and
+/// console racks are aligned by one decision and their chains still fuse (`runtime::chains_into`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PlacementLevels {
+    /// The placement as levels: every node at its placement level, levels ascending, nodes in id
+    /// order. Every edge goes strictly upward in it, like the graph's own levels, but it is the
+    /// planners' bucketing input, never the graph's schedule.
+    levels: Vec<DependencyLevel>,
+    by_node: BTreeMap<GraphNodeId, (u64, u64, u64)>,
+    /// Every node a bank planner groups, at its placement level.
+    planned_levels: BTreeMap<GraphNodeId, u64>,
+}
+
+impl PlacementLevels {
+    /// Every node at its own dependency level, its window that single point: the level bucketing
+    /// the placement replaced, for callers that plan without a graph.
+    #[cfg(test)]
+    pub(crate) fn single_point(levels: &[DependencyLevel]) -> Self {
+        let by_node = levels
+            .iter()
+            .flat_map(|level| {
+                level
+                    .nodes
+                    .iter()
+                    .map(move |node| (node.clone(), (level.level, level.level, level.level)))
+            })
+            .collect();
+        Self {
+            levels: levels.to_vec(),
+            by_node,
+            planned_levels: BTreeMap::new(),
+        }
+    }
+
+    /// The placement as the level list the planners bucket by.
+    pub(crate) fn levels(&self) -> &[DependencyLevel] {
+        &self.levels
+    }
+
+    fn level_of(&self, node: &GraphNodeId) -> Option<u64> {
+        self.by_node.get(node).map(|(level, _, _)| *level)
+    }
+
+    /// `[asap', ALAP]` for a segment's first stage, the window it was placed within once its
+    /// producers were; the placement level alone for every other node, which follows its segment.
+    fn window_of(&self, node: &GraphNodeId) -> Option<(u64, u64)> {
+        self.by_node
+            .get(node)
+            .map(|(_, floor, alap)| (*floor, *alap))
+    }
+}
+
+/// The key class a node is placed in (issue #2136): a builtin strip stage, or the first slot of a
+/// rack chain, per rack, and the strip's pool class. Coarser than the planners' own keys (a
+/// program, a leader's subsequences), which only means the sweep may align two chains that then do
+/// not bank together; it never splits what the planners would group.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PlacementKey {
+    Stage(TrackStage, CohortPoolClass),
+    Chain(RackId, CohortPoolClass),
+}
+
+/// Place every node of the graph for bank planning (issue #2136, `docs/BANKING_DESIGN.md` 2.2).
+///
+/// Each node's window is `[ASAP, ALAP]`: `ASAP` its dependency level, `ALAP` the latest level it
+/// can take without lengthening the longest path to the session output (the output sits at its own
+/// level; a node no path joins to the output may sink to the deepest level).
+///
+/// `rack_compiler::place_over_windows` places the **keyed** nodes earliest deadline first among
+/// the nodes of their [`PlacementKey`], and every other node as early as its producers allow, so
+/// an unkeyed node keeps its offset from the keyed node before it. Keyed are every strip's
+/// post-input builtin stage, the first slot of every rack chain, and a fader that no bankable
+/// effect feeds directly (through elided stage boundaries). A chain's later slots, a fader fed by
+/// a chain's last slot, and every matrix stage follow: they keep the lane set of the stage before
+/// them, so the chains the planners form there still fuse (`runtime::chains_into`). Moving a
+/// fader apart from the chain that feeds it would trade a fused stage for a planar round trip per
+/// bank (H2), and on C1 that round trip cost what a merged bank saved (#2136 evidence). A chain's
+/// slot `k` therefore sits at its first slot's placement plus `k` whenever it sat at its first
+/// slot's level plus `k`.
+///
+/// A merge is taken only where it lowers the count of groups the planners form
+/// (`place_over_windows`; a group the bind renders per node still counts as one), and the count
+/// is the planners' own: [`PlannedNode`] keys every node a bank planner will group exactly as that
+/// planner keys it -- a rack chain's first slot by its candidate (rack, program, pool class), fed
+/// through `rack_compiler::plan_bank_groups` as the rack planner feeds it; a builtin strip stage by
+/// (stage, pool class), through the same planner as the builtin planner -- whether the sweep keyed
+/// it for placement or placed it as a follower. So the set counted at a (planner key, level) is the
+/// members the planner will group there, minus the nodes later stabs place at that level; the
+/// report's `planned_levels` exposes it and `bank_levels.rs` checks it against the plan. One limit:
+/// #971 may move a stranded mono track to the stereo pool after placement, which the count, taken
+/// on the classes before the move, does not see. With no bank width nothing merges.
+///
+/// `chains` and `programs` are [`rack_chains`]' candidates.
+///
+/// `per_node` is every effect whose slot key blocks banking: it neither heads nor continues a
+/// chain a fader would follow.
+pub(crate) fn placement_levels(
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    levels: &[DependencyLevel],
+    classes: &SessionPoolClasses,
+    per_node: &BTreeSet<EffectNodeId>,
+    (chains, programs): &RackChains,
+    width: Option<BankWidth>,
+) -> Result<PlacementLevels, GraphDiagnostic> {
+    let invariant = || diag("graph.internal.invariant", "$.graph");
+    let index_of = |id: &GraphNodeId| nodes.binary_search_by(|node| node.id.cmp(id)).ok();
+    let mut asap = vec![0u64; nodes.len()];
+    for level in levels {
+        for id in &level.nodes {
+            asap[index_of(id).ok_or_else(invariant)?] = level.level;
+        }
+    }
+    let mut ends: Vec<(usize, usize)> = Vec::with_capacity(edges.len());
+    let mut strip_producer: Vec<Option<usize>> = vec![None; nodes.len()];
+    for edge in edges {
+        let source = index_of(&edge.source.node).ok_or_else(invariant)?;
+        let destination = index_of(&edge.destination.node).ok_or_else(invariant)?;
+        ends.push((source, destination));
+        if matches!(edge.id, GraphEdgeId::TrackMain { .. })
+            && edge.destination.kind == GraphPortKind::MainInput
+        {
+            strip_producer[destination] = Some(source);
+        }
+    }
+    // ALAP, deepest first: a consumer's level is always above its producer's.
+    let depth = levels.last().map_or(0, |level| level.level);
+    let output = nodes
+        .iter()
+        .position(|node| matches!(node.id, GraphNodeId::Output { .. }));
+    let mut alap = vec![depth; nodes.len()];
+    if let Some(output) = output {
+        alap[output] = asap[output];
+    }
+    let mut by_source: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    for &(source, destination) in &ends {
+        by_source[source].push(destination);
+    }
+    for level in levels.iter().rev() {
+        for id in &level.nodes {
+            let index = index_of(id).ok_or_else(invariant)?;
+            for &consumer in &by_source[index] {
+                alap[index] = alap[index].min(alap[consumer].saturating_sub(1));
+            }
+            alap[index] = alap[index].max(asap[index]);
+        }
+    }
+    // An elided stage boundary: carries the signal without an op.
+    let transparent = |index: usize| {
+        matches!(
+            &nodes[index].id,
+            GraphNodeId::TrackStage {
+                stage: TrackStage::PostSimd1
+                    | TrackStage::PostDynamic
+                    | TrackStage::PostSimd2PreFader,
+                ..
+            }
+        )
+    };
+    // The first producer up the strip's main chain that is not an elided boundary.
+    let feeder = |index: usize| {
+        let mut cursor = strip_producer[index]?;
+        while transparent(cursor) {
+            cursor = strip_producer[cursor]?;
+        }
+        Some(cursor)
+    };
+    let banked_effect = |index: usize| matches!(&nodes[index].id, GraphNodeId::Effect(effect) if !per_node.contains(effect));
+    let key_of = |index: usize| -> Option<PlacementKey> {
+        match &nodes[index].id {
+            GraphNodeId::TrackStage {
+                track_id,
+                stage: stage @ (TrackStage::PostInputBuiltins | TrackStage::PostFader),
+            } => {
+                let follows =
+                    *stage == TrackStage::PostFader && feeder(index).is_some_and(banked_effect);
+                (!follows).then(|| PlacementKey::Stage(*stage, classes.class_of(track_id.as_str())))
+            }
+            GraphNodeId::Effect(effect) => {
+                // A chain's first slot: its main producer is not a slot of the same chain.
+                let continues = strip_producer[index].is_some_and(|producer| {
+                    matches!(&nodes[producer].id, GraphNodeId::Effect(previous)
+                        if previous.track_id == effect.track_id && previous.rack == effect.rack)
+                });
+                (!continues).then(|| {
+                    PlacementKey::Chain(effect.rack, classes.class_of(effect.track_id.as_str()))
+                })
+            }
+            _ => None,
+        }
+    };
+    let placement_nodes: Vec<rack_compiler::PlacementNode<PlacementKey>> = (0..nodes.len())
+        .map(|index| rack_compiler::PlacementNode {
+            window: rack_compiler::CohortWindow {
+                asap: asap[index],
+                alap: alap[index],
+            },
+            key: key_of(index),
+        })
+        .collect();
+    // What each bank planner groups, keyed as it keys it.
+    let mut planned: Vec<Option<PlannedNode>> = vec![None; nodes.len()];
+    for (chain, chain_nodes) in chains {
+        let Some(first) = chain_nodes.first() else {
+            continue;
+        };
+        let Some(index) = index_of(&GraphNodeId::Effect(first.clone())) else {
+            continue;
+        };
+        // A chain that cannot bank is never in a group (the planner lists it as scalar).
+        if !programs[chain].is_bankable() {
+            continue;
+        }
+        planned[index] = Some(PlannedNode::Chain(CohortCandidate {
+            id: chain.clone(),
+            class: classes.class_of(&chain.track_id),
+            program: programs[chain].clone(),
+        }));
+    }
+    for (index, node) in nodes.iter().enumerate() {
+        if let GraphNodeId::TrackStage {
+            track_id,
+            stage:
+                stage @ (TrackStage::PostInputBuiltins | TrackStage::PostFader | TrackStage::PostMatrix),
+        } = &node.id
+        {
+            planned[index] = Some(PlannedNode::Stage(
+                *stage,
+                classes.class_of(track_id.as_str()),
+            ));
+        }
+    }
+    let banks_of = |set: &[usize]| -> usize {
+        let Some(width) = width else {
+            return set
+                .iter()
+                .filter(|index| planned[**index].is_some())
+                .count();
+        };
+        let mut effect_candidates = Vec::new();
+        let mut stage_candidates = Vec::new();
+        for &index in set {
+            match &planned[index] {
+                Some(PlannedNode::Chain(candidate)) => effect_candidates.push(candidate.clone()),
+                Some(PlannedNode::Stage(stage, class)) => stage_candidates.push(CohortCandidate {
+                    id: index,
+                    program: RackProgram::new(RackLocation::Simd1, vec![StageSlot(*stage)]),
+                    class: *class,
+                }),
+                None => {}
+            }
+        }
+        // Candidate ids are unique (one chain per strip and rack, one node per stage index), so
+        // the planner's only error cannot occur here.
+        let groups = |count: Result<usize, _>| count.unwrap_or(0);
+        groups(
+            plan_bank_groups(
+                &[CohortLevel {
+                    level: 0,
+                    candidates: effect_candidates,
+                }],
+                width,
+            )
+            .map(|plan| plan.groups.len()),
+        ) + groups(
+            plan_bank_groups(
+                &[CohortLevel {
+                    level: 0,
+                    candidates: stage_candidates,
+                }],
+                width,
+            )
+            .map(|plan| plan.groups.len()),
+        )
+    };
+    let placed = rack_compiler::place_over_windows(&placement_nodes, &ends, banks_of)
+        .map_err(|_| invariant())?;
+    let planned_levels: BTreeMap<GraphNodeId, u64> = placed
+        .iter()
+        .enumerate()
+        // With no bank width nothing banks, so nothing is counted.
+        .filter(|(index, _)| width.is_some() && planned[*index].is_some())
+        .map(|(index, placement)| (nodes[index].id.clone(), placement.level))
+        .collect();
+    let mut by_level: BTreeMap<u64, Vec<GraphNodeId>> = BTreeMap::new();
+    let mut by_node = BTreeMap::new();
+    for (index, placement) in placed.iter().enumerate() {
+        by_level
+            .entry(placement.level)
+            .or_default()
+            .push(nodes[index].id.clone());
+        // A segment's later stages follow its first, so their window is their placement alone:
+        // the sweep can merge them only where their segment heads merge.
+        let window = if placement_nodes[index].key.is_some() {
+            (placement.floor, alap[index])
+        } else {
+            (placement.level, placement.level)
+        };
+        by_node.insert(
+            nodes[index].id.clone(),
+            (placement.level, window.0, window.1),
+        );
+    }
+    Ok(PlacementLevels {
+        levels: by_level
+            .into_iter()
+            .map(|(level, mut nodes)| {
+                nodes.sort();
+                DependencyLevel { level, nodes }
+            })
+            .collect(),
+        by_node,
+        planned_levels,
+    })
+}
+
+/// A node a bank planner groups, keyed exactly as that planner keys it ([`placement_levels`]).
+#[derive(Clone, Debug)]
+enum PlannedNode {
+    /// A rack chain's first slot: the rack planner's candidate.
+    Chain(CohortCandidate<RackChainId>),
+    /// A builtin strip stage of a strip in a pool class: the builtin planner's candidate.
+    Stage(TrackStage, CohortPoolClass),
+}
+
+/// The builtin planner's slot key, one per stage: it plans each stage in a call of its own with
+/// a fieldless key, which groups exactly as one call keyed by stage.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct StageSlot(TrackStage);
+
+impl rack::BankSlotKey for StageSlot {}
 
 /// Strip ID -> the sorted destination IDs of its routes (issue #2132): the fold target
 /// [`BankUtilisation::of`] compares. Every route counts, muted or not, because a muted route keeps

@@ -2637,12 +2637,6 @@ impl PreparedGraphPlan {
             return false;
         }
 
-        let positions: BTreeMap<_, _> = self
-            .sequential_schedule
-            .iter()
-            .enumerate()
-            .map(|(position, node)| (node, position))
-            .collect();
         if self.spec.edges.iter().any(|edge| {
             match (
                 level_by_node.get(&edge.source.node),
@@ -2655,18 +2649,11 @@ impl PreparedGraphPlan {
             return false;
         }
 
-        // The source of every edge into each node, main and sidechain alike, gathered once (issue
-        // #962). The check below asks, per bank, whether any edge *into* a member starts at or
-        // after the bank's first member. Only the members' own incoming edges can answer that, and
-        // scanning every edge of the spec for every bank instead made bind quadratic in the track
-        // count.
-        let mut sources_into: BTreeMap<&GraphNodeId, Vec<&GraphNodeId>> = BTreeMap::new();
-        for edge in &self.spec.edges {
-            sources_into
-                .entry(&edge.destination.node)
-                .or_default()
-                .push(&edge.source.node);
-        }
+        // Every bank lists graph nodes in strictly ascending id order, and no node is in two
+        // banks. Since issue #2134 a bank's members need not share a dependency level: the
+        // executor places each bank by the graph contracted by bank (`program::lower`), and a
+        // plan whose contraction is cyclic, or one of whose banks has a member feeding another,
+        // fails that lowering and is refused here by `lowered` with this same code.
         let effect_banks = self.banks.iter().map(|bank| {
             bank.members
                 .iter()
@@ -2680,31 +2667,8 @@ impl PreparedGraphPlan {
             if members.is_empty() || members.windows(2).any(|pair| pair[0] >= pair[1]) {
                 return false;
             }
-            let Some(bank_level) = level_by_node.get(&members[0]).copied() else {
-                return false;
-            };
             if members.iter().any(|member| {
-                level_by_node.get(member).copied() != Some(bank_level)
-                    || !bank_members.insert(member.clone())
-            }) {
-                return false;
-            }
-            let Some(first_member) = members
-                .iter()
-                .filter_map(|member| positions.get(member))
-                .min()
-                .copied()
-            else {
-                return false;
-            };
-            if members.iter().any(|member| {
-                sources_into.get(member).is_some_and(|sources| {
-                    sources.iter().any(|source| {
-                        positions
-                            .get(*source)
-                            .is_none_or(|source| *source >= first_member)
-                    })
-                })
+                !level_by_node.contains_key(member) || !bank_members.insert(member.clone())
             }) {
                 return false;
             }
@@ -2833,17 +2797,11 @@ impl PreparedGraphPlan {
             {
                 return Err(GraphBuiltinBankAttachError::InvalidMembers);
             }
-            let Some(level) = bank
-                .members
-                .first()
-                .and_then(|member| level_by_node.get(member))
-                .copied()
-            else {
-                return Err(GraphBuiltinBankAttachError::IncompatibleMembers);
-            };
+            // Since issue #2134 a bank's members need not share a dependency level: the
+            // executor places the bank by the graph contracted by bank, and a plan with no such
+            // order fails lowering at bind (`graph.scheduler.layout`).
             if bank.members.iter().any(|member| {
-                level_by_node.get(member).copied() != Some(level)
-                    || required.binary_search(&member).is_err()
+                !level_by_node.contains_key(member) || required.binary_search(&member).is_err()
             }) {
                 return Err(GraphBuiltinBankAttachError::IncompatibleMembers);
             }

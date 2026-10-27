@@ -465,7 +465,8 @@ fn node_levels(artifact: &PreparedGraphBuiltinsArtifact) -> BTreeMap<GraphNodeId
 }
 
 /// Gate 1: every console slot binds banked, at every track count the gate names, and forms
-/// exactly one padded group per (pool class, dependency level).
+/// exactly one padded group per (pool class, placement level) (issue #2136; per dependency level
+/// before the windows planner).
 ///
 /// Two consoles, each on every track with its own mix of bypassed slots:
 ///
@@ -480,9 +481,9 @@ fn node_levels(artifact: &PreparedGraphBuiltinsArtifact) -> BTreeMap<GraphNodeId
 /// dependency levels (H2). At the host's width (eight lanes here, four on the AArch64 leg):
 ///
 /// * no console node renders per node;
-/// * each console rack forms one group per (pool class, level of its first slot), `ceil(n / W)` of
-///   them for `n` tracks there, and binds every slot of every group;
-/// * `post_insert` splits into one level per insert count;
+/// * each console rack forms one group per (pool class, placement level of its first slot),
+///   `ceil(n / W)` of them for `n` tracks there, and binds every slot of every group;
+/// * `post_insert` is placed at one level per pool, whatever the insert count (#2136);
 /// * each track pools as its own class, mono-symmetric exactly when its feed is mono (nothing is
 ///   demoted, #971 under padding), and bypassed lanes share banks with unbypassed ones. Since
 ///   #1873 every console-eligible effect carries a channel-symmetry witness, so this holds on both
@@ -490,8 +491,9 @@ fn node_levels(artifact: &PreparedGraphBuiltinsArtifact) -> BTreeMap<GraphNodeId
 ///   [`a_mono_track_whose_witness_declines_pools_as_stereo`]'s.
 ///
 /// Red if console groups stop padding (a remainder renders per node), if a padded group is bound
-/// for fewer slots than it plans, if the planner merged groups across a level or a class, or if a
-/// bypassed lane left its bank.
+/// for fewer slots than it plans, if the planner merged groups across a placement level or a
+/// class, if `post_insert` stays split by insert count (a level bucket), or if a bypassed lane
+/// left its bank.
 #[test]
 fn every_console_slot_binds_banked_at_every_track_count() {
     let lanes = BankWidth::for_backend(host_dispatch())
@@ -569,8 +571,13 @@ fn every_console_slot_binds_banked_at_every_track_count() {
                         "{n} tracks: {chain:?} pools as its own class"
                     );
                     pools.insert(group.class);
-                    let level = levels[&GraphNodeId::Effect(nodes[0].clone())];
-                    *buckets.entry((group.class, level)).or_default() += 1;
+                    // Issue #2136: the chain's placement level, which the planner pooled it at;
+                    // a chain is never placed below its first slot's dependency level.
+                    assert!(
+                        group.level >= levels[&GraphNodeId::Effect(nodes[0].clone())],
+                        "{n} tracks: {chain:?} placed below its level"
+                    );
+                    *buckets.entry((group.class, group.level)).or_default() += 1;
                 }
                 let groups: usize = buckets.values().map(|count| count.div_ceil(lanes)).sum();
                 assert_eq!(
@@ -585,12 +592,16 @@ fn every_console_slot_binds_banked_at_every_track_count() {
                     "{n} tracks, {location:?}: every slot of every group binds"
                 );
                 if location == RackLocation::Simd2 {
-                    let post_levels: BTreeSet<u64> =
-                        buckets.keys().map(|(_, level)| *level).collect();
+                    // Issue #2136: the insert counts put `post_insert` at up to three dependency
+                    // levels, and the tracks' level windows share the deepest, so each pool
+                    // places it at one level.
+                    let pools_here: BTreeSet<CohortPoolClass> =
+                        buckets.keys().map(|(class, _)| *class).collect();
                     assert_eq!(
-                        post_levels.len(),
-                        n.min(3),
-                        "{n} tracks: post_insert sits at one level per insert count"
+                        buckets.len(),
+                        pools_here.len(),
+                        "{n} tracks: post_insert is placed at one level per pool, whatever the \
+                         insert count: {buckets:?}"
                     );
                 }
             }
@@ -883,10 +894,10 @@ fn randomized_console_sessions_render_the_per_node_bits_on_every_track() {
 /// at eight lanes and at four.
 ///
 /// The console is the limiter alone, in `post_insert`; the tracks carry zero, one or two EQ
-/// inserts in turn, so the limiter sits at up to three levels, each a padded group of its own
-/// (H2). Tracks alternate mono and stereo, each with its own ceiling ([`VARIANTS`]), and tracks
+/// inserts in turn, so the limiter sits at up to three dependency levels; since #2136 their level
+/// windows place it at one level per pool. Tracks alternate mono and stereo, each with its own ceiling ([`VARIANTS`]), and tracks
 /// `2..=3`, `6..=7` and so on bypass the limiter, a pattern that mixes bypassed and unbypassed
-/// lanes inside every (pool, level) group of two or more. Every track is fed seeded noise at +6
+/// lanes inside the groups. Every track is fed seeded noise at +6
 /// to +18 dBFS peak, far above the limiter's ceiling, and the gain path is shown to run: the
 /// limiter moves every unbypassed track's bits against the same session with every lane bypassed.
 ///
@@ -904,6 +915,7 @@ fn a_hot_padded_post_insert_limiter_renders_the_per_node_bits_at_both_widths() {
         pre: Vec::new(),
         post: vec![Kind::Limiter],
     };
+    let mut mixed_padded = BTreeSet::new();
     for n in TRACK_COUNTS {
         let tracks: Vec<TrackShape> = (0..n)
             .map(|index| TrackShape {
@@ -959,14 +971,19 @@ fn a_hot_padded_post_insert_limiter_renders_the_per_node_bits_at_both_widths() {
                         tracks[index].bypass[0]
                     })
             });
-            assert_eq!(
-                padded_bypassed,
-                n >= 2,
-                "{what}: a padded limiter bank carries a bypassed lane"
-            );
+            if padded_bypassed {
+                mixed_padded.insert(width.lanes());
+            }
             assert_renders_the_oracle(&render(banked, &tracks, BLOCKS), &oracle, &what);
         }
     }
+    // Which track counts leave a padded remainder holding a bypassed lane depends on the width
+    // and, since #2136, on the placement; every width meets one.
+    assert_eq!(
+        mixed_padded.len(),
+        Backend::VECTOR.len(),
+        "at every width some padded limiter bank carries a bypassed lane"
+    );
 }
 
 /// A limiter whose bank bind declines every padded request, and binds full ones as the launch
