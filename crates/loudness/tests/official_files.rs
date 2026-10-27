@@ -114,8 +114,8 @@ fn measure(pcm: &Pcm<'_>) -> Option<f64> {
 #[test]
 #[ignore = "external official ITU audio: acquire with data/fetch-official-loudness.py; see data/README.md"]
 fn itu_bs2217_published_mono_stereo_files() {
-    let directory = env::var_os("MISO_LOUDNESS_FIXTURES")
-        .expect("set MISO_LOUDNESS_FIXTURES to the verified external corpus directory");
+    let directory = env::var_os("MISO_ENGINE_LOUDNESS_FIXTURES")
+        .expect("set MISO_ENGINE_LOUDNESS_FIXTURES to the verified external corpus directory");
     // Sequential, offline verification is part of the explicit gate, not an optional pre-step.
     // Verify every required file before measuring any; missing/corrupt cases cannot become skips.
     let verification = Command::new("python3")
