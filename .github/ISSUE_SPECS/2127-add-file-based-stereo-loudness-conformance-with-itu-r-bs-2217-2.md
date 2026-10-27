@@ -201,3 +201,11 @@ product tree remains mandatory before delivery/closure. Raw artifact and indepen
 PASS for the scoped official ITU corpus owner after fresh independent review `0a29fc46fddd4aaf126897b09c4e09ec1e18fcfe`. Official byte identities, native channel/rate handling, bounded header exceptions and the published ±0.1 LKFS expectations are explicit. All 19 required cases executed; the EBU and multichannel boundaries remain candid. No production DSP or redistributed audio enters the batch.
 
 The limiter screen is excluded after its real performance failure. Its removal leaves this slice’s reviewed source unchanged. Final normal required qualification on the actual combined product tree is mandatory before merge, issue closure and completed-worktree cleanup. This record does not claim that pending workflow passed.
+
+## Required-CI integration verdict and bounded attempt 2 (2026-10-27)
+
+Attempt 1 failed required CI for [PR #2169, run 40475574564](https://github.com/misofm/engine/actions/runs/40475574564), lint job `122093153624`: after formatting, full workspace Clippy and earlier policies passed, `check-env-vocabulary.sh` refused the fixture environment name because it lacked the mandatory `MISO_ENGINE_` prefix. The earlier conditional source approvals did not establish this integration policy; attempt 1 is not a final PASS.
+
+Bounded attempt 2, Sol commit `f7707d436e8117ed4bb0ddd957ba753d326405de`, changes exactly three active string occurrences in `official_files.rs` and its data README to `MISO_ENGINE_LOUDNESS_FIXTURES`. There is no alias, vocabulary-table entry, new test, manifest/byte change, DSP change or tolerance change. Historical frozen proof scripts and logs retain the name they actually used.
+
+The exact blocking command `bash scripts/check-env-vocabulary.sh` passed through the shared serial wrapper (63 documented names; one mandatory engine prefix). Evidence: `engine-work-evidence/easy3-20261027/2127/attempt2-env-vocabulary.log`. The author worktree is clean; no local Cargo, test binary or timing workload ran for this correction. The existing vocabulary owner discriminated the defect, so no new test is introduced. Fresh Astra narrow verification and full required qualification on the corrected head remain mandatory before merge/closure.
