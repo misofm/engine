@@ -15,7 +15,7 @@ use effect_compiler::{
 use graph::GraphCompileCaps;
 use graph_compiler::{
     Backend, BankUtilisation, GraphBuiltinsCompileRequest, GraphCompiler, GraphRackBankReport,
-    GraphRackBoundSlot,
+    GraphRackBoundSlot, PreparedGraphBuiltinsArtifact,
 };
 use rack_compiler::{BankGroup, CohortPoolClass};
 use session::{CompileCaps, SessionModel, compile_session, parse_session_json};
@@ -30,6 +30,10 @@ fn width() -> Backend {
 }
 
 fn report(model: &SessionModel) -> GraphRackBankReport {
+    compile(model).report().rack_cohorts.clone()
+}
+
+fn compile(model: &SessionModel) -> PreparedGraphBuiltinsArtifact {
     let session = compile_session(
         model,
         CompileCaps {
@@ -68,7 +72,7 @@ fn report(model: &SessionModel) -> GraphRackBankReport {
         },
     )
     .expect("the session's builtins");
-    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         input_floors: Default::default(),
         plan_id: 2132,
         effects,
@@ -89,8 +93,7 @@ fn report(model: &SessionModel) -> GraphRackBankReport {
         dispatch: width(),
         gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
-    .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
-    artifact.report().rack_cohorts.clone()
+    .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics))
 }
 
 /// `group` with only the active lanes `range` kept, moved to lanes `0..`, and the rest padding.
@@ -222,4 +225,80 @@ fn the_bank_report_counts_mergeable_pairs() {
         0,
         "two groups of mixed fold targets are not one key"
     );
+}
+
+/// Issue #2134 gate 3: on every standing session fixture the executor order -- the op order
+/// `graph::program::lower` emits, the graph contracted by bank -- is the canonical schedule minus
+/// its elided nodes: no op moved. Every bank of these plans sits at one dependency level, and on
+/// such a plan the contraction must reproduce today's unit order exactly, because #2142's lane
+/// map builds lane chains and pack groups from unit adjacency and order.
+///
+/// Test value: red when the contracted order moves a unit that did not need to move -- a key that
+/// emits a bank's members together, or one that sinks a one-level bank past a consumer.
+#[test]
+fn the_contracted_order_is_the_schedule_on_every_standing_fixture() {
+    for (name, text) in [
+        (
+            "parametric-eq-nine-track",
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json"),
+        ),
+        (
+            "parametric-eq-bank-console",
+            include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json"),
+        ),
+        (
+            "console-sixty-four-track",
+            include_str!("../../../fixtures/session/v1/console-sixty-four-track.json"),
+        ),
+        ("console-sixty-four-track-intended", INTENDED),
+        (
+            "console-sixty-four-track-app",
+            include_str!("../../../fixtures/session/v1/console-sixty-four-track-app.json"),
+        ),
+        (
+            "console-sixty-four-track-mono",
+            include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json"),
+        ),
+        (
+            "console-sixty-four-track-sends",
+            include_str!("../../../fixtures/session/v1/console-sixty-four-track-sends.json"),
+        ),
+        (
+            "console-c1-16",
+            include_str!("../../../fixtures/session/v1/console-c1-16.json"),
+        ),
+        (
+            "console-c1-32",
+            include_str!("../../../fixtures/session/v1/console-c1-32.json"),
+        ),
+        (
+            "console-c1-64",
+            include_str!("../../../fixtures/session/v1/console-c1-64.json"),
+        ),
+        (
+            "irregular-graph",
+            include_str!("../../../fixtures/session/v1/irregular-graph.json"),
+        ),
+    ] {
+        let artifact = compile(&parse_session_json(text).expect("the fixture parses"));
+        let plan = artifact.graph();
+        let program = plan.program().expect("the plan lowers");
+        let canonical: Vec<u32> = plan
+            .sequential_schedule
+            .iter()
+            .map(|id| graph::program::node_index(&plan.spec, id).expect("a node"))
+            .filter(|index| program.node_op[*index as usize].is_some())
+            .collect();
+        assert!(
+            program.ops.len() == canonical.len(),
+            "{name}: one op per unelided node"
+        );
+        let moved = program
+            .ops
+            .iter()
+            .zip(&canonical)
+            .filter(|(op, node)| op.node != **node)
+            .count();
+        assert_eq!(moved, 0, "{name}: the executor order moved {moved} ops");
+    }
 }

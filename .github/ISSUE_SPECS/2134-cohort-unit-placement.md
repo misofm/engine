@@ -97,3 +97,43 @@ None (#2131, #2133 and #2142 are merged). Unblocks slice 6b (#2136). Runs immedi
   because #2142 made unit order a pack-group input. Line cites refreshed to the #2142 branch.
 - Value statement: no production plan changes shape in this slice; it is worth doing only as
   #2136's precondition. Schedule: stream A step 3, after #2135.
+
+## Evidence (attempt 1, 2026-10-27, branch `codex/batch-b14-windows` on the #2135 head `f08c3a40e`)
+
+### Where the contraction lives
+
+The contracted order is computed once, in `graph::program::lower` (`contracted_order`), and the
+program's op list is emitted in it: the op order **is** the executor order. `runtime::units_of`
+and `build_sequential` are unchanged in code (a bank is still one unit at its first member's op),
+and colouring, `render_bounds`, `chainable_bank_groups`, `op_dataflow` and `cohort_runs` all read
+op positions, so they are over the executed order with no second permutation to track. This is
+the spec's rule with one Kahn instead of two (lowering and the runtime would otherwise have to
+agree on it). Doing the Kahn on nodes rather than units is equivalent: a bank's members all enter
+the ready set together once every member's producers are out, and a bank of one is a plain node.
+
+- `crates/graph/src/program.rs`: `contracted_order`, `ProgramError::CohortCycle`, the #169 section
+  re-made on the executed order (`lower`'s doc), the `ops` field doc.
+- `crates/graph/src/lib.rs` `has_valid_structural_layout`: the one-level-per-bank and
+  source-before-first-member clauses are gone; bind still refuses unsorted or overlapping member
+  lists, and a cyclic contraction fails lowering (`lowered`) with the same
+  `graph.scheduler.layout`.
+- `crates/graph/src/runtime.rs`: `units_of`'s doc and `cohort_runs`' "a successor is always later
+  in unit order", re-made on the topological op order.
+- `docs/rulings/bank-placement-contracted-order.md`: the ruling.
+
+### Gates
+
+| gate | test | red on |
+|---|---|---|
+| 1 | `graph` `program::tests::contracted_order_preserves_dataflow_on_random_graphs` (1500 seeds; 416 with a cross-level bank, 372 of them reordered, 14 cyclic and refused) | M1 lowering in the canonical order (the first-member hoist): `graph 0: op 58 rendered a foreign value`; M2 a sink that gates the bank but leaves members' consumers at their canonical positions: `graph 0: NotTopological` |
+| 2 | `the_banked_console_arena_equals_the_bank_unaware_arena` unchanged | (unchanged, green) |
+| 3 | `graph-compiler` `tests/console_banking.rs` `the_contracted_order_is_the_schedule_on_every_standing_fixture` (11 session fixtures) | M3 emitting a bank's members contiguously: `console-c1-16: the executor order moved 5 ops` |
+
+The structural `assert_no_slot_is_recycled_inside_a_bank_window` is not asked of the cross-level
+corpus: its premise (the op later in op order is the recycler) needs a window in which no op reads
+another's output, and a sunk consumer of an early member breaks it without a defect. The symbolic
+interpreter reads every value in render order, so an early recycle is a foreign value there.
+
+Gate 3's pack-group clause: with no op moved the program, its units and therefore #2142's lane
+chains and pack groups are the base plan's. The one-time comparison of `test_only_pack_groups` on
+C1-16/32/64 against the base is recorded with the bit-identity run in `2136-alap-windows-planner.md`.
