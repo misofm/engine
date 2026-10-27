@@ -3131,7 +3131,7 @@ fn graph_caps() -> graph::GraphCompileCaps {
         maximum_graph_bytes: 100_000_000,
         maximum_plan_bytes: 1_000_000_000,
         maximum_single_allocation_bytes: 100_000_000,
-        maximum_finite_tail_samples: 10_000_000,
+        maximum_finite_tail_samples: u64::MAX,
     }
 }
 
@@ -3773,6 +3773,45 @@ impl Drop for LiveFeed {
 mod tests {
     use super::*;
     use engine::realtime::audit;
+
+    /// A real delay composed with the finite builtin sections must fit the tool's graph caps.
+    /// The console fixture's infinite EQ tail would otherwise mask a finite-tail cap regression.
+    #[test]
+    fn tool_caps_admit_a_composed_finite_delay_tail() {
+        let mut model =
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+                .expect("one-track fixture");
+        model.automation.clear();
+        let effect = &mut model.tracks[0].inserts.effects[0];
+        effect.identity = session::EffectIdentity::Native {
+            effect_id: StableId::parse("miso.delay").expect("delay id"),
+        };
+        effect.params.clear();
+        let session = compile_session(&model, compile_caps()).expect("delay session");
+        let registry = launch_native_effect_registry().expect("launch effect registry");
+        let effects = prepare_native_session_effects(&session, registry, effect_caps())
+            .expect("prepared delay");
+        let delay_tail = effects.entries[0].metadata.tail;
+        assert!(matches!(delay_tail, effect_contract::TailSamples::Finite(n) if n > 10_000_000));
+        let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
+            .expect("prepared finite builtins");
+        let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            input_floors: Default::default(),
+            dispatch: Backend::current(),
+            plan_id: PLAN_ID,
+            effects,
+            builtins,
+            caps: graph_caps(),
+            gain_liveness: graph_compiler::GainLiveness::FIXED,
+        })
+        .unwrap_or_else(|failure| panic!("finite delay graph: {:?}", failure.diagnostics));
+        for tail in [
+            artifact.report().output_tail,
+            artifact.report().output_tail_every_peak,
+        ] {
+            assert!(matches!(tail, effect_contract::TailSamples::Finite(_)) && tail >= delay_tail);
+        }
+    }
 
     /// The row facts a record states, less the feed.
     fn stated_facts(workload: Workload) -> (u32, &'static str, bool, &'static str, &'static str) {

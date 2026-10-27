@@ -70,7 +70,7 @@ function routePath(urlPath, artifactDirectory, sdkBundleDirectory) {
   return null;
 }
 
-export async function startQualificationServer({ artifacts, sdkBundle, port = 0 }) {
+export async function startQualificationServer({ artifacts, sdkBundle, port = 0, isolated = false }) {
   const artifactDirectory = path.resolve(artifacts);
   await exactArtifacts(artifactDirectory);
   const server = createServer(async (request, response) => {
@@ -83,6 +83,10 @@ export async function startQualificationServer({ artifacts, sdkBundle, port = 0 
       }
       const body = await readFile(file);
       response.writeHead(200, {
+        ...(isolated ? {
+          "Cross-Origin-Opener-Policy": "same-origin",
+          "Cross-Origin-Embedder-Policy": "require-corp",
+        } : {}),
         "Cache-Control": "no-store",
         "Content-Length": body.byteLength,
         "Content-Type": contentType(file),
