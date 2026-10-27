@@ -749,6 +749,10 @@ pub struct PreparedGraphPlan {
     banks: Vec<GraphPreparedEffectBank>,
     builtin_banks: Vec<GraphPreparedBuiltinBank>,
     observers: Vec<GraphNodeObserverBinding>,
+    /// Issue #2135: the strips whose stored automation drives one of their effect bypasses, by
+    /// strip ID ([`pin_bypass_automated_strips`](Self::pin_bypass_automated_strips)). The lane
+    /// packer pins them for the plan's life. Empty unless the compiler names one.
+    pinned_strips: Vec<Box<str>>,
     _not_sync: Cell<()>,
 }
 /// One prepared per-node effect in the plan's control-side effect table, keyed by its node `id`.
@@ -3185,10 +3189,19 @@ impl PreparedGraphPlan {
             banks: parts.banks,
             builtin_banks: parts.builtin_banks,
             observers: parts.observers,
+            pinned_strips: Vec::new(),
             _not_sync: Cell::new(()),
         };
         plan.program = plan.lower_from_current_fields();
         plan
+    }
+
+    /// Name the strips whose stored automation drives one of their effect bypasses (issue
+    /// #2135): the lane packer pins each one where bind places it, for the plan's life, since its
+    /// bypass pattern is data-driven. Off the render thread, before bind; a later call replaces
+    /// the list.
+    pub fn pin_bypass_automated_strips(&mut self, strips: Vec<Box<str>>) {
+        self.pinned_strips = strips;
     }
     /// The failure carries every input back, which is the point; boxing it would only move the
     /// allocation onto the caller's error path.
@@ -6440,6 +6453,17 @@ pub fn test_only_bank_pack_attempts(plan: &PreparedRenderPlan) -> u64 {
         .map_or(0, |executor| executor.runtime.pack_attempts())
 }
 
+/// Test-only (issue #2135): the tracks of a graph plan's pack groups whose strip is not at its home
+/// lane, by the track bind placed at that home; empty for any other plan and under the identity map.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_displaced_tracks(plan: &PreparedRenderPlan) -> Vec<Box<str>> {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or_else(Vec::new, |executor| executor.runtime.displaced_tracks())
+}
+
 /// Test-only (issue #1981): the strips of a graph plan's pack groups not at their home lane; zero
 /// for any other plan and under the identity map.
 #[cfg(any(test, feature = "test-support"))]
@@ -6735,8 +6759,9 @@ impl GraphExecutor {
         } else {
             lent_claims
         };
-        let (runtime, bind_identities) =
+        let (mut runtime, bind_identities) =
             runtime::build_sequential(program, &plan.spec, parts, frames, planning, &lent_claims);
+        runtime.pin_strips(&plan.pinned_strips);
         // The copy loop fills exactly the claims that are not read in place.
         let source_input_buffers: Box<[(usize, u32)]> = source_input_buffers
             .iter()
