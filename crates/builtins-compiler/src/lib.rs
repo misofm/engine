@@ -9665,8 +9665,8 @@ impl GraphRuntimeObserver for MeterObserver {
         self.0.metrics() == builtins::MeterMetricSet::SAMPLE_PEAK
     }
 
-    /// Issue #950: a meter that can commit a banked block -- no held peak with a hold or a decay
-    /// -- asks the bank for its full meter pass, unless it selects exactly `SAMPLE_PEAK`, which
+    /// Issues #950/#951: a meter asks the bank for its full meter pass, including the separately
+    /// seeded held recurrence, unless it selects exactly `SAMPLE_PEAK`, which
     /// issue #943's cheaper peak pass already serves.
     fn accepts_banked_meter(&self) -> bool {
         self.0.banked_eligible() && self.0.metrics() != builtins::MeterMetricSet::SAMPLE_PEAK
@@ -9677,6 +9677,15 @@ impl GraphRuntimeObserver for MeterObserver {
     fn banked_meter_seed(&self, first_sample: u64, frames: u32) -> Option<[f64; 2]> {
         self.0
             .banked_seed(first_sample, usize::try_from(frames).ok()?)
+    }
+
+    fn banked_held_seed(
+        &self,
+        first_sample: u64,
+        frames: u32,
+    ) -> Option<[lane::kernels::builtins::MeterHeldSeed; 2]> {
+        self.0
+            .banked_held_seed(first_sample, usize::try_from(frames).ok()?)
     }
 
     /// A meter's window, cumulative counters and producer are state a swap carries (#1327 D1).
@@ -9733,6 +9742,7 @@ impl GraphRuntimeObserver for MeterObserver {
                 sanitized: meter.sanitized.map(u64::from),
                 energy_seed: meter.energy_seed,
                 energy: meter.energy,
+                held: meter.held,
             });
         Some(
             builtins::MeterInput::strided(
@@ -9978,7 +9988,10 @@ pub const TEST_ONLY_PAIR_GRAPH_TRACKS: usize = Backend::current().width() + 1;
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::{test_only_builtin_lane_swap, test_only_prepared_unpaired_graph};
+pub use tests::{
+    test_only_builtin_lane_swap, test_only_prepared_unpaired_graph,
+    test_only_prepared_unpaired_graph_with_held_meter,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -11289,6 +11302,22 @@ mod tests {
         )
     }
 
+    /// The same full-cohort-and-tail fixture, with one final resident hold/decay meter, for the
+    /// existing isolated full-render allocation owner (issue #951).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_prepared_unpaired_graph_with_held_meter() -> PreparedBuiltinsGraphBound {
+        prepared_live_graph_fixture_with_ballistics(
+            Some(TEST_ONLY_PAIR_GRAPH_TRACKS - 1),
+            false,
+            false,
+            None,
+            PAIR_GRAPH_BACKEND,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            (7, 12.0),
+        )
+    }
+
     /// A queued graph of `n` live-control tracks at the vector `backend`, prepared, lowered and
     /// bound: separate fader and matrix banks. `post_fader_observed` adds a post-fader meter on
     /// track 0; `post_matrix_capture` captures the last track's post-matrix words.
@@ -11300,6 +11329,26 @@ mod tests {
         backend: Backend,
         n: usize,
     ) -> PreparedBuiltinsGraphBound {
+        prepared_live_graph_fixture_with_ballistics(
+            post_fader_observed.then_some(0),
+            symmetric_input,
+            nonfinite_input,
+            post_matrix_capture,
+            backend,
+            n,
+            (0, 0.0),
+        )
+    }
+
+    fn prepared_live_graph_fixture_with_ballistics(
+        post_fader_track: Option<usize>,
+        symmetric_input: bool,
+        nonfinite_input: bool,
+        post_matrix_capture: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
+        backend: Backend,
+        n: usize,
+        ballistics: (u32, f32),
+    ) -> PreparedBuiltinsGraphBound {
         let compiled = n_track_session_with_symmetry(n, symmetric_input);
         let controls = (0..n)
             .map(|index| TrackControlRequest {
@@ -11308,14 +11357,14 @@ mod tests {
                 input_lane: true,
             })
             .collect::<Vec<_>>();
-        let meter = post_fader_observed.then(|| MeterRequest {
+        let meter = post_fader_track.map(|track| MeterRequest {
             handle: MeterHandle(NonZeroU64::new(0x459).expect("handle")),
-            track_id: track_name(0),
+            track_id: track_name(track),
             tap: MeterTap::PostFader,
             config: MeterConfig {
                 period_frames: NonZeroU32::new(HARNESS_QUANTUM).expect("period"),
-                peak_hold_frames: 0,
-                peak_decay_db_per_second: 0.0,
+                peak_hold_frames: ballistics.0,
+                peak_decay_db_per_second: ballistics.1,
                 queue_capacity: NonZeroUsize::new(8).expect("queue"),
                 reset_generation: 0,
             },
@@ -12537,25 +12586,78 @@ mod tests {
     #[test]
     fn resident_meter_accepted_plan_avoids_planar_acquisition_and_matches_decline() {
         for &backend in Backend::VECTOR {
-            let mut candidate = prepared_live_graph_fixture(true, true, false, None, backend, 9);
-            let mut reference = prepared_live_graph_fixture(true, true, false, None, backend, 9);
-            candidate.plan.arm_mono_collapse(&|_| true);
-            reference.plan.arm_mono_collapse(&|_| true);
-            for (block, forced) in [false, true, false].into_iter().enumerate() {
-                candidate.plan.force_mono_collapse_off(forced);
-                reference.plan.force_mono_collapse_off(forced);
-                graph::test_only_meter_input_reset(false);
-                let a = render_bound(&mut candidate, block as u64 * u64::from(HARNESS_QUANTUM));
-                assert_eq!(graph::test_only_meter_input_counts(), [0, 1, 1]);
-                graph::test_only_meter_input_reset(true);
-                let b = render_bound(&mut reference, block as u64 * u64::from(HARNESS_QUANTUM));
-                assert_eq!(graph::test_only_meter_input_counts(), [1, 0, 0]);
-                assert_eq!(a, b);
-                assert_eq!(
-                    candidate.meter_consumers[0].consumer.try_pop(),
-                    reference.meter_consumers[0].consumer.try_pop()
+            // The combined case keeps L/R distinct so swapped held-state metadata cannot pass;
+            // the other cases retain the collapsed/forced-dual execution rows.
+            for (ballistics, symmetric) in [
+                ((0, 0.0), true),
+                ((7, 0.0), true),
+                ((0, 12.0), true),
+                ((7, 12.0), false),
+            ] {
+                let mut candidate = prepared_live_graph_fixture_with_ballistics(
+                    Some(8),
+                    symmetric,
+                    false,
+                    None,
+                    backend,
+                    9,
+                    ballistics,
                 );
+                let mut reference = prepared_live_graph_fixture_with_ballistics(
+                    Some(8),
+                    symmetric,
+                    false,
+                    None,
+                    backend,
+                    9,
+                    ballistics,
+                );
+                candidate.plan.arm_mono_collapse(&|_| true);
+                reference.plan.arm_mono_collapse(&|_| true);
+                let mut a = vec![0.0; HARNESS_QUANTUM as usize * 2];
+                let mut b = a.clone();
+                // Warm both plans before checking steady-state dispatch and parity.
                 graph::test_only_meter_input_reset(false);
+                render_bound_result(&mut candidate, 0, &mut a).unwrap();
+                graph::test_only_meter_input_reset(true);
+                render_bound_result(&mut reference, 0, &mut b).unwrap();
+                candidate.meter_consumers[0].consumer.try_pop().unwrap();
+                reference.meter_consumers[0].consumer.try_pop().unwrap();
+                for (block, forced) in [false, true, false].into_iter().enumerate() {
+                    candidate.plan.force_mono_collapse_off(forced);
+                    reference.plan.force_mono_collapse_off(forced);
+                    graph::test_only_meter_input_reset(false);
+                    builtins::test_only_reset_banked_meter_commits();
+                    let result = render_bound_result(
+                        &mut candidate,
+                        (block as u64 + 1) * u64::from(HARNESS_QUANTUM),
+                        &mut a,
+                    );
+                    result.unwrap();
+                    assert_eq!(graph::test_only_meter_input_counts(), [0, 1, 1]);
+                    assert_eq!(
+                        builtins::test_only_banked_meter_commits(),
+                        1,
+                        "{backend:?} {ballistics:?}: the resident meter commits the banked recurrence"
+                    );
+                    graph::test_only_meter_input_reset(true);
+                    render_bound_result(
+                        &mut reference,
+                        (block as u64 + 1) * u64::from(HARNESS_QUANTUM),
+                        &mut b,
+                    )
+                    .unwrap();
+                    assert_eq!(graph::test_only_meter_input_counts(), [1, 0, 0]);
+                    assert_eq!(
+                        a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                    );
+                    assert_eq!(
+                        candidate.meter_consumers[0].consumer.try_pop(),
+                        reference.meter_consumers[0].consumer.try_pop()
+                    );
+                    graph::test_only_meter_input_reset(false);
+                }
             }
         }
     }

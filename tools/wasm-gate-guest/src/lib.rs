@@ -187,7 +187,7 @@ pub extern "C" fn miso_gate_meter_block_mismatches(width: u32) -> u32 {
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn miso_gate_meter_block_probe(seed: u32) -> u32 {
-    use lane::kernels::builtins::meter_block;
+    use lane::kernels::builtins::{MeterHeldSeed, meter_block, meter_held_block};
     use lane::{Lane, LaneF64, Simd4, Widen};
 
     let mut words = [0.0_f32; 4 * 64];
@@ -205,9 +205,26 @@ pub extern "C" fn miso_gate_meter_block_probe(seed: u32) -> u32 {
     block.sanitized.store(&mut counts[8..]);
     let mut energy = [0.0_f64; 4];
     block.energy.store(&mut energy);
+    // The held recurrence is the other production meter pass (issue #951). Dynamic full-u32
+    // countdowns and distinct lane seeds keep the real borrow/reload/multiply operations live.
+    let held_seeds: [MeterHeldSeed; 4] = core::array::from_fn(|lane| MeterHeldSeed {
+        held: f32::from_bits(0x3f80_0000 - (lane as u32 * 0x0080_0000)),
+        remaining: seed.rotate_left(lane as u32 * 7),
+        hold_frames: seed ^ (0x8000_0001 + lane as u32),
+        decay: 0.999_99,
+    });
+    let mut held = [0.0; 4];
+    let mut remaining = [0; 4];
+    meter_held_block::<Simd4>(&words, 64, &held_seeds, &mut held, &mut remaining);
+    let fold = held
+        .iter()
+        .zip(remaining)
+        .fold(0_u32, |fold, (held, remaining)| {
+            fold.rotate_left(3) ^ held.to_bits() ^ remaining
+        });
     let fold = counts
         .iter()
-        .fold(0_u32, |fold, value| fold.rotate_left(5) ^ value.to_bits());
+        .fold(fold, |fold, value| fold.rotate_left(5) ^ value.to_bits());
     energy.iter().fold(fold, |fold, value| {
         let bits = value.to_bits();
         fold ^ (bits as u32) ^ ((bits >> 32) as u32)

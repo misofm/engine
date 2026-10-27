@@ -1137,6 +1137,99 @@ fn meter_block_mismatches_at<L: Widen>() -> u32 {
             }
         }
     }
+    mismatches + meter_held_mismatches_at::<L>()
+}
+
+/// Held-state part of the existing meter differential (issue #951). Per-lane configuration,
+/// every u32 digit boundary, equality reloads, invalid/signed-zero inputs and underflow. Both
+/// outputs are compared: a wrong countdown may remain inaudible for billions of frames.
+fn meter_held_mismatches_at<L: lane::Lane>() -> u32 {
+    use lane::kernels::builtins::{MeterHeldSeed, meter_held_block};
+    let counters = [
+        0_u32,
+        1,
+        7,
+        65_535,
+        65_536,
+        0x00ff_ffff,
+        0x0100_0001,
+        u32::MAX,
+    ];
+    let decays = [1.0_f32, 0.999_99, 0.5, 0.0];
+    let mut mismatches = 0;
+    for frames in [0, 1, 3, 64, 129] {
+        for offset in 0..counters.len() {
+            let mut seeds = [MeterHeldSeed::default(); LANES];
+            for lane in 0..L::WIDTH {
+                seeds[lane] = MeterHeldSeed {
+                    held: if (lane + offset) % 2 == 0 {
+                        f32::MIN_POSITIVE
+                    } else {
+                        1.0
+                    },
+                    remaining: counters[(lane + offset) % counters.len()],
+                    hold_frames: counters[(lane + offset + 3) % counters.len()],
+                    decay: decays[(lane + offset) % decays.len()],
+                };
+            }
+            let mut oracle = seeds;
+            for block in 0..16 {
+                let mut words = Vec::with_capacity(frames * L::WIDTH);
+                for frame in 0..frames {
+                    for lane in 0..L::WIDTH {
+                        let word = match (frame + lane * 3 + block * 7) % 23 {
+                            0 if block > 1 => 1.0,
+                            1 if block > 1 => -0.5,
+                            2 => f32::NAN,
+                            3 => f32::INFINITY,
+                            4 => f32::NEG_INFINITY,
+                            5 => f32::from_bits(1),
+                            _ => -0.0,
+                        };
+                        words.push(word);
+                    }
+                }
+                let mut held = [0.0; LANES];
+                let mut remaining = [0; LANES];
+                meter_held_block::<L>(
+                    core::hint::black_box(&words),
+                    frames,
+                    &seeds,
+                    &mut held,
+                    &mut remaining,
+                );
+                let (held, remaining) = core::hint::black_box((held, remaining));
+                for lane in 0..L::WIDTH {
+                    let state = &mut oracle[lane];
+                    for frame in 0..frames {
+                        let x = words[frame * L::WIDTH + lane];
+                        let a = if x.is_finite() && !x.is_subnormal() {
+                            x.abs()
+                        } else {
+                            0.0
+                        };
+                        if a >= state.held {
+                            state.held = a;
+                            state.remaining = state.hold_frames;
+                        } else if state.remaining > 0 {
+                            state.remaining -= 1;
+                        } else if state.decay != 1.0 {
+                            let x = state.held * state.decay;
+                            state.held = if x.is_finite() && !x.is_subnormal() {
+                                x
+                            } else {
+                                0.0
+                            };
+                        }
+                    }
+                    mismatches += u32::from(held[lane].to_bits() != state.held.to_bits());
+                    mismatches += u32::from(remaining[lane] != state.remaining);
+                    seeds[lane].held = held[lane];
+                    seeds[lane].remaining = remaining[lane];
+                }
+            }
+        }
+    }
     mismatches
 }
 
