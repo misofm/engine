@@ -470,8 +470,10 @@ pub struct Placement {
 /// 2. A ready keyed node waits in its class's pool. While any node waits, the one with the
 ///    earliest deadline (`alap`, then index) is the stab: every node waiting in **its** class
 ///    whose floor is at most that deadline is placed together, at the largest of their floors --
-///    **if** that lowers the class's bank count at `lanes` per bank (`ceil(n / lanes)` merged
-///    against the sum over their own floors). Otherwise each is placed at its own floor, as level
+///    **if** that lowers the class's bank count at `lanes` per bank, counted over the class's
+///    nodes already placed at those levels (`ceil` of the merged level's total against the sum
+///    over the members' own floors; nodes a later stab places there are not seen, a limit of the
+///    online greedy). Otherwise each is placed at its own floor, as level
 ///    bucketing would: a merge that saves no bank only moves a lane into a bank of other lanes,
 ///    where it can no longer skip with a bank of its own. Their consumers may then become ready,
 ///    and the sweep continues.
@@ -508,6 +510,8 @@ pub fn place_over_windows<K: Ord + Clone>(
     // Waiting keyed nodes: by class, and all of them by deadline.
     let mut pools: BTreeMap<K, BTreeSet<usize>> = BTreeMap::new();
     let mut deadlines: BTreeSet<(u64, usize)> = BTreeSet::new();
+    // Keyed nodes already placed, per (class, level): what a merge's bank count is measured on.
+    let mut placed_at: BTreeMap<(K, u64), usize> = BTreeMap::new();
     let mut done = 0usize;
     let place = |index: usize,
                  level: u64,
@@ -560,24 +564,34 @@ pub fn place_over_windows<K: Ord + Clone>(
             .map(|index| floor[*index])
             .max()
             .expect("the stab is a member");
-        // A merge is committed only when it lowers the key's bank count: `ceil(n / W)` over the
-        // merged set against the sum, over the members' own floors, of what the level plan binds
-        // there. A merge that saves no bank only moves lanes between banks, and a member that was
-        // alone at its level (a silent aux, say) would then run inside a bank of active lanes
-        // instead of skipping with its own; so it is refused, and every member is placed at its
-        // own floor, as the level plan would place it.
+        // A merge is committed only when it lowers the key's bank count. Both sides count the
+        // banks the key gains over the nodes already placed at each level (`placed_at`): merged,
+        // `ceil((P_M + n) / W) - ceil(P_M / W)` at the merged level `M`; split, that difference
+        // summed over the members' own floors. A merge that saves no bank only moves lanes
+        // between banks, and a member that was alone at its level (a silent aux, say) would then
+        // run inside a bank of active lanes instead of skipping with its own; so it is refused,
+        // and every member is placed at its own floor, as the level plan would place it. Nodes a
+        // later stab places at those levels are not seen here: a limit of the online greedy.
         let mut by_floor: BTreeMap<u64, usize> = BTreeMap::new();
         for index in &members {
             *by_floor.entry(floor[*index]).or_default() += 1;
         }
-        let split: usize = by_floor.values().map(|count| count.div_ceil(lanes)).sum();
-        let merge = members.len().div_ceil(lanes) < split;
+        let at = |level: u64| placed_at.get(&(key.clone(), level)).copied().unwrap_or(0);
+        let gain = |level: u64, added: usize| {
+            (at(level) + added).div_ceil(lanes) - at(level).div_ceil(lanes)
+        };
+        let split: usize = by_floor
+            .iter()
+            .map(|(level, count)| gain(*level, *count))
+            .sum();
+        let merge = gain(merged_level, members.len()) < split;
         for index in &members {
             pool.remove(index);
             deadlines.remove(&(nodes[*index].window.alap, *index));
         }
         for index in members {
             let level = if merge { merged_level } else { floor[index] };
+            *placed_at.entry((key.clone(), level)).or_default() += 1;
             place(
                 index,
                 level,
@@ -1437,6 +1451,43 @@ mod tests {
                 );
                 assert!(placed[1..].iter().all(|placement| placement.level == 1));
             }
+        }
+        // Second case: the merged level already holds `W - 1` nodes an earlier stab placed. A
+        // late stab of `x` (`[1, 6]`, floor 1 from its producer `p`) and `y` (`[2, 6]`, floor 2
+        // from `q`) would add one bank either way: merged at 2 the level holds `W + 1` (two
+        // banks), split it is `{x}` at 1 and `W` at 2 (two banks). Refused.
+        for lanes in [4_usize, 8] {
+            let window = |asap, alap| CohortWindow { asap, alap };
+            let mut input: Vec<PlacementNode<char>> = (0..lanes - 1)
+                .map(|_| PlacementNode {
+                    window: window(2, 2),
+                    key: Some('K'),
+                })
+                .collect();
+            let k = input.len();
+            input.push(PlacementNode {
+                window: window(0, 5),
+                key: Some('A'),
+            });
+            input.push(PlacementNode {
+                window: window(1, 5),
+                key: Some('B'),
+            });
+            input.push(PlacementNode {
+                window: window(1, 6),
+                key: Some('K'),
+            });
+            input.push(PlacementNode {
+                window: window(2, 6),
+                key: Some('K'),
+            });
+            let edges = [(k, k + 2), (k + 1, k + 3)];
+            let placed = place_over_windows(&input, &edges, lanes).expect("acyclic");
+            assert_eq!(
+                (placed[k + 2].level, placed[k + 3].level),
+                (1, 2),
+                "W={lanes}: x keeps its floor when the merged level's banks would not drop"
+            );
         }
     }
 }

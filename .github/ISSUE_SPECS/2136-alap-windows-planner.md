@@ -252,3 +252,18 @@ different depths are one cohort per pool. `mergeable_partial_pairs` is 0 on ever
   chain order and runs on #2134's cross-level corpus again.
 - MINOR 2: `w4_counters_describe_the_designs_plan` no longer asserts the constant 28; the static
   count's one owner is `the_c1_submix_drives_are_one_cohort_over_level_windows`.
+
+## Attempt 3 (2026-10-27, after the second verify's FAIL)
+
+- **MAJOR fixed:** the no-bank-saved rule now counts the key's nodes already placed at each level
+  (`placed_at`, per key and level): merged at `M`, `ceil((P_M + n) / W) - ceil(P_M / W)`; split,
+  the same difference summed over the members' floors; merge only when the merged delta is
+  strictly smaller. Nodes a later stab places at those levels are not seen (a limit of the online
+  greedy). Reproducer added as the second case of `a_merge_that_saves_no_bank_is_refused` (W-1
+  nodes already at level 2; late `x` floor 1, `y` floor 2), at W=4 and W=8. Red on the attempt-2
+  rule: `W=4: x keeps its floor when the merged level's banks would not drop` (left (2, 2), right
+  (1, 2)).
+- MINOR: the slot-recycle checker's same-run exemption also requires that the later op reads the
+  earlier op's output.
+- Ruling point 10 records the accepted trade: a merge that saves a static bank may still run more
+  banks on a silent-heavy block; the #2135 packer groups by state at run time.
