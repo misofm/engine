@@ -822,11 +822,18 @@ impl ProviderEpoch {
         owner
     }
 
-    /// This epoch with its plan's meter frame ring (#1588 D2), if it has one.
-    pub(crate) fn with_meter_frames(mut self, ring: Option<host_core::MeterFrameRing>) -> Self {
-        if let Some(ring) = ring {
-            self.meter_frames = Some(ring.consumer);
-            self.meter_frame_producer = Some(ring.producer);
+    /// This epoch with its plan's meter frame ring (#1588 D2), if it has one: the control half,
+    /// and the render half unless the preparer moved it into the plan (#1332).
+    pub(crate) fn with_meter_frames(
+        mut self,
+        ring: Option<(
+            host_core::MeterFrameConsumer,
+            Option<host_core::MeterFrameProducer>,
+        )>,
+    ) -> Self {
+        if let Some((consumer, producer)) = ring {
+            self.meter_frames = Some(consumer);
+            self.meter_frame_producer = producer;
         }
         self
     }

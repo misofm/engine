@@ -353,3 +353,67 @@ to the worklet (D2-D4), routes the existing control messages to the Worker (D7) 
 
 Split, all in this issue: (a) the Rust exports and `worker_handoff.rs`; (b) the JS modes, the
 Worker file, the ports, `instanceMode` and the isolated leg; (c) growth and gate 4.
+
+## S4 evidence (2026-10-27): the host split in place, one thread
+
+Slice S4 of the #1332 build plan (#1332(a1)): a pure refactor of `hosts/host-web/src/lib.rs`, with
+no ABI, export, JS or SDK change. Branch `codex/issue-1332-host-split` from main `0512957d5`.
+
+- **Split.** `AudioWorkletEngineHost` holds `control: Option<ControlHalf>` and `render: RenderHalf`.
+  `ControlHalf` is the old `ReadyOwnership` without its render fields: the control plane, the
+  queries, the preparer record, `blocking_rebuilds`, the `ControlWords` it decides and its own
+  `last_result`. `RenderHalf` owns `WebStatus`, the staging buffers and `RenderReady` (the plan,
+  `shape`, `shape_epoch`, the meter delivery, the meter level word, `meter_applied`, the
+  `live_values_superseded` handle and the retired tables). `render_next` and `poll_meters` are
+  `RenderHalf` calls. A control call records its result in the control half and the status word,
+  as before; a render call records it in the status only. The published status word does not
+  change in single mode.
+- **Tables travel with the plan.** `RenderCompanions` carries the plan's boxed `PlanShape`. The
+  preparer moves the plan's meter frame producer into it before publication, through the new
+  `RuntimePreparer::keep_meter_frame_producer` (the default keeps the producer in the epoch, so the
+  C ABI does not change). `RenderReady::adopt_shape` takes the tables from the adopted plan's
+  companions. `pending_shapes`, the room check and `name_successor` are gone. A superseded
+  candidate's tables drop with its plan.
+- **Control words.** The control half leaves `ControlWords`: the newest epoch, the master index in
+  the newest strip order, the structure epoch, and the address of the newest replacement's meter
+  header, which the preparer leaves in the record. The render half applies the master and
+  structure words to the plan of that epoch only, at once between blocks (the single instance
+  hands them over after each control call) and at adoption. It names the successor header while a
+  newer plan waits. The retired-header rule (#1290d1) is unchanged.
+- **Retired tables.** The block that adopts a plan moves the retired tables, by exchange with an
+  empty slot, into one of `RETIRED_SHAPES = 4` slots. The bound is exact: 3 retirement credits
+  (`RETIREMENT_CAPACITY`) plus the one in-place adoption before the first block (#1597), and a
+  change to either needs a fifth slot. If all slots are full, the tables stay in the adopted plan's
+  companions and drop with that plan on the control thread, which is safe. The memory timing
+  changes: retired tables now live until the next `service()` tick, not the next control call that
+  reclaimed them before, bounded by the four slots. The accounting rows do not change.
+
+Gates, all green on the branch: `cargo test -p host-web -p control-plane -p capi --all-targets`
+with the workspace debug step's features for them (501 passed); workspace `cargo clippy
+--all-targets --all-features -D warnings`; `cargo fmt --check`; `RUSTDOCFLAGS='-D warnings' cargo
+doc --workspace --no-deps`; every lint-job policy script, including `check-lane-policy.sh`;
+`realtime_policy` (285 marked regions); `build-web-audioworklet.sh`, `check-web-audioworklet.sh`
+(render closure 35 members, 11 pinned indirect sites unchanged, no allocation, `atomic_waits=0`),
+`test-web-audioworklet.sh` and `check-browser-expected-resources.py --artifacts`; and both local
+browser legs, `npm run qualify -- --check-matrix --self-test-mutations` on Chromium 151 and WebKit
+26.5 with a private null PulseAudio sink.
+
+No bit moved (PR evidence, not a committed test): `direct-oracle.mjs` in print mode over the base
+module (main `0512957d5`, `df4a8800…`) and the S4 module (`87691d75…`). Every PCM digest (8),
+status snapshot, result transcript and timeline is equal. Four resource rows grew within their
+ceilings: `graphSessionPlusPlanBytes` and `graphIncrementalPlanBytes` by 4 B (the companions'
+tables pointer), and `bridgeMetadataBytes` and `bridgeRetainedBytes` by 96 B (the two halves'
+shells and the retired slots).
+
+Notes for S5/S6:
+- `ControlWords` describe one epoch. Across threads, render could adopt a candidate after a later
+  commit replaced the words. That plan would then keep its preparation defaults (no master,
+  structure epoch 0) until the words name it. S5 must carry the words for each epoch, or stamp
+  them into the plan before publication.
+- The retired-table slots are emptied by the host's service step on the same thread. Across
+  threads, S6 needs a bounded hand-back from render to control. The free must not happen until
+  the worklet has switched its meter views off the retired header (`postMeterFrame` runs after
+  `render_next` in the same `process()`), so the hand-back should wait at least one block.
+- The control exports still read the render half's `status` (state, quantum, clock) and the
+  shared staging `buffers` (control request, diagnostic, source staging). In worker mode the
+  Worker needs its own copies.
