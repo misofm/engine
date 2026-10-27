@@ -783,6 +783,8 @@ CONTROL_THREAD_EXEMPT: dict[str, str] = {
 # deleting the row silently (the INDIRECT_SITES policy). A counted kernel that is neither here
 # nor in `CONTROL_THREAD_EXEMPT` fails, so a change that adds a kernel adds its row.
 RENDER_KERNELS: dict[str, str] = {
+    "_RINvNvNtCs_5graph7runtime15bank_meter_pass5planeNtNtCs_4wide6f32x4_5f32x4EB_":
+        "resident bank meter plane: seeded energy and optional held-peak hold/decay (#951)",
     "_RNvMCs_8builtinsINtB_10InputStageNtNtCs_4wide6f32x4_5f32x4E7processB_":
         "builtins input section (polarity/trim/HPF/LPF), stereo body",
     "_RNvMCs_8builtinsINtB_10InputStageNtNtCs_4wide6f32x4_5f32x4E12process_monoB_":
