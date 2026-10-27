@@ -741,12 +741,15 @@ struct PlanMeterRing {
 }
 
 /// How many retired plans' tables the render half holds for the control side's next service step
-/// (#1290a, #1332 S4). Render adopts at most one plan per retirement credit between two service
-/// steps (a displaced plan holds its credit until the service step reclaims it, and a full
-/// retirement queue defers the swap), and the control plane has three
-/// (`control_plane::compile::RETIREMENT_CAPACITY`), so four leaves room to spare. Were they ever
+/// (#1290a, #1332 S4). The bound is exact: between two service steps render adopts at most one plan
+/// per retirement credit (a displaced plan holds its credit until the service step reclaims it, and
+/// a full retirement queue defers the swap), and the control plane has three
+/// (`control_plane::compile::RETIREMENT_CAPACITY`), plus the one plan a `SPECTRUM_CONFIGURE` may
+/// adopt in place before the first block (`PlanState::adopt_before_first_block`, through
+/// `SessionState::command_with_plan`): four. A change to either needs a fifth slot. Were they ever
 /// all taken, the retired tables would stay in the adopted plan's companions and drop with that
-/// plan, off the render thread either way.
+/// plan on the control thread when the service step reclaims it, never on the render thread: safe,
+/// only later.
 const RETIRED_SHAPES: usize = 4;
 
 /// What the control half decided about the newest committed plan's meter header (#1332 S4): the
@@ -2277,18 +2280,6 @@ impl AudioWorkletEngineHost {
         self.render.diagnostic_len = 0;
         self.render.status.state = STATE_DISPOSED;
         self.record(RESULT_OK)
-    }
-
-    /// The result code of the last call the control half ran (#1332 S4): what a control status
-    /// reports once the two halves run apart. The single instance publishes the same word in its
-    /// status ([`WebStatus::last_result`]); a host with no control half reports the status's.
-    #[must_use]
-    pub fn control_last_result(&self) -> u32 {
-        self.control
-            .as_ref()
-            .map_or(self.render.status.last_result, |control| {
-                control.last_result
-            })
     }
 
     /// Every control call returns its result through here, so the status's `blocking_rebuilds`

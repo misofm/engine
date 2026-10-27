@@ -381,8 +381,12 @@ no ABI, export, JS or SDK change. Branch `codex/issue-1332-host-split` from main
   hands them over after each control call) and at adoption. It names the successor header while a
   newer plan waits. The retired-header rule (#1290d1) is unchanged.
 - **Retired tables.** The block that adopts a plan moves the retired tables, by exchange with an
-  empty slot, into one of `RETIRED_SHAPES = 4` slots. The control side's next service step empties
-  them, as `reclaim_shapes` did before, so the memory timing and the accounting do not change.
+  empty slot, into one of `RETIRED_SHAPES = 4` slots. The bound is exact: 3 retirement credits
+  (`RETIREMENT_CAPACITY`) plus the one in-place adoption before the first block (#1597), and a
+  change to either needs a fifth slot. If all slots are full, the tables stay in the adopted plan's
+  companions and drop with that plan on the control thread, which is safe. The memory timing
+  changes: retired tables now live until the next `service()` tick, not the next control call that
+  reclaimed them before, bounded by the four slots. The accounting rows do not change.
 
 Gates, all green on the branch: `cargo test -p host-web -p control-plane -p capi --all-targets`
 with the workspace debug step's features for them (501 passed); workspace `cargo clippy
