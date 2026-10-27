@@ -45,9 +45,9 @@ test thread. Full logs are retained outside the worktree at
   audit tests before root requested SIGINT during repeated debug fixture-corpus generation
   (`audit-debug-interrupted.log`). This is not a package-suite pass. Root assigns the full audit
   suite to the fresh verifier's single integrated release run, matching the standing CI profile.
-- GREEN: `cargo test --locked -p console-workload` has passed the library's 15 tests, including
-  the new regression, plus automation's 8 and chain_shape's 22 integration tests
-  (`green-console.log`). The broader package run is still ongoing at this checkpoint.
+- GREEN: `cargo test --locked -p console-workload` completed successfully: 56 tests passed
+  (library 15, automation 8, chain_shape 22, eq_ramping_scenario 1, paired_spans 9, placement 1;
+  zero doc tests), including the new regression (`green-console.log`).
 - Independent adversarial review and the integrated release suite: pending with root's fresh
   verifier.
 
