@@ -228,3 +228,9 @@ failure without weakening the gate. No new/rewritten test or duplicate official-
 needed for the constant-string correction; the original test-value judgment and nineteen-file
 measurement evidence remain applicable. **PASS this bounded attempt 2 correction**, contingent
 on the mandatory corrected qualification run for final delivery.
+
+## Actual main integration before final qualification (2026-10-27)
+
+Main advanced to `9eb3575000abb2dc6ae59ee1e164341b836f899f` (independently delivered #2166). Root integrated it without conflicts and retired its now-closed local spec. Exact diff guards confirm this slice’s lane/builtins/graph/graph-compiler/loudness source, Wasm corpus/probe and owned meter audit are byte-identical to corrected head `6105becf645be5be03065192607bcc25457fd04c`. The limiter remains identical to actual main; the production qualification workflow is unchanged. This base-only integration is not another implementation attempt.
+
+Before integration, corrected run `40478246122` passed full workspace lint/environment policy, shipped artifact construction, the actual outlined meter render-kernel pin and the unchanged iOS/Android cross-target assembly owner. Final full required qualification on the actual combined tree remains mandatory before merged delivery and verified closure. No local build/test/timing workload was launched.
