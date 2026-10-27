@@ -988,197 +988,6 @@ struct RenderReady {
     plan: WebPlan,
 }
 
-impl RenderReady {
-    /// Take the words the control half left (#1332 S4) and apply them at once: the single
-    /// instance hands them over between blocks, after each control call.
-    fn receive_words(&mut self, words: ControlWords) {
-        self.words = words;
-        self.publish_words();
-    }
-
-    // REALTIME_POLICY_BEGIN: #1332 S4, the render half's application of the control half's words.
-    /// Apply the control half's words to the rendering plan's tables (#1332 S4): its master and
-    /// structure words when they describe this plan, and the successor its header names while a
-    /// newer plan waits, `0` otherwise (#1290d1). Scalar writes only.
-    fn publish_words(&mut self) {
-        let words = self.words;
-        let shape = &mut *self.shape;
-        if words.newest_epoch == self.shape_epoch {
-            shape.master_track = words.master_track;
-            shape.meter_header.master_track_plus_one = words
-                .master_track
-                .map_or(0, |track| track.saturating_add(1));
-            shape.meter_header.structure_epoch = words.structure_epoch;
-        }
-        let successor = if words.newest_epoch > self.shape_epoch {
-            words.successor_header
-        } else {
-            0
-        };
-        shape.meter_header.successor_pointer = u32::try_from(successor).unwrap_or(0);
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            shape.successor_address = successor;
-        }
-    }
-    // REALTIME_POLICY_END
-
-    /// Drop the tables of the plans render retired (#1290a, #1332 S4), after the service step
-    /// reclaimed their plans. Control side only: it frees.
-    fn reclaim_shapes(&mut self) {
-        for slot in &mut self.retired_shapes {
-            *slot = None;
-        }
-    }
-
-    // REALTIME_POLICY_BEGIN: #1588 D1, the render half's application of the meter level word.
-    /// Apply the session's meter level word from `next_sample`, the next block's first sample
-    /// (#1588 D1). When the word differs from the one last applied, the delivery's level follows
-    /// whether any client is on, and a change that keeps it on restarts the delivery epoch
-    /// ([`MeterDelivery::restart`]): either client's change restarts the epoch once, and a client
-    /// alone sees exactly the level transitions it asks for. The render half calls it before
-    /// each block, so a configure the control half accepted between two blocks turns the level
-    /// on from the next block's first sample, as the C ABI's requested gate does, and the lease
-    /// export calls it at once. Returns whether the publication was cleared, so the caller
-    /// republishes the lease frame. One `Acquire` load; allocation-free.
-    fn apply_meter_level(&mut self, next_sample: u64) -> bool {
-        let word = self.meter_level.load();
-        if word == self.meter_applied {
-            return false;
-        }
-        self.meter_applied = word;
-        let on = word != 0;
-        self.meters.set_level(on, next_sample) || (on && self.meters.restart(next_sample))
-    }
-
-    /// Copy the delivery's frame into the lease frame and its header (#1582 D4).
-    fn publish_lease_frame(&mut self) {
-        publish_web_meter_frame(
-            self.meters.frame(),
-            self.shape.master_track,
-            &mut self.shape.meter_frame,
-            &mut self.shape.meter_header,
-        );
-    }
-    // REALTIME_POLICY_END
-
-    // REALTIME_POLICY_BEGIN
-    /// Take the tables of the plan whose epoch is `epoch` from its companions (#1290a, #1332 S4),
-    /// at the block that adopted it. The tables it retires go to a free slot of
-    /// [`Self::retired_shapes`] for the control side's next service step. Pointer exchanges: it
-    /// allocates and frees nothing, and indexes nothing, so it adds no trap to the render export.
-    ///
-    /// The companions' `carried` is the pairing the swap block's attachment hook made (#1381b):
-    /// the readers the executors carried, which this hand-over follows with the meter delivery's
-    /// per-meter state (a carried tap's arm state is in its slot, #1585 D6). A swap that carried
-    /// a meter keeps the meter delivery running, because the carried meters keep their window grid
-    /// and the host's master windows are continuous; one that carried none restarts it, because
-    /// its meters open their first window at the adoption block. A swap that adds or removes a
-    /// strip in front shifts the meters' handles (a handle is a position): each carried meter
-    /// remembers the handle its predecessor published under ([`MeterDelivery::adopt`], which takes
-    /// the adopted plan's [`PlanShape::meter_tables`]), so a window closed before the swap,
-    /// pending or still queued, is accepted by the strip it was carried to, not dropped.
-    ///
-    /// The meter frame travels with the tables (#1290d1): the adopted plan's frame and header are
-    /// the published ones from this block on. The retiring header is marked
-    /// ([`WebMeterHeader::retired`]) and names the adopted one, so the page's render path switches
-    /// to the views it cut over them in advance. The control half's words then apply to the
-    /// adopted plan ([`Self::publish_words`]). Pointer exchanges and scalar writes only.
-    fn adopt_shape(&mut self, epoch: u64, first_sample: u64) {
-        self.shape_epoch = epoch;
-        let Self {
-            plan,
-            shape,
-            meters,
-            retired_shapes,
-            ..
-        } = self;
-        let Some(companions) = plan.active_attachment_mut::<RenderCompanions>() else {
-            return;
-        };
-        let RenderCompanions {
-            shape: slot,
-            carried,
-            carried_len,
-            ..
-        } = companions;
-        // What the swap block's hook paired (#1381b); empty when nothing was.
-        let carried = carried.get(..*carried_len as usize).unwrap_or(&[]);
-        let meters_carried = carried
-            .iter()
-            .any(|reader| reader.kind == ObserverKind::Meter);
-        let Some(incoming) = slot.as_mut() else {
-            debug_assert!(false, "an adopted plan carries no tables");
-            return;
-        };
-        core::mem::swap(shape, incoming);
-        // `shape` is the adopted plan's and `incoming` the retired one's, in the adopted plan's
-        // companions. The stream the page reads continues in the adopted plan's header (#1290d1):
-        // its window, sequence, generation and loss are the stream's, its strip counts and frame
-        // are the plan's. The retired header says so and names the adopted one, so the page's
-        // render path switches to the views it cut in advance.
-        let retired = incoming;
-        let stream = retired.meter_header;
-        retired.meter_header.retired = 1;
-        let adopted_header = core::ptr::from_ref(&shape.meter_header).addr();
-        retired.meter_header.successor_pointer = u32::try_from(adopted_header).unwrap_or(0);
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            retired.successor_address = adopted_header;
-        }
-        shape.meter_header.windows = stream.windows;
-        shape.meter_header.first_sample = stream.first_sample;
-        shape.meter_header.end_sample = stream.end_sample;
-        shape.meter_header.sequence = stream.sequence;
-        shape.meter_header.master_gr_present = stream.master_gr_present;
-        shape.meter_header.reserved = stream.reserved;
-        // #1588 D3: the adopted plan's frames name its epoch, the epoch of the ring its tables
-        // carry, which its preparer could not know.
-        debug_assert!(
-            shape.meter_ring.is_some(),
-            "a published plan has no meter ring"
-        );
-        if let Some(ring) = shape.meter_ring.as_mut() {
-            ring.epoch = epoch;
-        }
-        // The delivery adopts the plan's meter tables (#1582 R1): the pending strip snapshots
-        // follow their meters, and a swap that carried no meter restarts the delivery at this
-        // block, on a new grid (#1581 D5). The retired tables come back in the adopted shape's
-        // slot and go to the retired one, by pointer exchange. Every plan's tables are built with
-        // its meter tables (`build_plan_shape`), and only this exchange takes them.
-        debug_assert!(
-            shape.meter_tables.is_some(),
-            "an adopted plan shape has no meter tables"
-        );
-        if let Some(tables) = shape.meter_tables.as_mut() {
-            tables.set_plan_epoch(epoch);
-            meters.adopt(
-                tables,
-                carried
-                    .iter()
-                    .filter(|reader| reader.kind == ObserverKind::Meter)
-                    .map(|reader| MeterCarry {
-                        successor: reader.successor,
-                        predecessor: reader.predecessor,
-                        successor_handle: reader.successor_handle,
-                        predecessor_handle: reader.predecessor_handle,
-                    }),
-                meters_carried,
-                first_sample,
-            );
-        }
-        core::mem::swap(&mut shape.meter_tables, &mut retired.meter_tables);
-        // A carried tap's arm state needs no hand-over: it is in the tap's slot, which moves with
-        // the tap (#1585 D6). The retired tables leave the adopted plan's companions for a slot
-        // the control side's next service step empties, by exchange with an empty slot.
-        if let Some(free) = retired_shapes.iter_mut().find(|free| free.is_none()) {
-            core::mem::swap(free, slot);
-        }
-        self.publish_words();
-    }
-    // REALTIME_POLICY_END
-}
-
 /// One compiled source's declared shape, in canonical normalized source order (issue #207).
 ///
 /// The strict JSON declares one channel count and full-source frame count; sample rate is solely a
@@ -2504,7 +2313,201 @@ impl AudioWorkletEngineHost {
     }
 }
 
+impl RenderReady {
+    /// Take the words the control half left (#1332 S4) and apply them at once: the single
+    /// instance hands them over between blocks, after each control call.
+    fn receive_words(&mut self, words: ControlWords) {
+        self.words = words;
+        self.publish_words();
+    }
+
+    // REALTIME_POLICY_BEGIN: #1332 S4, the render half's application of the control half's words.
+    /// Apply the control half's words to the rendering plan's tables (#1332 S4): its master and
+    /// structure words when they describe this plan, and the successor its header names while a
+    /// newer plan waits, `0` otherwise (#1290d1). Scalar writes only.
+    fn publish_words(&mut self) {
+        let words = self.words;
+        let shape = &mut *self.shape;
+        if words.newest_epoch == self.shape_epoch {
+            shape.master_track = words.master_track;
+            shape.meter_header.master_track_plus_one = words
+                .master_track
+                .map_or(0, |track| track.saturating_add(1));
+            shape.meter_header.structure_epoch = words.structure_epoch;
+        }
+        let successor = if words.newest_epoch > self.shape_epoch {
+            words.successor_header
+        } else {
+            0
+        };
+        shape.meter_header.successor_pointer = u32::try_from(successor).unwrap_or(0);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            shape.successor_address = successor;
+        }
+    }
+    // REALTIME_POLICY_END
+
+    /// Drop the tables of the plans render retired (#1290a, #1332 S4), after the service step
+    /// reclaimed their plans. Control side only: it frees.
+    fn reclaim_shapes(&mut self) {
+        for slot in &mut self.retired_shapes {
+            *slot = None;
+        }
+    }
+
+    // REALTIME_POLICY_BEGIN: #1588 D1, the render half's application of the meter level word.
+    /// Apply the session's meter level word from `next_sample`, the next block's first sample
+    /// (#1588 D1). When the word differs from the one last applied, the delivery's level follows
+    /// whether any client is on, and a change that keeps it on restarts the delivery epoch
+    /// ([`MeterDelivery::restart`]): either client's change restarts the epoch once, and a client
+    /// alone sees exactly the level transitions it asks for. The render half calls it before
+    /// each block, so a configure the control half accepted between two blocks turns the level
+    /// on from the next block's first sample, as the C ABI's requested gate does, and the lease
+    /// export calls it at once. Returns whether the publication was cleared, so the caller
+    /// republishes the lease frame. One `Acquire` load; allocation-free.
+    fn apply_meter_level(&mut self, next_sample: u64) -> bool {
+        let word = self.meter_level.load();
+        if word == self.meter_applied {
+            return false;
+        }
+        self.meter_applied = word;
+        let on = word != 0;
+        self.meters.set_level(on, next_sample) || (on && self.meters.restart(next_sample))
+    }
+
+    /// Copy the delivery's frame into the lease frame and its header (#1582 D4).
+    fn publish_lease_frame(&mut self) {
+        publish_web_meter_frame(
+            self.meters.frame(),
+            self.shape.master_track,
+            &mut self.shape.meter_frame,
+            &mut self.shape.meter_header,
+        );
+    }
+    // REALTIME_POLICY_END
+
+    // REALTIME_POLICY_BEGIN
+    /// Take the tables of the plan whose epoch is `epoch` from its companions (#1290a, #1332 S4),
+    /// at the block that adopted it. The tables it retires go to a free slot of
+    /// [`Self::retired_shapes`] for the control side's next service step. Pointer exchanges: it
+    /// allocates and frees nothing, and indexes nothing, so it adds no trap to the render export.
+    ///
+    /// The companions' `carried` is the pairing the swap block's attachment hook made (#1381b):
+    /// the readers the executors carried, which this hand-over follows with the meter delivery's
+    /// per-meter state (a carried tap's arm state is in its slot, #1585 D6). A swap that carried
+    /// a meter keeps the meter delivery running, because the carried meters keep their window grid
+    /// and the host's master windows are continuous; one that carried none restarts it, because
+    /// its meters open their first window at the adoption block. A swap that adds or removes a
+    /// strip in front shifts the meters' handles (a handle is a position): each carried meter
+    /// remembers the handle its predecessor published under ([`MeterDelivery::adopt`], which takes
+    /// the adopted plan's [`PlanShape::meter_tables`]), so a window closed before the swap,
+    /// pending or still queued, is accepted by the strip it was carried to, not dropped.
+    ///
+    /// The meter frame travels with the tables (#1290d1): the adopted plan's frame and header are
+    /// the published ones from this block on. The retiring header is marked
+    /// ([`WebMeterHeader::retired`]) and names the adopted one, so the page's render path switches
+    /// to the views it cut over them in advance. The control half's words then apply to the
+    /// adopted plan ([`Self::publish_words`]). Pointer exchanges and scalar writes only.
+    fn adopt_shape(&mut self, epoch: u64, first_sample: u64) {
+        self.shape_epoch = epoch;
+        let Self {
+            plan,
+            shape,
+            meters,
+            retired_shapes,
+            ..
+        } = self;
+        let Some(companions) = plan.active_attachment_mut::<RenderCompanions>() else {
+            return;
+        };
+        let RenderCompanions {
+            shape: slot,
+            carried,
+            carried_len,
+            ..
+        } = companions;
+        // What the swap block's hook paired (#1381b); empty when nothing was.
+        let carried = carried.get(..*carried_len as usize).unwrap_or(&[]);
+        let meters_carried = carried
+            .iter()
+            .any(|reader| reader.kind == ObserverKind::Meter);
+        let Some(incoming) = slot.as_mut() else {
+            debug_assert!(false, "an adopted plan carries no tables");
+            return;
+        };
+        core::mem::swap(shape, incoming);
+        // `shape` is the adopted plan's and `incoming` the retired one's, in the adopted plan's
+        // companions. The stream the page reads continues in the adopted plan's header (#1290d1):
+        // its window, sequence, generation and loss are the stream's, its strip counts and frame
+        // are the plan's. The retired header says so and names the adopted one, so the page's
+        // render path switches to the views it cut in advance.
+        let retired = incoming;
+        let stream = retired.meter_header;
+        retired.meter_header.retired = 1;
+        let adopted_header = core::ptr::from_ref(&shape.meter_header).addr();
+        retired.meter_header.successor_pointer = u32::try_from(adopted_header).unwrap_or(0);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            retired.successor_address = adopted_header;
+        }
+        shape.meter_header.windows = stream.windows;
+        shape.meter_header.first_sample = stream.first_sample;
+        shape.meter_header.end_sample = stream.end_sample;
+        shape.meter_header.sequence = stream.sequence;
+        shape.meter_header.master_gr_present = stream.master_gr_present;
+        shape.meter_header.reserved = stream.reserved;
+        // #1588 D3: the adopted plan's frames name its epoch, the epoch of the ring its tables
+        // carry, which its preparer could not know.
+        debug_assert!(
+            shape.meter_ring.is_some(),
+            "a published plan has no meter ring"
+        );
+        if let Some(ring) = shape.meter_ring.as_mut() {
+            ring.epoch = epoch;
+        }
+        // The delivery adopts the plan's meter tables (#1582 R1): the pending strip snapshots
+        // follow their meters, and a swap that carried no meter restarts the delivery at this
+        // block, on a new grid (#1581 D5). The retired tables come back in the adopted shape's
+        // slot and go to the retired one, by pointer exchange. Every plan's tables are built with
+        // its meter tables (`build_plan_shape`), and only this exchange takes them.
+        debug_assert!(
+            shape.meter_tables.is_some(),
+            "an adopted plan shape has no meter tables"
+        );
+        if let Some(tables) = shape.meter_tables.as_mut() {
+            tables.set_plan_epoch(epoch);
+            meters.adopt(
+                tables,
+                carried
+                    .iter()
+                    .filter(|reader| reader.kind == ObserverKind::Meter)
+                    .map(|reader| MeterCarry {
+                        successor: reader.successor,
+                        predecessor: reader.predecessor,
+                        successor_handle: reader.successor_handle,
+                        predecessor_handle: reader.predecessor_handle,
+                    }),
+                meters_carried,
+                first_sample,
+            );
+        }
+        core::mem::swap(&mut shape.meter_tables, &mut retired.meter_tables);
+        // A carried tap's arm state needs no hand-over: it is in the tap's slot, which moves with
+        // the tap (#1585 D6). The retired tables leave the adopted plan's companions for a slot
+        // the control side's next service step empties, by exchange with an empty slot.
+        if let Some(free) = retired_shapes.iter_mut().find(|free| free.is_none()) {
+            core::mem::swap(free, slot);
+        }
+        self.publish_words();
+    }
+    // REALTIME_POLICY_END
+}
+
 impl RenderHalf {
+    // REALTIME_POLICY_BEGIN
+    /// [`AudioWorkletEngineHost::render_next`]: render exactly one prepared quantum at the next
+    /// absolute sample time.
     fn render_next(&mut self) -> u32 {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
@@ -3285,7 +3288,7 @@ type WebPlan = PlanState<WebAdapter>;
 /// readers there. A plan's spectrum captures are not among them: the preparer returns them to the
 /// session, whose spectrum monitor installs them at the plan's promotion (#1596 D3).
 ///
-/// The plan's own tables ride here too (#1332 S4): its [`PlanShape`], from its preparation to the
+/// The plan's own tables ride here too (#1332 S4): its `PlanShape`, from its preparation to the
 /// block that adopts it, so a committed plan carries what its render half reads through the plan
 /// exchange, and nothing beside the plan has to follow it.
 ///
