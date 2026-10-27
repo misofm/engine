@@ -1833,7 +1833,7 @@ async function main() {
   );
   const artifacts = option("--artifacts");
   if (artifacts === null) {
-    throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--check-matrix|--record-matrix --candidate-commit 40_HEX] [--self-test-mutations] [--pcm-feed-suspended-only]");
+    throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--check-matrix|--record-matrix --candidate-commit 40_HEX] [--self-test-mutations] [--pcm-feed-suspended-only|--blake3-only [--record-blake3 --candidate-commit 40_HEX]]");
   }
   const browserOption = option("--browser") ?? "all";
   const browserNames = browserOption === "all" ? Object.keys(ENGINES) : [browserOption];
@@ -1852,6 +1852,7 @@ async function main() {
     throw new Error("--record-blake3 requires --blake3-only --browser all");
   }
   const feedOnly = process.argv.includes("--pcm-feed-suspended-only");
+  if (feedOnly && blake3Only) throw new Error("select only one focused qualification row");
   if (feedOnly && (recordMatrix || checkMatrix || proveMutations)) {
     throw new Error("--pcm-feed-suspended-only cannot record/check the full matrix or its mutations");
   }
@@ -1860,11 +1861,11 @@ async function main() {
   }
   const candidateCommit = option("--candidate-commit");
   if ((recordMatrix || recordBlake3) && (candidateCommit === null || !CANONICAL_COMMIT.test(candidateCommit))) {
-    throw new Error("--record-matrix requires --candidate-commit as canonical lowercase 40-hex");
+    throw new Error("recording requires --candidate-commit as canonical lowercase 40-hex");
   }
   const artifactDigest = await sha256(path.join(path.resolve(artifacts), WASM_ARTIFACT));
   const sdkRoot = option("--sdk-root");
-  // The bundle is always built and served: the raw live-control rows send their `SET_CONTROL`
+  // Full qualification builds and serves the bundle: raw live-control rows send `SET_CONTROL`
   // transaction through it (#1563B). `--sdk-root` selects which SDK it comes from, and whether the
   // SDK rows run; without it the repository's own `sdk/` (with its `node_modules`) is bundled.
   const sdkBundle = blake3Only ? undefined : await buildSdkBundle(path.resolve(sdkRoot ?? path.join(HERE, "../../../sdk")));
