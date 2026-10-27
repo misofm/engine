@@ -221,7 +221,7 @@ def normalize_authorized_edits(text: str) -> str:
     # #2152 changes only five version literals and the accepted artifact pin.
     # Keep the historical baseline hash, so no other workflow edits are normalized away.
     require(text.count("0.8.1") == 5, "expected five exact #2170 release-version guards")
-    release_pin = "18350855c70e5a9e75d92ef1932f227bf71e1768be77a38452ff62a45084b879"
+    release_pin = "df4a880085f673d6ba04f9bc26506fbe7c69350d53e7ac9b7843bda332444479"
     baseline_pin = "47d12d99c034a3209b9d142d51d5a1ea62c4bcbdbbb90dc074546b7a6f6d85ba"
     require(text.count(release_pin) == 1, "expected the exact accepted #2152 artifact pin")
     text = text.replace("0.8.1", "0.2.4").replace(release_pin, baseline_pin, 1)
@@ -764,7 +764,7 @@ def test_invalid_shapes(workflow: str) -> None:
     expect_invalid("folded run block", lambda: extract_steps(unknown_run))
     for label, old, new in (
         ("wrong release version", 'PACKAGE_VERSION: "0.8.1"', 'PACKAGE_VERSION: "0.8.0"'),
-        ("wrong release pin", "18350855c70e5a9e75d92ef1932f227bf71e1768be77a38452ff62a45084b879", "0" * 64),
+        ("wrong release pin", "df4a880085f673d6ba04f9bc26506fbe7c69350d53e7ac9b7843bda332444479", "0" * 64),
     ):
         mutated = workflow.replace(old, new, 1)
         expect_invalid(label, lambda: check_static_contract(mutated, extract_steps(mutated)))
