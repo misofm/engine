@@ -1,7 +1,7 @@
 import { decodeObservationEnded } from "../core/observation-ended.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { WasmBoundary } from "../core/boundary.ts";
-import { planLatencyOf } from "../core/boundary.ts";
+import { bootSpectrumCommand, planLatencyOf } from "../core/boundary.ts";
 import type { EngineCallResult, PlanLatency, SessionShape } from "../core/boundary.ts";
 import { MisoEngineError, MisoUsageError, SessionSeekProducerError, resultName } from "../core/errors.ts";
 import type { SdkTimeoutCode } from "../core/errors.ts";
@@ -209,6 +209,8 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
     readonly options: ReturnType<typeof workletBootOptions>;
     readonly simd128ModuleUrl: string;
     readonly preparedModule?: WebAssembly.Module;
+    /** The boot's spectrum taps as one `SPECTRUM_CONFIGURE` command frame (#2166), when it has taps. */
+    readonly bootCommand?: Uint8Array;
     readonly workletModuleUrl: string;
   }) => Promise<MisoAudioWorkletHost>;
   readonly policy?: BrowserBootPolicy;
@@ -565,22 +567,18 @@ async function sendSpectrumFrame<T>(
 
 /**
  * D2 of #1596 for the browser engine, as for the headless one: refuse an engine whose
- * `CAPABILITIES_GET` lacks flag bit 16, then send one `SPECTRUM_CONFIGURE` of the boot's taps with
- * the policy's hop. The context is suspended until the engine is returned, so no block has
- * rendered: the engine prepares the plan with the taps and adopts it in place of the boot's plan
- * (#1597), and the reply reports `adoptedEpoch === configuredEpoch` at once.
+ * `CAPABILITIES_GET` lacks flag bit 16. The boot's taps are not sent here: the host staged them as
+ * the boot command (#2166), so the first plan carries them and the boot counts no blocking rebuild.
  */
-async function configureBootSpectrum(
+async function requireBootSpectrumCapability(
   host: MisoAudioWorkletHost,
-  configuration: SpectrumQuery | SpectrumCollection,
-  hopFrames: SpectrumHopFrames | undefined,
   deadlineMs: number,
   signal: AbortSignal | undefined,
 ): Promise<ControlTransactionQueue> {
   const started = Date.now();
   // The boot's own deadline is the SDK's boot timeout, not a usage error of the caller's.
   const expired = (): Error => new MisoEngineError(
-    `the boot spectrum configuration did not complete within ${deadlineMs} ms`,
+    `the boot spectrum capability probe did not complete within ${deadlineMs} ms`,
     { phase: "boot", code: "bootConfigureTimeout" },
   );
   const queue = await awaitSpectrum(createBrowserControlQueue(host), started, deadlineMs, signal, expired);
@@ -595,18 +593,6 @@ async function configureBootSpectrum(
   if (!capabilities.ok) throw spectrumCapabilityRefusal(`CAPABILITIES_GET was refused with ${capabilities.status}`);
   if ((capabilities.value.flags & CAPABILITY_SPECTRUM) === 0n) {
     throw spectrumCapabilityRefusal("capability flag bit 16 is clear");
-  }
-  const { request } = spectrumConfigureRequest(configuration, hopFrames === undefined ? undefined : { hopFrames });
-  const reply = await awaitSpectrum(
-    sendSpectrumFrame(host, queue, request, decodeSpectrumConfiguredReply),
-    started,
-    deadlineMs,
-    signal,
-    expired,
-  );
-  if (!reply.ok) throw spectrumRefusalError("the engine refused the boot spectrum configuration", reply, "boot");
-  if (reply.value.adoptedEpoch !== reply.value.configuredEpoch) {
-    throw malformed("the boot spectrum configuration was not carried by the first plan");
   }
   return queue;
 }
@@ -800,6 +786,10 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       ...request,
       ...(options.hostModuleUrl === undefined ? {} : { hostModuleUrl: options.hostModuleUrl }),
     }));
+    // #2166: the boot's taps ride the boot as one `SPECTRUM_CONFIGURE` command frame, so the
+    // first plan carries them and the boot counts no blocking rebuild.
+    const bootSpectrum = preparedSpectrumCollection ?? preparedSpectrum;
+    const bootCommand = bootSpectrumCommand(bootSpectrum, spectrumHopFrames);
     const host = await createHost({
       context,
       document,
@@ -810,16 +800,14 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       simd128ModuleUrl,
       workletModuleUrl,
       ...(preparedModule === undefined ? {} : { preparedModule }),
+      ...(bootCommand === undefined ? {} : { bootCommand }),
     });
-    // D2 of #1596: the boot's taps through one `SPECTRUM_CONFIGURE`, before the engine is returned.
+    // D2 of #1596: an engine with taps must serve the spectrum frames.
     let spectrumQueue: ControlTransactionQueue | undefined;
-    const bootSpectrum = preparedSpectrumCollection ?? preparedSpectrum;
     if (bootSpectrum !== undefined) {
       try {
-        spectrumQueue = await configureBootSpectrum(
+        spectrumQueue = await requireBootSpectrumCapability(
           host,
-          bootSpectrum,
-          spectrumHopFrames,
           spectrumDeadlineMs(options.requestDeadlineMs ?? 5_000),
           options.signal,
         );

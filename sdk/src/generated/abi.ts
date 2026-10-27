@@ -33,6 +33,7 @@ export const ABI_LAYOUT = deepFreeze(
   "exports": [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
+    "miso_engine_web_v1_boot_command_ptr",
     "miso_engine_web_v1_boot_diagnostic_bytes",
     "miso_engine_web_v1_boot_options_ptr",
     "miso_engine_web_v1_boot_result",
