@@ -1219,7 +1219,9 @@ fn touched(program: &ExecutionProgram, op: &Op) -> (Vec<u32>, Vec<u32>) {
 /// two different values: the schedule-later op recycled the slot. That is sound only if its run
 /// renders after the schedule-earlier op's run has finished, which is what this asserts against
 /// the executor's own run order ([`runs_in_runtime_order`]). An op writing its own input in place
-/// is the one exception, because that is one op, not two.
+/// is one exception, because that is one op, not two. A later slot of one fused run consuming an
+/// earlier slot's buffer in place is the other (issue #2134's cross-level corpus reaches it): the
+/// two are one run, in chain order, and the value passes along the chain.
 fn assert_no_slot_is_recycled_inside_a_bank_window(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -1228,9 +1230,13 @@ fn assert_no_slot_is_recycled_inside_a_bank_window(
 ) {
     let lanes = member_lanes(spec, banks);
     let mut run_of_op = vec![usize::MAX; program.ops.len()];
+    let mut slot_of_op = vec![0usize; program.ops.len()];
     for (position, run) in runs_in_runtime_order(program, &lanes).iter().enumerate() {
-        for op in run.iter().flatten() {
-            run_of_op[*op] = position;
+        for (slot, ops) in run.iter().enumerate() {
+            for op in ops {
+                run_of_op[*op] = position;
+                slot_of_op[*op] = slot;
+            }
         }
     }
     for members in banks {
@@ -1255,8 +1261,13 @@ fn assert_no_slot_is_recycled_inside_a_bank_window(
                         continue;
                     }
                     let (earlier, later) = (here.min(there), here.max(there));
+                    // One fused run, in chain order: the later slot computes over the resident
+                    // block from the earlier one's value, so sharing its buffer (an in-place
+                    // consumer of the earlier slot) is one value passed along the chain.
+                    let in_order_in_one_run = run_of_op[later] == run_of_op[earlier]
+                        && slot_of_op[later] > slot_of_op[earlier];
                     assert!(
-                        run_of_op[later] > run_of_op[earlier],
+                        in_order_in_one_run || run_of_op[later] > run_of_op[earlier],
                         "{label}: ops {here} and {there} share buffer {slot} inside a bank \
                          window, and op {later}, which recycled it, does not render in a later \
                          run than op {earlier}"
@@ -2345,12 +2356,7 @@ fn contracted_order_preserves_dataflow_on_random_graphs() {
             moved_graphs += 1;
         }
         let lanes = member_lanes(&spec, &banks);
-        // `assert_no_slot_is_recycled_inside_a_bank_window` is not asked here: its premise, that
-        // the op later in op order is the one that recycled a shared slot, holds only when no op
-        // in a window reads another's output. A sunk consumer of an early member renders after
-        // the bank, so it may recycle a slot a later member read at the bank's position. The
-        // interpreter below models render order and reads every value, so a slot recycled
-        // early is a foreign value there.
+        assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "cross-level");
         assert_program_matches_spec(&spec, &schedule, &delays, &program);
         assert_eq!(
             divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),

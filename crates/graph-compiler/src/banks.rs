@@ -858,6 +858,9 @@ enum PlacementKey {
 /// slot `k` therefore sits at its first slot's placement plus `k` whenever it sat at its first
 /// slot's level plus `k`.
 ///
+/// `lanes` is the bank width: a merge is taken only where it lowers a key's bank count at that
+/// width (`place_over_windows`), and at one lane (no bank width) nothing merges.
+///
 /// `per_node` is every effect whose slot key blocks banking: it neither heads nor continues a
 /// chain a fader would follow.
 pub(crate) fn placement_levels(
@@ -866,6 +869,7 @@ pub(crate) fn placement_levels(
     levels: &[DependencyLevel],
     classes: &SessionPoolClasses,
     per_node: &BTreeSet<EffectNodeId>,
+    lanes: usize,
 ) -> Result<PlacementLevels, GraphDiagnostic> {
     let invariant = || diag("graph.internal.invariant", "$.graph");
     let index_of = |id: &GraphNodeId| nodes.binary_search_by(|node| node.id.cmp(id)).ok();
@@ -962,8 +966,8 @@ pub(crate) fn placement_levels(
             key: key_of(index),
         })
         .collect();
-    let placed =
-        rack_compiler::place_over_windows(&placement_nodes, &ends).map_err(|_| invariant())?;
+    let placed = rack_compiler::place_over_windows(&placement_nodes, &ends, lanes)
+        .map_err(|_| invariant())?;
     let mut by_level: BTreeMap<u64, Vec<GraphNodeId>> = BTreeMap::new();
     let mut by_node = BTreeMap::new();
     for (index, placement) in placed.iter().enumerate() {

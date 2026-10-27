@@ -129,10 +129,10 @@ the ready set together once every member's producers are out, and a bank of one 
 | 2 | `the_banked_console_arena_equals_the_bank_unaware_arena` unchanged | (unchanged, green) |
 | 3 | `graph-compiler` `tests/console_banking.rs` `the_contracted_order_is_the_schedule_on_every_one_level_fixture` (11 session fixtures at 6a; since #2136 the C1 and sends fixtures bank across levels and are left out, the four consoles without submixes are required in) | M3 emitting a bank's members contiguously: `console-c1-16: the executor order moved 5 ops` (at 6a) |
 
-The structural `assert_no_slot_is_recycled_inside_a_bank_window` is not asked of the cross-level
-corpus: its premise (the op later in op order is the recycler) needs a window in which no op reads
-another's output, and a sunk consumer of an early member breaks it without a defect. The symbolic
-interpreter reads every value in render order, so an early recycle is a foreign value there.
+The structural `assert_no_slot_is_recycled_inside_a_bank_window` runs on the cross-level corpus
+too (attempt 2). It flagged one false positive (graph 1348, ops 44 and 49, buffer 10): `s00`'s fx1
+and fx2 are fused into one run and fx2 consumes fx1's output in place. The checker now accepts a
+pair in one run in chain order.
 
 Gate 3's pack-group clause: with no op moved the program, its units and therefore #2142's lane
 chains and pack groups are the base plan's. The one-time comparison of `test_only_pack_groups` on

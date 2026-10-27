@@ -59,3 +59,10 @@ contraction the consumers move with the unit and nothing is declined.
 8. **The #966 invariant is a window check.** A bankable chain whose slots are not consecutive in
    ASAP still fails the compile; a bank slot still binds only when its members share a placement
    level at that slot.
+9. **A merge that saves no bank is refused** (attempt 2). The sweep commits a stab's members at one
+   level only when that lowers the key's bank count at the build's width (`ceil(n / W)` merged
+   against the sum over the members' own floors); otherwise each member keeps its own floor, as the
+   level plan places it. A merge that saves no bank only moves lanes between banks: a strip that
+   was alone at its level (a silent aux beside active groups) would run inside a bank of active
+   lanes, with its fader and matrix behind it, instead of skipping with a bank of its own -- more
+   work on silence for nothing (the owner's skip-work-on-silence rule).
