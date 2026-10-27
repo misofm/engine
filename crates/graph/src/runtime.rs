@@ -9214,7 +9214,13 @@ fn observer_nodes<'a>(
 }
 
 /// Groups the program's ops into units: a bank's members become one unit at the first member's
-/// position, which the level-major schedule proves is after every member's producers (#98 F1).
+/// position, which the program's op order proves is after every member's producers (#98 F1).
+///
+/// The op order is the executor order (issue #2134): `program::lower` emits ops in the
+/// topological order of the graph contracted by bank, keyed by canonical schedule position, so a
+/// bank's first member follows every member's producers and every consumer of a member follows the
+/// member, whatever dependency levels the members sit at. On a plan whose banks each sit at one
+/// level that order is the schedule itself, and so is the unit order this returns.
 ///
 /// Returns, for each unit, the ops it owns and the bank membership it belongs to.
 pub(crate) fn units_of(
@@ -14080,7 +14086,7 @@ fn finish_unit(
 ///
 /// The lowering gives an op output a *coloured* buffer and colours are reused, so "which ops name
 /// this buffer" is not the question -- "which ops name it while this op is still its last writer"
-/// is. Walking `program.ops` in schedule order and remembering the last writer of each colour
+/// is. Walking `program.ops` in op order (the order colouring walked) and remembering the last writer of each colour
 /// answers exactly that: liveness colouring never reassigns a colour while a consumer still needs
 /// it, so the last writer at the moment a consumer is reached is that consumer's producer. This
 /// reuses #98/#99's colouring rather than forming a second opinion from the semantic graph.
@@ -14235,10 +14241,12 @@ fn chains_into(
 ///   `first_producer[later[i]] == Some(earlier[i])` for every lane, so two different predecessors
 ///   would have to share lane 0's op -- that is, be the same unit. No unit is ever appended to two
 ///   runs.
-/// * **A successor is always later in unit order.** Every lane of `later` is scheduled after the
-///   matching lane of `earlier`, and a unit is emitted at its members' minimum op index, so the
-///   minimum over `later` strictly exceeds the minimum over `earlier`. The runs therefore have no
-///   cycles and stay in render order.
+/// * **A successor is always later in unit order.** Every lane of `later` reads the matching lane
+///   of `earlier`, and the op order is a topological order of the program (the contracted executor
+///   order, issue #2134), so every lane of `later` has a higher op index than the matching lane of
+///   `earlier`. A unit is emitted at its members' minimum op index, so the minimum over `later`
+///   strictly exceeds the minimum over `earlier`. The runs therefore have no cycles and stay in
+///   render order.
 ///
 /// The op range a merged run permutes is held by `program::lower`'s bank window, which forms the
 /// same union from the same lane-wise relation (`program::chainable_bank_groups`).

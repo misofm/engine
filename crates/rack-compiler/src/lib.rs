@@ -170,6 +170,8 @@ pub struct BankPlan<Id, K = EffectProgramKey> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RackCompileError {
     DuplicateId,
+    /// The placement sweep's edges are cyclic (issue #2136, [`place_over_windows`]).
+    Cyclic,
 }
 
 struct WorkingMember<Id> {
@@ -422,6 +424,207 @@ fn plan_invariants_hold<Id: Ord, K: BankSlotKey>(plan: &BankPlan<Id, K>, lanes: 
 #[must_use]
 pub fn compare_programs<K: BankSlotKey>(a: &RackProgram<K>, b: &RackProgram<K>) -> Ordering {
     a.rack.cmp(&b.rack).then_with(|| a.slots.cmp(&b.slots))
+}
+
+/// A node's feasible level window on the graph (issue #2136): `asap` is its longest-path level,
+/// `alap` the latest level it can take without lengthening the longest path to the session
+/// output (`ALAP(c) = min ALAP(consumers) - 1`, the output at its own level).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CohortWindow {
+    pub asap: u64,
+    pub alap: u64,
+}
+
+/// One node of the placement sweep: its window, and the key class it banks in, `None` for a node
+/// no bank planner groups.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlacementNode<K> {
+    pub window: CohortWindow,
+    pub key: Option<K>,
+}
+
+/// Where the sweep put one node.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Placement {
+    /// The node's placement level `L`: every edge goes strictly upward in `L`.
+    pub level: u64,
+    /// `asap'`: the earliest level the node could take once its producers were placed,
+    /// `max(asap, 1 + max L(producers))`. A bank's window after placement is the intersection
+    /// over its members of `[asap', alap]`.
+    pub floor: u64,
+}
+
+/// Place every node of a DAG at one level, so that nodes of one key class whose windows
+/// intersect share a level (issue #2136, `docs/BANKING_DESIGN.md` section 2.2).
+///
+/// The bank planners then bucket candidates by placement level instead of by dependency level:
+/// a bank's members share the level they are placed at, and since every edge goes strictly upward
+/// in it, the graph contracted by bank is acyclic (#2134's executor order exists). The canonical
+/// levels and schedule are untouched; placement is a lowering decision.
+///
+/// The sweep, in topological order:
+///
+/// 1. A node is ready when all its producers are placed; its floor is
+///    `asap' = max(asap, 1 + max L(producers))`. A ready node without a key is placed at its floor
+///    at once.
+/// 2. A ready keyed node waits in its class's pool. While any node waits, the one with the
+///    earliest deadline (`alap`, then index) is the stab: every node waiting in **its** class
+///    whose floor is at most that deadline is placed together, at the largest of their floors --
+///    **if** that lowers the bank count `banks_of` gives (below). Otherwise each is placed at its
+///    own floor, as level bucketing would. A merge that saves no bank only moves a lane into a
+///    bank of other lanes, where it can no longer skip with a bank of its own. Their consumers
+///    may then become ready, and the sweep continues.
+///
+/// `banks_of(set)` is the number of groups the caller's bank planners form over a set of node
+/// indices placed at one level (a group the bind later renders per node, such as a remainder
+/// below the padding threshold, still counts as one): the planners' own grouping, keyed exactly as they key it, over
+/// every node they bank there -- a keyed node or a follower placed through the `None` branch, it
+/// does not matter which. The sweep passes it every node already placed at a level plus the
+/// candidates, so the invariant is: **the set counted at (planner key, level) is the members the
+/// planner will group there, minus the nodes later stabs place at that level** (a limit of the
+/// online greedy: a merge cannot see what has not been placed yet).
+///
+/// Earliest deadline first is the interval greedy; a node is never placed past its own deadline
+/// unless its floor already is (a window the caller computed inconsistently). With every window a
+/// single point (`asap == alap`) each node is placed at `asap`, which is the level bucketing this
+/// replaces. Deterministic in the input; `O((N + E) log N)` plus one pass over a class's pool per
+/// stab.
+///
+/// # Errors
+/// [`RackCompileError::Cyclic`] when `edges` (`(producer, consumer)` indices) leave a node that
+/// never becomes ready.
+pub fn place_over_windows<K: Ord + Clone>(
+    nodes: &[PlacementNode<K>],
+    edges: &[(usize, usize)],
+    mut banks_of: impl FnMut(&[usize]) -> usize,
+) -> Result<Vec<Placement>, RackCompileError> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let count = nodes.len();
+    let mut consumers: Vec<Vec<usize>> = vec![Vec::new(); count];
+    let mut pending = vec![0usize; count];
+    for &(producer, consumer) in edges {
+        consumers[producer].push(consumer);
+        pending[consumer] += 1;
+    }
+    let mut floor: Vec<u64> = nodes.iter().map(|node| node.window.asap).collect();
+    let mut placed: Vec<Option<u64>> = vec![None; count];
+    let mut ready: Vec<usize> = (0..count)
+        .rev()
+        .filter(|index| pending[*index] == 0)
+        .collect();
+    // Waiting keyed nodes: by class, and all of them by deadline.
+    let mut pools: BTreeMap<K, BTreeSet<usize>> = BTreeMap::new();
+    let mut deadlines: BTreeSet<(u64, usize)> = BTreeSet::new();
+    // Every node already placed, per level: what a merge's bank count is measured on.
+    let mut placed_at: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    let mut done = 0usize;
+    let place = |index: usize,
+                 level: u64,
+                 placed_at: &mut BTreeMap<u64, Vec<usize>>,
+                 placed: &mut Vec<Option<u64>>,
+                 floor: &mut Vec<u64>,
+                 pending: &mut Vec<usize>,
+                 ready: &mut Vec<usize>| {
+        placed[index] = Some(level);
+        placed_at.entry(level).or_default().push(index);
+        for &consumer in &consumers[index] {
+            floor[consumer] = floor[consumer].max(level + 1);
+            pending[consumer] -= 1;
+            if pending[consumer] == 0 {
+                ready.push(consumer);
+            }
+        }
+    };
+    loop {
+        while let Some(index) = ready.pop() {
+            match &nodes[index].key {
+                None => {
+                    let level = floor[index];
+                    place(
+                        index,
+                        level,
+                        &mut placed_at,
+                        &mut placed,
+                        &mut floor,
+                        &mut pending,
+                        &mut ready,
+                    );
+                    done += 1;
+                }
+                Some(key) => {
+                    pools.entry(key.clone()).or_default().insert(index);
+                    deadlines.insert((nodes[index].window.alap, index));
+                }
+            }
+        }
+        let Some(&(deadline, stab)) = deadlines.first() else {
+            break;
+        };
+        let key = nodes[stab].key.clone().expect("a waiting node has a key");
+        let pool = pools.get_mut(&key).expect("the stab's pool");
+        let members: Vec<usize> = pool
+            .iter()
+            .copied()
+            .filter(|index| floor[*index] <= deadline.max(floor[stab]))
+            .collect();
+        let merged_level = members
+            .iter()
+            .map(|index| floor[*index])
+            .max()
+            .expect("the stab is a member");
+        // A merge is committed only when it lowers the bank count. Both sides ask `banks_of`,
+        // the bank planners' own grouping, how many banks the nodes already placed at a level
+        // become with the members added: merged at the level `M`, `banks(P_M + members) -
+        // banks(P_M)`; split, that difference summed over the members' own floors. A merge that
+        // saves no bank only moves lanes between banks, and a member that was alone at its level
+        // (a silent aux, say) would then run inside a bank of active lanes instead of skipping
+        // with its own; so it is refused, and every member is placed at its own floor, as the
+        // level plan would place it. Nodes a later stab places at those levels are not seen here:
+        // a limit of the online greedy.
+        let mut by_floor: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        for index in &members {
+            by_floor.entry(floor[*index]).or_default().push(*index);
+        }
+        let mut gain = |level: u64, added: &[usize]| {
+            let before: &[usize] = placed_at.get(&level).map_or(&[], Vec::as_slice);
+            let mut after = before.to_vec();
+            after.extend_from_slice(added);
+            banks_of(&after).saturating_sub(banks_of(before))
+        };
+        let split: usize = by_floor
+            .iter()
+            .map(|(level, added)| gain(*level, added))
+            .sum();
+        let merge = gain(merged_level, &members) < split;
+        for index in &members {
+            pool.remove(index);
+            deadlines.remove(&(nodes[*index].window.alap, *index));
+        }
+        for index in members {
+            let level = if merge { merged_level } else { floor[index] };
+            place(
+                index,
+                level,
+                &mut placed_at,
+                &mut placed,
+                &mut floor,
+                &mut pending,
+                &mut ready,
+            );
+            done += 1;
+        }
+    }
+    if done != count {
+        return Err(RackCompileError::Cyclic);
+    }
+    Ok(placed
+        .into_iter()
+        .zip(floor)
+        .map(|(level, floor)| Placement {
+            level: level.expect("every node placed"),
+            floor,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -1051,6 +1254,47 @@ mod tests {
                 .collect();
             let plan = plan_bank_groups(&input, width).expect("plan");
             assert!(plan_invariants_hold(&plan, lanes), "case={case}");
+            // Issue #2136 gate 2: single-point windows place every candidate at its own level, so
+            // bucketing by placement reproduces the level plan group for group.
+            let flat: Vec<&CohortCandidate<u32>> = input
+                .iter()
+                .flat_map(|level| level.candidates.iter())
+                .collect();
+            let level_of = |id: u32| {
+                input
+                    .iter()
+                    .find(|level| level.candidates.iter().any(|candidate| candidate.id == id))
+                    .expect("known id")
+                    .level
+            };
+            let nodes: Vec<PlacementNode<(RackLocation, CohortPoolClass)>> = flat
+                .iter()
+                .map(|candidate| PlacementNode {
+                    window: CohortWindow {
+                        asap: level_of(candidate.id),
+                        alap: level_of(candidate.id),
+                    },
+                    key: Some((candidate.program.rack, candidate.class)),
+                })
+                .collect();
+            let placed =
+                place_over_windows(&nodes, &[], banks_by_key(&nodes, lanes)).expect("acyclic");
+            let mut by_placement: BTreeMap<u64, Vec<CohortCandidate<u32>>> = BTreeMap::new();
+            for (candidate, placement) in flat.iter().zip(&placed) {
+                by_placement
+                    .entry(placement.level)
+                    .or_default()
+                    .push((*candidate).clone());
+            }
+            let placed_input: Vec<_> = by_placement
+                .into_iter()
+                .map(|(level, candidates)| CohortLevel { level, candidates })
+                .collect();
+            assert_eq!(
+                plan_bank_groups(&placed_input, width).expect("plan"),
+                plan,
+                "case={case}: single-point windows changed the plan"
+            );
             for group in &plan.groups {
                 for lane in 0..lanes {
                     let Some(id) = &group.members[lane] else {
@@ -1098,5 +1342,192 @@ mod tests {
             ),
             Ordering::Less
         );
+    }
+
+    /// Issue #2136 gate 1: windows `[0,0]`, `[1,3]`, `[2,3]`, `[1,2]`, `[4,4]` of one key at four
+    /// lanes form three banks -- `{a}`, `{b, c, d}` placed at 2, `{e}` -- and a second key's
+    /// producer `p` `[0,5]`, placed at 5 because `r` `[5,5]` joins it there, keeps its consumer
+    /// `q` `[1,6]` above it. Every edge goes strictly upward and no feeding pair shares a bank.
+    ///
+    /// Test value: red when the planner places a consumer at or before its producer -- a sweep that
+    /// ignores `asap'` after a commit puts `q` at 1, under `p` at 5.
+    #[test]
+    fn windows_merge_what_levels_split() {
+        let window = |asap, alap| CohortWindow { asap, alap };
+        let nodes = [
+            ("a", window(0, 0), 'K'),
+            ("b", window(1, 3), 'K'),
+            ("c", window(2, 3), 'K'),
+            ("d", window(1, 2), 'K'),
+            ("e", window(4, 4), 'K'),
+            ("p", window(0, 5), 'P'),
+            ("r", window(5, 5), 'P'),
+            ("q", window(1, 6), 'P'),
+        ];
+        let input: Vec<PlacementNode<char>> = nodes
+            .iter()
+            .map(|(_, window, key)| PlacementNode {
+                window: *window,
+                key: Some(*key),
+            })
+            .collect();
+        // a -> c and p -> q.
+        let edges = [(0, 2), (5, 7)];
+        let placed = place_over_windows(&input, &edges, banks_by_key(&input, 4)).expect("acyclic");
+        for (producer, consumer) in edges {
+            assert!(
+                placed[consumer].level > placed[producer].level,
+                "{} at {} feeds {} at {}",
+                nodes[producer].0,
+                placed[producer].level,
+                nodes[consumer].0,
+                placed[consumer].level
+            );
+        }
+        let mut by_level: BTreeMap<u64, Vec<CohortCandidate<u32>>> = BTreeMap::new();
+        for (index, ((_, _, class), placement)) in nodes.iter().zip(&placed).enumerate() {
+            by_level
+                .entry(placement.level)
+                .or_default()
+                .push(CohortCandidate {
+                    id: index as u32,
+                    program: RackProgram::new(
+                        if *class == 'K' {
+                            RackLocation::Simd1
+                        } else {
+                            RackLocation::Simd2
+                        },
+                        vec![key(0)],
+                    ),
+                    class: CohortPoolClass::Stereo,
+                });
+        }
+        let levels: Vec<_> = by_level
+            .into_iter()
+            .map(|(level, candidates)| CohortLevel { level, candidates })
+            .collect();
+        let plan = plan_bank_groups(&levels, BankWidth::Four).expect("plan");
+        let banks: Vec<(u64, Vec<&str>)> = plan
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    group.level,
+                    group
+                        .members
+                        .iter()
+                        .flatten()
+                        .map(|id| nodes[*id as usize].0)
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            banks,
+            vec![
+                (0, vec!["a"]),
+                (2, vec!["b", "c", "d"]),
+                (4, vec!["e"]),
+                (5, vec!["p", "r"]),
+                (6, vec!["q"]),
+            ]
+        );
+    }
+
+    /// `banks_of` for a test sweep: the nodes grouped by `bank` (the planners' key, `None` for a
+    /// node no planner banks), `ceil(n / lanes)` banks per key.
+    fn banks_by<B: Ord>(
+        lanes: usize,
+        bank: impl Fn(usize) -> Option<B>,
+    ) -> impl FnMut(&[usize]) -> usize {
+        move |set: &[usize]| {
+            let mut by_key: BTreeMap<B, usize> = BTreeMap::new();
+            for index in set {
+                if let Some(key) = bank(*index) {
+                    *by_key.entry(key).or_default() += 1;
+                }
+            }
+            by_key.values().map(|count| count.div_ceil(lanes)).sum()
+        }
+    }
+
+    /// `banks_of` keyed by the placement key itself.
+    fn banks_by_key<K: Ord + Clone>(
+        nodes: &[PlacementNode<K>],
+        lanes: usize,
+    ) -> impl FnMut(&[usize]) -> usize + '_ {
+        banks_by(lanes, move |index| nodes[index].key.clone())
+    }
+
+    /// Issue #2136: a merge that saves no bank is refused, counted over every node the planners
+    /// bank at the levels involved. Four cases, each at four and at eight lanes:
+    ///
+    /// 1. One key, `x` alone at its floor with a window reaching the floor of `W` others: merged,
+    ///    `W + 1` nodes still need two banks, the level plan's two, so `x` -- a silent aux beside
+    ///    active groups -- keeps a bank it can skip alone. With `W - 1` others it merges.
+    /// 2. The merged level already holds `W - 1` nodes an earlier stab placed; a late stab of `x`
+    ///    (floor 1) and `y` (floor 2) adds one bank either way.
+    /// 3. As 2, but the `W - 1` are followers (`key: None`, placed at once) that the planner still
+    ///    banks with `x` and `y`: faders behind banked chains.
+    /// 4. As 2, but the level holds `W - 1` nodes of `x`'s program and one of another program in
+    ///    the same placement class: only the first count, because the planner groups by program.
+    ///
+    /// Test value: red when the sweep merges whenever windows intersect (case 1), counts only the
+    /// stab's members (case 2), skips followers (case 3) or counts by the placement key instead
+    /// of the planner's (case 4).
+    #[test]
+    fn a_merge_that_saves_no_bank_is_refused() {
+        let window = |asap, alap| CohortWindow { asap, alap };
+        for lanes in [4_usize, 8] {
+            for (others, merges) in [(lanes, false), (lanes - 1, true)] {
+                let mut input = vec![PlacementNode {
+                    window: window(0, 1),
+                    key: Some('K'),
+                }];
+                input.extend((0..others).map(|_| PlacementNode {
+                    window: window(1, 1),
+                    key: Some('K'),
+                }));
+                let placed =
+                    place_over_windows(&input, &[], banks_by_key(&input, lanes)).expect("acyclic");
+                assert_eq!(
+                    placed[0].level,
+                    u64::from(merges),
+                    "case 1, W={lanes}, {others} others: x merges only when a bank is saved"
+                );
+                assert!(placed[1..].iter().all(|placement| placement.level == 1));
+            }
+            // Cases 2-4: `W - 1` (case 4: `W`) nodes at level 2, then `p` (`[0, 5]`) and `q`
+            // (`[1, 5]`) feed `x` (`[1, 6]`, floor 1) and `y` (`[2, 6]`, floor 2), one late stab.
+            // Bank keys: 'K' the shared program, 'O' the other program, `None` unbanked.
+            for case in [2, 3, 4] {
+                let mut input: Vec<PlacementNode<char>> = Vec::new();
+                let mut bank: Vec<Option<char>> = Vec::new();
+                for index in 0..lanes - 1 + usize::from(case == 4) {
+                    input.push(PlacementNode {
+                        window: window(2, 2),
+                        key: (case != 3).then_some('K'),
+                    });
+                    bank.push(Some(if case == 4 && index == 0 { 'O' } else { 'K' }));
+                }
+                let k = input.len();
+                for (asap, alap, key) in [(0, 5, 'A'), (1, 5, 'B'), (1, 6, 'K'), (2, 6, 'K')] {
+                    input.push(PlacementNode {
+                        window: window(asap, alap),
+                        key: Some(key),
+                    });
+                    bank.push(Some(key));
+                }
+                let edges = [(k, k + 2), (k + 1, k + 3)];
+                let placed =
+                    place_over_windows(&input, &edges, banks_by(lanes, |index| bank[index]))
+                        .expect("acyclic");
+                assert_eq!(
+                    (placed[k + 2].level, placed[k + 3].level),
+                    (1, 2),
+                    "case {case}, W={lanes}: x keeps its floor when the banks would not drop"
+                );
+            }
+        }
     }
 }

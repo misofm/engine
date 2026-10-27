@@ -297,6 +297,13 @@ pub struct GraphRackBankReport {
     pub utilisation: BankUtilisation,
     /// The same, per rack, in [`RackLocation::ALL`] order.
     pub utilisation_by_rack: [(RackLocation, BankUtilisation); 3],
+    /// Each chain's level window after placement (issue #2136): `[asap', ALAP]` of its first slot,
+    /// the window [`BankUtilisation::of`] intersects. Empty when the backend has no bank width.
+    pub windows: BTreeMap<RackChainId, (u64, u64)>,
+    /// Every node a bank planner groups -- a rack chain's first slot, a builtin strip stage -- at
+    /// its placement level (issue #2136): the set the placement's bank count was taken over, so a
+    /// test can hold it to the groups the planners formed.
+    pub planned_levels: BTreeMap<GraphNodeId, u64>,
 }
 
 /// How well a plan's bound banks use their lanes (issue #2132, `docs/BANKING_DESIGN.md`'s
@@ -306,9 +313,10 @@ pub struct BankUtilisation {
     /// Plan groups with at least one bound slot: one bank of `W` lanes each.
     pub banks: u32,
     /// Pairs of partial banks the planner could have merged into one: one rack, one pool class,
-    /// one dependency level (this slice's rule; slice 6b, #2136, widens it to intersecting level
-    /// windows), one fold target, every member of one a subsequence of the other's leader program,
-    /// and together no more than `W` active lanes. A checkable property, not a `ceil(n / W)` bound.
+    /// intersecting level windows (issue #2136: a bank's window is the intersection over its
+    /// members of `[asap', ALAP]` after placement, so no pair the sweep could not merge counts),
+    /// one fold target, every member of one a subsequence of the other's leader program, and
+    /// together no more than `W` active lanes. A checkable property, not a `ceil(n / W)` bound.
     pub mergeable_partial_pairs: u32,
     /// Static lane use in permille: the active lanes of every bound slot over that slot count times
     /// `W`, rounded to nearest. A padded lane is not active. `0` when nothing is bound.
@@ -330,6 +338,7 @@ impl BankUtilisation {
         bound_slots: &[GraphRackBoundSlot],
         lanes: usize,
         fold_targets: &BTreeMap<String, Vec<String>>,
+        windows: &BTreeMap<RackChainId, (u64, u64)>,
         rack: Option<RackLocation>,
     ) -> Self {
         let admitted = |group: &BankGroup<RackChainId>| rack.is_none_or(|rack| group.rack == rack);
@@ -383,6 +392,25 @@ impl BankUtilisation {
                         .is_some()
                 })
         };
+        // A bank's window is the intersection over its members of `[asap', ALAP]` (issue #2136);
+        // a member the map does not name sits at the bank's level alone. `None` is empty.
+        let window_of = |group: &BankGroup<RackChainId>| -> Option<(u64, u64)> {
+            group
+                .members
+                .iter()
+                .flatten()
+                .map(|member| {
+                    windows
+                        .get(member)
+                        .copied()
+                        .unwrap_or((group.level, group.level))
+                })
+                .try_fold((0_u64, u64::MAX), |(low, high), (floor, alap)| {
+                    let (low, high) = (low.max(floor), high.min(alap));
+                    (low <= high).then_some((low, high))
+                })
+        };
+        let windows_intersect = |a: Option<(u64, u64)>, b: Option<(u64, u64)>| matches!((a, b), (Some(a), Some(b)) if a.0.max(b.0) <= a.1.min(b.1));
         let mut mergeable_partial_pairs = 0_u32;
         for (index, a) in banked.iter().enumerate() {
             for b in &banked[index + 1..] {
@@ -392,7 +420,7 @@ impl BankUtilisation {
                     && a_lanes + b_lanes <= lanes
                     && a.rack == b.rack
                     && a.class == b.class
-                    && a.level == b.level
+                    && windows_intersect(window_of(a), window_of(b))
                     && matches!((fold_of(a), fold_of(b)), (Some(a), Some(b)) if a == b)
                     && (fits_under(a, b) || fits_under(b, a))
                 {
