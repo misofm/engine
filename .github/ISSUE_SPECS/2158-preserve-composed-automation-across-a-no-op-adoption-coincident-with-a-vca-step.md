@@ -46,3 +46,43 @@ This is Class B because it corrects audible words in the defective case. Root's 
 ## Dependency
 
 #2096 supplies the expanded regression. This issue does not block its bounded no-ramp correction.
+
+
+## Approved brief and attempt 1 (2026-10-27)
+
+Root approved the product ordering before implementation, under #1716 fix D and #2096's same-node-time continuity rule: a table-only/no-op Reposition at node time T preserves the ordinary merged walk's arithmetic and event precedence on a running own ride. The real VCA step at T is processed once, at its existing ordering and prospective completion target. Adoption must introduce neither a second mismatched retarget nor suppression of B17-R13's genuine boundary jump.
+
+The smallest slice is the composed fader adoption adapter and shared adoption rule in `crates/builtins-compiler`, plus one row in its existing carry owner. No DSP algorithm, rounding, automation core, host interface or fixture framework change is intended. This is Class B: rendered words may move in the defective running-composed coincident case only. The user requested Sol 6.1 high for implementation; root coordinates fresh independent Astra review, GitHub synchronization and batch delivery.
+
+The existing `entry-step` row retains its static own curve. The added `entry-step-running` row uses the same VCA step with the moving own ride, so the carry owner continues to defend both B17-R13 and no-op running continuity, as well as #2096's held/free, repeated-adoption and on/off-grid cases.
+
+Test value: a running composed no-op adoption that replaces the genuine VCA boundary event with a landing targeting every curve at the jump's completion now fails the existing audible sample comparison; its former static-own entry row cannot reveal that arithmetic change.
+
+Verification uses `/home/bl/misofm/engine-work-evidence/easy2-20261027/run-serial.sh` exclusively, separate worktree targets, Cargo jobs two and test threads one. Evidence is retained outside the worktree at `/home/bl/misofm/engine-work-evidence/easy2-20261027/2158/`. Local implementation and review do not claim upstream synchronization or completion.
+
+
+### Attempt 1 implementation and supported paths
+
+Root refined attempt 1 before its independent verdict after identifying that a previous jump can leave each component with a different target origin from the composed output's completion. A T - 1/output-completion comparison is insufficient and was discarded before verification. The approved implementation records each composed cursor's heard-value origin and last non-held target origin. Held grid events can advance the first without advancing the second; output holds may overwrite ramp completion without changing either.
+
+For a free running composed Reposition with a discontinuity at T, evaluate each successor curve at both carried origins. When every component agrees, retain its heard value and full held/deferred/event state, reindex only its discontinuity cursor in the successor table, and let the ordinary merged walk process the real T step once. A changed component value keeps the existing entry-landing path. A changed cursor layout or unapplied prepared offset/own-value backstop cannot take the preservation path. This uses fixed preallocated metadata and bounded table reads; the existing size-based cursor and composite accounting charges the new words. No DSP arithmetic, host, schema or wire change is introduced.
+
+Root approved the correction to the original scalar gate: the production carry owner exercises W4 and W8. `VcaRig` requires a bank width, which `Backend::Scalar` does not have; the scalar oracle passes `stage_gain: None` and has no supported carried-bank adoption comparison. The existing scalar/shared-event arithmetic suites remain required, without introducing unsupported scalar swap plumbing.
+
+The existing carry owner also changes the successor's own table in the moving-entry-step case and checks one entry jump of length 480 targeting the changed curve at sample 1,579. This catches an overbroad no-op shortcut that would preserve an actually changed table instead of retaining its existing entry landing. No additional test function or corpus owner is introduced.
+
+
+### Additional bounded prior-jump row
+
+The same carry owner adds `entry-step-running-prior-jump`: VCA steps from -3 to -6 at sample 900, then to -12 at adoption 1,100 while the earlier jump and own ride are running. This catches treating the output's ramp completion as every component's origin, or resetting its held/deferred event state. Both moving-entry rows use the issue's coincident 100-frame layout; every previous 128-frame/on-grid row remains. An analytical after-step/1,152 observation is retained externally in `after-step-observation.md` for fresh independent review; it is not claimed as a measured separate defect.
+
+Baseline production plus only the extended owner is RED: `cargo test --locked -p builtins-compiler a_carried_automated_lane_renders_the_uninterrupted_bits`, exit 101, `entry-step-running`, composed true, continued 0, Simd8, 100-frame blocks. `baseline-red.log` records the failing audible comparison. The corrected implementation remains awaiting focused green and independent review.
+
+
+### Focused green and recovery checkpoint
+
+`cargo test --locked -p builtins-compiler a_carried_automated_lane_renders_the_uninterrupted_bits` is GREEN on the principled implementation (exit 0, one owner passed, 35 filtered out; `focused-green.log`). This runs both W4 and W8 across the preserved cases, the moving entry step inside a grid ramp and an earlier jump, and the changed-table landing guard. The same owner is RED on unchanged baseline production (`baseline-red.log`, replayable `baseline-only.patch`). Formatting of automation and builtins-compiler and `git diff --check` passed.
+
+Both known origins are copied during carry. The existing origin-free `set_heard(value)` API remains compatible with graph callers and explicitly makes provenance unknown; it cannot establish equivalence. Prepared values have the known held origin at node time zero. The original value evaluation still uses the same clipped target-time arithmetic, now factored to retain that time as metadata. Composed cursor storage is charged by `Composed::bytes`, builtin sizes use the live `size_of` report, and graph route-cursor accounting calls that same composition helper; no hardcoded byte charge was introduced.
+
+The owner pauses at this compiling, focused-green tranche for an exact-path local checkpoint. Full automation/builtins-compiler suites, independent adversarial verdict and upstream synchronization remain pending. No remote completion is claimed.
