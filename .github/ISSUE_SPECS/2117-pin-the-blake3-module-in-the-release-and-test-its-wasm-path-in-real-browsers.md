@@ -88,3 +88,23 @@ Required CI for PR #2163, run `40454965624`, lint job `122026314555`, rejected a
 Attempt 2 (Sol, root-authorized bounded correction) restores the loader's exact bytes from `e8414e96e9b8efc159b9a464a0bf54de79ca716a`. The provenance record, gate, runtime behavior, server routes, Worker proof, release pin and release documentation remain unchanged. No new or rewritten test is needed: the existing stem-store gate owns the source-provenance contract.
 
 Validation: `.github/workflows/qualification.yml`'s exact blocking command, `node scripts/check-stem-store-v1.mjs`, ran through `/home/bl/misofm/engine-work-evidence/easy2-20261027/run-serial.sh` after external engine workloads became quiet and passed (operator path, source provenance, hash/store/pump gates; three opt-in wall-clock budget assertions skipped by the gate's normal lint mode). Log: `/home/bl/misofm/engine-work-evidence/easy2-20261027/2117/attempt2-stem-store-gate.log`. `git diff --quiet` against that base confirms the restored loader is identical. This checkpoint contains only the restoration and this issue record; fresh Astra re-verification and root-owned corrective delivery remain pending.
+
+## Independent review — attempt 2 bounded PASS (2026-10-27)
+
+Fresh Astra reviewed author commit `9d5db062015b3cdf5f639fb02c9cd86ac8a3644a`, integrated at
+`5efcef1c9fa24ef8975777e7eb0e8a593c860aff`. The complete source diff from the first PR head is
+only restoration of the two original comment lines. Independent SHA256 calculation gives
+`051c39c28ef475a6f44076eca9f6aaa8bfa6797dcde56114dd76ab6755a5b4fe`, exactly the unchanged
+provenance record; `git diff --exit-code` against `e8414e96e9b8efc159b9a464a0bf54de79ca716a`
+also confirms byte-for-byte restoration. No executable behavior or Rust/Wasm compiler input changed.
+The preserved author log confirms the exact previously failing CI command passes its operator,
+source-provenance, store and pump gates in the workflow's normal lint mode. No gate was weakened
+and no pin was changed. This correction introduces no new or rewritten test; the existing
+provenance owner discriminated the defect and now passes.
+
+The first PR run also passed both full browser qualifications with `--check-matrix` and
+`--self-test-mutations`, the artifact identity/reproducibility/release-pin job, artifact gates,
+and SDK qualification. Fresh review retained the Chromium and WebKit job logs, each showing
+the SIMD Worker corpus and all qualification gates passing. These results supplement the local
+and native Arm evidence; they do not turn the failed first workflow into a PASS. The corrective
+PR head must still pass the complete required qualification before merged delivery or closure.
