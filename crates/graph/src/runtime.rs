@@ -11579,7 +11579,7 @@ impl Runtime {
                 }
             }
             // Stable: equal costs keep chain order.
-            slots.sort_by(|a, b| b.0.cmp(&a.0));
+            slots.sort_by_key(|slot| core::cmp::Reverse(slot.0));
             slots.truncate(PACK_RANKED_SLOTS);
             let group = &mut self.lane_map.groups[group];
             group.ranked_base = u32::try_from(ranked.len()).expect("a slot index fits");
