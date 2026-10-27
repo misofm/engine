@@ -113,8 +113,8 @@ the ready set together once every member's producers are out, and a bank of one 
 
 - `crates/graph/src/program.rs`: `contracted_order`, `ProgramError::CohortCycle`, the #169 section
   re-made on the executed order (`lower`'s doc), the `ops` field doc.
-- `crates/graph/src/lib.rs` `has_valid_structural_layout`: the one-level-per-bank and
-  source-before-first-member clauses are gone; bind still refuses unsorted or overlapping member
+- `crates/graph/src/lib.rs` `has_valid_structural_layout` (and, with #2136, `with_builtin_banks`):
+  the one-level-per-bank and source-before-first-member clauses are gone; bind still refuses unsorted or overlapping member
   lists, and a cyclic contraction fails lowering (`lowered`) with the same
   `graph.scheduler.layout`.
 - `crates/graph/src/runtime.rs`: `units_of`'s doc and `cohort_runs`' "a successor is always later
@@ -127,7 +127,7 @@ the ready set together once every member's producers are out, and a bank of one 
 |---|---|---|
 | 1 | `graph` `program::tests::contracted_order_preserves_dataflow_on_random_graphs` (1500 seeds; 416 with a cross-level bank, 372 of them reordered, 14 cyclic and refused) | M1 lowering in the canonical order (the first-member hoist): `graph 0: op 58 rendered a foreign value`; M2 a sink that gates the bank but leaves members' consumers at their canonical positions: `graph 0: NotTopological` |
 | 2 | `the_banked_console_arena_equals_the_bank_unaware_arena` unchanged | (unchanged, green) |
-| 3 | `graph-compiler` `tests/console_banking.rs` `the_contracted_order_is_the_schedule_on_every_standing_fixture` (11 session fixtures) | M3 emitting a bank's members contiguously: `console-c1-16: the executor order moved 5 ops` |
+| 3 | `graph-compiler` `tests/console_banking.rs` `the_contracted_order_is_the_schedule_on_every_one_level_fixture` (11 session fixtures at 6a; since #2136 the C1 and sends fixtures bank across levels and are left out, the four consoles without submixes are required in) | M3 emitting a bank's members contiguously: `console-c1-16: the executor order moved 5 ops` (at 6a) |
 
 The structural `assert_no_slot_is_recycled_inside_a_bank_window` is not asked of the cross-level
 corpus: its premise (the op later in op order is the recycler) needs a window in which no op reads
@@ -136,4 +136,5 @@ interpreter reads every value in render order, so an early recycle is a foreign 
 
 Gate 3's pack-group clause: with no op moved the program, its units and therefore #2142's lane
 chains and pack groups are the base plan's. The one-time comparison of `test_only_pack_groups` on
-C1-16/32/64 against the base is recorded with the bit-identity run in `2136-alap-windows-planner.md`.
+C1-16/32/64 was not taken: the harness keeps the bound plan private and 6a moved no op, so the
+units are the base's by construction. The 6a + 6b bit identity is in `2136-alap-windows-planner.md`.

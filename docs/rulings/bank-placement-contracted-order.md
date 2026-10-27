@@ -1,6 +1,6 @@
 # Bank placement: the executor order is the graph contracted by bank
 
-Planner decision, issue #2134 (banking design slice 6a, `docs/BANKING_DESIGN.md` section 2.2, M2).
+Planner decision, issues #2134 and #2136 (banking design slices 6a and 6b, `docs/BANKING_DESIGN.md` section 2.2, M2).
 Class A: it moves no rendered bit.
 
 ## Ruling
@@ -41,5 +41,21 @@ contraction the consumers move with the unit and nothing is declined.
 - `graph::program::tests::contracted_order_preserves_dataflow_on_random_graphs`: seeded graphs with
   cross-level cohorts, submixes and sends off early members render the semantic graph's value in
   executor order; cyclic plans are refused exactly when an independent search finds the cycle.
-- `graph-compiler` `the_contracted_order_is_the_schedule_on_every_standing_fixture`: no op moves
-  on any standing session fixture.
+- `graph-compiler` `the_contracted_order_is_the_schedule_on_every_one_level_fixture`: no op moves
+  on any standing session fixture whose banks each sit at one level.
+
+## The planner (issue #2136, slice 6b)
+
+6. **Cohorts are placed over level windows.** Each graph node's window is `[ASAP, ALAP]`, ALAP
+   anchored at the session output. `rack_compiler::place_over_windows` places the keyed nodes --
+   every post-input builtin stage, every rack chain's first slot, every fader no bankable effect
+   feeds -- earliest deadline first within their key class (stage or rack, and pool class), and
+   every other node as early as its producers allow. Both bank planners bucket by this one
+   placement instead of by dependency level; the graph's levels and schedule are unchanged.
+7. **A stage a chain feeds follows it.** A chain's later slots, a fader behind a bankable chain and
+   every matrix stage are not placed on their own, so a strip's stages keep one lane set and its
+   chains still fuse. Merging one stage while its neighbours stay apart costs a planar round trip
+   per bank (H2), which on C1 cost what the merged bank saved (#2136 evidence, plans M1 and M2).
+8. **The #966 invariant is a window check.** A bankable chain whose slots are not consecutive in
+   ASAP still fails the compile; a bank slot still binds only when its members share a placement
+   level at that slot.

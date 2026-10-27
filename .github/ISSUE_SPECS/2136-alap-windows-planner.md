@@ -114,3 +114,118 @@ masks, `O(P + edges)` for the contracted order; no `MAX_TRACKS`.
 - The `Toggle` row is in the one-time `to_bits` evidence (every host word, 600 blocks, the #2142
   method). The fold counter (`route_folds`) is recorded per fixture: a merged submix cohort whose
   id order is not the master's contributor order declines the fold (same bits, more cost).
+
+## Evidence (attempt 1, 2026-10-27, branch `codex/batch-b14-windows`, base main `3ef18112f`)
+
+### The open point, settled
+
+**There is no width-dependent rule.** Both widths plan C1's submixes by the same levels (probe of
+the compiled plan at W=8, and #2143's W=4 counters agree with it): the two auxes take the tracks'
+post-*fader* sends, the groups their post-*pan* routes, so the auxes' strips start one level before
+the groups'. `pre_insert` is `{aux A, aux B}` at level 13 and `{4 groups}` at 14 at both widths;
+the drive is `{aux B}` at 18 and `{aux A, 4 groups}` at 19 (aux A's delay brings its drive level
+with the groups'). #2143's "2 banks over six strips" is those two pre banks at W=4, not one pooled
+bank, and the finish map's reading (aux A's pre with the groups, aux A's drive alone) had the two
+auxes swapped. So the spec's gate-3 plan (one pre bank of six, 17 BSR) rested on that misreading.
+
+**Under the spec's windows aux A's pre cannot join the groups.** ALAP is anchored at the session
+output, and aux A's delay puts aux A on the longest path: its pre window is the point `[13, 13]`
+(groups `[14, 14]`, aux B `[13, 14]`). What the windows can merge on C1 is the drive: aux B's
+`[18, 19]` meets aux A's and the groups' `[19, 19]`.
+
+**Measured trade (C1, `bench console --bank-report`, `taskset -c 31`, one run each, one warmup,
+two rounds; p50 us, round 2; plans forced by a scratch level override, not committed; every plan
+bit-identical on all 17 rows):**
+
+| plan | static BSR W=8 16/32/64 | all-active p50 16 / 32 / 64 |
+|---|---|---|
+| S: level bucketing (today) | 20 / 28 / 44 | 99.30 / 147.44 / 245.03 |
+| M1: drives merged, builtin stages left by level (the spec's effect-only windows) | 19 / 27 / 43 | 98.81 / 149.46 / 245.47 |
+| M2: drives merged and aux B's fader and matrix with them (one placement for both planners) | 19 / 27 / 43 | 96.23 / 145.70 / 245.03 |
+| M3: all six submixes aligned at every stage (needs the depth to grow past ALAP) | 16 / 24 / 40 | 96.29 / 146.44 / 245.20 |
+
+M1 merges the drive but leaves aux B's fader and matrix banks apart from the groups', so the drive
+no longer fuses into the fader (one H2 round trip for the whole bank): it gains nothing (+1.4 % at
+32). M2 keeps the fusion and is the cheaper plan. M3's extra 3 BSR are aux banks that skip on
+silence anyway on these rows; it buys nothing measurable and is outside the window definition.
+
+**The rule kept:** one placement, computed once per compile, feeds both bank planners (rack chains
+and the builtin strip stages), and a stage that a bankable chain feeds directly *follows* that
+chain instead of being placed on its own. The keyed nodes are every post-input builtin stage,
+every rack chain's first slot and every fader no bankable effect feeds; a chain's later slots, a
+fader behind a chain and every matrix stage follow their producer. That is what keeps a strip's
+stages in one lane set and its chains fused. A stage-wise rule with every fader keyed (the first
+try) merged the faders of bare and stripped tracks in `misaligned_lane_sets_decline_the_merge`
+and broke seven effect-to-fader fusions there; a whole-segment rule (a cohort per strip segment
+signature) kept every fusion but put aux B with the groups' pre and cost 2 BSR at W=4 (31 vs 29).
+
+### What changed
+
+- `crates/rack-compiler/src/lib.rs`: `CohortWindow`, `PlacementNode`, `Placement`,
+  `place_over_windows` (the sweep: keyed nodes earliest deadline first within their key class,
+  placed at the largest floor of the stab's members; every other node at its floor;
+  `RackCompileError::Cyclic`). `plan_bank_groups` is unchanged: it is fed placement levels in
+  place of dependency levels (one bucket planner, gate 2 then holds by construction).
+- `crates/graph-compiler/src/banks.rs`: `placement_levels` (ASAP, ALAP anchored at the output,
+  the keys above), `PlacementLevels`, `bind_rack_banks_placed`; the #966 path check stays on the
+  graph's levels (a bankable chain whose slots are not consecutive still fails the compile), the
+  bucketing and the bind's one-level-per-slot check read the placement.
+- `crates/graph-compiler/src/compile.rs`: one placement per compile, handed to the rack planner and
+  to the builtin strip planner (resource preflight, scalar owners and the attach).
+- `crates/graph-compiler/src/lib.rs`: `BankUtilisation::of` intersects windows
+  (`GraphRackBankReport::windows`: a keyed stage's `[asap', ALAP]`, a follower's placement alone).
+- `crates/graph/src/lib.rs` `with_builtin_banks`: the one-level-per-builtin-bank clause is gone
+  (#2134's rule; a cyclic contraction still fails at bind).
+
+### Gates
+
+| gate | test | red on |
+|---|---|---|
+| 1 | `rack-compiler` `windows_merge_what_levels_split` | sweep that ignores `asap'` after a commit: `p at 5 feeds q at 1` |
+| 2 | `rack-compiler` `invariants_hold_on_seeded_corpus` extended (single-point windows reproduce the plan) | stab that takes every waiting node of the class: `case=0: single-point windows changed the plan` |
+| 3 | `graph-compiler` `tests/console_banking.rs` `the_c1_submix_drives_are_one_cohort_over_level_windows` (C1-16/32/64 at the build's width, W-generic; irregular pairs 0) | level bucket (no keyed node): `C1-16: the submix console groups` (`{aux B}` drive apart) |
+| 3 | `src/tests/console_banking.rs` `every_console_slot_binds_banked_at_every_track_count` rewritten: one group per (class, placement level), `post_insert` at one level per pool whatever the insert count | (the level bucket fails its window claim) |
+| - | `misaligned_lane_sets_decline_the_merge` (unchanged) | every fader keyed: `24` builtin banks for `26` (fusion broken) |
+
+Rewritten for the new plan: `bank_levels.rs` (no "cross-level bank" count: a cross-level bank is
+now a plan bind accepts and renders at the scalar bits, which the file still asserts; the
+misaligned-slot count reads each lane's level above its own chain's first slot; bank pins 47/23 ->
+46/22, 45/22 -> 44/21, 11/7 -> 10/6: the early limiter now banks with the others); the C1 #2134
+order test keeps only the one-level fixtures; `a_hot_padded_post_insert_limiter...` asserts a mixed
+padded bank at every width over the track counts rather than at each one. The W=4 pins in
+`bank_levels.rs` were derived, not run (this host binds C1's console at eight lanes only): a
+scratch probe counted the bindable slots of the same plan at four lanes and reproduced the base
+tree's W=4 pins (47, 45, 11) before giving the new ones. The arm64 leg confirms them.
+
+### Bit identity (one-time, not committed)
+
+All 17 `BANK_REPORT_WORKLOADS` rows (C1 16/32/64 in Load, Typical, AllActive, Sparse, Toggle, the
+reverb row, the irregular graph), 600 blocks through `console_workload::SessionRuntime`, FNV-1a of
+every host word: identical on main `3ef18112f` and on this branch. `route_folds` is 0 on every row
+on both.
+
+### W=4 pins (`tools/wasm-gates`)
+
+`scripts/run-wasm-gates.sh` (wasm leg): `banks` 15 -> 14 on all four rows (the spec predicted no
+move; that prediction rested on the misread plan above). `silent_skips` 260/260/259/259 ->
+4/4/3/3: aux B's drive, fader and matrix were a one-lane chain that skipped on silence each block;
+they are now lanes of banks that hold the groups, which run. `bank_slot_runs_total` and every
+other counter are unchanged. Re-pinned from the wasm leg; the arm64 native leg was not run here.
+`w4_counters_describe_the_designs_plan` restated: 28 BSR, six submix banks.
+
+### BSR and CPU (descriptive; `artifacts/steps/bank-design-6b/`)
+
+| row | static BSR | executed BSR/block | banks | p50 us main -> branch |
+|---|---|---|---|---|
+| C1-16 Load | 20 -> 19 | 0 -> 0 | 10 -> 9 | 21.16 -> 19.97 |
+| C1-16 Typical | 20 -> 19 | 10.00 -> 10.00 | | 62.84 -> 60.98 |
+| C1-16 AllActive | 20 -> 19 | 16.66 -> 16.66 | | 98.32 -> 97.47 (-0.9 %) |
+| C1-32 AllActive | 28 -> 27 | 24.66 -> 24.66 | 14 -> 13 | 147.49 -> 145.28 (-1.5 %) |
+| C1-64 AllActive | 44 -> 43 | 40.66 -> 40.66 | 22 -> 21 | 247.27 -> 246.72 (-0.2 %) |
+| C1-64 Typical | 44 -> 43 | 24.00 -> 24.00 | | 153.32 -> 153.80 (+0.3 %) |
+| irregular graph | 38 -> 28 | 38.00 -> 28.00 | 23 -> 15 | 265.82 -> 192.93 (-27.4 %) |
+
+W=8 C1 lands at 19/27/43, not the spec's 17/25/41 (see the open point). Executed BSR on C1 does not
+move: the merged drive bank absorbs aux B, which skipped on silence. The irregular row is where
+the windows pay: `post_insert` of tracks with different insert counts and the submix strips of
+different depths are one cohort per pool. `mergeable_partial_pairs` is 0 on every row.
