@@ -1,7 +1,21 @@
 {
   "schema": "miso.web.qualification.matrix.v1",
-  "candidateCommit": "00ee2899fb68eeff7234c035069e825d880fb9a4",
-  "wasmSha256": "aa7578f99e0f2612203d2a40d362819fc52106593997a1a41b4eac838e181b67",
+  "candidateCommit": "6ee9f757cfc15c74261141a5ba19ac496911aaf0",
+  "wasmSha256": "7af24e632f9bbedfb05d5c6b0e1fada17e703519e9e0b396d3682d088025caf7",
+  "blake3Qualification": {
+    "candidateCommit": "6ee9f757cfc15c74261141a5ba19ac496911aaf0",
+    "sha256": "ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1",
+    "browsers": [
+      {
+        "browser": "chromium",
+        "backend": "simd128"
+      },
+      {
+        "browser": "webkit",
+        "backend": "simd128"
+      }
+    ]
+  },
   "playwrightVersion": "1.62.1",
   "platform": "linux-headless",
   "artifact": "single shipped simd128 AudioWorklet artifact",
@@ -36,19 +50,5 @@
         "sdkResponse": "pass"
       }
     }
-  ],
-  "blake3Qualification": {
-    "candidateCommit": "8890792627e9eb1abf49f8626403d9016fad8cc8",
-    "sha256": "ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1",
-    "browsers": [
-      {
-        "browser": "chromium",
-        "backend": "simd128"
-      },
-      {
-        "browser": "webkit",
-        "backend": "simd128"
-      }
-    ]
-  }
+  ]
 }
