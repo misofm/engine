@@ -570,13 +570,15 @@ pub(crate) fn bind_rack_banks_placed(
 /// swept earliest deadline first, as `rack_compiler::place_over_windows` sweeps chains: the stab
 /// takes every waiting candidate whose window holds the earliest deadline, except one with a
 /// graph edge to a member already taken, and places them all at the largest window floor among
-/// them. A stab smaller than [`min_padded_insert_members`] would not bind, so it moves nothing and
-/// only its earliest-deadline candidate leaves the sweep. A stab is merged only when the merge
-/// renders fewer nodes per node than the level plan of the same members (one bucket per level they
-/// sit at), or as many in fewer banks ([`leftover_cost`]); otherwise each member is bucketed at
-/// its own level, as the level plan would, since a merge that saves no bank only costs silence
-/// skips (#2136's rule). The buckets are then [`plan_bank_groups`]'s input and bind through the
-/// chain pass's binder.
+/// them. A stab is merged only when the key class then renders fewer nodes per node than under the
+/// level plan of the same members (one bucket per level they sit at), or as many in fewer banks
+/// ([`leftover_cost`]); both counts include the same-key candidates earlier stabs committed at
+/// each level, which share that bucket. Otherwise each member is bucketed at its own level, as the
+/// level plan would, since a merge that saves no bank only costs silence skips (#2136's rule).
+/// Nodes the chain pass bound are not counted: they sit in its banks, which a leftover candidate
+/// never joins. The buckets are then [`plan_bank_groups`]'s input and bind through the chain
+/// pass's binder; a bucket below [`min_padded_insert_members`] forms a group that does not bind,
+/// and its nodes render per node.
 ///
 /// Each move keeps every edge of the graph strictly upward in the placement, so every bank, chain
 /// or leftover, still has its members at one placement level and the graph contracted by bank is
@@ -667,6 +669,8 @@ fn leftover_pass(
     let lanes = width.lanes() as usize;
     let mut buckets: BTreeMap<u64, Vec<CohortCandidate<RackChainId>>> = BTreeMap::new();
     for ((key, class), mut waiting) in by_class {
+        // Committed candidates of this key class per level.
+        let mut committed: BTreeMap<u64, usize> = BTreeMap::new();
         while !waiting.is_empty() {
             let mut open = Vec::with_capacity(waiting.len());
             for (index, (_, node)) in waiting.iter().enumerate() {
@@ -685,25 +689,32 @@ fn leftover_pass(
                     stab.push((index, (low, high)));
                 }
             }
-            if stab.len() < threshold {
-                waiting.remove(open[0].1);
-                continue;
-            }
-            // The level plan of the same members: one bucket per level they sit at now.
-            let mut at_level: BTreeMap<u64, usize> = BTreeMap::new();
+            // The level plan of the same members: one bucket per level they sit at now, beside
+            // the same-key candidates earlier stabs already committed there (they share the
+            // bucket). The merge is taken when the whole key class then renders fewer nodes per
+            // node, or as many in fewer banks; otherwise every member is bucketed where it sits,
+            // as the level plan would.
+            let mut split_counts = committed.clone();
             for (index, _) in &stab {
                 let here = level_of(&moved, &GraphNodeId::Effect(waiting[*index].1.clone()))
                     .ok_or_else(invariant)?;
-                *at_level.entry(here).or_default() += 1;
+                *split_counts.entry(here).or_default() += 1;
             }
-            let merged = leftover_cost(stab.len(), lanes, threshold);
-            let split = at_level
-                .values()
-                .map(|members| leftover_cost(*members, lanes, threshold))
-                .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
-            // The merge is taken when it renders fewer nodes per node, or as many with fewer
-            // banks; otherwise every member is bucketed where it sits, as the level plan would.
-            let merge = merged < split;
+            let target = stab
+                .iter()
+                .map(|(_, (low, _))| *low)
+                .max()
+                .unwrap_or(deadline);
+            let mut merged_counts = committed.clone();
+            *merged_counts.entry(target).or_default() += stab.len();
+            let cost = |counts: &BTreeMap<u64, usize>| {
+                counts
+                    .values()
+                    .map(|members| leftover_cost(*members, lanes, threshold))
+                    .fold((0, 0), |(a, b), (c, d)| (a + c, b + d))
+            };
+            let merge = cost(&merged_counts) < cost(&split_counts);
+            committed = if merge { merged_counts } else { split_counts };
             let level = stab
                 .iter()
                 .map(|(_, (low, _))| *low)
