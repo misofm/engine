@@ -186,6 +186,19 @@ impl CellState {
         self.held = false;
     }
 
+    /// The most recently recorded ramp's completion node time, retained after it ends. A
+    /// reposition or an exact set clears it. An adopting caller reads it before repositioning:
+    /// even with no stage ramp, the carried target belongs to this time, including when a held
+    /// stage only remembered the grid's target.
+    #[must_use]
+    pub const fn ramp_completion(&self) -> Option<i64> {
+        if self.ramp_done == IDLE {
+            None
+        } else {
+            Some(self.ramp_done)
+        }
+    }
+
     /// Reports a ramp the caller started on this lane (a mute ramp, a live record's ramp) that
     /// completes at node time `completion`, so the grid holds inside it.
     ///
