@@ -112,7 +112,9 @@ Shared scripts/gates and floor accounting are root-owned and outside this slice.
    exactly one warmup and two measured rounds, separate baseline/candidate binaries/modules,
    alternating A/B order; no tuning or retries. Freeze 64 tracks, 48 kHz, 128 frames, Maximum link,
    5 ms lookahead, diagnosis per-track ceiling/release; quiet 0.3 tone, hot +3 dBFS seeded noise,
-   near-miss quiet inputs with the sole rejecting tap at final lane/right/final frame. Preflight
+   near-miss quiet inputs with the sole rejecting threshold-equality tap at final lane/right/frame 115
+   followed by twelve quiet frames (the final 16-frame scan group still runs in full, and no
+   rejecting history contaminates the next block). Preflight
    arguments, schema, validator, exclusive output persistence and child-failure exit semantics
    without a timed workload. A broad runner covers all nine rows in the one invocation. A runner
    defect after one bounded correction becomes a tooling successor rather than another timing run.
@@ -132,3 +134,19 @@ No code, builds or tests performed. Root ruled that the hard +1% hot/near-miss g
 current codegen inventory replaces only obsolete absolute instruction counts. Bounded external
 runner feasibility reported; implementation approval and GitHub amendment synchronization pending.
 Historical benchmark/codegen evidence is retained as a risk, not reproduced or asserted current.
+
+Attempt 1 checkpoint (2026-10-27): root approved `2c838adb1` and retained the hard +1% gate.
+Implemented a separate `#[inline(never)]` screened block and compile-time required-gain
+specializations of the existing two frame kernels. The current unscreened two-pass/stream body
+keeps its arithmetic; its frame calls explicitly choose `false`. No layout/state fields changed.
+`cargo test -p true-peak-limiter --lib screen_ -- --nocapture`: 2 passed in dev (9.78s).
+`cargo fmt -p true-peak-limiter`: passed. Both commands ran through the serial wrapper.
+The initial test expectation for empty blocks was corrected: `process_block` does no zero-frame
+kernel dispatch, so an engagement witness must be false even though empty history identity holds.
+Focused test value: `screen_bound_covers_the_attaining_phase_patterns` rejects an excessive
+screen factor/rounding margin at the coefficient table's attaining sign patterns; no existing test
+proves detector omission safe. `screen_preserves_every_word_and_refuses_unproven_blocks` rejects
+short-history loss, cross-channel limit mistakes, omitted gain writes and out-of-domain admission
+on the new path, which existing detector and gain-law tests never engaged.
+Further release, mutation, external baseline, codegen, timing and merged target gates remain;
+this checkpoint is not a PASS or a runtime speed claim.
