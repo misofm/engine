@@ -972,7 +972,7 @@ fn a_skipping_block_allocates_nothing() {
                 write_bypass(
                     &mut bound,
                     channel,
-                    (channel + block as usize / 40) % 3 == 0,
+                    (channel + block as usize / 40).is_multiple_of(3),
                 );
             }
         }
@@ -2279,12 +2279,12 @@ fn a_pattern_packed_plan_renders_the_bits_of_an_unpacked_one() {
         let mut twin_pcm = vec![0.0_f32; frames * 2];
         let mut writes = 0;
         for block in 0..blocks {
-            for channel in 0..state.len() {
+            for (channel, bypassed) in state.iter_mut().enumerate() {
                 let flip = rng.below(256) == 0 || (Some(channel) == rapid && block % 8 == 0);
                 if flip {
-                    state[channel] = !state[channel];
-                    write_bypass(&mut packed, channel, state[channel]);
-                    write_bypass(&mut twin, channel, state[channel]);
+                    *bypassed = !*bypassed;
+                    write_bypass(&mut packed, channel, *bypassed);
+                    write_bypass(&mut twin, channel, *bypassed);
                     writes += 1;
                 }
             }
