@@ -20,7 +20,7 @@ brief's proposed code integration and 133/223 instruction counts belong to its o
 Research, not a patch to apply: [full diagnosis](../../docs/handoffs/effects-2026-09-27/LIMITER-DIAGNOSIS.md)
 and [adversarial verification](../../docs/handoffs/effects-2026-09-27/VERIFY-LIMITER.md).
 The latter previously measured native unscreened regressions and proposed a hard no-regression gate;
-that evidence must be reconciled explicitly below before implementation is approved. Historical
+that evidence is retained as the acceptance gate below. Historical
 prototype speedups are not measurements of this implementation or a capacity claim.
 
 ## Algorithm and numerical proof
@@ -102,8 +102,20 @@ Shared scripts/gates and floor accounting are root-owned and outside this slice.
    root-owned amendment, not relaxed silently.
 7. Current proportional codegen evidence is proposed in place of stale absolute instruction pins:
    compare baseline/candidate release disassembly, record unchanged FIR arithmetic/unscreened target
-   and stream inventory, and demonstrate the screened body has no FIR. Runtime no-regression
-   acceptance is unresolved pending root's explicit brief approval (see below).
+   and stream inventory, and demonstrate the screened body has no FIR. The historical absolute
+   133/223 counts are superseded by the already-merged #1014/#2121 shape and compiler changes;
+   preserving the current unscreened codegen is still required.
+8. Hard performance acceptance: hot and near-miss rows must be at most 1% slower than the current
+   baseline at native W8/W4 and V8 W4. A failure stops/rescopes the issue; recording risk is not PASS.
+   Reuse the retained diagnosis bank preparation/staging as a bounded external evidence runner,
+   native executable plus wasm cdylib through the public bank API. One orchestrator invocation,
+   exactly one warmup and two measured rounds, separate baseline/candidate binaries/modules,
+   alternating A/B order; no tuning or retries. Freeze 64 tracks, 48 kHz, 128 frames, Maximum link,
+   5 ms lookahead, diagnosis per-track ceiling/release; quiet 0.3 tone, hot +3 dBFS seeded noise,
+   near-miss quiet inputs with the sole rejecting tap at final lane/right/final frame. Preflight
+   arguments, schema, validator, exclusive output persistence and child-failure exit semantics
+   without a timed workload. A broad runner covers all nine rows in the one invocation. A runner
+   defect after one bounded correction becomes a tooling successor rather than another timing run.
 
 Every local build/test/formatter/heavy check runs sequentially through
 `/home/bl/misofm/engine-work-evidence/easy3-20261027/run-serial.sh` from this worktree; wrapper owns
@@ -116,5 +128,7 @@ delivery. Pause after a coherent green tranche for root's commit/status audit.
 ## Brief decisions and evidence
 
 2026-10-27: Sol read AGENTS, current code, complete diagnosis and its adversarial verification.
-No code, builds or tests performed. Amendment proposed to root; implementation approval pending.
+No code, builds or tests performed. Root ruled that the hard +1% hot/near-miss gate remains binding;
+current codegen inventory replaces only obsolete absolute instruction counts. Bounded external
+runner feasibility reported; implementation approval and GitHub amendment synchronization pending.
 Historical benchmark/codegen evidence is retained as a risk, not reproduced or asserted current.
