@@ -1219,8 +1219,8 @@ fn touched(program: &ExecutionProgram, op: &Op) -> (Vec<u32>, Vec<u32>) {
 /// two different values: the schedule-later op recycled the slot. That is sound only if its run
 /// renders after the schedule-earlier op's run has finished, which is what this asserts against
 /// the executor's own run order ([`runs_in_runtime_order`]). An op writing its own input in place
-/// is one exception, because that is one op, not two. A later slot of one fused run consuming an
-/// earlier slot's buffer in place is the other (issue #2134's cross-level corpus reaches it): the
+/// is one exception, because that is one op, not two. A later slot of one fused run that reads an
+/// earlier slot's output and consumes its buffer in place is the other (issue #2134's cross-level corpus reaches it): the
 /// two are one run, in chain order, and the value passes along the chain.
 fn assert_no_slot_is_recycled_inside_a_bank_window(
     program: &ExecutionProgram,
@@ -1261,11 +1261,17 @@ fn assert_no_slot_is_recycled_inside_a_bank_window(
                         continue;
                     }
                     let (earlier, later) = (here.min(there), here.max(there));
-                    // One fused run, in chain order: the later slot computes over the resident
-                    // block from the earlier one's value, so sharing its buffer (an in-place
-                    // consumer of the earlier slot) is one value passed along the chain.
+                    // One fused run, in chain order, the later op reading the earlier one's output:
+                    // the later slot computes over the resident block from the earlier one's
+                    // value, so sharing its buffer (an in-place consumer of the earlier slot) is
+                    // one value passed along the chain. Any other pair in one run is an alias.
+                    let reads_earlier = program
+                        .inputs_of(&program.ops[later])
+                        .iter()
+                        .any(|input| input.buffer == program.ops[earlier].output);
                     let in_order_in_one_run = run_of_op[later] == run_of_op[earlier]
-                        && slot_of_op[later] > slot_of_op[earlier];
+                        && slot_of_op[later] > slot_of_op[earlier]
+                        && reads_earlier;
                     assert!(
                         in_order_in_one_run || run_of_op[later] > run_of_op[earlier],
                         "{label}: ops {here} and {there} share buffer {slot} inside a bank \
