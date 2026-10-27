@@ -195,3 +195,9 @@ limiter screen introduces no loudness edit. Normal required qualification on the
 product tree remains mandatory before delivery/closure. Raw artifact and independent judgment:
 `engine-work-evidence/easy3-20261027/fresh-astra/remote/result/` and
 `fresh-astra/remote/artifact-judgment.json` outside Git.
+
+## Root source co-review and final delivery gate (2026-10-27)
+
+PASS for the scoped official ITU corpus owner after fresh independent review `0a29fc46fddd4aaf126897b09c4e09ec1e18fcfe`. Official byte identities, native channel/rate handling, bounded header exceptions and the published ±0.1 LKFS expectations are explicit. All 19 required cases executed; the EBU and multichannel boundaries remain candid. No production DSP or redistributed audio enters the batch.
+
+The limiter screen is excluded after its real performance failure. Its removal leaves this slice’s reviewed source unchanged. Final normal required qualification on the actual combined product tree is mandatory before merge, issue closure and completed-worktree cleanup. This record does not claim that pending workflow passed.
