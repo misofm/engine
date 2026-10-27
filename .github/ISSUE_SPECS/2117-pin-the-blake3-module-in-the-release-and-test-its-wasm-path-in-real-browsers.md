@@ -75,3 +75,9 @@ The final combined production source is `24000af983207d5f18aecb2aece5d1a3466741c
 Full required PR `qualification`, including both unmutated AArch64 legs and both standard
 browser matrices with their mutations, remains mandatory before delivery and issue closure.
 Those full browser rows were deliberately deferred to required CI, not reported as local PASS.
+
+## Root co-review and delivery status (2026-10-27)
+
+PASS for attempt1 after independent Astra checkpoint `a666b967fa5e8ae5b816542d6d48c194c59cd62b`. The shipped default Worker URL, SIMD-mode guard and frozen corpus are exercised in both browsers, including a route-revert failure proof. Cold-built BLAKE3 bytes match the new independent pin; release identity, npm behavior and router checks defend the actual publication gates. No release publication is performed.
+
+Implementation and local/native proof are complete. The full required batch qualification remains mandatory before merged delivery and verified GitHub closure. This record does not claim that pending gate has passed.

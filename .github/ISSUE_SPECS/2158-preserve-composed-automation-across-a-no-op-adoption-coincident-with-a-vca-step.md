@@ -137,3 +137,9 @@ The final combined production source is `24000af983207d5f18aecb2aece5d1a3466741c
 Full required PR `qualification`, including both unmutated AArch64 legs and both standard
 browser matrices with their mutations, remains mandatory before delivery and issue closure.
 Those full browser rows were deliberately deferred to required CI, not reported as local PASS.
+
+## Root co-review and delivery status (2026-10-27)
+
+PASS for attempt1 after independent Astra checkpoint `a666b967fa5e8ae5b816542d6d48c194c59cd62b`. The comparison uses each carried component’s actual heard/target origins and retains its event state only under semantic/arrival/layout/value backstops. Size accounting follows the cursor type. Native owner and independent selective-origin/after-step controls defend no-op continuity and genuine changed-table landing without suppressing the step; no render allocation or new DSP arithmetic is introduced.
+
+Implementation and local/native proof are complete. The full required batch qualification remains mandatory before merged delivery and verified GitHub closure. This record does not claim that pending gate has passed.
