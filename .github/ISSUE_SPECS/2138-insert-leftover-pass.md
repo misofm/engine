@@ -59,3 +59,54 @@ they are bucketed). If #2136 is deferred, this slice runs on levels with no othe
 - Dependency on #2136 restated as sequencing. Schedule: stream A step 5, after #2136 (or after
   #2135 if 6a/6b are deferred). The claim is on user graphs (ragged inserts), measured by the
   irregular row only; C1 has no inserts on tracks.
+
+## Evidence (attempt 1, 2026-10-27, branch `codex/batch-b14-leftover`, base #2136 `BASE_HEAD`)
+
+### What changed
+
+- `crates/graph-compiler/src/banks.rs` `leftover_pass`, called from `bind_rack_banks_placed`
+  after the chain pass and #971's move: every `Dynamic` chain node no bound bank carries, whose
+  own key does not block banking, is a one-slot candidate. The candidates are placed by
+  `rack_compiler::place_over_windows` (the chain pass's sweep and its merge counter, keyed by
+  program key and pool class) over a sub-problem: the candidates and every graph neighbour of one,
+  fixed at its placement level (`PlacementLevels::neighbours`, recorded in `placement_levels`). So
+  a move keeps every edge strictly upward and the contracted graph acyclic, and a cross-level
+  merge is taken only when it saves a bank (coordinator direction 2026-10-27: no second count).
+  The placed candidates are bucketed by level, planned by `plan_bank_groups`, bound by
+  `bind_group_banks`, and appended to the plan; a group below `min_padded_insert_members` does
+  not bind and renders per node.
+- `crates/graph-compiler/src/lib.rs`: `RackChainId::slot` (`None` a whole chain, `Some(k)` the
+  leftover candidate of slot `k`; its `chains` entry is that one node); `scalar_in` dedups.
+- No runtime change: a one-slot `Dynamic` bank is #96's shape.
+
+### Gates
+
+| gate | test | red on |
+|---|---|---|
+| 1 + 2 | `graph-compiler` `tests/bank_levels.rs` `leftover_inserts_bank_by_key_in_their_window` (new row of the scalar-oracle differential) | no second pass (a second pass that groups by chain reproduces pass 1): per node `3`, expected `0` |
+
+Gate 1 as written does not hold on the tree: the chain pass's leader is `[comp, eq]` (#99's
+order), and at W=4 the two `[comp, eq]` strips already pad, so the six-track session leaves two
+EQs per node at W=4 and nothing pass 2 can bank at W=8 (below its threshold of 3). The row is
+nine tracks (three of each program): the chain pass leaves the three `[comp, eq]` EQs per node at
+both widths, pass 2 binds them as one padded bank, per node 3 -> 0 at W=4 and W=8. The W=4
+count (5 banks) is derived from the plan (this x86-64-v3 host's factories decline four lanes);
+the arm64 leg runs it.
+
+Re-pinned, each because pass 2 binds what the chain pass left per node (`bank_levels.rs`):
+64-track console less one EQ (three rows and the mono row) 22/46 -> 24/48 (the mixed group's EQs
+and compressors, `ch00`'s early compressor stays per node); less nine EQs 21/44 -> 23/46; the
+soft-clip row 6/10 -> 7/11; the realigning row 9/18 -> 13/22 (B's EQs, A's and B's compressors,
+A's transients, pooled over both four-lane A/B groups); the reduced #970 console W=4 3 -> 4.
+`src/lib.rs` `chains_of_different_depths_share_a_cohort_through_identity_slots` and
+`bank_membership_is_independent_of_entry_order`: slot 1's half now binds as a leftover bank.
+
+### Bit identity (one-time, not committed)
+
+All 17 `BANK_REPORT_WORKLOADS` rows, 600 blocks through `console_workload::SessionRuntime`, FNV-1a
+of every host word: identical on `BASE_HEAD` and on this branch, including the irregular row,
+whose plan moved.
+
+### Gate 3: the irregular row and C1 (descriptive)
+
+BENCH_TABLE
