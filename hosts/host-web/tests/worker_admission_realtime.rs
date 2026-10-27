@@ -54,6 +54,9 @@ const BLOCKS: u64 = 360;
 /// How far ahead of render the control thread may feed, in blocks: the source ring's length, so
 /// render runs ahead freely while the control thread commits.
 const RING_BLOCKS: u64 = 256;
+/// How many blocks render may run past the block of the action the control thread is about to
+/// run: the window in which render adopts plans while the control thread commits.
+const LEAD: u64 = 12;
 const FADER_DB: u32 = 5;
 /// The `master` monitor row of a strip (#1683).
 const MASTER_ROW: u32 = 4;
@@ -395,7 +398,12 @@ fn two_threads() -> TwoThreads {
         let mut feed = 0;
         loop {
             let done = rendered.load(Ordering::Acquire);
-            while feed < BLOCKS && feed < done + RING_BLOCKS && control.feed(feed) {
+            // Render may run up to `LEAD` blocks past the next action's block while the action
+            // commits, and no further, so the script runs whole whatever the threads' speeds.
+            let limit = script
+                .get(next)
+                .map_or(BLOCKS, |&(at, _)| (at + LEAD).min(BLOCKS));
+            while feed < limit && feed < done + RING_BLOCKS && control.feed(feed) {
                 feed += 1;
                 fed.store(feed, Ordering::Release);
             }
