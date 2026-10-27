@@ -370,7 +370,7 @@ fn the_contracted_order_is_the_schedule_on_every_one_level_fixture() {
 /// -- a level bucket leaves aux B's drive apart from the others' (20, 28, 44 at eight lanes).
 #[test]
 fn the_c1_submix_drives_are_one_cohort_over_level_windows() {
-    let lanes = width().width() as usize;
+    let lanes = width().width();
     for (tracks, text) in [
         (
             16_usize,

@@ -41,13 +41,15 @@ fn w4_counters_match_between_wasm_and_native_simd4() {
 }
 
 /// The pinned table describes the plan the banking design's W=4 finish line is stated for
-/// (`docs/BANKING_DESIGN.md`, section 7: 16 tracks, W=4, 29 bank-slot runs per block).
+/// (`docs/BANKING_DESIGN.md`, section 7: 16 tracks, W=4; 28 bank-slot runs per block since the
+/// windows planner, #2136).
 ///
 /// Claim: re-pinning the table from a counter summed over the wrong units, or from a plan that
 /// stopped matching the design, turns this red. The track banks are `ceil(16 / 4)` per console
-/// rack (`pre_insert`: gate, EQ, compressor; `post_insert`: drive). The submix banks are the
-/// design's seven at W=4: `pre_insert` over `{4 groups, aux B, aux A}` (two banks), drive over
-/// `{4 groups, aux B}` (two), aux A's drive alone (one, after its delay), and the master's
+/// rack (`pre_insert`: gate, EQ, compressor; `post_insert`: drive). The submix banks are six at
+/// W=4: `pre_insert` over `{aux A, aux B}` (one bank: the auxes take post-fader sends, a level
+/// before the groups, and aux A's delay keeps its window to that level) and over the four groups
+/// (one), the six submix drives as one cohort over level windows (two), and the master's
 /// `pre_insert` and drive (one each, split by its limiter).
 #[test]
 fn w4_counters_describe_the_designs_plan() {
@@ -55,9 +57,9 @@ fn w4_counters_describe_the_designs_plan() {
     const TRACKS: u64 = 16;
     let track_banks = 2 * TRACKS.div_ceil(W);
     let track_bsr = (3 + 1) * TRACKS.div_ceil(W);
-    let submix_banks = 6_u64.div_ceil(W) + 5_u64.div_ceil(W) + 1 + 2;
-    let submix_bsr = 3 * 6_u64.div_ceil(W) + 5_u64.div_ceil(W) + 1 + (3 + 1);
-    assert_eq!(track_bsr + submix_bsr, 29, "the design's W=4 table");
+    let submix_banks = 2 + 6_u64.div_ceil(W) + 2;
+    let submix_bsr = 3 * 2 + 6_u64.div_ceil(W) + (3 + 1);
+    assert_eq!(track_bsr + submix_bsr, 28, "the design's W=4 table");
 
     let row = |kind: &str| {
         W4_COUNTER_WORKLOADS

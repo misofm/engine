@@ -642,7 +642,7 @@ struct Lifetime {
 ///
 /// Colouring walks the ops in **op order**, and the op order is the executor order (issue #2134):
 /// the topological order of the graph contracted by bank, keyed by canonical schedule position
-/// ([`contracted_order`]). On a plan whose banks each sit at one dependency level that is the
+/// (`contracted_order`). On a plan whose banks each sit at one dependency level that is the
 /// level-major schedule itself.
 ///
 /// `runtime::units_of` emits a whole bank as **one unit at its first member's op position**, and
@@ -663,7 +663,7 @@ struct Lifetime {
 /// > **No physical slot may be recycled inside a bank window**, except to an op proven to render
 /// > after the run that last touched it (the exception is issue #931's, below).
 ///
-/// The window is the unit: the sentence keeps its meaning because the positions [`render_bounds`]
+/// The window is the unit: the sentence keeps its meaning because the positions `render_bounds`
 /// bounds are op positions in the executed order, and runs execute in order of their first op.
 ///
 /// ## A cohort chain's window spans levels, and the sentence still holds (issues #181, #202)
