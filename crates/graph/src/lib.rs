@@ -4006,6 +4006,8 @@ pub struct GraphBankedMeterLane {
     /// `energy_seed` plus the square of every sanitized sample, widened to `f64` and added one
     /// sample at a time in frame order: the sum the answering observer's own loop would reach.
     pub energy: [f64; 2],
+    /// Held recurrence, when a held-only seed search answered for this lane (issue #951).
+    pub held: Option<lane::kernels::builtins::MeterHeldBanked>,
 }
 /// A bounded observer invoked after its node has completed.
 pub trait GraphRuntimeObserver: Send {
@@ -4064,6 +4066,17 @@ pub trait GraphRuntimeObserver: Send {
     /// The answer seeds the pass; it does not commit anything. An observer that accepts the result
     /// must check [`GraphBankedMeterLane::energy_seed`] against its own state before using it.
     fn banked_meter_seed(&self, _first_sample: u64, _frames: u32) -> Option<[f64; 2]> {
+        None
+    }
+
+    /// Independent held-state seed search (issue #951), with the same purity, boundedness and
+    /// allocation-free rules as `banked_meter_seed`. A held-only meter must not take an energy
+    /// seed from another meter. Consumers validate every state/configuration word on both channels.
+    fn banked_held_seed(
+        &self,
+        _first_sample: u64,
+        _frames: u32,
+    ) -> Option<[lane::kernels::builtins::MeterHeldSeed; 2]> {
         None
     }
 

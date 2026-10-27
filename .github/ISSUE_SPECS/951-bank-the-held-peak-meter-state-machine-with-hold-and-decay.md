@@ -74,3 +74,37 @@ change, not audio DSP or a claimed performance result. Extended target matrices 
 work are qualification successors if the representative existing gates cannot run locally.
 After the coherent green tranche, commit exact paths locally and pause for root's status/commit
 audit before further implementation. Maximum five attempts, each with one adversarial verdict.
+
+## Attempt 1 — native product checkpoint (2026-10-27)
+
+Implemented the lane-parallel held recurrence with exact two-digit u32 countdown, independent
+energy/held seed searches, both-channel bitwise state/configuration checks and inline results.
+No heap field was added to an accumulator/observer; temporary bank metadata is stack-only.
+The hold=0/decay=0 maximum merge remains the existing path.
+
+Evidence directory: `/home/bl/misofm/engine-work-evidence/easy3-20261027/951/`.
+`red-prechange.log` records the amended production owner failing the baseline: Simd4, hold=7,
+decay=0 made zero banked commits when one was required. `production-green.log` passes the same
+owner with all four hold/decay combinations, forced/separate mono, nine tracks with padded banks,
+bit-identical PCM/snapshots and exactly zero render-thread allocations and frees.
+`meter-green.log` passes all 12 meter tests: the existing full differential compares 19,504,032
+snapshots bitwise and records 423,288 commits over all selections, ballistics, window splits,
+resets and discontinuities; both channels reject each independently corrupted held seed word.
+The existing multi-binding owner now proves a held-only binding does not steal the ALL meter's
+energy seed and both seeded meters commit every contained block.
+
+Test value (production owner rewrite): a final resident positive-hold/decay meter that silently
+runs scalar, loses state while banking or allocates/frees during render now fails, where the
+previous row bound only hold=0/decay=0.
+Test value (full meter differential rewrite): accepting a mismatched held state/configuration
+word on either channel, losing per-sample countdown/decay order or failing to bank advanced held
+metric selections now fails; the old owner explicitly required those selections to stay scalar.
+Test value (multi-binding owner rewrite): allowing a held-only meter's unused energy to stop the
+seed search before an ALL meter now fails; the previous row covered only SAMPLE_PEAK first.
+
+The existing wasm corpus function has been extended locally with an independent held/countdown
+oracle, but that extension is not yet compiled or executed at this checkpoint. Remaining gates:
+compile/run the extended corpus natively and on wasm simd128, reuse/extend the existing lowering
+probe as needed, capture one held-recurrence mutation red then restore, run proportional formatting,
+lints and graph/compiler owning regressions. Root's independent Astra review and merged-tree gates
+remain outstanding. This checkpoint claims native product evidence only, not issue completion.

@@ -5704,10 +5704,10 @@ impl Runtime {
                 // an active lane has a final member. Each observer then commits its own lane, in
                 // binding order, and only if the seed is still its own.
                 // The seeds are written once, where the hand-off below reads them, and never copied.
-                let mut seeds: Option<[[f64; 8]; 2]> = None;
+                let mut seeds: Option<BankMeterSeeds> = None;
                 let meters = if banked_meter && eligible {
                     frames.zip(final_start).and_then(|(frames, final_start)| {
-                        let seeds = seeds.insert([[0.0; 8]; 2]);
+                        let seeds = seeds.insert(BankMeterSeeds::default());
                         if !bank_meter_seeds(members, final_start, first_sample, frames, seeds) {
                             return None;
                         }
@@ -6471,12 +6471,20 @@ const BANK_METER_MAX_FRAMES: usize = 1 << 24;
 
 /// One plane of the full meter pass (issue #950), for every lane of the bank: the partials of
 /// `lane::kernels::builtins::MeterBlock`, stored.
+#[derive(Default)]
+struct BankMeterSeeds {
+    energy: [[f64; 8]; 2],
+    held: [Option<[lane::kernels::builtins::MeterHeldSeed; 2]>; 8],
+}
+
 #[derive(Clone, Copy)]
 struct BankMeterPlane {
     peak: [f32; 8],
     clipped: [f32; 8],
     sanitized: [f32; 8],
     energy: [f64; 8],
+    held: [f32; 8],
+    remaining: [u32; 8],
 }
 
 /// The full meter pass over one final resident block (issue #950): both planes' results,
@@ -6495,9 +6503,9 @@ impl BankMeterResults {
 
     /// Lane `lane`'s results, started from `seeds`, with its counts as integers: an `f32` count
     /// below `2^24` converts exactly. `None` past the eighth lane.
-    fn lane(&self, lane: usize, seeds: &[[f64; 8]; 2]) -> Option<crate::GraphBankedMeterLane> {
+    fn lane(&self, lane: usize, seeds: &BankMeterSeeds) -> Option<crate::GraphBankedMeterLane> {
         let [left, right] = &self.planes;
-        let [left_seed, right_seed] = seeds;
+        let [left_seed, right_seed] = &seeds.energy;
         Some(crate::GraphBankedMeterLane {
             sample_peak: [*left.peak.get(lane)?, *right.peak.get(lane)?],
             clipped: [
@@ -6510,6 +6518,14 @@ impl BankMeterResults {
             ],
             energy_seed: [*left_seed.get(lane)?, *right_seed.get(lane)?],
             energy: [*left.energy.get(lane)?, *right.energy.get(lane)?],
+            held: seeds
+                .held
+                .get(lane)?
+                .map(|seed| lane::kernels::builtins::MeterHeldBanked {
+                    seed,
+                    held: [left.held[lane], right.held[lane]],
+                    remaining: [left.remaining[lane], right.remaining[lane]],
+                }),
         })
     }
 }
@@ -6527,14 +6543,19 @@ fn bank_meter_seeds(
     final_start: usize,
     first_sample: u64,
     frames: u32,
-    seeds: &mut [[f64; 8]; 2],
+    seeds: &mut BankMeterSeeds,
 ) -> bool {
     let mut answered = false;
-    let [left, right] = seeds;
+    let [left, right] = &mut seeds.energy;
     let Some(finals) = members.get(final_start..) else {
         return false;
     };
-    for ((member, left), right) in finals.iter().zip(left.iter_mut()).zip(right.iter_mut()) {
+    for (lane, ((member, left), right)) in finals
+        .iter()
+        .zip(left.iter_mut())
+        .zip(right.iter_mut())
+        .enumerate()
+    {
         if let Some([l, r]) = member
             .observers
             .iter()
@@ -6544,6 +6565,11 @@ fn bank_meter_seeds(
             *right = r;
             answered = true;
         }
+        seeds.held[lane] = member
+            .observers
+            .iter()
+            .find_map(|binding| binding.observer.banked_held_seed(first_sample, frames));
+        answered |= seeds.held[lane].is_some();
     }
     answered
 }
@@ -6564,29 +6590,54 @@ fn bank_meter_pass(
     width: BankWidth,
     left: &[f32],
     right: &[f32],
-    seeds: &[[f64; 8]; 2],
+    seeds: &BankMeterSeeds,
 ) -> Option<BankMeterResults> {
     use lane::kernels::builtins::meter_block;
     use lane::{LaneF64, Widen};
-    fn plane<L: Widen>(words: &[f32], frames: usize, seeds: &[f64; 8]) -> Option<BankMeterPlane> {
+    fn plane<L: Widen>(
+        words: &[f32],
+        frames: usize,
+        seeds: &BankMeterSeeds,
+        channel: usize,
+    ) -> Option<BankMeterPlane> {
         let words = words.get(..frames * L::WIDTH)?;
-        let block = meter_block::<L>(words, frames, <L::F64 as LaneF64>::load(&seeds[..L::WIDTH]));
+        let block = meter_block::<L>(
+            words,
+            frames,
+            <L::F64 as LaneF64>::load(&seeds.energy[channel][..L::WIDTH]),
+        );
         let mut plane = BankMeterPlane {
             peak: [0.0; 8],
             clipped: [0.0; 8],
             sanitized: [0.0; 8],
             energy: [0.0; 8],
+            held: [0.0; 8],
+            remaining: [0; 8],
         };
         block.peak.store(&mut plane.peak[..L::WIDTH]);
         block.clipped.store(&mut plane.clipped[..L::WIDTH]);
         block.sanitized.store(&mut plane.sanitized[..L::WIDTH]);
         block.energy.store(&mut plane.energy[..L::WIDTH]);
+        if seeds.held.iter().any(Option::is_some) {
+            let held_seeds = seeds.held.map(|seed| {
+                seed.map_or(lane::kernels::builtins::MeterHeldSeed::default(), |seed| {
+                    seed[channel]
+                })
+            });
+            lane::kernels::builtins::meter_held_block::<L>(
+                words,
+                frames,
+                &held_seeds,
+                &mut plane.held,
+                &mut plane.remaining,
+            );
+        }
         Some(plane)
     }
     fn planes<L: Widen>(
         left: &[f32],
         right: &[f32],
-        seeds: &[[f64; 8]; 2],
+        seeds: &BankMeterSeeds,
     ) -> Option<BankMeterResults> {
         let frames = left.len() / L::WIDTH;
         if left.len() != right.len()
@@ -6595,11 +6646,10 @@ fn bank_meter_pass(
         {
             return None;
         }
-        let [left_seeds, right_seeds] = seeds;
         Some(BankMeterResults {
             planes: [
-                plane::<L>(left, frames, left_seeds)?,
-                plane::<L>(right, frames, right_seeds)?,
+                plane::<L>(left, frames, seeds, 0)?,
+                plane::<L>(right, frames, seeds, 1)?,
             ],
         })
     }
@@ -14899,7 +14949,10 @@ mod tests {
             1 << 24,
             "the largest exact f32 count"
         );
-        let seeds = [[0.5_f64; 8]; 2];
+        let seeds = BankMeterSeeds {
+            energy: [[0.5_f64; 8]; 2],
+            ..BankMeterSeeds::default()
+        };
         for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let over = vec![0.0_f32; (BANK_METER_MAX_FRAMES + 1) * lanes];
