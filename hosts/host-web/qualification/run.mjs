@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, webkit } from "playwright";
+import { qualifyBlake3 } from "./blake3.mjs";
 import { qualifySuspendedPcmFeed } from "./pcm-feed-suspended.mjs";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
@@ -1842,6 +1843,14 @@ async function main() {
   const checkMatrix = process.argv.includes("--check-matrix");
   const recordMatrix = process.argv.includes("--record-matrix");
   const proveMutations = process.argv.includes("--self-test-mutations");
+  const blake3Only = process.argv.includes("--blake3-only");
+  const recordBlake3 = process.argv.includes("--record-blake3");
+  if (blake3Only && (recordMatrix || checkMatrix || proveMutations)) {
+    throw new Error("--blake3-only cannot record/check the full matrix or its mutations");
+  }
+  if (recordBlake3 && (!blake3Only || browserOption !== "all")) {
+    throw new Error("--record-blake3 requires --blake3-only --browser all");
+  }
   const feedOnly = process.argv.includes("--pcm-feed-suspended-only");
   if (feedOnly && (recordMatrix || checkMatrix || proveMutations)) {
     throw new Error("--pcm-feed-suspended-only cannot record/check the full matrix or its mutations");
@@ -1850,7 +1859,7 @@ async function main() {
     throw new Error("--record-matrix requires --browser all");
   }
   const candidateCommit = option("--candidate-commit");
-  if (recordMatrix && (candidateCommit === null || !CANONICAL_COMMIT.test(candidateCommit))) {
+  if ((recordMatrix || recordBlake3) && (candidateCommit === null || !CANONICAL_COMMIT.test(candidateCommit))) {
     throw new Error("--record-matrix requires --candidate-commit as canonical lowercase 40-hex");
   }
   const artifactDigest = await sha256(path.join(path.resolve(artifacts), WASM_ARTIFACT));
@@ -1858,8 +1867,8 @@ async function main() {
   // The bundle is always built and served: the raw live-control rows send their `SET_CONTROL`
   // transaction through it (#1563B). `--sdk-root` selects which SDK it comes from, and whether the
   // SDK rows run; without it the repository's own `sdk/` (with its `node_modules`) is bundled.
-  const sdkBundle = await buildSdkBundle(path.resolve(sdkRoot ?? path.join(HERE, "../../../sdk")));
-  const headlessEntry = await sdkHeadlessEntry(path.resolve(sdkRoot ?? path.join(HERE, "../../../sdk")));
+  const sdkBundle = blake3Only ? undefined : await buildSdkBundle(path.resolve(sdkRoot ?? path.join(HERE, "../../../sdk")));
+  const headlessEntry = blake3Only ? undefined : await sdkHeadlessEntry(path.resolve(sdkRoot ?? path.join(HERE, "../../../sdk")));
 
   if (proveMutations) {
     const served = await artifactSetProofs(artifacts);
@@ -1883,7 +1892,10 @@ async function main() {
     ? await startQualificationServer({ artifacts, sdkBundle, isolated: true }) : undefined;
   try {
     const rows = [];
+    const blake3Rows = [];
     for (const browserName of browserNames) {
+      if (!feedOnly) blake3Rows.push(await qualifyBlake3(browserName, ENGINES[browserName], server.origin));
+      if (blake3Only) continue;
       if (feedServer !== undefined) {
         await qualifySuspendedPcmFeed(browserName, ENGINES[browserName], feedServer.origin);
       }
@@ -1900,11 +1912,22 @@ async function main() {
       gate("matrix", "generated-document", renderMatrix(checked)
         === await readFile(MATRIX_PATH, "utf8"), "document was not regenerated from results.json");
     }
+    const blake3Qualification = {
+      candidateCommit,
+      sha256: await sha256(path.join(path.resolve(artifacts), "miso-engine-v1-blake3.simd128.wasm")),
+      browsers: blake3Rows,
+    };
+    if (recordBlake3) {
+      const results = JSON.parse(await readFile(RESULTS_PATH, "utf8"));
+      results.blake3Qualification = blake3Qualification;
+      await writeFile(RESULTS_PATH, `${JSON.stringify(results, null, 2)}\n`);
+    }
     if (recordMatrix) {
       const results = {
         schema: "miso.web.qualification.matrix.v1",
         candidateCommit,
         wasmSha256: artifactDigest,
+        blake3Qualification,
         playwrightVersion: PLAYWRIGHT_VERSION,
         platform: "linux-headless",
         artifact: "single shipped simd128 AudioWorklet artifact",

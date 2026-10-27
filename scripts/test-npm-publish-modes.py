@@ -56,6 +56,17 @@ PUBLISH_GUARD = (
     + "          fi\n"
 )
 
+# Exact authorized #2117 additions; retain the original workflow audit for every other byte.
+BLAKE3_ENV = re.compile(r'^  EXPECTED_BLAKE3_SHA256: "[0-9a-f]{64}"\n', re.MULTILINE)
+BLAKE3_PIN_CHECK = """          blake3_pin_file=hosts/host-web/web/miso-engine-v1-blake3-artifact.sha256
+          [[ -f "$blake3_pin_file" ]] || { echo "missing $blake3_pin_file" >&2; exit 1; }
+          [[ "$(<"$blake3_pin_file")" == "$EXPECTED_BLAKE3_SHA256" ]] || { echo "EXPECTED_BLAKE3_SHA256 differs from $blake3_pin_file" >&2; exit 1; }
+
+"""
+BLAKE3_BUILD_CHECK = """          [[ "$(sha256sum "$worklet/miso-engine-v1-blake3.simd128.wasm" | awk '{print $1}')" == "$EXPECTED_BLAKE3_SHA256" ]]
+
+"""
+
 STEP_HEADERS = (
     "      - name: Refuse non-main dispatches before checkout",
     "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
@@ -199,6 +210,10 @@ def step_map(steps: Iterable[Step]) -> dict[str, Step]:
 
 
 def normalize_authorized_edits(text: str) -> str:
+    require(len(BLAKE3_ENV.findall(text)) == 1, "expected one BLAKE3 release fingerprint")
+    require(text.count(BLAKE3_PIN_CHECK) == 1, "expected one BLAKE3 source pin guard")
+    require(text.count(BLAKE3_BUILD_CHECK) == 1, "expected one BLAKE3 built digest guard")
+    text = BLAKE3_ENV.sub("", text).replace(BLAKE3_PIN_CHECK, "", 1).replace(BLAKE3_BUILD_CHECK, "", 1)
     require(text.count(MODE_ENV) == 1,
             "shared re-smoke step must export MODE exactly once")
     require(text.count(PUBLISH_GUARD) == 1,
@@ -615,6 +630,46 @@ def test_qualify_shape(steps: list[Step]) -> None:
             "qualify must retain pack and exclude real publication")
 
 
+def test_blake3_release_pins(steps: list[Step]) -> None:
+    """Execute the real pin and qualify checksum guards, including independent byte mutations."""
+    named = step_map(steps)
+    pin_step = named[STEP_HEADERS[3].split("name: ", 1)[1]]
+    build_step = named[STEP_HEADERS[9].split("name: ", 1)[1]]
+    temporary, fixture = make_fixture()
+    try:
+        web = fixture.root / "hosts/host-web/web"
+        web.mkdir(parents=True)
+        worklet = b"worklet fixture"
+        blake3 = b"blake3 fixture"
+        worklet_digest = hashlib.sha256(worklet).hexdigest()
+        blake3_digest = hashlib.sha256(blake3).hexdigest()
+        (web / "miso-engine-v1-audio-worklet-artifact.sha256").write_text(worklet_digest + "\n")
+        pin = web / "miso-engine-v1-blake3-artifact.sha256"
+        pin.write_text(blake3_digest + "\n")
+        scripts = fixture.root / "scripts"
+        scripts.mkdir()
+        (scripts / "build-web-audioworklet.sh").write_text(
+            '#!/bin/bash\nset -eu\nprintf "worklet fixture" > "$1/miso-engine-v1-audio-worklet.simd128.wasm"\n'
+            'printf "%s" "$BLAKE3_FIXTURE" > "$1/miso-engine-v1-blake3.simd128.wasm"\n')
+        env = dict(os.environ, EXPECTED_WORKLET_SHA256=worklet_digest,
+                   EXPECTED_BLAKE3_SHA256=blake3_digest, BLAKE3_FIXTURE=blake3.decode())
+        run_step(pin_step, fixture, env)
+        run_step(build_step, fixture, env)
+        for label, value in (("wrong bytes", "different module"), ("empty bytes", "")):
+            result = run_step(build_step, fixture, dict(env, BLAKE3_FIXTURE=value), expect_success=False)
+            require(result.returncode != 0, f"BLAKE3 qualify accepted {label}")
+        for label, edit in (("stale pin", lambda: pin.write_text("0" * 64 + "\n")),
+                            ("missing pin", pin.unlink)):
+            edit()
+            result = run_step(pin_step, fixture, env, expect_success=False)
+            require(result.returncode != 0, f"BLAKE3 release accepted {label}")
+        pin.write_text(blake3_digest + "\n")
+        result = run_step(pin_step, fixture, dict(env, EXPECTED_BLAKE3_SHA256="0" * 64), expect_success=False)
+        require(result.returncode != 0, "BLAKE3 release accepted stale environment fingerprint")
+    finally:
+        temporary.cleanup()
+
+
 def test_publish_missing(steps: list[Step]) -> None:
     temporary, fixture = make_fixture()
     try:
@@ -850,6 +905,7 @@ def main() -> int:
     check_shell_syntax(steps)
     check_qualification_wiring()
     test_qualify_shape(steps)
+    test_blake3_release_pins(steps)
     test_publish_missing(steps)
     test_verify_existing(steps)
     test_red_restored_unconditional_dry_run(workflow, steps)

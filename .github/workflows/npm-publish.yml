@@ -31,6 +31,7 @@ env:
   PACKAGE_NAME: "@misofm/engine"
   PACKAGE_VERSION: "0.7.0"
   EXPECTED_WORKLET_SHA256: "aa7578f99e0f2612203d2a40d362819fc52106593997a1a41b4eac838e181b67"
+  EXPECTED_BLAKE3_SHA256: "ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1"
   RUSTUP_TOOLCHAIN: "1.99.1"
   BROWSER_ARTIFACT_TOOLCHAIN: "nightly-2026-08-20"
   NPM_CONFIG_REGISTRY: "https://registry.npmjs.org"
@@ -77,6 +78,10 @@ jobs:
             echo "EXPECTED_WORKLET_SHA256 ($EXPECTED_WORKLET_SHA256) has drifted from $pin_file ($pinned)" >&2
             exit 1
           }
+
+          blake3_pin_file=hosts/host-web/web/miso-engine-v1-blake3-artifact.sha256
+          [[ -f "$blake3_pin_file" ]] || { echo "missing $blake3_pin_file" >&2; exit 1; }
+          [[ "$(<"$blake3_pin_file")" == "$EXPECTED_BLAKE3_SHA256" ]] || { echo "EXPECTED_BLAKE3_SHA256 differs from $blake3_pin_file" >&2; exit 1; }
 
       - name: Guard release identity, accepted ancestry, and rejected commits
         env:
@@ -163,6 +168,8 @@ jobs:
           mkdir -p "$worklet"
           bash scripts/build-web-audioworklet.sh "$worklet"
           [[ "$(sha256sum "$worklet/miso-engine-v1-audio-worklet.simd128.wasm" | awk '{print $1}')" == "$EXPECTED_WORKLET_SHA256" ]]
+
+          [[ "$(sha256sum "$worklet/miso-engine-v1-blake3.simd128.wasm" | awk '{print $1}')" == "$EXPECTED_BLAKE3_SHA256" ]]
 
       - name: Run generated, deletion, type, headless, and package preparation gates
         if: inputs.mode == 'qualify'
