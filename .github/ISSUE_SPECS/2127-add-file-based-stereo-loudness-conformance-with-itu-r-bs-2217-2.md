@@ -1,23 +1,26 @@
-# #2127 — File-based loudness conformance from official EBU/ITU audio
+# #2127 — Add file-based stereo loudness conformance with ITU-R BS.2217-2
 
 ## Origin and smallest closable slice
 
 Successor of #2115, filed 2026-10-26. Qualify the shipped stereo-output loudness meter
-against authentic EBU Tech 3341 cases 7–8 / Tech 3342 cases 5–6 and the complete
-mono/stereo-applicable ITU-R BS.2217-2 file subset, at the files' native rates.
+against the complete mono/stereo-applicable ITU-R BS.2217-2 file subset, at the
+files' native 48 kHz rate. The original request also covered authentic EBU Tech
+3341 cases 7–8 / Tech 3342 cases 5–6; root split that blocked fixture acquisition
+into a stateless successor before implementation (cross-link pending root number).
 Existing recipe/true-peak tests remain the owners of their cases.
 
-Root's provisional scope ruling (2026-10-27): do not expand production into multichannel
+Root's final scope ruling (2026-10-27): do not expand production into multichannel
 metering, downmix material, or build a test-only multichannel composite. Inventory every
 published ITU resource and explicitly classify unsupported channel layouts outside the
 current product contract. This is no claim of complete ITU multichannel compliance.
-Root must approve the final brief and synchronize GitHub before implementation.
+Root approved this bounded ITU slice on 2026-10-27; GitHub synchronization precedes
+any builds/tests.
 
 ## Boundaries and proposed paths
 
 - `crates/loudness/tests/official_files.rs`: one owning file-conformance integration test,
   a small PCM WAV reader, native-rate block feed, and document tolerance assertions.
-- `crates/loudness/tests/data/official-loudness.json`: sole fixture inventory/identity
+- `crates/loudness/tests/data/official-loudness.tsv`: sole fixture inventory/identity
   manifest, official URLs, archive and selected WAV SHA-256, native PCM metadata,
   expected readings, applicability and exclusions; no audio.
 - `crates/loudness/tests/data/fetch-official-loudness.py`: standard-library-only fetch,
@@ -96,8 +99,8 @@ mono left + zero right preserves exactly that measurement without a gain transfo
    pins fixture acquisition identity, never production output or resource byte budgets.
 2. Parse actual RIFF PCM metadata, refuse unsupported rate/channel/sample-format drift,
    preserve original samples, feed blocks from sample zero at the native rate.
-3. Each selected ITU I reading meets its report's ±0.1 LKFS. EBU I meets ±0.1 LUFS,
-   EBU LRA meets ±1 LU. Print every reading and explicit total; no tolerance relaxation.
+3. Each selected ITU I reading meets its report's ±0.1 LKFS. Print every reading and
+   explicit total; no tolerance relaxation. The successor alone owns EBU I/LRA tests.
 4. Run proportional loudness tests, formatting and lint through the shared serial wrapper,
    with CARGO_BUILD_JOBS=2 / RUST_TEST_THREADS=1 and no concurrent test subprocesses.
 5. Fetcher preflight/failure checks: existing verified cache, corrupt payload rejection,
@@ -115,5 +118,8 @@ introduced; existing owners retain realtime/portability claims.
 
 2026-10-27 Sol implementation stream: brief only; no builds/tests before root approval.
 An unavailable EBU archive remains an explicit acquisition blocker, never qualification.
-If root bounds delivery to the obtainable ITU slice, it must amend scope and preserve
-EBU acquisition as a stateless successor rather than close this full brief as passed.
+Root bounded delivery to the obtainable ITU slice before implementation and owns the
+separate EBU successor. No EBU placeholders or unverified hashes belong in this slice.
+All 19 ITU archives were successfully obtained directly from the official catalogue;
+actual metadata confirms 48 kHz 16-bit PCM. The two −24 LKFS programme files use
+WAVE_FORMAT_EXTENSIBLE PCM; the test reader must validate the PCM subtype GUID.
