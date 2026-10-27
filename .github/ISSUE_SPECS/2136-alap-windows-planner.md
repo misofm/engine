@@ -229,3 +229,26 @@ W=8 C1 lands at 19/27/43, not the spec's 17/25/41 (see the open point). Executed
 move: the merged drive bank absorbs aux B, which skipped on silence. The irregular row is where
 the windows pay: `post_insert` of tracks with different insert counts and the submix strips of
 different depths are one cohort per pool. `mergeable_partial_pairs` is 0 on every row.
+
+## Attempt 2 (2026-10-27, after the bounded verify's FAIL)
+
+- **MAJOR fixed: a merge that saves no bank is refused.** `place_over_windows` commits a stab's
+  members at one level only when `ceil(n / W)` over them is below the sum, over their own floors,
+  of `ceil(count / W)`; otherwise every member keeps its own floor (the level plan). Why: such a
+  merge only moves lanes between banks. On C1 without aux A at W=4 (aux B plus four groups) the
+  windows would have built `{aux B, drums, fx, music}` and `{vox}`, still two drive banks, and with
+  aux B silent and the groups active, two banks would run where one ran and aux B's bank skipped
+  (its fader and matrix follow it) -- more work on silence for nothing. The width reaches the
+  sweep from the compile's dispatch; with no bank width nothing merges.
+- Test: `rack-compiler` `a_merge_that_saves_no_bank_is_refused` (one node alone at its floor plus
+  `W` others reaching it: refused; plus `W - 1`: taken; at four and eight lanes). Red on the
+  mutant "merge whenever windows intersect": `W=4, 4 others: x merges only when a bank is saved`
+  (left 1, right 0).
+- C1's drive merge still saves a bank (W=4 3 -> 2, W=8 2 -> 1): every row's plan (banks, pairs,
+  static BSR and every pack group's units) is the attempt-1 plan, so no pin and no benchmark moved
+  and the attempt-1 bank-report records stand. Bit identity re-run: all 17 rows identical to main
+  `3ef18112f`.
+- MINOR 1: `assert_no_slot_is_recycled_inside_a_bank_window` accepts a pair in one fused run in
+  chain order and runs on #2134's cross-level corpus again.
+- MINOR 2: `w4_counters_describe_the_designs_plan` no longer asserts the constant 28; the static
+  count's one owner is `the_c1_submix_drives_are_one_cohort_over_level_windows`.

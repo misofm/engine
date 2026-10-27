@@ -469,8 +469,12 @@ pub struct Placement {
 ///    at once.
 /// 2. A ready keyed node waits in its class's pool. While any node waits, the one with the
 ///    earliest deadline (`alap`, then index) is the stab: every node waiting in **its** class
-///    whose floor is at most that deadline is placed together, at the largest of their floors.
-///    Their consumers may then become ready, and the sweep continues.
+///    whose floor is at most that deadline is placed together, at the largest of their floors --
+///    **if** that lowers the class's bank count at `lanes` per bank (`ceil(n / lanes)` merged
+///    against the sum over their own floors). Otherwise each is placed at its own floor, as level
+///    bucketing would: a merge that saves no bank only moves a lane into a bank of other lanes,
+///    where it can no longer skip with a bank of its own. Their consumers may then become ready,
+///    and the sweep continues.
 ///
 /// Earliest deadline first is the interval greedy; a node is never placed past its own deadline
 /// unless its floor already is (a window the caller computed inconsistently). With every window a
@@ -484,8 +488,10 @@ pub struct Placement {
 pub fn place_over_windows<K: Ord + Clone>(
     nodes: &[PlacementNode<K>],
     edges: &[(usize, usize)],
+    lanes: usize,
 ) -> Result<Vec<Placement>, RackCompileError> {
     use std::collections::{BTreeMap, BTreeSet};
+    let lanes = lanes.max(1);
     let count = nodes.len();
     let mut consumers: Vec<Vec<usize>> = vec![Vec::new(); count];
     let mut pending = vec![0usize; count];
@@ -549,16 +555,29 @@ pub fn place_over_windows<K: Ord + Clone>(
             .copied()
             .filter(|index| floor[*index] <= deadline.max(floor[stab]))
             .collect();
-        let level = members
+        let merged_level = members
             .iter()
             .map(|index| floor[*index])
             .max()
             .expect("the stab is a member");
+        // A merge is committed only when it lowers the key's bank count: `ceil(n / W)` over the
+        // merged set against the sum, over the members' own floors, of what the level plan binds
+        // there. A merge that saves no bank only moves lanes between banks, and a member that was
+        // alone at its level (a silent aux, say) would then run inside a bank of active lanes
+        // instead of skipping with its own; so it is refused, and every member is placed at its
+        // own floor, as the level plan would place it.
+        let mut by_floor: BTreeMap<u64, usize> = BTreeMap::new();
+        for index in &members {
+            *by_floor.entry(floor[*index]).or_default() += 1;
+        }
+        let split: usize = by_floor.values().map(|count| count.div_ceil(lanes)).sum();
+        let merge = members.len().div_ceil(lanes) < split;
         for index in &members {
             pool.remove(index);
             deadlines.remove(&(nodes[*index].window.alap, *index));
         }
         for index in members {
+            let level = if merge { merged_level } else { floor[index] };
             place(
                 index,
                 level,
@@ -1233,7 +1252,7 @@ mod tests {
                     key: Some((candidate.program.rack, candidate.class)),
                 })
                 .collect();
-            let placed = place_over_windows(&nodes, &[]).expect("acyclic");
+            let placed = place_over_windows(&nodes, &[], lanes).expect("acyclic");
             let mut by_placement: BTreeMap<u64, Vec<CohortCandidate<u32>>> = BTreeMap::new();
             for (candidate, placement) in flat.iter().zip(&placed) {
                 by_placement
@@ -1328,7 +1347,7 @@ mod tests {
             .collect();
         // a -> c and p -> q.
         let edges = [(0, 2), (5, 7)];
-        let placed = place_over_windows(&input, &edges).expect("acyclic");
+        let placed = place_over_windows(&input, &edges, 4).expect("acyclic");
         for (producer, consumer) in edges {
             assert!(
                 placed[consumer].level > placed[producer].level,
@@ -1387,5 +1406,37 @@ mod tests {
                 (6, vec!["q"]),
             ]
         );
+    }
+
+    /// Issue #2136: a merge that saves no bank is refused. One key, a node `x` alone at its floor
+    /// with a window reaching the floor of `W` others: merged, `W + 1` nodes still need two banks,
+    /// the same two the level plan binds (`{x}` and the `W` others), so each node keeps its own
+    /// floor and `x` -- a silent aux beside active groups, C1 without aux A -- keeps a bank it can
+    /// skip alone. With `W - 1` others the merge saves a bank and is taken. At four and at eight
+    /// lanes.
+    ///
+    /// Test value: red when the sweep merges whenever windows intersect (`x` placed with the
+    /// others, in a bank of active lanes, for no bank saved).
+    #[test]
+    fn a_merge_that_saves_no_bank_is_refused() {
+        for lanes in [4_usize, 8] {
+            for (others, merges) in [(lanes, false), (lanes - 1, true)] {
+                let mut input = vec![PlacementNode {
+                    window: CohortWindow { asap: 0, alap: 1 },
+                    key: Some('K'),
+                }];
+                input.extend((0..others).map(|_| PlacementNode {
+                    window: CohortWindow { asap: 1, alap: 1 },
+                    key: Some('K'),
+                }));
+                let placed = place_over_windows(&input, &[], lanes).expect("acyclic");
+                assert_eq!(
+                    placed[0].level,
+                    u64::from(merges),
+                    "W={lanes}, {others} others: x merges only when a bank is saved"
+                );
+                assert!(placed[1..].iter().all(|placement| placement.level == 1));
+            }
+        }
     }
 }

@@ -41,8 +41,8 @@ fn w4_counters_match_between_wasm_and_native_simd4() {
 }
 
 /// The pinned table describes the plan the banking design's W=4 finish line is stated for
-/// (`docs/BANKING_DESIGN.md`, section 7: 16 tracks, W=4; 28 bank-slot runs per block since the
-/// windows planner, #2136).
+/// (`docs/BANKING_DESIGN.md`, section 7: 16 tracks, W=4; the static bank-slot count is
+/// `graph-compiler`'s `the_c1_submix_drives_are_one_cohort_over_level_windows`).
 ///
 /// Claim: re-pinning the table from a counter summed over the wrong units, or from a plan that
 /// stopped matching the design, turns this red. The track banks are `ceil(16 / 4)` per console
@@ -58,8 +58,6 @@ fn w4_counters_describe_the_designs_plan() {
     let track_banks = 2 * TRACKS.div_ceil(W);
     let track_bsr = (3 + 1) * TRACKS.div_ceil(W);
     let submix_banks = 2 + 6_u64.div_ceil(W) + 2;
-    let submix_bsr = 3 * 2 + 6_u64.div_ceil(W) + (3 + 1);
-    assert_eq!(track_bsr + submix_bsr, 28, "the design's W=4 table");
 
     let row = |kind: &str| {
         W4_COUNTER_WORKLOADS

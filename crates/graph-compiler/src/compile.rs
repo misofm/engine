@@ -520,7 +520,14 @@ impl GraphCompiler {
             .filter(|(entry, _)| rack::BankSlotKey::blocks_banking(&entry.metadata.program_key()))
             .filter_map(|(_, id)| id.clone())
             .collect();
-        let placement = match placement_levels(&nodes, &edges, &levels, &pool_classes, &per_node) {
+        let placement = match placement_levels(
+            &nodes,
+            &edges,
+            &levels,
+            &pool_classes,
+            &per_node,
+            BankWidth::for_backend(dispatch).map_or(1, |width| width.lanes() as usize),
+        ) {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
