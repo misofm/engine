@@ -185,6 +185,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Download shipped closure for the BLAKE3 release identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet-${{ github.sha }}
+          path: target/ci/qualification-artifacts
       # No toolchain in the runner's RUSTUP_HOME: the twin installs its own, and the report runs
       # only git and gh (#2045).
       # The twin: this commit again, from another checkout path, with another CARGO_HOME and with
@@ -212,7 +217,7 @@ jobs:
         run: |
           set -o pipefail
           python3 -B scripts/web-audioworklet-identity.py --self-test
-          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --toolchain "$TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --toolchain "$TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" --blake3-module target/ci/qualification-artifacts/miso-engine-v1-blake3.simd128.wasm | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Issue #1061: main's own record of the module this commit's run built, as the commit status
   # `audioworklet-sha256` (`<sha256> rustc <toolchain>`, linking the run; #1334: the toolchain is

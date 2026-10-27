@@ -8,3 +8,21 @@ Filed by root from the #2111 verification (2026-10-26).
 ## Smallest slice
 - One qualification row in Chromium and WebKit that loads the module in a Worker, resolves `"simd128"`, and hashes the corpus with the expected identities.
 - A release pin for the BLAKE3 module beside the worklet pin, checked by the identity report and by npm-publish's qualify step, with a test-npm-publish-modes mutation.
+
+
+## Approved brief and decisions (2026-10-27)
+Root approved the packaging/qualification slice above. The owner requested Sol 6.1 high implementation, replacing the standard Terra implementation stage; fresh Astra review follows the independent issue implementations. No runtime DSP, hash algorithm, worklet pin, or store ownership change is authorized.
+
+- The raw host module lives at `/web/stem-store/incremental-blake3.js`, whose existing static default resolves to `/assets/miso-engine-v1-blake3.simd128.wasm`. The qualification server now serves that layout, which also matches the SDK's `dist/browser/stems` to `dist/assets` relationship. The row uses no URL override.
+- One Worker row per browser runs in the normal qualification flow; `--blake3-only` runs this bounded packaging gate without rebuilding the SDK or exercising unrelated audio rows. JavaScript fallback is an immediate failure, before corpus hashes.
+- The BLAKE3 release pin and `EXPECTED_BLAKE3_SHA256` have independent release lineage, approved by root so adding the BLAKE3 pin does not force an unrelated worklet repin. A package-version change checks both identities; a browser toolchain change requires both qualifications. `results.json.blake3Qualification` records its own candidate, built hash, and both browsers' SIMD completion. `--record-blake3 --blake3-only --browser all` updates only that lineage.
+- The identity job reads BLAKE3 from the artifact job's uploaded closure. npm qualification verifies the source pin/environment agreement and the built BLAKE3 bytes; publish/verify retain the existing qualified-archive path. No release is dispatched or package published here.
+
+## Attempt 1 implementation evidence (Sol)
+Initial focused verification: identity-report self-test PASS; `scripts/test-npm-publish-modes.py` PASS, including executing the real workflow source-pin and build-digest checks against changed/empty BLAKE3 bytes, stale/missing pin, and stale environment fingerprint. Chromium 151.0.7922.34 and WebKit 26.5 each returned `simd128` and all six existing `fixtures/stem-identity/v1/VECTORS.tsv` identities.
+
+Initial browser artifact provenance: `/home/bl/misofm/engine-work-evidence/easy-fixes-20261027/fresh-astra/browser-artifacts`, reviewed source `08fd9fa7277af1729506dab46762cfdd0904645e`; `git diff` from that source to this worktree's baseline is empty for `hosts/blake3-web`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/config.toml`, `scripts/build-web-audioworklet.sh`, and `scripts/strip-wasm-names.py`. This reused closure has an older worklet; these scoped rows exercise only its unchanged BLAKE3 module. Fresh Astra will build the integrated closure once and verify it. BLAKE3 SHA256: `ee373d2f549b0d33bdd0324a8833698158274f516e01a7b0c4018347991a18b1`.
+
+Test value for review: the Worker parity row catches an absent/misrouted default asset or browser-specific load/instantiation failure that Node-only Wasm coverage and JavaScript-fallback browser ingest allow to pass. The extended npm workflow test catches a qualify step accepting altered BLAKE3 bytes or a stale/missing source fingerprint while the independently pinned worklet still matches. The extended identity-report self-test catches BLAKE3 release or toolchain checks accepting stale bytes, missing SIMD browser qualification, or malformed candidate lineage independently of the worklet.
+
+Checkpoint status: local implementation and focused gates green; lineage recording and explicit browser red mutation still pending; fresh independent verdict and remote delivery remain root-owned. All verification uses the batch's shared `run-serial.sh`; no Rust build or full browser matrix was run in this worktree.
