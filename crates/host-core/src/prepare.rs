@@ -280,8 +280,6 @@ pub struct HostPrepareCaps {
     pub shape: HostShapePolicy,
     /// Per-source ring capacity in frames; must be a nonzero multiple of the session quantum.
     pub source_ring_frames: u32,
-    /// Automation spans the effect compiler may schedule in one block.
-    pub maximum_automation_spans_per_block: u32,
     /// Maximum tracks in the session.
     pub maximum_tracks: u64,
     /// Maximum submix strips in the session (#1206). A configured bound of its own, never folded
@@ -2153,7 +2151,7 @@ fn compile_for_arrivals(
         EffectCompileCaps {
             maximum_total_state_bytes: caps.maximum_effect_state_bytes,
             maximum_scratch_bytes: caps.maximum_effect_scratch_bytes,
-            maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
+            maximum_automation_spans_per_block: u32::MAX,
         },
     )
     .map_err(effect_diagnostics)?;
@@ -3771,7 +3769,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         EffectCompileCaps {
             maximum_total_state_bytes: caps.maximum_effect_state_bytes,
             maximum_scratch_bytes: caps.maximum_effect_scratch_bytes,
-            maximum_automation_spans_per_block: caps.maximum_automation_spans_per_block,
+            maximum_automation_spans_per_block: u32::MAX,
         },
     ) {
         Ok(effects) if automation.is_empty() => effects,

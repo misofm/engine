@@ -93,7 +93,7 @@ fn limits(frame_bytes: u64) -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
         source_ring_frames: 1_024,
-        maximum_automation_spans_per_block: 128,
+        reserved1: 0,
         reserved0: 0,
         maximum_document_bytes: 1_000_000,
         maximum_diagnostic_bytes: 4_096,
@@ -394,7 +394,6 @@ fn composed(document: &str, strip: &str) -> TrackResponse {
     let caps = HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: 1_024,
-        maximum_automation_spans_per_block: 128,
         maximum_tracks: 16,
         maximum_submixes: 16,
         maximum_vcas: 16,

@@ -173,7 +173,7 @@ fn caps() -> EffectCompileCaps {
     EffectCompileCaps {
         maximum_total_state_bytes: 1 << 20,
         maximum_scratch_bytes: 1 << 20,
-        maximum_automation_spans_per_block: 32,
+        maximum_automation_spans_per_block: 128,
     }
 }
 
@@ -335,7 +335,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
     let generous = EffectCompileCaps {
         maximum_total_state_bytes: 1 << 30,
         maximum_scratch_bytes: 1 << 30,
-        maximum_automation_spans_per_block: 32,
+        maximum_automation_spans_per_block: 128,
     };
     let compiled = |effect_id: &str, post: bool| {
         let mut model =
@@ -548,20 +548,12 @@ fn insert_session(effect_id: &str) -> session::CompiledSession {
     compile_model(&model).expect("the insert session compiles")
 }
 
-/// Decision 15, D15-2 and #1345 D4: whatever automation capacity the caller asks for, every
-/// launch effect is prepared with a window for every one of its live parameter cells, so a block
-/// stages every cell it reads and none is deferred or dropped. The bound depends on the descriptor
-/// alone, so a larger request stays and a live lane changes no program key.
-///
-/// Mutation (PR evidence): pass the caller's capacity through unraised -> every effect with more
-/// live cells than one is red.
+/// Every launch effect's capacity is its descriptor's live-cell count, independent of a
+/// sufficient ceiling. A ceiling below that count is refused before preparation; attaching
+/// a lane still stages every dirty cell in one block.
 #[test]
 fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
     let registry = launch_native_effect_registry().expect("launch registry");
-    let small = EffectCompileCaps {
-        maximum_automation_spans_per_block: 1,
-        ..caps()
-    };
     let large = EffectCompileCaps {
         maximum_automation_spans_per_block: 4_096,
         ..caps()
@@ -573,13 +565,30 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
         let cells = EffectLaneShape::live_parameter_cells(descriptor);
         assert!(cells > 0, "{id}: every launch effect has a live parameter");
         let session = insert_session(id);
+        let small = EffectCompileCaps {
+            maximum_automation_spans_per_block: cells.max(1) as u32,
+            ..caps()
+        };
+        for ceiling in [0, cells.saturating_sub(1) as u32] {
+            let refused = prepare_native_session_effects(
+                &session,
+                registry,
+                EffectCompileCaps {
+                    maximum_automation_spans_per_block: ceiling,
+                    ..caps()
+                },
+            )
+            .err()
+            .expect("an insufficient ceiling is refused");
+            assert!(
+                refused.0.iter().all(|d| d.code == "effect.resource.limit"),
+                "{id}"
+            );
+        }
         let prepared = prepare_native_session_effects(&session, registry, small)
             .unwrap_or_else(|diagnostics| panic!("{id}: {:?}", diagnostics.0));
         let capacity = prepared.entries[0].metadata.automation_capacity as usize;
-        assert_eq!(
-            capacity, cells,
-            "{id}: a request of 1 is raised to the live cells"
-        );
+        assert_eq!(capacity, cells, "{id}: capacity equals the live cells");
         let mut attached =
             prepare_native_session_effects(&session, registry, small).expect("prepared again");
         let mut producers = effect_compiler::attach_effect_live_controls(
@@ -661,14 +670,26 @@ fn every_launch_effect_is_prepared_with_a_window_for_all_its_live_cells() {
         let bigger = prepare_native_session_effects(&session, registry, large)
             .unwrap_or_else(|diagnostics| panic!("{id}: {:?}", diagnostics.0));
         assert_eq!(
-            bigger.entries[0].metadata.automation_capacity, 4_096,
-            "{id}: a larger request is kept"
+            bigger.entries[0].metadata.automation_capacity as usize, cells,
+            "{id}: a larger ceiling does not inflate the capacity"
         );
         checked += 1;
         with_many_cells += usize::from(cells > 1);
     }
     assert_eq!(checked, 11, "the eleven launch effects");
     assert!(with_many_cells > 0);
+    // A descriptor with no live producer still gets the effect contract's minimum window.
+    static NO_CELLS: EffectDescriptor = EffectDescriptor {
+        parameters: &[],
+        ..DESCRIPTOR
+    };
+    let empty_registry =
+        NativeEffectRegistry::new([Box::new(Factory(&NO_CELLS)) as Box<dyn NativeEffectFactory>])
+            .expect("no-cell registry");
+    let empty =
+        prepare_native_session_effects(&insert_session(EFFECT_ID.as_str()), &empty_registry, large)
+            .expect("a descriptor without live parameters prepares");
+    assert_eq!(empty.entries[0].metadata.automation_capacity, 1);
 }
 
 /// An instance whose automation capacity is below its lane's live cells is refused at attach, not
@@ -706,7 +727,7 @@ fn a_console_link_override_is_checked_as_resolved_at_the_entry() {
     let generous = EffectCompileCaps {
         maximum_total_state_bytes: 1 << 34,
         maximum_scratch_bytes: 1 << 34,
-        maximum_automation_spans_per_block: 32,
+        maximum_automation_spans_per_block: 128,
     };
     let fixture = || {
         parse_session_json(include_str!(

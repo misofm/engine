@@ -3061,7 +3061,7 @@ fn effect_caps() -> EffectCompileCaps {
     EffectCompileCaps {
         maximum_total_state_bytes: 1 << 28,
         maximum_scratch_bytes: 1 << 28,
-        maximum_automation_spans_per_block: 32,
+        maximum_automation_spans_per_block: 128,
     }
 }
 

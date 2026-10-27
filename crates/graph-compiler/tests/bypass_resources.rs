@@ -3,10 +3,8 @@
 //! P1 (#1087) lowered a session `bypass` to a prepared `bypass = false` plus a channel-less lane on
 //! a latency-preserving shunt, so every bypassed instance now has a live-control owner: a per-node
 //! `graph` `LiveControlEffect`, or a `rack::LiveControlEffectBankStage` for its bank slot. This
-//! file gates the three things that owner must not cost:
+//! file gates the retained cost and allocation behavior of that owner:
 //!
-//! * **Gate 1, bounded.** A channel-less lane holds no staging window, so a live-control-free
-//!   bypass binds at any automation capacity, per node and banked.
 //! * **Gate 2, charged.** The graph estimate charges every byte a bypass or live controls make
 //!   bind retain -- windows, shunts and the owners that hold them -- measured here by the
 //!   workspace's audited allocator, not taken from the accounting under test.
@@ -340,61 +338,6 @@ fn render_blocks(plan: &mut PreparedRenderPlan, pcm: &mut [f32], first: u64, blo
     }
 }
 
-/// Gate 1: a live-control-free session bypass binds and renders at `u32::MAX` automation spans, per
-/// node and banked.
-///
-/// A channel-less lane stages nothing, so neither owner holds a window: before #1100 the per-node
-/// `LiveControlEffect` sized one from the automation capacity whatever the lane, and bind aborted
-/// on `memory allocation of 171798691800 bytes failed` (`u32::MAX` spans of 40 bytes). Its estimate
-/// charges no window either, so it stays far below the 172 GB the window would have cost.
-///
-/// A host with that much memory does not abort, so the test also asserts, from the audited
-/// allocator, that the bound plan retains less than 1 GiB.
-///
-/// Red mutations: size `LiveControlEffect::new`'s window by the automation capacity whatever the
-/// lane (the per-node leg); size `LiveControlEffectBankStage::new`'s windows likewise (the banked
-/// leg, `baa03f09`'s twin). Each aborts bind or retains 172 GB.
-#[test]
-fn a_live_control_free_bypass_binds_at_any_automation_capacity() {
-    let lanes = host_lanes();
-    // The per-node leg is an insert: a lone console slot would bind a padded bank (#1098).
-    for (label, model) in [
-        ("one per-node bypassed EQ", inserts(1, [1, 0, 0])),
-        (
-            "one bypassed lane of an EQ bank",
-            console(lanes, [1 << (lanes - 1), 0, 0]),
-        ),
-    ] {
-        let tracks = model.tracks.len();
-        let mut bound = bind(&model, Backend::current(), u32::MAX, None);
-        if tracks == 1 {
-            assert_eq!(bound.shape.banks, 0, "{label}: one track banks nothing");
-            assert_eq!(bound.shape.bypassed_per_node, 1, "{label}: per node");
-        } else {
-            assert_eq!(
-                bound.shape.banks_with_a_bypassed_lane, 1,
-                "{label}: the bypassed lane stays in its bank"
-            );
-        }
-        assert!(
-            bound.live < 1 << 30,
-            "{label}: the plan retains {} bytes, so a channel-less lane holds a window",
-            bound.live
-        );
-        assert!(
-            bound.estimate < 1 << 30,
-            "{label}: the estimate charges no window for a channel-less lane ({} bytes)",
-            bound.estimate
-        );
-        let mut pcm = vec![0.0_f32; 2 * 128];
-        render_blocks(&mut bound.plan, &mut pcm, 0, 4);
-        assert!(
-            pcm.iter().any(|sample| *sample != 0.0),
-            "{label}: the plan renders"
-        );
-    }
-}
-
 /// Gate 2: the graph estimate charges at least the bytes a session bypass, or live controls,
 /// make the bound plan retain.
 ///
@@ -407,7 +350,7 @@ fn a_live_control_free_bypass_binds_at_any_automation_capacity() {
 ///   retained 6,186 bytes here against a 72-byte charge (#1087 verdict, M1).
 /// * One bypassed lane of a limiter bank: the live-control stage's growth over the plain stage and
 ///   the shunt over the whole AoSoA block, including the limiter's 486-sample line on every lane.
-/// * Live controls, per node and banked: the same owners plus their staging windows of 128 spans.
+/// * Live controls, per node and banked: the same owners plus their cell-sized staging windows.
 ///
 /// Red mutations: drop the shunt from `effect_control_resource` (every case); drop the window
 /// (the live cases); drop the per-node owner's box (the per-node cases).
@@ -525,33 +468,6 @@ fn a_lanes_own_accounting_is_what_the_allocator_sees() {
     }
 }
 
-/// #1621: a per-node live-control effect holds its lane's cells, not the automation capacity.
-///
-/// The same single-track session, with live controls on its per-node EQ, compressor and limiter, is
-/// bound at 128 and at 4,096 automation spans. Every effect's capacity is at least its descriptor's
-/// cells, so the larger capacity changes no window: the audited allocator reads the same retained
-/// bytes, and the estimate charges the same. Before #1621 each window was
-/// `automation_capacity` spans (40 bytes each), so the EQ alone, which has no parameter cell, held
-/// 160 KiB more at 4,096.
-///
-/// Red mutation: size `LiveControlEffect::new`'s window, or the estimate's, by the capacity again
-/// -> both readings grow with it.
-#[test]
-fn a_per_node_live_window_does_not_grow_with_the_automation_capacity() {
-    let model = inserts(1, [0, 0, 0]);
-    let small = bind(&model, Backend::current(), 128, Some(0));
-    let large = bind(&model, Backend::current(), 4096, Some(0));
-    assert_eq!(small.shape.banks, 0, "one track banks nothing");
-    assert_eq!(
-        large.live, small.live,
-        "the plan retains more at a larger capacity, so a window follows the capacity"
-    );
-    assert_eq!(
-        large.estimate, small.estimate,
-        "the estimate charges more at a larger capacity, so a window follows the capacity"
-    );
-}
-
 /// Gate 2, observation: an effect that declares a tap gets a queue, and the estimate charges
 /// exactly what bind retains for it, banked and per node.
 ///
@@ -650,7 +566,7 @@ fn a_mixed_session_bypass_renders_without_allocating() {
         } else {
             inserts(INSERT_TRACKS, MASKS)
         };
-        let mut bound = bind(&model, dispatch, 32, None);
+        let mut bound = bind(&model, dispatch, 128, None);
         let shape = &bound.shape;
         if console_leg {
             assert_eq!(

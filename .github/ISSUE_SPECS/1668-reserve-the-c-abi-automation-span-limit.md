@@ -158,3 +158,121 @@ Checked against `12d4a4f9d`.
   `:172`; `prepare_caps` is `crates/control-plane/src/compile.rs:596` over `ControlLimits`
   (`crates/control-plane/src/adapter.rs:33`). The browser's S derivation
   (`hosts/host-web/src/lib.rs:4447-4455`) is #1306 D3's.
+
+## Current-source brief amendment (root-approved, 2026-10-26)
+
+At `8f32d1673`, `miso_engine_v1_compile_session` clears both writable output
+locations before argument validation (`crates/capi/src/ffi.rs:355-366`), preserving
+its frozen atomic-publication rule. Gate 1 therefore requires both output handles
+to be null on refusal, rather than preserving nonnull sentinels. No handle is
+published; the diagnostics descriptor and payload remain untouched, and invalid
+limits are refused before document or diagnostics dereference. This slice does
+not change the existing failure-publication contract.
+
+Authorize the obsolete `ControlLimits` literal field removal in
+`hosts/host-web/src/lib.rs` as well. #1306 and #1668 are sequential checkpoints
+with independent review, delivered in one coherent PR.
+
+Current-source authorized literal inventory includes `crates/control-plane/tests/`,
+all `CompileLimits` literals under `crates/capi/tests/`, and the C smoke initializer.
+Existing Rust/C/C++ layout gates explicitly pin `reserved1` at offset 8.
+#1306 prerequisite checkpoint `89b6208bc` received root PASS before implementation
+of this slice; no preparation path reads the former ABI word.
+
+## Implementation record (2026-10-26, attempt 1)
+
+`reserved1` occupies the former S word, with Rust, C11 and C++17 assertions at
+offset 8; the struct remains 208 bytes and no version, symbol or feature bit
+changes. `limits_are_valid` requires zero for this word and `all_limits_nonzero`
+no longer treats it as a limit. The portable `ControlLimits` field and all its
+literals are removed; every C ABI literal supplies zero. The temporary #1306
+S-invariance test is deleted in this same change; the owner capacity test stays.
+
+The new FFI test calls the actual compile export with reserved1 = 1, reserved0 = 1,
+and both zero. The refusals clear sentinel handle outputs to null and preserve
+every diagnostics descriptor field and all payload bytes; the zero case publishes
+both handles successfully and destroys them. Test value: it catches acceptance
+of either reserved word, premature diagnostics writes or child publication, while
+the zero row catches retention of the old required-nonzero rule. No existing
+compile test supplies nonzero reserved words. The layout assertions catch a moved
+word without pinning unrelated resources or rendered bytes.
+
+The documentation records both directions of prelaunch compatibility: an old
+library refuses the new zero word, and this library refuses an old caller's
+nonzero word, so caller and library update together. Focused validation passes: `cargo test --locked -p capi -p control-plane
+--features control-plane/test-support`, `cargo fmt --all -- --check`, and
+`git diff --check`. The C ABI checker and mutation suite are running at this
+checkpoint (shared-library build passed, static-library build in progress); final
+shared gates run after merging the newest main.
+
+Root adversarial review at `c172d4dbc`: **PASS, attempt 1**, with one minor
+stale span-limit doc sentence removed before delivery. Independent actual-FFI
+mutations removing either reserved1 or reserved0 validation fail with OK versus
+INVALID_ARGUMENT; clean/restored tests pass. Test value: the export test detects
+accepting either reserved word, premature diagnostics writes or child publication,
+and retaining the old nonzero requirement; layout assertions pin offset 8.
+No render arithmetic or allocation changes. Root evidence is preserved in
+`/home/bl/misofm/engine-work-evidence/1668/root-review/1668-*.log`.
+`bash scripts/check-capi-abi.sh --self-test` passes, including its unmutated
+positive control, C/C++ fixtures, shared/static links and drift mutations.
+Implementation evidence is preserved outside the worktree under
+`/home/bl/misofm/engine-work-evidence/1668/astra/`. Final shared qualification
+follows integration of the newest main.
+
+Final qualification on merged `1508be064` caught two missed CompileLimits
+fixture literals in `hosts/host-web/tests/control_parity.rs` and
+`hosts/host-web/tests/protocol_cross_host.rs`. Both now set `reserved1: 0`; no
+production behavior or test claim changes. These files join the authorized
+routine-literal inventory. Initial failed debug-a/clippy logs are retained.
+Browser qualification follows the current #2092 owner ruling and workflow:
+Chromium and WebKit; Firefox's retired leg is not run.
+
+The provisional component PASS above is superseded by **attempt 1 final
+integration FAIL**: debug-a/clippy could not compile the two omitted browser
+fixtures. Root authorized **attempt 2**, bounded to those two literal corrections
+and this evidence record. No hidden extra retry or production change. Focused
+host-web parity tests pass (`cargo test --locked -p host-web --features
+test-support,render-lock-probe --test control_parity --test protocol_cross_host`);
+only failed broad gates will be rerun, while
+independent production/browser/audit/cross-target results remain applicable.
+
+## Final aggregate qualification (2026-10-26)
+
+Root's independent final bounded reviews: **#1306 attempt 2 PASS** at
+`1f6e12dcf`; **#1668 attempt 2 PASS** at `8a10367ca`. These supersede the
+provisional attempt-1 component passes and their recorded integration failures.
+The final full `qualification.yml` debug-a workspace/all-target corpus, using its
+exact exclusions/features with `--no-fail-fast`, passes on `1f6e12dcf` (exit 0).
+Its separate workspace doctest step with the same exclusions/features also passes.
+
+Other completed gates: workspace/all-target/all-feature clippy with warnings
+denied; formatting and diff checks; host-core and workspace policies and their
+mutation suites; current realtime-policy binary plus 242 tests; C11/C++17 ABI
+checker and its mutation suite, including shared/static consumers; and the full
+cross-target matrix (iOS/Android checks and lint, iOS memset ratchet, Wasm SIMD,
+32-bit/scalar-Wasm refusal rows). The capi/control-plane focused suites pass.
+Console-workload's affected production-tool preparation passes its 56 release
+functional tests; no timed benchmark was run. The later changes are test fixtures
+and that tool helper, outside the engine/browser closure, so the already-passed
+product qualification remains applicable as independently reviewed by root.
+
+Production baseline `8f32d1673` and integrated production `1508be064` both give
+`audit capi` PCM digest `bffc21e857b5e134` over 100,000 calls, with zero render errors
+and zero allocations, frees, locks, syscalls or other realtime violations.
+The source-built browser module SHA-256 is
+`408bd79a0570609afa12f7578b2149449477c432a9d6908b98ea9332cc9e63af`.
+Static/object/closure gates, native/SIMD digest and resource parity, hermetic
+host/worklet tests, and current supported Chromium 151.0.7922.34/WebKit 26.5
+qualification with matrix checks and red mutations all pass. Expected PCM
+digests are unchanged. The checked release matrix retains its own lineage;
+`final-browser-matrix.log` is the current-run evidence, linked to the artifact
+and source commit by `final-browser-run-receipt.json`.
+
+All logs (including initial failures), browser artifacts and the run receipt
+are preserved outside the worktree at
+`/home/bl/misofm/engine-work-evidence/1668/astra/`; independent reviewer mutation
+evidence is under `../root-review/`. Final full-corpus/clippy logs are
+`final-debug-a-complete.log`, `final-debug-a-doc.log` and
+`final-clippy-complete.log`. This evidence checkpoint changes only the two issue
+specs; root owns PR qualification, merged-body synchronization and explicit
+GitHub closure.

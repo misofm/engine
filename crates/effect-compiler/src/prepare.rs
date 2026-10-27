@@ -22,6 +22,7 @@ use crate::{EffectDiagnostic, EffectDiagnosticSet};
 pub struct EffectCompileCaps {
     pub maximum_total_state_bytes: u64,
     pub maximum_scratch_bytes: u64,
+    /// Ceiling on the descriptor-derived per-instance capacity; never a requested window size.
     pub maximum_automation_spans_per_block: u32,
 }
 pub struct EffectPreparedEntry {
@@ -516,6 +517,17 @@ fn prepare_with_console_eligibility(
                 // lane. An effect that never banks lowers it too and renders per node (issue
                 // #1339), and the multiband's bank recovers per lane (issue #1340), so every
                 // effect lowers it.
+                let automation_capacity =
+                    u32::try_from(EffectLaneShape::live_parameter_cells(descriptor))
+                        .unwrap_or(u32::MAX)
+                        .max(1);
+                if automation_capacity > caps.maximum_automation_spans_per_block {
+                    diagnostics.push(EffectDiagnostic {
+                        code: "effect.resource.limit",
+                        path,
+                    });
+                    continue;
+                }
                 let bank_preparation = EffectBankPreparation {
                     sample_rate: session.sample_rate().0,
                     quantum: session.quantum().0,
@@ -534,12 +546,7 @@ fn prepare_with_console_eligibility(
                         // raised too, though its lane holds target cells in place of parameter
                         // cells and so stages no parameter span: whether an instance is attached
                         // to a lane, or to an owner, must not change its capacity.
-                        maximum_automation_spans_per_block: caps
-                            .maximum_automation_spans_per_block
-                            .max(
-                                u32::try_from(EffectLaneShape::live_parameter_cells(descriptor))
-                                    .unwrap_or(u32::MAX),
-                            ),
+                        maximum_automation_spans_per_block: automation_capacity,
                     },
                     tail_bound,
                 };
@@ -1095,7 +1102,7 @@ mod metadata_mismatch_tests {
         let caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
+            maximum_automation_spans_per_block: 128,
         };
         let prepare = |forge: Forge| {
             let registry = NativeEffectRegistry::new([
