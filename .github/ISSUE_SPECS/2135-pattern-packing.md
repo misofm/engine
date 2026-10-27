@@ -125,3 +125,109 @@ Unblocks the dynamic finish line.
   `swap_bank_lanes` over every row. Dependencies all merged. W=4 Typical pins will move.
 - Expected after: `Typical` executed BSR/block from 20.00 to 9-12 (16 tracks, W=8), 28 to 12-16,
   44 to 17-23; W=4 16 tracks from 29 to about 14-18. `Load` stays 0; `AllActive` within 2 %.
+
+## Evidence (attempt 1, 2026-10-27; branch `codex/batch-b13-patternpack`, main `7be08dd18` merged)
+
+### What landed
+
+- `crates/graph/src/runtime.rs`: `pack_step` / `pack_group_step` / `pack_sort` replace #1981's
+  running-unit rule. Per dirty group: pattern 0 for a strip silent at rest, else `PACK_AUDIBLE`
+  (bit 8) plus one running bit per ranked slot (costliest first); a counting sort over 512
+  preallocated counters (`PACK_PATTERNS`, the audible bit over `min(S, 8)` slot bits) gives the
+  movable strips the movable positions, one pattern in home order; a cycle walk realises it.
+  Fixed: padded lanes, pinned strips, strips in their dwell, strips refused this episode.
+  `B_total = W`, `A_total = 4W` per block across all groups, round-robin from a cursor that
+  survives blocks. Dwell `R_b = PACK_DWELL_BLOCKS = 16`, started by `LaneMap::record_settles`
+  (any row's unit, from `BankChain::settle_edges`), counted down by `LaneMap::tick_dwell` at the
+  block top; an expiry dirties the group. Slot rank at bind (`bind_ranked_slots`) from
+  `pack_slot_cost`: compressor 16.691, limiter 13.918, EQ 4.984 cycles/lane-sample (the floor
+  table's per-effect isolates); unmeasured effects rank below, ties in chain order.
+- **Refusal rule (decided here):** a refused trade fixes the *position's occupant* for the
+  episode, not the target strip. Fixing the target strip made every running stereo strip whose
+  sorted place is in a collapse-armed mono bank stay put (#1981's gate 1 then skipped no more than
+  its twin); fixing the occupant marks the incompatible bank's positions one by one and the strip
+  lands in the first compatible one. Each refusal fixes one strip, so an episode refuses at most
+  `span` times. A fact change (`fresh`) starts a new episode and forgets the refusals.
+- `crates/rack/src/lib.rs`: `BankStage::{settled_bypassed_lanes, settle_edges, effect_id}`;
+  `LiveControlEffectBankStage` caches the settled mask at each cell read and reports the XOR
+  against the last read (no edge on the first drain; before it, the mask is read from the lanes
+  bind left, so the sort at bind sees the session's bypasses); a move trades both bits.
+  `BankChain::{settle_edges, slot_settled_bypassed_lanes, slot_effect_id, slot_count}`; the
+  chain ORs the drained slots' edges in its existing step-0 loop.
+- **`lane_swap_fits` widened (needed, not in the spec):** a channel-less bypassed lane (a session
+  bypass, #1087) now trades with an uncontrolled lane. Both hold no cell; the shunt term still
+  decides whether the bypassed lane finds a line. Without it, a plan with no live effect channels
+  (every bench row but Toggle) refused every trade between a bypassed and an enabled strip and
+  the packer moved nothing on `Typical`.
+- Pin: `PreparedGraphPlan::pin_bypass_automated_strips`, filled by graph-compiler from the
+  session's stored automation on an effect bypass row (`bypass_automated_strips`), applied at bind
+  (`Runtime::pin_strips`). Stored effect-bypass automation does not render yet
+  (`controls::automation_row_renders` is fader, mute and VCA only), so today the pin keeps a
+  strip whose bypass is static in place; it is ready for the slice that renders it.
+
+### Gates (red first on the named mutant)
+
+| gate | test | mutant | red |
+|---|---|---|---|
+| 1 | `silent_bank_skip.rs` `a_pattern_packed_plan_renders_the_bits_of_an_unpacked_one` | pinned bit ignored in `pack_sort` | "the pinned strip moved", block 0 |
+| 1 | same | running bits forced to 0 | "the packing plan moved strips" |
+| 1 | same | `swap_lanes` (other stage) leaves the control lane behind | host word 38 differs, block 4 |
+| 2 | covered by `crates/rack/tests/lane_swap.rs` `a_swapped_strip_renders_and_publishes_what_its_twin_does` (a strip "fed and written as it moves"); no second test | - | - |
+| 3 | `runtime.rs` `the_pattern_sort_reaches_its_layout_and_keeps_the_dwell` | no dirty at dwell expiry | case 3 |
+| 3 | same | dwell not fixed | case 2, block 0 |
+| 3 | same | padded lane movable | "a padded lane never moves" |
+| 4 | `runtime.rs` `the_packing_budget_is_global` | budget per group | 7 swaps against 4 |
+| 4 | same | attempts uncapped | 26 attempts against 16 |
+| 5 | `a_skipping_block_allocates_nothing` + toggle burst | a `Vec` in `tick_dwell` | audited allocator abort |
+
+Gate 1 deviates from the spec on two points: it runs C1-**32**, not C1-16 (at W=8, C1-16 has two
+track banks, and a collapse-armed bank of eight refuses every trade with the other, so nothing
+crosses banks), and the collapse-armed bank never collapses in `Typical` (a bypassed lane clears
+`UNBYPASSED`), so it exercises the arming refusal, not the collapse. It adds per-track compressor
+thresholds and drives, without which C1's default console is close to the identity and a lane left
+behind moved no bit. Not in gate 1: the plan carry during a hold (the carry restores the identity
+first, `restore_home_lanes`, which #1782a's gate 3 covers) and a displaced group's fold (C1's track
+groups do not fold; #1981's gate 1 covers the fold). `a_refused_pack_is_not_retried` is rewritten
+to the new rule (attempts settle; some refused); the old attempt counts and peak step are gone.
+
+### Gates run locally (all pass)
+
+Lint job (fmt, clippy `-D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc`, every policy script
+including `check-lane-policy.sh`); the workspace debug test step with its excludes and features;
+`scripts/run-wasm-gates.sh`; the AudioWorklet artifact gates and the SDK headless evals.
+
+### W=4 re-pin (`tools/wasm-gates/src/lib.rs`, `c1_console_16_typical`)
+
+`[15, 0, 3584, 2304, 260, 3580, 1]` -> `[15, 0, 3328, 2048, 260, 3836, 1]`: the packer sorts the
+fixed draw from bind, so the track group runs 8 bank-slots per block instead of 9 (256 blocks) and
+the freed slot-block is a settled-bypass skip. `w4_counters_describe_the_designs_plan` passes. The
+four-lane native leg (arm64) was not run here.
+
+### Bit identity against main `7be08dd18` (one-time, not committed)
+
+All 16 `BANK_REPORT_WORKLOADS` rows, 600 blocks through `console_workload::SessionRuntime`, FNV-1a
+of every host word: identical on all 16.
+
+### BSR and CPU (descriptive; `artifacts/steps/bank-design-5b/`, taskset -c 31, AMD EPYC 7313P, one warmup, two rounds, lower round's p50)
+
+| row | BSR/block main -> branch (key-class ideal) | p50 us main -> branch |
+|---|---|---|
+| C1-16 Load | 0 -> 0 | 21.26 -> 20.85 |
+| C1-16 Typical | 10.00 -> 10.00 (9) | 63.33 -> 61.84 |
+| C1-16 AllActive | 16.66 -> 16.66 | 97.04 -> 97.03 (0.0 %) |
+| C1-16 Sparse | 13.60 -> 13.60 | 78.91 -> 78.61 |
+| C1-32 Load | 0 -> 0 | 32.18 -> 32.21 |
+| C1-32 Typical | 19.00 -> 17.00 (12) | 106.32 -> 94.05 (-11.5 %) |
+| C1-32 AllActive | 24.66 -> 24.66 | 147.02 -> 145.26 (-1.2 %) |
+| C1-32 Sparse | 18.54 -> 18.55 | 110.34 -> 108.99 |
+| C1-64 Load | 0 -> 0 | 57.32 -> 56.30 |
+| C1-64 Typical | 29.00 -> 24.00 (17) | 183.72 -> 149.90 (-18.4 %) |
+| C1-64 AllActive | 40.66 -> 40.66 | 244.11 -> 242.67 (-0.6 %) |
+| C1-64 Sparse | 28.43 -> 28.46 | 171.63 -> 173.16 (+0.9 %) |
+
+The amendment's "20.00" was #2132's static count: main already executes 10/19/29 on `Typical`
+(#2142's grouping and S1b's skip). The track group at 16 tracks is already at its ideal (5), so
+16 does not move. 32 and 64 land at 17 and 24, just above the amendment's estimates (12-16,
+17-23); the gap to the key-class ideal is the lexicographic sort itself (compressor-major, so the
+EQ, gate and drive runs split across the compressor boundary), which is the bound the design
+accepts (3.3), not an implementation gap.
