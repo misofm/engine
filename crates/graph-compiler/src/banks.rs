@@ -653,10 +653,13 @@ fn leftover_pass(
                     requests: &requests,
                     active_mask,
                 })
-                .is_ok_and(|bank| bank.is_some())
+                // An error is a contract violation, never a decline: it refuses the compile,
+                // as the bind's own call does.
+                .map(|bank| bank.is_some())
+                .map_err(|error| diag(error.code, "$.effects"))
         };
-        let full = binds_with(&vec![true; lanes]);
-        let padded = full && binds_with(&(0..lanes).map(|lane| lane == 0).collect::<Vec<_>>());
+        let full = binds_with(&vec![true; lanes])?;
+        let padded = full && binds_with(&(0..lanes).map(|lane| lane == 0).collect::<Vec<_>>())?;
         binds.insert(key.clone(), (full, padded));
         Ok((full, padded))
     };

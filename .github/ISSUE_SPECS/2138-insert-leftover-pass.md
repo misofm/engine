@@ -177,3 +177,11 @@ while 8 per-node renders become banked lanes; the row is 11.3 % faster.
   irregular row (W=4 probe) 1 -> 0 pairs, banks 24 unchanged; every `bank_levels.rs` session 0
   pairs. Bit identity, 17 rows against `bf05356df`: identical. The plans did not move, so the
   attempt-1 bench record stands.
+
+### Attempt 2 verdict (bounded opus-high verify, 2026-10-27): PASS
+
+- `merge_binds` and `bindable_slot_members` share one F7 predicate (`every_member_runs`); the old subsequence-only count turns `a_pair_is_mergeable_only_when_the_merge_still_binds` red, and the zero-pairs finish line holds on every `bank_levels` row.
+- The factory probe keeps no state past the compile; skipping it below the padding threshold is the same behaviour, since no group there can bind.
+- The leftover invariant compares the count's prediction with the leftover banks `bind_group_banks` actually bound; the verifier's mutants (filter always true, probe always binds) turn it red.
+- Folded MINOR: a factory error on the probe now refuses the compile, as the bind's own call does, instead of reading as a decline.
+- MINOR recorded: the probe asks with W clones of one candidate's request; a factory that declined by request content would make the count wrong, which the leftover invariant check would catch.
