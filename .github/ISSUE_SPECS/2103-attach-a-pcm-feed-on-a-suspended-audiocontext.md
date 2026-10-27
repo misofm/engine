@@ -77,3 +77,37 @@ no SDK implementation or ambient types were changed to accommodate the harness.
 
 Fresh independent verdict and integrated artifact verification are owned by the batch
 coordinator; no PASS, upstream synchronization or closure is claimed here.
+
+## Independent adversarial review — attempt 1 PASS (Astra, 2026-10-27)
+
+Fresh review of `08fd9fa7277af1729506dab46762cfdd0904645e` approves the baseline-green
+qualification/documentation slice. The production feed is unchanged; the original console
+timeout's cause remains unproven, so this is not a finding of console misuse. The isolated
+server is opt-in, normal `--sdk-root` qualification reaches the row, and the existing
+non-isolated deployment matrix retains its behavior.
+
+Test value: `runSuspendedPcmFeed` turns red when attachment requires render or advances the
+clock, covering real SAB attachment in both Chromium and WebKit where the existing browser
+matrix had no such row. It uses default `ready()`, the real host/prelude and explicit
+attachment, clock, drain and allocation assertions.
+
+Independent evidence is in `/home/bl/misofm/engine-work-evidence/easy-fixes-20261027/fresh-astra/`:
+
+- `browser-build.log`: one successful current integrated delivery build via
+  `bash scripts/build-web-audioworklet.sh .../fresh-astra/browser-artifacts`. Current shipped
+  Wasm SHA-256 is `76f230d93efd6693e056ce10197539ec722a8a6327ef02e776921b293bae5aa4`; this
+  records artifact provenance, not a new committed digest gate.
+- `browser-both.log`: `node hosts/host-web/qualification/run.mjs --artifacts
+  .../fresh-astra/browser-artifacts --browser all --pcm-feed-suspended-only` passed, sequentially,
+  with the source SDK (CI mode). Chromium 151.0.7922.34 ready: 0.35 ms; WebKit 26.5: 7.54 ms.
+  Both remain suspended at time/sample zero, active feed, ATTACHED=1, DRAIN_BLOCKS=0, and
+  successful render-allocation result/count zero. This closes the older-Wasm limitation above.
+- `static-gates-corrected.log`: canonical SDK `tsconfig.json` and `tsconfig.build.json --noEmit`
+  checks passed. The unrelated ad-hoc DOM typing diagnostic above is not a new harness error.
+- `reachability-and-owner.log`: `python3 -B scripts/check-script-reachability.py` passed
+  (118 reached scripts, nine operator exemptions). Workspace clippy, formatting and relevant
+  policies also passed in the shared integrated verification.
+
+All heavy checks used the batch serial wrapper. Full browser/target matrix qualification
+remains required PR CI; this focused row does not claim to replace that matrix. Root owns
+remote evidence, merge and issue closure.

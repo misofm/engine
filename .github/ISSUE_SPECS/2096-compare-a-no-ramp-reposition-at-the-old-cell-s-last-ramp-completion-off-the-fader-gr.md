@@ -38,3 +38,48 @@ Evidence directory: `/home/bl/misofm/engine-work-evidence/easy-fixes-20261027/20
 - Exploratory completion-history mutation logs are retained as development evidence, but are **not** counted as a successful discriminator: those runs stopped on the subsequently corrected fixture assertions or the coincident moving-own/entry-step observation below. Fresh independent review owns the final narrow preservation mutation check; the baseline natural-held reproducer above is the completed red-on-revert evidence.
 - The first attempt at a target-bit assertion also covered the 128-frame row while its unmute ramp was already running; that was outside the no-ramp premise and intentionally uses the existing entry-time adoption comparison. Restrict repeated-adoption/held-target assertions to the off-grid 100-frame no-ramp row; retain the running row's audible continuity check.
 - A boundary-step fixture with a simultaneously moving own ride exposed different pre-existing composed arithmetic at the first post-swap sample (lane 1 left: bits 1049322181 versus uninterrupted 1049321647). The trace shows the lane still has 52 ramp samples, so #2096's no-ramp branch is not involved. Keep B17-R13's existing entry comparison and use a static own curve for this issue's boundary-step guard. The moving-ride observation and minimal reintroducer are preserved in `coincident-step-observation.md`, `coincident-step-reproducer.patch` and `debug-comparison.log`; root/fresh review must assess against baseline before deciding whether a stateless successor is needed. No product approval or PASS is inferred for the observed difference.
+
+## Independent adversarial review — attempt 1 PASS (Astra, 2026-10-27)
+
+Fresh review of implementation `e72b5c969979e41ba93a6c831774e9cffee93a85` and evidence head
+`08fd9fa7277af1729506dab46762cfdd0904645e` finds the bounded no-ramp fix correct. Completion
+is captured before reposition, comes from the composed output state, and is restored only
+when the unchanged comparison keeps that target. Running ramps and B17-R13 entry jumps keep
+their existing rules. No state layout, ABI, allocation, lock, syscall or new unbounded loop
+is introduced. Class B authority remains #1716 fix D's compare-at-the-same-node-time ruling.
+
+Test value: the folded `a_carried_automated_lane_renders_the_uninterrupted_bits` catches an
+off-grid no-ramp comparison at the previous sample and loss of completion across repeated
+adoption, both audible after unmute and absent from the old running-ramp/grid-aligned rows.
+The original test is replaced, not duplicated.
+
+Independent logs are in `/home/bl/misofm/engine-work-evidence/easy-fixes-20261027/fresh-astra/`:
+
+- `completion-preservation-mutation.log`: removing only the unchanged-adoption
+  `hold_until(completion)` restoration is RED (exit 101), on the final audible bit comparison
+  for `muted-ride`, lone lane, Simd8, 100-frame blocks. The exact mutation patch is preserved.
+- `owner-green-rebuilt.log`: the owning regression is GREEN on integrated source (exit 0);
+  the implementation's full automation/builtins suite remains 102 passed, three existing
+  ignored, as recorded above. No duplicate full debug suite was run.
+- A first integrated focused invocation reused the scratch baseline binary from the shared
+  Cargo target and repeated its entry-step failure without compiling. Its log is preserved
+  in `reachability-and-owner.log`; invalidating the two reviewed source mtimes forced the
+  correct rebuild, without changing file contents. This is not a product failure.
+- `clippy.log`: `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+  passed. Workspace formatting/policy, realtime policy (283 regions/45 files), builtins policy
+  and unfused seal passed (`static-gates.log`, `static-gates-corrected.log`). The first command
+  named a nonexistent policy shell script; the corrected command runs `realtime-policy`.
+  Its first run rejected a local dependency symlink; regular ignored dependency directories
+  fixed that setup problem. No production workaround was made.
+
+The coincident moving-own/VCA-entry-step observation is a distinct confirmed baseline defect,
+now tracked by [#2158](https://github.com/misofm/engine/issues/2158). Baseline `7be08dd18`
+production plus the narrowed entry-step fixture is RED (`coincident-step-base.log` and
+`coincident-step-base.patch`): first post-swap block, lane 1 left, sample 0 is 1049322181
+versus uninterrupted 1049321647. The author's retained trace has 52 ramp samples remaining,
+so this is outside the no-ramp branch. The successor must preserve the required boundary
+jump, not suppress it. This review does not approve that differing behavior.
+
+All heavy checks used the shared serial wrapper; offline compilation was paused and resumed
+while unrelated builds ran (`cpu-pause.log`). Full required target/AArch64/browser matrices
+remain the batch PR qualification gate; remote evidence synchronization and closure are root's.

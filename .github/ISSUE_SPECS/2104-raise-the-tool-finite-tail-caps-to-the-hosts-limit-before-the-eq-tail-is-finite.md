@@ -53,3 +53,24 @@ test thread. Full logs are retained outside the worktree at
 
 GitHub evidence/state synchronization and merged-tree verification are owned by root at the
 CI-conscious batch boundary; this local checkpoint does not claim remote completion.
+
+## Independent adversarial review — attempt 1 PASS (Astra, 2026-10-27)
+
+Fresh review of `08fd9fa7277af1729506dab46762cfdd0904645e` confirms all four tool cap sites
+match the host finite-tail limit. This changes admission, not memory allocation or tail
+composition arithmetic; existing graph compiler checks still own those contracts.
+
+Test value: `tool_caps_admit_a_composed_finite_delay_tail` fails with `graph.tail.limit` when
+the former console cap returns, which existing fixtures with an infinite EQ tail mask. It
+uses the real launch delay and finite builtins through the actual console cap; graph compiler
+tests already own composition arithmetic. The implementation's retained red log proves the
+old cap fails.
+
+Independent integrated command `cargo test --locked --release -p audit -p console-workload`
+passed: all 27 audit tests and 56 console-workload tests, plus doc-tests (exit 0). This is the
+complete release-profile replacement for the interrupted debug suite above. Evidence:
+`/home/bl/misofm/engine-work-evidence/easy-fixes-20261027/fresh-astra/release-tools.log`.
+Workspace clippy with all targets/features and warnings denied, formatting, workspace policy,
+realtime policy, builtins policy and unfused seal also passed. All heavy commands used the
+shared serial wrapper. Full required merged-tree qualification and remote issue synchronization
+remain root's delivery gates; this record does not claim upstream closure.
