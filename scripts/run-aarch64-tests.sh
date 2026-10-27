@@ -8,7 +8,8 @@
 #   run-aarch64-tests.sh debug
 #       The product crates' tests (scripts/lib/product-crates.sh: capi's workspace closure) plus
 #       the DSP oracles `dsp-reference` and `conformance` and `target-smoke`'s width pin, in the
-#       debug profile with the test-support features test-debug-a/b name on x86.
+#       debug profile with the test-support features test-debug-a/b name on x86. Both modes also
+#       run the four existing host-web session pins against the shared browser/native corpus.
 #   run-aarch64-tests.sh release
 #       `lane` and `math` (G1-G4, G6 under FPCR.FZ, P1, M1-M3) in the shipping release profile,
 #       because LANE-3 is an optimizer fold a debug build does not make; `console-workload`'s
@@ -82,7 +83,7 @@ rows=()
 # --- no silent skip on a backend width ----------------------------------------------------------
 silent_skip='(?:Backend::current\(\)|\bbackend|\bdispatch)\s*!=\s*(?:\w+::)*Backend::Simd[48]\s*\{[^{}]*?\breturn\b'
 silent_skip+='|let\s+Some\([^=;]*\)\s*=\s*[^;]*?(?:_w[48]\b|Simd[48]|BankWidth::(?:Four|Eight))[^;]*?\belse\s*\{[^{}]*?\breturn\b'
-skip_roots=(crates tools/console-workload tools/wasm-gates tools/wasm-gate-corpus)
+skip_roots=(crates hosts/host-web tools/console-workload tools/wasm-gates tools/wasm-gate-corpus)
 if found="$(rg -n -U --pcre2 --glob '*.rs' "$silent_skip" "${skip_roots[@]}")"; then
     printf '%s\n' "$found" >&2
     fail 'a test returns early on a SIMD backend width; make it width-agnostic or #[ignore] the other width with its reason'
@@ -129,6 +130,16 @@ skip_arguments() {
     done
 }
 mapfile -t skips < <(skip_arguments)
+
+# #1670: reuse the single browser/native corpus owner, including #1669's narrowed automation
+# transcript. These exact tests run on NEON in both profiles; none is an expected failure.
+profile=()
+[[ "$mode" == release ]] && profile=(--release)
+cargo test --locked "${profile[@]}" -p host-web --features test-support --lib -- --exact \
+    tests::native_identity_session_digest_pins_the_wasm_parity \
+    tests::native_set_control_timeline_digest_pins_the_wasm_parity \
+    tests::native_observation_timeline_digest_pins_the_wasm_parity \
+    tests::native_automation_timeline_digest_pins_the_wasm_parity
 
 if [[ "$mode" == debug ]]; then
     source "$root/scripts/lib/product-crates.sh"

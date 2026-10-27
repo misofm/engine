@@ -7615,3 +7615,137 @@ fn a_session_seek_sets_an_automated_fader_exactly_on_the_c_abi() {
         }
     }
 }
+
+/// #1670 D2: the existing #1669 transcript after a plain seek, with silent PCM before it.
+/// Only the quantum and the seek's arrival change; the fixture and post-seek source frames do not.
+/// Test value: red if settled stored automation depends on render time or block partitioning;
+/// existing C ABI seek tests use one quantum and a flat fader around the target.
+#[test]
+fn stored_automation_after_a_seek_is_invariant_to_arrival_and_quantum_on_the_c_abi() {
+    const TARGET: u64 = 30_000;
+    const FRAMES: usize = 56 * 128; // #1669's blocks 40..96, aligned at the seek.
+    const SETTLE: usize = 1_440; // Default mute hold (480) plus fader ramp (960), at 48 kHz.
+    const SOURCES: [(&[u8], [u32; 2]); 2] =
+        [(b"src-t1", [40_503, 30_011]), (b"src-t2", [52_153, 18_749])];
+
+    fn transcript(quantum: u32, arrival: u64, automated: bool) -> [Vec<u32>; 2] {
+        let mut model = parse_session_json(include_str!(
+            "../../../../hosts/host-web/tests/browser-v1/automation-session.json"
+        ))
+        .expect("#1669 automation fixture");
+        model.quantum_frames = quantum;
+        if !automated {
+            model.automation.clear();
+        }
+        let document = session::canonical_session_json(&model).expect("canonical fixture");
+        let (session, plan) = boxed_c_children_with_limits(
+            &document,
+            CompileLimits {
+                source_ring_frames: quantum,
+                maximum_submixes: 1,
+                maximum_vcas: 1,
+                ..limits()
+            },
+        );
+        assert_eq!(crate::ffi::test_plan_latency(plan), 0, "no insert or delay");
+        let q = quantum as usize;
+        let mut pcm = vec![f32::NAN; q * 2];
+        let output = crate::PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: quantum,
+            plane_stride_samples: quantum,
+            reserved: [0; 2],
+        };
+        let silence = vec![0.0; q];
+        assert_eq!(arrival % u64::from(quantum), 0);
+        for start in (0..arrival).step_by(q) {
+            for (source, _) in SOURCES {
+                submit_c_to(session, source, 1, start, 48_000, &silence, &silence, false);
+            }
+            assert_eq!(
+                crate::ffi::test_render(plan, start, &output),
+                crate::RESULT_OK
+            );
+            assert!(
+                pcm.iter().all(|&sample| sample == 0.0),
+                "silent pre-seek PCM"
+            );
+        }
+        assert_eq!(
+            crate::ffi::test_session_seek(session, 2, TARGET, None),
+            crate::RESULT_OK
+        );
+        let mut bits: [Vec<u32>; 2] = core::array::from_fn(|_| Vec::new());
+        for relative in (0..FRAMES).step_by(q) {
+            let start = TARGET + relative as u64;
+            for (source, multipliers) in SOURCES {
+                // #1669's exact integer-formula PCM, repartitioned into the requested quantum.
+                let [left, right] = multipliers.map(|multiplier| {
+                    (start..start + u64::from(quantum))
+                        .map(|frame| {
+                            let residue =
+                                ((frame as u32).wrapping_mul(multiplier) & 0xffff) as i32 - 32_768;
+                            residue as f32 / 65_536.0
+                        })
+                        .collect::<Vec<_>>()
+                });
+                submit_c_to(session, source, 2, start, 48_000, &left, &right, false);
+            }
+            assert_eq!(
+                crate::ffi::test_render(plan, arrival + relative as u64, &output),
+                crate::RESULT_OK
+            );
+            if relative == 0 {
+                for (source, _) in SOURCES {
+                    let (generation, first, frame, underruns, _) = seek_report_c(session, source);
+                    assert_eq!((generation, first, frame), (2, arrival, TARGET));
+                    assert_eq!(underruns, 0, "the transcript supplied every source frame");
+                }
+            }
+            let take = q.min(FRAMES - relative);
+            for plane in 0..2 {
+                bits[plane].extend(pcm[plane * q..plane * q + take].iter().map(|v| v.to_bits()));
+            }
+        }
+        crate::ffi::test_plan_destroy(plan);
+        crate::ffi::test_session_destroy(session);
+        bits
+    }
+
+    // Plain seeks land at block entries: the original q128/block40 arrival is 5120. The q100
+    // arrivals change the 64-sample phase as well as the partition; each quantum also varies time.
+    let configurations = [(128, 5_120), (128, 5_248), (100, 5_100), (100, 5_200)];
+    assert_ne!((configurations[0].1 - configurations[2].1) % 64, 0);
+    let reference = transcript(configurations[0].0, configurations[0].1, true);
+    let plain = transcript(configurations[0].0, configurations[0].1, false);
+    for plane in 0..2 {
+        assert!(
+            reference[plane][SETTLE..]
+                .iter()
+                .any(|&v| f32::from_bits(v) != 0.0)
+        );
+        assert_ne!(
+            reference[plane][SETTLE..],
+            plain[plane][SETTLE..],
+            "plane {plane}: automation heard"
+        );
+    }
+    for (quantum, arrival) in configurations.into_iter().skip(1) {
+        let candidate = transcript(quantum, arrival, true);
+        for plane in 0..2 {
+            let first = (SETTLE..FRAMES).find(|&i| candidate[plane][i] != reference[plane][i]);
+            if let Some(first) = first {
+                panic!(
+                    "q{quantum}, arrival {arrival}, plane {plane}: first differing relative sample \
+                     {first}, timeline {}, actual bits {:#010x}, reference bits {:#010x}",
+                    TARGET + first as u64,
+                    candidate[plane][first],
+                    reference[plane][first]
+                );
+            }
+        }
+    }
+}
