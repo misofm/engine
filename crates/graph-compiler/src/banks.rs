@@ -223,6 +223,7 @@ pub(crate) fn bind_rack_banks_placed(
             let chain = RackChainId {
                 track_id: strip.id.as_str().to_owned(),
                 rack,
+                slot: None,
             };
             let mut nodes = Vec::with_capacity(declared.len());
             let mut slots = Vec::with_capacity(declared.len());
@@ -481,6 +482,21 @@ pub(crate) fn bind_rack_banks_placed(
             }
         }
     }
+    // Issue #2138: the leftover pass, over the insert nodes the chain pass left per node.
+    let mut windows = windows;
+    leftover_pass(
+        &mut plan,
+        &mut bound,
+        &mut chains,
+        &mut windows,
+        &programs,
+        placement,
+        classes,
+        effects,
+        prepared,
+        dispatch,
+        width,
+    )?;
     // Issue #1002: a bank reused from the trial plan carries the index its group had there, and
     // acceptance renumbers it. The report's slot index is gated by a test; the bank's cohort index
     // has no public reader, so it is tied to the same index here.
@@ -543,6 +559,220 @@ pub(crate) fn bind_rack_banks_placed(
     ))
 }
 
+/// The leftover pass (issue #2138, `docs/BANKING_DESIGN.md` slice 8): every insert node the chain
+/// pass left per node is offered again as a one-slot candidate, and the ones that meet in a level
+/// window bind as one-slot banks beside the chain pass's.
+///
+/// A candidate is a node of a [`RackLocation::Dynamic`] chain that no bound bank carries and whose
+/// own key does not block banking (a sidechained slot and the delay stay per node). Its window is
+/// the levels it may take with every graph neighbour where the placement put it: above its
+/// producers, below its consumers. Per key class (program key, pool class), the candidates are
+/// swept earliest deadline first, as `rack_compiler::place_over_windows` sweeps chains: the stab
+/// takes every waiting candidate whose window holds the earliest deadline, except one with a
+/// graph edge to a member already taken, and places them all at the largest window floor among
+/// them. A stab smaller than [`min_padded_insert_members`] would not bind, so it moves nothing and
+/// only its earliest-deadline candidate leaves the sweep. A stab is merged only when the merge
+/// renders fewer nodes per node than the level plan of the same members (one bucket per level they
+/// sit at), or as many in fewer banks ([`leftover_cost`]); otherwise each member is bucketed at
+/// its own level, as the level plan would, since a merge that saves no bank only costs silence
+/// skips (#2136's rule). The buckets are then [`plan_bank_groups`]'s input and bind through the
+/// chain pass's binder.
+///
+/// Each move keeps every edge of the graph strictly upward in the placement, so every bank, chain
+/// or leftover, still has its members at one placement level and the graph contracted by bank is
+/// acyclic (#2134). Banking regroups lanes only, so a leftover bank renders each lane's own
+/// arithmetic: the per-node bits.
+#[allow(clippy::too_many_arguments)] // The bind's whole context.
+fn leftover_pass(
+    plan: &mut BankPlan<RackChainId>,
+    bound: &mut Vec<BoundGroup>,
+    chains: &mut BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    windows: &mut BTreeMap<RackChainId, (u64, u64)>,
+    programs: &BTreeMap<RackChainId, RackProgram>,
+    placement: &PlacementLevels,
+    classes: &SessionPoolClasses,
+    effects: &EffectPreparedSession,
+    prepared: &PreparedEffectIndex<'_>,
+    dispatch: Backend,
+    width: BankWidth,
+) -> Result<(), GraphDiagnostic> {
+    let invariant = || diag("graph.internal.invariant", "$.effects");
+    let banked: BTreeSet<&EffectNodeId> = bound
+        .iter()
+        .flatten()
+        .flat_map(|(_, slot)| slot.members.iter())
+        .collect();
+    // (key, class) -> the candidates of that class, by id.
+    let mut by_class: BTreeMap<
+        (effect_contract::EffectProgramKey, CohortPoolClass),
+        Vec<(RackChainId, EffectNodeId)>,
+    > = BTreeMap::new();
+    for (chain, nodes) in chains.iter() {
+        if chain.rack != RackId::Dynamic || chain.slot.is_some() {
+            continue;
+        }
+        for (rank, node) in nodes.iter().enumerate() {
+            let key = programs[chain].slots.get(rank).ok_or_else(invariant)?;
+            if banked.contains(node) || rack::BankSlotKey::blocks_banking(key) {
+                continue;
+            }
+            let id = RackChainId {
+                slot: Some(rank),
+                ..chain.clone()
+            };
+            by_class
+                .entry((key.clone(), classes.class_of(&chain.track_id)))
+                .or_default()
+                .push((id, node.clone()));
+        }
+    }
+    if by_class.is_empty() {
+        return Ok(());
+    }
+    // The pass's own placement of the candidates; every other node stays where it was placed.
+    let mut moved: BTreeMap<GraphNodeId, u64> = BTreeMap::new();
+    let level_of = |moved: &BTreeMap<GraphNodeId, u64>, node: &GraphNodeId| {
+        moved
+            .get(node)
+            .copied()
+            .or_else(|| placement.level_of(node))
+    };
+    // `[lo, hi]`: the levels `node` may take with its neighbours fixed.
+    let window = |moved: &BTreeMap<GraphNodeId, u64>, node: &EffectNodeId| {
+        let id = GraphNodeId::Effect(node.clone());
+        let here = level_of(moved, &id)?;
+        let Some((producers, consumers)) = placement.neighbours.get(node) else {
+            return Some((here, here));
+        };
+        let mut low = 0_u64;
+        for producer in producers {
+            low = low.max(level_of(moved, producer)?.checked_add(1)?);
+        }
+        let mut high = u64::MAX;
+        for consumer in consumers {
+            high = high.min(level_of(moved, consumer)?.checked_sub(1)?);
+        }
+        (low <= here && here <= high).then_some((low, high))
+    };
+    let adjacent = |a: &EffectNodeId, b: &EffectNodeId| {
+        placement
+            .neighbours
+            .get(a)
+            .is_some_and(|(producers, consumers)| {
+                let b = GraphNodeId::Effect(b.clone());
+                producers.contains(&b) || consumers.contains(&b)
+            })
+    };
+    let threshold = min_padded_insert_members(width);
+    let lanes = width.lanes() as usize;
+    let mut buckets: BTreeMap<u64, Vec<CohortCandidate<RackChainId>>> = BTreeMap::new();
+    for ((key, class), mut waiting) in by_class {
+        while !waiting.is_empty() {
+            let mut open = Vec::with_capacity(waiting.len());
+            for (index, (_, node)) in waiting.iter().enumerate() {
+                open.push((window(&moved, node).ok_or_else(invariant)?, index));
+            }
+            // Earliest deadline first; ties by id (`waiting` is in id order).
+            open.sort_by_key(|((_, high), index)| (*high, *index));
+            let deadline = open[0].0.1;
+            let mut stab: Vec<(usize, (u64, u64))> = Vec::new();
+            for &((low, high), index) in &open {
+                if low <= deadline
+                    && !stab
+                        .iter()
+                        .any(|(taken, _)| adjacent(&waiting[*taken].1, &waiting[index].1))
+                {
+                    stab.push((index, (low, high)));
+                }
+            }
+            if stab.len() < threshold {
+                waiting.remove(open[0].1);
+                continue;
+            }
+            // The level plan of the same members: one bucket per level they sit at now.
+            let mut at_level: BTreeMap<u64, usize> = BTreeMap::new();
+            for (index, _) in &stab {
+                let here = level_of(&moved, &GraphNodeId::Effect(waiting[*index].1.clone()))
+                    .ok_or_else(invariant)?;
+                *at_level.entry(here).or_default() += 1;
+            }
+            let merged = leftover_cost(stab.len(), lanes, threshold);
+            let split = at_level
+                .values()
+                .map(|members| leftover_cost(*members, lanes, threshold))
+                .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
+            // The merge is taken when it renders fewer nodes per node, or as many with fewer
+            // banks; otherwise every member is bucketed where it sits, as the level plan would.
+            let merge = merged < split;
+            let level = stab
+                .iter()
+                .map(|(_, (low, _))| *low)
+                .max()
+                .unwrap_or(deadline);
+            stab.sort_by_key(|(index, _)| core::cmp::Reverse(*index));
+            for (index, window) in stab {
+                let (id, node) = waiting.remove(index);
+                let here =
+                    level_of(&moved, &GraphNodeId::Effect(node.clone())).ok_or_else(invariant)?;
+                let level = if merge { level } else { here };
+                moved.insert(GraphNodeId::Effect(node.clone()), level);
+                windows.insert(id.clone(), if merge { window } else { (here, here) });
+                chains.insert(id.clone(), vec![node]);
+                buckets.entry(level).or_default().push(CohortCandidate {
+                    id,
+                    class,
+                    program: RackProgram::new(RackLocation::Dynamic, vec![key.clone()]),
+                });
+            }
+        }
+    }
+    let levels: Vec<CohortLevel<RackChainId>> = buckets
+        .into_iter()
+        .map(|(level, candidates)| CohortLevel { level, candidates })
+        .collect();
+    let leftover = plan_bank_groups(&levels, width)
+        .map_err(|_| diag("graph.effect.bank_members", "$.effects"))?;
+    let placed: BTreeMap<&EffectNodeId, u64> = chains
+        .iter()
+        .filter(|(chain, _)| chain.slot.is_some())
+        .flat_map(|(_, nodes)| nodes.iter())
+        .filter_map(|node| {
+            level_of(&moved, &GraphNodeId::Effect(node.clone())).map(|level| (node, level))
+        })
+        .collect();
+    for group in leftover.groups {
+        let index = plan.groups.len();
+        bound.push(bind_group_banks(
+            index,
+            &group,
+            pads(&group, width),
+            chains,
+            &placed,
+            effects,
+            prepared,
+            dispatch,
+            width,
+        )?);
+        plan.groups.push(group);
+    }
+    Ok(())
+}
+
+/// `(nodes left per node, banks)` when `members` leftover nodes of one key share one bucket: whole
+/// banks of `lanes`, and a remainder that pads from `threshold` or renders per node. Ordered so
+/// that fewer per-node renders win first (banking a per-node effect always saves work), then
+/// fewer banks.
+const fn leftover_cost(members: usize, lanes: usize, threshold: usize) -> (usize, usize) {
+    let (whole, remainder) = (members / lanes, members % lanes);
+    if remainder == 0 {
+        (0, whole)
+    } else if remainder >= threshold {
+        (0, whole + 1)
+    } else {
+        (remainder, whole)
+    }
+}
+
 /// The level every graph node is placed at for bank planning (issue #2136), and each node's
 /// window after placement. Built once per compile by [`placement_levels`] and read by both bank
 /// planners -- the rack chains here and the builtin strip stages (`builtins-compiler`'s
@@ -555,6 +785,10 @@ pub(crate) struct PlacementLevels {
     /// planners' bucketing input, never the graph's schedule.
     levels: Vec<DependencyLevel>,
     by_node: BTreeMap<GraphNodeId, (u64, u64, u64)>,
+    /// Every insert node's graph producers and consumers (issue #2138): the leftover pass moves a
+    /// node only within the levels these leave it. Empty for [`Self::single_point`], where every
+    /// leftover node stays at its level.
+    neighbours: BTreeMap<EffectNodeId, (Vec<GraphNodeId>, Vec<GraphNodeId>)>,
 }
 
 impl PlacementLevels {
@@ -574,6 +808,7 @@ impl PlacementLevels {
         Self {
             levels: levels.to_vec(),
             by_node,
+            neighbours: BTreeMap::new(),
         }
     }
 
@@ -748,7 +983,30 @@ pub(crate) fn placement_levels(
             (placement.level, window.0, window.1),
         );
     }
+    let mut neighbours: BTreeMap<EffectNodeId, (Vec<GraphNodeId>, Vec<GraphNodeId>)> =
+        BTreeMap::new();
+    for &(source, destination) in &ends {
+        if let GraphNodeId::Effect(effect) = &nodes[destination].id
+            && effect.rack == RackId::Dynamic
+        {
+            neighbours
+                .entry(effect.clone())
+                .or_default()
+                .0
+                .push(nodes[source].id.clone());
+        }
+        if let GraphNodeId::Effect(effect) = &nodes[source].id
+            && effect.rack == RackId::Dynamic
+        {
+            neighbours
+                .entry(effect.clone())
+                .or_default()
+                .1
+                .push(nodes[destination].id.clone());
+        }
+    }
     Ok(PlacementLevels {
+        neighbours,
         levels: by_level
             .into_iter()
             .map(|(level, mut nodes)| {

@@ -442,6 +442,10 @@ impl BankUtilisation {
 pub struct RackChainId {
     pub track_id: String,
     pub rack: RackId,
+    /// `None` for the whole chain (the chain pass). `Some(k)` for the one-slot candidate the
+    /// leftover pass (issue #2138) offers for slot `k` of that chain, an insert node the chain
+    /// pass left per node; its entry in [`GraphRackBankReport::chains`] is that one node.
+    pub slot: Option<usize>,
 }
 
 /// One bound homogeneous bank: a slot of a cohort, and the effect node each lane runs there.
@@ -502,6 +506,8 @@ impl GraphRackBankReport {
             .cloned()
             .collect();
         ids.sort();
+        // A leftover-pass candidate (issue #2138) repeats a node of its whole chain.
+        ids.dedup();
         ids
     }
 }
@@ -4917,7 +4923,8 @@ mod tests {
 
         // The same production handoff is checked at both bank shapes: a homogeneous two-slot
         // program retains every session slot in order, while a depth mismatch leaves only the
-        // shared slot bankable and keeps the heterogeneous members scalar.
+        // shared slot bankable in the chain pass, and the leftover pass (#2138) binds the
+        // heterogeneous members' second slot as a one-slot bank of its own.
         if let Some(width) = BankWidth::for_backend(host_dispatch()) {
             let lanes = width.lanes() as usize;
             let (_registry, homogeneous) = rack_chain_fixture(lanes, 2, |_| 2);
@@ -4943,15 +4950,14 @@ mod tests {
                     .rack_cohorts
                     .bound_slots_in(RackLocation::Dynamic)
                     .count(),
-                1
+                2
             );
-            assert_eq!(
+            assert!(
                 heterogeneous
                     .report()
                     .rack_cohorts
                     .scalar_in(RackLocation::Dynamic)
-                    .len(),
-                lanes / 2
+                    .is_empty()
             );
             let heterogeneous_bound: Vec<_> = heterogeneous
                 .report()
@@ -4969,13 +4975,7 @@ mod tests {
                             && member.effect_id.as_str() == "chain1"
                     })
             );
-            let scalar_members: Vec<_> = heterogeneous
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Dynamic)
-                .into_iter()
-                .collect();
-            assert!(scalar_members.iter().all(|member| {
+            assert!(heterogeneous_bound[1].members.iter().all(|member| {
                 member
                     .track_id
                     .as_str()
@@ -5006,8 +5006,9 @@ mod tests {
         let groups: Vec<_> = report.groups_in(RackLocation::Dynamic).collect();
         assert_eq!(
             groups.len(),
-            1,
-            "the short chains are a subsequence of the long one"
+            2,
+            "the short chains are a subsequence of the long one; the second group is the \
+             leftover pass's (#2138)"
         );
         assert_eq!(groups[0].program.len(), 2);
         assert!(groups[0].is_full());
@@ -5019,12 +5020,19 @@ mod tests {
         );
 
         // Slot 0 binds; slot 1 cannot, because the effect contract has no per-lane bypass mask
-        // yet (#96 F7 / #95), so its members stay on the per-node scalar path.
+        // yet (#96 F7 / #95). Since #2138 its `lanes / 2` members bind in the leftover pass as one
+        // padded one-slot bank (half the lanes reach the insert threshold at either width).
         let bound: Vec<_> = report.bound_slots_in(RackLocation::Dynamic).collect();
-        assert_eq!(bound.len(), 1);
+        assert_eq!(bound.len(), 2);
         assert_eq!(bound[0].slot, 0);
         assert_eq!(bound[0].members.len(), lanes);
-        assert_eq!(report.scalar_in(RackLocation::Dynamic).len(), lanes / 2);
+        assert_eq!(bound[1].members.len(), lanes / 2);
+        assert!(
+            report.plan.groups[bound[1].group].members[0]
+                .as_ref()
+                .is_some_and(|id| id.slot == Some(1))
+        );
+        assert!(report.scalar_in(RackLocation::Dynamic).is_empty());
     }
 
     /// Twelve tracks that each carry one bankable SIMD-1 effect, plus a route per track.
