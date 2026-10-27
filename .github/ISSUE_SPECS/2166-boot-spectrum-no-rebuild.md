@@ -151,3 +151,10 @@ Attempt 1, branch `codex/issue-2166-boot-spectrum` (from `main` `0d326c5c8`, mer
 - **SDK surface.** Additive only: `CreateEngineOptions.createHost`'s request and the shipped
   host's `CreateMisoAudioWorkletHostOptions` gain the optional `bootCommand`; the generated ABI
   export list gains `miso_engine_web_v1_boot_command_ptr`. No public call changes.
+
+### Attempt 2 verdict (bounded opus-high verify, 2026-10-27): PASS
+
+- The confirming `SPECTRUM_CONFIGURE` is free when the boot carried the taps: `spectrum_configure` returns early on an equal configuration (no rebuild, no epoch or revision change, no watermark effect), and rendering cannot change the monitor's configuration between boot and confirmation.
+- The failure path disposes the host (time-bounded) and closes the context; no subscription exists yet.
+- Red evidence confirmed for `a_refused_boot_takes_the_staged_boot_command` and `a_boot_command_that_is_not_a_spectrum_configure_refuses_the_boot`.
+- Folded MINOR: sdk/README's "Upgrading from 0.8.0" lists the custom-`createHost` case under "Changed" (a host that drops `bootCommand` now fails `createEngine` loudly; the owner chose no boot rebuild, so the silent 0.8.0 behaviour is not kept).

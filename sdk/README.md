@@ -823,15 +823,18 @@ See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/c
 
 ## Upgrading from 0.8.0
 
-0.8.1 adds one optional field and removes nothing.
+0.8.1 adds one optional field and removes nothing, but one custom-host case now fails where
+0.8.0 worked (see "Changed: a custom `createHost`").
 
 - Fixed: `createEngine({ spectrum })` and `createEngine({ spectrumCollection })` no longer count
   a blocking rebuild at boot. The taps are part of the first plan, so `blockingRebuilds` is 0
   until the session changes. A `configureSpectrum` call while the engine runs still counts one.
 - Added: the `createHost` request carries an optional `bootCommand` (a `Uint8Array`) when the
-  boot has spectrum taps. A custom `createHost` must pass it to `createMisoAudioWorkletHost`.
-  If the host does not pass it, `createEngine` fails with a `boot` error whose diagnostic is
-  `sdk.boot.command`. It does not return an engine without its taps.
+  boot has spectrum taps.
+- Changed: a custom `createHost` must pass `bootCommand` to `createMisoAudioWorkletHost`. A host
+  that worked with spectrum taps on 0.8.0 but builds its request from named fields now makes
+  `createEngine` fail with a `boot` error whose diagnostic is `sdk.boot.command`, instead of
+  returning an engine without its taps. Forward the whole request (or add `bootCommand`).
 - Changed: a boot spectrum configuration that the engine refuses (for example an unknown target)
   now fails the boot itself. The error's `code` is the boot refusal (`refusedDocument` or
   `refusedBudget`), and its diagnostic is the engine's spectrum code (for example
