@@ -187,18 +187,31 @@ function snapshotBootOptions(value) {
   return validBootOptions(snapshot) ? snapshot : undefined;
 }
 
+// The optional factory fields: each is absent or an enumerable own value. `bootCommand` (#2166) is
+// one encoded SPECTRUM_CONFIGURE command frame the engine applies before it prepares the first
+// plan, so the boot's spectrum taps are that plan's and the boot counts no blocking rebuild.
+const OPTIONAL_FIELDS = ["preparedModule", "bootCommand"];
+
 function snapshotFactory(value) {
-  const captured = capturePlainRecord(value, [...OPTION_FIELDS, "preparedModule"]);
+  const captured = capturePlainRecord(value, [...OPTION_FIELDS, ...OPTIONAL_FIELDS]);
   if (!captured || !hasRequiredEnumerableFields(captured, OPTION_FIELDS)) return undefined;
-  const preparedDescriptor = captured.descriptors.get("preparedModule");
-  const preparedModule = preparedDescriptor === undefined ? undefined : preparedDescriptor.value;
-  if (preparedModule === undefined) {
-    if (captured.enumerableCount !== OPTION_FIELDS.length) return undefined;
-  } else if (!preparedDescriptor.enumerable
-      || captured.enumerableCount !== OPTION_FIELDS.length + 1) {
-    return undefined;
+  let present = 0;
+  const optional = {};
+  for (let index = 0; index < OPTIONAL_FIELDS.length; index += 1) {
+    const descriptor = captured.descriptors.get(OPTIONAL_FIELDS[index]);
+    const field = descriptor === undefined ? undefined : descriptor.value;
+    if (field === undefined) continue;
+    if (!descriptor.enumerable) return undefined;
+    present += 1;
+    optional[OPTIONAL_FIELDS[index]] = field;
   }
-  return { descriptors: captured.descriptors, preparedModule };
+  if (captured.enumerableCount !== OPTION_FIELDS.length + present) return undefined;
+  let bootCommand;
+  if (optional.bootCommand !== undefined) {
+    bootCommand = snapshotDocument(optional.bootCommand);
+    if (bootCommand === undefined || bootCommand.byteLength === 0) return undefined;
+  }
+  return { descriptors: captured.descriptors, preparedModule: optional.preparedModule, bootCommand };
 }
 
 function deferred() {
@@ -1137,6 +1150,7 @@ export async function createMisoAudioWorkletHost(options) {
   let sampleRateHz;
   let quantumFrames;
   let preparedModule;
+  let bootCommand;
   let simd128ModuleUrl;
   let workletModuleUrl;
   try {
@@ -1148,6 +1162,7 @@ export async function createMisoAudioWorkletHost(options) {
     quantumFrames = context?.renderQuantumSize ?? 128;
     sampleRateHz = context?.sampleRate;
     preparedModule = factorySnapshot.preparedModule;
+    bootCommand = factorySnapshot.bootCommand;
     simd128ModuleUrl = descriptors.get("simd128ModuleUrl").value;
     workletModuleUrl = descriptors.get("workletModuleUrl").value;
     documentSnapshot = snapshotDocument(descriptors.get("document").value);
@@ -1188,6 +1203,7 @@ export async function createMisoAudioWorkletHost(options) {
         module: selected.module,
         document: documentSnapshot,
         options: bootOptions,
+        ...(bootCommand === undefined ? {} : { bootCommand }),
       },
     });
     const ready = await new Promise((resolve, reject) => {

@@ -54,9 +54,9 @@ use crate::render_lock::{control_allocation_count, render_allocation_count, rend
 // Named by the exports' result docs only.
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM,
-    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES, RESULT_INTERNAL,
-    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
-    RESULT_REFUSED_LIFECYCLE, STATE_READY, WebBootOptions,
+    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, CONTROL_FRAME_BYTES, MAXIMUM_DOCUMENT_BYTES,
+    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
+    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, STATE_READY, WebBootOptions,
 };
 #[cfg(doc)]
 use crate::{RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_WRONG_STATE};
@@ -77,6 +77,9 @@ struct LiveHost {
 struct BootStaging {
     options: WebBootOptions,
     document: ManuallyDrop<Vec<u8>>,
+    /// The boot command frame `miso_engine_web_v1_boot_command_ptr` staged (#2166), empty when none
+    /// is: the next boot takes it, whatever its outcome.
+    command: ManuallyDrop<Vec<u8>>,
     result: u32,
     diagnostic_bytes: u32,
     document_valid: bool,
@@ -111,6 +114,7 @@ impl BootStaging {
         Self {
             options: ZERO_BOOT_OPTIONS,
             document: ManuallyDrop::new(Vec::new()),
+            command: ManuallyDrop::new(Vec::new()),
             result: RESULT_OK,
             diagnostic_bytes: 0,
             document_valid: false,
@@ -130,6 +134,7 @@ impl BootStaging {
         // Assignment through `DerefMut` frees the staged bytes; the `ManuallyDrop` only keeps a
         // thread-local destructor from ever being registered for them.
         *self.document = Vec::new();
+        *self.command = Vec::new();
         self.result = RESULT_OK;
         self.diagnostic_bytes = 0;
         self.document_valid = false;
@@ -416,6 +421,9 @@ pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
         let Ok(mut staging) = staging.try_borrow_mut() else {
             return 0;
         };
+        // #2166: a staged boot command belongs to its document; staging a document frees any
+        // command staged before it, so the page stages the command after the document.
+        *staging.command = Vec::new();
         if live {
             staging.result = RESULT_REFUSED_LIFECYCLE;
             staging.diagnostic_bytes = 0;
@@ -442,6 +450,46 @@ pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
         staging.diagnostic_bytes = 0;
         staging.document_valid = true;
         pointer_u32(staging.document.as_mut_ptr())
+    })
+}
+
+/// Stage an exact-length boot command frame for the next boot (#2166): one encoded
+/// `SPECTRUM_CONFIGURE` command frame, which the control plane applies before it prepares the first
+/// plan ([`control_plane::compile_children_with_boot_command`]), so the boot's spectrum taps are
+/// that plan's and the boot counts no blocking rebuild. Optional: a boot with none staged has no
+/// taps. Call it after `document_ptr` (which frees a command staged before it) and before `boot`;
+/// the boot takes the frame whatever its outcome, and dispose frees one no boot took.
+///
+/// Returns the buffer's address, or zero, with nothing staged, while a host is live, for a `len`
+/// that is zero or over the control frame ceiling, or for a failed reservation. Every call first
+/// frees what an earlier one staged. It never touches the boot result word. Control side only (the
+/// boot's own staging), never `process()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot_command_ptr(len: u32) -> u32 {
+    pointer_u32(stage_boot_command(len))
+}
+
+/// [`miso_engine_web_v1_boot_command_ptr`]'s staging, with the address as a pointer (null for a
+/// refusal).
+fn stage_boot_command(len: u32) -> *mut u8 {
+    let live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
+    BOOT_STAGING.with(|staging| {
+        let Ok(mut staging) = staging.try_borrow_mut() else {
+            return ptr::null_mut();
+        };
+        // Assignment frees the earlier bytes; the `ManuallyDrop` registers no destructor.
+        *staging.command = Vec::new();
+        if live || len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
+            return ptr::null_mut();
+        }
+        let count = len as usize;
+        let mut command = Vec::new();
+        if command.try_reserve_exact(count).is_err() {
+            return ptr::null_mut();
+        }
+        command.resize(count, 0);
+        *staging.command = command;
+        staging.command.as_mut_ptr()
     })
 }
 
@@ -517,6 +565,8 @@ fn boot_staged(len: u32) -> u32 {
         let Ok(mut staging) = staging.try_borrow_mut() else {
             return None;
         };
+        // #2166: the boot takes the staged command, whatever its outcome.
+        let command = core::mem::take(&mut *staging.command);
         if !staging.document_valid || staging.document.len() != len as usize {
             staging.result = RESULT_REFUSED_DOCUMENT;
             staging.diagnostic_bytes = 0;
@@ -524,7 +574,12 @@ fn boot_staged(len: u32) -> u32 {
             return None;
         }
 
-        let result = AudioWorkletEngineHost::boot(&staging.document, staging.options);
+        let result = AudioWorkletEngineHost::boot_with_command(
+            &staging.document,
+            staging.options,
+            (!command.is_empty()).then_some(command.as_slice()),
+        );
+        drop(command);
 
         match result {
             Ok(host) => {
@@ -1397,6 +1452,26 @@ pub(crate) fn test_stage_document(bytes: &[u8]) {
         staging.result = RESULT_OK;
         staging.diagnostic_bytes = 0;
     })
+}
+
+/// Stage `bytes` as the boot command, as the worklet does through
+/// [`miso_engine_web_v1_boot_command_ptr`] (#2166); `false` when the staging refused them.
+#[cfg(test)]
+pub(crate) fn test_stage_boot_command(bytes: &[u8]) -> bool {
+    let Ok(length) = u32::try_from(bytes.len()) else {
+        return false;
+    };
+    if stage_boot_command(length).is_null() {
+        return false;
+    }
+    BOOT_STAGING.with(|staging| staging.borrow_mut().command.copy_from_slice(bytes));
+    true
+}
+
+/// The staged boot command's length (#2166).
+#[cfg(test)]
+pub(crate) fn test_staged_boot_command_bytes() -> usize {
+    BOOT_STAGING.with(|staging| staging.borrow().command.len())
 }
 
 #[cfg(test)]

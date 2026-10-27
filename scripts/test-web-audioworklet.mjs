@@ -621,6 +621,18 @@ async function testMainRealm() {
         const emptyHost = await createMisoAudioWorkletHost(makeFactory({ document: new Uint8Array() }));
         await emptyHost.dispose();
       }
+      // #2166 parity row: the host hands the worklet a private copy of the boot command, and
+      // refuses one that is not a nonempty Uint8Array.
+      {
+        const bootCommand = new Uint8Array([3, 1, 4]);
+        const commanded = await createMisoAudioWorkletHost(makeFactory({ bootCommand }));
+        const copied = FakeNode.latest.options.processorOptions.bootCommand;
+        assert.deepEqual([...copied], [3, 1, 4], "the boot command reaches the worklet");
+        assert.notEqual(copied.buffer, bootCommand.buffer, "the boot command is a private copy");
+        await commanded.dispose();
+        await assertRefusal("empty boot command", makeFactory({ bootCommand: new Uint8Array() }));
+        await assertRefusal("array boot command", makeFactory({ bootCommand: [3, 1, 4] }));
+      }
 
       {
         let audioWorkletReads = 0;
@@ -2132,7 +2144,16 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     miso_engine_web_v1_abi_version: () => 0x00010000,
     miso_engine_web_v1_boot_options_ptr: () => 512,
     miso_engine_web_v1_document_ptr: () => 2048,
-    miso_engine_web_v1_boot: (...args) => { calls.boot.push(args); return boot(); },
+    // #2166: the boot command is staged at a fixed address and read back when the boot takes it.
+    miso_engine_web_v1_boot_command_ptr: (length) => { calls.bootCommandLength = length; return 190000; },
+    miso_engine_web_v1_boot: (...args) => {
+      calls.boot.push(args);
+      if (calls.bootCommandLength !== undefined) {
+        calls.bootCommand = new Uint8Array(memory.buffer, 190000, calls.bootCommandLength).slice();
+        calls.bootCommandLength = undefined;
+      }
+      return boot();
+    },
     miso_engine_web_v1_boot_result: () => calls.bootResult,
     miso_engine_web_v1_boot_diagnostic_bytes: () => 0,
     miso_engine_web_v1_buffer_ptr: (_handle, kind) => pointers[kind] ?? 0,
@@ -2740,13 +2761,14 @@ async function testProcessor() {
   try {
     await import(`${workletUrl.href}?processor-test`);
     assert.equal(typeof registered, "function");
-    const construct = (fake, options = limits) => {
+    const construct = (fake, options = limits, bootCommand = undefined) => {
       nextFake = fake;
       return new registered({
         processorOptions: {
           module: {},
           document: processorSessionDocument,
           options,
+          ...(bootCommand === undefined ? {} : { bootCommand }),
         },
       });
     };
@@ -2775,6 +2797,18 @@ async function testProcessor() {
       assert.equal(processor.port.posts[0].message.result, 0, "the boot is ready");
       assert.deepEqual(fake.calls.boot, [[processorSessionDocument.byteLength]],
         "the boot export's arguments");
+    }
+
+    // #2166 parity row: the processor stages the boot command before the boot export, so the
+    // engine prepares the first plan with it; a boot without one stages nothing.
+    {
+      const fake = createFakeExports(64);
+      const processor = construct(fake, limits, new Uint8Array([7, 6, 5, 4]));
+      assert.equal(processor.port.posts[0].message.result, 0, "the boot with a command is ready");
+      assert.deepEqual([...fake.calls.bootCommand], [7, 6, 5, 4], "the boot took the staged command");
+      const plain = createFakeExports(64);
+      construct(plain);
+      assert.equal(plain.calls.bootCommand, undefined, "a boot without a command stages none");
     }
 
     // #1597: the processor's boot options lost their spectrum fields; one that comes back is

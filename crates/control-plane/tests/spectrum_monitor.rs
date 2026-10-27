@@ -2637,3 +2637,42 @@ fn a_stream_read_at_the_frame_limit_delivers_its_gap() {
         assert!(exact.configure(request).is_ok(), "{fits}");
     }
 }
+
+/// #2166: a boot command that does not decode, or that names another command than
+/// `SPECTRUM_CONFIGURE`, refuses the boot with `control.boot.command`.
+///
+/// Red if the boot ignores a frame it cannot apply (it would boot without the taps the host
+/// staged, and the SDK's boot would fail only at its confirmation).
+#[test]
+fn a_boot_command_that_is_not_a_spectrum_configure_refuses_the_boot() {
+    let mut read = vec![0_u8; 4_096];
+    let length = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(1).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Any,
+                payload: CommandPayload::SpectrumStream(&StreamRequest::Read),
+            },
+            &mut read,
+        )
+        .expect("a stream frame");
+    read.truncate(length);
+    for (label, frame) in [
+        ("malformed", &b"not a frame"[..]),
+        ("wrong kind", &read[..]),
+    ] {
+        let Err(failure) = control_plane::compile_children_with_boot_command::<Adapter>(
+            SESSION,
+            limits(),
+            Box::new(Preparer),
+            frame,
+        ) else {
+            panic!("{label}: the boot accepted the command");
+        };
+        assert_eq!(
+            failure.diagnostic().as_ref(),
+            b"control.boot.command\t$\n",
+            "{label}"
+        );
+    }
+}

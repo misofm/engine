@@ -140,6 +140,21 @@ function spectrumKey(target: SpectrumQuery["target"], channels: string): string 
   return JSON.stringify([target.kind, target.kind === "output" ? target.outputId : target.trackId, channels]);
 }
 
+/**
+ * The boot command of a boot's spectrum taps (#2166): one `SPECTRUM_CONFIGURE` command frame with
+ * the policy's hop, staged through `boot_command_ptr` so the engine prepares the first plan with the
+ * taps and the boot counts no blocking rebuild. The engine reads no request ID in it: a boot has
+ * no reply. `undefined` without taps. @internal
+ */
+export function bootSpectrumCommand(
+  configuration: SpectrumQuery | SpectrumCollection | undefined,
+  hopFrames: SpectrumHopFrames | undefined,
+): Uint8Array | undefined {
+  if (configuration === undefined) return undefined;
+  const { request } = spectrumConfigureRequest(configuration, hopFrames === undefined ? undefined : { hopFrames });
+  return encodeSpectrumCommand(1n, request);
+}
+
 function wantsSpectrum(snapshot: BootSnapshot): boolean {
   return snapshot.spectrumQuery !== undefined || snapshot.spectrumCollection !== undefined;
 }
@@ -378,8 +393,30 @@ export class WasmBoundary {
     options: BootOptions = {},
   ): Promise<WasmBoundary> {
     const snapshot = snapshotBootOptions(options);
+    return WasmBoundary.#boot(asset, document, snapshot, bootCommandOf(snapshot));
+  }
+
+  /**
+   * Boot with `bootCommand` staged as given (#2166), as the worklet stages the command the browser
+   * engine hands its host. The browser engine's test host boots its core through this. @internal
+   */
+  static async bootWithCommand(
+    asset: MisoEngineAsset,
+    document: Uint8Array,
+    options: BootOptions,
+    bootCommand: Uint8Array | undefined,
+  ): Promise<WasmBoundary> {
+    return WasmBoundary.#boot(asset, document, snapshotBootOptions(options), bootCommand);
+  }
+
+  static async #boot(
+    asset: MisoEngineAsset,
+    document: Uint8Array,
+    snapshot: BootSnapshot,
+    bootCommand: Uint8Array | undefined,
+  ): Promise<WasmBoundary> {
     const exports = exportsOf(await asset.instantiate());
-    const staged = stage(exports, document, snapshot.options);
+    const staged = stage(exports, document, snapshot.options, bootCommand);
     const boundary = new WasmBoundary(
       exports,
       staged.handle,
@@ -390,7 +427,6 @@ export class WasmBoundary {
     );
     try {
       if (wantsSpectrum(snapshot)) boundary.#requireSpectrumCapability();
-      boundary.#configureBootSpectrum(snapshot);
     } catch (error) {
       boundary.dispose();
       throw error;
@@ -417,7 +453,7 @@ export class WasmBoundary {
     this.dispose();
     this.#stripOrder = undefined;
     this.#stripOrders.clear();
-    const staged = stage(this.#exports, document, snapshot.options);
+    const staged = stage(this.#exports, document, snapshot.options, bootCommandOf(snapshot));
     this.#handle = staged.handle;
     this.#optionBytes = staged.optionBytes;
     this.#metersAttached = (snapshot.options.liveControls?.meterBlocks ?? 0) > 0;
@@ -426,7 +462,6 @@ export class WasmBoundary {
     this.#spectrumActiveQuery = snapshot.spectrumQuery;
     try {
       if (wantsSpectrum(snapshot)) this.#requireSpectrumCapability();
-      this.#configureBootSpectrum(snapshot);
     } catch (error) {
       this.dispose();
       throw error;
@@ -441,24 +476,6 @@ export class WasmBoundary {
     if (!reply.ok) throw spectrumCapabilityRefusal(`CAPABILITIES_GET was refused with ${reply.status}`);
     if ((reply.value.flags & CAPABILITY_SPECTRUM) === 0n) {
       throw spectrumCapabilityRefusal("capability flag bit 16 is clear");
-    }
-  }
-
-  /**
-   * D2 of #1596 for the headless engine: one `SPECTRUM_CONFIGURE` of the boot's taps with the
-   * policy's hop, before the first block. The engine prepares the plan with the taps and, as no
-   * block has rendered, adopts it in place of the boot's plan (#1597), so the reply reports
-   * `adoptedEpoch === configuredEpoch` at once and a capture armed now covers sample 0.
-   */
-  #configureBootSpectrum(snapshot: BootSnapshot): void {
-    const configuration = snapshot.spectrumCollection ?? snapshot.spectrumQuery;
-    if (configuration === undefined) return;
-    const hopFrames = snapshot.spectrumHopFrames;
-    const { request } = spectrumConfigureRequest(configuration, hopFrames === undefined ? undefined : { hopFrames });
-    const reply = this.#spectrumCommand(request, decodeSpectrumConfiguredReply);
-    if (!reply.ok) throw spectrumRefusalError("the engine refused the boot spectrum configuration", reply, "boot");
-    if (reply.value.adoptedEpoch !== reply.value.configuredEpoch) {
-      throw malformed("the boot spectrum configuration was not carried by the first plan");
     }
   }
 
@@ -1361,10 +1378,16 @@ function reportAsynchronously(error: unknown): void {
  * Extracted so a first boot and a mix switch are literally the same code: a reboot that drifted
  * from a boot is exactly the class of bug that makes "it works the first time" a support ticket.
  */
+/** The boot command of `snapshot`'s spectrum taps (#2166), or `undefined`. */
+function bootCommandOf(snapshot: BootSnapshot): Uint8Array | undefined {
+  return bootSpectrumCommand(snapshot.spectrumCollection ?? snapshot.spectrumQuery, snapshot.spectrumHopFrames);
+}
+
 function stage(
   exports: ExportTable,
   document: Uint8Array,
   options: BootOptions,
+  bootCommand: Uint8Array | undefined,
 ): { handle: number; optionBytes: Uint8Array } {
   // 1. `abi_version` -- already pinned by `asset.instantiate()`, re-read here so this function is
   //    the published sequence rather than an abbreviation of it.
@@ -1390,6 +1413,21 @@ function stage(
     throw bootFailure(exports, 0, "the engine refused to stage the document");
   }
   new Uint8Array(exports.memory.buffer, documentPointer, document.byteLength).set(document);
+
+  // #2166: the boot's spectrum taps, staged beside the document, are the first plan's. Optional,
+  // so not a step of the published sequence.
+  if (bootCommand !== undefined) {
+    const commandPointer = Number(exports.miso_engine_web_v1_boot_command_ptr(bootCommand.byteLength));
+    if (commandPointer === 0) {
+      throw new MisoEngineError("the engine refused to stage the boot command", {
+        phase: "boot",
+        code: "invalidArgument",
+        result: constantValue("resultCodes", "invalidArgument"),
+        diagnostics: [{ code: "sdk.boot.command", path: String(bootCommand.byteLength) }],
+      });
+    }
+    new Uint8Array(exports.memory.buffer, commandPointer, bootCommand.byteLength).set(bootCommand);
+  }
 
   // 4. `boot(len)`.
   const handle = Number(exports.miso_engine_web_v1_boot(document.byteLength));

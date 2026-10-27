@@ -418,6 +418,79 @@ fn spectrum_configuration_of(
     Ok(preparation.map(|preparation| host_core::SpectrumConfiguration { preparation, hop }))
 }
 
+/// The configuration a `SPECTRUM_CONFIGURE` request sets against `model`, with every check the
+/// command runs before any write (#1594 D4), in order: the request's own rules
+/// ([`spectrum_configuration_of`]); each target names a strip or an output of `model` (`NOT_FOUND`,
+/// `spectrum.target.unknown`); no entry twice (`VALIDATION_FAILED`, `spectrum.duplicate`); every
+/// tap's reads fit the frame `limit` (#1595 R6, `LIMIT_EXCEEDED`, `spectrum.frame`). The command
+/// and the boot (#2166) both run it, so a boot accepts exactly the configurations the command does.
+fn checked_spectrum_configuration(
+    request: &protocol::SpectrumConfigureRequest,
+    model: &session::SessionModel,
+    limit: u64,
+) -> Result<Option<host_core::SpectrumConfiguration>, SpectrumRefusal> {
+    use protocol::StatusCode;
+    let configuration = spectrum_configuration_of(request)?;
+    for entry in &request.entries {
+        let id = entry.target_id.as_str();
+        let present = match entry.target_kind {
+            protocol::SpectrumTargetKind::TrackPostInput
+            | protocol::SpectrumTargetKind::TrackPostPan => {
+                model.tracks.iter().any(|track| track.id.as_str() == id)
+                    || model.submixes.iter().any(|submix| submix.id.as_str() == id)
+            }
+            protocol::SpectrumTargetKind::Output => {
+                model.outputs.iter().any(|output| output.id.as_str() == id)
+            }
+        };
+        if !present {
+            return Err(SpectrumRefusal::reply(
+                StatusCode::NotFound,
+                "spectrum.target.unknown",
+            ));
+        }
+    }
+    for (index, entry) in request.entries.iter().enumerate() {
+        if request.entries[..index].contains(entry) {
+            return Err(SpectrumRefusal::reply(
+                StatusCode::ValidationFailed,
+                "spectrum.duplicate",
+            ));
+        }
+    }
+    // #1595 R6: a tap whose one-plane one-shot read (without the window) or whose stream read
+    // (of the tap's channels) the session's frame limit cannot carry would answer
+    // `LIMIT_EXCEEDED` on every such read; it is refused here.
+    if request
+        .entries
+        .iter()
+        .any(|entry| !tap_fits(entry.channels, entry.target_id.len(), limit))
+    {
+        return Err(SpectrumRefusal::reply(
+            StatusCode::LimitExceeded,
+            "spectrum.frame",
+        ));
+    }
+    Ok(configuration)
+}
+
+/// The spectrum configuration a boot's `SPECTRUM_CONFIGURE` sets (#2166), checked as the command
+/// checks it ([`checked_spectrum_configuration`]) against the boot's model. A refusal is the
+/// boot's: one `code\t$\n` line with the command's code.
+pub(crate) fn boot_spectrum_configuration(
+    request: &protocol::SpectrumConfigureRequest,
+    model: &session::SessionModel,
+    limit: u64,
+) -> Result<Option<host_core::SpectrumConfiguration>, CompileFailure> {
+    checked_spectrum_configuration(request, model, limit).map_err(|refusal| match refusal {
+        SpectrumRefusal::Reply(_, code) => prepare_failure(host_core::PrepareDiagnostics::fixed(
+            host_core::PrepareRejection::Session,
+            &code,
+        )),
+        SpectrumRefusal::Error(_) => failure(ResourceFault::Platform),
+    })
+}
+
 /// Whether two preparations hold the same taps (form, targets and channels), whatever their
 /// budgets (#1594 D5).
 fn same_taps(
@@ -5033,49 +5106,11 @@ where
         plan: Option<&mut PlanState<A>>,
     ) -> Result<protocol::SpectrumConfigured, SpectrumRefusal> {
         use protocol::StatusCode;
-        let configuration = spectrum_configuration_of(request)?;
-        let model = self.controller.session().compiled().normalized_model();
-        for entry in &request.entries {
-            let id = entry.target_id.as_str();
-            let present = match entry.target_kind {
-                protocol::SpectrumTargetKind::TrackPostInput
-                | protocol::SpectrumTargetKind::TrackPostPan => {
-                    model.tracks.iter().any(|track| track.id.as_str() == id)
-                        || model.submixes.iter().any(|submix| submix.id.as_str() == id)
-                }
-                protocol::SpectrumTargetKind::Output => {
-                    model.outputs.iter().any(|output| output.id.as_str() == id)
-                }
-            };
-            if !present {
-                return Err(SpectrumRefusal::reply(
-                    StatusCode::NotFound,
-                    "spectrum.target.unknown",
-                ));
-            }
-        }
-        for (index, entry) in request.entries.iter().enumerate() {
-            if request.entries[..index].contains(entry) {
-                return Err(SpectrumRefusal::reply(
-                    StatusCode::ValidationFailed,
-                    "spectrum.duplicate",
-                ));
-            }
-        }
-        // #1595 R6: a tap whose one-plane one-shot read (without the window) or whose stream read
-        // (of the tap's channels) the session's frame limit cannot carry would answer
-        // `LIMIT_EXCEEDED` on every such read; it is refused here.
-        let limit = self.limits.maximum_control_frame_bytes;
-        if request
-            .entries
-            .iter()
-            .any(|entry| !tap_fits(entry.channels, entry.target_id.len(), limit))
-        {
-            return Err(SpectrumRefusal::reply(
-                StatusCode::LimitExceeded,
-                "spectrum.frame",
-            ));
-        }
+        let configuration = checked_spectrum_configuration(
+            request,
+            self.controller.session().compiled().normalized_model(),
+            self.limits.maximum_control_frame_bytes,
+        )?;
         let revision = self.controller.session().revision().0;
         let reply = |monitor: &crate::spectrum::SpectrumMonitor, plan_epoch: Option<u64>| {
             protocol::SpectrumConfigured {
@@ -9469,6 +9504,7 @@ mod tests {
                     limits,
                     Box::new(Preparer(backend)),
                     warm,
+                    None,
                 )
                 .expect("boot");
                 let boot = children

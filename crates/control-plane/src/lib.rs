@@ -66,7 +66,9 @@ mod spectrum;
 pub use adapter::{
     ControlAdapter, ControlLimits, PlanResources, TAIL_FINITE, TAIL_INFINITE, tail_words,
 };
-pub use compile::{CompiledChildren, RuntimePreparer, compile_children};
+pub use compile::{
+    CompiledChildren, RuntimePreparer, compile_children, compile_children_with_boot_command,
+};
 pub use control::{
     CommandError, EventError, EventLane, ObservationChange, ObservationForward,
     ObservationKeyError, ObservationKeyRef, ObservationLimit, ObservationRefusal,
