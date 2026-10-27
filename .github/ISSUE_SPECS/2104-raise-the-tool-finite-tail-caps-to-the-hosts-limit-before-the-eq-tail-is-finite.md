@@ -16,3 +16,40 @@ Order: before #1372 merges.
 
 ## Paths
 tools/console-workload/src/lib.rs, the audit tool cap sites, their tests, this spec.
+
+## Attempt 1 — implementation and evidence (2026-10-27)
+
+Root approved the bounded slice; Sol implements under the owner's explicit agent choice.
+The console-workload graph caps and the three audit graph cap sites now use `u64::MAX`,
+matching `host-core`. Other resource ceilings and graph compilation semantics are unchanged.
+The standalone graph_fixture cap is outside this slice: it prepares no effects.
+
+The single new regression, `tests::tool_caps_admit_a_composed_finite_delay_tail`, takes the
+canonical one-track fixture, replaces its EQ with the real default launch delay, removes EQ
+parameters/automation, and prepares the real builtins and graph through console-workload's
+`graph_caps()`. The delay's finite tail exceeds the former 10,000,000-sample ceiling. Both
+composed output-tail reports must remain finite and at least the delay's own tail.
+
+Test value: restoring the old console-workload cap rejects this finite graph with
+`graph.tail.limit`, whereas the existing console fixture tests remain masked by an infinite EQ
+tail; graph-compiler tests already own tail-composition arithmetic.
+
+All CPU-intensive checks use the shared `run-serial.sh` runner with two Cargo jobs and one
+test thread. Full logs are retained outside the worktree at
+`/home/bl/misofm/engine-work-evidence/easy-fixes-20261027/2104/`.
+
+- RED: `cargo test -p console-workload --lib tests::tool_caps_admit_a_composed_finite_delay_tail -- --exact --nocapture`
+  compiled and failed as intended with `graph.tail.limit` before changing the caps (`red.log`).
+- Formatting: `cargo fmt --package console-workload --package audit` passed (`fmt.log`).
+- INTERRUPTED: `cargo test -p console-workload -p audit` compiled both packages and passed eight
+  audit tests before root requested SIGINT during repeated debug fixture-corpus generation
+  (`audit-debug-interrupted.log`). This is not a package-suite pass. Root assigns the full audit
+  suite to the fresh verifier's single integrated release run, matching the standing CI profile.
+- GREEN: `cargo test --locked -p console-workload` has passed the library's 15 tests, including
+  the new regression, plus automation's 8 and chain_shape's 22 integration tests
+  (`green-console.log`). The broader package run is still ongoing at this checkpoint.
+- Independent adversarial review and the integrated release suite: pending with root's fresh
+  verifier.
+
+GitHub evidence/state synchronization and merged-tree verification are owned by root at the
+CI-conscious batch boundary; this local checkpoint does not claim remote completion.

@@ -332,7 +332,7 @@ fn prepared_graph(
             maximum_graph_bytes: 10_000_000,
             maximum_plan_bytes: 100_000_000,
             maximum_single_allocation_bytes: 10_000_000,
-            maximum_finite_tail_samples: 10_000_000,
+            maximum_finite_tail_samples: u64::MAX,
         },
         gain_liveness: graph_compiler::GainLiveness::FIXED,
     })
