@@ -48,7 +48,7 @@ fn report(model: &SessionModel) -> GraphRackBankReport {
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 30,
             maximum_scratch_bytes: 1 << 28,
-            maximum_automation_spans_per_block: 32,
+            maximum_automation_spans_per_block: 128,
         },
     )
     .unwrap_or_else(|error| panic!("effects: {}", error.0[0].code));

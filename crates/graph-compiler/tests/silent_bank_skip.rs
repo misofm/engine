@@ -37,20 +37,23 @@
 //! Live writes (a mid-ramp fader or trim edit, a bypass edge) are not attached here: this level
 //! compiles without live controls. The #1781 rest tests in the stage crates cover them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
+use builtins::BuiltinLaneSelector;
 use builtins_compiler::{
-    BuiltinCompileCaps, prepare_session_builtins, session_structural_symmetry,
+    BuiltinCompileCaps, TestOnlyWriteGate, TrackControlProducer, TrackControlRequest,
+    TrackInputRecord, prepare_session_builtins, prepare_session_builtins_with_live_controls,
+    session_structural_symmetry,
 };
 use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use engine::realtime::{
-    PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime, ResponseSnapshotError,
-    ResponseSnapshotOwnerInfo, ResponseSnapshotRequest, ResponseSnapshotSection,
-    ResponseSnapshotSink,
+    PlanRevisionGate, PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
+    ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotRequest,
+    ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
@@ -60,8 +63,8 @@ use graph::{
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
     Automation, AutomationOffset, AutomationSegment, AutomationShape, CompileCaps, ControlAddress,
-    Lane, Owner, ParameterUnit, RouteSource, Section, SessionModel, StableId, compile_session,
-    parse_session_json,
+    EffectParam, Lane, Owner, ParameterChannel, ParameterUnit, RouteSource, Section, SendTap,
+    SessionModel, StableId, compile_session, parse_session_json,
 };
 
 const MONO: &str = include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
@@ -343,12 +346,45 @@ struct Bound {
     /// The effect banks the compile bound: one bank-slot run each on a block every chain renders
     /// (issue #2132).
     bound_banks: u64,
+    /// Each track's live control channel, in track order, when [`Setup::live`].
+    controls: Vec<TrackControlProducer>,
+    /// The plan's revision gate, which publishes a live write, when [`Setup::live`].
+    gate: Option<PlanRevisionGate>,
 }
 
 /// Compile `model` at [`width`] the way every host does, bind every track input to its schedule,
 /// observe every track's post-matrix stage when `observed`, and arm the mono collapse as
 /// `host-core`'s prepare does.
 fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bound {
+    bind_with(model, schedules, observed, Setup::DESK)
+}
+
+/// How [`bind_with`] prepares a plan beyond [`bind`]'s defaults.
+#[derive(Clone, Copy)]
+struct Setup {
+    /// Which tracks' sources write two different planes; every other track's source writes its
+    /// left plane on both.
+    stereo: fn(usize) -> bool,
+    /// Whether every track gets a live input-lane control channel (trim, polarity, filters), as a
+    /// `Concurrent` host prepares it (issue #2142's collapse rows write a live trim through it).
+    live: bool,
+}
+
+impl Setup {
+    /// The desk of [`session`]: [`stereo`] sources, no live channel.
+    const DESK: Self = Self {
+        stereo,
+        live: false,
+    };
+}
+
+/// [`bind`] under `setup`.
+fn bind_with(
+    model: &SessionModel,
+    schedules: &[Arc<[Block]>],
+    observed: bool,
+    setup: Setup,
+) -> Bound {
     let session = compile_session(
         model,
         CompileCaps {
@@ -367,25 +403,44 @@ fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bou
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 30,
             maximum_scratch_bytes: 1 << 28,
-            maximum_automation_spans_per_block: 32,
+            maximum_automation_spans_per_block: 128,
         },
     )
     .unwrap_or_else(|error| panic!("effects: {}", error.0[0].code));
-    let builtins = prepare_session_builtins(
-        &session,
-        &[],
-        BuiltinCompileCaps {
-            maximum_total_state_bytes: u64::MAX,
-            maximum_total_retained_payload_bytes: u64::MAX,
-            maximum_total_meter_items: u64::MAX,
-            maximum_total_meter_bytes: u64::MAX,
-            maximum_single_allocation_bytes: u64::MAX,
-            maximum_meter_streams: u64::MAX,
-            maximum_period_frames: u32::MAX,
-            maximum_peak_hold_frames: u32::MAX,
-            maximum_smoothing_samples: u32::MAX,
-        },
-    )
+    let caps = BuiltinCompileCaps {
+        maximum_total_state_bytes: u64::MAX,
+        maximum_total_retained_payload_bytes: u64::MAX,
+        maximum_total_meter_items: u64::MAX,
+        maximum_total_meter_bytes: u64::MAX,
+        maximum_single_allocation_bytes: u64::MAX,
+        maximum_meter_streams: u64::MAX,
+        maximum_period_frames: u32::MAX,
+        maximum_peak_hold_frames: u32::MAX,
+        maximum_smoothing_samples: u32::MAX,
+    };
+    let builtins = if setup.live {
+        let requests: Vec<TrackControlRequest> = model
+            .tracks
+            .iter()
+            .map(|track| TrackControlRequest {
+                track_id: track.id.as_str().to_owned(),
+                superseded: builtins_compiler::LiveValuesSuperseded::default(),
+                input_lane: true,
+            })
+            .collect();
+        prepare_session_builtins_with_live_controls(
+            &session,
+            &controls::effective(
+                session.normalized_model(),
+                &controls::MonitorOverlay::default(),
+            ),
+            &[],
+            &requests,
+            caps,
+        )
+    } else {
+        prepare_session_builtins(&session, &[], caps)
+    }
     .expect("the session's builtins");
     let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         input_floors: Default::default(),
@@ -424,7 +479,7 @@ fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bou
                     let index: usize = track_id.as_str()[2..].parse().expect("chNN");
                     Box::new(TrackSource {
                         schedule: Arc::clone(&schedules[index]),
-                        stereo: stereo(index),
+                        stereo: (setup.stereo)(index),
                         seed: 17 + index as u32 * 7919,
                     })
                 }
@@ -453,14 +508,20 @@ fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bou
             sinks.push(sink);
         }
     }
-    let mut plan = artifact
+    let bound = artifact
         .into_bound(GraphRuntimeBindings {
             envelope,
             nodes,
             observers,
         })
-        .unwrap_or_else(|failure| panic!("bind: {}", failure.code))
-        .plan;
+        .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+    let controls = bound.track_controls;
+    let mut plan = bound.plan;
+    let gate = if setup.live {
+        plan.take_revision_gate()
+    } else {
+        None
+    };
     let mono_source: std::collections::BTreeSet<Box<str>> = session_structural_symmetry(&session)
         .into_iter()
         .filter(|(_, witness)| witness.eligible())
@@ -474,6 +535,8 @@ fn bind(model: &SessionModel, schedules: &[Arc<[Block]>], observed: bool) -> Bou
         pack: true,
         sinks,
         bound_banks,
+        controls,
+        gate,
     }
 }
 
@@ -895,8 +958,8 @@ fn a_refused_pack_is_not_retried() {
     let probe = bind(&session(first_sixteen), &silent, false);
     let groups = graph::test_only_pack_groups(&probe.plan);
     assert_eq!(groups.len(), 1, "one pack group: {groups:?}");
-    let (first, last, lanes) = groups[0];
-    let span = u64::from(last - first + 1) * u64::from(lanes);
+    let lanes = groups[0].width;
+    let span = groups[0].chains.len() as u64 * u64::from(lanes);
     drop(probe);
     let wide: Playing = if lanes == 8 {
         |track| track == 0 || track >= 16
@@ -966,7 +1029,7 @@ fn resting_second_bank(model: &mut SessionModel) {
 // ---- Gate 3 (issue #1782a) ----------------------------------------------------------------------
 
 /// Where each grouped track renders, as `(unit, lane)`, read from the plan itself: each pack
-/// group `graph::test_only_pack_groups` reports is `(first unit, last unit, lanes per unit)`, and
+/// group `graph::test_only_pack_groups` reports lists its lane chains (one unit each here), and
 /// each of its units' `PlanUnitEligibility::lane_tracks` names the track bind put on each lane
 /// (its home). A track in no group is `None` and never moves.
 ///
@@ -992,8 +1055,12 @@ impl Placement {
         let rows = plan.unit_eligibility();
         let mut at = vec![None; TRACKS];
         let mut group = vec![None; TRACKS];
-        for (index, &(first, last, _)) in groups.iter().enumerate() {
-            for unit in first as usize..=last as usize {
+        for (index, pack) in groups.iter().enumerate() {
+            assert!(
+                pack.chains.iter().all(|chain| chain.len() == 1),
+                "the session splits no strip"
+            );
+            for unit in pack.chains.iter().map(|chain| chain[0] as usize) {
                 let row = rows
                     .iter()
                     .find(|row| row.unit as usize == unit)
@@ -1119,8 +1186,15 @@ struct Pair {
 }
 
 fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
-    let mut before = bind(model, schedules, true);
-    let mut after = bind(model, schedules, true);
+    carried_pair_with(model, schedules, Setup::DESK)
+}
+
+/// [`carried_pair`] under `setup`, for `model`'s tracks.
+fn carried_pair_with(model: &SessionModel, schedules: &[Arc<[Block]>], setup: Setup) -> Pair {
+    let tracks = model.tracks.len();
+    let all_strips = tracks + model.submixes.len();
+    let mut before = bind_with(model, schedules, true, setup);
+    let mut after = bind_with(model, schedules, true, setup);
     graph::install_carry_program(
         &mut after.plan,
         graph::GraphCarryProgram {
@@ -1142,7 +1216,7 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
             predecessor: inputs[&strip],
         })
         .collect();
-    assert_eq!(input_moves.len(), TRACKS, "every input section carries");
+    assert_eq!(input_moves.len(), all_strips, "every input section carries");
     graph::install_builtin_input_carry(&mut after.plan, input_moves).expect("input carry");
     let strips: BTreeMap<_, _> = graph::builtin_strip_lanes(&mut before.plan)
         .expect("a graph plan")
@@ -1161,7 +1235,7 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
         .collect();
     assert_eq!(
         strip_moves.len(),
-        2 * TRACKS,
+        2 * all_strips,
         "every fader and matrix carries"
     );
     graph::install_builtin_strip_carry(&mut after.plan, strip_moves).expect("strip carry");
@@ -1180,7 +1254,7 @@ fn carried_pair(model: &SessionModel, schedules: &[Arc<[Block]>]) -> Pair {
         .collect();
     assert_eq!(effect_moves.len(), effects.len(), "every effect carries");
     assert!(
-        effect_moves.len() >= 3 * TRACKS,
+        effect_moves.len() >= 3 * tracks,
         "every console effect carries"
     );
     graph::install_effect_carry(&mut after.plan, effect_moves, 0).expect("effect carry");
@@ -1337,4 +1411,598 @@ fn gate_three(model: &SessionModel, inserts: bool) {
             }
         }
     }
+}
+
+// ---- Issue #2142: a split strip packs as one strip -------------------------------------------
+
+const C1: &str = include_str!("../../../fixtures/session/v1/console-c1-16.json");
+
+/// The C1 console at 16 tracks (issue #2132's fixture) in its `AllActive` state: every console
+/// slot of every strip and the master's limiter un-bypassed. Its two muted post-fader sends per
+/// track split every track strip at the fader: part one is the fused input-to-fader chain, part two
+/// the matrix, which gathers part one's lanes through its producer row.
+fn c1_all_active() -> SessionModel {
+    let mut model = parse_session_json(C1).expect("the C1 fixture parses");
+    for track in &mut model.tracks {
+        for entry in &mut track.console {
+            entry.bypass = false;
+        }
+    }
+    for submix in &mut model.submixes {
+        for entry in &mut submix.console {
+            entry.bypass = false;
+        }
+        for effect in &mut submix.inserts.effects {
+            if effect.id.as_str() == "limiter" {
+                effect.bypass = false;
+            }
+        }
+    }
+    model
+}
+
+/// [`c1_all_active`] with every track mono-mapped, so every track bank is collapse-armed, and the
+/// sends tapped at the insert send instead: part one is the input section and the pre-insert slots,
+/// part two the post-insert slot, the fader and the matrix, whose collapse prefix is not empty. So
+/// part two's collapse reads its producer row: whether part one rendered identical planes.
+fn c1_collapse_armed() -> SessionModel {
+    let mut model = c1_all_active();
+    for track in &mut model.tracks {
+        track.right_source_channel = track.left_source_channel;
+    }
+    for route in &mut model.routes {
+        if let RouteSource::Track { tap, .. } = &mut route.source
+            && *tap == SendTap::PostFader
+        {
+            *tap = SendTap::InsertSend;
+        }
+    }
+    model
+}
+
+/// A block by which C1's silent strips are packed and their chains skip: a fresh gate lane at its
+/// defaults reports rest only after about 348 blocks of silence (its release from the open state;
+/// the chain holds the lane until then), then [`PACK_IDLE_BLOCKS`](graph) = 16 more blocks, then
+/// one pack step. Measured at eight lanes: the track group first runs its ideal at block 363.
+const C1_PACKED: usize = 400;
+
+/// #2132's `Sparse` input: every odd track exact `+0.0`, every even track playing, for `blocks`
+/// blocks (one schedule per [`TRACKS`] slot; C1 reads the first 16).
+fn c1_sparse(blocks: usize) -> Vec<Arc<[Block]>> {
+    c1_input(blocks, |track| track % 2 == 1)
+}
+
+/// Every track for which `silent` holds exact `+0.0`, every other track playing, for `blocks`
+/// blocks.
+fn c1_input(blocks: usize, silent: fn(usize) -> bool) -> Vec<Arc<[Block]>> {
+    (0..TRACKS)
+        .map(|track| {
+            let kind = if silent(track) {
+                Block::Silence
+            } else {
+                Block::Signal(0.05)
+            };
+            vec![kind; blocks].into()
+        })
+        .collect()
+}
+
+/// The pack group that holds the track banks, if any, and every bank unit that renders a track.
+fn track_group(plan: &PreparedRenderPlan) -> (Option<graph::TestOnlyPackGroup>, BTreeSet<u32>) {
+    let track_units: BTreeSet<u32> = plan
+        .unit_eligibility()
+        .iter()
+        .filter(|row| row.banked && row.lane_tracks.iter().any(|track| track.starts_with("ch")))
+        .map(|row| row.unit)
+        .collect();
+    let group = graph::test_only_pack_groups(plan)
+        .into_iter()
+        .find(|group| {
+            group
+                .chains
+                .iter()
+                .flatten()
+                .any(|unit| track_units.contains(unit))
+        });
+    (group, track_units)
+}
+
+/// Issue #2142 gate 1: on C1 at 16 tracks, every track's two units are in one pack group, two
+/// units per lane chain and `ceil(16 / W)` chains; and on the `Sparse` state the track group's
+/// bank-slot runs fall from every chain's (`slots x ceil(16 / W)` per block) to the per-key-class
+/// ideal `slots x ceil(8 / W)` (one bank per slot at eight lanes, two at four) once the silent strips
+/// rest, are packable ([`PACK_IDLE_BLOCKS`](graph) = 16 blocks later) and one pack step has run
+/// ([`C1_PACKED`]).
+///
+/// Test value: red when a send keeps a console strip out of packing -- a producer row or a resident
+/// pairing treated as a reason to leave both units ungrouped (#1981's `pack_member_eligible`), so
+/// no C1 track bank packs -- which no other test reaches: #1981's rows use sessions without sends.
+#[test]
+fn a_split_strip_packs_as_one_strip() {
+    let model = c1_all_active();
+    let tracks = model.tracks.len();
+    let blocks = C1_PACKED + 16;
+    let mut bound = bind_with(
+        &model,
+        &c1_sparse(blocks),
+        false,
+        Setup {
+            stereo: |_| true,
+            live: false,
+        },
+    );
+    let (group, track_units) = track_group(&bound.plan);
+    let group = group.expect("the track banks are in a pack group");
+    let lanes = group.width as usize;
+    assert_eq!(
+        group.chains.len(),
+        tracks.div_ceil(lanes),
+        "ceil(16 / W) lane chains: {group:?}"
+    );
+    assert!(
+        group.chains.iter().all(|chain| chain.len() == 2),
+        "two units per chain, the strip split at the fader: {group:?}"
+    );
+    let grouped: BTreeSet<u32> = group.chains.iter().flatten().copied().collect();
+    assert_eq!(grouped, track_units, "every track unit is in the group");
+    let first = *grouped.first().expect("a grouped unit");
+    let runs = |plan: &mut PreparedRenderPlan| {
+        let row = graph::test_only_bank_slot_runs(plan)
+            .into_iter()
+            .find(|row| row.first_unit == first)
+            .expect("the group's bank-slot row");
+        (row.runs, u64::from(row.effect_slots))
+    };
+    let mut pcm = vec![0.0_f32; bound.frames * 2];
+    let mut per_block = Vec::with_capacity(blocks);
+    let mut slots = 0;
+    for block in 0..blocks as u64 {
+        let (before, _) = runs(&mut bound.plan);
+        bound.render(block, true, &mut pcm);
+        let (after, effect_slots) = runs(&mut bound.plan);
+        slots = effect_slots;
+        per_block.push(after - before);
+    }
+    let every_chain = slots * tracks.div_ceil(lanes) as u64;
+    let ideal = slots * (tracks / 2).div_ceil(lanes) as u64;
+    assert_eq!(
+        per_block[1], every_chain,
+        "before the silent strips are packable every chain renders: {per_block:?}"
+    );
+    assert!(
+        per_block[C1_PACKED..].iter().all(|&runs| runs == ideal),
+        "packed, the group runs the per-key-class ideal {ideal} per block: {per_block:?}"
+    );
+    assert!(bound.lane_moves() > 0, "strips moved");
+}
+
+/// `ch10`: a playing strip of the second chain at both widths, which the packer moves into a lower
+/// chain (with `ch08`, `ch12` and `ch14`) once the odd strips are packable.
+const SPLIT_MOVED: &str = "ch10";
+
+/// The block before which [`SPLIT_MOVED`]'s right-channel trim moves live: after the packer moved
+/// it, so the chain that renders it then is not its home chain.
+const SPLIT_TRIM: u64 = C1_PACKED as u64;
+
+/// Write [`SPLIT_MOVED`]'s right-channel trim to -6 dB through its live input lane: from then on its
+/// two channels differ, while every other strip's agree.
+fn trim_moved_strip(bound: &mut Bound) {
+    let Bound { controls, gate, .. } = bound;
+    let input = controls
+        .iter_mut()
+        .find(|channel| &*channel.track_id == SPLIT_MOVED)
+        .and_then(|channel| channel.input.as_mut())
+        .expect("the moved strip's input lane");
+    gate.as_mut()
+        .expect("the plan's gate")
+        .write_published(|stamp| {
+            input.write(
+                stamp,
+                TrackInputRecord::TrimDb {
+                    lanes: BuiltinLaneSelector::Right,
+                    db: -6.0,
+                    smoothing_samples: 64,
+                },
+            );
+        });
+}
+
+/// Render `model` twice over `input` ([`c1_input`]), packing and not packing, with every track
+/// collapse-armed and [`SPLIT_MOVED`]'s right trim moved live before [`SPLIT_TRIM`]; every block's
+/// host words and every track's post-matrix words must agree by `to_bits`, NaNs folded. `moves`:
+/// whether the packer must have moved strips by then, if the caller knows. Returns the packing
+/// plan, rendered, for the caller's own checks.
+fn split_strip_differential(
+    model: &SessionModel,
+    silent: fn(usize) -> bool,
+    moves: Option<bool>,
+) -> Bound {
+    let blocks = C1_PACKED + 32;
+    let schedules = c1_input(blocks, silent);
+    let setup = Setup {
+        stereo: |_| false,
+        live: true,
+    };
+    let mut packed = bind_with(model, &schedules, true, setup);
+    let mut unpacked = bind_with(model, &schedules, true, setup);
+    unpacked.pack = false;
+    let frames = packed.frames;
+    let mut packed_pcm = vec![0.0_f32; frames * 2];
+    let mut unpacked_pcm = vec![0.0_f32; frames * 2];
+    for block in 0..blocks as u64 {
+        if block == SPLIT_TRIM {
+            if let Some(moves) = moves {
+                assert_eq!(
+                    packed.displaced() > 0,
+                    moves,
+                    "whether the packer moved strips before the trim"
+                );
+            }
+            trim_moved_strip(&mut packed);
+            trim_moved_strip(&mut unpacked);
+        }
+        packed.render(block, true, &mut packed_pcm);
+        unpacked.render(block, true, &mut unpacked_pcm);
+        for (index, (a, b)) in packed_pcm.iter().zip(&unpacked_pcm).enumerate() {
+            assert_eq!(
+                fold_nan(a.to_bits()),
+                fold_nan(b.to_bits()),
+                "block {block}: host word {index} differs ({a:e} packed, {b:e} unpacked)"
+            );
+        }
+    }
+    let moved = model
+        .tracks
+        .iter()
+        .position(|track| track.id.as_str() == SPLIT_MOVED)
+        .expect("the moved strip");
+    for (track, (a, b)) in packed.sinks.iter().zip(&unpacked.sinks).enumerate() {
+        let a = a.lock().expect("capture");
+        let b = b.lock().expect("capture");
+        assert_eq!(a.len(), b.len(), "ch{track:02}: observed lengths");
+        for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                fold_nan(*x),
+                fold_nan(*y),
+                "ch{track:02}: post-matrix word {index} differs"
+            );
+        }
+        if track == moved && moves == Some(true) {
+            let block = 2 * frames;
+            let last = &a[a.len() - block..];
+            assert_ne!(
+                last[..frames],
+                last[frames..],
+                "the moved strip's two channels differ after its trim"
+            );
+        }
+    }
+    for bound in [&packed, &unpacked] {
+        assert!(
+            bound.plan.bank_collapse_counters()[0] > 0,
+            "the plan collapses: the armed rows are live"
+        );
+    }
+    packed
+}
+
+/// Issue #2142 gate 2: a packed plan renders the bits of its unpacked twin when the moved strip is
+/// split, collapse-armed, and its two channels come to differ after the move. The strip split at
+/// the insert send has a part two whose collapse prefix is not empty, so part two collapses on a
+/// block whose producer row says part one rendered identical planes: a row that asks the wrong
+/// unit would collapse the moved strip's differing channels.
+///
+/// Test value: red when a pack moves a split strip's bits or collapses channels that differ: a
+/// move that trades part one only (part two's row then asks a chain of silent strips, which skips,
+/// and collapses the moved strip's differing planes) or part two only (it asks the unmoved strip's
+/// first chain, which collapses). Trading every unit needs no row translation, which is the rule.
+#[test]
+fn a_packed_split_strip_renders_the_bits_of_an_unpacked_one() {
+    let model = c1_collapse_armed();
+    let mut probe = bind_with(
+        &model,
+        &c1_sparse(1),
+        false,
+        Setup {
+            stereo: |_| false,
+            live: true,
+        },
+    );
+    let (group, _) = track_group(&probe.plan);
+    let group = group.expect("the track banks are in a pack group");
+    let rows = probe.plan.unit_eligibility();
+    for chain in &group.chains {
+        assert_eq!(
+            chain.len(),
+            2,
+            "the strip splits at the insert send: {group:?}"
+        );
+        let later = rows
+            .iter()
+            .find(|row| row.unit == chain[1])
+            .expect("part two's row");
+        assert!(
+            later.armed_on_input,
+            "part two collapses on its producer row's proof"
+        );
+    }
+    // Both rows hold effect slots here (part two has the drive): each row's units count that row's
+    // slots, so the rows' counts sum to the banks the compile bound (issue #2132's relation).
+    let counted: u64 = graph::test_only_bank_slot_runs(&mut probe.plan)
+        .iter()
+        .map(|row| u64::from(row.effect_slots) * u64::from(row.last_unit - row.first_unit + 1))
+        .sum();
+    assert_eq!(
+        counted, probe.bound_banks,
+        "every bank-slot row counts its own row's slots once per unit"
+    );
+    drop(probe);
+    let packed = split_strip_differential(&model, |track| track % 2 == 1, Some(true));
+    assert!(packed.lane_moves() > 0, "strips moved");
+}
+
+/// Issue #2142 gate 3: a per-node insert ends a lane chain on both sides. Every track of the
+/// collapse-armed C1 carries a per-node delay insert between its pre-insert and post-insert slots:
+/// its pre bank packs, and each delay op's input term (#1899), which a later bank's collapse
+/// reads, must ask the unit that renders its strip **now**; the bank after the delays, whose row
+/// names the ops, stays in no group. The moved strip's trim makes its pre bank's planes differ
+/// after the move, and the packed plan must still render its unpacked twin's bits.
+///
+/// Test value: red when a per-node insert loses or misreads its collapse proof under packing: an
+/// op row read at the strip's home unit asks a chain of silent strips that skips, keeps the delay's
+/// agreement, and the bank after it collapses the moved strip's differing planes.
+#[test]
+fn a_per_node_insert_reads_the_moved_strip() {
+    let mut model = c1_collapse_armed();
+    let delay = model
+        .submixes
+        .iter()
+        .find(|submix| submix.id.as_str() == "aux.a")
+        .and_then(|submix| submix.inserts.effects.first())
+        .cloned()
+        .map(|mut delay| {
+            // A 1 ms line, so the trimmed words reach the post-matrix tap within the run.
+            delay.params.push(EffectParam {
+                parameter_id: 1,
+                channel: ParameterChannel::Both,
+                unit: ParameterUnit::Milliseconds,
+                value: 1.0,
+            });
+            delay
+        })
+        .expect("aux A's delay insert");
+    for track in &mut model.tracks {
+        track.inserts.effects.push(delay.clone());
+    }
+    let probe = bind_with(
+        &model,
+        &c1_sparse(1),
+        false,
+        Setup {
+            stereo: |_| false,
+            live: true,
+        },
+    );
+    let (group, track_units) = track_group(&probe.plan);
+    let group = group.expect("the pre banks are in a pack group");
+    assert!(
+        group.chains.iter().all(|chain| chain.len() == 1),
+        "the delay ends each pre bank's chain: {group:?}"
+    );
+    let grouped: BTreeSet<u32> = group.chains.iter().flatten().copied().collect();
+    let pack_groups = graph::test_only_pack_groups(&probe.plan);
+    for unit in track_units.difference(&grouped) {
+        assert!(
+            pack_groups.iter().all(|group| !group
+                .chains
+                .iter()
+                .flatten()
+                .any(|other| other == unit)),
+            "unit {unit}, after the delay ops, is in no group"
+        );
+    }
+    drop(probe);
+    let packed = split_strip_differential(&model, |track| track % 2 == 1, Some(true));
+    assert!(packed.lane_moves() > 0, "strips moved");
+}
+
+/// Issue #2142 gate 1a, the layout term: C1, collapse-armed, with its sends tapped after the input
+/// section. Part one is then the input section alone, and the second chain's part one writes its
+/// outputs into the buffers the first chain's part one gathered its inputs from: the colouring
+/// recycles them, since the first chain has read them by then (at eight lanes; the four-lane plan's
+/// colouring is its own). A move would have a strip written by an earlier unit overwrite an input a
+/// later unit still gathers, so such chains form no group, and the packing plan renders its
+/// unpacked twin's bits whatever the width.
+///
+/// Test value: red when a group forms over a buffer that holds two values in its span (the
+/// "inputs are never written" term of `group_layout_holds` dropped): a moved strip's part one
+/// overwrites a bank mate's input and the packed plan's bits move, which none of the other rows
+/// reaches, because the colouring recycles no group buffer there.
+#[test]
+fn a_recycled_buffer_keeps_its_strips_apart() {
+    let mut model = c1_collapse_armed();
+    for route in &mut model.routes {
+        if let RouteSource::Track { tap, .. } = &mut route.source
+            && *tap == SendTap::InsertSend
+        {
+            *tap = SendTap::PostInput;
+        }
+    }
+    // The first chain's odd strips silent, every other strip playing: at eight lanes the second
+    // chain's strips move into the first chain's silent lanes, and a strip moved into the first
+    // chain writes a buffer a displaced strip still gathers from.
+    split_strip_differential(&model, |track| track < 8 && track % 2 == 1, None);
+}
+
+/// Issue #2142 gate 4: on C1 at 16 tracks, a move of a split strip (both units of both lane chains)
+/// allocates and frees nothing on the render thread, made by hand or by the packer, and neither
+/// does the carry out of a displaced split-strip group (`restore_home_lanes` walks the chains) or
+/// any block between.
+///
+/// Test value: red when a chain swap, the walk home over lane chains or a displaced split group's
+/// render allocates, which the eight-track desk's allocation gate (#1981) cannot reach: its strips
+/// are not split.
+#[test]
+fn a_split_strip_move_allocates_nothing() {
+    let model = c1_all_active();
+    let blocks = 48;
+    let setup = Setup {
+        stereo: |_| true,
+        live: false,
+    };
+    let Pair {
+        mut before,
+        mut after,
+    } = carried_pair_with(&model, &c1_sparse(blocks), setup);
+    let (group, _) = track_group(&before.plan);
+    let group = group.expect("the track banks are in a pack group");
+    assert!(group.chains.iter().all(|chain| chain.len() == 2));
+    // Two strips of the second chain trade with two of the first, named by their part-one units.
+    let (low, high) = (group.chains[0][0] as usize, group.chains[1][0] as usize);
+    let moves = [((low, 1), (high, 0)), ((low, 3), (high, 2))];
+    let mut pcm = vec![0.0_f32; before.frames * 2];
+    assert_installed();
+    let swap = 24;
+    before.pack = false;
+    for block in 0..blocks as u64 {
+        let bound = if block < swap {
+            &mut before
+        } else {
+            &mut after
+        };
+        let mark = current_thread_counters();
+        if block == 10 || block == swap + 4 {
+            for (a, b) in moves {
+                assert!(
+                    graph::test_only_swap_bank_lanes(&mut bound.plan, a, b),
+                    "block {block}: {a:?} and {b:?} trade"
+                );
+            }
+        }
+        if block == swap {
+            assert!(
+                before.displaced() > 0,
+                "the predecessor is displaced at the swap"
+            );
+            assert_eq!(
+                after.plan.adopt_predecessor_plan(&mut before.plan),
+                engine::realtime::CarryOutcome::Carried,
+                "the successor takes the carry"
+            );
+        }
+        let bound = if block < swap {
+            &mut before
+        } else {
+            &mut after
+        };
+        bound.render(block, true, &mut pcm);
+        let delta = current_thread_delta_since(mark);
+        if block >= 10 {
+            assert_eq!(
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (0, 0, 0),
+                "block {block}: a split strip's move, carry or displaced block allocated or freed"
+            );
+        }
+    }
+    assert!(
+        after.lane_moves() > 0,
+        "the successor's packer moved the displaced strips home"
+    );
+    assert_eq!(after.displaced(), 0, "the successor is home again");
+}
+
+/// Issue #2142: the packer's fact path writes nothing for a first-row unit whose lanes are all
+/// unquiet and whose idle counts are all zero (the load state's every block). A strip that plays
+/// again after it was packed must still reset its count, in two cases on C1 at 16 tracks:
+///
+/// * `Sparse` packs by [`C1_PACKED`]; then every strip plays, every strip is running, and the
+///   packer takes the group home within a few blocks;
+/// * only `ch01` is silent, so the packer trades it with a playing strip of the second chain, a
+///   unit whose every strip played until then; `ch01` plays from the very block of that move. The
+///   unit that now renders it must count its idle down, and the group goes home.
+///
+/// Test value: red when the write-nothing path hides a count that must fall to zero -- taken on
+/// every unquiet block, or (the second case) taken by a unit a move just filled with a strip whose
+/// count is not zero -- so the strip that plays again stays packable, the displaced strips never
+/// trade home, and the group pays the displaced fold and a lost skip with no bit to show it.
+#[test]
+fn a_strip_that_plays_again_is_not_packable() {
+    let model = c1_all_active();
+    let setup = Setup {
+        stereo: |_| true,
+        live: false,
+    };
+    let schedules = |blocks: usize, silent: &dyn Fn(usize, usize) -> bool| -> Vec<Arc<[Block]>> {
+        (0..TRACKS)
+            .map(|track| {
+                (0..blocks)
+                    .map(|block| {
+                        if silent(track, block) {
+                            Block::Silence
+                        } else {
+                            Block::Signal(0.05)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            })
+            .collect()
+    };
+    // Case 1: every strip plays again.
+    let blocks = C1_PACKED + 24;
+    let mut bound = bind_with(
+        &model,
+        &schedules(blocks, &|track, block| track % 2 == 1 && block < C1_PACKED),
+        false,
+        setup,
+    );
+    let mut pcm = vec![0.0_f32; bound.frames * 2];
+    for block in 0..blocks as u64 {
+        if block == C1_PACKED as u64 {
+            assert!(
+                bound.displaced() > 0,
+                "the group is packed before the strips play"
+            );
+        }
+        bound.render(block, true, &mut pcm);
+    }
+    assert_eq!(
+        bound.displaced(),
+        0,
+        "every strip plays again, so the packer took the group home"
+    );
+    // Case 2: find the block whose top moves `ch01`, then play it from that block on.
+    let blocks = C1_PACKED + 24;
+    let silent_alone = |track: usize, _: usize| track == 1;
+    let mut probe = bind_with(&model, &schedules(blocks, &silent_alone), false, setup);
+    let mut moved = None;
+    for block in 0..blocks as u64 {
+        probe.render(block, true, &mut pcm);
+        if probe.lane_moves() > 0 {
+            moved = Some(block as usize);
+            break;
+        }
+    }
+    let moved = moved.expect("the packer moves ch01");
+    let mut bound = bind_with(
+        &model,
+        &schedules(blocks, &|track, block| track == 1 && block < moved),
+        false,
+        setup,
+    );
+    for block in 0..blocks as u64 {
+        bound.render(block, true, &mut pcm);
+        if block == moved as u64 {
+            assert!(
+                bound.displaced() > 0,
+                "ch01 moved at the top of block {moved}"
+            );
+        }
+    }
+    assert_eq!(
+        bound.displaced(),
+        0,
+        "ch01 plays from the block it moved, so the packer took it home"
+    );
 }

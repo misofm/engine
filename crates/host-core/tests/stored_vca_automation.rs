@@ -37,7 +37,6 @@ fn caps(model: &SessionModel) -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: 32 * model.quantum_frames,
-        maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
         maximum_submixes: 100,
         maximum_vcas: 100,

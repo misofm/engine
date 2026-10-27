@@ -272,6 +272,8 @@ struct Rendered {
     nodes: BTreeMap<(String, String), Vec<u32>>,
     /// The session output's words.
     output: Vec<u32>,
+    /// Blocks the plan's per-node live effects skipped settled bypassed (issue #2129 D7).
+    node_bypass_skips: u64,
 }
 
 /// Compile `model` at `dispatch`, optionally with today's lowering, and render it.
@@ -322,7 +324,7 @@ fn render_prepared(
         EffectCompileCaps {
             maximum_total_state_bytes: 1 << 30,
             maximum_scratch_bytes: 1 << 28,
-            maximum_automation_spans_per_block: 32,
+            maximum_automation_spans_per_block: 128,
         },
     )
     .expect("prepared effects");
@@ -414,6 +416,7 @@ fn render_prepared(
         .expect("render");
         output.extend(pcm.iter().map(|sample| sample.to_bits()));
     }
+    let node_bypass_skips = graph::test_only_node_bypass_skips(&plan);
     drop(plan);
     let nodes = sinks
         .into_iter()
@@ -429,6 +432,7 @@ fn render_prepared(
         banks,
         nodes,
         output,
+        node_bypass_skips,
     }
 }
 
@@ -516,7 +520,7 @@ fn a_mixed_bypass_cohort_binds_one_bank_per_slot() {
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 30,
                 maximum_scratch_bytes: 1 << 28,
-                maximum_automation_spans_per_block: 32,
+                maximum_automation_spans_per_block: 128,
             },
         )
         .expect("prepared effects");
@@ -807,8 +811,9 @@ fn a_mixed_bypass_multiband_cohort_binds_one_bank() {
 /// (D7); its bank-mates are fed music. Every other track's taps equal the same cohort with track 0
 /// fed music too. With the whole-bank recovery back (D1 reverted), the hot lane zeroes its
 /// bank-mates' blocks and this turns red. That the feed trips D7 is shown at `Scalar`, where track
-/// 0 renders per node through [`CountRecoveries`]: banking never changes a lane's bits, so its
-/// lane in the bank trips on the same blocks.
+/// 0, enabled, renders per node through [`CountRecoveries`]: a bypassed lane's wet path in a bank
+/// that runs is an enabled instance's (banking never changes a lane's bits), so it trips on the
+/// same blocks. (A per-node instance settled bypassed runs no wet path at all, #2129 D7.)
 #[test]
 fn a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged() {
     const TRACKS: usize = 8;
@@ -841,13 +846,14 @@ fn a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged() {
     assert_eq!(compared, 2 * (TRACKS - 1));
     let recovered = Arc::new(AtomicU64::new(0));
     let feed = |track| if track == HOT { Feed::Hot } else { Feed::Music };
-    render_prepared(&model, Backend::Scalar, &feed, &mut |effects| {
+    let enabled = multiband_console(TRACKS, MASK & !(1 << HOT));
+    render_prepared(&enabled, Backend::Scalar, &feed, &mut |effects| {
         let entry = effects
             .entries
             .iter_mut()
             .find(|entry| entry.track_id == format!("ch{HOT:02}"))
             .expect("the hot track's multiband");
-        assert!(entry.initial_bypass && !entry.metadata.bypass);
+        assert!(!entry.initial_bypass && !entry.metadata.bypass);
         let inner = std::mem::replace(&mut entry.processor, Box::new(Inert));
         entry.processor = Box::new(CountRecoveries {
             inner,
@@ -902,20 +908,22 @@ impl PreparedNativeEffect for CountRecoveries {
     }
 }
 
-/// Issue #1339, gate 1: a session-bypassed delay passes its dry block bit for bit, also on the
-/// blocks where its own feedback ring trips its block-boundary check.
+/// Issue #1339, gate 1, and #2129 D7: a session-bypassed delay and a session-bypassed reverb
+/// pass their dry block bit for bit and run no wet path, also on a feed that would trip the
+/// delay's feedback ring.
 ///
-/// One track with one bypassed `miso.delay` insert (1 ms, feedback `0.95`, damping `0`, mix `1`),
-/// fed [`Feed::Trip`]: `9e29` builds the ring past `1e30`, D7 recovers the wet path and zeroes it,
-/// and the per-node shunt copies the dry block over it. Every track stage and the session output
-/// must equal the same session with the insert removed, at the host's width and at `Scalar`.
+/// One track with a bypassed `miso.delay` insert (1 ms, feedback `0.95`, damping `0`, mix `1`)
+/// then a bypassed `miso.reverb` at its defaults, fed [`Feed::Trip`]: `9e29` would build the
+/// delay's ring past `1e30`. Each renders per node settled bypassed from its first block, so each
+/// block skips `capture` and `process` (no D7 check runs, decision 15 E4). Every track stage and
+/// the session output must equal the same session with the inserts removed, at the host's width
+/// and at `Scalar`, and both instances skip every block.
 ///
-/// Red mutations: keep the delay's prepared bypass -> the
-/// lowering precondition (`!entry.metadata.bypass`) fails, and with that precondition removed the
-/// bit assertion fails, because its D7 zeroes the tripped dry blocks; build no per-node shunt for
-/// a never-banked effect -> the wet runaway reaches the output.
+/// Red mutations: keep the delay's prepared bypass -> the lowering precondition
+/// (`!entry.metadata.bypass`) fails; build no per-node shunt for a never-banked effect -> the wet
+/// runaway reaches the output; drop the per-node skip -> no block is counted.
 #[test]
-fn a_bypassed_delay_passes_its_dry_block_when_its_ring_trips() {
+fn a_bypassed_delay_and_reverb_skip_their_wet_path_and_pass_their_dry_block() {
     use session::{EffectParam, EffectQuality, LinkMode, ParameterChannel, ParameterUnit};
     let mut bare = console(1, [0, 0, 0]);
     identity_inputs(&mut bare);
@@ -931,49 +939,56 @@ fn a_bypassed_delay_passes_its_dry_block_when_its_ring_trips() {
         unit,
         value,
     };
-    let mut delayed = bare.clone();
-    delayed.tracks[0].inserts.effects = vec![session::Effect {
-        id: StableId::parse("dly").expect("effect id"),
+    let insert = |id: &str, effect_id: &str, params| session::Effect {
+        id: StableId::parse(id).expect("effect id"),
         identity: EffectIdentity::Native {
-            effect_id: StableId::parse("miso.delay").expect("delay id"),
+            effect_id: StableId::parse(effect_id).expect("native id"),
         },
         quality: EffectQuality::Normal,
         bypass: true,
         link_mode: LinkMode::DualMono,
-        params: vec![
-            param(1, ParameterUnit::Milliseconds, 1.0),
-            param(2, ParameterUnit::Linear, 0.95),
-            param(3, ParameterUnit::Linear, 0.0),
-            param(4, ParameterUnit::Linear, 1.0),
-        ],
+        params,
         sidechain: session::SidechainDeclaration::None,
-    }];
+    };
+    let mut bypassed = bare.clone();
+    bypassed.tracks[0].inserts.effects = vec![
+        insert(
+            "dly",
+            "miso.delay",
+            vec![
+                param(1, ParameterUnit::Milliseconds, 1.0),
+                param(2, ParameterUnit::Linear, 0.95),
+                param(3, ParameterUnit::Linear, 0.0),
+                param(4, ParameterUnit::Linear, 1.0),
+            ],
+        ),
+        insert("rvb", "miso.reverb", Vec::new()),
+    ];
     for dispatch in [Backend::current(), Backend::Scalar] {
         let what = format!("{dispatch:?}");
         let expected = render_with(&bare, dispatch, Lowering::Session, &|_| Feed::Trip);
-        let recovered = Arc::new(AtomicU64::new(0));
-        let actual = render_prepared(&delayed, dispatch, &|_| Feed::Trip, &mut |effects| {
-            let [entry] = effects.entries.as_mut_slice() else {
-                panic!("{what}: one delay entry");
-            };
-            assert!(entry.initial_bypass && !entry.metadata.bypass);
-            let inner = std::mem::replace(&mut entry.processor, Box::new(Inert));
-            entry.processor = Box::new(CountRecoveries {
-                inner,
-                recovered: Arc::clone(&recovered),
-            });
+        let actual = render_prepared(&bypassed, dispatch, &|_| Feed::Trip, &mut |effects| {
+            assert_eq!(effects.entries.len(), 2, "{what}: the delay and the reverb");
+            for entry in &effects.entries {
+                assert!(entry.initial_bypass && !entry.metadata.bypass);
+            }
         });
-        assert_same_bits(&format!("{what} bypassed delay"), &actual, &expected);
-        assert!(
-            recovered.load(Ordering::Relaxed) >= 1,
-            "{what}: the delay's ring never tripped, so the case proves nothing"
+        assert_same_bits(
+            &format!("{what} bypassed delay and reverb"),
+            &actual,
+            &expected,
+        );
+        assert_eq!(
+            actual.node_bypass_skips,
+            2 * BLOCKS,
+            "{what}: both instances skip every block"
         );
         let frames = expected.output.len() / BLOCKS as usize;
         assert!(
             expected.output[..4 * frames]
                 .iter()
                 .any(|word| f32::from_bits(*word) != 0.0),
-            "{what}: the tripped blocks carry an audible dry signal"
+            "{what}: the blocks carry an audible dry signal"
         );
     }
 }

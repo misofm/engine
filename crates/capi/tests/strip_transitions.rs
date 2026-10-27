@@ -160,7 +160,7 @@ fn limits() -> CompileLimits {
     CompileLimits {
         struct_size: COMPILE_LIMITS_SIZE,
         source_ring_frames: 1_024,
-        maximum_automation_spans_per_block: 128,
+        reserved1: 0,
         reserved0: 0,
         maximum_document_bytes: 1_000_000,
         maximum_diagnostic_bytes: 4_096,

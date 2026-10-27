@@ -159,8 +159,10 @@ an **owner decision**, dated 2026-10-26, under the ruling's amendment 15.
   state is tracked by a bounded per-lane counter of trailing `+0.0` samples fed by capture and
   passthrough, not by a scan. Gate: one `crates/rack` row, a bank with one bypassed lane on
   silence reaches `silent_skips > 0`; red on today's predicate.
-- **D7. The delay (S2).** `LiveControlEffect` (`graph/src/runtime.rs:3054`, `:5890-5945`) takes the
-  same rule with one lane: skip when settled-bypassed with no span, target or armed `None` tap; at zero
+- **D7. The two never-banked effects, `miso.delay` and `miso.reverb` (S2)** (`NEVER_BANKED_EFFECTS`,
+  `crates/effect-compiler/src/prepare.rs:295`). `LiveControlEffect` (`graph/src/runtime.rs:3076`,
+  rendered in the `NodeKind::LiveControlEffect` arm of `execute`, about `:6271-6345` on the #2142
+  branch) takes the same rule with one lane: skip when settled-bypassed with no span, target or armed `None` tap; at zero
   latency no capture and no apply; `stale` and the resume `reset(DiscontinuityKeepParameters)` on
   the `PreparedNativeEffect`; the hold through the same `EffectControlLane` logic S1 builds (the
   delay's `W` is 0, so the hold is a no-op and the first echo starts at un-bypass). A per-node
@@ -173,7 +175,8 @@ an **owner decision**, dated 2026-10-26, under the ruling's amendment 15.
   hold, shunt passthrough, trait warm-up with the two overrides, the identity row, the counter
   tests, the warm-up gate, the CPU row, the rulings. Closable in half a day of implementation
   plus one review.
-- **S2 (successor, filed at S1's close): the per-node delay skip** (D7), reusing S1's lane hold.
+- **S2 (this issue's last slice): the per-node skip for the delay and the reverb** (D7), reusing
+  S1b's lane hold. S2 closes #2129.
 - Not in scope: a per-lane silence skip (a bank skips as a whole), any change to
   effect parameter defaults, any change to the bypass classification or ramp length.
 
@@ -437,3 +440,97 @@ the DSP crates, graph-compiler, bench and console-workload in release;
   rows to the full track runs, and `Load` to no run.
 - Gates: `scripts/run-wasm-gates.sh` (both legs, then the V8 spill gate) ok; every lint-job step;
   `cargo test` for rack, graph-compiler, bench, console-workload, wasm-gates and capi.
+
+
+## Amendment (finish map, 2026-10-26; tree main `26d8f97c8` + #2142 PR #2154 `4f5d448eb`)
+
+### S2 scope after S1b (PR #2150) and #2142 (PR #2154)
+
+Already done by S1b on the per-node path, and **not to be rebuilt**: the un-bypass law
+(`LiveControlEffect::stage`: `take_rest()` -> `processor.reset(DiscontinuityKeepParameters)` ->
+`begin_hold(warmup)`), the D5 fold of a settled-bypassed instance's declared tap value, and the
+`settled_bypassed` read before the mix. D7's "`stale` and the resume reset" clause is therefore
+superseded by the per-lane law: there is no per-node `stale`.
+
+What S2 adds, in the arm only:
+
+- Skip iff `settled_bypassed && staged.staged == 0 && prepared_targets() is empty && no armed tap
+  whose bypass value is None`. On a skipped block: at zero latency no `capture` and no `process`
+  (the planes already hold the dry words; `apply_bypass` is not needed either, since `needs_dry`
+  selects dry = the plane); at nonzero latency exchange the block through the line
+  (`BypassShunt::passthrough`, built by S1b) and no `process`. The words equal today's
+  `capture` + `process` + `apply_bypass` for a settled-bypassed lane by construction (the wet
+  words are discarded by the select).
+- `bypass_skips: u64` on `LiveControlEffect`, exposed through `NodeKind::bypass_skips()` beside
+  `silent_skips()` (about `:3696`). Not added to `console_workload::bank_counters` (the W=4 table's
+  `bypass_skips` is the bank counter; its pins stay).
+- The reverb's `W` is the trait default (declared latency 0, `crates/reverb/src/lib.rs:514`); the
+  delay's likewise; the hold is a no-op for both. Decision 15 E4's rule stands: no D7 check on a
+  skipped block.
+
+Gates (minimal): one row in `crates/graph-compiler/tests/bypass_shunt_identity.rs` (the delay and
+the reverb per node, settled-bypassed for `N` blocks: words equal the oracle by `to_bits`,
+`bypass_skips == N`; a block with a span, a target or an armed `None` tap skips none; red on a
+skip that reads `bypassed()` without `bypass_ramping()` or drops the line exchange); one-time
+`to_bits` of C1-16 `Load` and `Toggle` (600 blocks) against main as PR evidence; no CPU row (#2147
+measures the reverb). Realtime: the arm is inside its `REALTIME_POLICY` region; record the count.
+Paths: `crates/graph/src/runtime.rs`, the test file, this spec. The module bytes move: the
+release-window rule applies.
+
+### S2 attempt 1 (2026-10-26): the per-node skip
+
+- **Change.** `crates/graph/src/runtime.rs:6308-6336`, the `NodeKind::LiveControlEffect` arm: a
+  block that begins settled bypassed with `staged.staged == 0`, no prepared target and no armed
+  tap whose bypass value is `None` runs `shunt.passthrough` on the planes (nothing written at zero
+  latency), folds the declared tap values through `publish_observations(.., true, ..)`, counts
+  `LiveControlEffect::bypass_skips` (`:3099`) and returns: no `capture`, no `process`, no
+  `apply_bypass`, no D7 check (E4). It holds for every per-node live effect, not only the two
+  never-banked ones. Reader: `RuntimeUnit::bypass_skips` (`:3709`) and
+  `graph::test_only_node_bypass_skips` (`crates/graph/src/lib.rs:6291`, test-support). Not added to
+  `bank_slot_runs` or `console_workload::bank_counters` (W=4 pins unchanged).
+- **Tests.** One per claim, in the owning crate:
+  - `graph` `a_settled_bypassed_per_node_effect_skips_only_blocks_without_work`
+    (`lib.rs:11248`), latency 2: no skip on the two crossfade blocks, 3 on 3 settled blocks, none
+    on the block that stages a span. Red: the skip reads `bypassed()` in place of
+    `settled_bypassed` (the ramp blocks count, `0` expected); the skip drops `staged.staged == 0`
+    (the span block counts). Red on base: the counter does not exist (never counts).
+  - `graph` `live_bypass_is_latency_preserving_and_reversible` now holds the line exchange of the
+    skipped block: removing `live.shunt.passthrough(..)` is red (the input renders undelayed).
+  - `graph-compiler` `bypass_cohorts::a_bypassed_delay_and_reverb_skip_their_wet_path_and_pass_their_dry_block`
+    (`:926`, rewritten from `a_bypassed_delay_passes_its_dry_block_when_its_ring_trips`, whose
+    "the ring tripped" guard S2 makes unreachable on a settled block): a bypassed delay then a
+    bypassed reverb on one track, `Feed::Trip`, bits equal the bare session at the host width and
+    at `Scalar`, and `node_bypass_skips == 2 * BLOCKS`. The `bypass_shunt_identity.rs` harness
+    re-implements the arm and cannot see the runtime's skip, so the row is here, not there.
+  - `bypass_cohorts::a_hot_bypassed_multiband_lane_leaves_its_bank_mates_bits_unchanged` (`:818`):
+    its `Scalar` proof that `Feed::Hot` trips D7 now renders track 0 enabled per node, because a
+    settled-bypassed per-node instance runs no wet path. The bank claim is unchanged.
+  - The shunt on a settled-bypassed per-node block that does not skip: the lib row's span block
+    must emit the dry input delayed by the latency (attempt 2). This closes the gap attempt 1
+    recorded as lost coverage; what has no row now is only a *tripped ring* on such a block.
+- **Bits (one-time, PR evidence).** C1-16 `Load` and `Toggle`, 600 blocks, `to_bits` SHA-256 of
+  the output, base `d28d97c41` against head: `Load` `0265284a…`, `Toggle` `ffce347e…`, both equal.
+  With aux.a's delay bypassed, a bypassed `miso.reverb` at its defaults after it, and every
+  `.send.aux.a` unmuted at -6 dB (temporary patch, not committed): `Load` `56916656…` on both
+  (differs from the plain `Load`, so the aux is audible), `Toggle` equal. `-0.0` per node is held by
+  `a_negative_zero_from_an_enabled_stage_passes_a_bypassed_slot_unchanged`'s `Scalar` leg.
+- **CPU (descriptive, one invocation, one warmup, two rounds).** `bench console --bank-report`,
+  Simd8: `c1_console_16_load` p50 21.200 / 21.771 us, `c1_console_16_toggle` 100.642 / 102.796 us.
+- **Realtime.** The skip is inside `execute_op`'s existing region: `realtime_policy` ok, 283 marked
+  regions in 45 files (no region added).
+- **Gates.** Every lint-job step (fmt, clippy `-D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc`,
+  every policy script incl. `check-lane-policy.sh`); the workspace debug test step with its exact
+  excludes and features (242 binaries ok); the AudioWorklet artifact gates (build, call graph and
+  roster, expected resources, scalar-oracle absent, hermetic host/worklet suite, V8 spill); the SDK
+  headless evals; `scripts/run-wasm-gates.sh` ok. The module bytes move: the release-window rule
+  applies.
+
+### S2 attempt 2 (2026-10-26): the review's MAJOR
+
+- **MAJOR** (`runtime.rs` mix guard): the mix written as `if needs_dry && !settled_bypassed` made a
+  settled-bypassed block that does not skip emit wet, and no test saw it. The lib row
+  `a_settled_bypassed_per_node_effect_skips_only_blocks_without_work` now asserts the span block's
+  words are the delayed dry input. Red on that mutant: `left: [6.0, 7.0, 10.0, 10.5, -6.0, -7.0,
+  -20.0, -21.0]` against `right: [18.0, 19.0, 20.0, 21.0, -18.0, -19.0, -20.0, -21.0]`; green on
+  revert.
+- Gates: `graph` lib tests, clippy and fmt, every lint-job step.

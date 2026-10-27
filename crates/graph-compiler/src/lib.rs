@@ -1369,7 +1369,7 @@ mod tests {
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 20,
                 maximum_scratch_bytes: 1 << 20,
-                maximum_automation_spans_per_block: 32,
+                maximum_automation_spans_per_block: 128,
             },
         )
         .expect("prepared effects");
@@ -5691,7 +5691,7 @@ mod tests {
                 EffectCompileCaps {
                     maximum_total_state_bytes: 1 << 20,
                     maximum_scratch_bytes: 1 << 20,
-                    maximum_automation_spans_per_block: 32,
+                    maximum_automation_spans_per_block: 128,
                 },
             )
             .expect("prepared cohort-boundary effects");
@@ -6228,7 +6228,7 @@ mod tests {
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
+            maximum_automation_spans_per_block: 128,
         };
         let registry = launch_native_effect_registry().expect("launch registry");
         for row in rows {
@@ -6807,7 +6807,7 @@ mod tests {
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 20,
                 maximum_scratch_bytes: 1 << 20,
-                maximum_automation_spans_per_block: 32,
+                maximum_automation_spans_per_block: 128,
             },
         )
         .expect("prepared queued-EQ effects");
@@ -11299,7 +11299,7 @@ mod tests {
                 EffectCompileCaps {
                     maximum_total_state_bytes: 1 << 22,
                     maximum_scratch_bytes: 1 << 20,
-                    maximum_automation_spans_per_block: 32,
+                    maximum_automation_spans_per_block: 128,
                 },
             )
             .expect("prepared console effects"),
@@ -11453,7 +11453,7 @@ mod tests {
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 20,
                 maximum_scratch_bytes: 1 << 20,
-                maximum_automation_spans_per_block: 32,
+                maximum_automation_spans_per_block: 128,
             },
         )
         .expect("prepared per-node effects");
@@ -11513,7 +11513,7 @@ mod tests {
                 EffectCompileCaps {
                     maximum_total_state_bytes: 1 << 22,
                     maximum_scratch_bytes: 1 << 20,
-                    maximum_automation_spans_per_block: 32,
+                    maximum_automation_spans_per_block: 128,
                 },
             )
             .expect("prepared console effects"),
@@ -11594,7 +11594,7 @@ mod tests {
                 EffectCompileCaps {
                     maximum_total_state_bytes: 1 << 22,
                     maximum_scratch_bytes: 1 << 20,
-                    maximum_automation_spans_per_block: 32,
+                    maximum_automation_spans_per_block: 128,
                 },
             )
             .expect("prepared console effects"),

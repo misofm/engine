@@ -70,7 +70,6 @@ impl RuntimePreparer for Preparer {
 fn limits(maximum_document_bytes: u64) -> ControlLimits {
     ControlLimits {
         source_ring_frames: 0,
-        maximum_automation_spans_per_block: 128,
         maximum_document_bytes,
         maximum_diagnostic_bytes: 4_096,
         maximum_tracks: 100,
