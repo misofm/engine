@@ -9988,7 +9988,10 @@ pub const TEST_ONLY_PAIR_GRAPH_TRACKS: usize = Backend::current().width() + 1;
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::{test_only_builtin_lane_swap, test_only_prepared_unpaired_graph};
+pub use tests::{
+    test_only_builtin_lane_swap, test_only_prepared_unpaired_graph,
+    test_only_prepared_unpaired_graph_with_held_meter,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -11299,6 +11302,22 @@ mod tests {
         )
     }
 
+    /// The same full-cohort-and-tail fixture, with one final resident hold/decay meter, for the
+    /// existing isolated full-render allocation owner (issue #951).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn test_only_prepared_unpaired_graph_with_held_meter() -> PreparedBuiltinsGraphBound {
+        prepared_live_graph_fixture_with_ballistics(
+            Some(TEST_ONLY_PAIR_GRAPH_TRACKS - 1),
+            false,
+            false,
+            None,
+            PAIR_GRAPH_BACKEND,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            (7, 12.0),
+        )
+    }
+
     /// A queued graph of `n` live-control tracks at the vector `backend`, prepared, lowered and
     /// bound: separate fader and matrix banks. `post_fader_observed` adds a post-fader meter on
     /// track 0; `post_matrix_capture` captures the last track's post-matrix words.
@@ -11311,7 +11330,7 @@ mod tests {
         n: usize,
     ) -> PreparedBuiltinsGraphBound {
         prepared_live_graph_fixture_with_ballistics(
-            post_fader_observed,
+            post_fader_observed.then_some(0),
             symmetric_input,
             nonfinite_input,
             post_matrix_capture,
@@ -11322,7 +11341,7 @@ mod tests {
     }
 
     fn prepared_live_graph_fixture_with_ballistics(
-        post_fader_observed: bool,
+        post_fader_track: Option<usize>,
         symmetric_input: bool,
         nonfinite_input: bool,
         post_matrix_capture: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
@@ -11338,9 +11357,9 @@ mod tests {
                 input_lane: true,
             })
             .collect::<Vec<_>>();
-        let meter = post_fader_observed.then(|| MeterRequest {
+        let meter = post_fader_track.map(|track| MeterRequest {
             handle: MeterHandle(NonZeroU64::new(0x459).expect("handle")),
-            track_id: track_name(0),
+            track_id: track_name(track),
             tap: MeterTap::PostFader,
             config: MeterConfig {
                 period_frames: NonZeroU32::new(HARNESS_QUANTUM).expect("period"),
@@ -12566,23 +12585,38 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn resident_meter_accepted_plan_avoids_planar_acquisition_and_matches_decline() {
-        use bench_support::alloc::{
-            assert_installed, current_thread_counters, current_thread_delta_since,
-        };
-        assert_installed();
         for &backend in Backend::VECTOR {
-            for ballistics in [(0, 0.0), (7, 0.0), (0, 12.0), (7, 12.0)] {
+            // The combined case keeps L/R distinct so swapped held-state metadata cannot pass;
+            // the other cases retain the collapsed/forced-dual execution rows.
+            for (ballistics, symmetric) in [
+                ((0, 0.0), true),
+                ((7, 0.0), true),
+                ((0, 12.0), true),
+                ((7, 12.0), false),
+            ] {
                 let mut candidate = prepared_live_graph_fixture_with_ballistics(
-                    true, true, false, None, backend, 9, ballistics,
+                    Some(8),
+                    symmetric,
+                    false,
+                    None,
+                    backend,
+                    9,
+                    ballistics,
                 );
                 let mut reference = prepared_live_graph_fixture_with_ballistics(
-                    true, true, false, None, backend, 9, ballistics,
+                    Some(8),
+                    symmetric,
+                    false,
+                    None,
+                    backend,
+                    9,
+                    ballistics,
                 );
                 candidate.plan.arm_mono_collapse(&|_| true);
                 reference.plan.arm_mono_collapse(&|_| true);
                 let mut a = vec![0.0; HARNESS_QUANTUM as usize * 2];
                 let mut b = a.clone();
-                // Warm the process statics before measuring the complete render entry.
+                // Warm both plans before checking steady-state dispatch and parity.
                 graph::test_only_meter_input_reset(false);
                 render_bound_result(&mut candidate, 0, &mut a).unwrap();
                 graph::test_only_meter_input_reset(true);
@@ -12594,15 +12628,12 @@ mod tests {
                     reference.plan.force_mono_collapse_off(forced);
                     graph::test_only_meter_input_reset(false);
                     builtins::test_only_reset_banked_meter_commits();
-                    let mark = current_thread_counters();
                     let result = render_bound_result(
                         &mut candidate,
                         (block as u64 + 1) * u64::from(HARNESS_QUANTUM),
                         &mut a,
                     );
-                    let delta = current_thread_delta_since(mark);
                     result.unwrap();
-                    assert_eq!((delta.allocations, delta.deallocations), (0, 0));
                     assert_eq!(graph::test_only_meter_input_counts(), [0, 1, 1]);
                     assert_eq!(
                         builtins::test_only_banked_meter_commits(),

@@ -197,7 +197,10 @@ self_test_detector_residency() {
 #                                kernel of the graph's banked full meter pass on the browser's
 #                                four-lane banks (issue #950, amendment 4). Its body must also
 #                                have no scalar `f32.add`, `f32.gt` or `f32.abs`: the sanitize,
-#                                peak and counts stay `f32x4` too.
+#                                peak and counts stay `f32x4` too. Issue #951 adds the real held
+#                                recurrence: decay and countdown must use `f32x4.mul/sub`, with
+#                                no scalar f32 arithmetic in this owned probe. Boundary integer
+#                                conversions/gather/scatter remain allowed.
 #
 # The graph's own pass is reached through `call_indirect` in the AudioWorklet artifact, so no other
 # required gate reads its instructions; the second probe is the pin on the kernel it runs.
@@ -215,26 +218,29 @@ census_f64_probe() {
         inside && /f64\.promote_f32/ { scalar_promote++ }
         inside && /f64\.mul/ { scalar_mul++ }
         inside && /f64\.add/ { scalar_add++ }
-        inside && /[^x]f32\.(add|gt|abs)/ { scalar_f32++ }
+        inside && /[^x]f32\.(add|sub|mul|gt|ge|abs)/ { scalar_f32++ }
         inside && /f32x4\.abs/ { vector_abs++ }
         inside && /f32x4\.add/ { vector_f32_add++ }
+        inside && /f32x4\.mul/ { held_mul++ }
+        inside && /f32x4\.sub/ { held_sub++ }
         END {
-            printf "%d %d %d %d %d %d %d %d %d %d\n", seen, promote, vector_mul, vector_add,
-                scalar_promote, scalar_mul, scalar_add, scalar_f32, vector_abs, vector_f32_add
+            printf "%d %d %d %d %d %d %d %d %d %d %d %d\n", seen, promote, vector_mul, vector_add,
+                scalar_promote, scalar_mul, scalar_add, scalar_f32, vector_abs, vector_f32_add, held_mul, held_sub
         }
     '
 }
 
 check_f64_lane_lowering() {
     local module="$1" probe census seen promote vector_mul vector_add scalar_promote scalar_mul
-    local scalar_add scalar_f32 vector_abs vector_f32_add summary
+    local scalar_add scalar_f32 vector_abs vector_f32_add held_mul held_sub summary
     for probe in miso_gate_f64_lane_probe miso_gate_meter_block_probe; do
         census="$(census_f64_probe "$module" "$probe")"
         read -r seen promote vector_mul vector_add scalar_promote scalar_mul scalar_add scalar_f32 \
-            vector_abs vector_f32_add <<<"$census"
+            vector_abs vector_f32_add held_mul held_sub <<<"$census"
         summary="f64x2.promote_low_f32x4=$promote f64x2.mul=$vector_mul f64x2.add=$vector_add"
         summary="$summary f64.promote_f32=$scalar_promote f64.mul=$scalar_mul f64.add=$scalar_add"
-        summary="$summary f32.{add,gt,abs}=$scalar_f32 f32x4.abs=$vector_abs f32x4.add=$vector_f32_add"
+        summary="$summary f32.{add,sub,mul,gt,ge,abs}=$scalar_f32 f32x4.abs=$vector_abs f32x4.add=$vector_f32_add"
+        summary="$summary held.f32x4.mul=$held_mul held.f32x4.sub=$held_sub"
         [[ "$seen" == 1 ]] || {
             printf 'wasm gates: %s not found exactly once in %s (found %s)\n' \
                 "$probe" "$module" "$seen" >&2
@@ -248,7 +254,7 @@ check_f64_lane_lowering() {
             return 1
         fi
         if [[ "$probe" == miso_gate_meter_block_probe ]] &&
-            ((scalar_f32 != 0 || vector_abs == 0 || vector_f32_add == 0)); then
+            ((scalar_f32 != 0 || vector_abs == 0 || vector_f32_add == 0 || held_mul == 0 || held_sub == 0)); then
             printf 'wasm gates: %s left f32 lane arithmetic scalar on the simd128 leg: %s\n' \
                 "$probe" "$summary" >&2
             return 1

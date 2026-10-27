@@ -6648,13 +6648,13 @@ impl MeterAccumulator {
         }
         #[cfg(any(test, feature = "test-support"))]
         METER_BANKED_COMMITS.with(|commits| commits.set(commits.get().saturating_add(1)));
-        if held.is_some() {
-            if let Some(result) = banked.held {
-                self.left.held = result.held[0];
-                self.right.held = result.held[1];
-                self.left.hold_remaining = result.remaining[0];
-                self.right.hold_remaining = result.remaining[1];
-            }
+        if held.is_some()
+            && let Some(result) = banked.held
+        {
+            self.left.held = result.held[0];
+            self.right.held = result.held[1];
+            self.left.hold_remaining = result.remaining[0];
+            self.right.hold_remaining = result.remaining[1];
         }
         // An advanced held recurrence has already committed its exact state; the ordinary
         // maximum merge is only the hold=0/decay=0 case.

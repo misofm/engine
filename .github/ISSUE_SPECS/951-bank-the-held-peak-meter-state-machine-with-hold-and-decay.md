@@ -108,3 +108,81 @@ compile/run the extended corpus natively and on wasm simd128, reuse/extend the e
 probe as needed, capture one held-recurrence mutation red then restore, run proportional formatting,
 lints and graph/compiler owning regressions. Root's independent Astra review and merged-tree gates
 remain outstanding. This checkpoint claims native product evidence only, not issue completion.
+
+## Qualification decisions — attempt 1
+
+Root approved the existing guest meter probe and its existing script census as additional narrow
+paths. The probe now executes the real held recurrence with dynamic full-u32 countdowns and folds
+both final held values and counters; its census requires packed f32 multiply/subtract and refuses
+scalar f32 arithmetic within that owned probe. Integer boundary conversions remain permitted.
+The existing `meter_block_mismatches` field owns the added held oracle; no report schema, pins,
+exported symbol names or numeric boundary identity changes.
+
+The earlier full-render allocation measurement linked the audited global allocator into the entire
+compiler unit-test binary. Running the existing mixed custom Capture observer alongside it then
+aborted, because that fixture grows a Vec in render. Root ruled to isolate this claim rather than
+expand unrelated Capture cleanup: remove allocator linkage from the compiler unit owner; add one
+positive-hold/decay full-render case to the already isolated
+`crates/builtins-compiler/tests/lane_swap_alloc.rs`, using `bench_support::alloc` thread counters,
+preallocated output, warmed statics and a non-vacuous bank-commit witness. The provisional
+`allocation_tracker.rs` edit was reverted; that custom allocator owner is unchanged. Temporary
+kernel-only allocation assertions were removed so the full render entry owns this claim once.
+
+The final configured unit and allocation fixtures select the last track of nine (one padded tail
+bank on both vector widths); the compatibility fixture still selects track zero. The earlier
+`production-green.log` and initial compiler regression run observed track zero. Final tail-fixture
+parity and allocation results remain pending until recorded below.
+
+`native-corpus.log` passes the established release native G5 runner: 157 cases, 391 comparisons,
+zero mismatches, including the extended held/countdown oracle. The completed native correctness
+build overlapped an external wt-2166 build; no timing claim is drawn from it. Later offline
+compilers are coordinated with the fresh-review supervisor and paused only on our side while
+foreign validation runs; no running test is paused.
+
+Test value (new isolated full-render allocation row): allocating or freeing in the graph's advanced
+held seed/pass/accept branch now fails under the audited allocator, where the existing lane-swap
+allocation owner never bound a held meter and the original compiler unit row used only hold=0/off.
+Test value (existing cross-target meter differential extension): losing a high-digit borrow,
+rounding a countdown above 2^24 or coupling per-lane hold/decay configuration now fails against an
+independent full-u32 scalar recurrence, including the countdown word that snapshots do not expose.
+
+## Qualification relocation checkpoint — 2026-10-27
+
+Root moved remaining qualification to required final PR CI plus one dispatch-only evidence run,
+because sustained unrelated local builds/tests prevent uncontended validation. This is the same
+implementation attempt, not a new attempt or a lowered gate. All local queued/running #951 jobs
+were canceled through verified own-PID ancestry/cwd checks; no foreign process was signaled. Fresh
+Astra's `fresh-astra/cancel-local.log` preserves cancellation evidence. The active mutation's
+restoration path ran: the lane kernel matches both its exact pre-mutation backup and commit
+`fa560b658`; no compiler/linker/test or queued guest process from this stream remains.
+
+The interrupted no-high-borrow mutant never executed. Its partial compiler output is preserved as
+`mutation-no-borrow-interrupted.log`; it supplies **no mutation RED evidence**. The queued pinned
+Wasm guest build never started. These gates are PENDING remote:
+
+- final tail/asymmetric-channel production parity and bank-commit unit row;
+- the isolated positive-held full-render allocation row in `lane_swap_alloc.rs`;
+- the pinned nightly simd128 guest's existing differential and extended vector census;
+- the directed high-digit-borrow mutation RED and restored native GREEN;
+- final all-target Clippy, proportional policy checks and required merged qualification CI.
+
+The earlier completed native product/owner evidence remains valid for its recorded configurations:
+12 meter tests (19,504,032 full snapshot comparisons), both earlier resident compiler regressions,
+the graph full-meter frame-count ceiling, release native G5 (157 cases/391 comparisons, all
+mismatch fields zero), and the earlier all-target Clippy pass before the final allocation/tail
+fixture edits. Formatter-only `cargo fmt --all` passed through the shared serial wrapper after
+cancellation. No final tail/allocation/Wasm/mutation result is claimed at this checkpoint.
+
+Test value (final production owner): wrong lane selection in a padded held bank or swapped L/R
+held-state metadata now fails, where the earlier native row observed a full first bank with
+symmetric channels. The combined hold/decay case keeps L/R distinct, and the other cases retain
+collapsed/forced-dual execution coverage.
+
+Exact pending command/mutation handoff is preserved outside the worktree as
+`/home/bl/misofm/engine-work-evidence/easy3-20261027/951/remote-pending.sh` (not executed locally).
+The directed mutation replaces only
+`let next_high = high.sub(L::select(borrow, one, zero));` with `let next_high = high;`, runs the
+existing release native G5 runner, requires its `meter_block_mismatches` to be positive, restores
+the exact source, and requires the same runner GREEN. The remote owner must retain the emitted
+JSON and extended census, update this decision record, and obtain the independent Astra verdict
+before the issue can pass or close.
