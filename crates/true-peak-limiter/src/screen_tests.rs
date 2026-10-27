@@ -58,10 +58,20 @@ impl<L: Lane> ScreenPair<L> {
                 )
             })
             .collect();
-        Self {
+        let mut pair = Self {
             candidate: linked_core(&tracks, link, bypass, rate),
             oracle: linked_core(&tracks, link, bypass, rate),
-        }
+        };
+        // Warm render instrumentation and process statics before the thread-scoped counters.
+        let mut left = vec![0.01; 128 * L::WIDTH];
+        let mut right = left.clone();
+        pair.candidate.process_block(&mut left, &mut right, 128);
+        left.fill(0.01);
+        right.fill(0.01);
+        FORCE_UNSCREENED.with(|force| force.set(true));
+        pair.oracle.process_block(&mut left, &mut right, 128);
+        FORCE_UNSCREENED.with(|force| force.set(false));
+        pair
     }
 
     fn block(&mut self, left: &[f32], right: &[f32], expected: Option<bool>, label: &str) {
@@ -69,7 +79,15 @@ impl<L: Lane> ScreenPair<L> {
         let (mut a, mut b) = (left.to_vec(), right.to_vec());
         let (mut x, mut y) = (left.to_vec(), right.to_vec());
         let before = SCREENED_ENGAGEMENTS.with(Cell::get);
+        bench_support::alloc::assert_installed();
+        let mark = bench_support::alloc::current_thread_counters();
         let reports = self.candidate.process_block(&mut a, &mut b, frames);
+        let delta = bench_support::alloc::current_thread_delta_since(mark);
+        assert_eq!(
+            (delta.allocations, delta.deallocations),
+            (0, 0),
+            "{label}: render allocation"
+        );
         let engaged = SCREENED_ENGAGEMENTS.with(Cell::get) != before;
         if let Some(expected) = expected {
             assert_eq!(engaged, expected, "{label}: admission");
@@ -207,6 +225,17 @@ fn screen_identity<L: Lane>() {
                 Some(frames != 0),
                 "signed-zero/subnormal history bits",
             );
+        }
+    }
+    for exponent in -24..=0 {
+        let mut pair = ScreenPair::<L>::new(48_000, LinkMode::DualMono, false, false);
+        let magnitude = 2.0_f32.powi(exponent);
+        for frames in lengths {
+            let left: Vec<_> = (0..frames * L::WIDTH)
+                .map(|word| if word % 2 == 0 { magnitude } else { -magnitude })
+                .collect();
+            let right: Vec<_> = left.iter().map(|word| -*word).collect();
+            pair.block(&left, &right, None, "log-grid magnitudes 2^-24 through 2^0");
         }
     }
     // A stale history tap is a separate admission leg, even when never emitted this block.

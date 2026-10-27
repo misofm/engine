@@ -150,3 +150,23 @@ short-history loss, cross-channel limit mistakes, omitted gain writes and out-of
 on the new path, which existing detector and gain-law tests never engaged.
 Further release, mutation, external baseline, codegen, timing and merged target gates remain;
 this checkpoint is not a PASS or a runtime speed claim.
+
+Attempt 1 qualification checkpoint (2026-10-27): full
+`cargo test --release -p true-peak-limiter` passed, including allocation, determinism, conformance,
+randomized, padding, mono and tail contracts. Five isolated mutations ran red in the focused tests;
+actual failure reasons are recorded in `tests/MUTATIONS.md`, with original production source restored.
+Fresh Astra read-through identified no broader correctness finding and agreed with the implementer's
+two test-only tightenings: warm both cores before counter admission, then assert zero thread-scoped
+allocations/frees around each candidate render in the existing differential; and exercise every
+power-of-two magnitude from `2^-24` through `2^0`. These extend the same test's behavior coverage,
+without a redundant owner. Focused dev/release rerun passed (2/2 each, 12.55s/0.79s).
+
+External runner's current API adaptation completed: `BankWidth::for_lanes`, `.backend()` and
+`.full_mask()`, registry tail bounds and current automation offsets. Separate native/Wasm baseline
+and candidate artifacts build with identical pinned dependencies and release profile; the baseline
+worktree is pristine. Initial compile diagnostics for missing/wrong-typed `active_mask` are preserved;
+root classified them as one coherent, pre-freeze current-API adaptation pass. No timed workload ran.
+Quiet timing input is an exactly representable integer triangle-wave table at 0.3 instead of a libm
+sine, so native/V8 share every input bit. Frozen hot noise and near-miss semantics remain as above.
+Driver preflight, current codegen comparison, single A/B timing invocation and root target gates
+remain. Production source is still exactly the shipping-source change at `ae4d1d094`.
