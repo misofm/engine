@@ -6453,6 +6453,17 @@ pub fn test_only_bank_pack_attempts(plan: &PreparedRenderPlan) -> u64 {
         .map_or(0, |executor| executor.runtime.pack_attempts())
 }
 
+/// Test-only (issue #2135): the tracks of a graph plan's pack groups whose strip is not at its home
+/// lane, by the track bind placed at that home; empty for any other plan and under the identity map.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_displaced_tracks(plan: &PreparedRenderPlan) -> Vec<Box<str>> {
+    plan.executor_any()
+        .and_then(|any| any.downcast_ref::<GraphExecutor>())
+        .map_or_else(Vec::new, |executor| executor.runtime.displaced_tracks())
+}
+
 /// Test-only (issue #1981): the strips of a graph plan's pack groups not at their home lane; zero
 /// for any other plan and under the identity map.
 #[cfg(any(test, feature = "test-support"))]

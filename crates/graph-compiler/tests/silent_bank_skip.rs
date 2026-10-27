@@ -48,12 +48,13 @@ use builtins_compiler::{
     session_structural_symmetry,
 };
 use effect_compiler::{
-    EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
+    EffectCompileCaps, EffectControlProducer, attach_effect_live_controls,
+    launch_native_effect_registry, prepare_native_session_effects,
 };
 use engine::realtime::{
-    PlanRevisionGate, PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime,
-    ResponseSnapshotError, ResponseSnapshotOwnerInfo, ResponseSnapshotRequest,
-    ResponseSnapshotSection, ResponseSnapshotSink,
+    LiveValuesSuperseded, PlanRevisionGate, PlanarBufferMut, PreparedRenderPlan, RenderError,
+    RenderIo, RenderTime, ResponseSnapshotError, ResponseSnapshotOwnerInfo,
+    ResponseSnapshotRequest, ResponseSnapshotSection, ResponseSnapshotSink,
 };
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
@@ -348,8 +349,12 @@ struct Bound {
     bound_banks: u64,
     /// Each track's live control channel, in track order, when [`Setup::live`].
     controls: Vec<TrackControlProducer>,
-    /// The plan's revision gate, which publishes a live write, when [`Setup::live`].
+    /// The plan's revision gate, which publishes a live write, when [`Setup::live`] or
+    /// [`Setup::effects_live`].
     gate: Option<PlanRevisionGate>,
+    /// Every effect's live control channel, in prepared-entry order, when
+    /// [`Setup::effects_live`] (issue #2135's bypass toggles).
+    effect_controls: Vec<EffectControlProducer>,
 }
 
 /// Compile `model` at [`width`] the way every host does, bind every track input to its schedule,
@@ -368,6 +373,9 @@ struct Setup {
     /// Whether every track gets a live input-lane control channel (trim, polarity, filters), as a
     /// `Concurrent` host prepares it (issue #2142's collapse rows write a live trim through it).
     live: bool,
+    /// Whether every effect gets a live control channel, as a product host attaches them (issue
+    /// #2135's bypass toggles write through them).
+    effects_live: bool,
 }
 
 impl Setup {
@@ -375,6 +383,7 @@ impl Setup {
     const DESK: Self = Self {
         stereo,
         live: false,
+        effects_live: false,
     };
 }
 
@@ -397,7 +406,7 @@ fn bind_with(
         },
     )
     .unwrap_or_else(|error| panic!("session: {:?}", error.diagnostics()));
-    let effects = prepare_native_session_effects(
+    let mut effects = prepare_native_session_effects(
         &session,
         launch_native_effect_registry().expect("launch registry"),
         EffectCompileCaps {
@@ -407,6 +416,12 @@ fn bind_with(
         },
     )
     .unwrap_or_else(|error| panic!("effects: {}", error.0[0].code));
+    let effect_controls = if setup.effects_live {
+        attach_effect_live_controls(&mut effects, &LiveValuesSuperseded::new(), 0)
+            .unwrap_or_else(|error| panic!("effect controls: {}", error.0[0].code))
+    } else {
+        Vec::new()
+    };
     let caps = BuiltinCompileCaps {
         maximum_total_state_bytes: u64::MAX,
         maximum_total_retained_payload_bytes: u64::MAX,
@@ -517,7 +532,7 @@ fn bind_with(
         .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
     let controls = bound.track_controls;
     let mut plan = bound.plan;
-    let gate = if setup.live {
+    let gate = if setup.live || setup.effects_live {
         plan.take_revision_gate()
     } else {
         None
@@ -537,6 +552,7 @@ fn bind_with(
         bound_banks,
         controls,
         gate,
+        effect_controls,
     }
 }
 
@@ -853,7 +869,8 @@ fn gate_one(layout: RightNegative, kind: Twin) {
 /// (#1782a) if a forced lane move, or a block of a displaced group -- the deferred epilogues, the
 /// home-tile re-materialisation and the group fold, skipping or not -- does; and (#1981) if the
 /// per-block packer -- its facts, a pack or homing move -- or a carry from a displaced predecessor
-/// and the successor's first block do.
+/// and the successor's first block do; and (#2135) if the pattern packer after a bypass toggle
+/// burst -- the settle edges, the dwells and their expiry, the sorts and their trades -- does.
 #[test]
 fn a_skipping_block_allocates_nothing() {
     let blocks = 400;
@@ -933,6 +950,44 @@ fn a_skipping_block_allocates_nothing() {
     }
     assert!(measured > 0, "some block skipped");
     assert!(before.lane_moves() > 0, "the packer moved lanes");
+    // Issue #2135: a bypass toggle burst on every effect's live lane at once, twice, on the
+    // pattern gate's C1-32 plan: the settle edges, the dwells, their expiry and the sorts and
+    // trades that follow allocate nothing.
+    let model = c1_pattern_model();
+    let blocks = 160_u64;
+    let schedules: Vec<Arc<[Block]>> = (0..model.tracks.len())
+        .map(|_| vec![Block::Signal(0.05); blocks as usize].into())
+        .collect();
+    let setup = Setup {
+        stereo: |track| track >= 8,
+        live: false,
+        effects_live: true,
+    };
+    let mut bound = bind_with(&model, &schedules, false, setup);
+    let mut pcm = vec![0.0_f32; bound.frames * 2];
+    let moves = bound.lane_moves();
+    for block in 0..blocks {
+        if block == 40 || block == 100 {
+            for channel in 0..bound.effect_controls.len() {
+                write_bypass(
+                    &mut bound,
+                    channel,
+                    (channel + block as usize / 40) % 3 == 0,
+                );
+            }
+        }
+        let mark = current_thread_counters();
+        bound.render(block, true, &mut pcm);
+        let delta = current_thread_delta_since(mark);
+        if block >= 2 {
+            assert_eq!(
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (0, 0, 0),
+                "block {block}: a block after a bypass toggle burst allocated or freed"
+            );
+        }
+    }
+    assert!(bound.lane_moves() > moves, "the bursts moved strips");
 }
 
 /// Which tracks play a signal.
@@ -1519,6 +1574,7 @@ fn a_split_strip_packs_as_one_strip() {
         Setup {
             stereo: |_| true,
             live: false,
+            effects_live: false,
         },
     );
     let (group, track_units) = track_group(&bound.plan);
@@ -1612,6 +1668,7 @@ fn split_strip_differential(
     let setup = Setup {
         stereo: |_| false,
         live: true,
+        effects_live: false,
     };
     let mut packed = bind_with(model, &schedules, true, setup);
     let mut unpacked = bind_with(model, &schedules, true, setup);
@@ -1696,6 +1753,7 @@ fn a_packed_split_strip_renders_the_bits_of_an_unpacked_one() {
         Setup {
             stereo: |_| false,
             live: true,
+            effects_live: false,
         },
     );
     let (group, _) = track_group(&probe.plan);
@@ -1771,6 +1829,7 @@ fn a_per_node_insert_reads_the_moved_strip() {
         Setup {
             stereo: |_| false,
             live: true,
+            effects_live: false,
         },
     );
     let (group, track_units) = track_group(&probe.plan);
@@ -1839,6 +1898,7 @@ fn a_split_strip_move_allocates_nothing() {
     let setup = Setup {
         stereo: |_| true,
         live: false,
+        effects_live: false,
     };
     let Pair {
         mut before,
@@ -1922,6 +1982,7 @@ fn a_strip_that_plays_again_is_not_packable() {
     let setup = Setup {
         stereo: |_| true,
         live: false,
+        effects_live: false,
     };
     let schedules = |blocks: usize, silent: &dyn Fn(usize, usize) -> bool| -> Vec<Arc<[Block]>> {
         (0..TRACKS)
@@ -1995,4 +2056,284 @@ fn a_strip_that_plays_again_is_not_packable() {
         0,
         "ch01 plays from the block it moved, so the packer took it home"
     );
+}
+
+// ---- Issue #2135: pattern packing ---------------------------------------------------------------
+
+/// The seed of the C1 `Typical` draw (issue #2132's `C1_TYPICAL_SEED`).
+const C1_TYPICAL_SEED: u64 = 2132;
+
+/// The C1 console at 32 tracks (issue #2132's fixture) in its `Typical` state: every console slot of every strip drawn on,
+/// independently, with probability 75 % (EQ), 50 % (compressor) and 10 % (gate, drive), in the
+/// draw order of `console-workload`'s `apply_c1_state`; the master's limiter bypassed. Then the
+/// pattern gate's shape: per-track compressor thresholds and drives, so the strips' words differ; tracks `ch00..ch07` mono-mapped (their banks collapse-armed), fader rides
+/// on `ch09` and `ch13`, and a stored automation entry on `ch21`'s compressor bypass, which pins
+/// that strip.
+fn c1_pattern_model() -> SessionModel {
+    let mut model = parse_session_json(C1_THIRTY_TWO).expect("the C1 fixture parses");
+    let mut seed = C1_TYPICAL_SEED;
+    let mut draw = move || {
+        seed ^= seed >> 12;
+        seed ^= seed << 25;
+        seed ^= seed >> 27;
+        (seed.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11) as f64 / (1_u64 << 53) as f64
+    };
+    let consoles = model
+        .tracks
+        .iter_mut()
+        .map(|track| &mut track.console)
+        .chain(model.submixes.iter_mut().map(|submix| &mut submix.console));
+    for console in consoles {
+        for entry in console.iter_mut() {
+            let probability = match entry.slot.as_str() {
+                "eq" => 0.75,
+                "comp" => 0.5,
+                "gate" | "drive" => 0.1,
+                other => panic!("C1 has no console slot {other}"),
+            };
+            entry.bypass = draw() >= probability;
+        }
+    }
+    for track in &mut model.tracks[..8] {
+        track.right_source_channel = track.left_source_channel;
+    }
+    // Per-track compressor thresholds below the input's level and per-track drives, so a lane whose
+    // state or bypass is left behind by a move renders another strip's words.
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        for entry in &mut track.console {
+            let (parameter_id, value) = match entry.slot.as_str() {
+                "comp" => (1, -30.0 - (index % 7) as f32),
+                "drive" => (1, 3.0 * (index % 5) as f32),
+                _ => continue,
+            };
+            entry.params.push(EffectParam {
+                parameter_id,
+                channel: ParameterChannel::Both,
+                unit: ParameterUnit::Db,
+                value,
+            });
+        }
+    }
+    for (index, track) in [(0, "ch09"), (1, "ch13")] {
+        model.automation.push(Automation {
+            id: sid(&format!("ride{index}")),
+            target: ControlAddress {
+                owner: Owner::Strip(sid(track)),
+                section: Section::Builtins,
+                control: 5,
+                lane: Lane::Both,
+            },
+            segments: vec![AutomationSegment {
+                shape: AutomationShape::Linear,
+                start_sample: 50 * 128,
+                end_sample: 400 * 128,
+                start_value: 0.0,
+                end_value: -9.0,
+                unit: ParameterUnit::Db,
+            }],
+            offset: AutomationOffset {
+                left_db: 0.0,
+                right_db: 0.0,
+            },
+        });
+    }
+    model.automation.push(Automation {
+        id: sid("pinned"),
+        target: ControlAddress {
+            owner: Owner::Strip(sid(PINNED)),
+            section: Section::Console(sid("comp")),
+            control: 0,
+            lane: Lane::Both,
+        },
+        segments: vec![AutomationSegment {
+            shape: AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 1 << 40,
+            start_value: 1.0,
+            end_value: 1.0,
+            unit: ParameterUnit::Linear,
+        }],
+        offset: AutomationOffset {
+            left_db: 0.0,
+            right_db: 0.0,
+        },
+    });
+    model
+}
+
+/// C1 at 32 tracks: at eight lanes the mono-mapped bank and three stereo banks, so strips trade
+/// across banks beside a bank the chains refuse to trade with.
+const C1_THIRTY_TWO: &str = include_str!("../../../fixtures/session/v1/console-c1-32.json");
+
+/// The strip [`c1_pattern_model`] pins: a stored automation entry drives its compressor bypass.
+const PINNED: &str = "ch21";
+
+/// Every strip's session bypass of `effect`, by `(strip, effect)`: a console entry by its slot,
+/// an insert by its ID.
+fn session_bypasses(model: &SessionModel) -> BTreeMap<(String, String), bool> {
+    let tracks = model
+        .tracks
+        .iter()
+        .map(|track| (&track.id, &track.console, &track.inserts));
+    let submixes = model
+        .submixes
+        .iter()
+        .map(|submix| (&submix.id, &submix.console, &submix.inserts));
+    let mut bypasses = BTreeMap::new();
+    for (strip, console, inserts) in tracks.chain(submixes) {
+        for entry in console {
+            bypasses.insert(
+                (strip.as_str().to_owned(), entry.slot.as_str().to_owned()),
+                entry.bypass,
+            );
+        }
+        for effect in &inserts.effects {
+            bypasses.insert(
+                (strip.as_str().to_owned(), effect.id.as_str().to_owned()),
+                effect.bypass,
+            );
+        }
+    }
+    bypasses
+}
+
+/// Write `bypassed` to effect channel `channel` of `bound` through its live lane.
+fn write_bypass(bound: &mut Bound, channel: usize, bypassed: bool) {
+    let Bound {
+        effect_controls,
+        gate,
+        ..
+    } = bound;
+    let producer = &mut effect_controls[channel];
+    let record =
+        effect_contract::EffectControlRecord::Bypass(effect_contract::BypassSwitch::step(bypassed));
+    gate.as_mut()
+        .expect("the plan's gate")
+        .write_published(|stamp| {
+            producer.write(stamp, record).expect("a bypass write");
+        });
+}
+
+/// Every pack group's and ungrouped bank's slot-blocks skipped for settled bypass (issue #2129).
+fn bypass_skips(bound: &mut Bound) -> u64 {
+    graph::test_only_bank_slot_runs(&mut bound.plan)
+        .iter()
+        .map(|row| row.bypass_skips)
+        .sum()
+}
+
+/// Issue #2135 gate 1: on C1-32 in its `Typical` draw ([`c1_pattern_model`]: a collapse-armed
+/// bank of mono strips, which the chains refuse to trade with, two fader rides, one strip pinned by
+/// automated bypass; 32 tracks, not 16, so strips trade across banks beside the armed one at eight
+/// lanes), a plan that packs by
+/// activity pattern renders, block by block, every host word and every track's post-matrix word of
+/// its twin with packing off, by `to_bits`, NaNs folded; it moves strips, skips more settled-bypass
+/// bank-slots than the twin, and never moves the pinned strip. Two arms: the session's bypasses
+/// alone, whose channel-less bypassed lanes trade with uncontrolled ones; and every effect on a
+/// live channel under a seeded toggle schedule over every strip's console slots and the master's
+/// limiter (about one write in 256 per channel per block), plus `ch02`'s EQ toggled every 8 blocks,
+/// inside its dwell for good.
+///
+/// Test value: red when a pattern pack moves a strip's or the master's bits (a displaced group's
+/// fold out of home order, a lane trade that leaves a bypass lane or its shunt line behind), when
+/// it packs without raising the bypass-skip count, or when a pinned strip moves.
+#[test]
+fn a_pattern_packed_plan_renders_the_bits_of_an_unpacked_one() {
+    let blocks = 600_u64;
+    let model = c1_pattern_model();
+    let schedules: Vec<Arc<[Block]>> = (0..model.tracks.len())
+        .map(|_| vec![Block::Signal(0.05); blocks as usize].into())
+        .collect();
+    let bypasses = session_bypasses(&model);
+    for effects_live in [false, true] {
+        let setup = Setup {
+            stereo: |track| track >= 8,
+            live: false,
+            effects_live,
+        };
+        let mut packed = bind_with(&model, &schedules, true, setup);
+        let mut twin = bind_with(&model, &schedules, true, setup);
+        twin.pack = false;
+        let mut state: Vec<bool> = packed
+            .effect_controls
+            .iter()
+            .map(|producer| {
+                bypasses[&(
+                    producer.track_id.to_string(),
+                    producer.effect_id.to_string(),
+                )]
+            })
+            .collect();
+        let rapid = packed
+            .effect_controls
+            .iter()
+            .position(|producer| &*producer.track_id == "ch02" && &*producer.effect_id == "eq");
+        assert_eq!(
+            rapid.is_some(),
+            effects_live,
+            "ch02's EQ has a live channel"
+        );
+        let mut rng = Rng(0x2135);
+        let frames = packed.frames;
+        let mut packed_pcm = vec![0.0_f32; frames * 2];
+        let mut twin_pcm = vec![0.0_f32; frames * 2];
+        let mut writes = 0;
+        for block in 0..blocks {
+            for channel in 0..state.len() {
+                let flip = rng.below(256) == 0 || (Some(channel) == rapid && block % 8 == 0);
+                if flip {
+                    state[channel] = !state[channel];
+                    write_bypass(&mut packed, channel, state[channel]);
+                    write_bypass(&mut twin, channel, state[channel]);
+                    writes += 1;
+                }
+            }
+            packed.render(block, true, &mut packed_pcm);
+            twin.render(block, true, &mut twin_pcm);
+            for (index, (a, b)) in packed_pcm.iter().zip(&twin_pcm).enumerate() {
+                assert_eq!(
+                    fold_nan(a.to_bits()),
+                    fold_nan(b.to_bits()),
+                    "live {effects_live}, block {block}: host word {index} differs \
+                     ({a:e} packed, {b:e} unpacked)"
+                );
+            }
+            assert!(
+                !graph::test_only_displaced_tracks(&packed.plan)
+                    .iter()
+                    .any(|track| &**track == PINNED),
+                "live {effects_live}, block {block}: the pinned strip moved"
+            );
+        }
+        for (track, (a, b)) in packed.sinks.iter().zip(&twin.sinks).enumerate() {
+            let a = a.lock().expect("capture");
+            let b = b.lock().expect("capture");
+            assert_eq!(a.len(), b.len(), "ch{track:02}: observed lengths");
+            for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert_eq!(
+                    fold_nan(*x),
+                    fold_nan(*y),
+                    "live {effects_live}, ch{track:02}: post-matrix word {index} differs"
+                );
+            }
+        }
+        let (skips, twin_skips) = (bypass_skips(&mut packed), bypass_skips(&mut twin));
+        eprintln!(
+            "live {effects_live}: writes {writes}, moves {}, attempts {}, bypass skips {skips} \
+             (twin {twin_skips})",
+            packed.lane_moves(),
+            graph::test_only_bank_pack_attempts(&packed.plan),
+        );
+        assert_eq!(twin.lane_moves(), 0, "the twin never packs");
+        assert!(packed.lane_moves() > 0, "the packing plan moved strips");
+        assert!(
+            skips > twin_skips,
+            "packing let more bank-slots skip ({skips} against {twin_skips})"
+        );
+        assert!(
+            graph::test_only_bank_pack_attempts(&packed.plan) > packed.lane_moves(),
+            "the chains refused a trade (the armed bank)"
+        );
+        assert_eq!(writes > 0, effects_live, "the live arm toggles");
+    }
 }

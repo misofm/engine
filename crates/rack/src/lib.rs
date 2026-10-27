@@ -2638,7 +2638,19 @@ impl BankStage for LiveControlEffectBankStage {
     }
 
     fn settled_bypassed_lanes(&self) -> u32 {
-        u32::from(self.settled)
+        if self.settle_primed {
+            return u32::from(self.settled);
+        }
+        // Before the first drain: the lanes as bind left them.
+        self.lanes
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (lane, control)| {
+                let settled = control
+                    .as_ref()
+                    .is_some_and(EffectControlLane::settled_bypassed);
+                mask | (u32::from(settled) << lane)
+            })
     }
 
     fn settle_edges(&self) -> u32 {
@@ -2855,7 +2867,8 @@ impl LiveControlEffectBankStage {
 
     /// Whether lane `lane` of this stage and lane `other_lane` of `other` (which may be this
     /// stage) can trade every per-lane part (issue #1747): both lanes exist; both stages run one
-    /// program key; the lanes are of one kind and, with two control lanes, of one cell shape;
+    /// program key; two control lanes have one cell shape, and a control lane trades with an
+    /// uncontrolled one only when it holds no cell (issue #2135);
     /// both or neither has an observation queue; both or neither has taps, and two lanes' taps are the
     /// same menu; and each lane that can read a dry shunt finds one in the other stage, with two
     /// shunts of one shape. Allocation-free and bounded by the lane and tap counts.
@@ -2867,7 +2880,10 @@ impl LiveControlEffectBankStage {
         ) {
             (Some(own), Some(theirs)) => own.same_cell_shape(theirs),
             (None, None) => true,
-            _ => false,
+            // Issue #2135: a channel-less lane (a session bypass, issue #1087) holds no cell, so
+            // it trades with an uncontrolled lane as two element moves: nothing is staged for
+            // either, and the shunt term below decides whether the bypassed lane finds a line.
+            (Some(control), None) | (None, Some(control)) => !control.has_channel(),
         };
         let taps = match (self.observation(lane), other.observation(other_lane)) {
             (Some(own), Some(theirs)) => own.same_taps(theirs),
@@ -2883,7 +2899,6 @@ impl LiveControlEffectBankStage {
         lane < self.lanes()
             && other_lane < other.lanes()
             && self.program_key == other.program_key
-            && self.lane_kind(lane) == other.lane_kind(other_lane)
             && controls
             && self.observe_queue_position(lane).is_some()
                 == other.observe_queue_position(other_lane).is_some()

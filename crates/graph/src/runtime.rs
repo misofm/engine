@@ -11253,6 +11253,31 @@ impl Runtime {
         self.lane_map.pack_attempts
     }
 
+    /// The tracks whose strip is not at its home position, by its home lane's track (issue
+    /// #2135). Off the render thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn displaced_tracks(&self) -> Vec<Box<str>> {
+        let mut tracks = Vec::new();
+        for pack in self.lane_map.groups.iter() {
+            for strip in 0..pack.span() {
+                let away = self
+                    .lane_map
+                    .at
+                    .get(pack.base as usize + strip)
+                    .is_some_and(|&position| position as usize != strip);
+                if let (true, Some((unit, lane))) = (away, self.lane_map.unit_lane(pack, strip, 0))
+                    && let Some(track) = self
+                        .identity
+                        .get(unit)
+                        .and_then(|row| row.lane_tracks.get(lane))
+                {
+                    tracks.push(track.clone());
+                }
+            }
+        }
+        tracks
+    }
+
     /// The strips of every pack group not at their home position (issue #1981). Off the render
     /// thread.
     #[cfg(any(test, feature = "test-support"))]
@@ -16683,6 +16708,334 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// Issue #2135: a pack host whose patterns, padded positions and refusals the test sets: the
+    /// lane map alone, its trades recorded by [`LaneMap::record_swap`].
+    struct FakePackHost {
+        map: LaneMap,
+        /// Global home index -> the strip's running bits ([`PackHost::running_bits`]).
+        bits: Vec<u16>,
+        /// Global position -> a padded lane.
+        padded: Vec<bool>,
+        /// Global position -> every trade that touches the position refuses.
+        refuse: Vec<bool>,
+    }
+
+    impl FakePackHost {
+        /// `groups` groups of `chains` one-row chains of four lanes, every strip audible with no
+        /// running bit, nothing padded or refused.
+        fn new(groups: u32, chains: u32) -> Self {
+            let discovered = (0..groups)
+                .map(|group| DiscoveredGroup {
+                    group: PackGroup {
+                        first: group * chains,
+                        last: group * chains + chains - 1,
+                        width: 4,
+                        chains,
+                        rows: 1,
+                        units_base: 0,
+                        base: 0,
+                        folded: false,
+                        master: FoldTarget::Output,
+                        displaced: 0,
+                        dirty: true,
+                        fresh: true,
+                        dwelling: 0,
+                        ranked_base: 0,
+                        ranked: 2,
+                    },
+                    units: (group * chains..(group + 1) * chains).collect(),
+                })
+                .collect();
+            let map = LaneMap::from_groups(discovered, (groups * chains) as usize, 0, 0);
+            let positions = map.at.len();
+            Self {
+                map,
+                bits: vec![0; positions],
+                padded: vec![false; positions],
+                refuse: vec![false; positions],
+            }
+        }
+
+        /// Run one block's packer and return its `[moves, attempts]`.
+        fn block(&mut self) -> [u64; 2] {
+            let before = [self.map.lane_moves, self.map.pack_attempts];
+            pack_step(self);
+            [
+                self.map.lane_moves - before[0],
+                self.map.pack_attempts - before[1],
+            ]
+        }
+
+        /// Group `group`'s strips' running bits, position by position.
+        fn layout(&self, group: usize) -> Vec<u16> {
+            let pack = self.map.groups[group];
+            let base = pack.base as usize;
+            (0..pack.span())
+                .map(|position| self.bits[base + self.map.home[base + position] as usize])
+                .collect()
+        }
+
+        /// Group `group`'s bank-slot runs per block on ranked slot `rank`: the banks with a
+        /// populated lane running it.
+        fn runs(&self, group: usize, rank: usize) -> usize {
+            let pack = self.map.groups[group];
+            let base = pack.base as usize;
+            let layout = self.layout(group);
+            layout
+                .chunks(4)
+                .enumerate()
+                .filter(|(chain, lanes)| {
+                    lanes.iter().enumerate().any(|(lane, bits)| {
+                        !self.padded[base + chain * 4 + lane]
+                            && (bits >> (PACK_RANKED_SLOTS - 1 - rank)) & 1 != 0
+                    })
+                })
+                .count()
+        }
+
+        /// A settle on the strip whose home is `strip` of group `group`, as render records one.
+        fn settle(&mut self, group: usize, strip: usize, bits: u16) {
+            let pack = self.map.groups[group];
+            let base = pack.base as usize;
+            self.bits[base + strip] = bits;
+            let position = self.map.at[base + strip] as usize;
+            let (unit, lane) = self.map.unit_lane(&pack, position, 0).expect("a position");
+            self.map.record_settles(group, unit, 1 << lane);
+        }
+    }
+
+    impl PackHost for FakePackHost {
+        fn lanes(&self) -> &LaneMap {
+            &self.map
+        }
+
+        fn lanes_mut(&mut self) -> &mut LaneMap {
+            &mut self.map
+        }
+
+        fn padded(&self, pack: &PackGroup, position: usize) -> bool {
+            self.padded[pack.base as usize + position]
+        }
+
+        fn running_bits(&self, pack: &PackGroup, position: usize) -> u16 {
+            let base = pack.base as usize;
+            self.bits[base + self.map.home[base + position] as usize]
+        }
+
+        fn trade(&mut self, pack: &PackGroup, a: usize, b: usize) -> bool {
+            let base = pack.base as usize;
+            if self.refuse[base + a] || self.refuse[base + b] {
+                return false;
+            }
+            let (Some(a), Some(b)) = (
+                self.map.unit_lane(pack, a, 0),
+                self.map.unit_lane(pack, b, 0),
+            ) else {
+                return false;
+            };
+            let group = self.map.group(a.0).expect("a grouped unit").0;
+            self.map.record_swap(group, a, b)
+        }
+    }
+
+    /// Ranked slot 1 running (the costliest): bit 7.
+    const SLOT_1: u16 = 1 << (PACK_RANKED_SLOTS - 1);
+    /// Ranked slot 2 running: bit 6.
+    const SLOT_2: u16 = 1 << (PACK_RANKED_SLOTS - 2);
+
+    /// Issue #2135 gate 3, four cases on [`FakePackHost`] (four lanes, `B_total = 4`):
+    ///
+    /// 1. two banks `[A,B,A,B | A,B,A,B]` (A: slot 1 running, B: every slot bypassed) reach
+    ///    `[A,A,A,A | B,B,B,B]` within `ceil(7 / 4) = 2` blocks, the second bank's demand is 0, and
+    ///    the clean group then costs no attempt;
+    /// 2. a strip toggled every 8 blocks (inside its dwell for good) never moves;
+    /// 3. a strip toggled once is packed on the block its dwell expires, `R_b` blocks after the
+    ///    settle, with no other event, and not before;
+    /// 4. the review's layout (`11` once, `10` six times, `01` twice, three padded lanes, homes
+    ///    shuffled) sorts to `11 | 10 x 6 | 01 x 2`, slot 2 runs on 3 banks against the bound
+    ///    `ceil(3 / 4) + 2^2 - 2 = 3`, and no padded lane moves, also once every populated strip
+    ///    is silent at rest and sorts below them.
+    ///
+    /// Test value: red when the packer cannot reach the sorted layout the counts allow (a step that
+    /// stops at a 1-swap optimum, a padded lane counted as movable), thrashes on a ride (a move
+    /// inside the dwell), or forgets a strip after its dwell (a missing expiry trigger), which no
+    /// render test can see: each costs banks, never a bit.
+    #[test]
+    fn the_pattern_sort_reaches_its_layout_and_keeps_the_dwell() {
+        const A: u16 = SLOT_1;
+        const B: u16 = 0;
+        // Case 1.
+        let mut host = FakePackHost::new(1, 2);
+        for strip in 0..8 {
+            host.bits[strip] = if strip % 2 == 0 { A } else { B };
+        }
+        let mut blocks = 0;
+        while host.map.groups[0].dirty {
+            let [moves, attempts] = host.block();
+            assert!(moves <= 4 && attempts <= 16, "the global caps");
+            blocks += 1;
+            assert!(blocks <= 2, "case 1 converges within two blocks");
+        }
+        assert_eq!(host.layout(0), [A, A, A, A, B, B, B, B], "case 1 sorts");
+        assert_eq!(
+            host.runs(0, 0),
+            1,
+            "case 1: only the first bank runs slot 1"
+        );
+        for _ in 0..4 {
+            assert_eq!(
+                host.block(),
+                [0, 0],
+                "case 1: a clean group costs no attempt"
+            );
+        }
+        // Case 2: home 1 toggles every 8 blocks from block 0; every other strip is sorted.
+        let mut host = FakePackHost::new(1, 2);
+        for strip in [0, 2, 3] {
+            host.bits[strip] = A;
+        }
+        for block in 0..200 {
+            if block % 8 == 0 {
+                let bits = if (block / 8) % 2 == 0 { B } else { A };
+                host.settle(0, 1, bits);
+            }
+            host.block();
+            assert_eq!(
+                host.map.at[1], 1,
+                "case 2, block {block}: the ridden strip never moves"
+            );
+        }
+        // Case 3: sorted, then home 5's slot 1 is un-bypassed once after block 10's step.
+        let mut host = FakePackHost::new(1, 2);
+        for strip in 0..4 {
+            host.bits[strip] = A;
+        }
+        for _ in 0..10 {
+            host.block();
+        }
+        assert!(
+            !host.map.groups[0].dirty,
+            "case 3: the sorted group is clean"
+        );
+        host.settle(0, 5, A);
+        for after in 1..=u64::from(PACK_DWELL_BLOCKS) {
+            let [moves, _] = host.block();
+            if after < u64::from(PACK_DWELL_BLOCKS) {
+                assert_eq!(moves, 0, "case 3: no move inside the dwell (block {after})");
+            } else {
+                assert!(moves > 0, "case 3: the strip packs as its dwell expires");
+            }
+        }
+        assert_eq!(
+            host.layout(0),
+            [A, A, A, A, A, B, B, B],
+            "case 3: home 5 packed beside the A strips"
+        );
+        assert_eq!(host.map.at[5], 4, "case 3: at the first B position");
+        // Case 4: three chains, nine populated lanes, the last three padded.
+        let mut host = FakePackHost::new(1, 3);
+        let wanted = [
+            SLOT_1 | SLOT_2,
+            SLOT_1,
+            SLOT_1,
+            SLOT_1,
+            SLOT_1,
+            SLOT_1,
+            SLOT_1,
+            SLOT_2,
+            SLOT_2,
+        ];
+        // Shuffled homes: home `h` gets `wanted[(5 h + 3) % 9]`.
+        for strip in 0..9 {
+            host.bits[strip] = wanted[(5 * strip + 3) % 9];
+        }
+        for position in 9..12 {
+            host.padded[position] = true;
+            host.bits[position] = SLOT_1 | SLOT_2;
+        }
+        for _ in 0..8 {
+            host.block();
+        }
+        assert!(!host.map.groups[0].dirty, "case 4 converges");
+        assert_eq!(host.layout(0)[..9], wanted, "case 4 sorts");
+        for position in 9..12 {
+            assert_eq!(
+                host.map.home[position] as usize, position,
+                "a padded lane never moves"
+            );
+        }
+        assert_eq!(
+            host.runs(0, 1),
+            3,
+            "case 4: slot 2 runs on the bound's 3 banks"
+        );
+        // Every populated strip falls silent at rest, below the padded lanes' pattern: the padded
+        // lanes still stay.
+        for strip in 0..9 {
+            host.map.idle[strip] = PACK_IDLE_BLOCKS;
+        }
+        host.map.groups[0].dirty = true;
+        host.map.groups[0].fresh = true;
+        for _ in 0..8 {
+            host.block();
+        }
+        for position in 9..12 {
+            assert_eq!(
+                host.map.home[position] as usize, position,
+                "a padded lane never moves"
+            );
+        }
+    }
+
+    /// Issue #2135 gate 4: four dirty groups of three four-lane chains under the global budget
+    /// (`B_total = 4` swaps and `A_total = 16` attempts per block across all groups), seeded
+    /// patterns and five positions per group whose every trade refuses: no block exceeds either cap
+    /// in total, and every group converges within `4 x ceil((12 - 1) / 4) = 12` blocks.
+    ///
+    /// Test value: red when a scene recall's packing cost scales with the plan: a budget per group
+    /// rather than per block, or attempts uncapped under refusals.
+    #[test]
+    fn the_packing_budget_is_global() {
+        let mut host = FakePackHost::new(4, 3);
+        let mut seed = 0x2135_u64;
+        for strip in 0..host.bits.len() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            host.bits[strip] = [SLOT_1, SLOT_2, SLOT_1 | SLOT_2, 0][(seed % 4) as usize];
+        }
+        for group in 0..4 {
+            for position in [1, 2, 5, 8, 10] {
+                host.refuse[group * 12 + position] = true;
+            }
+        }
+        let mut converged = [None; 4];
+        for block in 1..=12 {
+            let [moves, attempts] = host.block();
+            assert!(
+                moves <= 4,
+                "block {block}: {moves} swaps against B_total = 4"
+            );
+            assert!(
+                attempts <= 16,
+                "block {block}: {attempts} attempts against A_total = 16"
+            );
+            for (group, done) in converged.iter_mut().enumerate() {
+                if done.is_none() && !host.map.groups[group].dirty {
+                    *done = Some(block);
+                }
+            }
+        }
+        assert!(
+            converged.iter().all(Option::is_some),
+            "every group converges within 12 blocks: {converged:?}"
+        );
+        assert!(
+            host.map.lane_moves > 4,
+            "the groups needed several blocks of budget"
+        );
     }
 
     /// Issue #1782a: a move in a pack group whose positions do not start the map's table.
