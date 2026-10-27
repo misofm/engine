@@ -211,7 +211,14 @@ pub enum C1State {
     /// ([`SessionRuntime::before_block`]), so every later slice's `to_bits` evidence carries
     /// un-bypass transitions.
     Toggle,
+    /// [`Self::AllActive`] with `miso.reverb` at mix 1 inserted on the `aux.b` return and every
+    /// track's post-fader send to `aux.b` unmuted at [`C1_REVERB_SEND_DB`] (issue #2147), so the
+    /// row measures a fed per-node reverb.
+    Reverb,
 }
+
+/// The gain of every track's send to `aux.b` in [`C1State::Reverb`].
+pub const C1_REVERB_SEND_DB: f32 = -6.0;
 
 /// The seed of [`C1State::Typical`]'s slot draw.
 pub const C1_TYPICAL_SEED: u64 = 2132;
@@ -788,11 +795,11 @@ pub const BYPASS_WORKLOADS: [Workload; 1] = [Workload::SixteenTrackStripBypassed
 /// The bank-utilisation rows (issue #2132): the C1 shape at 16, 32 and 64 tracks in each
 /// [`C1State`], then the irregular graph. `bench console --bank-report` measures them; no standing
 /// record carries them, so the standing record set and its validator are unchanged.
-pub const BANK_REPORT_WORKLOADS: [Workload; 16] = {
+pub const BANK_REPORT_WORKLOADS: [Workload; 17] = {
     const fn c1(tracks: C1Tracks, state: C1State) -> Workload {
         Workload::C1Console { tracks, state }
     }
-    use C1State::{AllActive, Load, Sparse, Toggle, Typical};
+    use C1State::{AllActive, Load, Reverb, Sparse, Toggle, Typical};
     use C1Tracks::{Sixteen, SixtyFour, ThirtyTwo};
     [
         c1(Sixteen, Load),
@@ -800,6 +807,7 @@ pub const BANK_REPORT_WORKLOADS: [Workload; 16] = {
         c1(Sixteen, AllActive),
         c1(Sixteen, Sparse),
         c1(Sixteen, Toggle),
+        c1(Sixteen, Reverb),
         c1(ThirtyTwo, Load),
         c1(ThirtyTwo, Typical),
         c1(ThirtyTwo, AllActive),
@@ -1032,7 +1040,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleOnePerBank => "sixty_four_track_console_one_per_bank",
             Self::SixteenTrackStripBypassed => "sixteen_track_strip_bypassed",
             Self::C1Console { tracks, state } => {
-                use C1State::{AllActive, Load, Sparse, Toggle, Typical};
+                use C1State::{AllActive, Load, Reverb, Sparse, Toggle, Typical};
                 use C1Tracks::{Sixteen, SixtyFour, ThirtyTwo};
                 match (tracks, state) {
                     (Sixteen, Load) => "c1_console_16_load",
@@ -1040,16 +1048,19 @@ impl Workload {
                     (Sixteen, AllActive) => "c1_console_16_all_active",
                     (Sixteen, Sparse) => "c1_console_16_sparse",
                     (Sixteen, Toggle) => "c1_console_16_toggle",
+                    (Sixteen, Reverb) => "c1_console_16_reverb",
                     (ThirtyTwo, Load) => "c1_console_32_load",
                     (ThirtyTwo, Typical) => "c1_console_32_typical",
                     (ThirtyTwo, AllActive) => "c1_console_32_all_active",
                     (ThirtyTwo, Sparse) => "c1_console_32_sparse",
                     (ThirtyTwo, Toggle) => "c1_console_32_toggle",
+                    (ThirtyTwo, Reverb) => "c1_console_32_reverb",
                     (SixtyFour, Load) => "c1_console_64_load",
                     (SixtyFour, Typical) => "c1_console_64_typical",
                     (SixtyFour, AllActive) => "c1_console_64_all_active",
                     (SixtyFour, Sparse) => "c1_console_64_sparse",
                     (SixtyFour, Toggle) => "c1_console_64_toggle",
+                    (SixtyFour, Reverb) => "c1_console_64_reverb",
                 }
             }
             Self::IrregularGraph => "irregular_graph",
@@ -1649,11 +1660,11 @@ fn apply_c1_state(model: &mut SessionModel, state: C1State) {
             };
             draw() < probability
         }
-        C1State::AllActive | C1State::Sparse | C1State::Toggle => true,
+        C1State::AllActive | C1State::Sparse | C1State::Toggle | C1State::Reverb => true,
     };
     let limiter = matches!(
         state,
-        C1State::AllActive | C1State::Sparse | C1State::Toggle
+        C1State::AllActive | C1State::Sparse | C1State::Toggle | C1State::Reverb
     );
     let tracks = model
         .tracks
@@ -1671,6 +1682,49 @@ fn apply_c1_state(model: &mut SessionModel, state: C1State) {
             if effect.id.as_str() == "limiter" {
                 effect.bypass = !limiter;
             }
+        }
+    }
+    if state == C1State::Reverb {
+        add_c1_reverb(model);
+    }
+}
+
+/// [`C1State::Reverb`]'s edit (issue #2147): `miso.reverb` at mix 1 (its parameter 8) as the
+/// `aux.b` return's one insert, built from `aux.a`'s delay insert (the same native, dual-mono,
+/// sidechain-free declaration), and every track's post-fader send to `aux.b` unmuted at
+/// [`C1_REVERB_SEND_DB`].
+fn add_c1_reverb(model: &mut SessionModel) {
+    let submix = |model: &SessionModel, id: &str| {
+        model
+            .submixes
+            .iter()
+            .position(|submix| submix.id.as_str() == id)
+            .unwrap_or_else(|| panic!("C1 has a submix {id}"))
+    };
+    let aux_a = submix(model, "aux.a");
+    let mut reverb = model.submixes[aux_a].inserts.effects[0].clone();
+    reverb.id = StableId::parse("reverb").expect("stable id");
+    reverb.identity = session::EffectIdentity::Native {
+        effect_id: StableId::parse("miso.reverb").expect("stable id"),
+    };
+    reverb.bypass = false;
+    reverb.params.truncate(1);
+    reverb.params[0].parameter_id = 8;
+    reverb.params[0].value = 1.0;
+    let aux_b = submix(model, "aux.b");
+    assert!(
+        model.submixes[aux_b].inserts.effects.is_empty(),
+        "C1's aux.b has no insert"
+    );
+    model.submixes[aux_b].inserts.effects.push(reverb);
+    for route in &mut model.routes {
+        let into_aux_b = matches!(
+            &route.destination,
+            session::RouteDestination::SubmixInput { submix_id } if submix_id.as_str() == "aux.b"
+        );
+        if into_aux_b && matches!(route.source, session::RouteSource::Track { .. }) {
+            route.mute = false;
+            route.gain_db = C1_REVERB_SEND_DB;
         }
     }
 }
@@ -3729,6 +3783,68 @@ mod tests {
             workload.strip_content(),
             workload.strip_layout(),
         )
+    }
+
+    /// Issue #2147 gate 1: the reverb row binds one per-node reverb, on `aux.b`, and feeds it:
+    /// all sixteen tracks' sends to `aux.b` are unmuted, and the row renders other words than the
+    /// [`C1State::AllActive`] row (the same session with no reverb and every send muted). With
+    /// the sends muted the reverb reads silence, outputs silence, and the two rows' words agree.
+    ///
+    /// Test value: red when the row stops measuring a fed reverb.
+    #[test]
+    fn the_reverb_row_feeds_one_per_node_reverb_on_aux_b() {
+        const BLOCKS: u64 = 64;
+        let c1 = |state| Workload::C1Console {
+            tracks: C1Tracks::Sixteen,
+            state,
+        };
+        let render = |workload: Workload| {
+            let mut runtime = SessionRuntime::new(workload);
+            let mut sink = Sha256Sink::new();
+            for block in 0..BLOCKS {
+                runtime.before_block(block);
+                runtime.render(block).expect("console render");
+                runtime.hash_output(&mut sink);
+            }
+            (runtime, sink.finish_hex())
+        };
+        let (mut runtime, reverb) = render(c1(C1State::Reverb));
+        let model = console_model(c1(C1State::Reverb));
+        let session = compile_session(&model, compile_caps()).expect("compiled session");
+        let registry = launch_native_effect_registry().expect("launch effect registry");
+        let prepared = prepare_native_session_effects(&session, registry, effect_caps())
+            .expect("prepared effects");
+        let reverbs: Vec<&str> = prepared
+            .entries
+            .iter()
+            .filter(|entry| entry.effect_id == "reverb")
+            .map(|entry| entry.track_id.as_str())
+            .collect();
+        assert_eq!(reverbs, ["aux.b"], "the strips that carry a reverb");
+        let banked = graph::bank_effect_lanes(&mut runtime.plan)
+            .unwrap_or_default()
+            .into_iter()
+            .any(|(_, lane)| lane.effect_id.as_ref() == "reverb");
+        assert!(!banked, "the reverb renders per node, in no bank");
+        let fed = model
+            .routes
+            .iter()
+            .filter(|route| {
+                !route.mute
+                    && matches!(route.source, session::RouteSource::Track { .. })
+                    && matches!(
+                        &route.destination,
+                        session::RouteDestination::SubmixInput { submix_id }
+                            if submix_id.as_str() == "aux.b"
+                    )
+            })
+            .count();
+        assert_eq!(fed, 16, "unmuted track sends into aux.b");
+        assert_ne!(
+            reverb,
+            render(c1(C1State::AllActive)).1,
+            "the reverb row renders the all-active row's words: its reverb reads silence"
+        );
     }
 
     /// Issue #965 gate 1: every session row the bench emits is fed the way a host feeds a
