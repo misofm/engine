@@ -463,13 +463,15 @@ const BANK_REPORT_WARMUP_BLOCKS: u64 = 2 * console_workload::C1_TOGGLE_BLOCKS;
 /// row, in one invocation of one untimed warmup round and two measured rounds, one JSON line per
 /// row and measured round: the plan's bank utilisation, each pack group's bank-slot runs per block
 /// beside the row's per-group ideal, the row's key-class ideal (its key classes' active lanes
-/// packed together, whatever the pack groups), and the p50 microseconds per block. `--bank-report-preflight` builds
+/// packed together, whatever the pack groups), the SHA-256 of the timed blocks' output (issue
+/// #2147: equal across the two rounds when the row is deterministic), and the p50 microseconds per
+/// block. `--bank-report-preflight` builds
 /// every row and renders [`BANK_REPORT_WARMUP_BLOCKS`] untimed blocks, checks every fact the record
 /// states is readable, and prints no number.
 ///
 /// Descriptive (AGENTS.md): a fixed workload, one warmup and two rounds, no tuning or retry. The
-/// clock holds the render call alone; the toggle row's bypass writes and every counter read sit
-/// outside it.
+/// clock holds the render call alone; the toggle row's bypass writes, the output hash and every
+/// counter read sit outside it.
 fn bank_report(preflight: bool) {
     use console_workload::{BANK_REPORT_WORKLOADS, BankGroupRuns, C1_TOGGLE_BLOCKS};
     let backend = Backend::current();
@@ -529,6 +531,7 @@ fn bank_report(preflight: bool) {
             }
             let mut durations = Vec::with_capacity(BANK_REPORT_OBSERVATIONS as usize);
             let mut render_errors = 0_u64;
+            let mut output = Sha256Sink::new();
             audit::warm_up();
             audit::reset();
             for _ in 0..BANK_REPORT_OBSERVATIONS {
@@ -536,6 +539,7 @@ fn bank_report(preflight: bool) {
                 let (elapsed_ns, result) = timing::timed(|| runtime.render(block));
                 render_errors += u64::from(result.is_err());
                 durations.push(elapsed_ns);
+                runtime.hash_output(&mut output);
                 block += 1;
             }
             let forbidden = audit::snapshot().total();
@@ -577,7 +581,7 @@ fn bank_report(preflight: bool) {
             let ideal: u64 = after.iter().map(|group| group.ideal).sum();
             let p50 = Percentiles::from_samples(&durations).p50;
             println!(
-                "{{\"issue\":2132,\"round\":{round},\"workload_kind\":\"{}\",\"backend\":\"{}\",\"width\":{width},\"tracks\":{},\"toggle_blocks\":{},\"observations\":{BANK_REPORT_OBSERVATIONS},\"render_errors\":{render_errors},\"forbidden_operations\":{forbidden},\"banks\":{},\"mergeable_partial_pairs\":{},\"lane_use_permille\":{},\"bsr_static\":{bsr_static},\"bsr_per_block\":{},\"bsr_ideal\":{ideal},\"bsr_ideal_key_class\":{},\"groups\":[{}],\"p50_us\":{}}}",
+                "{{\"issue\":2132,\"round\":{round},\"workload_kind\":\"{}\",\"backend\":\"{}\",\"width\":{width},\"tracks\":{},\"toggle_blocks\":{},\"observations\":{BANK_REPORT_OBSERVATIONS},\"render_errors\":{render_errors},\"forbidden_operations\":{forbidden},\"banks\":{},\"mergeable_partial_pairs\":{},\"lane_use_permille\":{},\"bsr_static\":{bsr_static},\"bsr_per_block\":{},\"bsr_ideal\":{ideal},\"bsr_ideal_key_class\":{},\"groups\":[{}],\"output_sha256\":\"{}\",\"p50_us\":{}}}",
                 workload.kind(),
                 backend_name(backend),
                 workload.tracks(),
@@ -592,6 +596,7 @@ fn bank_report(preflight: bool) {
                 format_f64(bsr),
                 runtime.bsr_ideal_key_class(),
                 groups.join(","),
+                output.finish_hex(),
                 microseconds(p50)
             );
         }

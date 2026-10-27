@@ -2330,10 +2330,15 @@ fn a_pattern_packed_plan_renders_the_bits_of_an_unpacked_one() {
             skips > twin_skips,
             "packing let more bank-slots skip ({skips} against {twin_skips})"
         );
-        assert!(
-            graph::test_only_bank_pack_attempts(&packed.plan) > packed.lane_moves(),
-            "the chains refused a trade (the armed bank)"
-        );
+        // At eight lanes the first bank (ch00-ch07) is mono-mapped and collapse-armed, and the
+        // chains refuse its trades. At four lanes the arm64 leg accepts every trade it attempts
+        // (attempts equal moves), so the refusal claim is checked at eight lanes only.
+        if width().width() == 8 {
+            assert!(
+                graph::test_only_bank_pack_attempts(&packed.plan) > packed.lane_moves(),
+                "the chains refused a trade (the armed bank)"
+            );
+        }
         assert_eq!(writes > 0, effects_live, "the live arm toggles");
     }
 }

@@ -11324,6 +11324,46 @@ impl Runtime {
     }
 }
 
+impl Runtime {
+    /// Issue #2135: rank every pack group's bypassable slots once, at bind, by the effect's
+    /// measured cost ([`pack_slot_cost`]), ties in chain order (row, then slot), keeping the
+    /// costliest [`PACK_RANKED_SLOTS`]. The group's chains are peers, so its first chain's slots
+    /// name every chain's. Allocates; never on the render thread.
+    fn bind_ranked_slots(&mut self) {
+        let mut ranked: Vec<(u32, u32)> = Vec::new();
+        for group in 0..self.lane_map.groups.len() {
+            let pack = self.lane_map.groups[group];
+            let mut slots: Vec<(u32, u32, u32)> = Vec::new();
+            for row in 0..pack.rows as usize {
+                let Some(&unit) = self
+                    .lane_map
+                    .chain_units
+                    .get(pack.units_base as usize + row)
+                else {
+                    continue;
+                };
+                let Some(RuntimeUnit::Bank { chain, .. }) = self.units.get(unit as usize) else {
+                    continue;
+                };
+                for slot in 0..chain.slot_count() {
+                    if let Some(effect) = chain.slot_effect_id(slot) {
+                        let index = |value: usize| u32::try_from(value).expect("an index fits");
+                        slots.push((pack_slot_cost(effect), index(row), index(slot)));
+                    }
+                }
+            }
+            // Stable: equal costs keep chain order.
+            slots.sort_by_key(|slot| core::cmp::Reverse(slot.0));
+            slots.truncate(PACK_RANKED_SLOTS);
+            let group = &mut self.lane_map.groups[group];
+            group.ranked_base = u32::try_from(ranked.len()).expect("a slot index fits");
+            group.ranked = u32::try_from(slots.len()).expect("a slot count fits");
+            ranked.extend(slots.iter().map(|&(_, row, slot)| (row, slot)));
+        }
+        self.lane_map.ranked = ranked.into_boxed_slice();
+    }
+}
+
 // REALTIME_POLICY_BEGIN
 impl Runtime {
     /// Where the strip bind placed at `at` renders now (issue #1782a): `at` outside a pack group
@@ -11555,44 +11595,6 @@ impl Runtime {
             return;
         }
         pack_step(self);
-    }
-
-    /// Issue #2135: rank every pack group's bypassable slots once, at bind, by the effect's
-    /// measured cost ([`pack_slot_cost`]), ties in chain order (row, then slot), keeping the
-    /// costliest [`PACK_RANKED_SLOTS`]. The group's chains are peers, so its first chain's slots
-    /// name every chain's. Allocates; never on the render thread.
-    fn bind_ranked_slots(&mut self) {
-        let mut ranked: Vec<(u32, u32)> = Vec::new();
-        for group in 0..self.lane_map.groups.len() {
-            let pack = self.lane_map.groups[group];
-            let mut slots: Vec<(u32, u32, u32)> = Vec::new();
-            for row in 0..pack.rows as usize {
-                let Some(&unit) = self
-                    .lane_map
-                    .chain_units
-                    .get(pack.units_base as usize + row)
-                else {
-                    continue;
-                };
-                let Some(RuntimeUnit::Bank { chain, .. }) = self.units.get(unit as usize) else {
-                    continue;
-                };
-                for slot in 0..chain.slot_count() {
-                    if let Some(effect) = chain.slot_effect_id(slot) {
-                        let index = |value: usize| u32::try_from(value).expect("an index fits");
-                        slots.push((pack_slot_cost(effect), index(row), index(slot)));
-                    }
-                }
-            }
-            // Stable: equal costs keep chain order.
-            slots.sort_by_key(|slot| core::cmp::Reverse(slot.0));
-            slots.truncate(PACK_RANKED_SLOTS);
-            let group = &mut self.lane_map.groups[group];
-            group.ranked_base = u32::try_from(ranked.len()).expect("a slot index fits");
-            group.ranked = u32::try_from(slots.len()).expect("a slot count fits");
-            ranked.extend(slots.iter().map(|&(_, row, slot)| (row, slot)));
-        }
-        self.lane_map.ranked = ranked.into_boxed_slice();
     }
 
     /// Issue #2135: pin every grouped strip whose track `pinned` names (a stored automation lane
