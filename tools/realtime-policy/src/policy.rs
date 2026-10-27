@@ -91,7 +91,7 @@ pub struct ControlSideEntry {
 /// The day-one control-side allowlist (#1443 D7): path, function, sites, thread, reason. A reason
 /// says why the pop never runs inside a product render callback (the C ABI render call, the
 /// worklet's `process()` or a worklet message handler).
-const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 13] = [
+const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 14] = [
     (
         "crates/control-plane/src/loudness.rs",
         "LoudnessMonitor::drain",
@@ -119,6 +119,13 @@ const CONTROL_SIDE: [(&str, &str, usize, &str, &str); 13] = [
         1,
         "C ABI control thread",
         "ProtocolController batches counter telemetry on the control side; the protocol crate is not linked into the browser artifact",
+    ),
+    (
+        "hosts/host-web/src/lib.rs",
+        "ControlHalf::reclaim_shapes",
+        1,
+        "the browser host's control half (the service step)",
+        "the hand-back ring's consumer is the control half, which drops the retired plans' tables off the render thread; render only pushes (#1332 S5)",
     ),
     (
         "crates/engine/src/realtime/plan_exchange.rs",

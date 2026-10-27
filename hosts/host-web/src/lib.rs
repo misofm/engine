@@ -1017,19 +1017,22 @@ impl ControlHalf {
             .lock()
             .map_or(None, |mut record| record.successor.take());
         let epoch = self.control.newest_plan_epoch();
-        if result.is_ok() && epoch != before {
+        let published = result.is_ok() && epoch != before;
+        if published {
             // A rebuild commits only after the preparer returned `Ok`, and the preparer returns
             // `Ok` only once it has left the header's address and the words' writer in the record
             // (it refuses the preparation, before anything is committed, when it cannot). So a
             // committed rebuild always has them, and no refusal can follow a commit. The previous
-            // plan's writer drops here: that plan keeps the words it has.
+            // plan's writer drops here: that plan keeps the words it has. The published plan's
+            // own words were stamped before its publication, by the commit itself, and nothing
+            // after the commit changes them: they are not written again.
             let prepared = prepared.expect("a committed rebuild's preparer left the plan's words");
             self.successor_header = prepared.header;
             self.plan_words = prepared.words;
             self.blocking_rebuilds = self.blocking_rebuilds.saturating_add(1);
         }
         if result.is_ok() {
-            self.sync_words(epoch);
+            self.sync_words(epoch, !published);
         }
         result
     }
@@ -1040,15 +1043,18 @@ impl ControlHalf {
     /// other commit adds, removes or reorders a strip), so a strip added or removed before the
     /// master never moves the reading to another strip; and the structure epoch the control list
     /// holds now. A plan that does not hold the strip has no master. They go to the newest plan's
-    /// own words, and the successor record names the newest epoch and its header (#1332 S5).
-    /// Control side only; each publication is two wait-free record stores.
-    fn sync_words(&mut self, newest_epoch: u64) {
-        let master = master_index(
-            self.control.committed_session().normalized_model(),
-            self.control.master_strip(),
-        );
-        self.plan_words
-            .publish(&plan_words(master, self.control.structure_epoch()));
+    /// own words (`plan`: a call that published the plan leaves the words its commit stamped),
+    /// and the successor record names the newest epoch and its header (#1332 S5). Control side
+    /// only; each publication is a wait-free record store.
+    fn sync_words(&mut self, newest_epoch: u64, plan: bool) {
+        if plan {
+            let master = master_index(
+                self.control.committed_session().normalized_model(),
+                self.control.master_strip(),
+            );
+            self.plan_words
+                .publish(&plan_words(master, self.control.structure_epoch()));
+        }
         let words: SuccessorWords = [newest_epoch, self.successor_header as u64];
         self.successor.publish(&words);
     }
@@ -1766,6 +1772,20 @@ impl AudioWorkletEngineHost {
                 .committed_session()
                 .normalized_model()
                 .revision
+        })
+    }
+
+    /// The epoch of the newest committed plan and the structure epoch of the committed control
+    /// list, as the control half sees them after its last call (#1332 S5): what a plan published
+    /// by that call carries as its own words. Test support.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn newest_plan_words(&self) -> Option<(u64, u64)> {
+        self.control.as_ref().map(|control| {
+            (
+                control.control.newest_plan_epoch(),
+                control.control.structure_epoch(),
+            )
         })
     }
 
