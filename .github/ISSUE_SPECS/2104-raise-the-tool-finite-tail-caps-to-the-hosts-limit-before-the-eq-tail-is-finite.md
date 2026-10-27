@@ -74,3 +74,9 @@ Workspace clippy with all targets/features and warnings denied, formatting, work
 realtime policy, builtins policy and unfused seal also passed. All heavy commands used the
 shared serial wrapper. Full required merged-tree qualification and remote issue synchronization
 remain root's delivery gates; this record does not claim upstream closure.
+
+## Root co-review and delivery status (2026-10-27)
+
+PASS for attempt 1 after independent Astra checkpoint `a37676ea80be821da4c0ea24fe60ed357c7aedcf`. The four tool caps now match host admission without changing other resource ceilings. The owning real-delay graph is refused by the former cap and admitted by the new cap; the standing EQ fixture could not catch that masking defect. Full release audit and workload checks passed.
+
+The implementation is locally complete and awaiting the required batch PR qualification, upstream delivery and matching GitHub state synchronization. Local PASS does not claim remote completion.

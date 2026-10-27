@@ -83,3 +83,9 @@ jump, not suppress it. This review does not approve that differing behavior.
 All heavy checks used the shared serial wrapper; offline compilation was paused and resumed
 while unrelated builds ran (`cpu-pause.log`). Full required target/AArch64/browser matrices
 remain the batch PR qualification gate; remote evidence synchronization and closure are root's.
+
+## Root co-review and delivery status (2026-10-27)
+
+PASS for attempt 1 after independent Astra checkpoint `a37676ea80be821da4c0ea24fe60ed357c7aedcf`. The completion accessor reads existing state in constant time; the shared adoption rule preserves it only after an unchanged no-ramp reposition. The rewritten owner catches both the wrong comparison time and lost history through audible off-grid/repeated-swap output; the independent preservation mutation is red. Existing running-ramp and entry-step behavior remains covered, with the distinct baseline defect tracked in #2158.
+
+The implementation is locally complete and awaiting the required batch PR qualification, upstream delivery and matching GitHub state synchronization. Local PASS does not claim remote completion.

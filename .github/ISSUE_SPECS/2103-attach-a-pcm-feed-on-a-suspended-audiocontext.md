@@ -111,3 +111,9 @@ Independent evidence is in `/home/bl/misofm/engine-work-evidence/easy-fixes-2026
 All heavy checks used the batch serial wrapper. Full browser/target matrix qualification
 remains required PR CI; this focused row does not claim to replace that matrix. Root owns
 remote evidence, merge and issue closure.
+
+## Root co-review and delivery status (2026-10-27)
+
+PASS for attempt 1 after independent Astra checkpoint `a37676ea80be821da4c0ea24fe60ed357c7aedcf`. The supported suspended attachment sequence is proven through a real host/prelude in both browsers using current integrated Wasm. An attach acknowledgement that depends on process() turns this row red while the required clock and sample counters remain zero. Qualification and README are sufficient under the issue brief; no original cause is asserted.
+
+The implementation is locally complete and awaiting the required batch PR qualification, upstream delivery and matching GitHub state synchronization. Local PASS does not claim remote completion.
