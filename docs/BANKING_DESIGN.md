@@ -520,8 +520,16 @@ run in parallel worktrees.
 key class (same rack, same leader program or a subsequence of it, same pool class after the
 remainder rule, same fold target) whose **windows intersect** and whose union fits `W`, where a
 bank's window is the intersection over its members of `[asap'_m, ALAP_m]` after placement (so the
-criterion never reports a pair the sweep could not have merged). This is checkable on the plan in
-`O(banks^2)` and reported as a count; the finish line is zero on every slice-0 row. Lane use is reported beside it. Recomputed numbers for C1 (aux A's delay splits its
+criterion never reports a pair the sweep could not have merged), **and whose merge still binds
+every slot either bank bound** under #96 F7 (every member lane runs it; the binder's predicate
+`every_member_runs`). This is checkable on the plan in
+`O(banks^2)` and reported as a count; the finish line is zero on every slice-0 row.
+
+*Definition change, owner decision 2026-10-27 (#2138):* the binding clause is new. The old count
+took the subsequence test alone and so counted pairs F7 forbids: on the irregular graph at W=4 a
+`[eq, deess, shape]` group whose lanes run only `eq` beside the leftover `[shape]` bank of two
+lanes, whose merge would unbind the `eq` bank and bind nothing. It over-counted; no plan and no
+bit changes with the definition. Lane use is reported beside it. Recomputed numbers for C1 (aux A's delay splits its
 chain: its pre segment joins the submix pre bank by prefix, its drive banks alone; the master's
 limiter splits the master, which banks alone in any case):
 

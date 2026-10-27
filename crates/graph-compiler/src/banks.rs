@@ -281,6 +281,7 @@ pub(crate) fn bind_rack_banks_placed(
         utilisation_by_rack: RackLocation::ALL.map(|rack| (rack, BankUtilisation::default())),
         windows: BTreeMap::new(),
         planned_levels: placement.planned_levels.clone(),
+        leftover_levels: BTreeMap::new(),
     };
     let Some(width) = BankWidth::for_backend(dispatch) else {
         return Ok((Vec::new(), empty(dispatch, chains)));
@@ -505,6 +506,7 @@ pub(crate) fn bind_rack_banks_placed(
     }
     // Issue #2138: the leftover pass, over the insert nodes the chain pass left per node.
     let mut windows = windows;
+    let mut leftover_levels = BTreeMap::new();
     leftover_pass(
         &mut plan,
         &mut bound,
@@ -517,6 +519,7 @@ pub(crate) fn bind_rack_banks_placed(
         prepared,
         dispatch,
         width,
+        &mut leftover_levels,
     )?;
     // Issue #1002: a bank reused from the trial plan carries the index its group had there, and
     // acceptance renumbers it. The report's slot index is gated by a test; the bank's cohort index
@@ -577,6 +580,7 @@ pub(crate) fn bind_rack_banks_placed(
             utilisation_by_rack,
             windows,
             planned_levels: placement.planned_levels.clone(),
+            leftover_levels,
         },
     ))
 }
@@ -614,6 +618,7 @@ fn leftover_pass(
     prepared: &PreparedEffectIndex<'_>,
     dispatch: Backend,
     width: BankWidth,
+    leftover_levels: &mut BTreeMap<EffectNodeId, u64>,
 ) -> Result<(), GraphDiagnostic> {
     let invariant = || diag("graph.internal.invariant", "$.effects");
     let banked: BTreeSet<&EffectNodeId> = bound
@@ -621,6 +626,40 @@ fn leftover_pass(
         .flatten()
         .flat_map(|(_, slot)| slot.members.iter())
         .collect();
+    // What the key's factory binds at this width, asked once per key with the bind's own request
+    // shape: `(a full bank, a padded bank)`. A factory with no bank kernel (the delay, the
+    // reverb) or none at this width declines both, and its nodes are no candidates; a factory
+    // that has not opted into padding binds only full banks. The probe banks are dropped here, off
+    // the render thread.
+    let mut binds: BTreeMap<effect_contract::EffectProgramKey, (bool, bool)> = BTreeMap::new();
+    let lanes = width.lanes() as usize;
+    let mut probe = |key: &effect_contract::EffectProgramKey,
+                     node: &EffectNodeId|
+     -> Result<(bool, bool), GraphDiagnostic> {
+        if let Some(known) = binds.get(key) {
+            return Ok(*known);
+        }
+        let slot = prepared
+            .get(node.track_id.as_str(), node.rack, node.effect_id.as_str())
+            .ok_or_else(invariant)?;
+        let entry = effects.entries.get(slot.index()).ok_or_else(invariant)?;
+        let requests = vec![entry.bank_preparation.request(); lanes];
+        let binds_with = |active_mask: &[bool]| {
+            entry
+                .factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: dispatch,
+                    width,
+                    requests: &requests,
+                    active_mask,
+                })
+                .is_ok_and(|bank| bank.is_some())
+        };
+        let full = binds_with(&vec![true; lanes]);
+        let padded = full && binds_with(&(0..lanes).map(|lane| lane == 0).collect::<Vec<_>>());
+        binds.insert(key.clone(), (full, padded));
+        Ok((full, padded))
+    };
     // (key, class) -> the candidates of that class, by id.
     let mut by_class: BTreeMap<
         (effect_contract::EffectProgramKey, CohortPoolClass),
@@ -645,6 +684,16 @@ fn leftover_pass(
                 .push((id, node.clone()));
         }
     }
+    // A key class with fewer candidates than the padding threshold forms no group that binds, so
+    // it is dropped without asking its factory; every other class is asked once per key.
+    let threshold = min_padded_insert_members(width);
+    let mut kept = BTreeMap::new();
+    for ((key, class), members) in by_class {
+        if members.len() >= threshold && probe(&key, &members[0].1)?.0 {
+            kept.insert((key, class), members);
+        }
+    }
+    let by_class = kept;
     if by_class.is_empty() {
         return Ok(());
     }
@@ -747,7 +796,7 @@ fn leftover_pass(
         .collect();
     // The merge counter is the leftover planner's own grouping: `plan_bank_groups` over the
     // set's one-slot candidates (a fixed neighbour has no key and is not counted).
-    let banks_of = |set: &[usize]| -> usize {
+    let binding_groups = |set: &[usize]| -> Vec<Vec<usize>> {
         let candidates: Vec<CohortCandidate<usize>> = set
             .iter()
             .filter_map(|index| {
@@ -766,14 +815,41 @@ fn leftover_pass(
             }],
             width,
         )
-        .map_or(0, |plan| plan.groups.len())
+        .map_or_else(
+            |_| Vec::new(),
+            |plan| {
+                // Only the groups the bind will bind: full, or padded from the threshold where the
+                // factory pads. Every member of a one-slot group runs its slot, so #96 F7 holds.
+                plan.groups
+                    .iter()
+                    .filter(|group| {
+                        let padded = binds
+                            .get(&group.program[0])
+                            .is_some_and(|(_, padded)| *padded);
+                        group.is_full() || (padded && group.active_count() >= threshold)
+                    })
+                    .map(|group| group.members.iter().flatten().copied().collect())
+                    .collect()
+            },
+        )
     };
+    let banks_of = |set: &[usize]| -> usize { binding_groups(set).len() };
     let placed_levels =
         rack_compiler::place_over_windows(&nodes, &edges, banks_of).map_err(|_| invariant())?;
     // Every fixed node must stay where it was placed, or the chain pass's banks would move.
     for (offset, (_, level)) in fixed.iter().enumerate() {
         if placed_levels[candidates.len() + offset].level != *level {
             return Err(invariant());
+        }
+    }
+    // What the counter says binds, per level: the report's `leftover_levels`.
+    let mut at_level: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (index, placement) in placed_levels.iter().enumerate().take(candidates.len()) {
+        at_level.entry(placement.level).or_default().push(index);
+    }
+    for (level, set) in &at_level {
+        for index in binding_groups(set).into_iter().flatten() {
+            leftover_levels.insert(candidates[index].3.clone(), *level);
         }
     }
     let mut buckets: BTreeMap<u64, Vec<CohortCandidate<RackChainId>>> = BTreeMap::new();
@@ -1471,6 +1547,20 @@ fn bind_group_banks(
     Ok(bound)
 }
 
+/// #96 F7, the one predicate: a slot can be one homogeneous bank only when every member lane runs
+/// it, because the effect contract has no per-lane identity slot. `lanes` are the member lanes'
+/// slot masks over the leader program (padding lanes excluded). Shared by the binder
+/// ([`bindable_slot_members`]) and the utilisation report's merge test
+/// (`BankUtilisation::of`), so the report never counts a merge the binder would refuse.
+pub(crate) fn every_member_runs<'a>(
+    lanes: impl IntoIterator<Item = &'a [bool]>,
+    slot: usize,
+) -> bool {
+    lanes
+        .into_iter()
+        .all(|lane| lane.get(slot).copied().unwrap_or(false))
+}
+
 /// The effect node each member of `group` runs at leader slot `slot`, in lane order, when that
 /// slot can be one homogeneous bank; `None` when it cannot, and its members render per node.
 ///
@@ -1492,12 +1582,15 @@ fn bindable_slot_members(
     // (#96 F7), so a bank some of whose members skip the slot cannot be expressed. A padded lane
     // has no member and no slots, and is the padding contract's, not an identity. (Lanes that
     // disagree only about bypass all run it: issue #1087 carries bypass on the rack's shunt.)
-    if !group
-        .active_slots
-        .iter()
-        .zip(&group.active_mask)
-        .all(|(lane, active)| !*active || lane[slot])
-    {
+    if !every_member_runs(
+        group
+            .active_slots
+            .iter()
+            .zip(&group.active_mask)
+            .filter(|(_, active)| **active)
+            .map(|(lane, _)| &lane[..]),
+        slot,
+    ) {
         return Ok(None);
     }
     // Padding lanes come after every member (`rack_compiler::BankGroup::members`), so the

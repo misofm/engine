@@ -1919,7 +1919,7 @@ fn assert_placement_counts_the_plan(artifact: &PreparedGraphBuiltinsArtifact) {
     let mut grouped: BTreeMap<u64, BTreeSet<GraphNodeId>> = BTreeMap::new();
     for group in &report.plan.groups {
         // A leftover-pass group (#2138, `slot: Some(_)`) is placed by its own sub-problem after
-        // this count, so it is not a member of it.
+        // this count, so it is not a member of it; the leftover count is checked below.
         for chain in group
             .members
             .iter()
@@ -1958,6 +1958,27 @@ fn assert_placement_counts_the_plan(artifact: &PreparedGraphBuiltinsArtifact) {
     assert_eq!(
         counted, grouped,
         "the placement counted exactly the members the planners grouped at each level"
+    );
+    // Issue #2138: the leftover pass's count, against what its bind bound. Every leftover
+    // candidate the count counted as binding is a member of a bound leftover bank at the level it
+    // was counted at, and no bound leftover bank holds a node it did not count.
+    let mut bound_leftovers: BTreeMap<graph::EffectNodeId, u64> = BTreeMap::new();
+    for bound in &report.bound_slots {
+        let group = &report.plan.groups[bound.group];
+        if group
+            .members
+            .iter()
+            .flatten()
+            .any(|chain| chain.slot.is_some())
+        {
+            for member in &bound.members {
+                bound_leftovers.insert(member.clone(), group.level);
+            }
+        }
+    }
+    assert_eq!(
+        report.leftover_levels, bound_leftovers,
+        "the leftover count counted exactly the leftover nodes the bind bound"
     );
 }
 

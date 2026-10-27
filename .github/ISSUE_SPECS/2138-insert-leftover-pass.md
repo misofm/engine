@@ -141,3 +141,34 @@ while 8 per-node renders become banked lanes; the row is 11.3 % faster.
   this host's factories decline four lanes. The arm64 leg runs them.
 - The irregular row is not added to `W4_COUNTER_WORKLOADS` (its W=4 counters above come from a
   scratch run only).
+
+## Attempt 2 (2026-10-27): the verify's findings
+
+- **Blocker 1, the W=4 irregular row's mergeable pair, was a metric over-count.** The pair was a
+  chain-pass `[eq, deess, shape]` group (`ch09`, `ch21`, running only `eq`, `eq` bound) and the
+  leftover `[shape]` bank (`ch03`, `ch15`). Merging them leaves every slot with a lane that skips
+  it, so #96 F7 (`bindable_slot_members`) binds none of them and the `eq` bank is lost. No partial
+  chain-pass bank of key `shape` exists on the row, so no leftover can fill a free lane. **Owner
+  decision 2026-10-27:** `mergeable_partial_pairs` counts a pair only when the merge still binds
+  every slot either bank bound under F7, through the binder's own predicate (`every_member_runs`,
+  `banks.rs`, now shared by `bindable_slot_members` and `BankUtilisation::of`). The finish line
+  (zero pairs) and `console_banking.rs`'s assertion are unchanged. No plan and no bit moves.
+  Test: `console_banking.rs` `a_pair_is_mergeable_only_when_the_merge_still_binds` (W=4 and W=8,
+  pure), red on the subsequence-only count: `W=4: the [comp] lane would skip the bound eq (F7)`,
+  left 1, right 0.
+- **Major 3, the leftover count matches the bind.** A key class with fewer candidates than the
+  padding threshold is dropped without asking its factory; every other key's factory is asked once
+  (a full and a padded probe request, the bind's own shape) and a key whose factory declines (the
+  delay, the reverb, a foreign width) offers no candidate. `banks_of` counts only groups that will
+  bind (full, or padded from the threshold where the factory pads; a one-slot group satisfies F7).
+  The report's `leftover_levels` is that count's binding set, and `bank_levels.rs`'
+  `assert_placement_counts_the_plan` holds it to the leftover banks actually bound on every
+  compile in that file. Red on the attempt-1 count (every group): C1 counted `aux.a/delay` and
+  `master/limiter` as binding, bound none.
+- **Major 2, W=4 pins run.** A scratch probe in `wasm-gate-guest` (not committed) compiles each
+  `bank_levels.rs` session (written as canonical JSON) at `Simd4` in the `simd128` guest (shipped
+  nightly, `-Zbuild-std`) under Node 22: every pin matches (48 four rows, 46, 11, 22, 5, reduced
+  #970 4).
+- **Minor 6:** the two `src/lib.rs` tests assert the chain pass's groups only again.
+- **Not covered:** bypass and un-bypass on a strip split between a chain bank and a leftover bank
+  (low risk: no runtime change; the bank's shunt is per lane as for any bank).
