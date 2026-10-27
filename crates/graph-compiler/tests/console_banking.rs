@@ -121,6 +121,83 @@ fn partial(
     }
 }
 
+/// Owner decision 2026-10-27 (#2138): a pair is mergeable only when the merged group still binds
+/// every slot either bank bound under #96 F7 (every member lane runs it), the binder's own rule.
+/// The irregular graph's W=4 shape: an `[eq, comp]` group whose lane runs only `eq` (its `eq`
+/// bound) beside a one-slot `[comp]` group (bound) is not mergeable, since the `[comp]` lane would
+/// skip the bound `eq`; the same `[eq, comp]` group whose lane runs only `comp` (its `comp` bound)
+/// is. Pure, so it holds at four and eight lanes on any host.
+///
+/// Test value: red when the count ignores what the merge would bind -- the subsequence test alone
+/// counts the first pair too.
+#[test]
+fn a_pair_is_mergeable_only_when_the_merge_still_binds() {
+    let console = report(&parse_session_json(INTENDED).expect("the standing console parses"));
+    let two = console
+        .plan
+        .groups
+        .iter()
+        .find(|group| group.program.len() == 2)
+        .expect("the console's [eq, comp] group");
+    let member = |track: &str| graph_compiler::RackChainId {
+        track_id: track.to_owned(),
+        rack: graph::RackId::Dynamic,
+        slot: None,
+    };
+    let node = console.bound_slots[0].members[0].clone();
+    for lanes in [4_usize, 8] {
+        let group = |program: Vec<_>, id: &str, runs: Vec<bool>| BankGroup {
+            level: 3,
+            rack: two.rack,
+            class: two.class,
+            members: (0..lanes)
+                .map(|lane| (lane == 0).then(|| member(id)))
+                .collect(),
+            active_mask: (0..lanes).map(|lane| lane == 0).collect(),
+            active_slots: (0..lanes)
+                .map(|lane| {
+                    if lane == 0 {
+                        runs.clone().into_boxed_slice()
+                    } else {
+                        vec![false; program.len()].into_boxed_slice()
+                    }
+                })
+                .collect(),
+            program: program.into_boxed_slice(),
+        };
+        let (eq, comp) = (two.program[0].clone(), two.program[1].clone());
+        let leftover = group(vec![comp.clone()], "b", vec![true]);
+        let bound = |group: usize, slot: usize| GraphRackBoundSlot {
+            group,
+            slot,
+            members: vec![node.clone()],
+        };
+        let pairs = |chain: BankGroup<_>, chain_slot: usize| {
+            BankUtilisation::of(
+                &[chain, leftover.clone()],
+                &[bound(0, chain_slot), bound(1, 0)],
+                lanes,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+            )
+            .mergeable_partial_pairs
+        };
+        let eq_only = group(vec![eq.clone(), comp.clone()], "a", vec![true, false]);
+        assert_eq!(
+            pairs(eq_only, 0),
+            0,
+            "W={lanes}: the [comp] lane would skip the bound eq (F7)"
+        );
+        let comp_only = group(vec![eq, comp], "a", vec![false, true]);
+        assert_eq!(
+            pairs(comp_only, 1),
+            1,
+            "W={lanes}: every merged lane runs the bound comp"
+        );
+    }
+}
+
 /// Gate 1. Test value: red when the report stops seeing a pair the planner could have merged --
 /// a count that ignores the pool class, or one that counts padded lanes as active (then two
 /// half-full banks no longer fit one, and the lane use reads full).

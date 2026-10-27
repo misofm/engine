@@ -304,6 +304,10 @@ pub struct GraphRackBankReport {
     /// its placement level (issue #2136): the set the placement's bank count was taken over, so a
     /// test can hold it to the groups the planners formed.
     pub planned_levels: BTreeMap<GraphNodeId, u64>,
+    /// Every leftover-pass candidate (issue #2138) its placement's bank count counted as binding,
+    /// at the level it was placed: the set the leftover merges were decided on, so a test can hold
+    /// it to the leftover banks actually bound.
+    pub leftover_levels: BTreeMap<EffectNodeId, u64>,
 }
 
 /// How well a plan's bound banks use their lanes (issue #2132, `docs/BANKING_DESIGN.md`'s
@@ -315,8 +319,10 @@ pub struct BankUtilisation {
     /// Pairs of partial banks the planner could have merged into one: one rack, one pool class,
     /// intersecting level windows (issue #2136: a bank's window is the intersection over its
     /// members of `[asap', ALAP]` after placement, so no pair the sweep could not merge counts),
-    /// one fold target, every member of one a subsequence of the other's leader program, and
-    /// together no more than `W` active lanes. A checkable property, not a `ceil(n / W)` bound.
+    /// one fold target, every member of one a subsequence of the other's leader program,
+    /// together no more than `W` active lanes, and a merge that still binds every slot either bank
+    /// bound under #96 F7 (owner decision 2026-10-27, #2138: the binder's `every_member_runs`). A
+    /// checkable property, not a `ceil(n / W)` bound.
     pub mergeable_partial_pairs: u32,
     /// Static lane use in permille: the active lanes of every bound slot over that slot count times
     /// `W`, rounded to nearest. A padded lane is not active. `0` when nothing is bound.
@@ -342,13 +348,12 @@ impl BankUtilisation {
         rack: Option<RackLocation>,
     ) -> Self {
         let admitted = |group: &BankGroup<RackChainId>| rack.is_none_or(|rack| group.rack == rack);
-        let banked: Vec<&BankGroup<RackChainId>> = groups
+        let banked: Vec<(usize, &BankGroup<RackChainId>)> = groups
             .iter()
             .enumerate()
             .filter(|(index, group)| {
                 admitted(group) && bound_slots.iter().any(|bound| bound.group == *index)
             })
-            .map(|(_, group)| group)
             .collect();
         let slots: Vec<&GraphRackBoundSlot> = bound_slots
             .iter()
@@ -371,15 +376,19 @@ impl BankUtilisation {
         };
         // `None` is "mixed": a group whose members route to different places has no one fold
         // target, so it is never one key with another group, mixed or not.
-        // Every member's own program, from the leader's and its lane's slot mask.
-        let fits_under = |members: &BankGroup<RackChainId>, leader: &BankGroup<RackChainId>| {
+        // Each active lane of `members`, its own program (the group's program under the lane's
+        // mask) laid over `leader`'s program: `None` when some lane's program is not a
+        // subsequence of the leader's.
+        let masks_under = |members: &BankGroup<RackChainId>,
+                           leader: &BankGroup<RackChainId>|
+         -> Option<Vec<Box<[bool]>>> {
             let program = leader.program();
             members
                 .active_slots
                 .iter()
                 .zip(members.active_mask.iter())
                 .filter(|(_, active)| **active)
-                .all(|(mask, _)| {
+                .map(|(mask, _)| {
                     let own: Vec<_> = members
                         .program
                         .iter()
@@ -387,10 +396,71 @@ impl BankUtilisation {
                         .filter(|(_, runs)| **runs)
                         .map(|(key, _)| key.clone())
                         .collect();
-                    RackProgram::new(members.rack, own)
-                        .subsequence_mask(&program)
-                        .is_some()
+                    RackProgram::new(members.rack, own).subsequence_mask(&program)
                 })
+                .collect()
+        };
+        // Whether `members` merged under `leader` still binds every slot either of them bound
+        // (owner decision 2026-10-27, #2138): each such slot, at its leader position, must pass
+        // #96 F7 over every merged lane -- the binder's own predicate, `every_member_runs`.
+        let merge_binds = |(members_index, members): (usize, &BankGroup<RackChainId>),
+                           (leader_index, leader): (usize, &BankGroup<RackChainId>)|
+         -> bool {
+            let Some(under) = masks_under(members, leader) else {
+                return false;
+            };
+            let leader_lanes: Vec<&[bool]> = leader
+                .active_slots
+                .iter()
+                .zip(leader.active_mask.iter())
+                .filter(|(_, active)| **active)
+                .map(|(lane, _)| &lane[..])
+                .collect();
+            let mut positions: Vec<usize> = bound_slots
+                .iter()
+                .filter(|bound| bound.group == leader_index)
+                .map(|bound| bound.slot)
+                .collect();
+            // A member group's bound slot `s`, at the leader position its first lane maps it to
+            // (every lane runs a bound slot, so any lane gives the same position).
+            let Some((first_mask, first_under)) = members
+                .active_slots
+                .iter()
+                .zip(members.active_mask.iter())
+                .filter(|(_, active)| **active)
+                .map(|(mask, _)| mask)
+                .zip(&under)
+                .next()
+            else {
+                return false;
+            };
+            for bound in bound_slots
+                .iter()
+                .filter(|bound| bound.group == members_index)
+            {
+                let rank = first_mask[..bound.slot]
+                    .iter()
+                    .filter(|runs| **runs)
+                    .count();
+                match first_under
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, runs)| **runs)
+                    .nth(rank)
+                {
+                    Some((position, _)) => positions.push(position),
+                    None => return false,
+                }
+            }
+            positions.iter().all(|position| {
+                crate::banks::every_member_runs(
+                    leader_lanes
+                        .iter()
+                        .copied()
+                        .chain(under.iter().map(|lane| &lane[..])),
+                    *position,
+                )
+            })
         };
         // A bank's window is the intersection over its members of `[asap', ALAP]` (issue #2136);
         // a member the map does not name sits at the bank's level alone. `None` is empty.
@@ -412,8 +482,8 @@ impl BankUtilisation {
         };
         let windows_intersect = |a: Option<(u64, u64)>, b: Option<(u64, u64)>| matches!((a, b), (Some(a), Some(b)) if a.0.max(b.0) <= a.1.min(b.1));
         let mut mergeable_partial_pairs = 0_u32;
-        for (index, a) in banked.iter().enumerate() {
-            for b in &banked[index + 1..] {
+        for (index, &(a_index, a)) in banked.iter().enumerate() {
+            for &(b_index, b) in &banked[index + 1..] {
                 let (a_lanes, b_lanes) = (a.active_count(), b.active_count());
                 if a_lanes < lanes
                     && b_lanes < lanes
@@ -422,7 +492,8 @@ impl BankUtilisation {
                     && a.class == b.class
                     && windows_intersect(window_of(a), window_of(b))
                     && matches!((fold_of(a), fold_of(b)), (Some(a), Some(b)) if a == b)
-                    && (fits_under(a, b) || fits_under(b, a))
+                    && (merge_binds((a_index, a), (b_index, b))
+                        || merge_binds((b_index, b), (a_index, a)))
                 {
                     mergeable_partial_pairs = mergeable_partial_pairs.saturating_add(1);
                 }
@@ -446,6 +517,10 @@ impl BankUtilisation {
 pub struct RackChainId {
     pub track_id: String,
     pub rack: RackId,
+    /// `None` for the whole chain (the chain pass). `Some(k)` for the one-slot candidate the
+    /// leftover pass (issue #2138) offers for slot `k` of that chain, an insert node the chain
+    /// pass left per node; its entry in [`GraphRackBankReport::chains`] is that one node.
+    pub slot: Option<usize>,
 }
 
 /// One bound homogeneous bank: a slot of a cohort, and the effect node each lane runs there.
@@ -506,6 +581,8 @@ impl GraphRackBankReport {
             .cloned()
             .collect();
         ids.sort();
+        // A leftover-pass candidate (issue #2138) repeats a node of its whole chain.
+        ids.dedup();
         ids
     }
 }
@@ -4921,7 +4998,8 @@ mod tests {
 
         // The same production handoff is checked at both bank shapes: a homogeneous two-slot
         // program retains every session slot in order, while a depth mismatch leaves only the
-        // shared slot bankable and keeps the heterogeneous members scalar.
+        // shared slot bankable in the chain pass (what the leftover pass then does with the
+        // other slot is #2138's claim, gated in `bank_levels.rs`).
         if let Some(width) = BankWidth::for_backend(host_dispatch()) {
             let lanes = width.lanes() as usize;
             let (_registry, homogeneous) = rack_chain_fixture(lanes, 2, |_| 2);
@@ -4941,30 +5019,21 @@ mod tests {
             // Chains of two depths are per-track, so they are inserts (decision 12).
             let (_registry, heterogeneous) = rack_chain_fixture(lanes, 2, |index| 1 + index % 2);
             let heterogeneous = compile_chain_fixture(heterogeneous);
-            assert_eq!(
-                heterogeneous
-                    .report()
-                    .rack_cohorts
-                    .bound_slots_in(RackLocation::Dynamic)
-                    .count(),
-                1
-            );
-            assert_eq!(
-                heterogeneous
-                    .report()
-                    .rack_cohorts
-                    .scalar_in(RackLocation::Dynamic)
-                    .len(),
-                lanes / 2
-            );
-            let heterogeneous_bound: Vec<_> = heterogeneous
-                .report()
-                .rack_cohorts
+            let report = &heterogeneous.report().rack_cohorts;
+            let chain_bound: Vec<_> = report
                 .bound_slots_in(RackLocation::Dynamic)
+                .filter(|bound| {
+                    report.plan.groups[bound.group]
+                        .members
+                        .iter()
+                        .flatten()
+                        .all(|chain| chain.slot.is_none())
+                })
                 .collect();
-            assert_eq!(heterogeneous_bound[0].slot, 0);
+            assert_eq!(chain_bound.len(), 1);
+            assert_eq!(chain_bound[0].slot, 0);
             assert!(
-                heterogeneous_bound[0]
+                chain_bound[0]
                     .members
                     .iter()
                     .enumerate()
@@ -4973,21 +5042,6 @@ mod tests {
                             && member.effect_id.as_str() == "chain1"
                     })
             );
-            let scalar_members: Vec<_> = heterogeneous
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Dynamic)
-                .into_iter()
-                .collect();
-            assert!(scalar_members.iter().all(|member| {
-                member
-                    .track_id
-                    .as_str()
-                    .strip_prefix("bank")
-                    .and_then(|index| index.parse::<usize>().ok())
-                    .is_some_and(|index| index % 2 == 1)
-                    && member.effect_id.as_str() == "chain0"
-            }));
         }
     }
 
@@ -5007,7 +5061,18 @@ mod tests {
         let artifact = compile_chain_fixture(effects);
         let report = &artifact.report().rack_cohorts;
 
-        let groups: Vec<_> = report.groups_in(RackLocation::Dynamic).collect();
+        // The chain pass's groups (the leftover pass's, `slot: Some(_)`, are #2138's claim).
+        let chain_group = |group: &BankGroup<RackChainId>| {
+            group
+                .members
+                .iter()
+                .flatten()
+                .all(|chain| chain.slot.is_none())
+        };
+        let groups: Vec<_> = report
+            .groups_in(RackLocation::Dynamic)
+            .filter(|group| chain_group(group))
+            .collect();
         assert_eq!(
             groups.len(),
             1,
@@ -5023,12 +5088,14 @@ mod tests {
         );
 
         // Slot 0 binds; slot 1 cannot, because the effect contract has no per-lane bypass mask
-        // yet (#96 F7 / #95), so its members stay on the per-node scalar path.
-        let bound: Vec<_> = report.bound_slots_in(RackLocation::Dynamic).collect();
+        // yet (#96 F7 / #95).
+        let bound: Vec<_> = report
+            .bound_slots_in(RackLocation::Dynamic)
+            .filter(|bound| chain_group(&report.plan.groups[bound.group]))
+            .collect();
         assert_eq!(bound.len(), 1);
         assert_eq!(bound[0].slot, 0);
         assert_eq!(bound[0].members.len(), lanes);
-        assert_eq!(report.scalar_in(RackLocation::Dynamic).len(), lanes / 2);
     }
 
     /// Twelve tracks that each carry one bankable SIMD-1 effect, plus a route per track.

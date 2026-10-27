@@ -232,6 +232,8 @@ pub struct Outcome {
     pub bind: Option<&'static str>,
     /// Bound effect banks.
     pub effect_banks: usize,
+    /// Insert nodes that render per node (`GraphRackBankReport::scalar_in` of the dynamic rack).
+    pub per_node_inserts: usize,
     /// Planned full-group slots every lane runs whose members span levels: the shape the fix
     /// leaves unbound. It depends only on the plan, so it also counts shapes a width this build's
     /// factories decline would meet on a build that banks it.
@@ -320,6 +322,7 @@ pub fn compile_bind_render(
     // is the bind and the rendered bits, not the levels.
     outcome.effect_banks = artifact.graph().effect_bank_members().count();
     let report = &artifact.report().rack_cohorts;
+    outcome.per_node_inserts = report.scalar_in(rack::RackLocation::Dynamic).len();
     let is_console =
         |rack: &graph::RackId| matches!(rack, graph::RackId::Simd1 | graph::RackId::Simd2);
     let class_of: BTreeMap<&graph_compiler::RackChainId, String> = report
@@ -1080,6 +1083,28 @@ pub fn realigning_simd1_strips() -> SessionModel {
     model
 }
 
+/// Issue #2138's session: nine tracks of the intended strip with no console, whose inserts are
+/// `[eq, comp]` (`ch00..=ch02`), `[comp, eq]` (`ch03..=ch05`) and `[comp]` (`ch06..=ch08`).
+pub fn ragged_insert_orders() -> SessionModel {
+    let mut model = intended_prefix(9);
+    let templates = Templates::of(&model);
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        let program: &[Kind] = match index / 3 {
+            0 => &[Kind::Eq, Kind::Comp],
+            1 => &[Kind::Comp, Kind::Eq],
+            _ => &[Kind::Comp],
+        };
+        track.console.clear();
+        track.inserts.effects = program
+            .iter()
+            .map(|kind| templates.effect(*kind, kind.slot_name()))
+            .collect();
+    }
+    model
+}
+
 /// The #970 verification probe's reduced reproducer (see [`REDUCED_MONO`]).
 pub fn reduced_mono_console() -> SessionModel {
     parse_session_json(REDUCED_MONO).expect("the reduced #970 reproducer parses")
@@ -1218,6 +1243,9 @@ fn native_bank_count(name: &str, outcomes: &[Outcome], simd4: usize, simd8: usiz
 /// lanes, 21 bound; 46 and 45 at four). Since #1098 `ch00`'s limiter, a level early, bound as a
 /// padded bank of one beside the other 63 limiters' padded remainder (23 and 47); since #2136 its
 /// level window places it with them, so the 64 limiters bind `64 / W` full banks: 22 and 46.
+/// Since #2138 the leftover pass binds the mixed group's EQs (seven at eight lanes, three at four)
+/// as one padded bank and the compressors of those tracks as another (`ch00`'s, a level early,
+/// stays per node): 24 and 48.
 #[test]
 fn the_sixty_four_track_console_less_one_eq_binds_at_every_width() {
     let name = "64-track console less ch00's EQ";
@@ -1227,7 +1255,7 @@ fn the_sixty_four_track_console_less_one_eq_binds_at_every_width() {
     // tracks at eight lanes and with three at four, as lane 0 of both.
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[0]], &[&[0]]);
-    native_bank_count(name, &outcomes, 46, 22);
+    native_bank_count(name, &outcomes, 48, 24);
 }
 
 /// Gate 1 with the ragged lane in the middle of its group. Members sort by active slot count and
@@ -1240,7 +1268,7 @@ fn the_console_less_a_middle_lanes_eq_binds_at_every_width() {
         assert_binds_and_renders_the_scalar_bits(name, &sixty_four_track_console_less_eqs(&[60]));
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[0]], &[&[4]]);
-    native_bank_count(name, &outcomes, 46, 22);
+    native_bank_count(name, &outcomes, 48, 24);
 }
 
 /// Gate 1 with the ragged lane last in its group at both widths (`ch63`: lane 7 of `ch56..=ch63`,
@@ -1252,7 +1280,7 @@ fn the_console_less_a_last_lanes_eq_binds_at_every_width() {
         assert_binds_and_renders_the_scalar_bits(name, &sixty_four_track_console_less_eqs(&[63]));
     misaligned_slots(name, &outcomes, [1, 1]);
     ragged_lanes(name, &outcomes, &[&[3]], &[&[7]]);
-    native_bank_count(name, &outcomes, 46, 22);
+    native_bank_count(name, &outcomes, 48, 24);
 }
 
 /// The #962 probe's seed-412 shape. Before #966 it refused at `Simd8` natively; the report that it
@@ -1262,7 +1290,9 @@ fn the_console_less_a_last_lanes_eq_binds_at_every_width() {
 /// zero, one and two inserts put the `post_insert` limiter at three levels, each its own padded
 /// group (H2): eight lanes bound the EQ and compressor twice, no soft-clip and three limiters, 7;
 /// four lanes bound them three times, one soft-clip group and four limiters, 11. Since #2136 the
-/// limiters' level windows place them at one level, `ceil(9 / W)` groups: 6 and 10. An `x86-64-v3`
+/// limiters' level windows place them at one level, `ceil(9 / W)` groups: 6 and 10. Since #2138
+/// the soft-clips the chain pass left per node at one level (`ch03`'s group's other lanes) bind as
+/// one leftover bank: 7 and 11; `ch03`'s EQ and its soft-clip, a level later, stay per node. An `x86-64-v3`
 /// build cannot bank that console at four lanes and refuses there, so the AArch64 leg holds the
 /// four-lane plan.
 #[test]
@@ -1272,7 +1302,7 @@ fn a_cohort_lane_behind_an_extra_dynamic_eq_binds_at_every_width() {
     // Eight soft-clip lanes: one full group at eight lanes, two at four, and `ch03`'s group is the
     // one whose soft-clip slot is misaligned either way.
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 10, 6);
+    native_bank_count(name, &outcomes, 11, 7);
 }
 
 /// Gate 1 on the mono desk: every track mono-mapped and symmetric, so the rescued plan is one the
@@ -1284,7 +1314,7 @@ fn the_mono_console_less_one_eq_binds_and_collapses_at_every_width() {
     let (outcomes, armed) =
         assert_binds_and_renders_the_scalar_bits(name, &mono_console_less_eqs(&[0]));
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 46, 22);
+    native_bank_count(name, &outcomes, 48, 24);
     let native = &armed[native_index()];
     assert!(
         native.collapse[0] > 0,
@@ -1299,8 +1329,10 @@ fn the_mono_console_less_one_eq_binds_and_collapses_at_every_width() {
 /// compressor and its soft clip; the stereo group `t7, t9` pads and binds its compressor; the
 /// full stereo group `t0, t14, t18, t6` binds neither slot (only `t0` runs the EQ, and its
 /// compressor is misaligned). No mono track is stranded, so #971's move never runs and the plan
-/// does not depend on what a factory binds: three banks. The AArch64 leg runs it.
-const REDUCED_MONO_SIMD4_BANKS: usize = 3;
+/// does not depend on what a factory binds: three banks. Since #2138 the leftover pass binds the
+/// compressors of `t14, t18, t6` (one level, padded) and leaves `t0`'s EQ and compressor per node:
+/// four. The AArch64 leg runs it.
+const REDUCED_MONO_SIMD4_BANKS: usize = 4;
 /// At eight lanes `t11` and `t13` are the mono pool's only members, a partial group of two below
 /// the eight-lane threshold, so they strand and #971 moves them to the stereo pool, where `t11`
 /// leads a seven-member group that pads and binds its compressor: one bank (#888).
@@ -1344,7 +1376,8 @@ fn the_reduced_mono_console_from_the_970_probe_binds_at_every_width() {
 /// mixed group holding `ch00` loses its compressor bank. A binder that refused every slot
 /// behind an identity slot, rather than every misaligned one, binds one bank fewer here. Since
 /// #1098 the nine early limiters and the other 55 each bound a padded remainder (22 and 45); since
-/// #2136 their level windows place all 64 limiters together: 21 and 44.
+/// #2136 their level windows place all 64 limiters together: 21 and 44. Since #2138 the mixed
+/// group's EQs and compressors bind as two leftover banks: 23 and 46.
 #[test]
 fn lanes_that_skip_the_same_slot_still_bank_it() {
     let name = "64-track console less nine EQs";
@@ -1353,7 +1386,7 @@ fn lanes_that_skip_the_same_slot_still_bank_it() {
         &sixty_four_track_console_less_eqs(&[0, 56, 57, 58, 59, 60, 61, 62, 63]),
     );
     misaligned_slots(name, &outcomes, [1, 1]);
-    native_bank_count(name, &outcomes, 44, 21);
+    native_bank_count(name, &outcomes, 46, 23);
 }
 
 /// The fix must not over-reach past the misaligned slot either: lanes that realign bank again.
@@ -1363,13 +1396,16 @@ fn lanes_that_skip_the_same_slot_still_bank_it() {
 /// the full group, gate and soft-clip for the A/B group, and a limiter bank at each of the two
 /// levels the two chain lengths put `simd2` at, so 9. Four lanes: 10, 4 and 4, so 18. A binder
 /// that stopped at the first misaligned slot of a group, or refused every slot behind an identity
-/// slot, loses the soft-clip bank of every A/B group: 8 at eight lanes.
+/// slot, loses the soft-clip bank of every A/B group: 8 at eight lanes. Since #2138 the leftover
+/// pass binds what the A/B groups left per node, pooled over both four-lane groups: B's EQs, A's
+/// compressors, B's compressors (a level later) and A's transient shapers, four banks of four
+/// lanes at either width: 13 and 22.
 #[test]
 fn a_slot_after_a_misaligned_one_realigns_and_still_banks() {
     let name = "sixteen tracks realigning after a misaligned compressor";
     let (outcomes, _) = assert_binds_and_renders_the_scalar_bits(name, &realigning_simd1_strips());
     misaligned_slots(name, &outcomes, [2, 1]);
-    native_bank_count(name, &outcomes, 18, 9);
+    native_bank_count(name, &outcomes, 22, 13);
 }
 
 /// #1202 gate 2's sessions: four tracks of the intended console (`pre_insert: [eq, comp]`,
@@ -1835,6 +1871,32 @@ fn the_banked_console_arena_equals_the_bank_unaware_arena() {
     );
 }
 
+/// Issue #2138 (gates 1 and 2): an insert the chain pass leaves per node banks with the same key
+/// in its level window, and the plan still renders the scalar bits.
+///
+/// The chain pass leads with `[comp, eq]` (#99's leader order) and takes the `[comp]` tracks as
+/// subsequence members: the compressor slot binds, and the EQ slot does not, because a `[comp]`
+/// lane skips it (#96 F7). The `[eq, comp]` tracks bind both slots as their own group, padded.
+/// That leaves the three `[comp, eq]` EQs per node, one level after the compressors, at both
+/// widths: four lanes plan `ch03..=ch06` (full) and `ch07, ch08` (padded), eight lanes one padded
+/// group of six. The leftover pass offers each EQ as a one-slot candidate, and the three meet at
+/// one level and pad (three members reach both widths' threshold). Per node 3 -> 0 at both widths;
+/// effect banks 4 -> 5 at four lanes (two compressor banks, the `[eq, comp]` pair, the EQs) and
+/// 3 -> 4 at eight. The four-lane counts are derived from the plan, as the other `simd4` pins are,
+/// and the AArch64 leg runs them.
+#[test]
+fn leftover_inserts_bank_by_key_in_their_window() {
+    let name = "nine tracks of [eq, comp], [comp, eq] and [comp]";
+    let (outcomes, _) = assert_binds_and_renders_the_scalar_bits(name, &ragged_insert_orders());
+    assert_eq!(
+        outcomes[native_index() + 1].per_node_inserts,
+        0,
+        "{name}: inserts per node at {:?}",
+        Backend::current()
+    );
+    native_bank_count(name, &outcomes, 5, 4);
+}
+
 /// Issue #2136's placement invariant, checked on a compiled plan: the set the placement's bank
 /// count was taken over at each level (`GraphRackBankReport::planned_levels`) is exactly the
 /// members the bank planners grouped there -- every rack-chain first slot of every plan group at
@@ -1856,7 +1918,14 @@ fn assert_placement_counts_the_plan(artifact: &PreparedGraphBuiltinsArtifact) {
     }
     let mut grouped: BTreeMap<u64, BTreeSet<GraphNodeId>> = BTreeMap::new();
     for group in &report.plan.groups {
-        for chain in group.members.iter().flatten() {
+        // A leftover-pass group (#2138, `slot: Some(_)`) is placed by its own sub-problem after
+        // this count, so it is not a member of it; the leftover count is checked below.
+        for chain in group
+            .members
+            .iter()
+            .flatten()
+            .filter(|chain| chain.slot.is_none())
+        {
             let first = report.chains[chain][0].clone();
             grouped
                 .entry(group.level)
@@ -1889,6 +1958,27 @@ fn assert_placement_counts_the_plan(artifact: &PreparedGraphBuiltinsArtifact) {
     assert_eq!(
         counted, grouped,
         "the placement counted exactly the members the planners grouped at each level"
+    );
+    // Issue #2138: the leftover pass's count, against what its bind bound. Every leftover
+    // candidate the count counted as binding is a member of a bound leftover bank at the level it
+    // was counted at, and no bound leftover bank holds a node it did not count.
+    let mut bound_leftovers: BTreeMap<graph::EffectNodeId, u64> = BTreeMap::new();
+    for bound in &report.bound_slots {
+        let group = &report.plan.groups[bound.group];
+        if group
+            .members
+            .iter()
+            .flatten()
+            .any(|chain| chain.slot.is_some())
+        {
+            for member in &bound.members {
+                bound_leftovers.insert(member.clone(), group.level);
+            }
+        }
+    }
+    assert_eq!(
+        report.leftover_levels, bound_leftovers,
+        "the leftover count counted exactly the leftover nodes the bind bound"
     );
 }
 
