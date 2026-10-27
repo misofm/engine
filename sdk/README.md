@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.7.0
+npm install @misofm/engine@0.8.0
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -794,7 +794,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.7.0 release record](https://github.com/misofm/engine/issues/2152) contains the accepted artifact
+[0.8.0 release record](https://github.com/misofm/engine/issues/2164) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -820,6 +820,25 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.7.0
+
+0.8.0 changes no SDK API: it adds nothing and removes nothing. The changes are in the engine
+module.
+
+- Changed: a bypassed `miso.delay` or `miso.reverb` now does no wet-path work, as a bypassed
+  console slot already did in 0.7.0. Un-bypass still starts from rest (dry for the warm-up, then
+  fade in; the warm-up of these two effects is zero). No rendered sample moves.
+- Changed: the plan places console and insert banks with fewer, fuller banks (pattern packing,
+  the contracted executor order, ASAP/ALAP window placement and the leftover insert pass). No
+  rendered sample moves.
+- Fixed: a table-only plan replacement (no session change) that lands while a stored automation
+  ride is in progress now renders the same samples as uninterrupted playback, off the fader grid
+  and when the ride coincides with a VCA step. Before 0.8.0 such a replacement could change the
+  first samples after it.
+- Docs: the PCM feed section above now shows how to attach a feed on a suspended
+  `AudioContext`. `attachEngineFeed` and `ready()` work there; you do not need resume, suspend
+  and a seek. The behaviour is the same as in 0.7.0.
 
 ## Upgrading from 0.6.0
 
