@@ -1215,6 +1215,18 @@ impl AudioWorkletEngineHost {
     /// The document is interpreted once. Every refusal is typed and nothing is published until
     /// both the shared runtime and all bridge staging buffers exist.
     pub fn boot(document: &[u8], options: WebBootOptions) -> Result<Self, BootFailure> {
+        Self::boot_with_command(document, options, None)
+    }
+
+    /// [`Self::boot`] with the boot command frame `miso_engine_web_v1_boot_command_ptr` staged
+    /// (#2166): the control plane applies it before it prepares the first plan
+    /// ([`control_plane::compile_children_with_boot_command`]), so a boot's spectrum taps are the
+    /// first plan's and the boot counts no blocking rebuild. The browser decodes nothing in it.
+    pub fn boot_with_command(
+        document: &[u8],
+        options: WebBootOptions,
+        boot_command: Option<&[u8]>,
+    ) -> Result<Self, BootFailure> {
         let document_bytes = u32::try_from(document.len()).map_err(|_| {
             BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.maximum_bytes")
         })?;
@@ -1299,8 +1311,14 @@ impl AudioWorkletEngineHost {
         // peak is the one compile's, as it was before.
         drop(session);
         drop(model);
-        let (ready, plan, resources) =
-            compile_ready(document, &caps, options, memory_budget, projection.report)?;
+        let (ready, plan, resources) = compile_ready(
+            document,
+            &caps,
+            options,
+            memory_budget,
+            projection.report,
+            boot_command,
+        )?;
         let exact_retained = exact_retained_bytes(&resources)?;
         if exact_retained > memory_budget {
             return Err(BootFailure::exact_budget(
@@ -3052,7 +3070,7 @@ fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
 
 /// Bytes of the control plane's one control frame (#1381a): the request and response scratch the
 /// session keeps for the protocol the browser serves through the core.
-const CONTROL_FRAME_BYTES: u64 = 16 << 10;
+pub(crate) const CONTROL_FRAME_BYTES: u64 = 16 << 10;
 /// Bytes of the control plane's replay cache.
 const CONTROL_REPLAY_BYTES: u64 = 64 << 10;
 /// Entries of the control plane's replay cache.
@@ -3859,6 +3877,7 @@ fn compile_ready(
     options: WebBootOptions,
     memory_budget: u64,
     mut report: WebResourceReport,
+    boot_command: Option<&[u8]>,
 ) -> Result<(ReadyOwnership, WebPlan, WebResourceReport), BootFailure> {
     // #1312 D2, #1399: the session's `live_values_superseded` count is the control plane's, made
     // once before any plan is prepared; the preparer leaves a handle on it in the record, which the
@@ -3866,13 +3885,21 @@ fn compile_ready(
     let record = Arc::new(Mutex::new(BootRecord::default()));
     let preparer = WebRuntimePreparer::new(options).recording(Arc::clone(&record));
     let limits = control_limits(caps, memory_budget);
-    // #1597: the boot plan has no spectrum taps; a `SPECTRUM_CONFIGURE` before the first block
-    // adopts a plan with them in its place (`SessionState::command_with_plan`).
+    // #2166: a staged boot command (the SDK's boot spectrum taps) is applied before the first plan
+    // is prepared, so the taps are that plan's and no rebuild is counted for them.
+    let compiled = match boot_command {
+        None => control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer)),
+        Some(frame) => control_plane::compile_children_with_boot_command::<WebAdapter>(
+            document,
+            limits,
+            Box::new(preparer),
+            frame,
+        ),
+    };
     let control_plane::CompiledChildren {
         session: mut control,
         mut plan,
-    } = control_plane::compile_children::<WebAdapter>(document, limits, Box::new(preparer))
-        .map_err(|failure| boot_refusal(&failure, &record))?;
+    } = compiled.map_err(|failure| boot_refusal(&failure, &record))?;
     let (engine, live_values_superseded, mut shape) = {
         let mut record = record
             .lock()
@@ -3933,8 +3960,8 @@ fn compile_ready(
     // Issue #143 R7: the engine's walked row, carried through unchanged.
     report.observation_retained_bytes = engine.observation_retained_bytes;
     // #1290a: the tables were built by the boot plan's own preparation (`build_plan_shape`), the
-    // same function every replacement plan's preparation runs. The boot plan has no spectrum
-    // captures (#1597).
+    // same function every replacement plan's preparation runs. The boot plan's spectrum captures,
+    // if a boot command set taps (#2166), went to the control plane's spectrum monitor.
     plan.active_attachment_mut::<RenderCompanions>()
         .ok_or_else(|| fixed_diagnostic("web.internal.companions"))?;
     let rows = shape

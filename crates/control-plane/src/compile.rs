@@ -2093,8 +2093,7 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
 /// the boot plan and every structural successor through it, and through nothing else.
 ///
 /// The first plan has no spectrum taps, and the session's monitor starts at configuration epoch 0
-/// (#1597): a host sets the taps with `SPECTRUM_CONFIGURE`, which before the first block replaces
-/// the boot plan in place ([`crate::SessionState::command_with_plan`]).
+/// (#1597). A host whose boot sets taps passes them to [`compile_children_with_boot_command`].
 pub fn compile_children<A: ControlAdapter>(
     document: &str,
     limits: ControlLimits,
@@ -2103,7 +2102,63 @@ pub fn compile_children<A: ControlAdapter>(
 where
     A::Row: Send + 'static,
 {
-    compile_children_warm(document, limits, preparer, None)
+    compile_children_warm(document, limits, preparer, None, None)
+}
+
+/// [`compile_children`] with one boot command frame (#2166): the session applies it to the boot
+/// before it prepares the first plan, so what it sets is part of that plan and no successor is
+/// prepared for it. The one command a boot carries is `SPECTRUM_CONFIGURE`: its taps are the first
+/// plan's, checked as the command checks them against the boot's model, and the session's monitor
+/// starts at configuration and adopted epoch 1, its service made from the plan's captures. A
+/// capture armed before the first block covers sample 0.
+///
+/// The frame is decoded as the command entry decodes one, under the session's frame limit; its
+/// request ID and expected revision are not read, because a boot has no reply and starts the
+/// revision. A frame that does not decode, or names another command, refuses the boot with
+/// `control.boot.command`; a configuration the command would refuse refuses it with the command's
+/// code (`spectrum.target.unknown`, `spectrum.duplicate`, `spectrum.frame`, or a request code), and
+/// a preparation refusal with the preparer's. A refused boot leaves nothing.
+pub fn compile_children_with_boot_command<A: ControlAdapter>(
+    document: &str,
+    limits: ControlLimits,
+    preparer: Box<dyn RuntimePreparer>,
+    boot_command: &[u8],
+) -> Result<CompiledChildren<A>, CompileFailure>
+where
+    A::Row: Send + 'static,
+{
+    compile_children_warm(document, limits, preparer, None, Some(boot_command))
+}
+
+/// The configuration a boot command frame sets (#2166, [`compile_children_with_boot_command`]),
+/// decoded with `codec` and checked against `model`.
+fn boot_command_spectrum(
+    codec: &ProtocolCodec,
+    frame: &[u8],
+    model: &session::SessionModel,
+    limits: ControlLimits,
+) -> Result<Option<host_core::SpectrumConfiguration>, CompileFailure> {
+    let refused = || {
+        prepare_failure(PrepareDiagnostics::fixed(
+            host_core::PrepareRejection::Session,
+            "control.boot.command",
+        ))
+    };
+    let field_count = usize::try_from(limits.maximum_control_frame_bytes)
+        .map_err(|_| failure(ResourceFault::Platform))?
+        / size_of::<u16>();
+    let mut fields = Vec::new();
+    fields
+        .try_reserve_exact(field_count)
+        .map_err(|_| failure(ResourceFault::Allocation))?;
+    fields.resize(field_count, 0_u16);
+    let decoded = codec
+        .decode_typed_command(frame, &mut protocol::DecodeScratch::new(&mut fields))
+        .map_err(|_| refused())?;
+    let protocol::DecodedCommandPayload::SpectrumConfigure(request) = decoded.payload else {
+        return Err(refused());
+    };
+    crate::control::boot_spectrum_configuration(&request, model, limits.maximum_control_frame_bytes)
 }
 
 /// [`compile_children`] with the session's warm-successor bounds (#1403 D1): with
@@ -2116,6 +2171,7 @@ pub(crate) fn compile_children_warm<A: ControlAdapter>(
     mut limits: ControlLimits,
     preparer: Box<dyn RuntimePreparer>,
     warm: Option<host_core::WarmConfig>,
+    boot_command: Option<&[u8]>,
 ) -> Result<CompiledChildren<A>, CompileFailure>
 where
     A::Row: Send + 'static,
@@ -2142,19 +2198,6 @@ where
     // #1312 D2: the session's `live_values_superseded` count, one for every plan it prepares.
     // Made here, with the session's other fixed rows, and charged by `capi_resources`.
     let live_values_superseded = host_core::LiveValuesSuperseded::default();
-    let runtime = prepare_runtime::<A>(
-        &*preparer,
-        store.compiled(),
-        limits,
-        None,
-        None,
-        &live_values_superseded,
-        0,
-        0,
-    )?;
-    // #1689 D3: a boot designates no master; the app writes the strip's `master` row after boot.
-    let monitor = controls::MonitorOverlay::new();
-
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure(ResourceFault::Platform))?;
     let replay_bytes = usize::try_from(limits.maximum_replay_bytes)
@@ -2168,6 +2211,27 @@ where
         max_string_bytes: control_bytes,
         max_nesting: 4,
     });
+    // #2166: the boot command's taps are the first plan's.
+    let boot_spectrum = boot_command
+        .map(|frame| {
+            boot_command_spectrum(&codec, frame, store.compiled().normalized_model(), limits)
+        })
+        .transpose()?
+        .flatten();
+    let runtime = prepare_runtime::<A>(
+        &*preparer,
+        store.compiled(),
+        limits,
+        boot_spectrum
+            .as_ref()
+            .map(|configuration| &configuration.preparation),
+        None,
+        &live_values_superseded,
+        0,
+        0,
+    )?;
+    // #1689 D3: a boot designates no master; the app writes the strip's `master` row after boot.
+    let monitor = controls::MonitorOverlay::new();
     let queues = ProtocolQueues::prepare(protocol_queue_config::<A>(limits)?)
         .map_err(|_| failure(ResourceFault::ProtocolQueue))?;
     let replay = ReplayCache::try_new(ReplayCacheConfig {
@@ -2195,11 +2259,19 @@ where
         inventory,
         control_catalog,
         capi,
-        // The boot plan is prepared with no spectrum configuration, so it has no captures.
-        spectrum: _,
+        // The boot plan's captures: `None` without a boot configuration.
+        spectrum: boot_captures,
     } = runtime;
-    let spectrum =
+    let mut spectrum =
         crate::spectrum::SpectrumMonitor::new(resources.sample_rate_hz, resources.quantum_frames);
+    // #2166: a boot configuration is the session's from the first plan, which holds its captures:
+    // stored and adopted at once, as the promotion of a plan prepared with it would.
+    if let Some(configuration) = boot_spectrum {
+        let hop = configuration.hop;
+        let epoch = spectrum.commit(Some(configuration));
+        // A boot service is made from the captures, so there is nothing to pair or displace.
+        drop(spectrum.adopt(boot_captures, &[], hop, epoch));
+    }
     // #1314 D1, #1502 D5: the initial plan carries the store's initial revision, published on its
     // own gate, and the watermark starts there.
     let (publisher, owner, retirer) = plan_exchange_at_revision(

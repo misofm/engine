@@ -3751,6 +3751,18 @@ fn bus_meter_host_with(
     meter_blocks: u64,
     source_quanta: u64,
 ) -> AudioWorkletEngineHost {
+    bus_meter_host_booted(quantum, buses, meter_blocks, source_quanta, None)
+}
+
+/// [`bus_meter_host_with`] booted with `boot_command` staged, as `miso_engine_web_v1_boot_command_ptr`
+/// stages it (#2166).
+fn bus_meter_host_booted(
+    quantum: u32,
+    buses: bool,
+    meter_blocks: u64,
+    source_quanta: u64,
+    boot_command: Option<&[u8]>,
+) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/observation-frame-shape.json"
     ))
@@ -3793,12 +3805,13 @@ fn bus_meter_host_with(
         live_control_meter_blocks: meter_blocks,
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
-        panic!(
-            "bus meter boot: {}",
-            String::from_utf8_lossy(failure.diagnostic())
-        )
-    })
+    AudioWorkletEngineHost::boot_with_command(document.as_bytes(), options, boot_command)
+        .unwrap_or_else(|failure| {
+            panic!(
+                "bus meter boot: {}",
+                String::from_utf8_lossy(failure.diagnostic())
+            )
+        })
 }
 
 /// Issue #1448 D6: after a window is lost on one or two meters, the poll that recovers publishes
@@ -3943,62 +3956,133 @@ fn the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix() {
     assert_eq!(header.master_gr_present, 0);
 }
 
-/// Configure one stereo spectrum tap on `host` through its command entry, before its first block,
-/// as the SDK's boot does (#1597): the reply reports the tap adopted at once.
-fn configure_spectrum_before_the_first_block(
-    host: &mut AudioWorkletEngineHost,
-    target_kind: protocol::SpectrumTargetKind,
-    target_id: &str,
-) {
-    use protocol::{
-        CommandPayload, DecodeScratch, DecodedSuccessResponsePayload, DecodedTypedResponseFrame,
-        ExpectedRevision, ProtocolCodec, RequestId, TypedCommandFrame,
-    };
-    let configure = protocol::SpectrumConfigureRequest {
-        form: protocol::SpectrumForm::Single,
-        entries: vec![protocol::SpectrumEntry {
-            target_kind,
-            target_id: target_id.to_owned(),
-            channels: protocol::ParameterChannel::Both,
-        }],
-        maximum_capture_bytes: host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES,
-        hop_frames: None,
-    };
-    let codec = ProtocolCodec::default();
+/// One stereo spectrum tap on `target_id`, encoded as a `SPECTRUM_CONFIGURE` command frame: the
+/// frame the SDK stages as the boot command (#2166), or sends through the command entry.
+fn spectrum_configure_frame(target_kind: protocol::SpectrumTargetKind, target_id: &str) -> Vec<u8> {
+    spectrum_frame(
+        1,
+        protocol::CommandPayload::SpectrumConfigure(&protocol::SpectrumConfigureRequest {
+            form: protocol::SpectrumForm::Single,
+            entries: vec![protocol::SpectrumEntry {
+                target_kind,
+                target_id: target_id.to_owned(),
+                channels: protocol::ParameterChannel::Both,
+            }],
+            maximum_capture_bytes: host_core::SPECTRUM_MAXIMUM_CAPTURE_BYTES,
+            hop_frames: None,
+        }),
+    )
+}
+
+/// `payload` encoded as one command frame with request ID `request` and no expected revision.
+fn spectrum_frame(request: u64, payload: protocol::CommandPayload<'_>) -> Vec<u8> {
     let mut bytes = vec![0_u8; 4_096];
-    let length = codec
+    let length = protocol::ProtocolCodec::default()
         .encode_command_frame_into(
-            &TypedCommandFrame {
-                request_id: RequestId::new(1).expect("nonzero request"),
-                expected_revision: ExpectedRevision::Any,
-                payload: CommandPayload::SpectrumConfigure(&configure),
+            &protocol::TypedCommandFrame {
+                request_id: protocol::RequestId::new(request).expect("nonzero request"),
+                expected_revision: protocol::ExpectedRevision::Any,
+                payload,
             },
             &mut bytes,
         )
-        .expect("a configure frame");
-    let len = u32::try_from(length).expect("a short frame");
-    host.control_request_mut(len).expect("the request staging")[..length]
-        .copy_from_slice(&bytes[..length]);
+        .expect("a spectrum frame");
+    bytes.truncate(length);
+    bytes
+}
+
+/// Run `frame` through `host`'s command entry and hand its success payload to `read`.
+fn spectrum_command<R>(
+    host: &mut AudioWorkletEngineHost,
+    frame: &[u8],
+    read: impl FnOnce(protocol::DecodedSuccessResponsePayload<'_>) -> R,
+) -> R {
+    use protocol::{DecodeScratch, DecodedTypedResponseFrame, ProtocolCodec};
+    let len = u32::try_from(frame.len()).expect("a short frame");
+    host.control_request_mut(len).expect("the request staging")[..frame.len()]
+        .copy_from_slice(frame);
     assert_eq!(host.control_command(len), RESULT_OK);
-    let mut fields = [0_u16; 64];
-    let DecodedTypedResponseFrame::Success {
-        payload: DecodedSuccessResponsePayload::SpectrumConfigured(reply),
-        ..
-    } = codec
+    let mut fields = vec![0_u16; 8_192];
+    match ProtocolCodec::default()
         .decode_typed_response(
             host.control_response(),
             &mut DecodeScratch::new(&mut fields),
         )
-        .expect("a configure reply")
-    else {
-        panic!("the configure was refused");
-    };
-    assert_eq!(reply.adopted_epoch, reply.configured_epoch);
+        .expect("a spectrum reply")
+    {
+        DecodedTypedResponseFrame::Success { payload, .. } => read(payload),
+        DecodedTypedResponseFrame::NonOk { payload, .. } => {
+            panic!("the spectrum command was refused: {payload:?}")
+        }
+    }
+}
+
+/// Issue #2166 claim (a): a boot whose staged command sets a spectrum tap counts no blocking
+/// rebuild, and the tap's stream delivers bins once a window has rendered: the tap is the first
+/// plan's.
+///
+/// Red if the boot drops the command (the stream start answers `Unprepared`), if the monitor does
+/// not adopt the boot plan's captures (likewise), or if the tap is set by a plan that replaces the
+/// boot's (`blocking_rebuilds` is 1).
+#[test]
+fn a_boot_spectrum_tap_is_the_first_plans_and_streams_with_no_rebuild() {
+    const QUANTUM: u32 = 128;
+    let configure = spectrum_configure_frame(protocol::SpectrumTargetKind::Output, "main-out");
+    let mut host = bus_meter_host_booted(QUANTUM, false, 2, 64, Some(&configure));
+    assert_eq!(host.blocking_rebuilds(), 0, "the boot rebuilt nothing");
+    let start = spectrum_frame(
+        2,
+        protocol::CommandPayload::SpectrumStream(&protocol::SpectrumStreamRequest::Start {
+            smoothing_ms: 0.0,
+        }),
+    );
+    let adopted = spectrum_command(&mut host, &start, |payload| match payload {
+        protocol::DecodedSuccessResponsePayload::SpectrumStreamed(reply) => reply.adopted_epoch,
+        _ => panic!("a stream reply"),
+    });
+    assert_eq!(adopted, 1, "the boot plan carries the configuration");
+    let windows = host_core::SPECTRUM_WINDOW_FRAMES as u64 / u64::from(QUANTUM);
+    for block in 0..windows {
+        feed_and_render_channels(&mut host, block, 0.5, 0.25);
+    }
+    let read = spectrum_frame(
+        3,
+        protocol::CommandPayload::SpectrumStream(&protocol::SpectrumStreamRequest::Read),
+    );
+    spectrum_command(&mut host, &read, |payload| {
+        let protocol::DecodedSuccessResponsePayload::SpectrumStreamed(reply) = payload else {
+            panic!("a stream reply");
+        };
+        assert_eq!(reply.status, protocol::SpectrumStreamStatus::Ready);
+        let bins = reply.bins.expect("a ready read carries bins");
+        assert!(bins.left_db.is_some() && bins.right_db.is_some());
+    });
+    assert_eq!(host.blocking_rebuilds(), 0, "rendering rebuilt nothing");
+}
+
+/// Issue #2166 claim (b): a `SPECTRUM_CONFIGURE` that changes the taps of a running session is a
+/// plan rebuild the browser counts, once.
+///
+/// Red if the browser stops counting a rebuild that changes no revision (a spectrum configure
+/// commits no edit), as a fix of claim (a) that excused the epoch change rather than avoiding it
+/// would.
+#[test]
+fn a_running_spectrum_configure_counts_one_blocking_rebuild() {
+    const QUANTUM: u32 = 128;
+    let mut host = bus_meter_host_with(QUANTUM, false, 2, 64);
+    feed_and_render_channels(&mut host, 0, 0.5, 0.25);
+    let configure = spectrum_configure_frame(protocol::SpectrumTargetKind::Output, "main-out");
+    let rebuild = spectrum_command(&mut host, &configure, |payload| match payload {
+        protocol::DecodedSuccessResponsePayload::SpectrumConfigured(reply) => reply.rebuild,
+        _ => panic!("a configure reply"),
+    });
+    assert!(rebuild, "the configure prepared a plan");
+    assert_eq!(host.blocking_rebuilds(), 1);
 }
 
 /// Issue #1581 gate 2: a session with a spectrum tap meters the submixes as the plain boot does,
 /// so the bus fixture's frame is the plain boot's, word for word, with nonzero submix peaks. The
-/// tap is configured before the first block (#1597), as a boot's taps are.
+/// tap is the boot command's (#2166), as a boot's taps are.
 ///
 /// Red on the base: the spectrum entries metered the tracks alone, so the submix pairs stayed `0`.
 #[test]
@@ -4007,12 +4091,8 @@ fn a_spectrum_tap_meters_every_submix_like_the_plain_boot() {
     const BLOCKS: u64 = 8;
     let mut plain = bus_meter_host(QUANTUM, true);
     let expected = bus_meter_frame(&mut plain, BLOCKS);
-    let mut host = bus_meter_host_with(QUANTUM, true, 2, 64);
-    configure_spectrum_before_the_first_block(
-        &mut host,
-        protocol::SpectrumTargetKind::Output,
-        "main-out",
-    );
+    let configure = spectrum_configure_frame(protocol::SpectrumTargetKind::Output, "main-out");
+    let mut host = bus_meter_host_booted(QUANTUM, true, 2, 64, Some(&configure));
     let frame = bus_meter_frame(&mut host, BLOCKS);
     let tracks = 3;
     for (word, peak) in frame
