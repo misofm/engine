@@ -1720,7 +1720,7 @@ impl AudioWorkletEngineHost {
             }
             Ok(None) => RESULT_OK,
             Err(error) => {
-                control.staging.write_diagnostic(&error.diagnostic());
+                control.staging.write_diagnostic(error.diagnostic());
                 match error {
                     control_plane::EventError::BufferTooSmall { .. } => RESULT_BUFFER_TOO_SMALL,
                     control_plane::EventError::Backpressure => RESULT_BACKPRESSURE,
@@ -2459,7 +2459,8 @@ impl AudioWorkletEngineHost {
     /// back through the hand-back ring, and the staging is the control half's own. `None` when
     /// the render half is not here or no session is prepared.
     ///
-    /// Control path; it allocates nothing. The host's own status stays as it was at the release.
+    /// Control path; it allocates the handle's one box. The host's own status stays as it was at
+    /// the release.
     pub fn release_render(&mut self) -> Option<RenderHost> {
         self.render.ready.as_ref()?;
         let shell = RenderHalf {
@@ -2469,7 +2470,7 @@ impl AudioWorkletEngineHost {
             ready: None,
         };
         Some(RenderHost {
-            half: core::mem::replace(&mut self.render, shell),
+            half: Box::new(core::mem::replace(&mut self.render, shell)),
         })
     }
 
@@ -2489,7 +2490,7 @@ impl AudioWorkletEngineHost {
         if !ours || self.render.ready.is_some() {
             return Err(render);
         }
-        self.render = render.half;
+        self.render = *render.half;
         if let Some(failure) = self.render.failure.take()
             && let Some(control) = self.control.as_mut()
         {
@@ -2939,7 +2940,8 @@ impl RenderHalf {
 /// control path (S6's Worker rejoins before it disposes); a render half dropped on its own frees
 /// the plan wherever it is dropped.
 pub struct RenderHost {
-    half: RenderHalf,
+    /// Boxed, so the handle that crosses threads is one pointer.
+    half: Box<RenderHalf>,
 }
 
 impl RenderHost {
