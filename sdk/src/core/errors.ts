@@ -25,8 +25,8 @@ export type MisoErrorCode =
  * - `hostDisposeTimeout`: the worklet host did not answer its dispose request.
  * - `contextCloseTimeout`: `AudioContext.close()` did not settle (it also covers the boot-path
  *   context closes).
- * - `bootConfigureTimeout`: the browser boot's spectrum configuration (`CAPABILITIES_GET` and
- *   `SPECTRUM_CONFIGURE`, #1596 D2) did not answer within `requestDeadlineMs`.
+ * - `bootConfigureTimeout`: the browser boot's spectrum capability probe (`CAPABILITIES_GET`,
+ *   #1596 D2; the taps themselves ride the boot, #2166) did not answer within `requestDeadlineMs`.
  */
 export type SdkTimeoutCode =
   | "hostDisposeTimeout"

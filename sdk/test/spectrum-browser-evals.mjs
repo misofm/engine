@@ -36,23 +36,24 @@ const candidateAsset = () => assetPromise ??= moduleBytes().then((bytes) => Miso
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 /**
- * A browser engine over a served core that staged the boot's taps, as the worklet boot does.
- * `harness.frames` counts the frames the page sent; `harness.hold`, when set, holds the reply of the
+ * A browser engine over a served core, booted with the boot command the engine hands its host, as
+ * the worklet boot stages it (#2166). `harness.frames` counts the frames the page sent and
+ * `harness.messages` holds their message IDs; `harness.hold`, when set, holds the reply of the
  * next frame after `harness.holdAfter` more (the core has served it) until that promise settles.
  * `reply(response)` may change a served reply, and `harness.disposed` counts host disposals.
  */
-async function served({ spectrum, spectrumCollection, policy, afterCall, reply, harness: given, requestDeadlineMs } = {}) {
+async function served({ spectrum, spectrumCollection, policy, afterCall, reply, harness: given, requestDeadlineMs, dropBootCommand = false } = {}) {
   const document = sessionDocument({ frames: 64 * 2_048 });
-  const core = await WasmBoundary.boot(await candidateAsset(), new TextEncoder().encode(document), {
-    ...(spectrum === undefined ? {} : { spectrum }),
-    ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
+  const harness = Object.assign(given ?? {}, {
+    frames: 0, messages: [], hold: undefined, holdAfter: 0, hostOptions: undefined, bootCommand: undefined, disposed: 0,
   });
-  const forward = onEndpointIds(core.controlRequestIds, (frame) => core.controlFrame(frame));
-  const harness = Object.assign(given ?? {}, { frames: 0, hold: undefined, holdAfter: 0, hostOptions: undefined, disposed: 0 });
+  let core;
+  let forward;
   let block = 0;
   const host = {
     async control(frame) {
       harness.frames += 1;
+      harness.messages.push(frame[16] | (frame[17] << 8));
       const response = reply === undefined ? forward(frame) : reply(forward(frame));
       let hold;
       if (harness.hold !== undefined && harness.holdAfter-- === 0) {
@@ -96,11 +97,21 @@ async function served({ spectrum, spectrumCollection, policy, afterCall, reply, 
     }),
     createHost: async (request) => {
       harness.hostOptions = request.options;
+      harness.bootCommand = request.bootCommand;
+      core = await WasmBoundary.bootWithCommand(
+        await candidateAsset(),
+        new TextEncoder().encode(document),
+        {},
+        // An app's own `createHost` that builds its request field by field drops the command.
+        dropBootCommand ? undefined : request.bootCommand,
+      );
+      forward = onEndpointIds(core.controlRequestIds, (frame) => core.controlFrame(frame));
       return host;
     },
   });
   afterCall?.();
-  return { engine: await pending, render, harness, core };
+  const engine = await pending;
+  return { engine, render, harness, core };
 }
 
 /** Render while `promise` is pending, one block per turn, and return what it settles to. */
@@ -126,11 +137,12 @@ async function nextReady(subscription, render, seen = []) {
   throw new Error(`the stream published no ready window: ${seen.map((row) => `${row.status}/${row.metadata?.captureEpoch}/${row.metadata?.sequence}`).join(",")}`);
 }
 
-test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in a boot word", SKIP, async (t) => {
-  // Red if the hop reaches neither the boot configure nor the stream (the boot words no longer
-  // carry it), if a boot word still carries it (the worklet would call the hop boot export), if a
-  // policy changed after `createEngine` was called changes it, or if a published metadata's nested
-  // target can be changed.
+test("the browser boot hands its taps and the policy's hop to the host as the boot command", SKIP, async (t) => {
+  // #2166 parity row. Red if the taps or the hop do not reach the core in the boot command (the
+  // core here is booted with nothing else, so the boot's confirming SPECTRUM_CONFIGURE would rebuild
+  // and the boot would be refused, or the stream would run at the default hop), if
+  // a boot word carries the hop, if a policy changed after `createEngine` was called changes it,
+  // or if a published metadata's nested target can be changed.
   t.mock.timers.enable({ apis: ["setInterval"] });
   const policy = { spectrumHopFrames: 256 };
   const { engine, render, harness } = await served({
@@ -140,6 +152,8 @@ test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in 
   });
   try {
     assert.equal(harness.hostOptions.spectrumHopFrames, undefined, "the boot words carry no hop");
+    assert.ok(harness.bootCommand instanceof Uint8Array, "the host was handed the boot command");
+    assert.equal(harness.messages.filter((id) => id === 0x0010).length, 1, "one confirming SPECTRUM_CONFIGURE");
     const subscription = await engine.subscribeSpectrum({ ...OUTPUT, smoothingMs: 0, cadenceMs: 1 });
     assert.equal(subscription.bounds.hopFrames, 256);
     const ready = await nextReady(subscription, render);
@@ -149,6 +163,21 @@ test("the browser boot sends the policy's hop in its SPECTRUM_CONFIGURE, not in 
   } finally {
     await engine.close();
   }
+});
+
+test("a host that drops the boot command fails the boot, naming bootCommand", SKIP, async () => {
+  // #2166. Red if `createEngine` returns an engine whose host booted without the taps (an app's
+  // own `createHost` that leaves `bootCommand` out): its spectrum reads would answer Unprepared
+  // later instead of the boot failing now.
+  const dropped = {};
+  await assert.rejects(served({ spectrum: OUTPUT, dropBootCommand: true, harness: dropped }), (error) => {
+    assert.ok(error instanceof MisoEngineError);
+    assert.equal(error.phase, "boot");
+    assert.match(error.message, /bootCommand/);
+    assert.equal(error.diagnosticCode, "sdk.boot.command");
+    return true;
+  });
+  assert.equal(dropped.disposed, 1, "the refused boot disposed its host");
 });
 
 test("a run-time configure that adds a tap keeps the stream on the kept tap (#1596 gate 4)", SKIP, async (t) => {
@@ -293,10 +322,10 @@ test("closing the last spectrum subscription waits for the owner's automatic rea
   }
 });
 
-test("the boot refuses an engine without spectrum frames, and a configure past its deadline", SKIP, async () => {
+test("the boot refuses an engine without spectrum frames, and a capability probe past its deadline", SKIP, async () => {
   // Red if the boot accepts a core whose CAPABILITIES_GET clears flag bit 16, if a refused boot
-  // leaves the host undisposed, or if a boot configure that never answers is reported as the
-  // caller's usage error rather than a boot failure.
+  // leaves the host undisposed, or if a boot probe that never answers is reported as the caller's
+  // usage error rather than a boot failure.
   const clearBit16 = (response) => {
     let capabilities;
     try { capabilities = decodeResponseEnvelope(response, 0x0001); } catch { return response; }
@@ -313,9 +342,10 @@ test("the boot refuses an engine without spectrum frames, and a configure past i
   });
   assert.equal(refused.disposed, 1, "the refused boot disposed its host");
   let release;
-  const late = { hold: new Promise((resolve) => { release = resolve; }), holdAfter: 2 };
+  const late = { hold: new Promise((resolve) => { release = resolve; }), holdAfter: 1 };
   const timedOut = {};
-  // The boot's frames: the queue's revision probe, the capability probe, then the configure.
+  // The boot's frames: the queue's revision probe, then the capability probe (#2166: the taps ride
+  // the boot command).
   await assert.rejects(served({
     spectrum: OUTPUT,
     requestDeadlineMs: 50,

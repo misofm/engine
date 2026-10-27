@@ -611,6 +611,10 @@ export interface CreateMisoAudioWorkletHostOptions {
   options: MisoWebBootOptions;
   simd128ModuleUrl: string;
   preparedModule?: WebAssembly.Module;
+  /// One encoded `SPECTRUM_CONFIGURE` command frame (#2166), privately copied like `document`: the
+  /// engine applies it before it prepares the first plan, so the boot's spectrum taps are that
+  /// plan's and the boot counts no blocking rebuild. Absent for a boot without taps.
+  bootCommand?: Uint8Array;
   workletModuleUrl: string;
 }
 

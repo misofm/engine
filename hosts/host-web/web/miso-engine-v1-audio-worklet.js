@@ -251,7 +251,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   initialize(init) {
-    if (!exactFields(init, INIT_FIELDS) || !(init.document instanceof Uint8Array)
+    const bootCommand = init?.bootCommand;
+    if (!exactFields(init, bootCommand === undefined ? INIT_FIELDS : [...INIT_FIELDS, "bootCommand"])
+        || !(init.document instanceof Uint8Array)
+        || (bootCommand !== undefined && !(bootCommand instanceof Uint8Array))
         || !exactFields(init.options, OPTION_FIELDS)) {
       return RESULT_INVALID_ARGUMENT;
     }
@@ -275,6 +278,13 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     new Uint8Array(this.exports.memory.buffer, documentPointer, init.document.byteLength)
       .set(init.document);
+    // #2166: the boot command (the boot's spectrum taps) is staged beside the document, so the
+    // engine prepares the first plan with it.
+    if (bootCommand !== undefined) {
+      const commandPointer = this.exports.miso_engine_web_v1_boot_command_ptr(bootCommand.byteLength);
+      if (!u32(commandPointer) || commandPointer === 0) return RESULT_INVALID_ARGUMENT;
+      new Uint8Array(this.exports.memory.buffer, commandPointer, bootCommand.byteLength).set(bootCommand);
+    }
     this.handle = this.exports.miso_engine_web_v1_boot(init.document.byteLength);
     if (this.handle === 0) {
       return this.exports.miso_engine_web_v1_boot_result();

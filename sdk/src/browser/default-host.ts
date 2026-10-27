@@ -21,6 +21,7 @@ export async function createDefaultHost(request: {
   readonly options: BootOptions;
   readonly simd128ModuleUrl: string;
   readonly preparedModule?: WebAssembly.Module;
+  readonly bootCommand?: Uint8Array;
   readonly workletModuleUrl: string;
   readonly hostModuleUrl?: string;
 }): Promise<MisoAudioWorkletHost> {
@@ -40,6 +41,7 @@ export async function createDefaultHost(request: {
     options,
     simd128ModuleUrl: request.simd128ModuleUrl,
     ...(request.preparedModule === undefined ? {} : { preparedModule: request.preparedModule }),
+    ...(request.bootCommand === undefined ? {} : { bootCommand: request.bootCommand }),
     workletModuleUrl: request.workletModuleUrl,
   });
 }

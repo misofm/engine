@@ -404,17 +404,35 @@ describe("issue #1596 D2 -- the spectrum capability and the boot configuration",
    * cleared in each `CAPABILITIES_GET` reply: an engine that does not serve the spectrum frames.
    */
   function proxiedAsset({ clearSpectrumFlag = false } = {}) {
-    const calls = { instantiates: 0, frames: [] };
+    const calls = { instantiates: 0, frames: [], bootCommands: [] };
     const fake = {
       instantiate: async () => {
         calls.instantiates += 1;
         const instance = await asset.instantiate();
         const real = instance.exports;
         let staging = 0;
+        let command;
         const exports = new Proxy(
           Object.fromEntries(Object.keys(real).map((name) => [name, real[name]])),
           {
             get(target, name, receiver) {
+              // #2166: the boot command, read back from its staging when the boot takes it.
+              if (name === "miso_engine_web_v1_boot_command_ptr") {
+                return (length) => {
+                  const pointer = Number(target[name](length));
+                  command = { pointer, length };
+                  return pointer;
+                };
+              }
+              if (name === "miso_engine_web_v1_boot") {
+                return (length) => {
+                  if (command !== undefined) {
+                    calls.bootCommands.push(new Uint8Array(real.memory.buffer, command.pointer, command.length).slice());
+                    command = undefined;
+                  }
+                  return target[name](length);
+                };
+              }
               if (name === "miso_engine_web_v1_control_request_ptr") {
                 return (handle, length) => (staging = Number(target[name](handle, length)));
               }
@@ -480,7 +498,8 @@ describe("issue #1596 D2 -- the spectrum capability and the boot configuration",
     }
   });
 
-  test("the boot's and the reboot's one SPECTRUM_CONFIGURE carries the hop copied before instantiate", async () => {
+  test("the boot's and the reboot's boot command carries the hop copied before instantiate", async () => {
+    // #2166: the taps ride the boot command, so no SPECTRUM_CONFIGURE follows the boot.
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     const { fake, calls } = proxiedAsset();
@@ -495,17 +514,20 @@ describe("issue #1596 D2 -- the spectrum capability and the boot configuration",
     options.spectrumHopFrames = 256;
     release();
     const boundary = await pending;
-    const configureHops = () => calls.frames
-      .filter((frame) => messageOf(frame) === 0x0010)
-      .map((frame) => {
+    const configureHops = () => {
+      assert.ok(!calls.frames.some((frame) => messageOf(frame) === 0x0010), "no boot SPECTRUM_CONFIGURE");
+      return calls.bootCommands.map((frame) => {
+        assert.equal(messageOf(frame), 0x0010, "the boot command is a SPECTRUM_CONFIGURE");
         const hop = fieldOf(frame, 4);
         assert.ok(hop, "the configuration carries the hop");
         return wordAt(hop, 0, 4);
       });
+    };
     try {
       assert.deepEqual(configureHops(), [1024]);
-      // A reboot is the same boot: its one configuration carries the reboot's own hop.
+      // A reboot is the same boot: its one command carries the reboot's own hop.
       calls.frames.length = 0;
+      calls.bootCommands.length = 0;
       boundary.reboot(document, { spectrum, spectrumHopFrames: 512 });
       assert.deepEqual(configureHops(), [512]);
     } finally {

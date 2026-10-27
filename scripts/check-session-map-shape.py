@@ -77,6 +77,7 @@ WIDTH_TO_TS = {"u32": "number", "u64": "bigint"}
 BOOT_EXPORT_SIGNATURES = {
     "miso_engine_web_v1_boot_options_ptr": ((), "u32"),
     "miso_engine_web_v1_document_ptr": (("len: u32",), "u32"),
+    "miso_engine_web_v1_boot_command_ptr": (("len: u32",), "u32"),
     "miso_engine_web_v1_boot": (("len: u32",), "u32"),
     "miso_engine_web_v1_boot_result": ((), "u32"),
     "miso_engine_web_v1_boot_diagnostic_bytes": ((), "u32"),
