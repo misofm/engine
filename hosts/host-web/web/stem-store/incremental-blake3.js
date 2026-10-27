@@ -231,8 +231,8 @@ const preparations = new Map()
 /**
  * Load the WebAssembly SIMD BLAKE3 so that every later `IncrementalBlake3` and
  * `blake3Stream` hashes in it. The default URL is the SDK package's layout: this
- * file is `dist/browser/stems/incremental-blake3.js` and the module is the gated
- * closure's copy, `dist/assets/miso-engine-v1-blake3.simd128.wasm`. A successful
+ * file is `dist/browser/stems/incremental-blake3.js` (or the raw host tree
+ * `web/stem-store/incremental-blake3.js`) and the module is the gated closure's copy, `dist/assets/miso-engine-v1-blake3.simd128.wasm`. A successful
  * load is cached per URL for the realm; a failed one is not, so a later call
  * retries. Resolves `"simd128"` when the module is loaded, and `"javascript"`
  * when the fetch, the compile (a browser without simd128) or the instantiation

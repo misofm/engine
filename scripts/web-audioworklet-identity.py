@@ -16,7 +16,8 @@ release, still parses and reads as a toolchain change. It is what later changes 
 and it does not expire.
 This script reads it:
 
-* ``report --event E [--before SHA] --repository R --built D --toolchain T --twin MODULE`` (the
+* ``report --event E [--before SHA] --repository R --built D --toolchain T --twin MODULE
+  --blake3-module MODULE`` (the
   `artifact-identity` job) prints the Markdown report for the job summary. Its headline compares
   this run's module with **the digest its base's own CI run recorded**, never with a rebuild of the
   base: a base rebuilt inside this run's workflow is built in whatever environment the change
@@ -48,6 +49,10 @@ This script reads it:
     recorded browser qualification does not describe the built bytes: a toolchain bump needs a
     re-recorded two-browser matrix, as a release does.
     `docs/RELEASE.md` is the procedure.
+  - #2117: a BLAKE3 pin or EXPECTED_BLAKE3_SHA256 change checks that module's independent
+    release pin, npm toolchain, and results.json.blake3Qualification (built hash, candidate and
+    both browsers' simd128 Worker row). PACKAGE_VERSION checks both artifacts; a browser
+    toolchain change requires both qualifications. Ordinary changes only report its pin.
 
   A failed status lookup (the API, or ``gh`` itself) is an error (exit 2), not CANNOT TELL: it means
   the job is misconfigured, and a CANNOT TELL that never ends would hide that.
@@ -245,7 +250,7 @@ def blake3_release_change(root: pathlib.Path, base: str) -> bool:
             or identity(old) != identity(new))
 
 
-def blake3_checks(root: pathlib.Path, built: str, *, release: bool) -> tuple[list[str], bool]:
+def blake3_checks(root: pathlib.Path, built: str, toolchain: str, *, release: bool) -> tuple[list[str], bool]:
     lines, ok = [], True
     if release:
         pin = (show(root, "HEAD", BLAKE3_PIN) or "").strip()
@@ -257,6 +262,11 @@ def blake3_checks(root: pathlib.Path, built: str, *, release: bool) -> tuple[lis
                          f"EXPECTED_BLAKE3_SHA256 `{expected}` must agree")
         else:
             lines.append(f"  - BLAKE3 release pin and EXPECTED_BLAKE3_SHA256 match `{built}`")
+        declared = NPM_TOOLCHAIN.search(show(root, "HEAD", NPM_PUBLISH) or "")
+        if declared is None or declared.group(1) != toolchain:
+            ok = False
+            lines.append("  - **FAIL** BLAKE3 release toolchain: BROWSER_ARTIFACT_TOOLCHAIN "
+                         "must match the artifact job's toolchain")
     try:
         row = json.loads(show(root, "HEAD", RESULTS) or "null")["blake3Qualification"]
     except (json.JSONDecodeError, KeyError, TypeError):
@@ -439,7 +449,7 @@ def report(root: pathlib.Path, event: str, before: str, repository: str, built: 
     blake3_release = base is not None and blake3_release_change(root, base)
     if blake3_release or moved is not None:
         lines.append("- BLAKE3 RELEASE:" if blake3_release else "- BLAKE3 TOOLCHAIN:")
-        checked, blake3_ok = blake3_checks(root, blake3_built, release=blake3_release)
+        checked, blake3_ok = blake3_checks(root, blake3_built, toolchain, release=blake3_release)
         lines += checked
         ok = ok and blake3_ok
     return lines, ok
@@ -702,6 +712,16 @@ def run_self_test(scratch: pathlib.Path) -> None:
         merge(base, commit(label, **fields))
         case(label, ok, (needle,))
 
+    at(base)
+    stale_blake3 = commit("old BLAKE3 pin", blake3_pin=b, blake3_expected=b,
+                          blake3_qualified=b)
+    statuses({stale_blake3: record_a})
+    merge(stale_blake3, commit("BLAKE3-only pin update"))
+    case("BLAKE3-only release leaves worklet pin unchanged", True, ("BLAKE3 RELEASE:",),
+         absent=("- RELEASE:",))
+    case("BLAKE3-only release toolchain mismatch", False,
+         ("**FAIL** BLAKE3 release toolchain",), toolchain=N2)
+
     # The base: a pull request's merge commit compares against its first parent, a push against
     # the previous tip, and nothing else has a base.
     for event, before, head_ref, expected in (
@@ -772,7 +792,7 @@ def main() -> int:
         self_test()
         print("web AudioWorklet identity self-test passed: the base's recorded digest (matching, "
               "different, missing, malformed, not success, refused, across documentation), "
-              "reproducibility, a toolchain change, seven release mutations and a toolchain "
+              "reproducibility, a toolchain change, independent BLAKE3 release mutations and a toolchain "
               "bump with and without its two-browser record")
         return 0
     try:

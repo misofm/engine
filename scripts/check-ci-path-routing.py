@@ -564,6 +564,23 @@ WRITE_PERMISSION = re.compile(r"^\s+[a-z-]+: write\s*$|^\s*permissions: write-al
 IDENTITY_PERMISSIONS = "    permissions:\n      contents: read\n      statuses: read\n"
 IDENTITY_CHECKOUT = re.compile(
     r"      - uses: actions/checkout@[0-9a-f]{40} # v\S+\n        with:\n          fetch-depth: 0\n\Z")
+# #2117: read BLAKE3 from the artifact job's shipped closure, verifying that closure first.
+IDENTITY_DOWNLOAD_STEP = """      - name: Download shipped closure for the BLAKE3 release identity
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet-${{ github.sha }}
+          path: target/ci/qualification-artifacts
+"""
+IDENTITY_VERIFY_STEP = r"""      - name: Verify the downloaded artifact against the artifact job's digest
+        env:
+          BUILT: ${{ needs.artifact.outputs.sha256 }}
+          CLOSURE: ${{ needs.artifact.outputs.closure_sha256 }}
+        run: |
+          actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
+          [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
+          closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
+          [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
+"""
 # Issue #2045: the twin also builds under a freshly installed second RUSTUP_HOME, so its digest
 # equals the shipped one only if the sysroot remap holds (a shared RUSTUP_HOME let a dropped remap
 # stay green).
@@ -585,9 +602,9 @@ IDENTITY_REPORT_STEP = """      - name: Report ARTIFACT CHANGED or UNCHANGED aga
         run: |
           set -o pipefail
           python3 -B scripts/web-audioworklet-identity.py --self-test
-          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --toolchain "$TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -B scripts/web-audioworklet-identity.py report --event "$EVENT" --before "$BEFORE" --repository "$GITHUB_REPOSITORY" --built "$BUILT" --toolchain "$TOOLCHAIN" --twin "$RUNNER_TEMP/twin-module/miso-engine-v1-audio-worklet.simd128.wasm" --blake3-module target/ci/qualification-artifacts/miso-engine-v1-blake3.simd128.wasm | tee -a "$GITHUB_STEP_SUMMARY"
 """
-IDENTITY_STEPS = (IDENTITY_TWIN_STEP, IDENTITY_REPORT_STEP)
+IDENTITY_STEPS = (IDENTITY_DOWNLOAD_STEP, IDENTITY_VERIFY_STEP, IDENTITY_TWIN_STEP, IDENTITY_REPORT_STEP)
 UNMASKABLE = re.compile(r"^    (continue-on-error|defaults|env):", re.MULTILINE)
 
 
@@ -698,8 +715,8 @@ def check_qualification_artifact_identity(text: str) -> None:
             "qualification.yml: artifact-identity must carry no job-level continue-on-error, "
             "defaults or env")
     steps = job_steps(identity)
-    require(len(steps) == 3,
-            "qualification.yml: artifact-identity must be exactly checkout, twin and report steps "
+    require(len(steps) == 5,
+            "qualification.yml: artifact-identity must be exactly checkout, download, verify, twin and report steps "
             "(#2045: the twin installs its own toolchain into its own RUSTUP_HOME)")
     require(IDENTITY_CHECKOUT.fullmatch(steps[0]) is not None,
             "qualification.yml: artifact-identity must check out full history (fetch-depth: 0), "
