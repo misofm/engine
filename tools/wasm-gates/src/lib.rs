@@ -239,8 +239,10 @@ pub const W4_CONSOLE_COUNTERS: [[u64; 7]; 4] = [
     // c1_console_16_load: every console slot bypassed, so every bank skips its wet path (#2129).
     // #2142: the track banks are one pack group of lane chains (pack_groups 1); nothing packs.
     [15, 0, 0, 0, 260, 7164, 1],
-    // c1_console_16_typical: the banks whose drawn lanes are all bypassed skip (#2129)
-    [15, 0, 3584, 2304, 260, 3580, 1],
+    // c1_console_16_typical: the banks whose drawn lanes are all bypassed skip (#2129); the
+    // pattern packer (#2135) sorts the fixed draw from bind, so the track group runs 8 bank-slots
+    // a block, not 9, and skips one more for settled bypass
+    [15, 0, 3328, 2048, 260, 3836, 1],
     // c1_console_16_all_active
     [15, 0, 7165, 4096, 259, 0, 1],
     // c1_console_16_sparse: the silent strips' gate rests only after about 348 blocks, past
