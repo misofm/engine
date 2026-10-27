@@ -648,8 +648,9 @@ enum PlacementKey {
 /// slot `k` therefore sits at its first slot's placement plus `k` whenever it sat at its first
 /// slot's level plus `k`.
 ///
-/// A merge is taken only where it lowers the bank count (`place_over_windows`), and the count is
-/// the planners' own: [`PlannedNode`] keys every node a bank planner will group exactly as that
+/// A merge is taken only where it lowers the count of groups the planners form
+/// (`place_over_windows`; a group the bind renders per node still counts as one), and the count
+/// is the planners' own: [`PlannedNode`] keys every node a bank planner will group exactly as that
 /// planner keys it -- a rack chain's first slot by its candidate (rack, program, pool class), fed
 /// through `rack_compiler::plan_bank_groups` as the rack planner feeds it; a builtin strip stage by
 /// (stage, pool class), through the same planner as the builtin planner -- whether the sweep keyed

@@ -475,8 +475,9 @@ pub struct Placement {
 ///    bank of other lanes, where it can no longer skip with a bank of its own. Their consumers
 ///    may then become ready, and the sweep continues.
 ///
-/// `banks_of(set)` is the number of banks the caller's bank planners form over a set of node
-/// indices placed at one level: the planners' own grouping, keyed exactly as they key it, over
+/// `banks_of(set)` is the number of groups the caller's bank planners form over a set of node
+/// indices placed at one level (a group the bind later renders per node, such as a remainder
+/// below the padding threshold, still counts as one): the planners' own grouping, keyed exactly as they key it, over
 /// every node they bank there -- a keyed node or a follower placed through the `None` branch, it
 /// does not matter which. The sweep passes it every node already placed at a level plus the
 /// candidates, so the invariant is: **the set counted at (planner key, level) is the members the

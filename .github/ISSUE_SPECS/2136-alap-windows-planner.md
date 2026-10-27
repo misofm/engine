@@ -290,3 +290,10 @@ different depths are one cohort per pool. `mergeable_partial_pairs` is 0 on ever
   (`case 4, W=4 ...`, same values).
 - Plans: identical on all 17 bank-report rows (banks, pairs, static BSR, every pack group's units),
   so no pin, record or benchmark moved.
+
+### Attempt 4 verdict (bounded opus-high verify, 2026-10-27): PASS
+
+- At each (planner key, level), the counted set is what each planner groups there, by construction: `rack_chains` is the one candidate source for bind and placement, and both count through `rack_compiler::plan_bank_groups`; builtin stages are keyed by (stage, pool class) as `planned_builtin_bank_members` keys them; followers are counted.
+- `assert_placement_counts_the_plan` compares against the bound plan (`report.plan.groups`, `prepared_builtin_banks()`), not a second copy of the count; the verifier's mutant (drop `PostFader` from the callback) turns it red.
+- MINORs, recorded and not chased: the count is of planner groups, not bound banks (a remainder below `min_padded_insert_members` still counts as one; the doc comments now say so); the invariant test checks membership, not keys (key equality rests on construction and unit case 4); the compile-time cost of re-planning per stab is bounded but not measured.
+- Attempts 1-3 failed on one class of defect (the merge's bank count differed from the planners' grouping); attempt 4 removes the separate count.
