@@ -2353,6 +2353,120 @@ pub fn meter_block<L: crate::Widen>(words: &[f32], frames: usize, energy: L::F64
     }
 }
 
+/// One lane's held-peak state and prepared configuration (issue #951). A seed is read after the
+/// meter's discontinuity preamble; `decay = 1.0` represents disabled decay.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeterHeldSeed {
+    /// Sanitized nonnegative magnitude at the start of this block.
+    pub held: f32,
+    /// Frames left before decay may begin.
+    pub remaining: u32,
+    /// Countdown loaded whenever a sample reaches or exceeds the held magnitude.
+    pub hold_frames: u32,
+    /// Prepared per-sample multiplier in `[0, 1]`, or 1 when disabled.
+    pub decay: f32,
+}
+
+impl MeterHeldSeed {
+    /// Exact state/configuration identity, including each float's bits.
+    #[must_use]
+    pub fn same_bits(self, other: Self) -> bool {
+        self.held.to_bits() == other.held.to_bits()
+            && self.remaining == other.remaining
+            && self.hold_frames == other.hold_frames
+            && self.decay.to_bits() == other.decay.to_bits()
+    }
+}
+
+/// Both channels' seeded held-peak result. Kept inline beside the full meter block, never on a
+/// wire. Consumers validate both original seeds before committing either channel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeterHeldBanked {
+    /// Original state and configuration, `[left, right]`.
+    pub seed: [MeterHeldSeed; 2],
+    /// Final magnitude, `[left, right]`.
+    pub held: [f32; 2],
+    /// Final countdown, `[left, right]`.
+    pub remaining: [u32; 2],
+}
+
+/// The held-peak recurrence across lanes, serial in sample order (issue #951).
+///
+/// Every lane has its own held value, u32 countdown, hold length and prepared decay in `[0, 1]`.
+/// Held seeds are sanitized nonnegative magnitudes. On `a >= held`, reload; otherwise decrement a
+/// nonzero countdown; otherwise decay and flush a subnormal to +0. Disabled decay is exactly 1.
+///
+/// Two base-65536 digits represent the full u32 counter without f32 rounding: subtraction and
+/// borrow are exact, as are reloading each digit and reconstruction once after the sample loop.
+/// No per-sample scalar arithmetic or cross-lane operation is used. Only the active lane's result
+/// is consumed; padded lanes cannot change another lane's state.
+///
+/// # Panics
+/// The word and seed/output slices must contain `frames * L::WIDTH` and `L::WIDTH` entries.
+#[inline(always)]
+pub fn meter_held_block<L: Lane>(
+    words: &[f32],
+    frames: usize,
+    seeds: &[MeterHeldSeed],
+    held_out: &mut [f32],
+    remaining_out: &mut [u32],
+) {
+    let mut held = [0.0; 8];
+    let mut low = [0.0; 8];
+    let mut high = [0.0; 8];
+    let mut reload_low = [0.0; 8];
+    let mut reload_high = [0.0; 8];
+    // Every lane read by L::load is overwritten from seeds below; the unused suffix is unread.
+    let mut decay = [0.0; 8];
+    for (lane, seed) in seeds[..L::WIDTH].iter().enumerate() {
+        held[lane] = seed.held;
+        low[lane] = (seed.remaining & 0xffff) as f32;
+        high[lane] = (seed.remaining >> 16) as f32;
+        reload_low[lane] = (seed.hold_frames & 0xffff) as f32;
+        reload_high[lane] = (seed.hold_frames >> 16) as f32;
+        decay[lane] = seed.decay;
+    }
+    let mut held = L::load(&held);
+    let mut low = L::load(&low);
+    let mut high = L::load(&high);
+    let reload_low = L::load(&reload_low);
+    let reload_high = L::load(&reload_high);
+    let decay = L::load(&decay);
+    let zero = L::zero();
+    let one = L::splat(1.0);
+    let digit_max = L::splat(65535.0);
+    let minimum = L::splat(f32::MIN_POSITIVE);
+    let infinity = L::splat(f32::INFINITY);
+    for frame in words[..frames * L::WIDTH].chunks_exact(L::WIDTH) {
+        let a = L::load(frame).abs();
+        let a = L::select(L::mask_and(a.ge(minimum), a.lt(infinity)), a, zero);
+        let reload = a.ge(held);
+        let positive_low = low.gt(zero);
+        let positive_high = high.gt(zero);
+        let counting = L::mask_or(positive_low, positive_high);
+        let borrow = L::mask_and(L::mask_not(positive_low), positive_high);
+        let next_low = L::select(
+            positive_low,
+            low.sub(one),
+            L::select(borrow, digit_max, zero),
+        );
+        let next_high = high.sub(L::select(borrow, one, zero));
+        let decayed = held.mul(decay);
+        let decayed = L::select(decayed.ge(minimum), decayed, zero);
+        held = L::select(reload, a, L::select(counting, held, decayed));
+        low = L::select(reload, reload_low, next_low);
+        high = L::select(reload, reload_high, next_high);
+    }
+    held.store(held_out);
+    let mut low_words = [0.0; 8];
+    let mut high_words = [0.0; 8];
+    low.store(&mut low_words);
+    high.store(&mut high_words);
+    for lane in 0..L::WIDTH {
+        remaining_out[lane] = ((high_words[lane] as u32) << 16) | low_words[lane] as u32;
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     static MIXED_PLAN_SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

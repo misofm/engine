@@ -932,6 +932,8 @@ enum BankedMode {
     MovedLeftSeed,
     /// The same for the right channel alone.
     MovedRightSeed,
+    /// Corrupt one held state/configuration word on one channel before computing the result.
+    MovedHeld { channel: usize, word: usize },
 }
 
 /// One M2 configuration. `metrics` is one lane's meters, in binding order; every lane has the same.
@@ -1078,7 +1080,7 @@ fn banked_differential<L: Widen>(
     events: &[BankedEvent],
     seed: u64,
 ) -> BankedOutcome {
-    use lane::kernels::builtins::meter_block;
+    use lane::kernels::builtins::{MeterHeldBanked, MeterHeldSeed, meter_block, meter_held_block};
     let width = L::WIDTH;
     let pool = peak_hostile_pool();
     let mut rng = PeakRng(seed);
@@ -1103,6 +1105,7 @@ fn banked_differential<L: Widen>(
                     index * 11 + 3,
                 );
                 let mut seeds = [[0.0_f64; 8]; 2];
+                let mut held_seeds = [None; 8];
                 let mut seeded = false;
                 if run.mode != BankedMode::Withheld {
                     for (lane, meters) in banked.iter().enumerate() {
@@ -1122,6 +1125,32 @@ fn banked_differential<L: Widen>(
                             seeds[1][lane] = moved(r, 1);
                             seeded = true;
                         }
+                        held_seeds[lane] = meters
+                            .iter()
+                            .find_map(|meter| meter.accumulator.banked_held_seed(time, frames));
+                        if let (Some(seed), BankedMode::MovedHeld { channel, word }) =
+                            (&mut held_seeds[lane], run.mode)
+                        {
+                            match word {
+                                0 => {
+                                    seed[channel].held =
+                                        f32::from_bits(seed[channel].held.to_bits() + 1)
+                                }
+                                1 => {
+                                    seed[channel].remaining =
+                                        seed[channel].remaining.wrapping_add(1)
+                                }
+                                2 => {
+                                    seed[channel].hold_frames =
+                                        seed[channel].hold_frames.wrapping_add(1)
+                                }
+                                _ => {
+                                    seed[channel].decay =
+                                        f32::from_bits(seed[channel].decay.to_bits() - 1)
+                                }
+                            }
+                        }
+                        seeded |= held_seeds[lane].is_some();
                     }
                 }
                 let blocks: Option<Vec<MeterBankedBlock>> = seeded.then(|| {
@@ -1129,6 +1158,8 @@ fn banked_differential<L: Widen>(
                     let mut clipped = [[0.0_f32; 8]; 2];
                     let mut sanitized = [[0.0_f32; 8]; 2];
                     let mut energy = [[0.0_f64; 8]; 2];
+                    let mut held = [[0.0_f32; 8]; 2];
+                    let mut remaining = [[0_u32; 8]; 2];
                     for (plane, words) in [&left, &right].into_iter().enumerate() {
                         let result = black_box(meter_block::<L>(
                             words,
@@ -1139,6 +1170,18 @@ fn banked_differential<L: Widen>(
                         result.clipped.store(&mut clipped[plane][..width]);
                         result.sanitized.store(&mut sanitized[plane][..width]);
                         result.energy.store(&mut energy[plane][..width]);
+                        if held_seeds.iter().any(Option::is_some) {
+                            let seeds = held_seeds.map(|seed| {
+                                seed.map_or(MeterHeldSeed::default(), |seed| seed[plane])
+                            });
+                            meter_held_block::<L>(
+                                words,
+                                frames,
+                                &seeds,
+                                &mut held[plane],
+                                &mut remaining[plane],
+                            );
+                        }
                     }
                     (0..width)
                         .map(|lane| MeterBankedBlock {
@@ -1147,6 +1190,11 @@ fn banked_differential<L: Widen>(
                             sanitized: [sanitized[0][lane] as u64, sanitized[1][lane] as u64],
                             energy_seed: [seeds[0][lane], seeds[1][lane]],
                             energy: [energy[0][lane], energy[1][lane]],
+                            held: held_seeds[lane].map(|seed| MeterHeldBanked {
+                                seed,
+                                held: [held[0][lane], held[1][lane]],
+                                remaining: [remaining[0][lane], remaining[1][lane]],
+                            }),
                         })
                         .collect()
                 });
@@ -1301,17 +1349,12 @@ fn banked_sweep(period: u32) -> (usize, u64) {
                         };
                         let last = commits.last().copied().unwrap_or(0);
                         committed += last;
-                        if metrics.contains(M::HELD_PEAK) && (hold != 0 || decay != 0.0) {
-                            assert_eq!(last, 0, "{run:?}: a held peak with ballistics never banks");
-                        }
-                        if !metrics.contains(M::ENERGY_RMS) {
+                        let has_seed = metrics.contains(M::ENERGY_RMS)
+                            || (metrics.contains(M::HELD_PEAK) && (hold != 0 || decay != 0.0));
+                        if !has_seed {
                             assert_eq!(last, 0, "{run:?}: no energy, no seed, no pass");
                         }
-                        if fixed_stream
-                            && metrics.contains(M::ENERGY_RMS)
-                            && (!metrics.contains(M::HELD_PEAK) || (hold == 0 && decay == 0.0))
-                            && period.is_multiple_of(128)
-                        {
+                        if fixed_stream && has_seed && period.is_multiple_of(128) {
                             assert!(last > 0, "{run:?}: a bankable meter commits");
                         }
                     }
@@ -1327,8 +1370,8 @@ fn banked_sweep(period: u32) -> (usize, u64) {
 /// and tone input, a fixed stream of 48 blocks of 128 frames and a random stream of 150 events.
 ///
 /// Built with `--features test-support`, it also pins the commit counter: every block of a plain
-/// 64-block stream at period 512 and 1536, none at 64, some at 300; none on a held peak with a hold
-/// or a decay; none with the block withheld; none with both seeds, the left alone or the right
+/// 64-block stream at period 512 and 1536, none at 64, some at 300; held peaks with a hold
+/// or a decay now commit too; none with the block withheld; none with both energy seeds, the left alone or the right
 /// alone moved by one ulp; and a block after a skipped gap commits.
 #[test]
 fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
@@ -1396,7 +1439,7 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
             &plain,
             7,
         )) {
-            assert_eq!(commits, 0, "hold {hold} decay {decay}");
+            assert_eq!(commits, every, "hold {hold} decay {decay}");
         }
     }
     // The safety net moves both seeds, then each one alone, so each channel's half of the seed
@@ -1422,6 +1465,21 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
                 );
             }
         });
+    }
+
+    // Both channels must match every held state/configuration word; checking only the value,
+    // only the countdown or only one channel would accept a corrupt recurrence.
+    for metrics in [M::ALL, M::HELD_PEAK] {
+        for channel in 0..2 {
+            for word in 0..4 {
+                let mut run = all(512, 7, 12.0, BankedMode::MovedHeld { channel, word });
+                run.metrics = vec![metrics];
+                let outcome = banked_differential::<Native>(&run, &plain, 7);
+                if let Some(commits) = outcome.commits {
+                    assert_eq!(commits.last(), Some(&0), "{run:?}");
+                }
+            }
+        }
     }
 
     // A discontinuity: the block after the gap commits too.
@@ -1452,24 +1510,29 @@ fn a_peak_meter_bound_first_leaves_the_seed_to_the_all_meter_behind_it() {
     use MeterMetricSet as M;
     let plain = banked_plain_stream(64);
     for (hostile, seed) in [(false, 7), (true, 8)] {
-        let pair = BankedRun {
-            metrics: vec![M::SAMPLE_PEAK, M::ALL],
-            period: 512,
-            hold: 0,
-            decay: 0.0,
-            hostile,
-            mode: BankedMode::Seeded,
-        };
-        lane::each_vector_lane!(|L, N| {
-            let outcome = banked_differential::<L>(&pair, &plain, seed);
-            assert_eq!(outcome.compared, 2 * N * 64 * 128 / 512);
-            if let Some(commits) = outcome.commits {
-                assert_eq!(
-                    commits[commits.len() - 1],
-                    N as u64 * 64,
-                    "the ALL meter commits every block"
-                );
-            }
-        });
+        for (metrics, hold, decay) in [
+            (vec![M::SAMPLE_PEAK, M::ALL], 0, 0.0),
+            (vec![M::SAMPLE_PEAK, M::HELD_PEAK, M::ALL], 7, 12.0),
+        ] {
+            let pair = BankedRun {
+                metrics,
+                period: 512,
+                hold,
+                decay,
+                hostile,
+                mode: BankedMode::Seeded,
+            };
+            lane::each_vector_lane!(|L, N| {
+                let outcome = banked_differential::<L>(&pair, &plain, seed);
+                assert_eq!(outcome.compared, pair.metrics.len() * N * 64 * 128 / 512);
+                if let Some(commits) = outcome.commits {
+                    assert_eq!(
+                        commits[commits.len() - 1],
+                        (pair.metrics.len() - 1) as u64 * N as u64 * 64,
+                        "each seeded meter commits every block"
+                    );
+                }
+            });
+        }
     }
 }

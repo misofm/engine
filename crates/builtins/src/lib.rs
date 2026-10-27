@@ -6104,6 +6104,8 @@ pub struct MeterBankedBlock {
     /// `energy_seed` plus the square of every sanitized sample, added one sample at a time in
     /// frame order, per channel. It replaces the meter's energy; it is never added to it.
     pub energy: [f64; 2],
+    /// Optional held-peak recurrence with each channel's own validated state/configuration seed.
+    pub held: Option<lane::kernels::builtins::MeterHeldBanked>,
 }
 
 struct MeterLane {
@@ -6341,17 +6343,51 @@ impl MeterAccumulator {
         self.observe_block(input, first_sample, block_peak, None)
     }
 
-    /// Whether this meter can ever commit a banked block (issue #950): every metric it keeps is an
-    /// order-free block partial or the seeded energy sum.
-    ///
-    /// Only a held peak with a hold or a decay is not. Its per-sample state machine counts frames
-    /// down and multiplies by the decay, so it has no block partial; with neither, it is the plain
-    /// select-form maximum `held = a >= held ? a : held`, which merges exactly. Fixed at
-    /// preparation, since nothing changes the configuration or the selection afterwards.
+    /// Every metric/configuration can consume a banked result (issues #950/#951). A block still
+    /// needs its own matching energy and, for hold/decay, held-state seeds before it can commit.
     #[must_use]
     pub fn banked_eligible(&self) -> bool {
-        !self.metrics.contains(MeterMetricSet::HELD_PEAK)
+        true
+    }
+
+    /// The held recurrence's post-preamble seeds, independently of the energy seed search.
+    /// Returns no seed for a meter without held ballistics, empty blocks or a window split.
+    /// This pure read changes no state and allocates nothing.
+    #[must_use]
+    pub fn banked_held_seed(
+        &self,
+        first_sample: u64,
+        frames: usize,
+    ) -> Option<[lane::kernels::builtins::MeterHeldSeed; 2]> {
+        if !self.metrics.contains(MeterMetricSet::HELD_PEAK)
             || (self.config.peak_hold_frames == 0 && self.config.peak_decay_db_per_second == 0.0)
+            || frames == 0
+        {
+            return None;
+        }
+        let discontinuous = self
+            .start
+            .is_some_and(|start| first_sample != start.saturating_add(u64::from(self.frames)));
+        let now = if discontinuous { 0 } else { self.frames };
+        if frames > self.config.period_frames.get().saturating_sub(now) as usize {
+            return None;
+        }
+        Some(
+            [&self.left, &self.right].map(|state| lane::kernels::builtins::MeterHeldSeed {
+                held: if discontinuous { 0.0 } else { state.held },
+                remaining: if discontinuous {
+                    0
+                } else {
+                    state.hold_remaining
+                },
+                hold_frames: self.config.peak_hold_frames,
+                decay: if self.config.peak_decay_db_per_second == 0.0 {
+                    1.0
+                } else {
+                    self.decay
+                },
+            }),
+        )
     }
 
     /// The `[left, right]` energy this meter's scalar loop would start a `frames`-frame block at
@@ -6399,10 +6435,14 @@ impl MeterAccumulator {
     /// * `banked` is `Some`, and this meter is [`Self::banked_eligible`];
     /// * the block is non-empty and lies inside the current window;
     /// * if the meter keeps [`MeterMetricSet::ENERGY_RMS`], `banked.energy_seed` is its own
-    ///   post-preamble energy, bit for bit, on both channels.
+    ///   post-preamble energy, bit for bit, on both channels;
+    /// * when held ballistics are selected, `banked.held` carries both channels' own
+    ///   post-preamble held values, countdowns, hold lengths and effective decay multipliers.
     ///
-    /// The commit, per channel, left then right: the peak and the held peak merge with the loop's
-    /// select forms (`q > peak`, `q >= held`); the energy is **replaced** by `banked.energy`, the
+    /// A held peak with hold/decay additionally requires both exact held state/configuration
+    /// seeds; its final held value and countdown replace the scalar state. Without ballistics,
+    /// the held peak merges with `q >= held`. Per channel, left then right, the sample peak merges
+    /// with `q > peak`; the energy is **replaced** by `banked.energy`, the
     /// seeded sample-serial sum, and never has a partial added to it; the counts `saturating_add`
     /// into the window's and then the lifetime counters. Then the window advances and emits at its
     /// period, exactly as the loop would. Every other block ignores `banked` and takes the loop, so
@@ -6587,7 +6627,19 @@ impl MeterAccumulator {
         let seeded = !self.metrics.contains(MeterMetricSet::ENERGY_RMS)
             || (banked.energy_seed[0].to_bits() == self.left.energy.to_bits()
                 && banked.energy_seed[1].to_bits() == self.right.energy.to_bits());
+        let held = self.banked_held_seed(
+            self.start
+                .unwrap_or(0)
+                .saturating_add(u64::from(self.frames)),
+            len,
+        );
+        let held_seeded = held.is_none_or(|seed| {
+            banked.held.is_some_and(|result| {
+                seed[0].same_bits(result.seed[0]) && seed[1].same_bits(result.seed[1])
+            })
+        });
         if !self.banked_eligible()
+            || !held_seeded
             || len == 0
             || len > period.saturating_sub(self.frames) as usize
             || !seeded
@@ -6596,9 +6648,26 @@ impl MeterAccumulator {
         }
         #[cfg(any(test, feature = "test-support"))]
         METER_BANKED_COMMITS.with(|commits| commits.set(commits.get().saturating_add(1)));
+        if held.is_some()
+            && let Some(result) = banked.held
+        {
+            self.left.held = result.held[0];
+            self.right.held = result.held[1];
+            self.left.hold_remaining = result.remaining[0];
+            self.right.hold_remaining = result.remaining[1];
+        }
+        // An advanced held recurrence has already committed its exact state; the ordinary
+        // maximum merge is only the hold=0/decay=0 case.
+        let metrics = if held.is_some() {
+            MeterMetricSet::from_bits_retain(
+                self.metrics.bits() & !MeterMetricSet::HELD_PEAK.bits(),
+            )
+        } else {
+            self.metrics
+        };
         commit_banked_lane(
             &mut self.left,
-            self.metrics,
+            metrics,
             banked.sample_peak[0],
             banked.clipped[0],
             banked.sanitized[0],
@@ -6608,7 +6677,7 @@ impl MeterAccumulator {
         );
         commit_banked_lane(
             &mut self.right,
-            self.metrics,
+            metrics,
             banked.sample_peak[1],
             banked.clipped[1],
             banked.sanitized[1],
