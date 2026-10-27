@@ -80,3 +80,20 @@ remain root's delivery gates; this record does not claim upstream closure.
 PASS for attempt 1 after independent Astra checkpoint `a37676ea80be821da4c0ea24fe60ed357c7aedcf`. The four tool caps now match host admission without changing other resource ceilings. The owning real-delay graph is refused by the former cap and admitted by the new cap; the standing EQ fixture could not catch that masking defect. Full release audit and workload checks passed.
 
 The implementation is locally complete and awaiting the required batch PR qualification, upstream delivery and matching GitHub state synchronization. Local PASS does not claim remote completion.
+
+### Integrated-main follow-up — PASS (Astra, 2026-10-27)
+
+Reviewed combined head `60d7b904ae1d44fee8f3277027508e0f04ac2c83` after merging upstream
+`39bad6e1d11f4674f7407e1f28e92366fcf9e91f` (#2156). Relative to that main, the reviewed
+console cap and finite-delay regression are unchanged. The added C1 reverb state feeds its
+per-node `aux.b` insert through the same graph preparation/cap path; no integration conflict
+or new concern was found.
+
+One invocation of `cargo test --locked --release -p console-workload` passed through the shared
+serial wrapper: **57 tests** (16 library, 41 integration), zero failures, doc-tests green. Both
+`tool_caps_admit_a_composed_finite_delay_tail` and the upstream
+`the_reverb_row_feeds_one_per_node_reverb_on_aux_b` passed. Log:
+`/home/bl/misofm/engine-work-evidence/easy-fixes-20261027/fresh-astra/release-console-integrated-main.log`.
+Offline compiler processes were paused/resumed once while an unrelated build ran, without
+restarting the invocation or suspending a running test (`cpu-pause.log`). No duplicate audit,
+browser or target matrix ran; required CI will qualify the combined tree after root's push.
