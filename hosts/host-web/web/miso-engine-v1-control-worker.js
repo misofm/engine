@@ -498,10 +498,8 @@ class ControlWorker {
       return;
     }
     this.lastRequestId = message.requestId;
-    // #1332 S8: `renderGone` (the page's context is closed): no worklet will answer a release.
-    if (message.tag === "miso.dispose.v1" && (exactFields(message, ["tag", "requestId"])
-        || (exactFields(message, ["tag", "requestId", "renderGone"]) && message.renderGone === true))) {
-      this.beginDispose(message.requestId, message.renderGone === true);
+    if (message.tag === "miso.dispose.v1" && exactFields(message, ["tag", "requestId"])) {
+      this.beginDispose(message.requestId);
       return;
     }
     if (this.stickyResult !== RESULT_OK) {
@@ -820,20 +818,12 @@ class ControlWorker {
   /// failed: `disposed` is set either way) is answered at once with that outcome in
   /// `onPageMessage`: it never joins a dispose that will not complete.
   ///
-  /// #1332 S8: the release is bounded. With `renderGone` (a closed context) no release is asked
-  /// for; otherwise, when no release arrives within `RELEASE_TIMEOUT_MS`, the host is disposed
-  /// with no token and the page is answered `release-timeout`.
-  beginDispose(requestId, renderGone = false) {
+  /// #1332 S8: the release is bounded: when no release arrives within `RELEASE_TIMEOUT_MS`, the
+  /// host is disposed with no token and the page is answered `release-timeout`.
+  beginDispose(requestId) {
     this.disposeRequestIds.push(requestId);
-    if (this.disposing) {
-      if (renderGone) this.finishDispose(0n);
-      return;
-    }
+    if (this.disposing) return;
     this.disposing = true;
-    if (renderGone) {
-      this.finishDispose(0n);
-      return;
-    }
     this.releaseDeadline = clock() + RELEASE_TIMEOUT_MS;
     this.workletPort.postMessage({ tag: "miso.release.v1" });
     // The deadline runs on the service tick (this Worker's one timer).

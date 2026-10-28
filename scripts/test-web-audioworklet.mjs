@@ -2023,30 +2023,37 @@ async function testMainRealm() {
     }
 
     // Issue #1332 S8, single mode: a dispose nobody answers ends in teardown with a typed reason.
-    // A closed context's worklet is not asked at all; a reply that does not come within the bound
-    // is given up on. Either way the node is disconnected, the tick stays stopped and a later
-    // dispose returns the same rejection (no retry after a teardown).
+    // A closed context alone is no failure (an `OfflineAudioContext` that rendered is closed and
+    // its worklet answers); a reply that does not come within the bound is given up on, named
+    // `context-closed` on a closed context. The node is disconnected, the tick stays stopped and
+    // a later dispose returns the same rejection (no retry after a teardown).
     {
       const create = () => createMisoAudioWorkletHost({
         context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
         workletModuleUrl: "processor.js",
       });
+      const offlineHost = await create();
+      context.state = "closed";
+      await offlineHost.dispose();
+      context.state = "suspended";
+
       const closedHost = await create();
       const closedNode = FakeNode.latest;
       const tick = intervals.at(-1);
-      const before = events.length;
       context.state = "closed";
+      holdAll = true;
       const first = closedHost.dispose();
-      context.state = "suspended";
+      holdAll = false;
+      intervals.at(-1).callback();
       await assert.rejects(first, (error) => {
         assert.deepEqual(error, { tag: "miso.teardown.v1", requestId: 0, result: 255, reason: "context-closed" });
         return true;
-      }, "a closed context tears down with its reason");
-      assert.deepEqual(events.slice(before), [], "a closed context's worklet is sent no dispose");
+      }, "no reply on a closed context tears down with its reason").finally(() => { context.state = "suspended"; });
       assert.equal(closedNode.disconnectCount, 1, "the node is disconnected");
       assert.equal(tick.cleared, true, "the tick is stopped");
       assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "and not restarted");
       assert.equal(closedHost.dispose(), first, "a later dispose returns the same rejection");
+      for (const respond of heldAll.splice(0)) respond();
 
       const silentHost = await create();
       const silentNode = FakeNode.latest;
@@ -2219,9 +2226,8 @@ async function testMainRealm() {
         }
 
         // #1332 S8: a worker-mode dispose nobody answers ends in teardown with a typed reason:
-        // no reply within the bound, the Worker's own release timeout, and a closed context, whose
-        // Worker is asked to dispose with no release. The Worker is terminated and the node
-        // disconnected once in each case.
+        // no reply within the bound (`context-closed` on a closed context), and the Worker's own
+        // release timeout. The Worker is terminated and the node disconnected once in each case.
         {
           const create = () => createMisoAudioWorkletHost({
             context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
@@ -2265,15 +2271,14 @@ async function testMainRealm() {
           const closedWorker = workers.at(-1);
           const closedNode = FakeNode.latest;
           context.state = "closed";
+          workerBehaviour = "silent";
           const closing = closed.dispose();
-          context.state = "suspended";
+          workerBehaviour = "ready";
+          intervals.at(-1).callback();
           await assert.rejects(closing, (error) => {
             assert.deepEqual(error, { tag: "miso.teardown.v1", requestId: 0, result: 255, reason: "context-closed" });
             return true;
-          }, "a closed context tears down with its reason");
-          const sent = closedWorker.posts.at(-1);
-          assert.deepEqual([sent.tag, sent.renderGone], ["miso.dispose.v1", true],
-            "the Worker disposes its control half with no release");
+          }, "no reply on a closed context tears down with its reason").finally(() => { context.state = "suspended"; });
           assert.equal(closedWorker.terminated, true);
           assert.equal(closedNode.disconnectCount, 1);
         }
@@ -4836,20 +4841,12 @@ async function testControlWorker() {
       assert.deepEqual(fake.calls.disposeHandles, [1, 1], "and freed");
     }
     // #1332 S8: a release with no token (the worklet's construction failed before it adopted)
-    // takes the boot's token back from the registry; a closed context's dispose asks no release.
+    // takes the boot's token back from the registry.
     {
       const { send, fromWorklet } = await boot();
       send({ tag: "miso.dispose.v1", requestId: 1 });
       fromWorklet({ tag: "miso.released.v1", token: 0n });
       assert.deepEqual(fake.calls.adopt, [(1n << 32n) | 1n], "the boot's token comes back");
-      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 1, result: 0 });
-    }
-    {
-      const { workletPosts, send } = await boot();
-      const releases = workletPosts.length;
-      send({ tag: "miso.dispose.v1", requestId: 1, renderGone: true });
-      assert.equal(workletPosts.length, releases, "no release is asked of a closed context's worklet");
-      assert.equal(fake.calls.dispose, 1, "the control half is disposed at once");
       assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 1, result: 0 });
     }
     // #1332 S8: the service tick asks the worklet whether render failed, at most every 50 ms.

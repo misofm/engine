@@ -950,11 +950,15 @@ Slice S8 of the #1332 build plan, branch `codex/issue-1332-failure` from S7 (`28
   the worklet's `miso.released.v1`; past it, it disposes the host with no token and answers the
   dispose `{tag: "miso.teardown.v1", requestId, result: 255, reason: "release-timeout"}`, which the
   page rejects with (and tears down). 2 s is about 750 quanta at 48 kHz / 128 and leaves the Worker
-  3 s to dispose and answer inside the page's bound. A closed context (`node.context.state ===
-  "closed"`) rejects `context-closed`: in `single` mode at once, posting nothing; in `worker` mode
-  after the Worker disposed its control half with no release (`miso.dispose.v1 {renderGone:
-  true}`, bounded by the same 5 s). In `single` mode a teardown is terminal: no retry and no tick
-  restart. New public type `MisoTeardown` (`.d.ts` and `sdk/src/browser/shipped-host.d.ts`).
+  3 s to dispose and answer inside the page's bound. **Deviation from the root text (for root):**
+  a closed context alone does not tear down. An `OfflineAudioContext` is `closed` once it
+  rendered and its worklet still answers the dispose (the S7 worker smoke and the SDK's
+  resident-observation browser leg dispose after `startRendering`; a first build that rejected
+  `context-closed` at once failed that leg on both engines). So `context.state === "closed"` only
+  names the reason when the 5 s bound expires (`context-closed` instead of `dispose-timeout`); in
+  `worker` mode the Worker's 2 s release bound answers first. In `single` mode a teardown is
+  terminal: no retry and no tick restart. New public type `MisoTeardown` (`.d.ts` and
+  `sdk/src/browser/shipped-host.d.ts`).
 - **Timers.** The page has no clock and one timer site, so the deadline uses it: the site is now
   `startTimer(periodMs, run)` between `SERVICE_TICK_BEGIN`/`SERVICE_TICK_END`, called by the
   single-mode service tick and by the dispose deadline (fires once, cleared); the timer policy
@@ -980,11 +984,12 @@ Slice S8 of the #1332 build plan, branch `codex/issue-1332-failure` from S7 (`28
 - **Worker `error` after boot** fails the host and terminates the Worker; a later dispose rejects
   at once with the host's error and posts nothing.
 - **Tests, red on mutants** (`scripts/test-web-audioworklet.mjs`): page deadline removed ("no
-  reply within the bound tears down"); worker-mode closed context not told ("a closed context
-  tears down"); single-mode closed check removed (same); Worker error not terminating; dispose
+  reply on a closed context tears down"); a closed context named `dispose-timeout`; single mode
+  rejecting at once on a closed context (the offline dispose resolves); Worker error not
+  terminating; dispose
   after a Worker error posting ("the dispose tears down at once"); requestId-0 fatal untyped (255
   !== 9); factory skips the Worker dispose; `release-timeout` reply refused; worklet ignores the
   render check; worklet keeps the half after a failed construction; worklet answers a release
-  twice; Worker release without deadline, without the boot token, dropping the orphan, asking a
-  release of a closed context's worklet, posting no render check. Native: dispose always refusing
+  twice; Worker release without deadline, without the boot token, dropping the orphan, posting no
+  render check. Native: dispose always refusing
   a render-only session, and dispose freeing on a bound instance, both abort the test.

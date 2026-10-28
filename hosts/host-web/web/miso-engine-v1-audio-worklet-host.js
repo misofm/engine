@@ -372,8 +372,8 @@ function isWorkerFailed(value) {
 }
 
 /// Issue #1332 S8: the typed reason a dispose ended in a teardown nobody answered. `context-closed`:
-/// the context was closed, so no worklet answers; `dispose-timeout`: no dispose reply within
-/// `DISPOSE_TIMEOUT_MS`; `release-timeout` (from the control Worker, with the dispose's request
+/// no dispose reply within `DISPOSE_TIMEOUT_MS` and the context is closed; `dispose-timeout`: no
+/// reply within that bound on a context that is not; `release-timeout` (from the control Worker, with the dispose's request
 /// ID): the worklet never released its render half, and the Worker disposed without it. The page
 /// has terminated the Worker and disconnected the node either way.
 function teardown(reason, requestId = 0) {
@@ -1298,10 +1298,10 @@ class MisoAudioWorkletHost {
   /// failed dispose may be retried: the promise is dropped and the service tick it stopped runs
   /// again, unless it ended in a teardown.
   ///
-  /// #1332 S8: a dispose ends in teardown even when nobody answers. A closed context, or no reply
-  /// within `DISPOSE_TIMEOUT_MS`, tears down directly and rejects with `miso.teardown.v1`. In
-  /// `worker` mode a closed context still asks the Worker to dispose its control half (with no
-  /// release: the render half stays with the dead worklet and goes with the memory), bounded.
+  /// #1332 S8: a dispose ends in teardown even when nobody answers. With no reply within
+  /// `DISPOSE_TIMEOUT_MS` the page tears down directly and rejects with `miso.teardown.v1`
+  /// (`context-closed` when the context is closed, `dispose-timeout` otherwise); in `worker` mode
+  /// the Worker's own bound on the worklet's release answers `release-timeout` first.
   dispose() {
     if (this.#worker !== undefined) {
       this.#disposePromise ??= this.#disposeWorkerMode();
@@ -1321,11 +1321,7 @@ class MisoAudioWorkletHost {
     try {
       // A Worker that failed after its boot was terminated: nobody is left to answer.
       if (this.#workerGone) throw this.#stickyError;
-      const renderGone = this.node.context?.state === "closed";
-      await this.#awaitDispose(renderGone
-        ? { tag: "miso.dispose.v1", renderGone: true }
-        : { tag: "miso.dispose.v1" });
-      if (renderGone) throw teardown("context-closed");
+      await this.#awaitDispose();
     } finally {
       this.#teardown();
     }
@@ -1334,13 +1330,8 @@ class MisoAudioWorkletHost {
   async #disposeSingleMode() {
     if (this.#disposed) return;
     this.#stopServiceTick();
-    // A closed context's worklet answers nothing: tear down directly.
-    if (this.node.context?.state === "closed") {
-      this.#teardown();
-      throw teardown("context-closed");
-    }
     try {
-      await this.#awaitDispose({ tag: "miso.dispose.v1" });
+      await this.#awaitDispose();
     } catch (error) {
       if (isTeardown(error)) this.#teardown();
       throw error;
@@ -1349,14 +1340,19 @@ class MisoAudioWorkletHost {
   }
 
   /// Send the dispose and wait for its reply, at most `DISPOSE_TIMEOUT_MS`: past it, the dispose
-  /// rejects with `dispose-timeout` (the reply, should it come, is dropped by the teardown).
-  async #awaitDispose(message) {
-    const reply = this.#request(message, [], "dispose", true);
+  /// rejects with `context-closed` when the context is closed by then and `dispose-timeout`
+  /// otherwise (the reply, should it come, is dropped by the teardown). A closed context alone
+  /// is no failure: an `OfflineAudioContext` is closed once it rendered, and its worklet still
+  /// answers.
+  async #awaitDispose() {
+    const reply = this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
     reply.catch(() => undefined);
     const timer = deadline(DISPOSE_TIMEOUT_MS);
     try {
       const timedOut = await Promise.race([reply.then(() => false), timer.promise]);
-      if (timedOut) throw teardown("dispose-timeout");
+      if (timedOut) {
+        throw teardown(this.node.context?.state === "closed" ? "context-closed" : "dispose-timeout");
+      }
     } finally {
       timer.cancel();
     }
