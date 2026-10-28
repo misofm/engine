@@ -2764,7 +2764,7 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
       return 1;
     },
     miso_engine_web_v1_source_count: () => sourceRows.length,
-    miso_engine_web_v1_resolved_source_ring_frames: () => 40 * quantum,
+    miso_engine_web_v1_resolved_source_ring_frames: () => (calls.ringQuanta ?? 40) * quantum,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
       if (id === undefined) return 0;
@@ -4791,8 +4791,9 @@ async function testControlWorker() {
       }
     };
     const workerSource = await readFile(workerUrl, "utf8");
-    const boot = async (overrides = {}, quantum = 64) => {
+    const boot = async (overrides = {}, quantum = 64, prepare = () => {}) => {
       fake = createFakeExports(quantum);
+      prepare(fake);
       posts = [];
       // The file is a classic script with no module syntax (Node would load it once, as CommonJS),
       // so each case evaluates it afresh: one Worker per boot, as in the browser.
@@ -5043,7 +5044,7 @@ async function testControlWorker() {
     // room), and on the attempt-1 drain that capped a guessed depth (during a hold the guess falls
     // below the real fill, the ring fills, and the next plain seek finds no room).
     {
-      const { send, fromWorklet } = await boot();
+      const { send, fromWorklet } = await boot({}, 64, (engine) => { engine.calls.ringQuanta = 80; });
       const tick = intervals.at(-1);
       const port = { onmessage: null, postMessage: () => {}, close() {} };
       send({ tag: "miso.feed-port.v1", port });
@@ -5112,19 +5113,14 @@ async function testControlWorker() {
       render(1);
       assert.equal(engine.queued[0], 3n, "the next block plays the new position");
     }
-    // Issue #1387 (root ruling 2, MINOR 3): a default ring request boots worker mode at 65 536
-    // frames; an explicit one at or above the minimum is kept; one below it is refused with the
-    // engine's refused-options code. Red if the Worker passes the 100 ms default through or boots
-    // a ring too short for its headroom.
+    // Issue #1387 (root ruling 2): a default ring request boots worker mode at 65 536 frames; an
+    // explicit one is kept, however short (MINOR 3: the headroom then halves the ring instead).
+    // Red if the Worker passes the 100 ms default through.
     {
       await boot();
       assert.equal(new DataView(fake.memory.buffer, 512, 64).getUint32(16, true), 65536);
-      // 48 kHz and 64 frames: H = 36, so the minimum is (2 * 36 + 8) quanta, 5120 frames.
-      await boot({ options: { ...limits, sourceRingFrames: 5120 } });
-      assert.equal(new DataView(fake.memory.buffer, 512, 64).getUint32(16, true), 5120);
-      await boot({ options: { ...limits, sourceRingFrames: 5056 } });
-      assert.deepEqual(posts, [{ tag: "miso.error.v1", requestId: 0, result: 2 }]);
-      assert.deepEqual(fake.calls.boot, [], "nothing is booted");
+      await boot({ options: { ...limits, sourceRingFrames: 256 } });
+      assert.equal(new DataView(fake.memory.buffer, 512, 64).getUint32(16, true), 256);
     }
     // Issue #1387 (MAJOR-2): the shared MSB1 consumer case table over this Worker, at 4-frame
     // quanta (`sdk/test/msb1-consumer-cases.mjs`; the prelude runs it in browser-pcm-evals).

@@ -376,8 +376,33 @@ bad frames submitted, mismatched tuple accepted, future slots discarded, detach 
 marked, old header accepted); prelude mutants (#1644 off, stale submitted, mismatched tuple,
 detach compacts, bad frames). **Follow-up:** generate both copies from one source at build time.
 
-**MINORs.** (3) In `worker` mode an explicit `sourceRingFrames` below `(2H + 8)` quanta (5888 frames
-at 48 kHz / 128) is refused with the engine's refused-options code 2, as its other boot options
-(`:283`; hermetic: 5120 kept and 5056 refused at 64-frame quanta). (5) The prelude's pending path
+**MINORs.** (3) **Not refused: a decision for root.** A first build refused an explicit
+`sourceRingFrames` below `(2H + 8)` quanta with code 2; it failed #1332 S9's worker leg on both
+engines (`browser-execution: miso.error.v1 result 2`), because the qualification corpus boots
+worker mode with explicit rings down to one quantum (`bootOptions(QUANTUM_FRAMES)`, the
+structural-edit and stall rings) whose resources and digests the matrix pins. So an explicit ring
+is kept as given, and below `2H` quanta the headroom is half the ring (`feedHeadroomQuanta`):
+such a ring trades seek headroom for depth, and a seek on it may underrun. A typed refusal needs
+the corpus moved to worker-sized rings first. (5) The prelude's pending path
 posts `attach-refused` too (`refuseIfWorkerMode`, prelude :162; test in `browser-pcm-evals`).
 (6) Memory numbers corrected above. MINOR 4 (epoch/tag read order) is #2184, not here.
+
+**Gates (attempt 2).** `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -D
+warnings`, `cargo doc -D warnings`, `cargo test -p host-web --features host-web/test-support`,
+`cargo test -p source -p host-core -p control-plane -p parameter-metadata`, `realtime_policy` (291
+regions), workspace policy; the artifact rebuilt; `check-web-audioworklet.sh` (artifact and named
+twin) with its four self-tests, `check-abi-layout-v1.py --self-test`, `test-web-audioworklet.sh`,
+`check-browser-expected-resources.py --artifacts`; the SDK job (generated, deletions, types, headless
+694 pass, package check); `qualify --leg all --check-matrix --self-test-mutations` on Chromium
+151.0.7922.34 and WebKit 26.5: the single and the worker leg both pass on both engines, and
+`pcm-feed-suspended` runs worker mode with drainBlocks 0, underruns 0, render allocations 0.
+
+**Smoke (attempt 2, worker mode, default ring, two runs per engine).** The SDK's anchored start
+(`FeedSource.start`, a `seek-at` holding until its anchor), 375 quanta played, then a live plain
+ring seek one generation above, 375 more. Chromium: 0 underrun frames at the seek in both runs (the
+512 frames counted before the start are the unfed source rendering before its start, and the start
+itself counts as held frames, 8192). WebKit headless: 0 at the seek in one run, 384 frames (3
+quanta) in the other: its sink's bursts (above) can outrun the 19 chunks a seek is admitted before
+render pops it. Render allocations 0 in every run. For comparison, single mode's live seek on
+Chromium underran 896 frames in the same smoke. The suspended-seek smoke (attempt 1's): Chromium 0;
+WebKit 0 in earlier runs, 640 frames in one run.

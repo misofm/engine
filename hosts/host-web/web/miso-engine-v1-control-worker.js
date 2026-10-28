@@ -97,10 +97,6 @@ const TIMER_CLAMP_MS = 4;
 // Worker cannot refill, in frames. A resume renders its output buffer ahead: 13 quanta measured on
 // Chromium 151 (headroom 8 underran 5 of them, 12 and more none), so 2048 frames bounds it.
 const RENDER_BURST_FRAMES = 2048;
-// Issue #1387 (MINOR 3): the quanta an explicit worker-mode ring keeps beyond twice the headroom.
-const SOURCE_RING_MARGIN_QUANTA = 8;
-// The engine's refused-options code (`RESULT_REFUSED_OPTIONS`, the ABI-mismatch code).
-const RESULT_REFUSED_OPTIONS = 2;
 
 const BOOT_FIELDS = [
   "tag", "module", "memory", "document", "options", "sampleRateHz", "quantumFrames", "workletPort",
@@ -276,12 +272,6 @@ class ControlWorker {
     const optionsPointer = this.exports.miso_engine_web_v1_boot_options_ptr();
     if (!u32(optionsPointer) || optionsPointer === 0) return RESULT_INTERNAL;
     if (!this.writeBootOptions(optionsPointer, message.options)) return RESULT_INVALID_ARGUMENT;
-    // Root ruling (#1387 MINOR 3): an explicit ring too short to keep the drain's headroom twice
-    // over, plus a margin, is refused as the engine refuses its other boot options.
-    if (message.options.sourceRingFrames !== 0
-        && message.options.sourceRingFrames < this.minimumSourceRingFrames()) {
-      return RESULT_REFUSED_OPTIONS;
-    }
     const document = message.document;
     const documentPointer = this.exports.miso_engine_web_v1_document_ptr(document.byteLength);
     if (!u32(documentPointer) || documentPointer === 0) {
@@ -400,7 +390,7 @@ class ControlWorker {
     const sourceRingFrames = e.miso_engine_web_v1_resolved_source_ring_frames(this.handle);
     if (!u32(sourceRingFrames) || sourceRingFrames === 0
         || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
-    this.feedHeadroom = this.feedHeadroomQuanta();
+    this.feedHeadroom = this.feedHeadroomQuanta(sourceRingFrames / this.quantumFrames);
     if (e.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
       const view = this.view(DataView, e.miso_engine_web_v1_watermark_ptr(this.handle), WATERMARK_BYTES);
       this.watermarkRevision = view.getBigUint64(8, true);
@@ -1007,18 +997,13 @@ class ControlWorker {
   /// new position at once, and they must last until the next pass refills: `H` covers the quanta
   /// render consumes in one Worker tick (a tick is at least `TIMER_CLAMP_MS`) plus a render burst
   /// (`RENDER_BURST_FRAMES`) plus the block whose render pops the seek. At 48 kHz and 128 frames:
-  /// 2 + 16 + 1 = 19.
-  feedHeadroomQuanta() {
+  /// 2 + 16 + 1 = 19. #1387 MINOR 3: an explicit ring shorter than twice that (the
+  /// qualification corpus boots rings down to one quantum) keeps half of itself free instead, so
+  /// such a ring trades seek headroom for depth; the default ring (512 quanta) is far above it.
+  feedHeadroomQuanta(ringQuanta) {
     const tickMs = Math.max(TIMER_CLAMP_MS, Math.round((1000 * this.quantumFrames) / this.sampleRateHz));
     const perTick = Math.ceil((tickMs * this.sampleRateHz) / (1000 * this.quantumFrames));
-    return perTick + Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames) + 1;
-  }
-
-  /// The shortest explicit source ring `worker` mode boots (#1387 MINOR 3): twice the headroom
-  /// plus `SOURCE_RING_MARGIN_QUANTA`, in frames. At 48 kHz and 128 frames: 46 quanta, 5888
-  /// frames (123 ms).
-  minimumSourceRingFrames() {
-    return (2 * this.feedHeadroomQuanta() + SOURCE_RING_MARGIN_QUANTA) * this.quantumFrames;
+    return Math.min(perTick + Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames) + 1, Math.floor(ringQuanta / 2));
   }
 
   /// The engine's cumulative underrun frames for the ring's source (its seek report), or null
