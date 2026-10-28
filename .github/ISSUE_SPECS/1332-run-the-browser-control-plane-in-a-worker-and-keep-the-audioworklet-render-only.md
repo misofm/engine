@@ -928,3 +928,13 @@ Slice S7 of the #1332 build plan (#1332(b1)), branch `codex/issue-1332-worker-js
   the node is disconnected; a dispose after the host is freed is answered at once ("a dispose
   after the host is freed is answered at once with the outcome"); a trap in the Worker's dispose
   is answered 255 (red without the catch).
+- Attempt 4 verify PASS; folds: a single-mode test that a failed dispose leaves exactly one live
+  service tick (red without the restart), and a worker-mode test that a dispose the Worker
+  answers 255 rejects with 255 and still terminates the Worker and disconnects the node once.
+
+### S8 requirement (root, 2026-10-28)
+
+- A dispose must end in teardown even when nobody answers: when `context.state === "closed"`, or
+  the release or the dispose reply does not arrive within a bounded time, the page tears down
+  directly (terminates the Worker, disconnects the node) and rejects with a typed reason; the
+  Worker then disposes with no token.

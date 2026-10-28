@@ -154,6 +154,8 @@ async function testMainRealm() {
   const sourceSeekMessages = [];
   let seekReportReply = null;
   let mixedSuccess = false;
+  // The result the fake worklet answers a dispose with (0: a clean dispose).
+  let disposeResult = 0;
   let compileGate = null;
   let addModuleGate = null;
   let readyGate = null;
@@ -248,7 +250,10 @@ async function testMainRealm() {
           response = { tag: "miso.seek-report.v1", ...seekReportReply(received) };
         } else {
           if (received.tag === "miso.seek-at.v1") sourceSeekMessages.push(received);
-          response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
+          response = {
+            tag: "miso.ack.v1", requestId: received.requestId,
+            result: received.tag === "miso.dispose.v1" ? disposeResult : 0,
+          };
         }
         if (received.tag === "miso.source.v1" && planeMutation !== null) {
           response = planeMutation(response);
@@ -1986,7 +1991,16 @@ async function testMainRealm() {
       timer.callback();
       assert.equal((await read).requestId, (await tickHost.status()).requestId - 1,
         "a tick consumes no request ID");
+      // A failed single-mode dispose may be retried, so it leaves exactly one live service tick.
+      const timersBefore = intervals.length;
+      disposeResult = 3;
+      await errorResult(tickHost.dispose(), 3);
+      disposeResult = 0;
+      const live = intervals.filter((entry) => !entry.cleared);
+      assert.equal(live.length, 1, "a failed dispose leaves exactly one live service tick");
+      assert.equal(intervals.length, timersBefore + 1, "the tick is restarted, once");
       await tickHost.dispose();
+      assert.equal(live[0].cleared, true, "the retried dispose stops the restarted tick");
       assert.equal(timer.cleared, true, "dispose stops the tick");
       const afterDispose = events.length;
       timer.callback();
@@ -2037,7 +2051,10 @@ async function testMainRealm() {
           } else if (message.tag === "miso.dispose.v1") {
             // `disposeTrap`: the Worker's dispose traps, which reaches the page as `error`.
             if (workerBehaviour === "disposeTrap") queueMicrotask(() => this.onerror?.({ preventDefault() {} }));
-            else reply({ tag: "miso.ack.v1", requestId: message.requestId, result: 0 });
+            else reply({
+              tag: "miso.ack.v1", requestId: message.requestId,
+              result: workerBehaviour === "dispose255" ? 255 : 0,
+            });
           }
         }
         terminate() {
@@ -2119,6 +2136,21 @@ async function testMainRealm() {
           await errorResult(trapped.dispose(), 255);
           assert.equal(trappedWorker.posts.filter((message) => message.tag === "miso.dispose.v1").length, 1);
           assert.equal(trappedNode.disconnectCount, 1, "teardown runs exactly once");
+        }
+        // The Worker answers the dispose with 255 (a trap it caught): the dispose rejects with it
+        // and still tears down once.
+        {
+          const refusing = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          const refusingWorker = workers.at(-1);
+          const refusingNode = FakeNode.latest;
+          workerBehaviour = "dispose255";
+          await errorResult(refusing.dispose(), 255);
+          workerBehaviour = "ready";
+          assert.equal(refusingWorker.terminated, true, "a refused dispose terminates the Worker");
+          assert.equal(refusingNode.disconnectCount, 1, "and disconnects the node once");
         }
 
         // S7 verify attempt 3: a request sent behind a dispose is refused locally (it cannot fail
