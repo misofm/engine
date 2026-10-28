@@ -42,9 +42,11 @@
 //! and not hidden. The render-locked count stays exactly zero.
 //!
 //! The flag is a const-initialised `Cell<bool>` thread local. It has no destructor, so it
-//! registers nothing with std: it is a plain static on today's non-atomic module and an
-//! instance-local slot once the module is built with atomics. The counter is a process-wide
-//! `AtomicU32`; one instance owns one copy of it.
+//! registers nothing with std: on the atomic module it is an instance-local slot. Since #1332 S6
+//! the render-locked counter is one too, so on one shared memory each instance (the Worker, the
+//! worklet) reports its own count. The control counter is a process-wide `AtomicU64`: on one
+//! shared memory both instances count into one copy (#1331 recipe rule 3), so a page in `worker`
+//! mode reads the two instances' control allocations together.
 //!
 //! The cost when unlocked is one thread-local load and one branch per allocator call. There is no
 //! nesting and no RAII guard: the release profile aborts on panic, so a panicking body never
@@ -54,13 +56,15 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 thread_local! {
     static RENDER_LOCKED: Cell<bool> = const { Cell::new(false) };
+    /// The allocator calls made inside render-locked windows (#1332 S6): per instance, a const,
+    /// destructor-free thread local like the flag, so on one shared memory the Worker's count and
+    /// the worklet's are their own (#1331 recipe rule 3). Saturating.
+    static RENDER_ALLOCATIONS: Cell<u32> = const { Cell::new(0) };
 }
-
-static RENDER_ALLOCATIONS: AtomicU32 = AtomicU32::new(0);
 
 /// The allocator calls made while no render-locked window was open (#1381a). Wide, so that a long
 /// session cannot wrap it to a small number; the export that reports it is 32 bits and saturates
@@ -86,7 +90,7 @@ fn locked() -> bool {
 #[inline]
 fn count_call() {
     if locked() {
-        RENDER_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let _ = RENDER_ALLOCATIONS.try_with(|count| count.set(count.get().saturating_add(1)));
     } else {
         CONTROL_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
     }
@@ -140,9 +144,10 @@ pub(crate) fn render_locked<R>(operation: impl FnOnce() -> R) -> R {
     result
 }
 
-/// The number of allocator calls made inside render-locked windows since this instance started.
+/// The number of allocator calls made inside render-locked windows since this instance started:
+/// this instance's own (on a native host, this thread's), never another's on the same memory.
 pub(crate) fn render_allocation_count() -> u32 {
-    RENDER_ALLOCATIONS.load(Ordering::Relaxed)
+    RENDER_ALLOCATIONS.try_with(Cell::get).unwrap_or(0)
 }
 
 /// Issue #1529: the positive control of the render-allocation gates, never in a shipped build.
@@ -232,8 +237,8 @@ mod tests {
             7,
             "the window returns its body's value"
         );
-        // Another thread's window never counts this thread's calls: the flag is a thread local,
-        // which is what makes it instance-local once the module has atomics.
+        // Another thread's window never counts this thread's calls: the flag and the render
+        // counter are thread locals, which is what makes them instance-local on the atomic module.
         let moved = render_locked(|| {
             std::thread::scope(|scope| {
                 scope
@@ -248,6 +253,18 @@ mod tests {
         assert_eq!(
             moved.0, 0,
             "a window on another thread counts nothing in the render counter"
+        );
+        // #1332 S6: the render counter is per instance (per thread natively): another thread's
+        // render-locked calls never move this thread's count.
+        let mine = render_allocation_count();
+        let theirs = std::thread::scope(|scope| {
+            scope.spawn(|| exercise(true)).join().expect("thread joins")
+        });
+        assert_eq!(theirs.0, 5, "the other thread counts its own window");
+        assert_eq!(
+            render_allocation_count(),
+            mine,
+            "another thread's window moved this thread's render count"
         );
         // The control counter is wide and its reader saturates: past `u32::MAX` calls it reads
         // `u32::MAX` and never wraps to a small number.

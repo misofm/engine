@@ -50,25 +50,41 @@
 
 #![allow(unsafe_code)]
 
+use crate::handoff;
 use crate::render_lock::{control_allocation_count, render_allocation_count, render_locked};
 // Named by the exports' result docs only.
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM,
     BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, CONTROL_FRAME_BYTES, MAXIMUM_DOCUMENT_BYTES,
     RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
-    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, STATE_READY, WebBootOptions,
+    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_WRONG_STATE, RenderHost, STATE_READY,
+    WebBootOptions, WebStatus,
 };
 #[cfg(doc)]
-use crate::{RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_WRONG_STATE};
+use crate::{RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL};
 use core::{
     cell::{Cell, RefCell},
     mem::{ManuallyDrop, MaybeUninit, needs_drop},
     ptr, slice,
 };
 
+/// The instance's one live session (#1332 S6). A booted instance holds the host, with its render
+/// half here (`single` mode) or released to another instance (the Worker, `worker` mode); a
+/// render-only instance (the worklet in `worker` mode) holds only the render half it adopted, under
+/// the handle of the host it belongs to.
 struct LiveHost {
     handle: u32,
-    host: Box<AudioWorkletEngineHost>,
+    /// The booted host; `None` on a render-only instance.
+    host: Option<Box<AudioWorkletEngineHost>>,
+    /// The adopted render half; `Some` only on a render-only instance.
+    render: Option<RenderHost>,
+}
+
+/// Where a render export finds the render half (#1332 S6): in the booted host (whose released
+/// shell refuses), or the render-only instance's adopted half.
+enum RenderTarget<'a> {
+    Host(&'a mut AudioWorkletEngineHost),
+    Half(&'a mut RenderHost),
 }
 
 /// Boot staging is a const-initialised, destructor-free thread local (issue #1333 D5): `options`
@@ -206,10 +222,14 @@ fn with_host<R>(
         let Ok(slot) = slot.try_borrow() else {
             return invalid;
         };
-        let Some(live) = slot.as_ref().filter(|live| live.handle == handle) else {
+        let Some(host) = slot
+            .as_ref()
+            .filter(|live| live.handle == handle)
+            .and_then(|live| live.host.as_deref())
+        else {
             return invalid;
         };
-        operation(&live.host)
+        operation(host)
     })
 }
 
@@ -225,10 +245,68 @@ fn with_host_mut<R>(
         let Ok(mut slot) = slot.try_borrow_mut() else {
             return invalid;
         };
+        let Some(host) = slot
+            .as_mut()
+            .filter(|live| live.handle == handle)
+            .and_then(|live| live.host.as_deref_mut())
+        else {
+            return invalid;
+        };
+        operation(host)
+    })
+}
+
+/// The render half `handle` names, wherever it is on this instance (#1332 S6).
+fn with_render_mut<R>(handle: u32, invalid: R, operation: impl FnOnce(RenderTarget<'_>) -> R) -> R {
+    if handle == 0 {
+        return invalid;
+    }
+    LIVE_HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return invalid;
+        };
         let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
             return invalid;
         };
-        operation(&mut live.host)
+        match (live.host.as_deref_mut(), live.render.as_mut()) {
+            (Some(host), _) => operation(RenderTarget::Host(host)),
+            (None, Some(render)) => operation(RenderTarget::Half(render)),
+            (None, None) => invalid,
+        }
+    })
+}
+
+/// The render half `handle` names, read-only (#1332 S6).
+fn with_render<R>(
+    handle: u32,
+    invalid: R,
+    operation: impl FnOnce(&WebStatus, &crate::WebMeterHeader, &[f32], Option<&[f32]>) -> R,
+) -> R {
+    if handle == 0 {
+        return invalid;
+    }
+    LIVE_HOST.with(|slot| {
+        let Ok(slot) = slot.try_borrow() else {
+            return invalid;
+        };
+        let Some(live) = slot.as_ref().filter(|live| live.handle == handle) else {
+            return invalid;
+        };
+        match (live.host.as_deref(), live.render.as_ref()) {
+            (Some(host), _) => operation(
+                host.status(),
+                host.meter_header(),
+                host.meter_frame(),
+                host.output_pcm(),
+            ),
+            (None, Some(render)) => operation(
+                render.status(),
+                render.meter_header(),
+                render.meter_frame(),
+                render.output_pcm(),
+            ),
+            (None, None) => invalid,
+        }
     })
 }
 
@@ -271,6 +349,24 @@ fn buffer_pointer(host: &mut AudioWorkletEngineHost, kind: u32) -> *mut u8 {
             .map_or(ptr::null_mut(), |value| value.as_ptr().cast_mut().cast()),
         BUFFER_METER_FRAME => {
             let frame = host.meter_frame();
+            if frame.is_empty() {
+                ptr::null_mut()
+            } else {
+                frame.as_ptr().cast_mut().cast()
+            }
+        }
+        _ => ptr::null_mut(),
+    }
+}
+
+/// [`buffer_pointer`] on a render-only instance (#1332 S6): the render half's two buffers.
+fn render_buffer_pointer(render: &RenderHost, kind: u32) -> *mut u8 {
+    match kind {
+        BUFFER_OUTPUT_PCM => render
+            .output_pcm()
+            .map_or(ptr::null_mut(), |value| value.as_ptr().cast_mut().cast()),
+        BUFFER_METER_FRAME => {
+            let frame = render.meter_frame();
             if frame.is_empty() {
                 ptr::null_mut()
             } else {
@@ -539,14 +635,30 @@ fn stage_replace_document(handle: u32, len: u32) -> *mut u8 {
 
 /// Return one prepared stable staging-buffer address or zero.
 #[unsafe(no_mangle)]
+///
+/// On a render-only instance (#1332 S6) only the render half's buffers answer:
+/// [`BUFFER_OUTPUT_PCM`] and [`BUFFER_METER_FRAME`].
 pub extern "C" fn miso_engine_web_v1_buffer_ptr(handle: u32, kind: u32) -> u32 {
-    with_host_mut(handle, 0, |host| pointer_u32(buffer_pointer(host, kind)))
+    with_render_mut(handle, 0, |target| match target {
+        RenderTarget::Host(host) => pointer_u32(buffer_pointer(host, kind)),
+        RenderTarget::Half(render) => pointer_u32(render_buffer_pointer(render, kind)),
+    })
 }
 
 /// Return one prepared staging-buffer capacity in bytes or zero.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_buffer_capacity(handle: u32, kind: u32) -> u32 {
-    with_host(handle, 0, |host| buffer_capacity(host, kind))
+    with_render_mut(handle, 0, |target| match target {
+        RenderTarget::Host(host) => buffer_capacity(host, kind),
+        RenderTarget::Half(render) => {
+            let words = match kind {
+                BUFFER_OUTPUT_PCM => render.output_pcm().map_or(0, <[f32]>::len),
+                BUFFER_METER_FRAME => render.meter_frame().len(),
+                _ => 0,
+            };
+            u32::try_from(words * 4).unwrap_or(0)
+        }
+    })
 }
 
 fn boot_staged(len: u32) -> u32 {
@@ -610,10 +722,11 @@ fn boot_staged(len: u32) -> u32 {
         let handle = next_handle();
         **live_slot = Some(LiveHost {
             handle,
-            host: Box::new(
+            host: Some(Box::new(
                 host.take()
                     .expect("boot host is present before publication"),
-            ),
+            )),
+            render: None,
         });
         Some(handle)
     });
@@ -913,11 +1026,23 @@ fn seek_report_pointer(host: &AudioWorkletEngineHost) -> *const crate::WebSeekRe
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> u32 {
     render_locked(|| {
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            if host.status().state == STATE_READY && host.status().quantum_frames != actual_frames {
-                return host.reject_output_quantum(actual_frames);
+        with_render_mut(handle, RESULT_INVALID_ARGUMENT, |target| match target {
+            RenderTarget::Host(host) => {
+                if host.status().state == STATE_READY
+                    && host.status().quantum_frames != actual_frames
+                {
+                    return host.reject_output_quantum(actual_frames);
+                }
+                host.render_next()
             }
-            host.render_next()
+            RenderTarget::Half(render) => {
+                if render.status().state == STATE_READY
+                    && render.status().quantum_frames != actual_frames
+                {
+                    return render.reject_output_quantum(actual_frames);
+                }
+                render.render_next()
+            }
         })
     })
 }
@@ -1131,11 +1256,15 @@ pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u
         if let Err(result) = verify_live_host(handle) {
             return result;
         }
-        with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-            if enabled > 1 {
-                return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+        with_render_mut(handle, RESULT_INVALID_ARGUMENT, |target| match target {
+            RenderTarget::Host(host) => {
+                if enabled > 1 {
+                    return host.record_boundary_result(RESULT_INVALID_ARGUMENT);
+                }
+                host.set_meter_lease(enabled == 1)
             }
-            host.set_meter_lease(enabled == 1)
+            RenderTarget::Half(_) if enabled > 1 => RESULT_INVALID_ARGUMENT,
+            RenderTarget::Half(render) => render.set_meter_lease(enabled == 1),
         })
     })
 }
@@ -1146,7 +1275,12 @@ pub extern "C" fn miso_engine_web_v1_meter_lease(handle: u32, enabled: u32) -> u
 /// `Copy` snapshots out of queues sized at compilation into a buffer sized at compilation.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
-    render_locked(|| with_host_mut(handle, 0, AudioWorkletEngineHost::poll_meters))
+    render_locked(|| {
+        with_render_mut(handle, 0, |target| match target {
+            RenderTarget::Host(host) => host.poll_meters(),
+            RenderTarget::Half(render) => render.poll_meters(),
+        })
+    })
 }
 
 /// Return the address of the header that describes the plan now rendering, or zero for an invalid
@@ -1164,8 +1298,8 @@ pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
 /// absolute render time continuous and therefore do not advance this meter generation.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        pointer_u32(ptr::from_ref(host.meter_header()))
+    with_render(handle, 0, |_, header, _, _| {
+        pointer_u32(ptr::from_ref(header))
     })
 }
 
@@ -1241,9 +1375,17 @@ pub extern "C" fn miso_engine_web_v1_resolved_source_ring_frames(handle: u32) ->
 }
 
 /// Return the stable status address or zero for an invalid handle.
+///
+/// #1332 S6: on a render-only instance it is the adopted half's status (its clock, its counters
+/// and its last result). On an instance whose render half is released it is the status shell the
+/// release left: from the release on, its `state` is the session's lifecycle word as of the last
+/// control call, and its `last_result` and `blocking_rebuilds` are the control half's, while the
+/// render clock and counters stay as they were at the release.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_status_ptr(handle: u32) -> u32 {
-    with_host(handle, 0, |host| pointer_u32(ptr::from_ref(host.status())))
+    with_render(handle, 0, |status, _, _, _| {
+        pointer_u32(ptr::from_ref(status))
+    })
 }
 
 /// Quiescently dispose the live handle; zero is an explicit no-op.
@@ -1266,15 +1408,224 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
             let Some(live) = live_slot.as_ref().filter(|live| live.handle == handle) else {
                 return RESULT_INVALID_ARGUMENT;
             };
-            let _ = live;
+            // #1332 S6: a render-only instance holds no host; its half goes back by a release.
+            if live.host.is_none() {
+                return RESULT_WRONG_STATE;
+            }
             let Some(mut live) = live_slot.take() else {
                 return RESULT_INTERNAL;
             };
-            let result = live.host.dispose();
+            let result = live
+                .host
+                .as_mut()
+                .map_or(RESULT_INTERNAL, |host| host.dispose());
             drop(live);
             boot.reset_after_dispose();
             result
         })
+    })
+}
+
+/// Release the render half of the host `handle` names and return its token, or `0` (#1332 S6).
+///
+/// On the instance that booted the host (the Worker), the render half leaves the host, which keeps
+/// its control half and a status shell (see [`miso_engine_web_v1_status_ptr`]); every render
+/// export on that host then refuses with [`RESULT_WRONG_STATE`] (the poll answers `0`). On a
+/// render-only instance (the worklet), the half it adopted leaves the instance, which holds no
+/// session afterwards; first the instance's reserved stack canary is checked
+/// ([`miso_engine_web_v1_instance_bind`]), and an overwritten canary fails the session
+/// (`web.instance.stack_canary`, sticky [`RESULT_INTERNAL`]) before the half goes, so the Worker
+/// that adopts it back sees the failure. Nothing is freed: the half is deposited in the handoff
+/// registry, and the token is the only way back to it. `0` for a wrong handle, a host whose half
+/// is already away or that has no session, or a full registry (the half stays where it was).
+///
+/// Render-locked: it allocates and frees nothing, wherever it runs.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_host_release(handle: u32) -> u64 {
+    render_locked(|| release_render_half(handle))
+}
+
+fn release_render_half(handle: u32) -> u64 {
+    if handle == 0 {
+        return 0;
+    }
+    LIVE_HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        let Some(live) = slot.as_mut().filter(|live| live.handle == handle) else {
+            return 0;
+        };
+        if let Some(host) = live.host.as_deref_mut() {
+            let Some(render) = host.release_render() else {
+                return 0;
+            };
+            return match handoff::deposit(handle, render) {
+                Ok(token) => token,
+                Err(render) => {
+                    // A full registry: the half goes back where it was. It is this host's, so the
+                    // adoption cannot refuse it; were it to, the half is forgotten, never dropped
+                    // here.
+                    if let Err(render) = host.adopt_render(render) {
+                        core::mem::forget(render);
+                    }
+                    0
+                }
+            };
+        }
+        let Some(mut render) = live.render.take() else {
+            return 0;
+        };
+        if !handoff::bound_canary_intact() {
+            let _ = render.fail(RESULT_INTERNAL, b"web.instance.stack_canary\t$\n");
+        }
+        match handoff::deposit(handle, render) {
+            Ok(token) => {
+                // The instance holds no session now. What leaves the slot holds neither a host
+                // nor a half, so it is forgotten: no drop glue joins the call.
+                let mut empty = None;
+                core::mem::swap(&mut **slot, &mut empty);
+                core::mem::forget(empty);
+                token
+            }
+            Err(render) => {
+                let mut back = Some(render);
+                core::mem::swap(&mut live.render, &mut back);
+                core::mem::forget(back);
+                0
+            }
+        }
+    })
+}
+
+/// Adopt the render half `token` names into this instance (#1332 S6).
+///
+/// It stores the half only into an empty slot: on an instance with no session (the worklet), the
+/// half becomes the instance's render-only session, under the handle of the host it belongs to
+/// (`token >> 32`), and the render exports serve it; on the instance whose host released it (the
+/// Worker), the host takes it back, and its render exports serve it again. Results:
+/// [`RESULT_OK`], the token consumed; [`RESULT_WRONG_STATE`] for an instance whose slot is taken (a
+/// render-only session, or a host whose render half is here), the token unconsumed;
+/// [`RESULT_INVALID_ARGUMENT`] for a token no release issued or one already taken, and for a half
+/// another host released (unconsumed); [`RESULT_INTERNAL`] for a refused borrow.
+///
+/// Render-locked: it allocates and frees nothing, wherever it runs.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_host_adopt(token: u64) -> u32 {
+    render_locked(|| adopt_render_half(token))
+}
+
+fn adopt_render_half(token: u64) -> u32 {
+    let handle = handoff::token_handle(token);
+    if handle == 0 {
+        return RESULT_INVALID_ARGUMENT;
+    }
+    LIVE_HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return RESULT_INTERNAL;
+        };
+        if let Some(live) = slot.as_mut() {
+            let Some(host) = live.host.as_deref_mut() else {
+                return RESULT_WRONG_STATE;
+            };
+            if host.render_here() {
+                return RESULT_WRONG_STATE;
+            }
+            return match handoff::take(token, |render| host.adopt_render(render)) {
+                Some(Ok(())) => RESULT_OK,
+                Some(Err(())) | None => RESULT_INVALID_ARGUMENT,
+            };
+        }
+        match handoff::take(token, Ok) {
+            Some(Ok(render)) => {
+                let mut fresh = Some(LiveHost {
+                    handle,
+                    host: None,
+                    render: Some(render),
+                });
+                core::mem::swap(&mut **slot, &mut fresh);
+                // The slot was empty (checked above): nothing to drop.
+                core::mem::forget(fresh);
+                RESULT_OK
+            }
+            Some(Err(())) | None => RESULT_INVALID_ARGUMENT,
+        }
+    })
+}
+
+/// Allocate one stack and TLS block for a second instance on this memory and return the address
+/// of its 16-byte record (`WebInstanceReservation`: `struct_size`, `tls_base`, `stack_top`,
+/// `stack_bottom`, little-endian `u32` words), or `0` (#1332 S6, #1331 recipe rule 2).
+///
+/// `tls_size` and `tls_align` are the module's exported `__tls_size` and `__tls_align` globals
+/// (a Wasm global is not addressable from Rust, so the page passes them). The stack is 2 MiB
+/// (owner decision O6) with a 64-byte canary below it, and the block is leaked for the instance's
+/// life. The page then starts the second instance with `__wasm_init_tls(tls_base)` and
+/// `__stack_pointer = stack_top`, before any other export, and binds it with
+/// [`miso_engine_web_v1_instance_bind`]. Control work: the first instance calls it, before the
+/// second starts; it allocates.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_instance_reserve(tls_size: u32, tls_align: u32) -> u32 {
+    handoff::reserve(tls_size, tls_align).map_or(0, |reservation| {
+        u32::try_from(reservation.record).unwrap_or(0)
+    })
+}
+
+/// Bind this instance to the reservation whose record is at `record` (#1332 S6), so that
+/// [`miso_engine_web_v1_host_release`] checks its stack canary. [`RESULT_OK`] when this module
+/// made the reservation and its canary is intact; [`RESULT_INVALID_ARGUMENT`] otherwise, which
+/// binds nothing. The second instance calls it once, after its stack and TLS are set and before
+/// [`miso_engine_web_v1_host_adopt`]. Render-locked: loads and compares only.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_instance_bind(record: u32) -> u32 {
+    render_locked(|| {
+        if handoff::bind(record as usize) {
+            RESULT_OK
+        } else {
+            RESULT_INVALID_ARGUMENT
+        }
+    })
+}
+
+/// The address of the fixed diagnostic of the render-only session's sticky failure, or `0` when
+/// it has none or this instance holds no render-only session (#1332 S6). The worklet reads it
+/// after a render failure; on the instance that holds the host, the session diagnostic
+/// ([`BUFFER_DIAGNOSTIC`]) carries a render failure instead. Render-locked.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_render_diagnostic_ptr(handle: u32) -> u32 {
+    render_locked(|| {
+        with_render_mut(handle, 0, |target| match target {
+            RenderTarget::Half(render) if !render.diagnostic().is_empty() => {
+                pointer_u32(render.diagnostic().as_ptr())
+            }
+            _ => 0,
+        })
+    })
+}
+
+/// The byte length of [`miso_engine_web_v1_render_diagnostic_ptr`]'s text, or `0` (#1332 S6).
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_render_diagnostic_bytes(handle: u32) -> u32 {
+    render_locked(|| {
+        with_render_mut(handle, 0, |target| match target {
+            RenderTarget::Half(render) => u32::try_from(render.diagnostic().len()).unwrap_or(0),
+            RenderTarget::Host(_) => 0,
+        })
+    })
+}
+
+/// The address of the meter header of the newest replacement plan the host's control half
+/// committed, or `0` before the first or for a wrong handle (#1332 S6, the meter-view hook S7's
+/// Worker uses). The Worker reads it after each control call that may publish a plan and names it,
+/// with the memory's byte length, to the worklet, whose message handler extends its views over
+/// the shared memory so that they cover the header and its frame before render adopts the plan:
+/// the worklet's `process()` then follows a retired header's `successor_pointer` without cutting
+/// a view. Only an address: after a supersession it may name freed tables, so the worklet never
+/// reads through it before render has adopted that plan. Control side; not render-locked.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_successor_header_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        u32::try_from(host.successor_header_address()).unwrap_or(0)
     })
 }
 
@@ -1288,7 +1639,7 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
 #[cfg(not(target_family = "wasm"))]
 #[doc(hidden)]
 pub mod native_staging {
-    use super::WebBootOptions;
+    use super::{AudioWorkletEngineHost, WebBootOptions};
 
     /// Stage the boot options and the exact document, as `miso_engine_web_v1_boot_options_ptr`
     /// and `miso_engine_web_v1_document_ptr` let the worklet do. Returns the staged length for the
@@ -1401,6 +1752,64 @@ pub mod native_staging {
         super::with_host_mut(handle, None, |host| {
             host.timeline_at_for_test(source_read_sample)
         })
+    }
+
+    /// Reserve a second instance's stack and TLS block, as
+    /// `miso_engine_web_v1_instance_reserve` does, with the full-width addresses (#1332 S6).
+    pub fn instance_reserve(tls_size: u32, tls_align: u32) -> Option<crate::Reservation> {
+        crate::handoff::reserve(tls_size, tls_align)
+    }
+
+    /// Overwrite one byte of `reservation`'s canary, as a stack overflow would (#1332 S6).
+    #[cfg(feature = "test-support")]
+    pub fn overwrite_canary(reservation: &crate::Reservation) {
+        crate::handoff::overwrite_canary_for_test(reservation);
+    }
+
+    /// Bind this thread's instance to the reservation at `record`, as
+    /// `miso_engine_web_v1_instance_bind` does with a `u32` address (#1332 S6).
+    pub fn instance_bind(record: usize) -> u32 {
+        super::render_locked(|| {
+            if crate::handoff::bind(record) {
+                super::RESULT_OK
+            } else {
+                super::RESULT_INVALID_ARGUMENT
+            }
+        })
+    }
+
+    /// The status `miso_engine_web_v1_status_ptr(handle)` names on this thread's instance: the
+    /// host's, its shell's, or a render-only session's (#1332 S6).
+    pub fn render_status(handle: u32) -> Option<crate::WebStatus> {
+        super::with_render(handle, None, |status, _, _, _| Some(*status))
+    }
+
+    /// The output planes and the meter header and frame of the render half `handle` names on this
+    /// thread's instance, wherever it is (#1332 S6).
+    pub fn render_output(handle: u32) -> Option<(Vec<f32>, crate::WebMeterHeader, Vec<f32>)> {
+        super::with_render(handle, None, |_, header, frame, output| {
+            Some((output?.to_vec(), *header, frame.to_vec()))
+        })
+    }
+
+    /// The render-only session's diagnostic, as `miso_engine_web_v1_render_diagnostic_ptr` and
+    /// `_bytes` name it (#1332 S6).
+    pub fn render_diagnostic(handle: u32) -> Vec<u8> {
+        super::with_render_mut(handle, Vec::new(), |target| match target {
+            super::RenderTarget::Half(render) => render.diagnostic().to_vec(),
+            super::RenderTarget::Host(_) => Vec::new(),
+        })
+    }
+
+    /// The session diagnostic of the host `handle` names, as the worklet reads it through
+    /// `BUFFER_DIAGNOSTIC` (#1332 S6).
+    pub fn diagnostic(handle: u32) -> Vec<u8> {
+        super::with_host(handle, Vec::new(), |host| host.diagnostic().to_vec())
+    }
+
+    /// The full-width address [`super::miso_engine_web_v1_successor_header_ptr`] names (#1332 S6).
+    pub fn successor_header(handle: u32) -> usize {
+        super::with_host(handle, 0, AudioWorkletEngineHost::successor_header_address)
     }
 
     /// The status record of the host `handle` names; `None` for an unknown handle.
