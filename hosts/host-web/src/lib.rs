@@ -1003,13 +1003,7 @@ impl ControlHalf {
             .ok_or(control_plane::CommandError::Invalid)?;
         let before = control.newest_plan_epoch();
         let result = match plan {
-            Some(plan) => control.command_with_plan(
-                request,
-                document,
-                output_capacity,
-                plan,
-                observation_handles,
-            ),
+            Some(plan) => control.command_with_plan(request, document, output_capacity, plan),
             None => control.command_with_document(request, document, output_capacity),
         };
         self.after_control(before, result)
@@ -3389,14 +3383,6 @@ fn publish_web_meter_frame(
 }
 // REALTIME_POLICY_END
 
-/// The active plan's observation handles (#1381a D3: the readers are its companions), which the
-/// read reads through: after a carried swap they hold the carried readers (#1586a). Empty for a
-/// plan with no companions, whose instances then all read as unbound.
-fn observation_handles(plan: &mut WebPlan) -> &[EffectObservationHandle] {
-    plan.active_attachment_mut::<RenderCompanions>()
-        .map_or(&[], |companions| &*companions.effect_observations)
-}
-
 const fn selected_backend() -> u32 {
     if cfg!(all(target_arch = "wasm32", target_feature = "simd128")) {
         BACKEND_SIMD128
@@ -3907,6 +3893,11 @@ pub struct RenderCompanions {
     carried: Box<[CarriedReader]>,
     /// How many entries of `carried` the last swap block wrote.
     carried_len: u32,
+    /// The plan's carried-tap record (#1587b, #1332 S6b), shared with its control-plane epoch:
+    /// the swap block that adopts the plan writes what it carried, and the control side pairs its
+    /// index's read-only views from it at promotion, so an `OBSERVATION_READ` follows a carried
+    /// tap on whichever thread the control half runs. `None` for a plan with no reader.
+    carried_taps: Option<std::sync::Arc<control_plane::CarriedTaps>>,
     /// The plan's tables (#1290a, #1332 S4), boxed by its preparation, so their address (and the
     /// meter header's, which the page reads) never moves: a replacement's until the block that
     /// adopts the plan exchanges them with the render half's, which leaves the retired plan's
@@ -3964,6 +3955,9 @@ impl RenderCompanions {
             effect_observations,
             carried,
             carried_len: _,
+            // A shared record, charged by the control plane with the plan's observation rows;
+            // its pointer is in the shell.
+            carried_taps: _,
             // A replacement's tables are charged with its attachment by its preparer
             // ([`PlanShape::retained_bytes`]), the boot plan's to the bridge (`compile_ready`).
             shape: _,
@@ -4054,6 +4048,11 @@ impl HostAttachment for RenderCompanions {
         carries: &[ObserverCarry],
     ) {
         self.carried_len = 0;
+        // The control side's half of the pairing (#1332 S6b), written before anything else, as
+        // the C ABI's attachment writes it.
+        if let Some(record) = &self.carried_taps {
+            record.record(carries);
+        }
         let Some(previous) = predecessor.as_any_mut().downcast_mut::<Self>() else {
             return;
         };
@@ -4193,6 +4192,22 @@ impl control_plane::RuntimePreparer for WebRuntimePreparer {
         host.plan
             .host_attachment_mut::<RenderCompanions>()
             .map_or(&[], |companions| &companions.effect_observations)
+    }
+
+    /// The plan's carried-tap record rides the plan's [`RenderCompanions`] (#1332 S6b), the
+    /// plan's one attachment, whose swap-block hook writes it.
+    fn keep_carried_taps(
+        &self,
+        plan: &mut engine::realtime::PreparedRenderPlan,
+        record: std::sync::Arc<control_plane::CarriedTaps>,
+    ) -> Option<std::sync::Arc<control_plane::CarriedTaps>> {
+        match plan.host_attachment_mut::<RenderCompanions>() {
+            Some(companions) => {
+                companions.carried_taps = Some(record);
+                None
+            }
+            None => Some(record),
+        }
     }
 
     /// The render half of the plan's meter frame ring rides the plan's tables (#1588 D2, #1332
@@ -4337,6 +4352,7 @@ impl WebRuntimePreparer {
             effect_observations,
             carried: carried.into_boxed_slice(),
             carried_len: 0,
+            carried_taps: None,
             shape: None,
         };
         // The attachment is the plan's own allocation, so the plan's rows charge it: the control

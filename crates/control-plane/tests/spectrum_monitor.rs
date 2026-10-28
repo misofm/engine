@@ -348,7 +348,7 @@ impl Rig {
             .expect("configure command");
         let length = if lend {
             self.session
-                .command_with_plan(&bytes[..length], &[], 65_536, &mut self.plan, |_| &[])
+                .command_with_plan(&bytes[..length], &[], 65_536, &mut self.plan)
         } else {
             self.session.command(&bytes[..length], 65_536)
         }

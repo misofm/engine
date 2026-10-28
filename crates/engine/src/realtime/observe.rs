@@ -146,6 +146,16 @@ pub struct ObservationReader {
     slot: Arc<ObservationSlot>,
 }
 
+/// A read-only endpoint of a reader's slot (#1332 S6b, root ruling R-S6b): it reads the cell as
+/// its [`ObservationReader`] does and has no `acknowledge`, so the cell keeps exactly one writer of
+/// its `consumed` word, the reader. A host whose acknowledging reader lives on the render thread
+/// gives its control side one of these, made from that reader by [`ObservationReader::view`]: a
+/// reference-count increment, no allocation. It is one pointer.
+#[derive(Debug)]
+pub struct ObservationView {
+    slot: Arc<ObservationSlot>,
+}
+
 /// Build one conflating slot and its two endpoints. The only allocation this module makes.
 #[must_use]
 pub fn observation_slot() -> (ObservationPublisher, ObservationReader) {
@@ -222,24 +232,15 @@ impl ObservationReader {
     /// (#1585 D2). Bounded as [`Self::read`] is.
     #[must_use]
     pub fn read_state(&self) -> Option<ObservationState> {
-        let [
-            first_sample,
-            end_sample,
-            sequence,
-            blocks,
-            lanes,
-            armed,
-            arm_sample,
-            arm_tag,
-        ] = self.slot.words.read().ok()?;
-        let window =
-            ObservationWindow::from_words([first_sample, end_sample, sequence, blocks, lanes]);
-        Some(ObservationState {
-            window: (window.sequence != 0).then_some(window),
-            armed: armed != 0,
-            arm_sample,
-            arm_tag,
-        })
+        read_slot_state(&self.slot)
+    }
+
+    /// A read-only endpoint of this reader's slot ([`ObservationView`]). Allocates nothing.
+    #[must_use]
+    pub fn view(&self) -> ObservationView {
+        ObservationView {
+            slot: Arc::clone(&self.slot),
+        }
     }
 
     /// Record that everything up to and including `sequence` has been consumed.
@@ -269,4 +270,40 @@ impl ObservationReader {
             .saturating_sub(self.consumed_sequence())
             .saturating_sub(1)
     }
+}
+
+impl ObservationView {
+    /// [`ObservationReader::read`], through this endpoint.
+    #[must_use]
+    pub fn read(&self) -> Option<ObservationWindow> {
+        self.read_state()?.window
+    }
+
+    /// [`ObservationReader::read_state`], through this endpoint. Never acknowledges.
+    #[must_use]
+    pub fn read_state(&self) -> Option<ObservationState> {
+        read_slot_state(&self.slot)
+    }
+}
+
+/// One bounded read of a slot's record: the window and arm state of one publication, or `None`
+/// if every attempt tore. Shared by both read endpoints; writes nothing.
+fn read_slot_state(slot: &ObservationSlot) -> Option<ObservationState> {
+    let [
+        first_sample,
+        end_sample,
+        sequence,
+        blocks,
+        lanes,
+        armed,
+        arm_sample,
+        arm_tag,
+    ] = slot.words.read().ok()?;
+    let window = ObservationWindow::from_words([first_sample, end_sample, sequence, blocks, lanes]);
+    Some(ObservationState {
+        window: (window.sequence != 0).then_some(window),
+        armed: armed != 0,
+        arm_sample,
+        arm_tag,
+    })
 }

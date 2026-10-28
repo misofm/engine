@@ -4467,6 +4467,46 @@ fn selected_observation_reads_keep_same_track_owner_windows_and_sequences() {
     assert_eq!(reader_state(&mut host, &gate).1, gate_consumed);
 }
 
+/// #1332 S6b: the `consumed` word of a tap's slot has one writer, the render half's meter fold,
+/// which acknowledges the window it folds through the plan's reader. The control side's
+/// endpoints are read-only by type ([`engine::realtime::ObservationView`]), and that a read moves
+/// no word is `selected_observation_reads_keep_same_track_owner_windows_and_sequences`'s.
+///
+/// Test value: red if the render half's fold stops acknowledging (a fold that read through a
+/// read-only endpoint instead of the plan's reader), which no other test sees: the gain reduction
+/// it folds is the same.
+#[test]
+fn the_render_half_meter_fold_acknowledges_the_window_it_folds() {
+    const QUANTUM: u32 = 128;
+    const WINDOW: u64 = 2;
+    let mut host = same_track_observation_host_metered(QUANTUM, WINDOW);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, RACK_INSERTS, 0, 1, 2, true), Ok(()));
+    for block in 0..4 * WINDOW {
+        feed_and_render_channels(&mut host, block, 0.75, 0.125);
+        let _ = host.poll_meters();
+    }
+    let tap = TapAt {
+        track_index: 0,
+        rack: RACK_INSERTS,
+        effect_index: 0,
+        tap_id: 1,
+        channels: protocol::ParameterChannel::Both,
+    };
+    let (effect, index) = resolve_observation(&host, &tap).expect("resolved tap");
+    let reader = &host
+        .test_observation_handle(effect)
+        .expect("observation handle")
+        .readers[index];
+    let sequence = reader.read().expect("published window").sequence;
+    assert!(sequence > 1, "several windows closed");
+    assert_eq!(
+        reader.consumed_sequence(),
+        sequence,
+        "the fold acknowledged the window it folded"
+    );
+}
+
 /// Feed one quantum of a constant to every track's shared source and render it.
 fn feed_and_render_tracks(host: &mut AudioWorkletEngineHost, block: u64, value: f32) {
     feed_and_render(host, 1, block, value);

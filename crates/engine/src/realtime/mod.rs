@@ -25,8 +25,8 @@ pub use latest_cell::{
     StampRefusal, StampRefused,
 };
 pub use observe::{
-    ObservationPublisher, ObservationReader, ObservationSlot, ObservationState, ObservationWindow,
-    observation_slot, observation_slot_retained_bytes,
+    ObservationPublisher, ObservationReader, ObservationSlot, ObservationState, ObservationView,
+    ObservationWindow, observation_slot, observation_slot_retained_bytes,
 };
 pub use plan::{
     CarryOutcome, ExecutorBlockReport, HostAttachment, ObserverCarry, ObserverKind,

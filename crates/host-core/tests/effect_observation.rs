@@ -1433,6 +1433,7 @@ fn a_read_checks_the_whole_batch_before_it_writes_a_row() {
                 effect: handle.descriptor,
             })
             .collect(),
+        observations,
     )
     .expect("one entry per instance");
     let tap_id = observations[0].descriptor.observations[0].id.0;
@@ -1454,8 +1455,8 @@ fn a_read_checks_the_whole_batch_before_it_writes_a_row() {
     };
     let refused = |selections: &[ObservationSelection<'_>]| {
         let mut rows = [sentinel; 3];
-        let error = read_into(&index, observations, selections, |_| (0, false), &mut rows)
-            .expect_err("a refused batch");
+        let error =
+            read_into(&index, selections, |_| (0, false), &mut rows).expect_err("a refused batch");
         assert_eq!(rows, [sentinel; 3], "a refused batch writes no row");
         error
     };
@@ -1496,7 +1497,6 @@ fn a_read_checks_the_whole_batch_before_it_writes_a_row() {
     let mut rows = [ObservationRow::default(); 2];
     read_into(
         &index,
-        observations,
         &[select(0, both), select(5, ObservationReadChannels::Right)],
         |_| (0, false),
         &mut rows,

@@ -3,18 +3,22 @@
 //! A host reads the latest window of up to [`MAXIMUM_OBSERVATION_SELECTIONS`] observation taps,
 //! each named by its strip ID, its section (a console slot or an insert), the console slot's or
 //! insert's ID and the effect-local tap ID. The read never consumes anything: it takes each tap's
-//! slot through [`ObservationReader::read_state`] and never calls
-//! [`ObservationReader::acknowledge`], whose word belongs to the meter fold.
+//! slot through a read-only [`ObservationView`], which has no `acknowledge`: the `consumed` word
+//! belongs to the meter fold's [`ObservationReader`].
 //!
-//! # The index holds positions, not readers (#1586a, root ruling on finding 1)
+//! # The index holds read-only endpoints (#1332 S6b, root ruling R-S6b)
 //!
 //! [`ObservationIndex`] is built once per plan on the control thread. Each entry is one effect
 //! instance's stable key, the position of its [`EffectObservationHandle`] in the plan's handle list
-//! (`None` for an effect that declares no tap) and its descriptor. The read takes that list as an
-//! argument and reads through it. A carried plan swap exchanges reader sets between two plans'
-//! handles at the same positions (`pair_carried_observations`), so the positions stay right and
-//! the read follows the slot that renders on; an index that held copies of the readers would keep
-//! reading the successor's fresh slot, which nothing publishes to after a carry.
+//! (`None` for an effect that declares no tap) and its descriptor. Beside the entries it keeps one
+//! [`ObservationView`] per tap of every handle, in handle order: one pointer each, cloned from the
+//! handle's readers, so the read needs no handle list and runs on whatever thread holds the index,
+//! while the readers themselves stay with whoever acknowledges (the C ABI's epoch, or the browser's
+//! render half). A carried plan swap exchanges reader sets between two plans' handles at the same
+//! positions (`pair_carried_observations`); the control side exchanges the two indexes' views at
+//! the same positions from the swap record ([`ObservationIndex::pair_carried`]), so the read
+//! follows the slot that renders on: an index whose views were not exchanged would keep reading
+//! the successor's fresh slot, which nothing publishes to after a carry (#1586a).
 //!
 //! # Status (#1585, as merged)
 //!
@@ -31,13 +35,12 @@
 //!   on every attempt.
 
 use effect_contract::{EffectDescriptor, ObservationCost, ObservationDescriptor};
-use engine::realtime::{ObservationState, ObservationWindow};
+use engine::realtime::{
+    ObservationReader, ObservationState, ObservationView, ObservationWindow, ObserverCarry,
+};
 
 use crate::meters::window_since_arm;
 use crate::{EffectObservationHandle, LiveEffectRack};
-
-#[cfg(doc)]
-use engine::realtime::ObservationReader;
 
 /// The most selections one read takes.
 pub const MAXIMUM_OBSERVATION_SELECTIONS: usize = 256;
@@ -160,35 +163,125 @@ pub struct ObservationIndexEntry {
     pub effect: &'static EffectDescriptor,
 }
 
-/// A second entry named a key an earlier one named.
+/// Why an index was not built.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DuplicateObservationKey;
+pub enum ObservationIndexError {
+    /// A second entry named a key an earlier one named.
+    DuplicateKey,
+    /// An entry names a handle position outside the handle list, or a count does not fit a `u32`.
+    Handle,
+    /// The view table could not be allocated.
+    Allocation,
+}
 
 /// One plan's effect instances, sorted by `(strip, section, effect)`, so a selection resolves by a
-/// binary search and a read allocates nothing.
+/// binary search and a read allocates nothing, and the read-only endpoint of every tap.
 #[derive(Debug, Default)]
 pub struct ObservationIndex {
     entries: Box<[ObservationIndexEntry]>,
+    /// One view per reader of every handle, in handle order, then reader order.
+    taps: Box<[ObservationView]>,
+    /// Where each handle's views start in `taps`, one per handle and one past the last: handle
+    /// `h`'s views are `taps[starts[h]..starts[h + 1]]`. Empty for an index of no handle.
+    starts: Box<[u32]>,
 }
 
 impl ObservationIndex {
-    /// Sort `entries` by key and keep them. Allocates only when `entries` has spare capacity (the
-    /// conversion to a boxed slice shrinks it). Control thread.
+    /// Sort `entries` by key and keep them, with a read-only view of every reader of `handles`,
+    /// the list the entries' positions name. Allocates the view and start tables, and the entry
+    /// table only when `entries` has spare capacity (the conversion to a boxed slice shrinks it).
+    /// No slot is allocated: a view shares its reader's. Control thread.
     ///
     /// # Errors
     ///
-    /// Two entries with the same key.
-    pub fn new(mut entries: Vec<ObservationIndexEntry>) -> Result<Self, DuplicateObservationKey> {
+    /// Two entries with the same key, a position outside `handles`, or an allocation failure.
+    pub fn new(
+        mut entries: Vec<ObservationIndexEntry>,
+        handles: &[EffectObservationHandle],
+    ) -> Result<Self, ObservationIndexError> {
         entries.sort_unstable_by(|left, right| key_of(left).cmp(&key_of(right)));
         if entries
             .windows(2)
             .any(|pair| key_of(&pair[0]) == key_of(&pair[1]))
         {
-            return Err(DuplicateObservationKey);
+            return Err(ObservationIndexError::DuplicateKey);
+        }
+        if entries
+            .iter()
+            .filter_map(|entry| entry.handle)
+            .any(|handle| handle as usize >= handles.len())
+        {
+            return Err(ObservationIndexError::Handle);
+        }
+        let tap_count: usize = handles.iter().map(|handle| handle.readers.len()).sum();
+        let mut taps = Vec::new();
+        taps.try_reserve_exact(tap_count)
+            .map_err(|_| ObservationIndexError::Allocation)?;
+        let mut starts = Vec::new();
+        if !handles.is_empty() {
+            starts
+                .try_reserve_exact(handles.len() + 1)
+                .map_err(|_| ObservationIndexError::Allocation)?;
+        }
+        for handle in handles {
+            starts.push(u32::try_from(taps.len()).map_err(|_| ObservationIndexError::Handle)?);
+            taps.extend(handle.readers.iter().map(ObservationReader::view));
+        }
+        if !handles.is_empty() {
+            starts.push(u32::try_from(taps.len()).map_err(|_| ObservationIndexError::Handle)?);
         }
         Ok(Self {
             entries: entries.into_boxed_slice(),
+            taps: taps.into_boxed_slice(),
+            starts: starts.into_boxed_slice(),
         })
+    }
+
+    /// The views of the handle at `position`, or `None` past the list.
+    fn handle_taps(&self, position: u32) -> Option<&[ObservationView]> {
+        let range = self.handle_range(position)?;
+        self.taps.get(range)
+    }
+
+    fn handle_range(&self, position: u32) -> Option<core::ops::Range<usize>> {
+        let position = position as usize;
+        let start = *self.starts.get(position)? as usize;
+        let end = *self.starts.get(position.checked_add(1)?)? as usize;
+        Some(start..end)
+    }
+
+    /// Exchange the views of each carried observation pair between `successor`'s and
+    /// `predecessor`'s tables, from the swap record's `carries` (handle positions, as
+    /// [`crate::pair_carried_observations`] reads them): the control side's half of the pairing
+    /// the render side made in the swap block, so the successor's views read the slots that render
+    /// on (#1332 S6b). Each carried pair is one effect, so the two handles have equal tap counts;
+    /// the exchange stops at the shorter. A record out of range of either table is skipped.
+    /// Allocation-free; drops nothing.
+    pub fn pair_carried(successor: &mut Self, predecessor: &mut Self, carries: &[ObserverCarry]) {
+        for carry in carries {
+            if carry.kind != engine::realtime::ObserverKind::Observation {
+                continue;
+            }
+            let (Ok(into), Ok(from)) = (
+                u32::try_from(carry.successor),
+                u32::try_from(carry.predecessor),
+            ) else {
+                continue;
+            };
+            let (Some(into), Some(from)) =
+                (successor.handle_range(into), predecessor.handle_range(from))
+            else {
+                continue;
+            };
+            let (Some(into), Some(from)) =
+                (successor.taps.get_mut(into), predecessor.taps.get_mut(from))
+            else {
+                continue;
+            };
+            for (into, from) in into.iter_mut().zip(from) {
+                core::mem::swap(into, from);
+            }
+        }
     }
 
     /// The entry for one effect instance, or `None` when the plan has none at that address.
@@ -206,13 +299,22 @@ impl ObservationIndex {
             .map(|position| &self.entries[position])
     }
 
-    /// The heap the index holds: its entry table and the IDs it copies. `None` on overflow.
+    /// The heap the index holds: its entry table, the IDs it copies, and its view and start
+    /// tables (one pointer per tap, one `u32` per handle and one more; the views' slots are their
+    /// readers', counted with them). `None` on overflow.
     #[must_use]
     pub fn retained_bytes(&self) -> Option<u64> {
         let table = u64::try_from(self.entries.len())
             .ok()?
             .checked_mul(u64::try_from(size_of::<ObservationIndexEntry>()).ok()?)?;
-        self.entries.iter().try_fold(table, |total, entry| {
+        let views = u64::try_from(self.taps.len())
+            .ok()?
+            .checked_mul(u64::try_from(size_of::<ObservationView>()).ok()?)?;
+        let starts = u64::try_from(self.starts.len())
+            .ok()?
+            .checked_mul(u64::try_from(size_of::<u32>()).ok()?)?;
+        let fixed = table.checked_add(views)?.checked_add(starts)?;
+        self.entries.iter().try_fold(fixed, |total, entry| {
             total.checked_add(u64::try_from(entry.strip_id.len() + entry.effect_id.len()).ok()?)
         })
     }
@@ -224,8 +326,8 @@ fn key_of(entry: &ObservationIndexEntry) -> (&str, LiveEffectRack, &str) {
 
 /// Read one batch into `rows`, one row per selection in order (#1586 D3).
 ///
-/// `handles` is the plan's handle list the index was built from, as it is now: after a carried
-/// swap it holds the carried readers. `issued` returns the tag of the last record the control plane
+/// The read goes through the index's own views ([`ObservationIndex::pair_carried`] keeps them on
+/// the slots that render). `issued` returns the tag of the last record the control plane
 /// issued for a tap and whether that record arms it (`(0, false)` for none). The whole batch is
 /// checked before any row is written (D4). Allocates nothing and never acknowledges.
 ///
@@ -234,7 +336,6 @@ fn key_of(entry: &ObservationIndexEntry) -> (&str, LiveEffectRack, &str) {
 /// The first refusal, in selection order; `rows` is untouched.
 pub fn read_into(
     index: &ObservationIndex,
-    handles: &[EffectObservationHandle],
     selections: &[ObservationSelection<'_>],
     issued: impl FnMut(&ObservationKey<'_>) -> (u64, bool),
     rows: &mut [ObservationRow],
@@ -253,7 +354,6 @@ pub fn read_into(
     }
     read_with(
         index,
-        handles,
         selections,
         |selection| Ok(*selection),
         issued,
@@ -271,7 +371,6 @@ pub fn read_into(
 /// The first refusal, in record order: `select`'s, or a [`ObservationReadError`] converted.
 pub fn read_with<'s, S, E: From<ObservationReadError>>(
     index: &ObservationIndex,
-    handles: &[EffectObservationHandle],
     selections: &[S],
     mut select: impl FnMut(&S) -> Result<ObservationSelection<'s>, E>,
     mut issued: impl FnMut(&ObservationKey<'_>) -> (u64, bool),
@@ -285,7 +384,7 @@ pub fn read_with<'s, S, E: From<ObservationReadError>>(
     let mut resolved = [Resolved::UNUSED; MAXIMUM_OBSERVATION_SELECTIONS];
     for (position, record) in selections.iter().enumerate() {
         let selection = select(record)?;
-        let found = resolve(index, handles, &selection).map_err(|refusal| {
+        let found = resolve(index, &selection).map_err(|refusal| {
             E::from(ObservationReadError {
                 selection: position,
                 refusal,
@@ -304,7 +403,7 @@ pub fn read_with<'s, S, E: From<ObservationReadError>>(
         resolved[position] = found;
     }
     for (position, found) in resolved[..selections.len()].iter().enumerate() {
-        let row = read_row(index, handles, found, &mut issued);
+        let row = read_row(index, found, &mut issued);
         write(position, &index.entries[found.entry as usize], row);
     }
     Ok(())
@@ -337,7 +436,6 @@ impl Resolved {
 
 fn resolve(
     index: &ObservationIndex,
-    handles: &[EffectObservationHandle],
     selection: &ObservationSelection<'_>,
 ) -> Result<Resolved, ObservationRefusal> {
     let wanted = (selection.strip_id, selection.section, selection.effect_id);
@@ -347,17 +445,11 @@ fn resolve(
         .map_err(|_| ObservationRefusal::UnknownAddress)?;
     let found = &index.entries[entry];
     let position = found.handle.ok_or(ObservationRefusal::Unbound)?;
-    // A handle at another address means the list is not the one the index was built from.
-    let handle = handles
-        .get(position as usize)
-        .filter(|handle| {
-            handle.track_id == found.strip_id
-                && handle.address.rack == found.section
-                && handle.effect_id == found.effect_id
-        })
+    let views = index
+        .handle_taps(position)
         .ok_or(ObservationRefusal::Unbound)?;
-    let (tap, declared) = handle
-        .descriptor
+    let (tap, declared) = found
+        .effect
         .observations
         .iter()
         .enumerate()
@@ -366,7 +458,7 @@ fn resolve(
     if declared.cost != ObservationCost::Resident {
         return Err(ObservationRefusal::UnsupportedTap);
     }
-    if tap >= handle.readers.len() {
+    if tap >= views.len() {
         return Err(ObservationRefusal::Unbound);
     }
     Ok(Resolved {
@@ -380,13 +472,11 @@ fn resolve(
 /// One row: the module's status rule over one locked read of the slot.
 fn read_row(
     index: &ObservationIndex,
-    handles: &[EffectObservationHandle],
     found: &Resolved,
     issued: &mut impl FnMut(&ObservationKey<'_>) -> (u64, bool),
 ) -> ObservationRow {
     let entry = &index.entries[found.entry as usize];
-    let handle = &handles[found.handle as usize];
-    let tap = &handle.descriptor.observations[found.tap as usize];
+    let tap = &entry.effect.observations[found.tap as usize];
     let (issued_tag, issued_arms) = issued(&ObservationKey {
         strip_id: &entry.strip_id,
         section: entry.section,
@@ -394,8 +484,10 @@ fn read_row(
         tap_id: tap.id.0,
     });
     let disarmed = issued_tag != 0 && !issued_arms;
-    let state = handle.readers[found.tap as usize]
-        .read_state()
+    let state = index
+        .handle_taps(found.handle)
+        .and_then(|views| views.get(found.tap as usize))
+        .and_then(ObservationView::read_state)
         .filter(|state| state.arm_tag >= issued_tag);
     let window = state
         .filter(|state| state.armed && !disarmed)
