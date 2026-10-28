@@ -956,6 +956,8 @@ async function runGrowthWhileRenderingRun(createHost, documentA, largeDocument) 
     lastResult: reply.lastResult,
     meterFramesSkipped: reply.meterFramesSkipped,
     blockingRebuilds: reply.blockingRebuilds,
+    sampleRateHz: reply.sampleRateHz,
+    quantumFrames: reply.quantumFrames,
   });
   await resumeThroughClick(context, GROWTH_RESUME);
   let before;

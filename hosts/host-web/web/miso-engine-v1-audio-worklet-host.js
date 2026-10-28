@@ -742,6 +742,9 @@ class MisoAudioWorkletHost {
       return;
     }
     const pending = this.#pending.get(message?.requestId) ?? null;
+    // Issue #1332 S9: once the host has failed, a late reply that finds no request (a fence the
+    // worklet answers after its own `miso.error.v1`, say) is ignored: the typed sticky error stands.
+    if (pending === null && this.#stickyError !== null) return;
     // Issue #1332 S8: the control Worker answers a dispose whose release timed out with the typed
     // teardown; the dispose rejects with it (and the page tears down).
     if (message?.tag === "miso.teardown.v1" && this.#worker !== undefined) {
@@ -1366,12 +1369,14 @@ class MisoAudioWorkletHost {
   }
 
   async #disposeWorkerMode() {
+    let clean = false;
     try {
       // A Worker that failed after its boot was terminated: nobody is left to answer.
       if (this.#workerGone) throw this.#stickyError;
       await this.#awaitDispose();
+      clean = true;
     } finally {
-      this.#teardown();
+      this.#teardown(clean);
     }
   }
 
@@ -1406,16 +1411,24 @@ class MisoAudioWorkletHost {
     }
   }
 
-  /// Runs once, after the dispose reply (or, in worker mode, its failure).
-  #teardown() {
+  /// Runs once, after the dispose reply (or, in worker mode, its failure). `clean` is a worker-mode
+  /// dispose the Worker answered OK.
+  #teardown(clean = false) {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#stopServiceTick();
     // No request promise outlives the host: whatever is still unsettled (a reply the dispose
-    // overtook) rejects with the typed disposed error.
+    // overtook) rejects with the typed disposed error. Issue #1332 S9: after a clean dispose, a
+    // control reply held for its fence was answered by the Worker (its transaction committed), so it
+    // resolves with that reply instead; the map is in request order, and the Worker answers control
+    // calls in order, so held replies settle in request order and before any later one is refused.
     const unsettled = [...this.#pending.values()];
     this.#pending.clear();
-    for (const pending of unsettled) pending.reject(webError(3));
+    for (const pending of unsettled) {
+      if (pending.response === "fence") continue;
+      if (clean && pending.response === "control" && pending.held !== undefined) pending.resolve(pending.held);
+      else pending.reject(webError(3));
+    }
     const follow = this.#statusFollow;
     this.#statusFollow = null;
     this.#statusRead = null;

@@ -2118,6 +2118,7 @@ async function testMainRealm() {
               });
             }
           } else if (message.tag === "miso.control.v1") {
+            if (workerBehaviour === "controlSilent") return;
             reply({
               tag: "miso.control.v1", requestId: message.requestId, result: 0,
               response: new Uint8Array([1]), revision: 3n,
@@ -2217,14 +2218,24 @@ async function testMainRealm() {
           assert.equal((await held).revision, 3n);
           assert.deepEqual(delivered, [["frame", 41], ["reply", 3n]],
             "the frame posted before the fence is delivered before the reply");
-          // A dispose while a reply is held settles it with the typed disposed outcome.
+          // A clean dispose while replies are held: the Worker answered them (their transactions
+          // committed), so they resolve with those replies, in request order; a control call the
+          // Worker never answered is refused with the typed disposed outcome.
           holdFences = true;
-          const overtaken = host.control(new Uint8Array([9]));
-          assert.equal(await settledState(overtaken), "pending");
+          const order = [];
+          const first = host.control(new Uint8Array([9])).then((value) => { order.push(9); return value; });
+          const second = host.control(new Uint8Array([10])).then((value) => { order.push(10); return value; });
+          assert.equal(await settledState(first), "pending");
+          workerBehaviour = "controlSilent";
+          const unanswered = host.control(new Uint8Array([11]));
+          workerBehaviour = "ready";
           await host.dispose();
-          await errorResult(overtaken, 3);
+          assert.equal((await first).revision, 3n, "a held reply resolves after a clean dispose");
+          assert.equal((await second).revision, 3n);
+          assert.deepEqual(order, [9, 10], "held replies settle in request order");
+          await errorResult(unanswered, 3);
           holdFences = false;
-          for (const respond of heldFences.splice(0)) respond();
+          heldFences.splice(0);
         }
         assert.equal(worker.posts.at(-1).tag, "miso.dispose.v1", "dispose goes to the Worker");
         assert.equal(worker.terminated, true, "the Worker ends after its dispose reply");
@@ -2352,7 +2363,16 @@ async function testMainRealm() {
             context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
             workletModuleUrl: "https://example.test/w.js",
           });
+          // Issue #1332 S9: a fence still outstanding when the worklet fails; its late answer is
+          // ignored and the typed error stands, for the held reply and every later request.
+          holdFences = true;
+          const held = failing.control(new Uint8Array([1]));
+          assert.equal(await settledState(held), "pending");
           FakeNode.latest.port.onmessage({ data: { tag: "miso.error.v1", requestId: 0, result: 9 } });
+          holdFences = false;
+          for (const respond of heldFences.splice(0)) respond();
+          await errorResult(held, 9);
+          await new Promise((resolve) => setImmediate(resolve));
           await errorResult(failing.control(new Uint8Array([1])), 9);
           await failing.dispose();
         }

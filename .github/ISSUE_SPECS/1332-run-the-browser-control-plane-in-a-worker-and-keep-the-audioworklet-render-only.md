@@ -1004,8 +1004,9 @@ Slice S8 of the #1332 build plan, branch `codex/issue-1332-failure` from S7 (`28
   a render-only session, and dispose freeing on a bound instance, both abort the test.
 ## S9 evidence (2026-10-28): the isolated (worker-mode) qualification leg
 
-Slice S9 of the #1332 build plan, branch `codex/issue-1332-isolated-leg` from S7 (`28bb9f849`). No
-host, Worker, Rust or SDK source change; the S8-owned files are untouched.
+Slice S9 of the #1332 build plan, branch `codex/issue-1332-isolated-leg` from S7 (`28bb9f849`), with
+main `59c0e3320` (S8) merged. No Rust, SDK or control Worker change. The host and the worklet change
+only for the control-reply fence (the S9 fold below), made after S8 merged.
 
 - **Two legs.** `npm run qualify -- --leg single|worker|all` (default `all`). `single` is the page
   without cross-origin isolation (unchanged, and it also runs the BLAKE3 Worker and suspended PCM
@@ -1039,7 +1040,12 @@ host, Worker, Rust or SDK source change; the S8-owned files are untouched.
     Measured: Chromium worker 24 frames in 129 ms, single 0 in 131 ms; WebKit worker 107 frames in
     611 ms, single 5 (already in flight) in 834 ms.
   - `meter-frames-skipped`: the offline and realtime growth rows' `meterFramesSkipped` is reported,
-    0 on the single leg and at most 4 on the worker leg (measured 0 on every run).
+    0 on the single leg and at most `swaps x ceil(L / meterBlocks)` on the worker leg. A frame is
+    skipped only between render adopting a plan and the worklet cutting its set from the Worker's
+    view message, which the Worker posts as the publishing commit returns. L, that message's
+    delivery latency (one cross-thread post and one handler turn), is budgeted at 8 quanta (about
+    21 ms at 48 kHz) for a loaded CI runner; each row swaps once and decimates by 2, so the bound is
+    4. Measured 0 on every run.
   - `observation-unsubscribe` (#1535) keeps its one rule on both legs: no frame carrying the tap
     reaches the page after the unsubscribe acknowledgement (see the fence below). Its red
     mutations are `unsubscribeFailureProofs`' table rows, which hold the rule for both legs.
@@ -1079,16 +1085,23 @@ host, Worker, Rust or SDK source change; the S8-owned files are untouched.
   {requestId}` on the worklet's port, under the host's one strictly increasing request ID. The
   worklet answers `{tag, requestId, result: 0}` from its message handler (`receiveWorkerMode`),
   never from `process()`, allocating only the reply. Every meter frame posted before the answer
-  reaches the page first, and every block after it began after the Worker's submit returned, which
-  the edit has reached (D15-2). On the answer the host releases the held reply. A failure or a
-  teardown rejects held replies with the host's typed outcome (the sticky error, or result 3 after
-  a dispose), so nothing hangs and the S8 contract stands. Status reads are not fenced (they carry
+  reaches the page first, and every block after it began after the Worker's submit returned. A live
+  value (an Observe arm or disarm among them) has reached render by then (D15-2); an edit that needs
+  a replacement plan takes effect at the block that adopts it, as in single mode, and the watermark
+  reports that block. On the answer the host releases the held reply. A failure rejects held
+  replies with the host's typed sticky error; a late fence answer after it is ignored, so that error
+  stands. A clean dispose resolves held replies (the Worker answered them, so their transactions
+  committed) in request order and refuses with result 3 only control calls the Worker never
+  answered; a failed dispose refuses all with 3. Nothing hangs and the S8 contract stands. Status reads are not fenced (they carry
   no control result); every other request is unchanged. Single mode is unchanged (one port).
 - **Cost.** Up to about one quantum (one worklet message turn) per worker-mode control reply.
 - **Test.** `scripts/test-web-audioworklet.mjs`, worker-mode host: with the fence answer held the
   reply is pending, one fence is sent with a newer request ID, a meter frame already on the
-  worklet's port is delivered before the reply, and a dispose while a reply is held rejects it
-  with 3. Red with the hold removed ("the Worker's reply waits for the fence").
+  worklet's port is delivered before the reply; a clean dispose resolves two held replies in request
+  order and refuses an unanswered call with 3 (red without the clean resolve: rejected 3); a fence
+  outstanding when the worklet posts `miso.error.v1` leaves that error (9) on the held reply and on
+  later requests (red without the guard: 255). Red with the hold removed ("the Worker's reply waits
+  for the fence").
 - **Gates after the fold**, green: both browsers on both legs (`--check-matrix
   --self-test-mutations`; Chromium 151.0.7922.34 single 15.0 s, worker 15.4 s; WebKit 26.5
   single 31.4 s, worker 25.1 s), `test-web-audioworklet.sh`, `check-web-audioworklet.sh` (CI form),

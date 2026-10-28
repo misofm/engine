@@ -159,10 +159,20 @@ const MUTATIONS = Object.freeze([
 // instead of waiting on a locator.
 const PAGE_DEADLINE_MS = 300_000;
 
-// Issue #1332 S9: the raw hosts the page boots (one render-allocation row each), and the bound on
-// the meter frames a worker-mode run may skip (R-S7-meters).
+// Issue #1332 S9: the raw hosts the page boots (one render-allocation row each).
 const RAW_INSTANCES = 16;
-const METER_FRAMES_SKIPPED_BOUND = 4;
+// Issue #1332 S9 (R-S7-meters 3): the bound on the meter frames a worker-mode growth row may skip.
+// A frame is skipped only between render adopting a plan and the worklet's handler cutting that
+// plan's set from the Worker's `miso.meter-view.v1`. The Worker posts the view as soon as the
+// commit that published the plan returns, so the window is at most the view's delivery latency:
+// one cross-thread post and one handler turn, budgeted here at 8 quanta
+// (about 21 ms at 48 kHz, for a loaded CI runner). Each growth row's host swaps plans once (the
+// 1 MiB replacement), and a frame covers `meterBlocks` quanta, so the bound is
+// 1 swap x ceil(8 / meterBlocks) frames: 4 at the rows' 2-block decimation. Measured: 0 on every run.
+const METER_VIEW_LATENCY_QUANTA = 8;
+const GROWTH_ROW_SWAPS = 1;
+const meterFramesSkippedBound = (meterBlocks) =>
+  GROWTH_ROW_SWAPS * Math.ceil(METER_VIEW_LATENCY_QUANTA / meterBlocks);
 
 // Issue #1476 D4: every SDK engine `sdk-response-entry.ts` creates, in the order its count is
 // read (with repeats). A new SDK instance adds its label here.
@@ -549,7 +559,9 @@ function validate(browserName, result, leg) {
   // the quanta the reply's wall time spans, and at least four. On the single leg the parse runs in
   // the worklet's own handler and `process()` cannot run until it returns (a few frames already in
   // flight still land: 0 on Chromium, 5 on WebKit in an 834 ms reply), so no bound is held there.
-  const spannedQuanta = Number.isFinite(growth?.replyMs) ? (growth.replyMs * 48_000) / (128 * 1_000) : Infinity;
+  const spannedQuanta = Number.isFinite(growth?.replyMs) && Number.isSafeInteger(growth?.after?.sampleRateHz)
+    && Number.isSafeInteger(growth?.after?.quantumFrames) && growth.after.quantumFrames > 0
+    ? (growth.replyMs * growth.after.sampleRateHz) / (growth.after.quantumFrames * 1_000) : Infinity;
   gate(browserName, "growth-while-rendering-concurrent", !worker
     || (Number.isSafeInteger(growth?.meterBlocks) && growth.meterBlocks >= 1
       && growth?.framesDuringReplace * growth.meterBlocks >= Math.max(4, spannedQuanta / 4)),
@@ -557,11 +569,14 @@ function validate(browserName, result, leg) {
   // R-S7-meters (3): a frame whose meter set the worklet has not cut is skipped and counted. In
   // single mode the handler that publishes a plan cuts its set first, so none is skipped; in worker
   // mode the Worker's view message may reach the worklet a few quanta after render adopts the plan,
-  // so a bounded number may be. Reported below; held here.
+  // so a bounded number may be (`meterFramesSkippedBound`; both rows boot with the growth row's
+  // decimation). Reported below; held here.
   const skipped = [large?.after?.meterFramesSkipped, growth?.after?.meterFramesSkipped];
+  const skipBound = worker && Number.isSafeInteger(growth?.meterBlocks) && growth.meterBlocks >= 1
+    ? meterFramesSkippedBound(growth.meterBlocks) : 0;
   gate(browserName, "meter-frames-skipped", skipped.every((count) => Number.isSafeInteger(count)
-    && count >= 0 && count <= (worker ? METER_FRAMES_SKIPPED_BOUND : 0)),
-  `meter frames skipped past the ${leg} leg's bound (${worker ? METER_FRAMES_SKIPPED_BOUND : 0}): ${JSON.stringify(skipped)}`);
+    && count >= 0 && count <= skipBound),
+  `meter frames skipped past the ${leg} leg's bound (${skipBound}): ${JSON.stringify(skipped)}`);
 
   // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
@@ -1309,7 +1324,7 @@ function mutate(result, mutation, leg) {
   if (mutation === "growth-while-rendering-stopped") growth.after.renderedQuanta = growth.committed.renderedQuanta;
   if (mutation === "growth-while-rendering-concurrent") growth.framesDuringReplace = 0;
   if (mutation === "meter-frames-skipped") {
-    growth.after.meterFramesSkipped = leg === "worker" ? METER_FRAMES_SKIPPED_BOUND + 1 : 1;
+    growth.after.meterFramesSkipped = leg === "worker" ? meterFramesSkippedBound(growth.meterBlocks) + 1 : 1;
   }
   if (mutation === "attestation") copy.attestation.outcome = "miso.unsupported.v1";
   if (mutation === "boot") copy.boot.ready = false;
