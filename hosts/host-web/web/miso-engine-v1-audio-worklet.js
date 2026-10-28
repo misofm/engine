@@ -550,6 +550,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0);
       return;
     }
+    // Issue #1332 S9: the host's fence. Answered here, in the message handler between two quanta
+    // and never in `process()`, so every meter frame posted before it reaches the page first; the
+    // reply is the only allocation. It is answered after a release or a failure too: render posts
+    // no frame then, so the answer orders nothing wrongly, and the host settles its held replies.
+    if (message?.tag === "miso.fence.v1" && exactFields(message, ["tag", "requestId"])
+        && Number.isSafeInteger(message.requestId) && message.requestId > 0) {
+      this.port.postMessage({ tag: "miso.fence.v1", requestId: message.requestId, result: RESULT_OK });
+      return;
+    }
     if (!WORKER_MODE_TAGS.has(message?.tag)) {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0);
       return;

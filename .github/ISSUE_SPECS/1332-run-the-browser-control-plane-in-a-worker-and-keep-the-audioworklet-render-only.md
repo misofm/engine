@@ -1002,3 +1002,107 @@ Slice S8 of the #1332 build plan, branch `codex/issue-1332-failure` from S7 (`28
   twice; Worker release without deadline, without the boot token, dropping the orphan, posting no
   render check. Native: dispose always refusing
   a render-only session, and dispose freeing on a bound instance, both abort the test.
+## S9 evidence (2026-10-28): the isolated (worker-mode) qualification leg
+
+Slice S9 of the #1332 build plan, branch `codex/issue-1332-isolated-leg` from S7 (`28bb9f849`), with
+main `59c0e3320` (S8) merged. No Rust, SDK or control Worker change. The host and the worklet change
+only for the control-reply fence (the S9 fold below), made after S8 merged.
+
+- **Two legs.** `npm run qualify -- --leg single|worker|all` (default `all`). `single` is the page
+  without cross-origin isolation (unchanged, and it also runs the BLAKE3 Worker and suspended PCM
+  feed rows); `worker` runs the same `qualifyBrowser` on the isolated origin, where the host picks
+  `worker` mode by default. Gate messages and reports are prefixed `<browser> <leg>`.
+- **Feed rows (choice).** The SDK forces `instanceMode: "single"` whenever `pcmFeed` is set (until
+  S11), so the PCM feed row stays one explicit `single` row on the isolated origin, run in the
+  single leg's job. The worker leg's raw rows feed through `submitSource`, which the host sends to
+  the Worker; none of the SDK rows sets `pcmFeed`, so they run in worker mode.
+- **Worker-leg assertions** (one gate each; the single leg keeps its own form):
+  - `instance-mode`: the page's `crossOriginIsolated` is the leg's, and all 16 raw hosts and every
+    SDK engine report the leg's `instanceMode`.
+  - `structural-edit-blocking`, `structural-edit-control-allocations`, `structural-replace-large`,
+    `sdk-spectrum-control-allocations`: `blockingRebuilds` 0 and `singleModeControlAllocations` 0
+    before and after (the single leg still requires 1 and a growth).
+  - Unchanged on both legs: every structural-edit row's digest (`structural-edit-output`,
+    `structural-apply-*`, `empty-boot-*`: the meter stream follows the strip count),
+    `render-allocations` 0 over all 16 instances including the structural rows, the offline
+    1 MiB growth row (`structural-replace-grown`: digest `383be91c…` equals the Node reference, the
+    192-strip meter frames after the growth), the #1530 realtime observation wait
+    (`sdk-observation-wait`), and `staging-reads`' `OBSERVATION_READ` on the observation document's
+    compressor tap, which the Worker now serves (S6b).
+  - New row `growth-while-rendering` (both legs): the 1 MiB `SESSION_REPLACE` sent while a real
+    `AudioContext` renders (one more trusted click; the click plan is 2, or 5 with the SDK). The
+    memory grew, the revision was applied, 64 quanta rendered past the commit with `lastResult` 0,
+    and the successor's 192 strips reached the page in a meter frame after the reply. No digest (a
+    real context is not deterministic; the offline row holds the bits). This is the S3 note's
+    two-thread case: the Worker grows the memory while `process()` renders over its old views.
+  - `growth-while-rendering-concurrent` (worker leg): meter frames that reached the page while the
+    reply was pending cover at least a quarter of the quanta its wall time spans (and at least 4).
+    Measured: Chromium worker 24 frames in 129 ms, single 0 in 131 ms; WebKit worker 107 frames in
+    611 ms, single 5 (already in flight) in 834 ms.
+  - `meter-frames-skipped`: the offline and realtime growth rows' `meterFramesSkipped` is reported,
+    0 on the single leg and at most `swaps x ceil(L / meterBlocks)` on the worker leg. A frame is
+    skipped only between render adopting a plan and the worklet cutting its set from the Worker's
+    view message, which the Worker posts as the publishing commit returns. L, that message's
+    delivery latency (one cross-thread post and one handler turn), is budgeted at 8 quanta (about
+    21 ms at 48 kHz) for a loaded CI runner; each row swaps once and decimates by 2, so the bound is
+    4. Measured 0 on every run.
+  - `observation-unsubscribe` (#1535) keeps its one rule on both legs: no frame carrying the tap
+    reaches the page after the unsubscribe acknowledgement (see the fence below). Its red
+    mutations are `unsubscribeFailureProofs`' table rows, which hold the rule for both legs.
+- **Gate 4 note.** The brief's qualification-only grow message is not built: the Worker file's
+  policy forbids `memory.grow`. The 1 MiB replacement grows the memory in the Worker instead
+  (about 3.9 MiB to 22.7 MiB).
+- **Mutations** (`--self-test-mutations`, leg-filtered by `onLeg`): `instance-mode`,
+  `sdk-instance-mode`, `structural-edit-blocking-counted` and
+  `structural-edit-control-allocations-counted` (worker), `sdk-spectrum-control-allocations-counted`
+  (worker), `growth-while-rendering-meter`, `growth-while-rendering-stopped`,
+  `growth-while-rendering-concurrent` (worker), `meter-frames-skipped`. The single-only `-uncounted` mutations and the existing
+  `sdk-spectrum-control-allocations` run on the single leg only.
+- **Matrix.** `results.json` is not re-recorded (docs/RELEASE.md). Rows gain an optional `leg`; the
+  generator renders a `Leg` column (`unsplit` for a row with none) and the prose names both legs.
+  `--check-matrix` holds each leg to the row for its browser and leg, or to the legless row of the
+  last release for its floor and outcome. `--record-matrix` needs `--browser all --leg all` and
+  records four rows.
+- **CI.** The `browser` job is a `browser x leg` matrix (`[chromium, webkit] x [single, worker]`,
+  O4), each job 10 minutes and named `<browser> <leg> — browser qualification gates`. The job id is
+  unchanged, so the verdict's expectation table and the routing checks are unchanged.
+
+### S9 fold: the control-reply fence (root decision, 2026-10-28)
+
+- **Found by the leg.** On the first worker-leg run the #1535 unsubscribe row was red: one meter
+  frame carrying the tap's reduction (17.6 dB, Chromium) reached the page after the unsubscribe
+  acknowledgement. In `worker` mode the acknowledgement comes from the Worker and the frames from
+  the worklet, so a frame rendered before the disarm can still be on the worklet's port when the
+  reply lands. Root ruled that the gate is not relaxed: the user-visible #1535 contract (no frame
+  carrying the tap after the acknowledgement) holds on both legs, and the cause is fixed in code.
+- **Why a revision stamp cannot order it.** A transaction of monitor edits only (solo writes and
+  subscriptions) keeps the revision (`crates/protocol/src/model.rs:1467`, and 1202, 1586): the
+  arm and the disarm are stamped under the last published revision (`stamp_monitor`), so frames
+  before and after a disarm carry the same revision.
+- **The fence** (`hosts/host-web/web/miso-engine-v1-audio-worklet-host.js`,
+  `miso-engine-v1-audio-worklet.js`; no control-worker.js, Rust or SDK change). In `worker` mode
+  the host holds each `miso.control.v1` reply from the Worker and posts `miso.fence.v1
+  {requestId}` on the worklet's port, under the host's one strictly increasing request ID. The
+  worklet answers `{tag, requestId, result: 0}` from its message handler (`receiveWorkerMode`),
+  never from `process()`, allocating only the reply. Every meter frame posted before the answer
+  reaches the page first, and every block after it began after the Worker's submit returned. A live
+  value (an Observe arm or disarm among them) has reached render by then (D15-2); an edit that needs
+  a replacement plan takes effect at the block that adopts it, as in single mode, and the watermark
+  reports that block. On the answer the host releases the held reply. A failure rejects held
+  replies with the host's typed sticky error; a late fence answer after it is ignored, so that error
+  stands. A clean dispose resolves held replies (the Worker answered them, so their transactions
+  committed) in request order and refuses with result 3 only control calls the Worker never
+  answered; a failed dispose refuses all with 3. Nothing hangs and the S8 contract stands. Status reads are not fenced (they carry
+  no control result); every other request is unchanged. Single mode is unchanged (one port).
+- **Cost.** Up to about one quantum (one worklet message turn) per worker-mode control reply.
+- **Test.** `scripts/test-web-audioworklet.mjs`, worker-mode host: with the fence answer held the
+  reply is pending, one fence is sent with a newer request ID, a meter frame already on the
+  worklet's port is delivered before the reply; a clean dispose resolves two held replies in request
+  order and refuses an unanswered call with 3 (red without the clean resolve: rejected 3); a fence
+  outstanding when the worklet posts `miso.error.v1` leaves that error (9) on the held reply and on
+  later requests (red without the guard: 255). Red with the hold removed ("the Worker's reply waits
+  for the fence").
+- **Gates after the fold**, green: both browsers on both legs (`--check-matrix
+  --self-test-mutations`; Chromium 151.0.7922.34 single 15.0 s, worker 15.4 s; WebKit 26.5
+  single 31.4 s, worker 25.1 s), `test-web-audioworklet.sh`, `check-web-audioworklet.sh` (CI form),
+  `check-browser-expected-resources.py --artifacts`.

@@ -793,6 +793,7 @@ async function runStructuralReplaceQualification(createHost, documentA, document
     blockingRebuilds: status.blockingRebuilds,
     singleModeControlAllocations: status.singleModeControlAllocations,
     memoryBytes: status.memoryBytes,
+    meterFramesSkipped: status.meterFramesSkipped,
     appliedRevision: status.appliedRevision.toString(),
     appliedSample: status.appliedSample.toString(),
     appliedOutcome: status.appliedOutcome.toString(),
@@ -900,6 +901,104 @@ async function runStructuralReplaceQualification(createHost, documentA, document
         .filter((frame) => BigInt(frame.endSample) > BigInt(largeGrownStart)).length,
       meterFinite: largeMeterFrames.every((frame) => frame.finite),
     },
+  };
+}
+
+/// Issue #1332 S9: the quanta the growth row's real context renders before the 1 MiB replacement is
+/// sent, and the quanta it must render after the commit.
+const GROWTH_RENDERED_BEFORE = 8n;
+const GROWTH_RENDERED_AFTER = 64n;
+/// The label of the growth row's one trusted-click resume (`resumeClickPlan` names it).
+const GROWTH_RESUME = "the worklet to render across a growth";
+
+/// Issue #1332 S9: the 1 MiB `SESSION_REPLACE` sent while a real `AudioContext` renders. On the
+/// isolated leg the Worker parses the document and grows the shared memory on its own thread while
+/// the worklet's `process()` keeps rendering over the views it cut before the growth (S3: a growth
+/// is no fault); the worklet re-cuts them only when the Worker's `miso.meter-view.v1` reaches its
+/// message handler (R-S7-meters). On the single leg the same edit grows the memory in the worklet's
+/// handler, between two quanta. The row records the quanta rendered while the reply was pending,
+/// the memory before and after, the status once the context has rendered
+/// [`GROWTH_RENDERED_AFTER`] quanta past the commit with the revision applied, and the meter frames
+/// that arrived after the reply: the successor's 192 strips must reach the page over the re-cut
+/// views. A render is not deterministic on a real context, so no digest is taken here: the offline
+/// capture of the same replacement holds the bits (`structural-replace-grown`).
+async function runGrowthWhileRenderingRun(createHost, documentA, largeDocument) {
+  const { replaceSessionThroughSdk } = await import("/sdk/sdk-response-client.js");
+  const context = new AudioContext({ sampleRate: SAMPLE_RATE });
+  void context.suspend().catch(() => {});
+  await requireSuspended(context, "the growth context before boot");
+  const host = await bounded("await", "createHost (growth)", context, () => createHost({
+    context,
+    document: documentA,
+    options: bootOptions(STRUCTURAL_REPLACE_CAPTURE_FRAMES, LIVE_CONTROL_METER_BLOCKS),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  }));
+  host.node.connect(context.destination);
+  const frames = [];
+  const lease = await bounded("await", "meters (growth)", context, () => host.meters({
+    enabled: true,
+    onFrame: (frame) => frames.push({
+      trackCount: frame.trackCount,
+      finite: Array.from(frame.peaks).every(Number.isFinite),
+    }),
+  }));
+  const status = (step) => bounded("await", step, context, () => host.status());
+  const describe = async () => ({
+    contextState: context.state,
+    currentTime: context.currentTime,
+    status: await host.status(),
+  });
+  const counters = (reply) => ({
+    renderedQuanta: reply.renderedQuanta.toString(),
+    memoryBytes: reply.memoryBytes,
+    appliedRevision: reply.appliedRevision.toString(),
+    lastResult: reply.lastResult,
+    meterFramesSkipped: reply.meterFramesSkipped,
+    blockingRebuilds: reply.blockingRebuilds,
+    sampleRateHz: reply.sampleRateHz,
+    quantumFrames: reply.quantumFrames,
+  });
+  await resumeThroughClick(context, GROWTH_RESUME);
+  let before;
+  await renderUntil(context, async () => {
+    before = await status("status (before the growth)");
+    return before.renderedQuanta >= GROWTH_RENDERED_BEFORE;
+  }, GROWTH_RESUME, describe, performance.now());
+  const sentAtFrame = frames.length;
+  const sentAt = performance.now();
+  const reply = await bounded("await", "the 1 MiB replacement (growth)", context,
+    () => replaceSessionThroughSdk(host, largeDocument));
+  const replyMs = performance.now() - sentAt;
+  const committedAtFrame = frames.length;
+  const committed = await status("status (committed)");
+  let after;
+  await renderUntil(context, async () => {
+    after = await status("status (after the growth)");
+    return after.renderedQuanta >= committed.renderedQuanta + GROWTH_RENDERED_AFTER
+      && after.appliedRevision.toString() === reply.revision
+      && frames.slice(committedAtFrame).some((frame) => frame.trackCount === 192);
+  }, "the quanta after the growth", describe, performance.now());
+  const allocations = await bounded("await", "renderAllocationCount (growth)", context,
+    () => renderAllocationCount(host));
+  await bounded("await", "dispose (growth)", context, () => host.dispose());
+  await bounded("await", "close (growth)", context, () => context.close());
+  const afterGrowth = frames.slice(committedAtFrame);
+  return {
+    meterLeaseResult: lease.result,
+    replyStatus: reply.status,
+    commandPath: reply.path,
+    committedRevision: reply.revision,
+    before: counters(before),
+    committed: counters(committed),
+    after: counters(after),
+    replyMs,
+    meterBlocks: Number(LIVE_CONTROL_METER_BLOCKS),
+    framesDuringReplace: committedAtFrame - sentAtFrame,
+    framesAfterGrowth: afterGrowth.length,
+    successorFramesAfterGrowth: afterGrowth.filter((frame) => frame.trackCount === 192).length,
+    meterFinite: frames.every((frame) => frame.finite),
+    renderAllocations: allocations,
   };
 }
 
@@ -1012,12 +1111,14 @@ async function runObservationRun(createHost, sessionDocument, armed) {
 /// real `AudioContext`: `run.mjs` clicks exactly these controls under one deadline and fails by name
 /// when the page resumed a context any other way, offered another control, or did not offer one.
 /// The three SDK controls belong to `sdk-response-entry.ts`'s live track-response, collection and
-/// hop workloads, which run first and only when the SDK qualification does; the last is the unsubscribe run's one
+/// hop workloads, which run first and only when the SDK qualification does; then the growth row's
+/// [`resumeThroughClick`] button (#1332 S9); the last is the unsubscribe run's one
 /// [`resumeThroughClick`] button (#1535).
 export function resumeClickPlan(sdkEnabled) {
   if (!WebAssembly.validate(SIMD128_PROBE)) return [];
   return [
     ...(sdkEnabled ? ["#track-response-resume", "#spectrum-collection-resume", "#spectrum-hop-resume"] : []),
+    resumeControlSelector(GROWTH_RESUME),
     resumeControlSelector(UNSUBSCRIBE_RESUME),
   ];
 }
@@ -1237,8 +1338,10 @@ async function renderUntil(context, condition, what, describe, started, atDeadli
 /// 1. suspended, the run feeds the source, subscribes, and reads the host status (`R1`);
 /// 2. one trusted click resumes the context; the run waits until a status read exceeds `R1` and
 ///    armed frames have arrived;
-/// 3. it unsubscribes. The acknowledgement and the meter frames travel one FIFO port, so a frame
-///    received after the acknowledgement resolved was polled after the tap was disarmed;
+/// 3. it unsubscribes. The acknowledgement and the meter frames reach the page in order -- one FIFO
+///    port in `single` mode; in `worker` mode the host delivers the Worker's reply only after a
+///    fence on the worklet's port (#1332 S9) -- so a frame received after the acknowledgement
+///    resolved was polled after the tap was disarmed;
 /// 4. under one deadline from the acknowledgement it waits for [`UNSUBSCRIBE_SIGNAL_FRAMES`] frames
 ///    received after it that peak above [`UNSUBSCRIBE_PEAK_FLOOR`], each frame counted once whatever
 ///    its block count (D4). At the deadline a render that moved 48 blocks is a `shortfall`; one that
@@ -1391,7 +1494,8 @@ async function runObservationUnsubscribeRun(createHost, sessionDocument) {
   const unsubscribed = await request("observe (unsubscribe)", "observe",
     // #2087: a disarm names its arm by the tag the subscribe's reply gave.
     () => observeThroughSdk(host, { ...subscription, armed: false, armTag: BigInt(subscribed.armTag ?? 0) }));
-  // Everything received from here on was polled after the tap was disarmed: the same port, in order.
+  // Everything received from here on was polled after the tap was disarmed: the same port, in order
+  // (in `worker` mode, after the host's fence on the worklet's port, #1332 S9).
   const acknowledgedAt = performance.now();
   const acknowledgedAtFrame = frames.length;
   const boundary = (await status("status (boundary)")).renderedQuanta;
@@ -1651,7 +1755,7 @@ async function runStagingReadRun(createHost, sessionDocument) {
 export async function runQualification() {
   const resumeRecord = countResumes();
   const [
-    { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
+    { createMisoAudioWorkletHost: createShippedHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
     liveControlResponse, observationResponse, emptyResponse, emptyFrameResponse, unsubscribeResponse,
     structuralEditResponse, { worstReplaceDocument },
   ] =
@@ -1674,6 +1778,14 @@ export async function runQualification() {
       || !emptyFrameResponse.ok || !unsubscribeResponse.ok || !structuralEditResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
+  // Issue #1332 S9: every host this page boots, in boot order, with the mode it reports. The page
+  // never chooses the mode: the host picks `worker` on an isolated page and `single` otherwise.
+  const instanceModes = [];
+  const createMisoAudioWorkletHost = async (arguments_) => {
+    const host = await createShippedHost(arguments_);
+    instanceModes.push(host.instanceMode);
+    return host;
+  };
   const expected = await expectedResponse.json();
   const corpusDocument = new TextEncoder().encode(await sessionResponse.text());
   const source = await sourceResponse.json();
@@ -1792,6 +1904,17 @@ export async function runQualification() {
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
   }
+  try {
+    structuralReplace.growth = await runGrowthWhileRenderingRun(
+      createMisoAudioWorkletHost,
+      corpusDocument,
+      worstReplaceDocument(),
+    );
+  } catch (error) {
+    const failure = new Error(`growth-while-rendering qualification failed: ${error?.message ?? String(error)}`);
+    if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
+    throw failure;
+  }
   let observation;
   try {
     observation = await runObservationQualification(
@@ -1836,6 +1959,8 @@ export async function runQualification() {
   return {
     schema: "miso.web.qualification.result.v1",
     secureContext: window.isSecureContext,
+    crossOriginIsolated: globalThis.crossOriginIsolated === true,
+    instanceModes,
     attestation: { probe: true, outcome: "simd128", typedRefusal: null },
     boot: {
       ready: correctness.runs.length === 2
@@ -1867,6 +1992,7 @@ export async function runQualification() {
       { workload: "empty-boot-first-stem", count: emptyBoot.firstStem.renderAllocations },
       { workload: "structural-edit", count: structuralReplace.edit.renderAllocations },
       { workload: "structural-replace-large", count: structuralReplace.large.renderAllocations },
+      { workload: "growth-while-rendering", count: structuralReplace.growth.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
