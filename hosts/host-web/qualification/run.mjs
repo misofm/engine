@@ -31,11 +31,19 @@ const PLAYWRIGHT_VERSION = JSON.parse(
 // Owner ruling 2026-10-25 (#2092): Chrome and Safari are the supported browsers; Firefox is not
 // qualified, and `--browser firefox` is refused as an unknown browser.
 const ENGINES = { chromium, webkit };
+// Issue #1332 S9: each leg's page. The worker leg's origin serves COOP/COEP, so the host picks
+// `worker` mode by default; the single leg's origin does not, so it runs `single`.
+const LEGS = Object.freeze({
+  single: Object.freeze({ isolated: false, instanceMode: "single" }),
+  worker: Object.freeze({ isolated: true, instanceMode: "worker" }),
+});
 // Issue #2040: each red mutation and the one gate that must catch it. `mutationProofs` holds the
 // thrown message to `${browserName}: ${gate}:`, so a gate that stops firing turns red even while
 // another gate still throws on the same record. A mutation whose name names a gate names the gate
 // it reaches.
 const caughtBy = (gate, ...mutations) => mutations.map((mutation) => ({ mutation, gate }));
+// Issue #1332 S9: a mutation of a claim only one leg makes runs on that leg alone.
+const onLeg = (leg, entries) => entries.map((entry) => ({ ...entry, leg }));
 const MUTATIONS = Object.freeze([
   ...caughtBy("attestation", "attestation"),
   ...caughtBy("AudioWorklet-boot", "boot"),
@@ -64,12 +72,23 @@ const MUTATIONS = Object.freeze([
   ...caughtBy("structural-edit-early", "structural-edit-early"),
   ...caughtBy("structural-edit-outcome", "structural-edit-outcome"),
   ...caughtBy("structural-edit-underruns", "structural-edit-underruns"),
-  ...caughtBy("structural-edit-blocking", "structural-edit-blocking-uncounted"),
-  ...caughtBy("structural-edit-control-allocations", "structural-edit-control-allocations-uncounted"),
+  ...onLeg("single", caughtBy("structural-edit-blocking", "structural-edit-blocking-uncounted")),
+  ...onLeg("single", caughtBy("structural-edit-control-allocations", "structural-edit-control-allocations-uncounted")),
+  // Issue #1332 S9: on the worker leg, a replacement counted as a blocking rebuild, and control
+  // allocations counted on the worklet instance.
+  ...onLeg("worker", caughtBy("structural-edit-blocking", "structural-edit-blocking-counted")),
+  ...onLeg("worker", caughtBy("structural-edit-control-allocations", "structural-edit-control-allocations-counted")),
   ...caughtBy("structural-replace-large", "structural-replace-large"),
   // Issue #1332 S3: after the 1 MiB replacement grew the shared memory in a handler, a capture
   // that is not the module's own render under Node.
   ...caughtBy("structural-replace-grown", "structural-replace-grown-output"),
+  // Issue #1332 S9: a host or an SDK engine in the other leg's mode; a context whose successor
+  // meter stream never arrived after the growth, or that stopped rendering after it; a worker-leg
+  // replacement during which the worklet did not render; and meter frames skipped past the bound.
+  ...caughtBy("instance-mode", "instance-mode", "sdk-instance-mode"),
+  ...caughtBy("growth-while-rendering", "growth-while-rendering-meter", "growth-while-rendering-stopped"),
+  ...onLeg("worker", caughtBy("growth-while-rendering-concurrent", "growth-while-rendering-concurrent")),
+  ...caughtBy("meter-frames-skipped", "meter-frames-skipped"),
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
   // transport would produce.
@@ -85,7 +104,8 @@ const MUTATIONS = Object.freeze([
   ...caughtBy("sdk-response", "sdk-response"),
   ...caughtBy("sdk-observation", "sdk-observation"),
   ...caughtBy("sdk-spectrum", "sdk-spectrum"),
-  ...caughtBy("sdk-spectrum-control-allocations", "sdk-spectrum-control-allocations"),
+  ...onLeg("single", caughtBy("sdk-spectrum-control-allocations", "sdk-spectrum-control-allocations")),
+  ...onLeg("worker", caughtBy("sdk-spectrum-control-allocations", "sdk-spectrum-control-allocations-counted")),
   ...caughtBy("sdk-spectrum-hop", "sdk-spectrum-hop-missing"),
   ...caughtBy("sdk-spectrum-continuous", "sdk-spectrum-continuous-hop-wrong"),
   ...caughtBy("sdk-spectrum-recovery", "sdk-spectrum-recovery-loss", "sdk-spectrum-recovery-unavailable",
@@ -138,6 +158,21 @@ const MUTATIONS = Object.freeze([
 // that is stuck (WebKit can wedge a page whose context stalls under full CPU load) fails by name here
 // instead of waiting on a locator.
 const PAGE_DEADLINE_MS = 300_000;
+
+// Issue #1332 S9: the raw hosts the page boots (one render-allocation row each).
+const RAW_INSTANCES = 16;
+// Issue #1332 S9 (R-S7-meters 3): the bound on the meter frames a worker-mode growth row may skip.
+// A frame is skipped only between render adopting a plan and the worklet's handler cutting that
+// plan's set from the Worker's `miso.meter-view.v1`. The Worker posts the view as soon as the
+// commit that published the plan returns, so the window is at most the view's delivery latency:
+// one cross-thread post and one handler turn, budgeted here at 8 quanta
+// (about 21 ms at 48 kHz, for a loaded CI runner). Each growth row's host swaps plans once (the
+// 1 MiB replacement), and a frame covers `meterBlocks` quanta, so the bound is
+// 1 swap x ceil(8 / meterBlocks) frames: 4 at the rows' 2-block decimation. Measured: 0 on every run.
+const METER_VIEW_LATENCY_QUANTA = 8;
+const GROWTH_ROW_SWAPS = 1;
+const meterFramesSkippedBound = (meterBlocks) =>
+  GROWTH_ROW_SWAPS * Math.ceil(METER_VIEW_LATENCY_QUANTA / meterBlocks);
 
 // Issue #1476 D4: every SDK engine `sdk-response-entry.ts` creates, in the order its count is
 // read (with repeats). A new SDK instance adds its label here.
@@ -305,7 +340,7 @@ async function headlessProtocolReference(headlessEntry, artifacts, protocol) {
   }
 }
 
-function validate(browserName, result) {
+function validate(browserName, result, leg) {
   gate(browserName, "result-schema", result?.schema === "miso.web.qualification.result.v1",
     "unexpected browser result");
   // Issue #1533 D3/D4: any page error or unhandled rejection is red, before every result gate and
@@ -328,6 +363,22 @@ function validate(browserName, result) {
     "simd128 probe and outcome disagree");
   gate(browserName, "AudioWorklet-boot", result.boot?.ready === true
     && result.boot?.backend === "simd128", "module did not instantiate and report ready");
+  // Issue #1332 S9: the leg's page ran every instance in the leg's mode. The worker leg's page is
+  // cross-origin isolated and every host and SDK engine it booted reports `worker` (a control
+  // Worker beside the render-only worklet); the single leg's page is not, and every one reports
+  // `single`. A host that silently fell back to the other mode turns this red.
+  const worker = leg === "worker";
+  const mode = LEGS[leg].instanceMode;
+  const sdkModes = result.sdkResponse?.instanceModes;
+  gate(browserName, "instance-mode", result.crossOriginIsolated === LEGS[leg].isolated
+    && Array.isArray(result.instanceModes)
+    && result.instanceModes.length === RAW_INSTANCES
+    && result.instanceModes.every((instanceMode) => instanceMode === mode)
+    && (result.sdkResponse === null || (Array.isArray(sdkModes)
+      && sdkModes.length === result.sdkResponse.renderAllocationInstances
+      && sdkModes.every((instanceMode) => instanceMode === mode))),
+  `the ${leg} leg did not run every instance in ${mode} mode: ${JSON.stringify({
+    crossOriginIsolated: result.crossOriginIsolated, raw: result.instanceModes, sdk: sdkModes ?? null })}`);
   const corpus = result.corpus;
   gate(browserName, "native-corpus-digest", corpus?.nativeDigest === corpus?.shippedArtifactDigest
     && Array.isArray(corpus?.browserDigests)
@@ -445,19 +496,31 @@ function validate(browserName, result) {
     && edit?.reference?.exact?.revision === edit?.committedRevision
     && edit.renderedDigest === edit.reference.exact.digest,
   `the capture is not the module's render of the same replace under Node: ${JSON.stringify({ browser: edit?.renderedDigest, reference: edit?.reference })}`);
-  gate(browserName, "structural-edit-blocking", edit?.before?.blockingRebuilds === 0 && edit?.after?.blockingRebuilds === 1,
-    `the single-mode replacement was not counted as exactly one blocking rebuild: ${edit?.before?.blockingRebuilds} -> ${edit?.after?.blockingRebuilds}`);
-  gate(browserName, "structural-edit-control-allocations", Number.isSafeInteger(edit?.before?.singleModeControlAllocations)
-    && edit?.after?.singleModeControlAllocations > edit.before.singleModeControlAllocations,
-  `the handler's allocations under the replacement were not counted: ${edit?.before?.singleModeControlAllocations} -> ${edit?.after?.singleModeControlAllocations}`);
+  // Issue #1332 S9: in `worker` mode the Worker prepares the replacement off the audio thread, so
+  // no rebuild blocks render and the worklet instance runs no control work: both counters stay 0
+  // (D15-10; #1332 gate 5).
+  gate(browserName, "structural-edit-blocking", edit?.before?.blockingRebuilds === 0
+    && edit?.after?.blockingRebuilds === (worker ? 0 : 1),
+  worker
+    ? `the worker-mode replacement was counted as a blocking rebuild: ${edit?.before?.blockingRebuilds} -> ${edit?.after?.blockingRebuilds}`
+    : `the single-mode replacement was not counted as exactly one blocking rebuild: ${edit?.before?.blockingRebuilds} -> ${edit?.after?.blockingRebuilds}`);
+  gate(browserName, "structural-edit-control-allocations", worker
+    ? edit?.before?.singleModeControlAllocations === 0 && edit?.after?.singleModeControlAllocations === 0
+    : Number.isSafeInteger(edit?.before?.singleModeControlAllocations)
+      && edit?.after?.singleModeControlAllocations > edit.before.singleModeControlAllocations,
+  worker
+    ? `the worklet instance counted control allocations in worker mode: ${edit?.before?.singleModeControlAllocations} -> ${edit?.after?.singleModeControlAllocations}`
+    : `the handler's allocations under the replacement were not counted: ${edit?.before?.singleModeControlAllocations} -> ${edit?.after?.singleModeControlAllocations}`);
   // #1697 gate 3: the 1 MiB boot-ceiling document is committed, counted and adopted; its memory
   // growth is reported (below, against the boot's projection), never pinned.
   const large = result.structuralReplace?.large;
   gate(browserName, "structural-replace-large", large?.documentBytes === 1 << 20
     && large?.replyStatus === "ok" && large?.commandPath === "rebuild"
     && large?.after?.appliedRevision === large?.committedRevision
-    && large?.before?.blockingRebuilds === 0 && large?.after?.blockingRebuilds === 1
-    && large?.after?.singleModeControlAllocations > large?.before?.singleModeControlAllocations
+    && large?.before?.blockingRebuilds === 0 && large?.after?.blockingRebuilds === (worker ? 0 : 1)
+    && (worker
+      ? large?.before?.singleModeControlAllocations === 0 && large?.after?.singleModeControlAllocations === 0
+      : large?.after?.singleModeControlAllocations > large?.before?.singleModeControlAllocations)
     && Number.isSafeInteger(large?.before?.memoryBytes) && Number.isSafeInteger(large?.after?.memoryBytes),
   `the 1 MiB replacement was not committed, counted and adopted: ${JSON.stringify(large)}`);
   // Issue #1332 S3: on a shared memory a growth gives `memory.buffer` a new identity, and a view
@@ -476,6 +539,44 @@ function validate(browserName, result) {
     && large?.meterFramesAfterGrowth >= 1 && large?.meterFinite === true
     && large?.meterTrackCounts?.includes(192),
   `the meter stream failed after the growth: ${JSON.stringify({ lease: large?.meterLeaseResult, after: large?.meterFramesAfterGrowth, counts: large?.meterTrackCounts, finite: large?.meterFinite })}`);
+  // Issue #1332 S9: the same 1 MiB replacement sent while a real context renders. The memory grew
+  // (in the Worker on the worker leg, in the worklet's handler on the single leg), the revision
+  // was applied, the context rendered 64 quanta past the commit with no render fault, and the
+  // successor's 192 strips reached the page in a meter frame after the reply, over the re-cut views.
+  const growth = result.structuralReplace?.growth;
+  gate(browserName, "growth-while-rendering", growth?.meterLeaseResult === 0
+    && growth?.replyStatus === "ok" && growth?.commandPath === "rebuild"
+    && growth?.after?.memoryBytes > growth?.before?.memoryBytes
+    && growth?.after?.appliedRevision === growth?.committedRevision
+    && /^[0-9]+$/.test(growth?.after?.renderedQuanta ?? "") && /^[0-9]+$/.test(growth?.committed?.renderedQuanta ?? "")
+    && BigInt(growth.after.renderedQuanta) >= BigInt(growth.committed.renderedQuanta) + 64n
+    && growth?.after?.lastResult === 0
+    && growth?.successorFramesAfterGrowth >= 1 && growth?.meterFinite === true,
+  `the context did not render on across the growth with the successor's meter stream: ${JSON.stringify(growth ?? null)}`);
+  // Worker leg only: the worklet rendered while the Worker parsed the document and grew the memory.
+  // Meter frames are posted from `process()` (one per `meterBlocks` quanta), so frames that reached the
+  // page between the send and the reply were rendered during the replacement: at least a quarter of
+  // the quanta the reply's wall time spans, and at least four. On the single leg the parse runs in
+  // the worklet's own handler and `process()` cannot run until it returns (a few frames already in
+  // flight still land: 0 on Chromium, 5 on WebKit in an 834 ms reply), so no bound is held there.
+  const spannedQuanta = Number.isFinite(growth?.replyMs) && Number.isSafeInteger(growth?.after?.sampleRateHz)
+    && Number.isSafeInteger(growth?.after?.quantumFrames) && growth.after.quantumFrames > 0
+    ? (growth.replyMs * growth.after.sampleRateHz) / (growth.after.quantumFrames * 1_000) : Infinity;
+  gate(browserName, "growth-while-rendering-concurrent", !worker
+    || (Number.isSafeInteger(growth?.meterBlocks) && growth.meterBlocks >= 1
+      && growth?.framesDuringReplace * growth.meterBlocks >= Math.max(4, spannedQuanta / 4)),
+  `the worklet did not render while the Worker grew the memory: ${JSON.stringify({ framesDuringReplace: growth?.framesDuringReplace, replyMs: growth?.replyMs })}`);
+  // R-S7-meters (3): a frame whose meter set the worklet has not cut is skipped and counted. In
+  // single mode the handler that publishes a plan cuts its set first, so none is skipped; in worker
+  // mode the Worker's view message may reach the worklet a few quanta after render adopts the plan,
+  // so a bounded number may be (`meterFramesSkippedBound`; both rows boot with the growth row's
+  // decimation). Reported below; held here.
+  const skipped = [large?.after?.meterFramesSkipped, growth?.after?.meterFramesSkipped];
+  const skipBound = worker && Number.isSafeInteger(growth?.meterBlocks) && growth.meterBlocks >= 1
+    ? meterFramesSkippedBound(growth.meterBlocks) : 0;
+  gate(browserName, "meter-frames-skipped", skipped.every((count) => Number.isSafeInteger(count)
+    && count >= 0 && count <= skipBound),
+  `meter frames skipped past the ${leg} leg's bound (${skipBound}): ${JSON.stringify(skipped)}`);
 
   // Issue #143 E12: subscribe -> nonzero `trackGrDb`, an unarmed tap publishes none, with `firstSample`
   // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
@@ -520,11 +621,11 @@ function validate(browserName, result) {
   const resumes = result.resumes;
   gate(browserName, "resume-clicks", resumes?.direct === 0
     && Number.isInteger(resumes?.declared)
-    && resumes.declared === (result.sdkResponse === null ? 1 : 4)
+    && resumes.declared === (result.sdkResponse === null ? 2 : 5)
     && resumes.inClick === resumes.declared
     && resumes.planned === resumes.declared
     && resumes.clicksPerformed === resumes.declared,
-  `a real AudioContext was resumed outside a trusted click, the page did not declare its one unsubscribe click (plus the three SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
+  `a real AudioContext was resumed outside a trusted click, the page did not declare its growth and unsubscribe clicks (plus the three SDK clicks when the SDK runs), or the harness did not click exactly the declared controls: ${JSON.stringify(resumes)}`);
 
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
@@ -563,10 +664,10 @@ function validate(browserName, result) {
   // executor does behind its `call_indirect`, which the static gate cannot see.
   const allocations = result.renderAllocations;
   gate(browserName, "render-allocations", Array.isArray(allocations)
-    && allocations.length === 15
+    && allocations.length === RAW_INSTANCES
     && allocations.every((row) => typeof row?.workload === "string" && row.count === 0),
   `a worklet instance allocated on its render thread: ${JSON.stringify(allocations)}`);
-  if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse);
+  if (result.sdkResponse !== null) validateSdkResponse(browserName, result.sdkResponse, leg);
   return "simd128 supported";
 }
 
@@ -777,7 +878,7 @@ function validateSdkProtocol(browserName, protocol) {
   `a lossy event is not the headless engine's event of its block, in order: ${json({ browser: lossy, headless: reference })}`);
 }
 
-function validateSdkResponse(browserName, response) {
+function validateSdkResponse(browserName, response, leg) {
   validateSdkRenderAllocations(browserName, response);
   validateSdkLiveBypass(browserName, response?.liveBypass);
   validateSdkProtocol(browserName, response?.protocol);
@@ -1010,12 +1111,15 @@ function validateSdkResponse(browserName, response) {
     && Array.isArray(row.left) && row.left.length === 1_025
     && Array.isArray(row.right) && row.right.length === 1_025),
   "SDK spectrum result did not preserve the complete bounded L/R window and sample span");
-  // #1596 gate 5: the core analyzes in the worklet's message handler on this page, and the handler's
-  // allocations are counted, never hidden.
+  // #1596 gate 5: on the single leg the core analyzes in the worklet's message handler, and the
+  // handler's allocations are counted, never hidden. #1332 S9: on the worker leg it analyzes in the
+  // Worker, and the worklet instance counts none.
   gate(browserName, "sdk-spectrum-control-allocations", spectrumRows.every((row) => Array.isArray(row.controlAllocations)
     && row.controlAllocations.every((value) => /^[0-9]+$/.test(value))
-    && BigInt(row.controlAllocations[1]) > BigInt(row.controlAllocations[0])),
-  `the spectrum reads' handler allocations were not counted: ${JSON.stringify(spectrumRows.map((row) => row.controlAllocations))}`);
+    && (leg === "worker"
+      ? row.controlAllocations.every((value) => value === "0")
+      : BigInt(row.controlAllocations[1]) > BigInt(row.controlAllocations[0]))),
+  `the spectrum reads' control allocations are not the ${leg} leg's: ${JSON.stringify(spectrumRows.map((row) => row.controlAllocations))}`);
   gate(browserName, "sdk-spectrum", spectrum?.allFinite === true
     && spectrum?.ownedArrays === true && spectrum?.postChainDiffers === true
     && spectrum?.busyRefused === true && spectrum?.closedRefused === true,
@@ -1210,8 +1314,18 @@ function validateSdkResponse(browserName, response) {
   `the hop probe's wait did not outlast a planted slow audio start or was not bounded by its deadline: ${JSON.stringify(hopWait)}`);
 }
 
-function mutate(result, mutation) {
+function mutate(result, mutation, leg) {
   const copy = structuredClone(result);
+  const otherMode = leg === "worker" ? "single" : "worker";
+  if (mutation === "instance-mode") copy.instanceModes[copy.instanceModes.length - 1] = otherMode;
+  if (mutation === "sdk-instance-mode") copy.sdkResponse.instanceModes[0] = otherMode;
+  const growth = copy.structuralReplace?.growth;
+  if (mutation === "growth-while-rendering-meter") growth.successorFramesAfterGrowth = 0;
+  if (mutation === "growth-while-rendering-stopped") growth.after.renderedQuanta = growth.committed.renderedQuanta;
+  if (mutation === "growth-while-rendering-concurrent") growth.framesDuringReplace = 0;
+  if (mutation === "meter-frames-skipped") {
+    growth.after.meterFramesSkipped = leg === "worker" ? meterFramesSkippedBound(growth.meterBlocks) + 1 : 1;
+  }
   if (mutation === "attestation") copy.attestation.outcome = "miso.unsupported.v1";
   if (mutation === "boot") copy.boot.ready = false;
   if (mutation === "native-corpus-digest") copy.corpus.browserDigests[0] = "0".repeat(64);
@@ -1242,6 +1356,8 @@ function mutate(result, mutation) {
   if (mutation === "structural-edit-control-allocations-uncounted") {
     edit.after.singleModeControlAllocations = edit.before.singleModeControlAllocations;
   }
+  if (mutation === "structural-edit-blocking-counted") edit.after.blockingRebuilds = 1;
+  if (mutation === "structural-edit-control-allocations-counted") edit.after.singleModeControlAllocations = 1;
   if (mutation === "structural-replace-large") copy.structuralReplace.large.replyStatus = "limit_exceeded";
   if (mutation === "structural-replace-grown-output") copy.structuralReplace.large.renderedDigest = "0".repeat(64);
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
@@ -1276,6 +1392,9 @@ function mutate(result, mutation) {
   if (mutation === "sdk-spectrum-control-allocations") {
     const counts = copy.sdkResponse.spectrum.targets[0].controlAllocations;
     counts[1] = counts[0];
+  }
+  if (mutation === "sdk-spectrum-control-allocations-counted") {
+    copy.sdkResponse.spectrum.targets[0].controlAllocations[1] = "1";
   }
   if (mutation === "sdk-spectrum-hop-missing") {
     delete copy.sdkResponse.spectrum.configuredHop.nativeStart.hopFrames;
@@ -1471,13 +1590,13 @@ function stallSignatureProofs() {
   }
 }
 
-function mutationProofs(browserName, result) {
-  const mutations = result.sdkResponse === null
-    ? MUTATIONS.filter(({ mutation }) => !mutation.startsWith("sdk-"))
-    : MUTATIONS;
+function mutationProofs(browserName, result, leg) {
+  const mutations = MUTATIONS
+    .filter(({ mutation }) => result.sdkResponse !== null || !mutation.startsWith("sdk-"))
+    .filter((entry) => entry.leg === undefined || entry.leg === leg);
   for (const { mutation, gate: expected } of mutations) {
     assert.throws(
-      () => validate(browserName, mutate(result, mutation)),
+      () => validate(browserName, mutate(result, mutation, leg), leg),
       (error) => error instanceof Error && error.message.startsWith(`${browserName}: ${expected}:`),
       `${browserName}: ${mutation}: red mutation escaped its gate ${expected}`,
     );
@@ -1493,7 +1612,7 @@ function mutationProofs(browserName, result) {
       Object.assign(hopPublications[index].result, { capturedSample, endSample });
     });
     assert.doesNotThrow(
-      () => validate(browserName, hopWidth),
+      () => validate(browserName, hopWidth, leg),
       `${browserName}: sdk-spectrum-hop-width: valid decimal-width-crossing hop pair was refused`,
     );
   }
@@ -1507,7 +1626,7 @@ function mutationProofs(browserName, result) {
     endSample: "1024",
   };
   assert.doesNotThrow(
-    () => validate(browserName, widthCrossing),
+    () => validate(browserName, widthCrossing, leg),
     `${browserName}: sdk-observation-subscription-window-width: valid decimal-width-crossing span was refused`,
   );
 }
@@ -1577,10 +1696,11 @@ async function artifactSetProofs(artifacts) {
   }
 }
 
-function normalizedRow(browserName, browserVersion, outcome) {
+function normalizedRow(browserName, leg, browserVersion, outcome) {
   const passed = outcome === "simd128 supported";
   return {
     browser: browserName,
+    leg,
     versionFloor: browserVersion,
     outcome,
     gates: {
@@ -1636,7 +1756,9 @@ async function largeReplaceReference(artifacts, large) {
   });
 }
 
-async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEnabled, protocolReference, structuralReference) {
+async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, sdkEnabled, protocolReference, structuralReference) {
+  // Issue #1332 S9: gate messages and reports name the leg, so a red line says which page it came from.
+  const label = `${browserName} ${leg}`;
   const launchOptions = { headless: true };
   if (browserName === "chromium") {
     launchOptions.channel = "chromium";
@@ -1719,13 +1841,13 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
         if (outcome.kind === "deadline" || outcome.kind === "click-error") {
           // The page neither finished nor made the control this loop waits for: it is stuck. Name
           // that, with what the page logged, instead of a bare locator timeout.
-          throw new Error(`${browserName}: the page did not finish or offer a declared control to click (${selector}; ${clicksPerformed} of ${plan.length} clicks done) within ${PAGE_DEADLINE_MS} ms: ${outcome.error?.message ?? "total deadline"}; page diagnostics: ${diagnostics.join("; ")}`);
+          throw new Error(`${label}: the page did not finish or offer a declared control to click (${selector}; ${clicksPerformed} of ${plan.length} clicks done) within ${PAGE_DEADLINE_MS} ms: ${outcome.error?.message ?? "total deadline"}; page diagnostics: ${diagnostics.join("; ")}`);
         }
         clicksPerformed += 1;
       }
       const outcome = await Promise.race([completion, expired]);
       if (outcome.kind === "deadline") {
-        throw new Error(`${browserName}: the page did not finish within ${PAGE_DEADLINE_MS} ms (${clicksPerformed} of ${plan.length} declared clicks done); page diagnostics: ${diagnostics.join("; ")}`);
+        throw new Error(`${label}: the page did not finish within ${PAGE_DEADLINE_MS} ms (${clicksPerformed} of ${plan.length} declared clicks done); page diagnostics: ${diagnostics.join("; ")}`);
       }
     } finally {
       clearTimeout(deadlineTimer);
@@ -1756,15 +1878,15 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     if (stallSignature !== undefined) {
       // A bounded render wait timed out. The signature is what classifies the failure (full means a
       // context that said "running" and rendered nothing while the processor still answered).
-      process.stdout.write(`${browserName}: stall-signature: ${JSON.stringify(stallSignature)}\n`);
+      process.stdout.write(`${label}: stall-signature: ${JSON.stringify(stallSignature)}\n`);
     }
-    gate(browserName, "browser-execution", result.qualificationError === undefined,
+    gate(label, "browser-execution", result.qualificationError === undefined,
       `${JSON.stringify(result.qualificationError, (_key, value) => (typeof value === "bigint" ? `${value}n` : value))}${diagnostics.length === 0 ? "" : `; ${diagnostics.join("; ")}`}`);
     if (errorRead.kind === "timeout") {
-      throw new Error(`${browserName}: page-errors: the page did not answer the error read within 10 s; page diagnostics: ${diagnostics.join("; ")}`);
+      throw new Error(`${label}: page-errors: the page did not answer the error read within 10 s; page diagnostics: ${diagnostics.join("; ")}`);
     }
     if (errorRead.kind === "error") {
-      throw new Error(`${browserName}: page-errors: the error read failed: ${errorRead.error?.message ?? String(errorRead.error)}; page diagnostics: ${diagnostics.join("; ")}`);
+      throw new Error(`${label}: page-errors: the error read failed: ${errorRead.error?.message ?? String(errorRead.error)}; page diagnostics: ${diagnostics.join("; ")}`);
     }
     if (result.sdkResponse?.protocol !== undefined) {
       // #1571: the headless half of the protocol row runs here, in Node, on the page's document.
@@ -1776,11 +1898,11 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     if (result.structuralReplace?.large?.frameHex !== undefined) {
       result.structuralReplace.large.reference = await structuralReference(result.structuralReplace.large, "large");
     }
-    const outcome = validate(browserName, result);
-    if (proveMutations) mutationProofs(browserName, result);
+    const outcome = validate(label, result, leg);
+    if (proveMutations) mutationProofs(label, result, leg);
     if (Array.isArray(result.renderAllocations)) {
       // Issue #1333 D3: the per-instance counts the render-allocations gate just held to zero.
-      process.stdout.write(`${browserName}: render-allocations: ${result.renderAllocations
+      process.stdout.write(`${label}: render-allocations: ${result.renderAllocations
         .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
     }
     const replace = result.structuralReplace;
@@ -1789,7 +1911,7 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       // boot's projection `document_bytes * PARSE_TRANSIENT_MULTIPLIER` (20); reported, not pinned.
       const growth = replace.large.after.memoryBytes - replace.large.before.memoryBytes;
       const projection = replace.large.documentBytes * 20;
-      process.stdout.write(`${browserName}: structural-replace-large: ${JSON.stringify({
+      process.stdout.write(`${label}: structural-replace-large: ${JSON.stringify({
         documentBytes: replace.large.documentBytes,
         memoryBytesBefore: replace.large.before.memoryBytes,
         memoryBytesCommitted: replace.large.committed.memoryBytes,
@@ -1801,10 +1923,11 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
         controlAllocations: replace.large.after.singleModeControlAllocations - replace.large.before.singleModeControlAllocations,
         underrunBlocks: replace.large.underrunBlocks,
         meterFramesAfterGrowth: replace.large.meterFramesAfterGrowth,
+        meterFramesSkipped: replace.large.after.meterFramesSkipped,
         digest: replace.large.renderedDigest,
       })}\n`);
       // The commit-to-adoption delay of the exact case, recorded, not gated (D6 non-goal).
-      process.stdout.write(`${browserName}: structural-edit: ${JSON.stringify({
+      process.stdout.write(`${label}: structural-edit: ${JSON.stringify({
         committedRevision: replace.edit.committedRevision,
         commitSample: replace.edit.pending.nextAbsoluteSample,
         appliedSample: replace.edit.after.appliedSample,
@@ -1814,11 +1937,27 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
         digest: replace.edit.renderedDigest,
       })}\n`);
     }
+    if (replace?.growth !== undefined) {
+      // Issue #1332 S9: the replacement sent while a real context rendered, with the meter frames
+      // the worklet rendered while it was pending and the frames it skipped (bounded above).
+      const growth = replace.growth;
+      process.stdout.write(`${label}: growth-while-rendering: ${JSON.stringify({
+        memoryBytesBefore: growth.before.memoryBytes,
+        memoryBytesAfter: growth.after.memoryBytes,
+        replyMs: Math.round(growth.replyMs),
+        framesDuringReplace: growth.framesDuringReplace,
+        quantaDuringReplace: Number(BigInt(growth.committed.renderedQuanta) - BigInt(growth.before.renderedQuanta)),
+        quantaAfterCommit: Number(BigInt(growth.after.renderedQuanta) - BigInt(growth.committed.renderedQuanta)),
+        successorFramesAfterGrowth: growth.successorFramesAfterGrowth,
+        meterFramesSkipped: growth.after.meterFramesSkipped,
+        blockingRebuilds: growth.after.blockingRebuilds,
+      })}\n`);
+    }
     const unsubscribe = result.observation?.unsubscribe;
     if (unsubscribe !== undefined) {
       // Issue #1535: what the observation-unsubscribe gate just held, with the dropouts it reports
       // and never fails (root ruling R1).
-      process.stdout.write(`${browserName}: observation-unsubscribe: ${JSON.stringify({
+      process.stdout.write(`${label}: observation-unsubscribe: ${JSON.stringify({
         framesAfterAcknowledgement: unsubscribe.framesAfterAcknowledgement,
         signalFramesAfterAcknowledgement: unsubscribe.signalFramesAfterAcknowledgement,
         lowPeakFramesAfterAcknowledgement: unsubscribe.lowPeakFramesAfterAcknowledgement,
@@ -1830,7 +1969,7 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
     }
     if (Array.isArray(result.sdkResponse?.renderAllocations)) {
       // Issue #1476 D4: the per-SDK-instance counts the sdk-render-allocations gate just held to zero.
-      process.stdout.write(`${browserName}: sdk-render-allocations: ${result.sdkResponse.renderAllocations
+      process.stdout.write(`${label}: sdk-render-allocations: ${result.sdkResponse.renderAllocations
         .map((row) => `${row.workload}=${row.count}`).join(" ")}\n`);
     }
     const protocol = result.sdkResponse?.protocol;
@@ -1838,10 +1977,10 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
       // #1571b: what the sdk-protocol gates just held, with the lossy events the browser received
       // (any number may be replaced before they are read, and that fails nothing).
       const kinds = (events) => events.map((event) => event.kind).join(",");
-      process.stdout.write(`${browserName}: sdk-protocol: browser events ${kinds(protocol.browser.events)}; headless events ${kinds(protocol.headless.events)}\n`);
+      process.stdout.write(`${label}: sdk-protocol: browser events ${kinds(protocol.browser.events)}; headless events ${kinds(protocol.headless.events)}\n`);
     }
-    process.stdout.write(`${browserName}: all qualification gates passed (${browser.version()})\n`);
-    const row = normalizedRow(browserName, browser.version(), outcome);
+    process.stdout.write(`${label}: all qualification gates passed (${browser.version()})\n`);
+    const row = normalizedRow(browserName, leg, browser.version(), outcome);
     if (sdkEnabled) row.gates.sdkResponse = "pass";
     return row;
   } finally {
@@ -1849,20 +1988,36 @@ async function qualifyBrowser(browserName, engine, origin, proveMutations, sdkEn
   }
 }
 
-function validateCheckedRow(browserName, actual, checked) {
-  const expected = checked.browsers.find((row) => row.browser === browserName);
-  gate(browserName, "deployment-matrix", expected !== undefined,
-    "checked matrix has no browser row");
-  gate(browserName, "deployment-matrix", JSON.stringify(actual) === JSON.stringify(expected),
+/// Issue #1332 S9: a run's row against the recorded one for its browser and leg. A recorded row
+/// with no `leg` was recorded before the module had two modes (the last release's run, a page
+/// without isolation); until a release re-records the matrix with both legs, it is the recorded
+/// floor and outcome for its browser on either leg, and the comparison leaves the run's leg out.
+function checkedRowFor(checked, browserName, leg) {
+  return checked.browsers.find((row) => row.browser === browserName && row.leg === leg)
+    ?? checked.browsers.find((row) => row.browser === browserName && row.leg === undefined);
+}
+
+function comparableRow(actual, expected) {
+  if (expected?.leg !== undefined) return actual;
+  const { leg: _leg, ...legless } = actual;
+  return legless;
+}
+
+function validateCheckedRow(browserName, leg, actual, checked) {
+  const label = `${browserName} ${leg}`;
+  const expected = checkedRowFor(checked, browserName, leg);
+  gate(label, "deployment-matrix", expected !== undefined,
+    "checked matrix has no row for this browser and leg");
+  gate(label, "deployment-matrix", JSON.stringify(comparableRow(actual, expected)) === JSON.stringify(expected),
     "checked browser floor/outcome differs from this CI run");
   const mutated = structuredClone(expected);
   mutated.versionFloor = `${mutated.versionFloor}-red-mutation`;
   assert.throws(
-    () => gate(browserName, "deployment-matrix",
-      JSON.stringify(actual) === JSON.stringify(mutated), "red mutation"),
+    () => gate(label, "deployment-matrix",
+      JSON.stringify(comparableRow(actual, mutated)) === JSON.stringify(mutated), "red mutation"),
     (error) => error instanceof Error
-      && error.message.startsWith(`${browserName}: deployment-matrix:`),
-    `${browserName}: deployment-matrix: red mutation escaped its gate`,
+      && error.message.startsWith(`${label}: deployment-matrix:`),
+    `${label}: deployment-matrix: red mutation escaped its gate`,
   );
 }
 
@@ -1877,9 +2032,17 @@ async function main() {
   );
   const artifacts = option("--artifacts");
   if (artifacts === null) {
-    throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--check-matrix|--record-matrix --candidate-commit 40_HEX] [--self-test-mutations] [--pcm-feed-suspended-only|--blake3-only [--record-blake3 --candidate-commit 40_HEX]]");
+    throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--leg single|worker|all] [--check-matrix|--record-matrix --candidate-commit 40_HEX] [--self-test-mutations] [--pcm-feed-suspended-only|--blake3-only [--record-blake3 --candidate-commit 40_HEX]]");
   }
   const browserOption = option("--browser") ?? "all";
+  // Issue #1332 S9: the two legs. `single` is the page without cross-origin isolation (the module's
+  // `single` mode, every control call in the worklet's message handler); `worker` is the same
+  // qualification on an isolated page (a control Worker beside the render-only worklet).
+  const legOption = option("--leg") ?? "all";
+  const legNames = legOption === "all" ? Object.keys(LEGS) : [legOption];
+  for (const legName of legNames) {
+    if (!(legName in LEGS)) throw new Error(`unknown leg: ${legName}`);
+  }
   const browserNames = browserOption === "all" ? Object.keys(ENGINES) : [browserOption];
   for (const browserName of browserNames) {
     if (!(browserName in ENGINES)) throw new Error(`unknown browser: ${browserName}`);
@@ -1900,8 +2063,14 @@ async function main() {
   if (feedOnly && (recordMatrix || checkMatrix || proveMutations)) {
     throw new Error("--pcm-feed-suspended-only cannot record/check the full matrix or its mutations");
   }
-  if (recordMatrix && browserOption !== "all") {
-    throw new Error("--record-matrix requires --browser all");
+  if (recordMatrix && (browserOption !== "all" || legOption !== "all")) {
+    throw new Error("--record-matrix requires --browser all --leg all");
+  }
+  // The BLAKE3 Worker and the suspended PCM feed rows do not depend on the leg (the feed row runs
+  // on an isolated page in an explicit `single` instance until S11): they run once, in the single
+  // leg.
+  if ((blake3Only || feedOnly) && !legNames.includes("single")) {
+    throw new Error("--blake3-only and --pcm-feed-suspended-only run in the single leg");
   }
   const candidateCommit = option("--candidate-commit");
   if ((recordMatrix || recordBlake3) && (candidateCommit === null || !CANONICAL_COMMIT.test(candidateCommit))) {
@@ -1932,25 +2101,31 @@ async function main() {
   const checked = checkMatrix
     ? JSON.parse(await readFile(RESULTS_PATH, "utf8"))
     : null;
+  const singleLeg = legNames.includes("single");
   const server = await startQualificationServer({ artifacts, sdkBundle });
-  const feedServer = sdkRoot !== null || feedOnly
+  const isolatedServer = (singleLeg && (sdkRoot !== null || feedOnly)) || (legNames.includes("worker") && !blake3Only && !feedOnly)
     ? await startQualificationServer({ artifacts, sdkBundle, isolated: true }) : undefined;
   try {
     const rows = [];
     const blake3Rows = [];
     for (const browserName of browserNames) {
-      if (!feedOnly) blake3Rows.push(await qualifyBlake3(browserName, ENGINES[browserName], server.origin));
+      if (singleLeg && !feedOnly) blake3Rows.push(await qualifyBlake3(browserName, ENGINES[browserName], server.origin));
       if (blake3Only) continue;
-      if (feedServer !== undefined) {
-        await qualifySuspendedPcmFeed(browserName, ENGINES[browserName], feedServer.origin);
+      if (singleLeg && (sdkRoot !== null || feedOnly)) {
+        await qualifySuspendedPcmFeed(browserName, ENGINES[browserName], isolatedServer.origin);
       }
       if (feedOnly) continue;
-      const row = await qualifyBrowser(browserName, ENGINES[browserName], server.origin, proveMutations, sdkRoot !== null,
-        (protocol) => headlessProtocolReference(headlessEntry, artifacts, protocol),
-        (edit, kind) => (kind === "large"
-          ? largeReplaceReference(artifacts, edit) : structuralEditReferences(artifacts, edit)));
-      rows.push(row);
-      if (checked !== null) validateCheckedRow(browserName, row, checked);
+      for (const leg of legNames) {
+        const started = Date.now();
+        const row = await qualifyBrowser(browserName, leg, ENGINES[browserName],
+          LEGS[leg].isolated ? isolatedServer.origin : server.origin, proveMutations, sdkRoot !== null,
+          (protocol) => headlessProtocolReference(headlessEntry, artifacts, protocol),
+          (edit, kind) => (kind === "large"
+            ? largeReplaceReference(artifacts, edit) : structuralEditReferences(artifacts, edit)));
+        process.stdout.write(`${browserName} ${leg}: leg took ${((Date.now() - started) / 1000).toFixed(1)} s\n`);
+        rows.push(row);
+        if (checked !== null) validateCheckedRow(browserName, leg, row, checked);
+      }
     }
     if (checked !== null) {
       gate("matrix", "playwright-version", checked.playwrightVersion === PLAYWRIGHT_VERSION,
@@ -1987,7 +2162,7 @@ async function main() {
     }
   } finally {
     await server.close();
-    await feedServer?.close();
+    await isolatedServer?.close();
     if (sdkBundle !== undefined) await rm(sdkBundle, { recursive: true, force: true });
   }
 }

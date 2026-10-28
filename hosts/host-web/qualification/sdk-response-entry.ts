@@ -89,6 +89,8 @@ type SdkEngineOptions = Parameters<typeof createEngine>[0];
 const sdkRenderAllocations = {
   instances: 0,
   rows: [] as { readonly workload: string; readonly count: number }[],
+  /** Issue #1332 S9: each booted engine's `instanceMode`, in boot order. */
+  instanceModes: [] as string[],
   open: new Map<SdkEngine, { readonly workload: string; failure?: object }>(),
   /** The first error each instance's body threw, kept after the instance leaves `open`. */
   failures: new WeakMap<SdkEngine, object>(),
@@ -101,6 +103,7 @@ const sdkRenderAllocations = {
 async function createSdkEngine(workload: string, options: SdkEngineOptions): Promise<SdkEngine> {
   const browser = await createEngine(options);
   sdkRenderAllocations.instances += 1;
+  sdkRenderAllocations.instanceModes.push(browser.instanceMode);
   sdkRenderAllocations.open.set(browser, { workload });
   try {
     browser.host.node.connect(browser.context.destination);
@@ -3046,6 +3049,7 @@ export async function requestTrackResponseThroughSdk(
 export async function runSdkResponseQualification(): Promise<Record<string, unknown>> {
   sdkRenderAllocations.instances = 0;
   sdkRenderAllocations.rows.length = 0;
+  sdkRenderAllocations.instanceModes.length = 0;
   sdkRenderAllocations.open.clear();
   const bytes = new Uint8Array(await (await fetch("/artifacts/miso-engine-v1-audio-worklet.simd128.wasm")).arrayBuffer());
   const asset = await MisoEngineAsset.load(bytes);
@@ -3111,6 +3115,7 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
       // Issue #1476 D2: read last, after every instance above has closed through closeSdkEngine.
       renderAllocations: sdkRenderAllocations.rows.slice(),
       renderAllocationInstances: sdkRenderAllocations.instances,
+      instanceModes: sdkRenderAllocations.instanceModes.slice(),
     };
   } catch (error) {
     runFailure = sdkFailureObject(error);
