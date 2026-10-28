@@ -4954,6 +4954,52 @@ async function testControlWorker() {
       assert.equal(control[MSB1_CONTROL.ATTACHED], 0);
       assert.equal(port.onmessage, null);
     }
+    // Issue #1387 (root ruling 1): with the engine's ring full of the old generation, a ring seek's
+    // new generation is admitted before the next block. The fake engine ring holds its 40 quanta
+    // until render pops the seek (as the split host's does). Red on the fill-to-capacity drain: the
+    // ring is full at the seek, and every new-generation chunk is refused BACKPRESSURE.
+    {
+      const { send, fromWorklet } = await boot();
+      const tick = intervals.at(-1);
+      const port = { onmessage: null, postMessage: () => {}, close() {} };
+      send({ tag: "miso.feed-port.v1", port });
+      fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
+      let held = 0;
+      const admitted = [];
+      fake.exports.miso_engine_web_v1_source_submit = (_handle, _id, generation) => {
+        if (held >= 40) return 6;
+        held += 1;
+        admitted.push(generation);
+        return 0;
+      };
+      const ring = createMsb1Ring({ sourceId: "drums", channels: 2, frameCapacity: 64, capacity: 64 });
+      const writer = new Msb1RingWriter(ring);
+      writer.engage(1n);
+      const write = (generation, startFrame) => {
+        writer.reserve(64);
+        writer.commit({ generation, startFrame, frames: 64, endOfRegion: false });
+      };
+      port.onmessage({ data: structuredClone({ op: "attach", rings: [ring] }) });
+      for (let block = 0; block < 64; block += 1) write(1n, BigInt(block * 64));
+      tick.callback();
+      // 48 kHz, 64 frames: a 4 ms tick is 3 quanta and a 2048-frame burst 32, so H is capped at
+      // half the ring, 20, and the drain stops at 20 of 40.
+      assert.equal(held, 20, "the drain keeps the headroom free");
+      writer.seek(2n, 9600n);
+      // The MSB1 ring still holds 44 old chunks: the writer has room for 20 new ones.
+      for (let block = 0; block < 7; block += 1) write(2n, 9600n + BigInt(block * 64));
+      tick.callback();
+      assert.deepEqual(admitted.filter((generation) => generation === 2n).length, 7,
+        "the new generation is admitted before the next block renders");
+    }
+    // Issue #1387 (root ruling 2): a default ring request boots worker mode at 65 536 frames; an
+    // explicit one is kept. Red if the Worker passes the engine's 100 ms default through.
+    {
+      await boot({ options: { ...limits, sourceRingFrames: 0 } });
+      assert.equal(new DataView(fake.memory.buffer, 512, 64).getUint32(16, true), 65536);
+      await boot();
+      assert.equal(new DataView(fake.memory.buffer, 512, 64).getUint32(16, true), 256);
+    }
     // D6: a refused boot answers with the engine's result code and releases nothing.
     {
       await boot({ sampleRateHz: 44100 });

@@ -277,8 +277,10 @@ export interface MisoTelemetryFrame {
 }
 
 export interface MisoWebBootOptions {
-  /// Per-source ring override, or `0` for the engine's default ring (the 100 ms stall ring plus the
-  /// largest warm-successor prime plus one quantum, issue #1406).
+  /// Per-source ring override, or `0` for the default ring: in `single` mode the engine's (the
+  /// 100 ms stall ring plus the largest warm-successor prime plus one quantum, issue #1406), in
+  /// `worker` mode 65 536 frames (issue 1387: the control Worker's timer-driven feed drain needs
+  /// the engine ring to ride out a render burst).
   sourceRingFrames: number;
   /// Total boot memory budget, or `0n` for the engine-owned default ceiling.
   /// A budget above the module's shared-memory maximum (the ABI layout's `memory.maximumPages`

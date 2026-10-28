@@ -277,3 +277,44 @@ warm-up 100 quanta, play 375, then suspend, ring seek to generation 2 at 240 000
    A render burst longer than the engine ring (headless WebKit's sink) underruns; real-device
    callbacks are far shorter. Root may want a larger default ring for worker mode, or a browser
    leg on a real device.
+
+## Root rulings on the two findings (2026-10-28) and their fold
+
+1. **Seek gap: drain headroom, no Rust change.** In `worker` mode the drain never lets the
+   engine's source ring hold more than `C - H` of its `C` quanta per source
+   (`miso-engine-v1-control-worker.js:1076`; `feedDepthCap` :997). After a ring seek the pass
+   submits new-generation chunks into the `H` free slots at once; render drops the stale ones by
+   tag when it pops the seek, so the next block plays the new position.
+   - **H.** `H` must last from the pass that admits the seek's PCM until the next pass refills:
+     the quanta render consumes in one Worker tick (a tick is at least the 4 ms timer clamp), plus a
+     render burst, plus the block whose render pops the seek; at most half the ring. At 48 kHz and
+     128 frames: 2 + 16 + 1 = **19 quanta** (of the default 512). The burst term is measured, not
+     guessed: with the tick term alone (`H` = 5) Chromium 151 underran 8 quanta at the resume after
+     a seek; `H` = 8 underran 5 in one of two runs; `H` = 12, 16 and 32 none. A resume renders about
+     13 quanta before the Worker refills, so the burst is bounded at 2048 frames
+     (`RENDER_BURST_FRAMES`, :99).
+   - **Test** (`scripts/test-web-audioworklet.mjs:4957`): a fake engine ring that keeps 40 quanta
+     until render pops the seek; the drain stops at `C - H` and a ring seek's 7 new chunks are
+     admitted before the next block. Red on the fill-to-capacity drain (the ring is full at the
+     seek and every new chunk is refused BACKPRESSURE).
+2. **Worker-mode default ring 65 536 frames.** A boot that asks for the default (`0`) gets 65 536
+   frames rounded up to a whole quantum in `worker` mode (`WORKER_DEFAULT_SOURCE_RING_FRAMES`, :92,
+   written at :343); single mode keeps the engine's default; an explicit `sourceRingFrames`
+   overrides. Documented on `MisoWebBootOptions.sourceRingFrames` (both `.d.ts` mirrors). Test
+   (`:4995`): red if the Worker passes the 100 ms default through.
+   - **Memory.** Measured on the shipped module (headless boot, 64 stereo stems of 480 000 frames):
+     `sourceTotalBytes` is 35 807 156 B (34.1 MiB) at 65 536 frames against 4 124 596 B at the
+     default, so about 32 MiB more, under 7 % of the 512 MiB cap. `web.boot.memory_maximum` refuses
+     only a `maximumMemoryBytes` above the module's maximum pages; the ring default does not touch
+     that word, so the default never hits it.
+
+**Rerun after the fold.** Hermetic suite (`test-web-audioworklet.sh`), `check-web-audioworklet.sh`
+with its capability and timer self-tests, `check-browser-expected-resources.py --artifacts`, the SDK
+job (generated, deletions, types, headless 688 pass, package check), and the full `qualify --sdk-root
+--check-matrix --self-test-mutations` legs on Chromium 151.0.7922.34 and WebKit 26.5: all pass;
+`pcm-feed-suspended` in worker mode on both, drainBlocks 0, underruns 0, render allocations 0.
+
+**Seek smoke after the fold** (default ring, two runs per engine, worker mode): 0 MSB1 underruns and
+0 engine underrun frames in every phase on Chromium and on WebKit, the suspended seek to
+generation 2 included; render allocations 0. (WebKit headless's sink bursts are covered by the
+1.36 s ring.) This supersedes the two findings above.

@@ -85,6 +85,18 @@ const STATUS_RENDERED_QUANTA_WORD = 10;
 // The code a seek refusal writes at the start of the session diagnostic when the source already
 // has the generation (#1644 D2).
 const STALE_GENERATION_CODE = new TextEncoder().encode("source.generation.stale");
+// Issue #1387 (root ruling 2): the engine source ring of `worker` mode when the boot asks for the
+// default (0): 65 536 frames, about 1.37 s at 48 kHz (512 KiB per stereo stem). The drain is a
+// timer on another thread, so the engine ring alone must ride out a render burst; single mode
+// keeps the engine's default (its drain runs inside `process()`). An explicit value overrides.
+const WORKER_DEFAULT_SOURCE_RING_FRAMES = 65536;
+// Issue #1387 (root ruling 1): the shortest period a browser keeps a repeating timer at (the HTML
+// timer clamp), so one Worker tick is at least this long.
+const TIMER_CLAMP_MS = 4;
+// Issue #1387 (root ruling 1): the longest run of quanta a browser renders back to back while the
+// Worker cannot refill, in frames. A resume renders its output buffer ahead: 13 quanta measured on
+// Chromium 151 (headroom 8 underran 5 of them, 12 and more none), so 2048 frames bounds it.
+const RENDER_BURST_FRAMES = 2048;
 
 const BOOT_FIELDS = [
   "tag", "module", "memory", "document", "options", "sampleRateHz", "quantumFrames", "workletPort",
@@ -327,7 +339,10 @@ class ControlWorker {
     view.setUint32(4, ABI_VERSION, true);
     view.setUint32(8, this.sampleRateHz, true);
     view.setUint32(12, this.quantumFrames, true);
-    view.setUint32(16, options.sourceRingFrames, true);
+    // Root ruling 2: a default request gets the worker-mode default, a whole number of quanta.
+    const ringFrames = options.sourceRingFrames !== 0 ? options.sourceRingFrames
+      : Math.ceil(WORKER_DEFAULT_SOURCE_RING_FRAMES / this.quantumFrames) * this.quantumFrames;
+    view.setUint32(16, ringFrames, true);
     view.setUint32(20, 0, true);
     view.setBigUint64(24, options.maximumMemoryBytes, true);
     words.forEach((value, index) => view.setBigUint64(32 + index * 8, value, true));
@@ -375,6 +390,7 @@ class ControlWorker {
     const sourceRingFrames = e.miso_engine_web_v1_resolved_source_ring_frames(this.handle);
     if (!u32(sourceRingFrames) || sourceRingFrames === 0
         || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
+    this.drainDepthCap = this.feedDepthCap(sourceRingFrames / this.quantumFrames);
     if (e.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
       const view = this.view(DataView, e.miso_engine_web_v1_watermark_ptr(this.handle), WATERMARK_BYTES);
       this.watermarkRevision = view.getBigUint64(8, true);
@@ -970,6 +986,22 @@ class ControlWorker {
     };
   }
 
+  /// Issue #1387 (root ruling 1): the chunks the drain lets the engine's ring hold for one source,
+  /// `C - H` of its `C` quanta. A seek's new generation is admitted only into free slots (the
+  /// stale chunks stay in the ring until render pops the seek and drops them by tag), so the drain
+  /// keeps `H` slots free. A ring seek's pass submits up to `H` chunks at the new position at
+  /// once, and they must last until the next pass refills: `H` covers the quanta render consumes
+  /// in one Worker tick (a tick is at least `TIMER_CLAMP_MS`) plus a render burst
+  /// (`RENDER_BURST_FRAMES`) plus the block whose render pops the seek. At 48 kHz and 128 frames:
+  /// 2 + 16 + 1, so `H` = 19 of the default 512. `H` is at most half the ring.
+  feedDepthCap(ringQuanta) {
+    const tickMs = Math.max(TIMER_CLAMP_MS, Math.round((1000 * this.quantumFrames) / this.sampleRateHz));
+    const perTick = Math.ceil((tickMs * this.sampleRateHz) / (1000 * this.quantumFrames));
+    const burst = Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames);
+    this.feedHeadroom = Math.min(perTick + burst + 1, Math.floor(ringQuanta / 2));
+    return ringQuanta - this.feedHeadroom;
+  }
+
   /// The low word of the render half's `renderedQuanta`, or null before the worklet named it.
   renderedQuanta() {
     if (this.renderStatusPointer === 0) return null;
@@ -1040,6 +1072,8 @@ class ControlWorker {
         control[RING.ERRORS] += 1;
         continue;
       }
+      // Root ruling 1: the headroom a seek's new generation is admitted into stays free.
+      if (ring.depth >= this.drainDepthCap) break;
       // Every slot plane is pre-zeroed by the writer: the full quantum is copied, as the prelude
       // copies it.
       const slotPlanes = ring.planes[slot];
