@@ -83,8 +83,9 @@ devtools session that loads the twin instead of the shipped module prints the na
 
 Nothing re-pins the pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`),
 `results.json` or `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md` between releases. They describe
-the last release, 0.8.1 (#2170): the pin is `npm-publish.yml`'s `EXPECTED_WORKLET_SHA256`, and
-`results.json` is that module's two-browser record.
+the last release, 0.9.0 (#2187): the pin is `npm-publish.yml`'s `EXPECTED_WORKLET_SHA256`, and
+`results.json` is that module's two-browser record, one row per browser and leg (`single` and
+`worker`).
 
 The browser legs still check every browser row, the Playwright version and the generated matrix
 against `results.json` on every PR (`--check-matrix`). Re-record the matrix when Playwright or a
@@ -151,12 +152,15 @@ builds once it merges.
    (cd sdk && npm ci)
    cd hosts/host-web/qualification
    npm ci && npx playwright install chromium webkit
-   npm run qualify -- --artifacts "$artifacts" --sdk-root ../../../sdk --browser all \
+   npm run qualify -- --artifacts "$artifacts" --sdk-root ../../../sdk --browser all --leg all \
      --record-matrix --candidate-commit "$(git rev-parse HEAD)" --self-test-mutations
    ```
 
-   This rewrites `results.json` and `BROWSER_DEPLOYMENT_MATRIX.md`. `--candidate-commit` names the
-   commit whose tree you built.
+   This rewrites `results.json` and `BROWSER_DEPLOYMENT_MATRIX.md`. `--record-matrix` requires
+   `--browser all --leg all` and records four rows: each browser on the `single` leg (a page
+   without cross-origin isolation) and on the `worker` leg (an isolated page, where the control
+   Worker runs the control plane; #1332 S9). `--candidate-commit` names the commit whose tree you
+   built.
 
 4. **Set the release identity.**
    - `.github/workflows/npm-publish.yml`: `PACKAGE_VERSION`, the version in the job name and in the

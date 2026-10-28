@@ -15,7 +15,7 @@ units, domains, and observation capabilities.
 ## Install and choose an entry point
 
 ```sh
-npm install @misofm/engine@0.8.1
+npm install @misofm/engine@0.9.0
 ```
 
 The package ships compiled ESM and TypeScript declarations, the `simd128` Wasm engine, its
@@ -285,6 +285,16 @@ export async function startMix(
 }
 ```
 
+The engine runs in one of two modes, which `engine.instanceMode` (and `engine.host.instanceMode`)
+reports. On a cross-origin-isolated page (`Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`) the default is `"worker"`: a dedicated control
+Worker boots, edits and disposes the session and drains the PCM feed, on one shared
+`WebAssembly.Memory` with the AudioWorklet, which only renders. On a page without isolation the
+mode is `"single"`: one instance, whose control work runs in the worklet's message handler. Pass
+`instanceMode: "single"` to `createEngine` to choose single mode on an isolated page; `"worker"`
+on a page without isolation is refused. Worker mode is qualified on desktop Chromium and WebKit;
+iOS Safari is not qualified.
+
 For shared-ring delivery, the browser entry exposes `prepareEngineFeed`, `attachEngineFeed`,
 `Msb1RingWriter`, and `waitForPcmRunway`. These transport already-decoded PCM; they do not fetch or
 decode media. The shared-ring path requires `SharedArrayBuffer` and a cross-origin-isolated page.
@@ -455,9 +465,10 @@ that the edit adds or changes starts from rest; `engine.counters(["stripsRestart
 strip that a swap started at rest. After a committed `replaceSession`, `engine.liveControls()`
 binds to the new document.
 
-On a page without cross-origin isolation, the worklet's message handler prepares a `rebuild` on
-the audio thread. The audio thread is blocked while it prepares, and
-`(await engine.host.status()).blockingRebuilds` counts each blocking rebuild.
+On a page without cross-origin isolation (`"single"` mode), the worklet's message handler
+prepares a `rebuild` on the audio thread. The audio thread is blocked while it prepares, and
+`(await engine.host.status()).blockingRebuilds` counts each blocking rebuild. In `"worker"` mode
+the control Worker prepares it, the audio thread keeps rendering, and `blockingRebuilds` stays 0.
 
 ```ts
 import { transaction } from "@misofm/engine/browser";
@@ -784,9 +795,9 @@ resolution, transport-byte verification, decoding, and seek coordination belong 
 There is no implicit sample-rate conversion. The control protocol carries commands, never PCM.
 
 `BUNDLED_ENGINE_ASSETS` locates the installed release's assets. Its
-`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the seven engine
-artifacts: the engine Wasm, host, processor, host declaration, metadata, ABI layout, and the BLAKE3
-Wasm.
+`miso-engine-v1-sdk-manifest.json` records byte counts and SHA-256 digests for the eight engine
+artifacts: the engine Wasm, host, processor, control Worker, host declaration, metadata, ABI
+layout, and the BLAKE3 Wasm.
 `loadBundledEngineAsset()` verifies the Wasm length and digest before compilation; boot checks
 the exported ABI version. Browser package-relative URLs bind deployment locations but do not
 constitute runtime digest verification. Custom delivery must preserve the matching artifact set;
@@ -794,7 +805,7 @@ constitute runtime digest verification. Custom delivery must preserve the matchi
 
 Metadata and TypeScript ABI declarations are generated from Rust. Release provenance binds the
 published archive to its source/workflow; the
-[0.8.1 release record](https://github.com/misofm/engine/issues/2170) contains the accepted artifact
+[0.9.0 release record](https://github.com/misofm/engine/issues/2187) contains the accepted artifact
 and archive identities. The manifest is an integrity reference, not an independent trust root.
 
 ## Build a session from the command line
@@ -820,6 +831,53 @@ canonical Session V1 JSON. File output preserves existing destinations unless `-
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and
 [Session V1 schema](https://github.com/misofm/engine/blob/main/docs/SESSION_SCHEMA_V1.md).
+
+## Upgrading from 0.8.1
+
+0.9.0 adds worker mode. On a cross-origin-isolated page the engine now runs in worker mode by
+default; a page without cross-origin isolation keeps single mode and behaves as in 0.8.1, apart
+from the bounded dispose and the shared memory below. Nothing is removed.
+
+- Added: worker mode. On a cross-origin-isolated page (COOP `same-origin` and COEP
+  `require-corp`), a dedicated control Worker parses, compiles, prepares, edits and disposes the
+  session on one shared `WebAssembly.Memory`, and the AudioWorklet only renders. A structural
+  edit no longer blocks the audio thread: `blockingRebuilds` and `singleModeControlAllocations`
+  stay 0. The PCM feed's rings drain in the control Worker. Qualified on desktop Chromium and
+  WebKit; iOS Safari is not qualified.
+- Added: the control Worker artifact `miso-engine-v1-control-worker.js`, resolved beside the
+  worklet module. The artifact set is now eight files; serve it with the others, same-origin.
+- Added: `engine.instanceMode` and `host.instanceMode` (`"worker"` or `"single"`), and the option
+  `instanceMode` on `createEngine` and `createMisoAudioWorkletHost`. Absent, the mode is
+  `"worker"` exactly when the page is cross-origin isolated. `"single"` keeps single mode on an
+  isolated page; `"worker"` on a page without isolation is refused. The `createHost` request
+  carries `instanceMode` when the option is given; a custom `createHost` must forward it.
+- Added: the status counter `meterFramesSkipped` (the meter frames the worklet skipped in worker
+  mode because a plan was adopted within one control-Worker round trip of its commit; always 0 in
+  single mode). `staleViewQuanta` is now always 0.
+- Added: `BrowserBootError` operation `worker-failed` (the host's `MisoWorkerFailed` record): the
+  control Worker failed before its boot reply. The page never falls back to single mode.
+- Added: `PcmFeedError` operation `attachRefused`. In worker mode the worklet drains no ring, so
+  `attachEngineFeed` needs the feed's `engine`; a feed attached without it on a worker-mode
+  engine closes with `attachRefused`. Pass `engine` (as the examples above do).
+- Changed: in worker mode the default per-source ring (`sourceRingFrames` 0) is 65 536 frames,
+  about 1.37 s at 48 kHz, so the Worker's timer-driven drain rides out a render burst. Single
+  mode keeps the engine's default; an explicit `sourceRingFrames` overrides both.
+- Changed: a dispose is bounded and always ends in teardown, in both modes. With no dispose
+  reply within 5 s the page disconnects the node (and in worker mode terminates the Worker) and
+  `host.dispose()` rejects with a `MisoTeardown` record (`tag: "miso.teardown.v1"`, reason
+  `context-closed` or `dispose-timeout`; in worker mode `release-timeout` when the worklet did not
+  release its render half within 2 s). `engine.close()` rejects with that record and still
+  closes the context. In worker mode every later `dispose()` returns the first one's promise and
+  a failed dispose is not retried; in single mode a dispose that ended in teardown is not retried
+  either.
+- Changed: in worker mode each control reply (`engine.apply`, live-control writes and the other
+  command replies) waits for one worklet message turn, up to about one quantum, so that no meter
+  frame rendered before the reply reaches the page after it. Status reads do not wait.
+- Changed: the module imports one shared `WebAssembly.Memory` (`env.memory`, at most 512 MiB,
+  sized by the ABI layout's `memory` pages) and re-exports it as `memory`. Code that instantiates
+  the shipped module itself must pass `{ env: { memory } }` with
+  `new WebAssembly.Memory({ initial, maximum, shared: true })`; empty imports fail. A boot budget
+  (`maximumMemoryBytes`) above 512 MiB is refused with `web.boot.memory_maximum`.
 
 ## Upgrading from 0.8.0
 
