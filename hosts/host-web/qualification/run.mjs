@@ -79,6 +79,9 @@ const MUTATIONS = Object.freeze([
   ...onLeg("worker", caughtBy("structural-edit-blocking", "structural-edit-blocking-counted")),
   ...onLeg("worker", caughtBy("structural-edit-control-allocations", "structural-edit-control-allocations-counted")),
   ...caughtBy("structural-replace-large", "structural-replace-large"),
+  // Issue #2191: a 256-track console session's bus add refused at the frame, or one whose document
+  // no longer exceeds the old 1 MiB ceiling.
+  ...caughtBy("console-limits", "console-limits-refused", "console-limits-small-document"),
   // Issue #1332 S3: after the 1 MiB replacement grew the shared memory in a handler, a capture
   // that is not the module's own render under Node.
   ...caughtBy("structural-replace-grown", "structural-replace-grown-output"),
@@ -160,7 +163,7 @@ const MUTATIONS = Object.freeze([
 const PAGE_DEADLINE_MS = 300_000;
 
 // Issue #1332 S9: the raw hosts the page boots (one render-allocation row each).
-const RAW_INSTANCES = 16;
+const RAW_INSTANCES = 17;
 // Issue #1332 S9 (R-S7-meters 3): the bound on the meter frames a worker-mode growth row may skip.
 // A frame is skipped only between render adopting a plan and the worklet's handler cutting that
 // plan's set from the Worker's `miso.meter-view.v1`. The Worker posts the view as soon as the
@@ -523,6 +526,18 @@ function validate(browserName, result, leg) {
       : large?.after?.singleModeControlAllocations > large?.before?.singleModeControlAllocations)
     && Number.isSafeInteger(large?.before?.memoryBytes) && Number.isSafeInteger(large?.after?.memoryBytes),
   `the 1 MiB replacement was not committed, counted and adopted: ${JSON.stringify(large)}`);
+  // Issue #2191: the configured limits. A 256-track console-shaped session, a document over the
+  // 1 MiB the boot admitted before, boots at the default options, and its bus add, one frame over
+  // the 16 KiB the browser had, commits on the rebuild path inside the frame the engine resolved,
+  // and the watermark covers it after the render.
+  const limits = result.consoleLimits;
+  gate(browserName, "console-limits", limits?.documentBytes > 1 << 20
+    && limits?.frameBytes > 16 << 10 && limits?.frameBytes <= limits?.controlFrameBytes
+    && limits?.controlFrameBytes === 256 << 10
+    && limits?.replyStatus === "ok" && limits?.commandPath === "rebuild"
+    && BigInt(limits?.committedRevision ?? "0") > BigInt(limits?.initialRevision ?? "0")
+    && limits?.finalRevision === limits?.committedRevision,
+  `the 256-track console session did not boot, or its bus add did not commit and apply: ${JSON.stringify(limits)}`);
   // Issue #1332 S3: on a shared memory a growth gives `memory.buffer` a new identity, and a view
   // over the older object stays valid for its bytes, so the growth is no fault. The capture renders
   // 64 quanta on after the sixteen. Precondition: the memory grew. The capture is the module's
@@ -1359,6 +1374,8 @@ function mutate(result, mutation, leg) {
   if (mutation === "structural-edit-blocking-counted") edit.after.blockingRebuilds = 1;
   if (mutation === "structural-edit-control-allocations-counted") edit.after.singleModeControlAllocations = 1;
   if (mutation === "structural-replace-large") copy.structuralReplace.large.replyStatus = "limit_exceeded";
+  if (mutation === "console-limits-refused") copy.consoleLimits.replyStatus = "limit_exceeded";
+  if (mutation === "console-limits-small-document") copy.consoleLimits.documentBytes = 1 << 20;
   if (mutation === "structural-replace-grown-output") copy.structuralReplace.large.renderedDigest = "0".repeat(64);
   // Issue #143 E12's named red mutation: `observationArmed = 0`.
   if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
@@ -1926,6 +1943,8 @@ async function qualifyBrowser(browserName, leg, engine, origin, proveMutations, 
         meterFramesSkipped: replace.large.after.meterFramesSkipped,
         digest: replace.large.renderedDigest,
       })}\n`);
+      // Issue #2191: the configured limits' row, as gated.
+      process.stdout.write(`${label}: console-limits: ${JSON.stringify(result.consoleLimits)}\n`);
       // The commit-to-adoption delay of the exact case, recorded, not gated (D6 non-goal).
       process.stdout.write(`${label}: structural-edit: ${JSON.stringify({
         committedRevision: replace.edit.committedRevision,

@@ -728,6 +728,48 @@ async function runEmptyBootQualification(createHost, emptyDocument, frameFixture
   };
 }
 
+/// Issue #2191: the console-shaped session's tracks and the quanta rendered after its bus add.
+const CONSOLE_LIMITS_TRACKS = 256;
+const CONSOLE_LIMITS_BLOCKS = 8;
+
+/// Issue #2191: the configured limits in a real browser. A console-shaped session of 256 tracks
+/// (a document over the 1 MiB the boot admitted before #2191) boots at the default options, and
+/// the console's atomic bus add over all 256 tracks (one frame of about 87 KiB, over the 16 KiB
+/// frame the browser had) commits on the rebuild path, and the applied-revision watermark covers
+/// it once the context renders. The host reports the frame the engine resolved.
+async function runConsoleLimitsQualification(createHost) {
+  const sdk = await import("/sdk/sdk-response-client.js");
+  const document = sdk.consoleLimitsDocument(CONSOLE_LIMITS_TRACKS);
+  const context = new OfflineAudioContext(2, CONSOLE_LIMITS_BLOCKS * QUANTUM_FRAMES, SAMPLE_RATE);
+  const host = await createHost({
+    context,
+    document,
+    options: bootOptions(0),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  });
+  host.node.connect(context.destination);
+  const booted = await host.status();
+  const reply = await sdk.consoleBusAddThroughSdk(
+    host, CONSOLE_LIMITS_TRACKS, booted.appliedRevision.toString(),
+  );
+  await context.startRendering();
+  const rendered = await host.status();
+  const renderAllocations = await renderAllocationCount(host);
+  await host.dispose();
+  return {
+    documentBytes: document.byteLength,
+    frameBytes: reply.frameBytes,
+    controlFrameBytes: host.controlFrameBytes,
+    replyStatus: reply.status,
+    commandPath: reply.path,
+    initialRevision: booted.appliedRevision.toString(),
+    committedRevision: reply.revision,
+    finalRevision: rendered.appliedRevision.toString(),
+    renderAllocations,
+  };
+}
+
 /// Issue #1295 D1: the structural-edit capture, the swap block and 32 quanta after it.
 const STRUCTURAL_EDIT_BLOCKS = 33;
 const STRUCTURAL_EDIT_FRAMES = STRUCTURAL_EDIT_BLOCKS * QUANTUM_FRAMES;
@@ -1825,6 +1867,7 @@ export async function runQualification() {
       structuralApply: null,
       emptyBoot: null,
       structuralReplace: null,
+      consoleLimits: null,
       observation: null,
       stall: null,
       stagingReads: null,
@@ -1914,6 +1957,14 @@ export async function runQualification() {
     if (error?.stallSignature !== undefined) failure.stallSignature = error.stallSignature;
     throw failure;
   }
+  let consoleLimits;
+  try {
+    consoleLimits = await runConsoleLimitsQualification(createMisoAudioWorkletHost);
+  } catch (error) {
+    throw new Error(`console-limits qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error,
+    })}`);
+  }
   let observation;
   try {
     observation = await runObservationQualification(
@@ -1976,6 +2027,7 @@ export async function runQualification() {
     structuralApply: structural,
     emptyBoot,
     structuralReplace,
+    consoleLimits,
     observation,
     stall,
     stagingReads,
@@ -1992,6 +2044,7 @@ export async function runQualification() {
       { workload: "structural-edit", count: structuralReplace.edit.renderAllocations },
       { workload: "structural-replace-large", count: structuralReplace.large.renderAllocations },
       { workload: "growth-while-rendering", count: structuralReplace.growth.renderAllocations },
+      { workload: "console-limits", count: consoleLimits.renderAllocations },
       { workload: "observation-armed", count: observation.armed.renderAllocations },
       { workload: "observation-disarmed", count: observation.disarmed.renderAllocations },
       { workload: "observation-unsubscribe", count: observation.unsubscribe.renderAllocations },
