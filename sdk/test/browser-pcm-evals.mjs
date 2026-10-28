@@ -31,6 +31,7 @@ import { WasmBoundary } from "../src/core/boundary.ts";
 import { constantValue } from "../src/core/abi.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
+import { MSB1_CONSUMER_CASES, STALE_GENERATION_CODE } from "./msb1-consumer-cases.mjs";
 
 const context = { audioWorklet: { addModule: async () => {} } };
 
@@ -478,48 +479,6 @@ test("prepareSeek bounds requests and rejects supersession, refusal, close and t
   assert.equal(timed.state, "closed");
 });
 
-test("control preparation never discards or applies a superseding producer generation", async () => {
-  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
-  const run = runPrelude(source);
-  const ring = run.rings[0], writer = run.writers[0];
-  writer.seek(2n, 12n);
-  const snapshot = { epoch: 1, generation: 2n, frame: 12n };
-  const applied = [];
-  run.engine.exports.miso_engine_web_v1_source_seek = (_handle, _id, generation, frame) => {
-    applied.push([generation, frame]);
-    if (generation === 2n) {
-      writer.seek(3n, 16n);
-      const planes = writer.reserve(4); planes[0].fill(0.75);
-      writer.commit({ generation: 3n, startFrame: 16n, frames: 4, endOfRegion: false });
-    }
-    return 0;
-  };
-  assert.equal(run.engine.prepareSharedSeeks([ring], [snapshot]).kind, "superseded");
-  assert.deepEqual(applied, [[2n, 12n]]);
-  assert.equal(writer.occupancy, 1, "future PCM must survive the rejected old request");
-  assert.equal(run.engine.prepareSharedSeeks([ring], [{ epoch: 2, generation: 3n, frame: 16n }]).kind, "confirmed");
-  assert.deepEqual(applied, [[2n, 12n], [3n, 16n]]);
-  assert.equal(writer.occupancy, 1);
-  assert.equal(run.ringControls[0][MSB1_CONTROL.STALE], 1);
-  assert.equal(run.ringControls[0][MSB1_CONTROL.DRAIN_BLOCKS], 0);
-  run.process();
-  assert.equal(run.submissions[0].generation, 3n);
-  assert.equal(run.submissions[0].pcm[0], 0.75);
-
-  const raced = runPrelude(source);
-  const racedWriter = raced.writers[0]; racedWriter.seek(2n, 12n);
-  const apply = raced.engine.applySharedSeek.bind(raced.engine);
-  let advance = true;
-  raced.engine.applySharedSeek = (ring, ...identity) => {
-    if (advance) { advance = false; racedWriter.seek(3n, 16n); }
-    return apply(ring, ...identity);
-  };
-  assert.equal(raced.engine.prepareSharedSeeks([raced.rings[0]], [snapshot]).kind, "superseded");
-  assert.deepEqual(raced.seeks, [[2n, 12n]], "apply the captured tuple, never mixed live epoch/generation words");
-  assert.equal(raced.engine.prepareSharedSeeks([raced.rings[0]], [{ epoch: 2, generation: 3n, frame: 16n }]).kind, "confirmed");
-  assert.deepEqual(raced.seeks, [[2n, 12n], [3n, 16n]]);
-});
-
 test("actual Wasm: a ring seek is consumed only when the engine refuses it as already at the session seek's generation", async () => {
   // Issue #1644 gate 1 (R4 amended). After a session seek at 2 a moved source refuses its own seek
   // at 2 as stale, and without the rule that ring never drains again. A source the session seek
@@ -563,10 +522,20 @@ test("actual Wasm: a ring seek is consumed only when the engine refuses it as al
       engine.process([], []);
       return controls(ring);
     };
-    return { boundary, seekAndWrite };
+    return { boundary, seekAndWrite, exports, handle };
   };
   const counts = (c) => [c[MSB1_CONTROL.SEEKS_APPLIED], c[MSB1_CONTROL.REFUSED], c[MSB1_CONTROL.SUBMITTED]];
 
+  // Issue #1387 (MINOR 2): the code both consumers' fakes write is the one the built engine writes.
+  const probe = await feedOver({ sessionSeek: true });
+  try {
+    const { exports, handle } = probe;
+    const staged = (kind) => exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", kind));
+    new Uint8Array(exports.memory.buffer, staged("sourceId"), 1).set([0x73]); // "s"
+    assert.equal(exports.miso_engine_web_v1_source_seek(handle, 1, 2n, 0n), 1, "a seek at the session seek's generation is refused");
+    const code = new TextDecoder().decode(new Uint8Array(exports.memory.buffer, staged("diagnostic"), STALE_GENERATION_CODE.length).slice());
+    assert.equal(code, STALE_GENERATION_CODE, "the engine's refusal code is the consumers'");
+  } finally { probe.boundary.dispose(); }
   const moved = await feedOver({ sessionSeek: true });
   try {
     assert.deepEqual(counts(moved.seekAndWrite(256n)), [1, 0, 1], "the moved source's stale refusal is the seek applied, not a refusal");
@@ -677,17 +646,128 @@ function anchoredPrelude(source) {
   return { engine, attach, node, submissions, seeks, seekAts, process: () => engine.process([], []), setSeekAtResult: (value) => { seekAtResult = value; } };
 }
 
-test("the drain refuses a ring written to the old MSB1 header offset", async () => {
-  // #1297b gate 3: a reader that keeps the old offsets reads the ID bytes as the anchor.
+/**
+ * Issue #1387 (MAJOR-2): the shared MSB1 consumer case table (`msb1-consumer-cases.mjs`) over the
+ * prelude: a stand-in engine with the engine handler's shapes, its exports recorded, and the
+ * attach node's port cloning each message as a browser port does. `pass()` is one `process()`.
+ */
+function preludeConsumer(source) {
+  const { sandbox, registrations } = preludeHarness(source);
+  const adapter = {
+    submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null,
+  };
+  const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
+  class Engine {
+    constructor() {
+      this.quantumFrames = 4; this.maximumSourceChannels = 2; this.memoryBuffer = new ArrayBuffer(65_536);
+      this.sourceIdPointer = 0; this.sourceIdCapacity = 128; this.sourcePcm = new sandbox.Float32Array(this.memoryBuffer, 1024, 8);
+      this.diagnosticView = new sandbox.Uint8Array(this.memoryBuffer, 4096, 256);
+      this.handle = 1; this.ready = true; this.disposed = false; this.stickyResult = 0;
+      this.exports = recordFeedCalls({
+        memory: { buffer: this.memoryBuffer },
+        miso_engine_web_v1_source_seek: (_h, _id, generation, frame) => {
+          adapter.seeks.push([generation, frame]);
+          adapter.onSeek?.(generation, frame);
+          this.diagnosticView.fill(0);
+          if (adapter.seekResult !== 0 && adapter.seekStale) this.diagnosticView.set(stale);
+          return adapter.seekResult;
+        },
+        miso_engine_web_v1_source_submit: (_h, idLength, generation, start, channels, frames, end) => {
+          adapter.submissions.push({ id: new TextDecoder().decode(new Uint8Array(this.memoryBuffer, 0, idLength)), generation, start, channels, frames, end, pcm: [...this.sourcePcm] });
+          return adapter.submitResult;
+        },
+      });
+    }
+    receiveSeekAt(message) { this.acknowledge(message.requestId, adapter.seekAtResult); }
+    acknowledge(requestId, result) { this.lastAck = { requestId, result }; }
+    rebindMemoryViews() { this.memoryBuffer = this.exports.memory.buffer; }
+    process() { return true; }
+  }
+  sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
+  const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
+  const apply = engine.applySharedSeek.bind(engine);
+  engine.applySharedSeek = (ring, ...identity) => {
+    if (identity.length !== 0) adapter.onApply?.();
+    return apply(ring, ...identity);
+  };
+  const attach = new (registrations.get("miso-sab-feed-attach"))();
+  const replies = [];
+  attach.port.postMessage = (data) => replies.push(structuredClone(data));
+  const send = (data) => { attach.port.onmessage({ data: structuredClone(data) }); return replies.pop(); };
+  let requestId = 0;
+  return Object.assign(adapter, {
+    attach: async (rings) => { send({ op: "attach", rings }); },
+    pass: async () => { engine.process([], []); },
+    seekAt: async (message) => { engine.receiveSeekAt({ tag: "miso.seek-at.v1", requestId: (requestId += 1), ...message }); },
+    sessionSeek: async (generation) => { engine.lastSessionSeekGeneration = generation; },
+    prepareSeek: async (seeks) => send({ op: "prepare-seek", requestId: (requestId += 1), seeks }),
+    detachSource: async (index) => send({ op: "detach-source", requestId: (requestId += 1), index }),
+  });
+}
+
+for (const { name, run } of MSB1_CONSUMER_CASES) {
+  test(`MSB1 consumer (worklet prelude): ${name}`, async () => {
+    const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+    await run(preludeConsumer(source));
+  });
+}
+
+test("issue 1387: in worker mode the prelude binds no ring, process() submits nothing, and the feed is refused at once", async () => {
+  // Red if the prelude binds rings in worker mode (process() would then call source_submit on a
+  // render-only instance), or if the refusal does not reach the feed, which would wait out its
+  // ready() bound instead.
   const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
   const run = anchoredPrelude(source);
-  const old = createMsb1Ring({ sourceId: "old", channels: 1, frameCapacity: 4, capacity: 2 });
-  // The old layout, self-consistent: headers at 256, PCM right after them.
-  controls(old)[MSB1_CONTROL.HEADER_OFFSET] = 256;
-  controls(old)[MSB1_CONTROL.PCM_OFFSET] = 256 + 2 * MSB1_SLOT_HEADER_BYTES;
-  const current = createMsb1Ring({ sourceId: "current", channels: 1, frameCapacity: 4, capacity: 2 });
-  run.attach.port.onmessage({ data: { op: "attach", rings: [old, current] } });
-  assert.deepEqual([old, current].map((ring) => controls(ring)[MSB1_CONTROL.ATTACHED]), [0, 1]);
+  run.engine.workerMode = true;
+  const replies = [];
+  run.attach.port.postMessage = (data) => replies.push(data);
+  const ring = createMsb1Ring({ sourceId: "worker", channels: 1, frameCapacity: 4, capacity: 2 });
+  const writer = new Msb1RingWriter(ring);
+  writer.engage(1n);
+  writer.reserve(4);
+  writer.commit({ generation: 1n, startFrame: 0n, frames: 4, endOfRegion: false });
+  run.attach.port.onmessage({ data: { op: "attach", rings: [ring] } });
+  run.process();
+  assert.deepEqual(run.submissions, [], "process() submits nothing in worker mode");
+  assert.equal(controls(ring)[MSB1_CONTROL.ATTACHED], 0, "the ring is not bound");
+  assert.deepEqual(replies.map((reply) => reply.op), ["attach-refused"]);
+  // Rings that arrive before the engine processor exists are refused when it is built.
+  const early = preludeHarness(source);
+  const earlyAttach = new (early.registrations.get("miso-sab-feed-attach"))();
+  const earlyReplies = [];
+  earlyAttach.port.postMessage = (data) => earlyReplies.push(data.op);
+  earlyAttach.port.onmessage({ data: { op: "attach", rings: [createMsb1Ring({ sourceId: "early", channels: 1, frameCapacity: 4, capacity: 2 })] } });
+  assert.deepEqual(earlyReplies, []);
+  early.sandbox.registerProcessor("miso-engine-v1-audio-worklet", class { constructor() { this.workerMode = true; } rebindMemoryViews() {} });
+  new (early.registrations.get("miso-engine-v1-audio-worklet"))();
+  assert.deepEqual(earlyReplies, ["attach-refused"], "the pending rings are refused too");
+  const refusing = { port: { onmessage: null, postMessage(data) { if (data.op === "attach") queueMicrotask(() => this.onmessage?.({ data: { op: "attach-refused" } })); } }, disconnect() {} };
+  const feed = attachEngineFeed({ context, quantumFrames: 4, sources: [{ sourceId: "worker", channels: 1 }], createNode: () => refusing });
+  await assert.rejects(feed.ready({ timeoutMs: 60_000 }), (error) => error instanceof PcmFeedError && error.operation === "attachRefused");
+  assert.equal(feed.state, "closed");
+});
+
+test("issue 1387: a feed of a worker-mode engine attaches through the host's feed port, a single-mode one through the attach node", async () => {
+  // Red if the feed ignores the engine's instanceMode in either direction.
+  const feedFor = (instanceMode) => {
+    const posted = { port: [], node: [] };
+    const host = {
+      instanceMode,
+      openFeedPort: () => ({ onmessage: null, postMessage: (data) => posted.port.push(data.op) }),
+      async status() { return { result: 0, nextAbsoluteSample: 0n }; },
+      async seekSourceAt() { return { result: 0 }; },
+      async seekReport() { return { result: 0, report: null }; },
+    };
+    linkFeedEngine(host, () => 1n);
+    const feed = attachEngineFeed({
+      engine: { host }, context, quantumFrames: 4, sources: [{ sourceId: "routed", channels: 1 }],
+      createNode: () => attachNode({ onMessage: (data) => posted.node.push(data.op) }),
+    });
+    feed.close();
+    return posted;
+  };
+  assert.deepEqual(feedFor("worker"), { port: ["attach", "detach"], node: [] });
+  assert.deepEqual(feedFor("single"), { port: [], node: ["attach", "detach"] });
 });
 
 test("an anchored start is applied once by the engine handler, and the drain reads none of its ring before", async () => {
@@ -740,19 +820,6 @@ test("an anchored start is applied once by the engine handler, and the drain rea
   const refused = attachEngineFeed({ context, sources: [{ sourceId: "refused", channels: 1, start: { frameAt: () => 0n, prime() {} } }], quantumFrames: 4, capacityChunks: 2, engine: { host }, createNode: () => run.node });
   await assert.rejects(refused.ready(), (error) => error instanceof MisoEngineError && error.result === 1);
   assert.equal(refused.state, "closed");
-  const direct = createMsb1Ring({ sourceId: "direct", channels: 1, frameCapacity: 4, capacity: 2 });
-  run.attach.port.onmessage({ data: { op: "attach", rings: [direct] } });
-  const writer = new Msb1RingWriter(direct); writer.engage(1n);
-  writer.seek(9n, 0n, 2_048n);
-  writer.reserve(4); writer.commit({ generation: 9n, startFrame: 0n, frames: 4, endOfRegion: false });
-  const seekAt = { tag: "miso.seek-at.v1", sourceId: "direct", generation: 9n, sourceFrame: 0n, anchorSample: 2_048n };
-  run.engine.receiveSeekAt({ ...seekAt, requestId: 100 });
-  run.process();
-  assert.deepEqual([controls(direct)[MSB1_CONTROL.SUBMITTED], controls(direct)[MSB1_CONTROL.SEEKS_APPLIED], controls(direct)[MSB1_CONTROL.REFUSED]], [0, 0, 0], "a refused handler seek leaves the epoch unseen");
-  run.setSeekAtResult(0);
-  run.engine.receiveSeekAt({ ...seekAt, requestId: 101 });
-  run.process();
-  assert.deepEqual([controls(direct)[MSB1_CONTROL.SUBMITTED], controls(direct)[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
 });
 
 /**

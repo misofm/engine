@@ -68,6 +68,16 @@
  *   - maintain the engine ring's depth and count a block that found it empty
  *     as an underrun.
  *
+ * ## `worker` mode (issue #1387)
+ *
+ * On a cross-origin-isolated page the engine runs its control plane in a
+ * Worker and the worklet only renders. There the control Worker
+ * (`miso-engine-v1-control-worker.js`) drains the rings by the same rules, on
+ * its service tick, and the SDK's feed attaches through the engine host's
+ * `openFeedPort()`. This prelude still loads and wraps the processor, but binds
+ * no ring: it answers an attach with `attach-refused`, so `process()` never
+ * calls a source export on the render-only instance.
+ *
  * The engine never sees the shared buffer and never runs an atomic. Every
  * index, generation and counter in this file is JS, and its layout is pinned
  * against `src/lib/mixer/engine/sab-ring.ts` by `sab-ring-layout.test.ts`.
@@ -146,19 +156,27 @@ const STALE_GENERATION_CODE = Uint8Array.from("source.generation.stale", (charac
 /** The one engine processor in this scope, and any rings that arrived before
  *  it existed. Both nodes are constructed by the same main thread in a fixed
  *  order, but the queue costs one field and removes the ordering assumption. */
-const registry = { engine: null, pending: null }
+const registry = { engine: null, pending: null, pendingNode: null }
 
-function deliver(rings) {
+/** Issue #1387: `worker` mode binds no ring; the attach node that brought them is told so. */
+function refuseIfWorkerMode(engine, node) {
+  if (engine?.workerMode === true && node !== null) node.port.postMessage({ op: "attach-refused" })
+}
+
+function deliver(rings, node) {
   if (registry.engine === null) {
     registry.pending = rings
+    registry.pendingNode = node
     return
   }
   registry.engine.attachSharedRings(rings)
+  refuseIfWorkerMode(registry.engine, node)
 }
 
 function withdraw(rings) {
   if (registry.engine === null) {
     registry.pending = null
+    registry.pendingNode = null
     return
   }
   registry.engine.detachSharedRings(rings)
@@ -290,8 +308,11 @@ function wrapEngineProcessor(Base) {
       registry.engine = this
       if (registry.pending !== null) {
         const pending = registry.pending
+        const node = registry.pendingNode
         registry.pending = null
+        registry.pendingNode = null
         this.attachSharedRings(pending)
+        refuseIfWorkerMode(this, node)
       }
     }
 
@@ -306,7 +327,11 @@ function wrapEngineProcessor(Base) {
      * available for the cost of a filter.
      */
     attachSharedRings(rings) {
-      if (!Array.isArray(rings)) return
+      // Issue #1387 (S11): in `worker` mode the control Worker drains the rings and this instance
+      // only renders: it binds none, so `process()` drains nothing and calls no source export.
+      // The attach node tells the feed (`attach-refused`); the SDK's feed attaches through the
+      // engine's host instead.
+      if (!Array.isArray(rings) || this.workerMode === true) return
       this.rebindMemoryViews()
       const bound = []
       const incoming = []
@@ -693,7 +718,7 @@ class MisoSabFeedAttachProcessor extends AudioWorkletProcessor {
       if (data === null || typeof data !== "object") return
       if (data.op === "attach" && Array.isArray(data.rings)) {
         this.delivered = data.rings
-        deliver(data.rings)
+        deliver(data.rings, this)
       } else if (data.op === "detach") {
         withdraw(this.delivered)
         this.delivered = []

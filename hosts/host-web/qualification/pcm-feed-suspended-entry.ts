@@ -43,13 +43,17 @@ export async function runSuspendedPcmFeed() {
       beforeSample: before.nextAbsoluteSample.toString(), afterSample: after.nextAbsoluteSample.toString(),
       elapsedMs, state: feed.state, attached: Atomics.load(control, MSB1_CONTROL.ATTACHED),
       drainBlocks: Atomics.load(control, MSB1_CONTROL.DRAIN_BLOCKS),
+      // Issue #1387 (S11): an isolated page runs worker mode with the feed; its Worker drains it.
+      instanceMode: engine.instanceMode,
+      underruns: Atomics.load(control, MSB1_CONTROL.UNDERRUNS),
       renderAllocations: await engine.host.renderAllocationCount(),
     };
     if (before.result !== 0 || after.result !== 0 || result.beforeState !== "suspended"
       || result.afterState !== "suspended" || result.beforeTime !== result.afterTime
       || result.beforeSample !== "0" || result.afterSample !== "0"
       || result.elapsedMs >= 2_000 || result.state !== "active" || result.attached !== 1
-      || result.drainBlocks !== 0 || result.renderAllocations.result !== 0
+      || result.drainBlocks !== 0 || result.instanceMode !== "worker" || result.underruns !== 0
+      || result.renderAllocations.result !== 0
       || result.renderAllocations.count !== 0) {
       throw new Error(`suspended PCM feed invariant failed: ${JSON.stringify(result)}`);
     }

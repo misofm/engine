@@ -533,6 +533,20 @@ impl SourceSeekReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceSeekReportBusy;
 
+/// The producer's view of its ring's occupancy (issue #1387): what a host-side feed sizes its
+/// submissions by. Read from the producer's endpoints alone -- each queue's cursors, the
+/// partner's with `Acquire` -- so it takes no lock, allocates nothing and is safe on the control
+/// thread while render runs; render may only lower `queued` and raise `room` after the read.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SourceAdmission {
+    /// Blocks published and not yet taken by render: chunks queued ahead of the played one, of
+    /// any generation (a seek's stale chunks stay counted until render pops the seek).
+    pub queued: u64,
+    /// Chunks a submit would accept now: the recycled blocks the producer holds storage for,
+    /// zero while a block whose push failed waits to be published first.
+    pub room: u64,
+}
+
 struct TransferBlock {
     generation: SourceGeneration,
     start_frame: SourceFrame,
@@ -1213,6 +1227,22 @@ impl PcmSourceProducer {
             .map_err(|_| SourceSeekReportBusy)
     }
 
+    /// The ring's occupancy as this producer sees it now (issue #1387); see [`SourceAdmission`].
+    #[must_use]
+    pub fn admission(&self) -> SourceAdmission {
+        let room = if self.deferred_block.is_some() {
+            0
+        } else {
+            self.recycle_consumer
+                .queued_len()
+                .min(self.data_producer.available_capacity())
+        };
+        SourceAdmission {
+            queued: self.data_producer.queued_len() as u64,
+            room: room as u64,
+        }
+    }
+
     /// A handle on the ring's `prime_required` flag (#1320 D4). Control only; never on render.
     #[must_use]
     pub fn prime_flag(&self) -> PcmSourcePrimeFlag {
@@ -1353,6 +1383,12 @@ impl HostChunkProvider {
     /// The ring's seek report; see [`PcmSourceProducer::seek_report`].
     pub fn seek_report(&self) -> Result<SourceSeekReport, SourceSeekReportBusy> {
         self.producer.seek_report()
+    }
+
+    /// The ring's occupancy; see [`PcmSourceProducer::admission`].
+    #[must_use]
+    pub fn admission(&self) -> SourceAdmission {
+        self.producer.admission()
     }
 
     /// The ring's `prime_required` flag; see [`PcmSourceProducer::prime_flag`].

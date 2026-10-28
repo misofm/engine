@@ -142,6 +142,7 @@ EXPORTS = [
     "miso_engine_web_v1_session_seek_at",
     "miso_engine_web_v1_source_channels",
     "miso_engine_web_v1_source_count",
+    "miso_engine_web_v1_source_fill",
     "miso_engine_web_v1_source_frames",
     "miso_engine_web_v1_source_id",
     "miso_engine_web_v1_source_seek",

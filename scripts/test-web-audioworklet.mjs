@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { MSB1_CONTROL, MSB1_CONTROL_BYTES, createMsb1Ring, Msb1RingWriter } from "../sdk/src/browser/pcm-ring.ts";
+import { MSB1_CONSUMER_CASES, STALE_GENERATION_CODE } from "../sdk/test/msb1-consumer-cases.mjs";
 const root = new URL("../", import.meta.url);
 const commandArguments = process.argv.slice(2);
 const bootDataModeFlags = [
@@ -2191,6 +2193,12 @@ async function testMainRealm() {
         await host.meters({ enabled: true, onFrame: (frame) => delivered.push(["frame", frame.sequence]) });
         assert.deepEqual(events.slice(eventsBefore).map((event) => event[1]), ["miso.meters.v1"],
           "the meter lease goes to the worklet");
+        // Issue #1387 (S11): a feed port is one end of a channel; the other goes to the Worker.
+        const feedPort = host.openFeedPort();
+        assert.equal(worker.posts.at(-1).tag, "miso.feed-port.v1", "the feed port's twin goes to the Worker");
+        assert.equal(typeof feedPort.postMessage, "function");
+        assert.notEqual(worker.posts.at(-1).port, feedPort);
+        feedPort.close();
         // Issue #1332 S9: the Worker's control reply is held until the worklet answers a fence on
         // its own port, so a meter frame the worklet posted before the fence (rendered before the
         // edit took effect) reaches the page before the reply, never after it.
@@ -2238,6 +2246,7 @@ async function testMainRealm() {
           heldFences.splice(0);
         }
         assert.equal(worker.posts.at(-1).tag, "miso.dispose.v1", "dispose goes to the Worker");
+        assert.equal(host.openFeedPort(), null, "no feed port once disposed");
         assert.equal(worker.terminated, true, "the Worker ends after its dispose reply");
         assert.equal(node.disconnectCount, 1, "and the node is disconnected");
 
@@ -2461,6 +2470,7 @@ async function testMainRealm() {
           workletModuleUrl: "processor.js", instanceMode: "single",
         });
         assert.equal(single.instanceMode, "single");
+        assert.equal(single.openFeedPort(), null, "single mode opens no Worker feed port");
         assert.equal(workers.length, workersBefore, "an explicit single mode starts no Worker");
         await single.dispose();
         Object.defineProperty(globalThis, "crossOriginIsolated", { value: false, configurable: true });
@@ -2523,7 +2533,7 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
   const calls = {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0, disposeHandles: [],
     sessionSeek: [], sessionSeekResult: 0,
-    sourceResult: 0, bootResult: 0, boot: [],
+    sourceResult: 0, sourceQueued: 0, bootResult: 0, boot: [],
     // Issue #1381a: the service step's handles and result, and the control counter's value.
     service: [], serviceResult: 0, controlAllocations: 5,
     // Issue #1562a D1: the control frames the fake received, the result it answers with, the
@@ -2682,8 +2692,12 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     miso_engine_web_v1_source_submit: (...args) => {
       calls.source.push(args);
       calls.sourceIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
+      if (calls.sourceResult === 0) calls.sourceQueued += 1;
       return calls.sourceResult;
     },
+    // Issue #1387: the producer's occupancy, queued chunks high and room low; tests that model
+    // render lower `sourceQueued` themselves.
+    miso_engine_web_v1_source_fill: () => (BigInt(calls.sourceQueued) << 32n) | 1000n,
     // Issue #1644: both session seek exports and the declaration record into one list, in order.
     miso_engine_web_v1_session_seek: (...args) => {
       calls.sessionSeek.push(["session_seek", ...args]);
@@ -2750,7 +2764,7 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
       return 1;
     },
     miso_engine_web_v1_source_count: () => sourceRows.length,
-    miso_engine_web_v1_resolved_source_ring_frames: () => 40 * quantum,
+    miso_engine_web_v1_resolved_source_ring_frames: () => (calls.ringQuanta ?? 40) * quantum,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
       if (id === undefined) return 0;
@@ -4507,7 +4521,10 @@ async function testProcessor() {
     };
     {
       const fake = createFakeExports(64);
-      const { processor } = constructWorkerMode(fake);
+      const { processor, controlPosts } = constructWorkerMode(fake);
+      // Issue #1387 (S11): the render half's status address, the Worker's feed drain clock.
+      assert.deepEqual(controlPosts, [{ tag: "miso.render-clock.v1", status: 16384 }],
+        "the worklet names its render status to the Worker");
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128", instanceMode: "worker",
       }, "worker mode is ready without a boot");
@@ -4774,18 +4791,24 @@ async function testControlWorker() {
       }
     };
     const workerSource = await readFile(workerUrl, "utf8");
-    const boot = async (overrides = {}) => {
-      fake = createFakeExports(64);
+    const boot = async (overrides = {}, quantum = 64, prepare = () => {}) => {
+      fake = createFakeExports(quantum);
+      prepare(fake);
       posts = [];
       // The file is a classic script with no module syntax (Node would load it once, as CommonJS),
       // so each case evaluates it afresh: one Worker per boot, as in the browser.
-      new Function(workerSource)();
+      // Issue #1387: the case table's race hook reaches the instance (a test-only rename).
+      new Function(workerSource.replace("new ControlWorker(globalThis);",
+        "globalThis.__controlWorker = new ControlWorker(globalThis);"))();
       const workletPosts = [];
       const workletPort = { onmessage: null, postMessage: (message) => workletPosts.push(message) };
       const send = (data) => globalThis.onmessage({ data });
       send({
         tag: "miso.worker-boot.v1", module, memory: fake.memory, document: new Uint8Array([1, 2, 3]),
-        options: limits, sampleRateHz: 48000, quantumFrames: 64, workletPort, ...overrides,
+        // #1387: worker mode refuses an explicit ring below its minimum, so the boot asks for its
+        // default (65 536 frames).
+        options: { ...limits, sourceRingFrames: 0 }, sampleRateHz: 48000, quantumFrames: quantum, workletPort,
+        ...overrides,
       });
       return { workletPosts, send, fromWorklet: (data) => workletPort.onmessage({ data }) };
     };
@@ -4923,6 +4946,312 @@ async function testControlWorker() {
       tick.callback();
       assert.deepEqual(workletPosts.filter((message) => message.tag === "miso.render-check.v1"),
         [{ tag: "miso.render-check.v1" }], "once per 50 ms");
+    }
+    // Issue #1387 (S11): the MSB1 feed drain of `worker` mode runs here, on the service tick and
+    // after every message. Red if the tick does not drain, if the block accounting counts ticks
+    // instead of the quanta render reports (a suspended context would count drain blocks), if a
+    // pass stops before the engine's ring pushes back, or if a backpressured chunk is consumed.
+    {
+      const { send, fromWorklet } = await boot();
+      const tick = intervals.at(-1);
+      const port = { onmessage: null, postMessage: () => {}, close() {} };
+      send({ tag: "miso.feed-port.v1", port });
+      const ring = createMsb1Ring({ sourceId: "drums", channels: 2, frameCapacity: 64, capacity: 4 });
+      const control = new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4);
+      const writer = new Msb1RingWriter(ring);
+      writer.engage(1n);
+      const write = (generation, startFrame, value) => {
+        const planes = writer.reserve(64);
+        planes[0].fill(value);
+        planes[1].fill(-value);
+        writer.commit({ generation, startFrame, frames: 64, endOfRegion: false });
+      };
+      let renderedSoFar = 0n;
+      const rendered = (quanta) => {
+        fake.calls.sourceQueued = Math.max(0, fake.calls.sourceQueued - Number(quanta - renderedSoFar));
+        renderedSoFar = quanta;
+        new DataView(fake.memory.buffer, 16384, 80).setBigUint64(40, quanta, true);
+      };
+      fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
+      // A port clones its message: the ring arrives as a new object over the same memory.
+      port.onmessage({ data: structuredClone({ op: "attach", rings: [ring] }) });
+      assert.equal(control[MSB1_CONTROL.ATTACHED], 1, "the Worker binds the ring");
+      write(1n, 0n, 0.5);
+      write(1n, 64n, 0.25);
+      write(1n, 128n, 0.125);
+      tick.callback();
+      assert.deepEqual(fake.calls.source, [
+        [1, 5, 1n, 0n, 2, 64, 0], [1, 5, 1n, 64n, 2, 64, 0], [1, 5, 1n, 128n, 2, 64, 0],
+      ], "the tick submits every published chunk through source_submit");
+      assert.deepEqual(fake.calls.sourceIdBytes.map((bytes) => new TextDecoder().decode(bytes)),
+        ["drums", "drums", "drums"]);
+      const staged = new Float32Array(fake.memory.buffer, 5000, 128);
+      assert.deepEqual([staged[0], staged[63], staged[64], staged[127]], [0.125, 0.125, -0.125, -0.125],
+        "the planes are staged per channel, a quantum apart");
+      tick.callback();
+      assert.deepEqual(
+        [control[MSB1_CONTROL.DRAIN_BLOCKS], control[MSB1_CONTROL.UNDERRUNS], control[MSB1_CONTROL.DEPTH]],
+        [0, 0, 3], "with no quantum rendered (a suspended context) the accounting counts nothing");
+      rendered(4n);
+      // The engine counted one quantum (64 frames) missing: one block underran.
+      fake.calls.seekReportWords = [5n, 1024n, 48000n, 7n + 64n, 9n];
+      tick.callback();
+      assert.deepEqual(
+        [control[MSB1_CONTROL.DRAIN_BLOCKS], control[MSB1_CONTROL.UNDERRUNS], control[MSB1_CONTROL.DEPTH]],
+        [4, 1, 0], "four rendered quanta count four drain blocks and the engine's one underrun");
+      write(1n, 192n, 1);
+      fake.calls.sourceResult = 6;
+      const read = control[MSB1_CONTROL.READ_INDEX];
+      tick.callback();
+      assert.equal(control[MSB1_CONTROL.READ_INDEX], read, "a backpressured chunk stays in the ring");
+      fake.calls.sourceResult = 0;
+      tick.callback();
+      assert.deepEqual(fake.calls.source.at(-1), [1, 5, 1n, 192n, 2, 64, 0], "and is submitted next");
+      // A seek in `worker` mode: the drain seeks the source before it reads a slot, drops the
+      // chunks of the old generation and resumes at the new one. Red if the drain submits a stale
+      // chunk, or reads a slot before the seek.
+      write(1n, 256n, 1);
+      writer.seek(2n, 4800n);
+      write(2n, 4800n, 0.75);
+      const submitted = fake.calls.source.length;
+      tick.callback();
+      assert.deepEqual(fake.calls.seek.at(-1), [1, 5, 2n, 4800n], "the ring's seek reaches source_seek");
+      assert.deepEqual(fake.calls.source.slice(submitted), [[1, 5, 2n, 4800n, 2, 64, 0]],
+        "only the new generation's chunk is submitted");
+      assert.deepEqual([control[MSB1_CONTROL.STALE], control[MSB1_CONTROL.SEEKS_APPLIED]], [1, 1]);
+      // An anchored seek waits for this Worker's own `source_seek_at`, and is then consumed with no
+      // `source_seek` (#1297b). Red if the Worker does not record the applied tuple: the ring stalls.
+      writer.seek(3n, 0n, 6400n);
+      write(3n, 0n, 0.5);
+      const seeks = fake.calls.seek.length;
+      // As in the prelude, a ring waiting for its seek-at counts no drain block (#1387 MINOR 1).
+      const drained = control[MSB1_CONTROL.DRAIN_BLOCKS];
+      rendered(6n);
+      tick.callback();
+      assert.equal(control[MSB1_CONTROL.DRAIN_BLOCKS], drained, "the quanta of the wait pass uncounted");
+      assert.equal(fake.calls.source.length, submitted + 1, "nothing of the anchored ring is read before the handler");
+      send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 3n, sourceFrame: 0n, anchorSample: 6400n });
+      assert.deepEqual(fake.calls.source.at(-1), [1, 5, 3n, 0n, 2, 64, 0], "the drain after the message resumes it");
+      assert.equal(fake.calls.seek.length, seeks, "with no second seek of the source");
+      // `detach` (the feed's close) withdraws the ring and closes the port from this end.
+      port.onmessage({ data: { op: "detach" } });
+      assert.equal(control[MSB1_CONTROL.ATTACHED], 0);
+      assert.equal(port.onmessage, null);
+    }
+    // Issue #1387 (root ruling 1, attempts 2-3): the headroom rule on the producer's real fill
+    // (`source_fill`). The fake engine ring holds 80 chunks; render takes one a block unless the
+    // source holds (an anchored seek before its anchor), drops a seek's stale chunks at the block
+    // that pops it and then reports the seek's generation in effect. 48 kHz and 64 frames: a 4 ms
+    // tick is 3 quanta and a 2048-frame burst 32, so H = 36. Red on a drain that fills the ring to
+    // capacity, on the attempt-1 drain that capped a guessed depth (during a hold the guess falls
+    // below the real fill), and on attempt 2's (`befd51fbd`) admission that ended on room alone (a
+    // seek into a short ring keeps the headroom filled for good, and the next seek finds none).
+    const headroomRig = async (sharedCapacity) => {
+      const { send, fromWorklet } = await boot({}, 64, (engine) => { engine.calls.ringQuanta = 80; });
+      const tick = intervals.at(-1);
+      const port = { onmessage: null, postMessage: () => {}, close() {} };
+      send({ tag: "miso.feed-port.v1", port });
+      fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
+      const engine = { queued: [], seek: null, generation: 1n, hold: 0, quanta: 0n };
+      const room = () => 80 - engine.queued.length;
+      const report = () => { fake.calls.seekReportWords = [engine.generation, 0n, 0n, 0n, 0n]; };
+      report();
+      fake.exports.miso_engine_web_v1_source_fill = () => (BigInt(engine.queued.length) << 32n) | BigInt(room());
+      fake.exports.miso_engine_web_v1_source_submit = (_handle, _id, generation) => {
+        if (room() === 0) return 6;
+        engine.queued.push(generation);
+        return 0;
+      };
+      fake.exports.miso_engine_web_v1_source_seek = (_handle, _id, generation) => {
+        engine.seek = generation;
+        return 0;
+      };
+      const render = (blocks) => {
+        for (let block = 0; block < blocks; block += 1) {
+          if (engine.seek !== null) {
+            engine.queued = engine.queued.filter((generation) => generation >= engine.seek);
+            engine.generation = engine.seek;
+            engine.seek = null;
+          }
+          if (engine.hold > 0) engine.hold -= 1;
+          else engine.queued.shift();
+          engine.quanta += 1n;
+        }
+        report();
+        new DataView(fake.memory.buffer, 16384, 80).setBigUint64(40, engine.quanta, true);
+      };
+      const ring = createMsb1Ring({ sourceId: "drums", channels: 2, frameCapacity: 64, capacity: sharedCapacity });
+      const writer = new Msb1RingWriter(ring);
+      writer.engage(1n);
+      const feed = { generation: 1n, next: 0n };
+      const fill = (limit = writer.capacity) => {
+        while (writer.occupancy < Math.min(writer.capacity, limit)) {
+          writer.reserve(64);
+          writer.commit({ generation: feed.generation, startFrame: feed.next, frames: 64, endOfRegion: false });
+          feed.next += 64n;
+        }
+      };
+      const seek = (generation, frame) => {
+        feed.generation = generation;
+        feed.next = frame;
+        writer.seek(generation, frame);
+      };
+      port.onmessage({ data: structuredClone({ op: "attach", rings: [ring] }) });
+      return { send, tick, engine, room, render, fill, seek, writer };
+    };
+    {
+      const { send, tick, engine, room, render, fill, seek } = await headroomRig(128);
+      fill();
+      tick.callback();
+      assert.equal(engine.queued.length, 44, "the drain keeps H = 36 of the 80 free");
+      // An anchored start that holds 60 blocks: render takes nothing meanwhile.
+      seek(2n, 0n);
+      send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n, sourceFrame: 0n, anchorSample: 640n });
+      engine.hold = 60;
+      for (let pass = 0; pass < 40; pass += 1) {
+        render(3);
+        fill();
+        tick.callback();
+        assert.ok(room() >= 36, `pass ${pass}: the headroom stays free through the hold (room ${room()})`);
+      }
+      // A plain ring seek now: its new generation is admitted before the next block.
+      seek(3n, 9600n);
+      tick.callback(); // the seek, and the old generation's slots freed from the shared ring
+      fill();
+      tick.callback();
+      assert.equal(engine.queued.filter((value) => value === 3n).length, 36,
+        "the plain seek's new generation fills the headroom before the next block renders");
+      render(1);
+      assert.equal(engine.queued[0], 3n, "the next block plays the new position");
+    }
+    {
+      // A plain seek while the engine ring is short: its pass may fill the free room, render then
+      // drops only a few stale chunks, and the admission ends because render reports the seek's
+      // generation, so the headroom comes back and the next seek is admitted again.
+      const { tick, engine, room, render, fill, seek } = await headroomRig(64);
+      fill(4);
+      tick.callback();
+      assert.equal(engine.queued.length, 4, "a short engine ring");
+      seek(2n, 4800n);
+      fill();
+      tick.callback();
+      assert.equal(engine.queued.length, 68, "the seek's pass fills the headroom (4 stale + 64 new)");
+      for (let pass = 0; pass < 20; pass += 1) {
+        render(3);
+        fill();
+        tick.callback();
+      }
+      assert.equal(room(), 36, "once render reports the seek in effect, the headroom is kept again");
+      seek(3n, 9600n);
+      tick.callback();
+      fill();
+      tick.callback();
+      assert.equal(engine.queued.filter((value) => value === 3n).length, 36, "the next seek is admitted");
+    }
+    // Issue #1387 (root ruling 2): a default ring request boots worker mode at 65 536 frames; an
+    // explicit one is kept, however short (MINOR 3: the headroom then halves the ring instead).
+    // Red if the Worker passes the 100 ms default through.
+    {
+      await boot();
+      assert.equal(new DataView(fake.memory.buffer, 512, 64).getUint32(16, true), 65536);
+      await boot({ options: { ...limits, sourceRingFrames: 256 } });
+      assert.equal(new DataView(fake.memory.buffer, 512, 64).getUint32(16, true), 256);
+    }
+    // Issue #1387 (MAJOR-2): the shared MSB1 consumer case table over this Worker, at 4-frame
+    // quanta (`sdk/test/msb1-consumer-cases.mjs`; the prelude runs it in browser-pcm-evals).
+    for (const { name, run } of MSB1_CONSUMER_CASES) {
+      const { send, fromWorklet } = await boot({}, 4);
+      const tick = intervals.at(-1);
+      const replies = [];
+      const port = { onmessage: null, postMessage: (data) => replies.push(structuredClone(data)), close() {} };
+      send({ tag: "miso.feed-port.v1", port });
+      fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
+      const adapter = { submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null };
+      const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
+      const memory = () => fake.memory.buffer;
+      // The fake engine ring: render takes one chunk a block, drops a seek's stale chunks at the
+      // block that pops it and then reports the seek's generation; an empty in-region block
+      // underruns a quantum.
+      const engine = { queue: [], pending: null, generation: 1n, underrun: 0n, ended: false };
+      const report = () => { fake.calls.seekReportWords = [engine.generation, 0n, 0n, engine.underrun, 0n]; };
+      report();
+      fake.exports.miso_engine_web_v1_source_fill = () => (BigInt(engine.queue.length) << 32n) | 4096n;
+      fake.exports.miso_engine_web_v1_source_seek = (_handle, _id, generation, frame) => {
+        adapter.seeks.push([generation, frame]);
+        adapter.onSeek?.(generation, frame);
+        const diagnostic = new Uint8Array(memory(), 150000, 256);
+        diagnostic.fill(0);
+        if (adapter.seekResult !== 0 && adapter.seekStale) diagnostic.set(stale);
+        if (adapter.seekResult === 0) engine.pending = generation;
+        return adapter.seekResult;
+      };
+      fake.exports.miso_engine_web_v1_source_seek_at = (_handle, _id, generation) => {
+        if (adapter.seekAtResult === 0) engine.pending = generation;
+        return adapter.seekAtResult;
+      };
+      fake.exports.miso_engine_web_v1_session_seek = (_handle, generation) => {
+        engine.pending = generation;
+        return 0;
+      };
+      fake.exports.miso_engine_web_v1_source_submit = (_handle, idLength, generation, start, channels, frames, end) => {
+        adapter.submissions.push({
+          id: new TextDecoder().decode(new Uint8Array(memory(), 4096, idLength).slice()), generation, start, channels,
+          frames, end, pcm: [...new Float32Array(memory(), 5000, 8)],
+        });
+        if (adapter.submitResult === 0) engine.queue.push({ generation, end: end === 1 });
+        return adapter.submitResult;
+      };
+      const worker = globalThis.__controlWorker;
+      const apply = worker.applySharedSeek.bind(worker);
+      worker.applySharedSeek = (ring, ...identity) => {
+        if (identity.length !== 0) adapter.onApply?.();
+        return apply(ring, ...identity);
+      };
+      const renderBlock = () => {
+        if (engine.pending !== null) {
+          engine.queue = engine.queue.filter((chunk) => chunk.generation >= engine.pending);
+          engine.generation = engine.pending;
+          engine.pending = null;
+          engine.ended = false;
+        }
+        const chunk = engine.queue.shift();
+        if (chunk === undefined && !engine.ended) engine.underrun += 4n;
+        if (chunk?.end) engine.ended = true;
+        report();
+      };
+      let quanta = 0n;
+      let requestId = 0;
+      const feed = (data) => {
+        port.onmessage({ data: structuredClone(data) });
+        return replies.pop();
+      };
+      Object.assign(adapter, {
+        attach: async (rings) => { feed({ op: "attach", rings }); },
+        // One pass: the drain, then one rendered block, then the drain that accounts it (the
+        // prelude drains and accounts its block in one `process()`).
+        pass: async () => {
+          tick.callback();
+          renderBlock();
+          quanta += 1n;
+          new DataView(memory(), 16384, 80).setBigUint64(40, quanta, true);
+          tick.callback();
+        },
+        seekAt: async (message) => {
+          fake.calls.seekAtResult = adapter.seekAtResult;
+          send({ tag: "miso.seek-at.v1", requestId: (requestId += 1), ...message });
+        },
+        sessionSeek: async (generation) => {
+          send({ tag: "miso.session-seek.v1", requestId: (requestId += 1), generation, sourceFrame: 0n, anchorSample: -1n });
+        },
+        prepareSeek: async (seeks) => feed({ op: "prepare-seek", requestId: (requestId += 1), seeks }),
+        detachSource: async (index) => feed({ op: "detach-source", requestId: (requestId += 1), index }),
+      });
+      try {
+        await run(adapter);
+      } catch (error) {
+        error.message = `MSB1 consumer (control Worker): ${name}: ${error.message}`;
+        throw error;
+      }
     }
     // D6: a refused boot answers with the engine's result code and releases nothing.
     {

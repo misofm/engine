@@ -12,7 +12,7 @@ import type { MisoAudioWorkletHost, MisoSeekReport } from "./shipped-host.d.ts";
 
 export type PcmFeedOperation = "moduleLoad" | "nodeCreate" | "attachPost" | "readyTimeout" | "closed"
   | "prepareState" | "prepareBusy" | "preparePost" | "prepareTimeout" | "prepareSuperseded" | "prepareRefused"
-  | "detachPost" | "detachTimeout" | "detachRefused";
+  | "detachPost" | "detachTimeout" | "detachRefused" | "attachRefused";
 
 export class PcmFeedError extends Error {
   readonly operation: PcmFeedOperation;
@@ -107,6 +107,11 @@ export interface FeedOptions<Context extends FeedContext = FeedContext> {
    * has a `start` with one anchored seek, and a committed `engine.apply` or
    * `engine.replaceSession` that removes a source of this feed detaches that source's ring once
    * `engine.applied(revision)` resolved. A source with a `start` requires it.
+   *
+   * Issue 1387: where the rings drain follows the engine's `instanceMode`. In `"worker"` mode the
+   * engine's control Worker drains them, through a port the engine's host opens, so a feed of a
+   * worker-mode engine requires it: without it the worklet prelude refuses the rings
+   * (`attachRefused`). In `"single"` mode the worklet prelude drains them in `process()`.
    */
   readonly engine?: FeedEngine;
   readonly quantumFrames: number;
@@ -150,7 +155,7 @@ export interface EngineFeed {
 
 /** The engine side of the feeds linked to one engine (issue 1297b). */
 interface FeedLink {
-  readonly host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport">;
+  readonly host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport" | "instanceMode" | "openFeedPort">;
   readonly reserveSeekGeneration: () => bigint;
   readonly feeds: Set<LinkedFeed>;
   /**
@@ -186,7 +191,7 @@ export interface FeedRetirement {
  * retired by `FeedRetirement`. The SDK's own seam; not an application API.
  */
 export function linkFeedEngine(
-  host: Pick<MisoAudioWorkletHost, "status" | "seekSourceAt" | "seekReport">,
+  host: FeedLink["host"],
   reserveSeekGeneration: () => bigint,
 ): FeedRetirement {
   const link: FeedLink = { host, reserveSeekGeneration, feeds: new Set(), starts: new Map() };
@@ -444,7 +449,12 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   let rings = liveRings();
   let node: FeedNode;
   try {
-    node = options.createNode?.(options.context, "miso-sab-feed-attach", { numberOfInputs: 0, numberOfOutputs: 1 }) ?? defaultNode(options.context);
+    // Issue 1387: a worker-mode engine drains the rings in its control Worker; the feed speaks
+    // the same attach protocol on a port to it. A single-mode engine drains them in the worklet
+    // prelude, reached through its attach node.
+    node = link?.host.instanceMode === "worker"
+      ? workerFeedNode(link.host)
+      : options.createNode?.(options.context, "miso-sab-feed-attach", { numberOfInputs: 0, numberOfOutputs: 1 }) ?? defaultNode(options.context);
   } catch (error) {
     release(created); throw new PcmFeedError("nodeCreate", "Engine feed attach processor is unavailable", error);
   }
@@ -462,7 +472,14 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
   // Issue #1297c: the sources whose anchored start this feed has not published yet.
   const pendingStarts = new Set(unstarted.map((entry) => entry.source.sourceId));
   let starting: Promise<void> | undefined;
+  // Why the feed closed, when the consumer refused it (issue 1387).
+  let refusal: PcmFeedError | undefined;
   node.port.onmessage = ({ data }: MessageEvent): void => {
+    if (data?.op === "attach-refused") {
+      refusal = new PcmFeedError("attachRefused", "the engine runs in worker mode, so its worklet drains no ring: pass the feed's engine");
+      close();
+      return;
+    }
     if (data?.op === "source-detached") {
       detaching.get(data.requestId)?.(data.detached === true ? undefined : new PcmFeedError("detachRefused", "PCM feed worklet withdrew no ring for the source"));
       return;
@@ -562,7 +579,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
     get rings() { return rings; },
     get state() { return state; },
     async ready(settings = {}): Promise<void> {
-      if (state === "closed") throw new PcmFeedError("closed", "Engine feed is closed");
+      if (state === "closed") throw refusal ?? new PcmFeedError("closed", "Engine feed is closed");
       if (state === "pending") {
         const now = settings.now ?? (() => performance.now());
         const wait = settings.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
@@ -572,7 +589,7 @@ export function attachEngineFeed<Context extends FeedContext>(options: FeedOptio
           if (now() >= deadline) { close(); throw new PcmFeedError("readyTimeout", "Engine feed attach confirmation timed out"); }
           await Promise.race([wait(0), terminal]);
         }
-        if (state !== "active") throw new PcmFeedError("closed", "Engine feed is closed");
+        if (state !== "active") throw refusal ?? new PcmFeedError("closed", "Engine feed is closed");
       }
       if (unstarted.length === 0) return;
       starting ??= (async () => {
@@ -773,6 +790,12 @@ function release(rings: readonly SharedArrayBuffer[]): void {
 }
 function attached(ring: SharedArrayBuffer): boolean {
   return Atomics.load(new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4), MSB1_CONTROL.ATTACHED) === 1;
+}
+/** Issue 1387: the control Worker's feed port of a worker-mode engine; the Worker closes its end on `detach`. */
+function workerFeedNode(host: FeedLink["host"]): FeedNode {
+  const port = host.openFeedPort();
+  if (port === null) throw new Error("the engine's host opens no feed port (it failed or is disposing)");
+  return { port, disconnect() { /* the Worker closes the port when it receives `detach` */ } };
 }
 function defaultNode(context: FeedContext): FeedNode {
   const Constructor = (globalThis as unknown as { AudioWorkletNode?: new (context: unknown, name: string, options: FeedNodeOptions) => FeedNode }).AudioWorkletNode;

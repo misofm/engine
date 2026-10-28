@@ -53,6 +53,50 @@ const RELEASE_TIMEOUT_MS = 2000;
 // about this long.
 const RENDER_CHECK_MS = 50;
 const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
+const BUFFER_DIAGNOSTIC = 4;
+
+// Issue #1387 (S11, D5): the SDK's MSB1 shared PCM rings (`sdk/src/browser/pcm-ring.ts`, the ring
+// authority), drained here in `worker` mode by the same rules the worklet prelude
+// (`sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js`) drains them by in `single` mode.
+// This file loads no code (its capability policy in `scripts/check-web-audioworklet.sh` bans it),
+// so the consumer is written here. The rings arrive on a feed port the main-realm host opens
+// (`openFeedPort`, `miso.feed-port.v1`), in a port message: a `SharedArrayBuffer` never rides in
+// processor options.
+const SAB_WRAP_MASK = (1 << 30) - 1;
+const SAB_MAGIC = 0x4d534231;
+const SAB_VERSION = 1;
+const RING = {
+  MAGIC: 0, VERSION: 1, CAPACITY: 2, CHANNELS: 3, FRAME_CAPACITY: 4, HEADER_OFFSET: 5,
+  PCM_OFFSET: 6, ID_LENGTH: 7, WRITE_INDEX: 8, READ_INDEX: 9, GENERATION_TAG: 10, SEEK_EPOCH: 11,
+  WRITER_STATE: 12, ATTACHED: 13, SUBMITTED: 16, STALE: 17, REFUSED: 18, LAST_RESULT: 19,
+  UNDERRUNS: 20, DRAIN_BLOCKS: 21, SEEKS_APPLIED: 22, DEPTH: 23, TORN: 24, FINISHED: 25,
+  ERRORS: 26, SUBMITTED_GENERATION_TAG: 27,
+};
+const RING_CONTROL_BYTES = 144;
+const RING_I64_OFFSET = 112;
+const RING_ID_OFFSET = 144;
+const RING_HEADER_OFFSET = 272;
+const SLOT_HEADER_BYTES = 32;
+const SLOT_FLAG_END_OF_REGION = 1;
+const NO_ANCHOR = -1n;
+// The render half's status record (`miso.render-clock.v1`): `renderedQuanta` is the `u64` at 40;
+// its low word is read, and differences wrap.
+const STATUS_RENDERED_QUANTA_WORD = 10;
+// The code a seek refusal writes at the start of the session diagnostic when the source already
+// has the generation (#1644 D2).
+const STALE_GENERATION_CODE = new TextEncoder().encode("source.generation.stale");
+// Issue #1387 (root ruling 2): the engine source ring of `worker` mode when the boot asks for the
+// default (0): 65 536 frames, about 1.37 s at 48 kHz (512 KiB per stereo stem). The drain is a
+// timer on another thread, so the engine ring alone must ride out a render burst; single mode
+// keeps the engine's default (its drain runs inside `process()`). An explicit value overrides.
+const WORKER_DEFAULT_SOURCE_RING_FRAMES = 65536;
+// Issue #1387 (root ruling 1): the shortest period a browser keeps a repeating timer at (the HTML
+// timer clamp), so one Worker tick is at least this long.
+const TIMER_CLAMP_MS = 4;
+// Issue #1387 (root ruling 1): the longest run of quanta a browser renders back to back while the
+// Worker cannot refill, in frames. A resume renders its output buffer ahead: 13 quanta measured on
+// Chromium 151 (headroom 8 underran 5 of them, 12 and more none), so 2048 frames bounds it.
+const RENDER_BURST_FRAMES = 2048;
 
 const BOOT_FIELDS = [
   "tag", "module", "memory", "document", "options", "sampleRateHz", "quantumFrames", "workletPort",
@@ -144,6 +188,13 @@ class ControlWorker {
     this.bootToken = 0n;
     this.lastRenderCheck = 0;
     this.disposing = false;
+    // Issue #1387 (S11): the feed ports (one per SDK feed), the rings bound from them, the render
+    // half's status address (the drain's render clock) and the last session seek's generation.
+    this.feeds = [];
+    this.rings = [];
+    this.renderStatusPointer = 0;
+    this.renderClockWords = null;
+    this.lastSessionSeekGeneration = undefined;
     scope.onmessage = (event) => this.onPageMessage(event.data);
     scope.onmessageerror = () => this.fatal(RESULT_INTERNAL, this.lastRequestId);
   }
@@ -155,6 +206,11 @@ class ControlWorker {
       this.booted = true;
       const result = this.boot(message);
       if (result !== RESULT_OK) this.failBoot(result);
+      return;
+    }
+    if (message?.tag === "miso.feed-port.v1" && exactFields(message, ["tag", "port"])
+        && typeof message.port?.postMessage === "function") {
+      this.openFeed(message.port);
       return;
     }
     if (this.disposed) {
@@ -170,6 +226,7 @@ class ControlWorker {
   }
 
   afterControl(requestId) {
+    this.drainFeeds();
     this.serviceControl(requestId);
     this.pushWatermark(requestId);
     this.drainControlEvents(requestId);
@@ -282,7 +339,10 @@ class ControlWorker {
     view.setUint32(4, ABI_VERSION, true);
     view.setUint32(8, this.sampleRateHz, true);
     view.setUint32(12, this.quantumFrames, true);
-    view.setUint32(16, options.sourceRingFrames, true);
+    // Root ruling 2: a default request gets the worker-mode default, a whole number of quanta.
+    const ringFrames = options.sourceRingFrames !== 0 ? options.sourceRingFrames
+      : Math.ceil(WORKER_DEFAULT_SOURCE_RING_FRAMES / this.quantumFrames) * this.quantumFrames;
+    view.setUint32(16, ringFrames, true);
     view.setUint32(20, 0, true);
     view.setBigUint64(24, options.maximumMemoryBytes, true);
     words.forEach((value, index) => view.setBigUint64(32 + index * 8, value, true));
@@ -330,6 +390,7 @@ class ControlWorker {
     const sourceRingFrames = e.miso_engine_web_v1_resolved_source_ring_frames(this.handle);
     if (!u32(sourceRingFrames) || sourceRingFrames === 0
         || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
+    this.feedHeadroom = this.feedHeadroomQuanta(sourceRingFrames / this.quantumFrames);
     if (e.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
       const view = this.view(DataView, e.miso_engine_web_v1_watermark_ptr(this.handle), WATERMARK_BYTES);
       this.watermarkRevision = view.getBigUint64(8, true);
@@ -640,6 +701,8 @@ class ControlWorker {
       : this.exports.miso_engine_web_v1_session_seek_at(
         this.handle, message.generation, message.sourceFrame, message.anchorSample,
       );
+    // #1644 D2: the feed drain's stale-generation rule reads it.
+    if (result === RESULT_OK) this.lastSessionSeekGeneration = message.generation;
     this.post({
       tag: "miso.session-seek.v1", requestId: message.requestId, result, generation: message.generation,
     });
@@ -656,9 +719,12 @@ class ControlWorker {
       this.sticky(4, message.requestId);
       return;
     }
-    this.acknowledge(message.requestId, this.exports.miso_engine_web_v1_source_seek_at(
+    const result = this.exports.miso_engine_web_v1_source_seek_at(
       this.handle, idLength, message.generation, message.sourceFrame, message.anchorSample,
-    ));
+    );
+    // #1297b: an applied anchored seek lets the drain consume that ring's anchored epoch.
+    if (result === RESULT_OK) this.recordAnchoredSeek(message);
+    this.acknowledge(message.requestId, result);
   }
 
   receiveSeekReport(message) {
@@ -796,6 +862,432 @@ class ControlWorker {
     }
   }
 
+  // Issue #1387 (S11, D5): the MSB1 feed drain of `worker` mode. Every rule is the worklet
+  // prelude's (`miso-engine-v1-pcm-feed-worklet.js`): apply a published plain seek through
+  // `source_seek` (an anchored one only after this Worker's `source_seek_at` answered OK for the
+  // same tuple), drop chunks whose generation tag is stale, stop at `RESULT_BACKPRESSURE` with the
+  // chunk left in the ring, copy the planes into the same staging buffer and call the same
+  // `source_submit` export the `miso.source.v1` path calls. Two things differ, both because this
+  // runs on the control Worker and not on the audio thread: a pass submits until the engine's ring
+  // pushes back (bounded by the MSB1 ring's capacity), not two chunks a block, so timer jitter
+  // never starves render; and the block accounting (depth, underruns, drain blocks) counts the
+  // quanta render reports since the last pass, read from the render half's status, so a
+  // suspended context counts nothing. The drain runs on the service tick (this Worker's one
+  // timer) and after every message.
+
+  /// One feed port (one SDK feed): the attach protocol of the prelude's attach node.
+  openFeed(port) {
+    const feed = { port, delivered: [] };
+    this.feeds.push(feed);
+    port.onmessage = (event) => {
+      this.receiveFeed(feed, event.data);
+      this.drainFeeds();
+    };
+  }
+
+  receiveFeed(feed, data) {
+    if (data === null || typeof data !== "object") return;
+    if (data.op === "attach" && Array.isArray(data.rings)) {
+      this.withdrawRings(feed.delivered);
+      feed.delivered = data.rings;
+      if (this.disposed || this.disposing) return;
+      for (const shared of data.rings) {
+        const ring = this.bindRing(shared);
+        if (ring === null) continue;
+        Atomics.store(ring.control, RING.ATTACHED, 1);
+        this.rings.push(ring);
+      }
+    } else if (data.op === "detach") {
+      // The feed closed: its rings are withdrawn and its port is closed from this end.
+      this.withdrawRings(feed.delivered);
+      feed.delivered = [];
+      this.feeds = this.feeds.filter((entry) => entry !== feed);
+      feed.port.onmessage = null;
+      try { feed.port.close?.(); } catch (_) { /* already closed */ }
+    } else if (data.op === "detach-source") {
+      // A port clones every message, so the ring is named by its index in the attach list.
+      const index = data.index;
+      const shared = Number.isSafeInteger(index) && index >= 0 && index < feed.delivered.length
+        ? feed.delivered[index] : null;
+      if (shared != null) {
+        this.withdrawRings([shared]);
+        feed.delivered = feed.delivered.map((entry, at) => (at === index ? null : entry));
+      }
+      feed.port.postMessage({ op: "source-detached", requestId: data.requestId, detached: shared != null });
+    } else if (data.op === "prepare-seek") {
+      const delivered = feed.delivered.filter((entry) => entry !== null);
+      feed.port.postMessage({ op: "seek-prepared", requestId: data.requestId, ...this.prepareSharedSeeks(delivered, data.seeks) });
+    }
+  }
+
+  withdrawRings(delivered) {
+    this.rings = this.rings.filter((ring) => {
+      if (!delivered.includes(ring.shared)) return true;
+      Atomics.store(ring.control, RING.ATTACHED, 0);
+      return false;
+    });
+  }
+
+  /// At dispose: the rings are withdrawn and the ports closed.
+  closeFeeds() {
+    for (const feed of this.feeds) {
+      this.withdrawRings(feed.delivered);
+      feed.port.onmessage = null;
+      try { feed.port.close?.(); } catch (_) { /* already closed */ }
+    }
+    this.feeds = [];
+  }
+
+  /// One MSB1 ring, checked as the prelude checks it, or null.
+  bindRing(shared) {
+    if (!(shared instanceof SharedArrayBuffer) || shared.byteLength < RING_HEADER_OFFSET) return null;
+    const control = new Int32Array(shared, 0, RING_CONTROL_BYTES / 4);
+    if (Atomics.load(control, RING.MAGIC) !== SAB_MAGIC || control[RING.VERSION] !== SAB_VERSION) return null;
+    const capacity = control[RING.CAPACITY];
+    const channels = control[RING.CHANNELS];
+    const frameCapacity = control[RING.FRAME_CAPACITY];
+    const headerOffset = control[RING.HEADER_OFFSET];
+    const pcmOffset = control[RING.PCM_OFFSET];
+    const idLength = control[RING.ID_LENGTH];
+    if (capacity <= 0 || (capacity & (capacity - 1)) !== 0 || channels <= 0
+        || channels > this.maximumSourceChannels || frameCapacity !== this.quantumFrames
+        || idLength <= 0 || idLength > this.sourceIdCapacity || headerOffset !== RING_HEADER_OFFSET
+        || headerOffset + capacity * SLOT_HEADER_BYTES !== pcmOffset
+        || pcmOffset + capacity * channels * frameCapacity * 4 > shared.byteLength) {
+      return null;
+    }
+    const planes = [];
+    for (let slot = 0; slot < capacity; slot += 1) {
+      const slotPlanes = [];
+      for (let channel = 0; channel < channels; channel += 1) {
+        slotPlanes.push(new Float32Array(shared, pcmOffset + (slot * channels + channel) * frameCapacity * 4, frameCapacity));
+      }
+      planes.push(slotPlanes);
+    }
+    return {
+      shared,
+      control,
+      controlI64: new BigInt64Array(shared, RING_I64_OFFSET, 3),
+      headers: new Int32Array(shared, headerOffset, (capacity * SLOT_HEADER_BYTES) / 4),
+      headersI64: new BigInt64Array(shared, headerOffset, (capacity * SLOT_HEADER_BYTES) / 8),
+      idBytes: new Uint8Array(shared, RING_ID_OFFSET, idLength),
+      idLength,
+      planes,
+      capacity,
+      channels,
+      seenEpoch: Atomics.load(control, RING.SEEK_EPOCH),
+      anchoredGeneration: 0n,
+      anchoredFrame: 0n,
+      anchoredSample: NO_ANCHOR,
+      // The block accounting: the engine's cumulative underrun frames at the last read (null
+      // until read), the frames counted and excluded since (a finished region, an idle writer),
+      // the quanta counted, and the rendered quanta not yet accounted.
+      reportUnderrun: null,
+      countedFrames: 0n,
+      excludedFrames: 0n,
+      countedQuanta: 0,
+      pendingElapsed: 0,
+      // A consumed seek render has not shown in effect yet: its generation (u64), or null, and
+      // whether its new generation may fill the headroom (a plain seek's).
+      seekGeneration: null,
+      seekAdmit: false,
+      finished: false,
+      // The render clock this ring's accounting has reached; null until the clock is known.
+      renderedSeen: this.renderedQuanta(),
+    };
+  }
+
+  /// Issue #1387 (root ruling 1, attempt 2): the headroom `H`, in chunks, the drain keeps free in
+  /// each source's engine ring, read from the producer's real occupancy (`source_fill`). A seek's
+  /// new generation is admitted only into free slots (the stale chunks stay queued until render
+  /// pops the seek and drops them by tag), so a ring seek's pass submits up to `H` chunks at the
+  /// new position at once, and they must last until the next pass refills: `H` covers the quanta
+  /// render consumes in one Worker tick (a tick is at least `TIMER_CLAMP_MS`) plus a render burst
+  /// (`RENDER_BURST_FRAMES`) plus the block whose render pops the seek. At 48 kHz and 128 frames:
+  /// 2 + 16 + 1 = 19. #1387 MINOR 3: an explicit ring shorter than twice that (the
+  /// qualification corpus boots rings down to one quantum) keeps half of itself free instead, so
+  /// such a ring trades seek headroom for depth; the default ring (512 quanta) is far above it.
+  feedHeadroomQuanta(ringQuanta) {
+    const tickMs = Math.max(TIMER_CLAMP_MS, Math.round((1000 * this.quantumFrames) / this.sampleRateHz));
+    const perTick = Math.ceil((tickMs * this.sampleRateHz) / (1000 * this.quantumFrames));
+    return Math.min(perTick + Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames) + 1, Math.floor(ringQuanta / 2));
+  }
+
+  /// The ring's source as render last published it (its seek report): the generation in effect
+  /// and the cumulative underrun frames, or null when the read is refused or lands
+  /// inside render's publication.
+  readSourceReport(ring) {
+    this.stageRingId(ring);
+    if (this.exports.miso_engine_web_v1_source_seek_report(this.handle, ring.idLength) !== RESULT_OK) return null;
+    const view = this.view(DataView, this.exports.miso_engine_web_v1_source_seek_report_ptr(this.handle), SEEK_REPORT_BYTES);
+    if (view.getUint32(0, true) !== SEEK_REPORT_BYTES) return null;
+    return { generation: view.getBigUint64(8, true), underrun: view.getBigUint64(32, true) };
+  }
+
+  /// The source's ring occupancy, `{ queued, room }` in chunks, or null when the engine refuses
+  /// the read (the drain then submits as the prelude does, and the export counts the refusal).
+  readFill(ring) {
+    this.stageRingId(ring);
+    const fill = BigInt.asUintN(64, BigInt(this.exports.miso_engine_web_v1_source_fill(this.handle, ring.idLength)));
+    if (fill === 0xffffffffffffffffn) return null;
+    return { queued: Number(fill >> 32n), room: Number(fill & 0xffffffffn) };
+  }
+
+  /// The low word of the render half's `renderedQuanta`, or null before the worklet named it.
+  renderedQuanta() {
+    if (this.renderStatusPointer === 0) return null;
+    if (this.renderClockWords?.buffer !== this.buffer) this.renderClockWords = new Uint32Array(this.buffer);
+    return Atomics.load(this.renderClockWords, this.renderStatusPointer / 4 + STATUS_RENDERED_QUANTA_WORD);
+  }
+
+  drainFeeds() {
+    if (this.rings.length === 0 || this.disposed || this.disposing || !this.ready
+        || this.stickyResult !== RESULT_OK) {
+      return;
+    }
+    const rendered = this.renderedQuanta();
+    for (const ring of this.rings) {
+      try {
+        this.drainSharedRing(ring, rendered);
+      } catch (_) {
+        ring.control[RING.ERRORS] += 1;
+      }
+    }
+  }
+
+  /// Stage a ring's source ID in the engine's ID staging buffer.
+  stageRingId(ring) {
+    this.view(Uint8Array, this.sourceIdPointer, ring.idLength).set(ring.idBytes);
+  }
+
+  drainSharedRing(ring, rendered) {
+    const control = ring.control;
+    // The quanta render took since the last pass: what the prelude counts once per block.
+    const elapsed = rendered === null || ring.renderedSeen === null ? 0 : (rendered - ring.renderedSeen) >>> 0;
+    if (rendered !== null) ring.renderedSeen = rendered;
+    // As in the prelude, a ring waiting for its seek (an anchored start before `seek-at`)
+    // counts no drain block and no underrun: the quanta pass uncounted.
+    if (this.applySharedSeek(ring) !== RESULT_OK) {
+      ring.pendingElapsed = 0;
+      return;
+    }
+    const report = this.readSourceReport(ring);
+    const before = this.readFill(ring);
+    this.accountBlocks(ring, elapsed, report, before);
+    // Root ruling 1: the headroom stays free, except for the chunks of a plain seek's new
+    // generation, admitted until render shows that seek in effect.
+    let allowed = before === null ? ring.capacity
+      : ring.seekAdmit ? before.room : before.room - this.feedHeadroom;
+    let queued = before === null ? 0 : before.queued;
+    const generationTag = Atomics.load(control, RING.GENERATION_TAG);
+    const write = Atomics.load(control, RING.WRITE_INDEX);
+    const capacityMask = ring.capacity - 1;
+    const staging = this.view(Float32Array, this.sourcePcmPointer, this.maximumSourceChannels * this.quantumFrames);
+    let read = control[RING.READ_INDEX];
+    for (let remaining = ring.capacity; read !== write && remaining > 0; remaining -= 1) {
+      const slot = read & capacityMask;
+      const word = slot * (SLOT_HEADER_BYTES / 4);
+      if (ring.headers[word] !== read) {
+        // Only a second writer makes the slot name another chunk than the index.
+        control[RING.TORN] += 1;
+        break;
+      }
+      if (ring.headers[word + 1] !== generationTag) {
+        read = (read + 1) & SAB_WRAP_MASK;
+        control[RING.STALE] += 1;
+        continue;
+      }
+      const frames = ring.headers[word + 2];
+      const flags = ring.headers[word + 3];
+      if (frames <= 0 || frames > this.quantumFrames) {
+        read = (read + 1) & SAB_WRAP_MASK;
+        control[RING.ERRORS] += 1;
+        continue;
+      }
+      if (allowed <= 0) break;
+      // Every slot plane is pre-zeroed by the writer: the full quantum is copied, as the prelude
+      // copies it.
+      const slotPlanes = ring.planes[slot];
+      for (let channel = 0; channel < ring.channels; channel += 1) {
+        staging.set(slotPlanes[channel], channel * this.quantumFrames);
+      }
+      this.stageRingId(ring);
+      const word64 = slot * (SLOT_HEADER_BYTES / 8);
+      const result = this.exports.miso_engine_web_v1_source_submit(
+        this.handle, ring.idLength, ring.headersI64[word64 + 2], ring.headersI64[word64 + 3],
+        ring.channels, frames, (flags & SLOT_FLAG_END_OF_REGION) !== 0 ? 1 : 0,
+      );
+      // The engine's ring is full: the chunk stays where it is, and the writer is held back.
+      if (result === RESULT_BACKPRESSURE) break;
+      read = (read + 1) & SAB_WRAP_MASK;
+      if (result === RESULT_OK) {
+        // Published only after the engine accepted the PCM (the main-thread start gate).
+        Atomics.store(control, RING.SUBMITTED_GENERATION_TAG, ring.headers[word + 1]);
+        control[RING.SUBMITTED] += 1;
+        allowed -= 1;
+        queued += 1;
+        if ((flags & SLOT_FLAG_END_OF_REGION) !== 0) {
+          ring.finished = true;
+          control[RING.FINISHED] = 1;
+        }
+      } else {
+        control[RING.REFUSED] += 1;
+        control[RING.LAST_RESULT] = result;
+      }
+    }
+    Atomics.store(control, RING.READ_INDEX, read);
+    control[RING.DEPTH] = queued;
+  }
+
+  /// The prelude's block accounting on the engine's counts (#1387 attempt 3): every rendered
+  /// quantum is a drain block, and the underruns are the engine's own missing in-region frames for
+  /// this source (its seek report; held frames, an anchored seek before its anchor, are not
+  /// missing) while a live writer feeds the ring and its region has not ended, in quanta. The
+  /// quanta come from the cumulative counted frames, never rounded per pass, so a region's end
+  /// counts as the prelude counts it. A pass whose reads are refused carries its quanta to the
+  /// next. It also ends a consumed seek's transition: render reports that seek's generation.
+  accountBlocks(ring, elapsed, report, before) {
+    const control = ring.control;
+    if (report === null || before === null) {
+      ring.pendingElapsed += elapsed;
+      return;
+    }
+    const quanta = ring.pendingElapsed + elapsed;
+    ring.pendingElapsed = 0;
+    if (ring.seekGeneration !== null && report.generation >= ring.seekGeneration) {
+      // Evidence that the seek took effect: render reports its generation. Never room alone.
+      ring.seekGeneration = null;
+      ring.seekAdmit = false;
+    }
+    if (ring.reportUnderrun !== null) {
+      const missing = report.underrun - ring.reportUnderrun;
+      if (ring.finished || Atomics.load(control, RING.WRITER_STATE) !== 1) ring.excludedFrames += missing;
+      else ring.countedFrames += missing;
+      const counted = Number((ring.countedFrames + BigInt(this.quantumFrames) - 1n) / BigInt(this.quantumFrames));
+      control[RING.UNDERRUNS] += counted - ring.countedQuanta;
+      ring.countedQuanta = counted;
+    }
+    ring.reportUnderrun = report.underrun;
+    control[RING.DRAIN_BLOCKS] += quanta;
+  }
+
+
+  /// The prelude's seek rule: a published plain seek is applied through `source_seek` before any
+  /// slot is read; an anchored one only once `source_seek_at` answered OK for the same tuple.
+  applySharedSeek(ring, epoch = Atomics.load(ring.control, RING.SEEK_EPOCH), generation, frame) {
+    const control = ring.control;
+    if (epoch === ring.seenEpoch) return RESULT_OK;
+    const requested = generation ?? ring.controlI64[0];
+    const requestedFrame = frame ?? ring.controlI64[1];
+    const anchor = ring.controlI64[2];
+    if (anchor !== NO_ANCHOR) {
+      if (ring.anchoredSample !== anchor || ring.anchoredGeneration !== requested
+          || ring.anchoredFrame !== requestedFrame) {
+        return RESULT_BACKPRESSURE;
+      }
+      ring.anchoredSample = NO_ANCHOR;
+      return this.consumeSharedSeek(ring, epoch, requested, false);
+    }
+    this.stageRingId(ring);
+    let result = this.exports.miso_engine_web_v1_source_seek(this.handle, ring.idLength, requested, requestedFrame);
+    // #1644 D2: a session seek at this generation already moved the source, so its own seek is
+    // refused as stale; that one refusal is the seek applied.
+    if (result === RESULT_INVALID_ARGUMENT && BigInt.asUintN(64, requested) === this.lastSessionSeekGeneration
+        && this.refusedAsStaleGeneration()) {
+      result = RESULT_OK;
+    }
+    if (result === RESULT_BACKPRESSURE) return result;
+    if (result !== RESULT_OK) {
+      control[RING.REFUSED] += 1;
+      control[RING.LAST_RESULT] = result;
+      return result;
+    }
+    return this.consumeSharedSeek(ring, epoch, requested, true);
+  }
+
+  /// `plain`: a plain seek, whose stale chunks render drops at its next block, so its new
+  /// generation may fill the headroom; an anchored seek's old generation keeps playing until its
+  /// anchor, so its new chunks queue behind it within the headroom rule.
+  consumeSharedSeek(ring, epoch, generation, plain) {
+    const control = ring.control;
+    ring.seenEpoch = epoch;
+    control[RING.SEEKS_APPLIED] += 1;
+    // Root ruling 1: a plain seek's new generation may fill the headroom until render reports
+    // this generation in effect (`accountBlocks`).
+    ring.seekGeneration = BigInt.asUintN(64, generation);
+    ring.seekAdmit = plain;
+    ring.finished = false;
+    control[RING.FINISHED] = 0;
+    return RESULT_OK;
+  }
+
+  refusedAsStaleGeneration() {
+    const pointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_DIAGNOSTIC);
+    const capacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_DIAGNOSTIC);
+    if (!u32(pointer) || pointer === 0 || !u32(capacity) || capacity < STALE_GENERATION_CODE.length) return false;
+    const view = this.view(Uint8Array, pointer, STALE_GENERATION_CODE.length);
+    return STALE_GENERATION_CODE.every((byte, index) => view[index] === byte);
+  }
+
+  /// #1297b: an OK `source_seek_at` is recorded on the ring of that source.
+  recordAnchoredSeek(message) {
+    const id = new TextEncoder().encode(message.sourceId);
+    for (const ring of this.rings) {
+      if (ring.idLength !== id.length || !id.every((byte, index) => ring.idBytes[index] === byte)) continue;
+      ring.anchoredGeneration = BigInt.asIntN(64, message.generation);
+      ring.anchoredFrame = BigInt.asIntN(64, message.sourceFrame);
+      ring.anchoredSample = BigInt.asIntN(64, message.anchorSample);
+    }
+  }
+
+  /// The prelude's `prepare-seek`: apply each ring's published seek and free its stale slots,
+  /// while the context is suspended (the SDK checks it); a newer seek supersedes the request.
+  prepareSharedSeeks(delivered, seeks) {
+    if (!this.ready || this.disposed || this.disposing || this.stickyResult !== RESULT_OK
+        || !Array.isArray(seeks) || seeks.length !== delivered.length) {
+      return { kind: "refused", result: RESULT_WRONG_STATE };
+    }
+    const rings = delivered.map((shared) => this.rings.find((ring) => ring.shared === shared));
+    if (rings.some((ring) => ring === undefined)) return { kind: "refused", result: RESULT_WRONG_STATE };
+    const matches = (ring, seek) => seek && seek.epoch !== 0
+      && Atomics.load(ring.control, RING.SEEK_EPOCH) === seek.epoch
+      && Atomics.load(ring.controlI64, 0) === seek.generation
+      && Atomics.load(ring.controlI64, 1) === seek.frame;
+    if (!rings.every((ring, index) => matches(ring, seeks[index]))) return { kind: "superseded" };
+    for (let index = 0; index < rings.length; index += 1) {
+      const ring = rings[index];
+      if (!matches(ring, seeks[index])) return { kind: "superseded" };
+      const result = this.applySharedSeek(ring, seeks[index].epoch, seeks[index].generation, seeks[index].frame);
+      if (result !== RESULT_OK) return { kind: "refused", result };
+      if (!this.releaseStaleSharedSlots(ring, seeks[index].generation)) return { kind: "refused", result: RESULT_INVALID_ARGUMENT };
+    }
+    return rings.every((ring, index) => matches(ring, seeks[index])) ? { kind: "confirmed", seeks } : { kind: "superseded" };
+  }
+
+  releaseStaleSharedSlots(ring, generation) {
+    const control = ring.control;
+    const write = Atomics.load(control, RING.WRITE_INDEX);
+    const capacityMask = ring.capacity - 1;
+    let read = control[RING.READ_INDEX];
+    for (let remaining = ring.capacity; read !== write && remaining > 0; remaining -= 1) {
+      const slot = read & capacityMask;
+      if (ring.headers[slot * (SLOT_HEADER_BYTES / 4)] !== read) {
+        control[RING.TORN] += 1;
+        Atomics.store(control, RING.READ_INDEX, read);
+        return false;
+      }
+      // Future-generation PCM belongs to a superseding seek and is never discarded.
+      if (BigInt.asUintN(64, ring.headersI64[slot * (SLOT_HEADER_BYTES / 8) + 2]) < BigInt.asUintN(64, generation)) {
+        read = (read + 1) & SAB_WRAP_MASK;
+        control[RING.STALE] += 1;
+        continue;
+      }
+      break;
+    }
+    Atomics.store(control, RING.READ_INDEX, read);
+    return true;
+  }
+
   /// Root ruling R-S7-meters (2): after every control call that may publish a plan or grow the
   /// memory, name the newest committed replacement's meter header and the memory's length to the
   /// worklet, whose message handler cuts the views before render adopts that plan.
@@ -852,6 +1344,7 @@ class ControlWorker {
     }
     this.disposed = true;
     this.handle = 0;
+    this.closeFeeds();
     this.disposeOutcome = result;
     this.disposeReason = reason;
     for (const requestId of this.disposeRequestIds) this.answerDispose(requestId);
@@ -888,6 +1381,11 @@ class ControlWorker {
       const token = BigInt.asUintN(64, message.token);
       if (this.disposeOutcome !== undefined) this.reclaimOrphan(token);
       else this.finishDispose(token);
+      return;
+    }
+    if (message?.tag === "miso.render-clock.v1" && exactFields(message, ["tag", "status"])
+        && u32(message.status) && message.status !== 0 && this.renderStatusPointer === 0) {
+      this.renderStatusPointer = message.status;
       return;
     }
     if (message?.tag === "miso.render-status.v1" && exactFields(message, ["tag", "requestId", "status"])

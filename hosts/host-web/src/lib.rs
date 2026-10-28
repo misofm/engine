@@ -88,6 +88,10 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 /// cannot silently outrun this projection.
 pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 
+/// What `miso_engine_web_v1_source_fill` answers for a refused read (issue #1387): no ring holds
+/// `u32::MAX` queued chunks, and a granted read's room word is below `u32::MAX`.
+pub const SOURCE_FILL_REFUSED: u64 = u64::MAX;
+
 /// Default host memory ceiling used only when the embedding passes zero.
 ///
 /// 512 MiB matches the native runner profile and the browser app's historical quota-reserve
@@ -1981,6 +1985,28 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub const fn seek_report(&self) -> &WebSeekReport {
         &self.seek_report
+    }
+
+    /// The staged source's ring occupancy as its producer sees it (issue #1387): the queued
+    /// chunks in the high word, the chunks a submit would accept now in the low word, or
+    /// [`SOURCE_FILL_REFUSED`] for a host that is not ready or a source the session does not
+    /// declare. A pure read of the producer's queue cursors (no lock, no allocation, no service
+    /// step), so the control Worker reads it while the worklet renders. It changes no status.
+    #[must_use]
+    pub fn source_fill(&self, source_id: &[u8]) -> u64 {
+        if !self.control_ready() {
+            return SOURCE_FILL_REFUSED;
+        }
+        let Some(control) = self.control.as_ref() else {
+            return SOURCE_FILL_REFUSED;
+        };
+        match control.control.source_admission(source_id) {
+            Ok(admission) => {
+                (admission.queued.min(u64::from(u32::MAX)) << 32)
+                    | admission.room.min(u64::from(u32::MAX - 1))
+            }
+            Err(_) => SOURCE_FILL_REFUSED,
+        }
     }
 
     /// The record [`Self::read_watermark`] fills.

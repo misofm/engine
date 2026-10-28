@@ -1290,6 +1290,61 @@ impl SeekExports {
     }
 }
 
+/// Issue #1387: `source_fill` reads the producer's ring occupancy through the raw export: the
+/// queued chunks in the high word and the chunks a submit accepts now in the low word, for the
+/// 4-quantum ring of this rig; render lowers the queue; a full ring has no room and a submit then
+/// is refused; an unknown source and a wrong handle are refused with `u64::MAX`.
+///
+/// Test value: red if the export reports the consumer's count or the ring's capacity instead of
+/// the producer's live occupancy, swaps the words, or answers a refused read with a count.
+#[test]
+fn source_fill_reads_the_producers_ring_occupancy() {
+    let rig = SeekExports::boot();
+    let fill = || miso_engine_web_v1_source_fill(rig.handle, SeekExports::SOURCE.len() as u32);
+    let words = |value: u64| (value >> 32, value & 0xffff_ffff);
+    assert_eq!(
+        words(fill()),
+        (0, 4),
+        "an empty ring accepts its four quanta"
+    );
+    rig.submit(1, 0);
+    rig.submit(1, 128);
+    rig.submit(1, 256);
+    assert_eq!(words(fill()), (3, 1));
+    rig.render();
+    let (queued, _) = words(fill());
+    assert_eq!(queued, 2, "render took one chunk");
+    rig.submit(1, 384);
+    rig.submit(1, 512);
+    let (queued, room) = words(fill());
+    assert_eq!(room, 0, "a full ring accepts nothing");
+    assert_eq!(queued, 4);
+    assert_eq!(
+        miso_engine_web_v1_source_submit(
+            rig.handle,
+            SeekExports::SOURCE.len() as u32,
+            1,
+            640,
+            2,
+            128,
+            0
+        ),
+        RESULT_BACKPRESSURE,
+        "the export's zero room is the submit's backpressure"
+    );
+    rig.stage(b"no-such-source");
+    assert_eq!(miso_engine_web_v1_source_fill(rig.handle, 14), u64::MAX);
+    rig.stage(SeekExports::SOURCE);
+    assert_eq!(
+        miso_engine_web_v1_source_fill(0, SeekExports::SOURCE.len() as u32),
+        u64::MAX
+    );
+    assert_eq!(
+        miso_engine_web_v1_source_fill(rig.handle, u32::MAX),
+        u64::MAX
+    );
+}
+
 /// Issue #1293 gates 3 and 4 through the raw exports: an anchored seek two quanta ahead is
 /// accepted (`RESULT_OK`, not the `prepare_source_seek` path's `RESULT_INTERNAL` for a held seek),
 /// the source plays silence until the anchor block and the sought frame from it on, an unaligned

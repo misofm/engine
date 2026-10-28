@@ -1008,6 +1008,30 @@ pub extern "C" fn miso_engine_web_v1_source_seek_report(handle: u32, source_id_b
     })
 }
 
+/// The staged source's ring occupancy as its producer sees it (issue #1387): the queued chunks
+/// in the high 32 bits, the chunks a submit would accept now in the low 32 bits, or
+/// `u64::MAX` (`SOURCE_FILL_REFUSED`) for a wrong handle, a host that is not ready, an ID count
+/// past the staging or a source the session does not declare. The control Worker's PCM feed
+/// drain sizes its submissions by it. A pure read of the producer's queue cursors: no lock, no
+/// allocation, no service step, no status change; never called from `process()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_fill(handle: u32, source_id_bytes: u32) -> u64 {
+    with_host_mut(handle, crate::SOURCE_FILL_REFUSED, |host| {
+        let id_count = source_id_bytes as usize;
+        let Some(ids) = host.source_id_mut() else {
+            return crate::SOURCE_FILL_REFUSED;
+        };
+        let Some(source_id) = ids.get(..id_count) else {
+            return crate::SOURCE_FILL_REFUSED;
+        };
+        let source_id_pointer = source_id.as_ptr();
+        // SAFETY: The checked ID prefix lies in stable staging and is only read during the
+        // synchronous, non-mutating safe-host call below.
+        let source_id = unsafe { slice::from_raw_parts(source_id_pointer, id_count) };
+        host.source_fill(source_id)
+    })
+}
+
 /// Return the stable address of the 64-byte seek report record, or zero for an invalid handle or a
 /// host that is not ready (issue #1293 D6).
 #[unsafe(no_mangle)]
