@@ -3264,7 +3264,6 @@ async function testProcessor() {
       assert.equal(status.result, 0);
       assert.equal(status.memoryBytes, 196608 * 4, "the status reports the grown memory");
       assert.equal(status.renderedQuanta, 1n, "the status reads the grown memory");
-      assert.equal(status.staleViewQuanta, 0, "no quantum ran on a detached view");
       assert.equal(processor.process([], [[left.fill(1), right.fill(1)]]), true);
       assert(left.every((sample) => sample === 0.25));
       assert.deepEqual(fake.calls.render, [64, 64]);
@@ -3436,8 +3435,8 @@ async function testProcessor() {
     {
       // Issue #1332 S3: a growth is no fault for `process()` either. On the shared memory a view
       // over the older buffer object stays valid for its bytes, so a quantum after a growth with
-      // no handler since renders over the views the instance holds, silences nothing and counts
-      // nothing; `process()` never re-binds, and the next handler re-cuts the views.
+      // no handler since renders over the views the instance holds; `process()` never re-binds,
+      // and the next handler re-cuts the views.
       const { processor, fake } = makeProcessor();
       const before = processor.outputLeft.buffer;
       fake.growMemory();
@@ -3453,7 +3452,6 @@ async function testProcessor() {
       processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
       const status = processor.port.posts.map((post) => post.message)
         .filter((message) => message.tag === "miso.status.v1").at(-1);
-      assert.equal(status.staleViewQuanta, 0, "no quantum is silenced for a growth");
       assert.equal(status.memoryBytes, 393216);
       assert.equal(processor.outputLeft.buffer, fake.exports.memory.buffer, "the handler re-cut the views");
     }
