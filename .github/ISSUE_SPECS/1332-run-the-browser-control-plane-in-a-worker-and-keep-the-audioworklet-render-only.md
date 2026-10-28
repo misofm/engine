@@ -679,3 +679,44 @@ Remains for S7: the Worker file and both JS halves (`__wasm_init_tls`, `__stack_
 `successor_header_ptr` in the Worker), the meter-view protocol above, the handler names the
 render-thread table already lists (`adoptRenderHalf`, `releaseRenderHalf`,
 `readRenderDiagnostic`), and reporting the shared control counter as shared in worker mode.
+
+### S6 verify folds (S6 verify PASS, 2026-10-28)
+
+- `instance_bind` marks a reservation bound with a compare-and-swap: a second bind of the same
+  reservation refuses, from the same or another instance, and an instance binds once. Test row in
+  `worker_handoff.rs` test 1 (red without the CAS: the Worker binds the worklet's stack).
+- The canary is checked before every block of a bound render-only session (eight `u64` volatile
+  compares) and fails the session sticky with `web.instance.stack_canary` at the first bad block;
+  the release check stays. Test `an_overwritten_stack_canary_fails_the_next_block` (red without
+  the per-render check: `0` for `255`).
+- `CONTROL_ALLOCATIONS` is a per-instance const `thread_local!` `Cell<u64>`, like the render count.
+  Test 1 asserts the Worker's control count does not move while the worklet renders, copies and
+  releases (red with a shared counter).
+- Test `a_release_into_a_full_registry_keeps_the_half`: four hosts fill the registry; a fifth
+  release returns `0` and that host still renders (red when the half is forgotten instead of taken
+  back).
+- The ABI layout document publishes `structures.instanceReservation` (16 bytes: `structSize`,
+  `tlsBase`, `stackTop`, `stackBottom`, `u32` each); `abi.ts` and the self-test fixture regenerated.
+  The call-graph gate also holds `instance_bind`, `render_diagnostic_ptr` and
+  `render_diagnostic_bytes` (no allocator, free or drop glue, no indirect site).
+
+### Root rulings (2026-10-28)
+
+- **R-S6b.** While the render half is away, `OBSERVATION_READ` uses option (b): the control side
+  holds read-only observation endpoints (a new read-only type: an `Arc` clone with no
+  `acknowledge`) in the epoch's `ObservationIndex`, as on the C ABI; carried taps pair at
+  promotion from the swap record (reusing #1674's C ABI code); the render half keeps its
+  acknowledging readers for the meter fold. This amends root decision #1589 R2. Class A, no SDK
+  or C ABI change. Slice S6b.
+- **R-S7-meters.** The two-thread meter-view protocol: (1) `process()` reads only the header render
+  reports as current (`meter_header_ptr` after `render()`, wrapped, call-graph pinned), never a
+  retired header or a successor pointer. (2) The Worker posts `{header, memoryBytes}` after every
+  control call that may publish a plan or grow memory; the worklet's message handler re-cuts the
+  whole-memory views if they are too short and cuts the set for that header, recording its frame
+  pointer and track and submix counts. (3) When the pointer changes, `process()` switches to the
+  pre-cut set only if the pointer, the frame pointer and the counts match (compares only);
+  otherwise it bounds-checks, skips the frame and counts the skip. The S6 builder's proposal above
+  (follow the retired header's successor pointer) is withdrawn: it reads freed memory.
+- **S8 note.** An orphaned render half (the Worker disposed while the half was away) must be
+  disposable: `instance_bind` marks the instance render-only, and dispose on an unbound instance
+  may free an adopted half.

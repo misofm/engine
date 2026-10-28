@@ -235,6 +235,10 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     # allocator, free or drop glue: a refusal path forgets or redeposits what it holds.
     "miso_engine_web_v1_host_adopt": {},
     "miso_engine_web_v1_host_release": {},
+    # The worklet's bind and render-diagnostic exports: loads, compares and one CAS.
+    "miso_engine_web_v1_instance_bind": {},
+    "miso_engine_web_v1_render_diagnostic_ptr": {},
+    "miso_engine_web_v1_render_diagnostic_bytes": {},
     "miso_engine_web_v1_meter_poll": {
         # #1332 S5: `RenderHalf::poll_meters` has a second caller (`RenderHost::poll_meters`), so
         # it is no longer inlined into the host's; the same two sites, by inlining only.

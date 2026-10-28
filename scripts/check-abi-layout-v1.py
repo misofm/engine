@@ -167,6 +167,7 @@ STRUCTURES = {
     "planWatermark": 96,
     "planLatency": 64,
     "seekReport": 64,
+    "instanceReservation": 16,
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
@@ -197,6 +198,9 @@ SEEK_REPORT_FIELDS = [
     "structSize", "reserved0", "generation", "firstSample", "sourceFrame",
     "cumulativeUnderrunFrames", "cumulativeHeldFrames", "reserved",
 ]
+# The instance reservation record (#1332 S6): four u32 words a page reads before it starts the
+# second instance on the shared memory.
+INSTANCE_RESERVATION_FIELDS = ["structSize", "tlsBase", "stackTop", "stackBottom"]
 # The status block (#1349 D2): offset 28 `blockingRebuilds` (#1294b), offset 48
 # `liveValuesSuperseded` (#1399), then the applied-revision watermark words at 56, 64 and 72, and
 # no reserved word.
@@ -330,6 +334,7 @@ def validate(document: object) -> None:
         ("planWatermark", PLAN_WATERMARK_FIELDS),
         ("planLatency", PLAN_LATENCY_FIELDS),
         ("seekReport", SEEK_REPORT_FIELDS),
+        ("instanceReservation", INSTANCE_RESERVATION_FIELDS),
     ):
         require([row["name"] for row in structures[name]["fields"]] == expected_fields,
                 f"{name} names exactly {expected_fields}")

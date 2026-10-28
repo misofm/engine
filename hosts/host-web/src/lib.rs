@@ -5032,7 +5032,8 @@ mod render_lock;
 
 pub use ffi::*;
 pub use handoff::{
-    CANARY_BYTES, HANDOFF_SLOTS, INSTANCE_STACK_BYTES, Reservation, WebInstanceReservation,
+    CANARY_BYTES, HANDOFF_SLOTS, INSTANCE_RESERVATION_BYTES, INSTANCE_STACK_BYTES, Reservation,
+    WebInstanceReservation,
 };
 pub use render_lock::RenderLockedAllocator;
 #[cfg(feature = "render-lock-probe")]
