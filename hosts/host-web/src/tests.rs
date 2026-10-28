@@ -801,6 +801,13 @@ fn each_boot_option_rule_has_its_own_typed_refusal() {
             },
             b"web.options.source_ring_frames\t$\n".as_slice(),
         ),
+        (
+            WebBootOptions {
+                maximum_memory_bytes: u64::from(WASM_MAXIMUM_MEMORY_PAGES) * WASM_PAGE_BYTES + 1,
+                ..boot_options(128)
+            },
+            b"web.boot.memory_maximum\t$\n".as_slice(),
+        ),
     ] {
         let failure = AudioWorkletEngineHost::boot(document.as_bytes(), options)
             .err()
@@ -810,6 +817,15 @@ fn each_boot_option_rule_has_its_own_typed_refusal() {
     }
     AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::default())
         .expect("all-zero options select defaults");
+    // #1380 D2: the module's maximum memory itself is an accepted budget.
+    AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            maximum_memory_bytes: u64::from(WASM_MAXIMUM_MEMORY_PAGES) * WASM_PAGE_BYTES,
+            ..boot_options(128)
+        },
+    )
+    .expect("a budget equal to the module's maximum memory boots");
 }
 
 /// Owner ruling R5 (#1036): browser boot refuses a document at a former extended research rate

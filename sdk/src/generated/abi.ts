@@ -727,6 +727,10 @@ export const ABI_LAYOUT = deepFreeze(
         }
       ]
     }
+  },
+  "memory": {
+    "initialPages": 20,
+    "maximumPages": 8192
   }
 } as const,
 );

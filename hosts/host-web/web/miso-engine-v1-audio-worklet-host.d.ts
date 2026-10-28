@@ -281,6 +281,8 @@ export interface MisoWebBootOptions {
   /// largest warm-successor prime plus one quantum, issue #1406).
   sourceRingFrames: number;
   /// Total boot memory budget, or `0n` for the engine-owned default ceiling.
+  /// A budget above the module's shared-memory maximum (the ABI layout's `memory.maximumPages`
+  /// pages, 512 MiB) is refused with `web.boot.memory_maximum` (issue #1380).
   maximumMemoryBytes: bigint;
   /// Reserved (offset 32 of the boot options): must be exactly `0n`. It was the live-command queue
   /// size until issue #1565.
