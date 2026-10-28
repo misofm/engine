@@ -160,6 +160,8 @@ beside the frame): that is a protocol change and leaves replies and events at 16
   the `(budget - rows) / 20` default; the aggregate pre-allocation admission (effect state first,
   then boot, replace and rebuild) is the successor, engine #2194, and is the reopening condition
   for the document default.
+  The `SESSION_REPLACE` parse is not projected against the live session's retained memory either
+  (only against `maximum_document_bytes`); that is folded into #2194.
 - **Does not hold for the whole boot** (stopped here, nothing adjusted): the same dense shape's
   full native `boot` peaks at about 38.6 bytes per input byte at every size (192 tracks: 20.4 MB
   for 527 KB; 1536: 162.6 MB for 4.2 MB; 3072: 325.3 MB for 8.4 MB). At 6,000 tracks (16.5 MB,

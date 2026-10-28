@@ -83,10 +83,12 @@ pub const ABI_VERSION: u32 = 0x0001_0000;
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
 ///
-/// Issue #2191: this projection is the document's only default limit. A boot (and a staged
-/// document, and a `SESSION_REPLACE`) admits up to `budget / PARSE_TRANSIENT_MULTIPLIER` bytes,
-/// 26,843,545 at the 512 MiB default; the compiled 1 MiB cap is gone, and the
-/// `maximum_document_bytes` boot word only tightens it.
+/// Issue #2191: this projection, with the control frame's rows, is the document's only default
+/// limit. A boot (and a staged document, and a `SESSION_REPLACE`) admits up to
+/// `(budget - frame rows) / PARSE_TRANSIENT_MULTIPLIER` bytes, 26,814,976 on wasm at the 512 MiB
+/// default and the 128 KiB frame; the compiled 1 MiB cap is gone, and the
+/// `maximum_document_bytes` boot word only tightens it. It bounds the parse transient, not
+/// effect-state growth (#2194).
 pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 
 /// What `miso_engine_web_v1_source_fill` answers for a refused read (issue #1387): no ring holds
@@ -455,8 +457,9 @@ pub struct WebBootOptions {
     /// The longest session document in bytes, or zero for the budget's own limit (issue #2191).
     ///
     /// A document of `n` bytes is projected to need `n * PARSE_TRANSIENT_MULTIPLIER` bytes of
-    /// transient memory to parse, so the effective budget already admits at most
-    /// `budget / PARSE_TRANSIENT_MULTIPLIER` bytes and a zero word adds no other limit. A nonzero
+    /// transient memory to parse beside the control frame's rows, so the effective budget already
+    /// admits at most `(budget - frame rows) / PARSE_TRANSIENT_MULTIPLIER` bytes (26,814,976 on
+    /// wasm at the defaults) and a zero word adds no other limit. A nonzero
     /// word is a tighter cap for a host that wants one (documents from other people): the boot
     /// document, `miso_engine_web_v1_document_ptr`, `miso_engine_web_v1_replace_document_ptr` and
     /// `SESSION_REPLACE` refuse a longer document, naming its bytes and the limit. The offset was
@@ -3704,8 +3707,10 @@ pub(crate) const fn memory_budget(options: &WebBootOptions) -> u64 {
     }
 }
 
-/// The longest document `options` admit (issue #2191): `budget / PARSE_TRANSIENT_MULTIPLIER`,
-/// or the `maximum_document_bytes` word when that is smaller. The boot, both document stagings
+/// The longest document `options` admit (issue #2191):
+/// `(budget - frame rows) / PARSE_TRANSIENT_MULTIPLIER` ([`control_frame_rows`]; 26,814,976 on
+/// wasm at the 512 MiB default and the 128 KiB frame), or the `maximum_document_bytes` word when
+/// that is smaller. The boot, both document stagings
 /// and the control plane's `SESSION_REPLACE` share it.
 pub(crate) fn maximum_document_bytes(options: &WebBootOptions) -> u32 {
     let rows = control_frame_rows(staged_control_frame_bytes(options)).unwrap_or(u64::MAX);
