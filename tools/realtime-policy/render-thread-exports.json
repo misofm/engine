@@ -5,6 +5,7 @@
     {"name": "render", "callers": [{"worklet": "engine", "handler": "process"}], "wrapped": true},
     {"name": "meter_lease", "callers": [{"worklet": "engine", "handler": "receiveMeterLease"}], "wrapped": true},
     {"name": "meter_poll", "callers": [{"worklet": "engine", "handler": "postMeterFrame"}], "wrapped": true},
+    {"name": "meter_header_ptr", "callers": [{"worklet": "engine", "handler": "syncMeterViews"}, {"worklet": "engine", "handler": "postMeterFrame"}], "wrapped": true},
     {"name": "source_submit", "callers": [{"worklet": "engine", "handler": "receiveSource"}, {"worklet": "feed", "handler": "drainSharedRing"}], "wrapped": true},
     {"name": "source_seek", "callers": [{"worklet": "engine", "handler": "receiveSeek"}, {"worklet": "feed", "handler": "applySharedSeek"}], "wrapped": true},
     {"name": "host_adopt", "callers": [{"worklet": "engine", "handler": "adoptRenderHalf"}], "wrapped": true},
@@ -32,7 +33,6 @@
     {"name": "control_response_ptr", "callers": [{"worklet": "engine", "handler": "readControlCommand"}], "wrapped": false, "reason": "single-mode control work (#1562a D1): the address of the last control response, read in the message handler"},
     {"name": "control_response_bytes", "callers": [{"worklet": "engine", "handler": "readControlCommand"}], "wrapped": false, "reason": "single-mode control work (#1562a D1): the length of the last control response, read in the message handler"},
     {"name": "control_revision", "callers": [{"worklet": "engine", "handler": "readControlCommand"}], "wrapped": false, "reason": "single-mode control work (#1562a, carry-forward 2): the committed revision the SDK's queue seeds from, read in the message handler"},
-    {"name": "meter_header_ptr", "callers": [{"worklet": "engine", "handler": "syncMeterViews"}], "wrapped": false, "reason": "single-mode control work (#1290d1): the address of the header the host publishes the meter frame through, read in the message handler to cut the views over a replacement plan's frame, never in process() or a render-locked window"},
     {"name": "control_allocation_count", "callers": [{"worklet": "engine", "handler": "receive"}], "wrapped": false, "reason": "the reader of the control allocation count, which the status reports as singleModeControlAllocations"}
   ]
 }

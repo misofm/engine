@@ -81,6 +81,75 @@ check_timer_policy() {
   [[ "${sites:-0}" == 1 && "${pinned:-0}" == 1 ]]
 }
 
+# Issue #1332 S7 (D8): the browser capabilities of the three JavaScript files. The main-realm host
+# holds exactly one `Worker(` site, `new Worker(workerUrl)`, which starts the control Worker, and
+# still no `Atomics`, `SharedArrayBuffer` construction, hand-made growth, `WebSocket` or clock. The
+# worklet holds no `Worker(`, `Atomics` (so no `Atomics.wait`), `SharedArrayBuffer` construction,
+# hand-made growth or `WebSocket`. The control Worker holds no `fetch(`, `WebSocket`, hand-made
+# growth, `Atomics.wait` or `Worker(`, no `setTimeout`, and exactly one `setInterval(` site, its
+# service tick between `SERVICE_TICK_BEGIN` and `SERVICE_TICK_END`. `--self-test-capabilities`
+# proves each rule can fire.
+check_capability_policy() {
+  local main=$1 worklet=$2 worker=$3
+  local sites pinned
+  if rg -q 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|performance\.now|Date\.now' "$main"; then
+    return 1
+  fi
+  [[ $(rg -c '\bWorker\(' "$main" || true) == 1 ]] || return 1
+  [[ $(rg -c 'new Worker\(workerUrl\);' "$main" || true) == 1 ]] || return 1
+  if rg -q 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|\bWorker\(' "$worklet"; then
+    return 1
+  fi
+  if rg -q 'fetch\(|WebSocket|memory\.grow|Atomics\.wait|\bWorker\(|setTimeout|importScripts' "$worker"; then
+    return 1
+  fi
+  sites=$(rg -c 'setInterval' "$worker" || true)
+  pinned=$(sed -n '/SERVICE_TICK_BEGIN/,/SERVICE_TICK_END/p' "$worker" | rg -c 'setInterval\(' || true)
+  [[ "${sites:-0}" == 1 && "${pinned:-0}" == 1 ]]
+}
+
+if (($# == 1)) && [[ $1 == --self-test-capabilities ]]; then
+  capability_dir=$(mktemp -d)
+  trap 'rm -rf -- "$capability_dir"' EXIT
+  main_ok="$capability_dir/main.js"
+  worklet_ok="$capability_dir/worklet.js"
+  worker_ok="$capability_dir/worker.js"
+  printf '%s\n' 'function start(workerUrl) {' '  const worker = new Worker(workerUrl);' '}' >"$main_ok"
+  printf '%s\n' 'class Processor { process() { return true; } }' >"$worklet_ok"
+  printf '%s\n' 'class ControlWorker {' '  // SERVICE_TICK_BEGIN' \
+    '  start() { this.tick = setInterval(() => this.run(), 3); }' '  // SERVICE_TICK_END' '}' >"$worker_ok"
+  check_capability_policy "$main_ok" "$worklet_ok" "$worker_ok" || {
+    echo "the valid capability fixtures were refused" >&2
+    exit 1
+  }
+  mutate() {
+    local name=$1 main=$2 worklet=$3 worker=$4
+    if check_capability_policy "$main" "$worklet" "$worker"; then
+      echo "capability mutation escaped policy: $name" >&2
+      exit 1
+    fi
+  }
+  with_line() {
+    local source=$1 line=$2 target=$3
+    { cat "$source"; printf '%s\n' "$line"; } >"$target"
+  }
+  with_line "$main_ok" 'function again(url) { return new Worker(url); }' "$capability_dir/m1.js"
+  mutate "a second Worker site in the main realm" "$capability_dir/m1.js" "$worklet_ok" "$worker_ok"
+  printf '%s\n' 'function none() {}' >"$capability_dir/m2.js"
+  mutate "no Worker site in the main realm" "$capability_dir/m2.js" "$worklet_ok" "$worker_ok"
+  with_line "$worklet_ok" 'function hold(word) { Atomics.wait(word, 0, 0); }' "$capability_dir/l1.js"
+  mutate "Atomics.wait in the worklet" "$main_ok" "$capability_dir/l1.js" "$worker_ok"
+  with_line "$worklet_ok" 'const worker = new Worker("x.js");' "$capability_dir/l2.js"
+  mutate "a Worker in the worklet" "$main_ok" "$capability_dir/l2.js" "$worker_ok"
+  for line in 'fetch("/x");' 'new WebSocket("ws://x");' 'memory.grow(1);' 'Atomics.wait(word, 0, 0);' \
+    'setTimeout(() => {}, 1);' 'setInterval(() => {}, 9);'; do
+    with_line "$worker_ok" "$line" "$capability_dir/w.js"
+    mutate "control Worker: $line" "$main_ok" "$worklet_ok" "$capability_dir/w.js"
+  done
+  echo "web AudioWorklet capability-policy mutations passed"
+  exit 0
+fi
+
 # Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`. The
 # scalar artifact and the dual-artifact selection are gone, so this file no longer has a
 # "scalar must contain no vector opcode" leg. No scalar wasm build is left at all: `lane` refuses
@@ -275,7 +344,8 @@ command -v wasm-objdump >/dev/null || {
   exit 2
 }
 
-# Issue #243: the set was six files; #2111 added the stem identities' BLAKE3 module, a seventh. `miso-engine-v1-abi-layout.json` joined it because the boot
+# Issue #243: the set was six files; #2111 added the stem identities' BLAKE3 module, a seventh, and
+# #1332 S7 the control Worker of `worker` mode, an eighth. `miso-engine-v1-abi-layout.json` joined it because the boot
 # ABI's bytes -- options offsets, result codes, the staging sequence -- were hand-written on the
 # JavaScript side five times over and drifted; it is emitted by the same generator, from the same
 # `offset_of!`s, and travels with the module it describes.
@@ -286,10 +356,11 @@ expected=$(printf '%s\n' \
   miso-engine-v1-audio-worklet.js \
   miso-engine-v1-audio-worklet.simd128.wasm \
   miso-engine-v1-blake3.simd128.wasm \
+  miso-engine-v1-control-worker.js \
   miso-engine-v1-parameter-metadata.json)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact seven frozen outputs" >&2
+  echo "artifact directory does not contain the exact eight frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
@@ -297,6 +368,7 @@ actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 simd="$artifact_dir/miso-engine-v1-audio-worklet.simd128.wasm"
 main_js="$artifact_dir/miso-engine-v1-audio-worklet-host.js"
 worklet_js="$artifact_dir/miso-engine-v1-audio-worklet.js"
+worker_js="$artifact_dir/miso-engine-v1-control-worker.js"
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/strip-wasm-names.py" check "$named" "$simd" || {
   echo "the named twin is not the shipped module plus its name section" >&2
   exit 1
@@ -566,10 +638,11 @@ printf '%s
 # at teardown, and the Worker calls the same two exports to hand it out and take it back. Neither
 # may reach an allocator, a deallocator or drop glue: the release and the adoption exchange
 # preallocated boxes, and every refusal path forgets or redeposits what it holds. The worklet's
-# bind and its render-diagnostic reads are held to the same rule.
+# bind and its render-diagnostic reads are held to the same rule. Issue #1332 S7 (root ruling
+# R-S7-meters): so is `meter_header_ptr`, which the worker-mode `process()` calls after `render()`.
 for export in miso_engine_web_v1_host_adopt miso_engine_web_v1_host_release \
   miso_engine_web_v1_instance_bind miso_engine_web_v1_render_diagnostic_ptr \
-  miso_engine_web_v1_render_diagnostic_bytes; do
+  miso_engine_web_v1_render_diagnostic_bytes miso_engine_web_v1_meter_header_ptr; do
   printf '%s
 ' "$named_disassembly" |
     python3 -B "$callgraph" --callgraph "$export" --render-thread || exit 1
@@ -587,14 +660,11 @@ done
 # line of the worklet. (`setTimeout` and `setInterval` are the pinned-site rule of
 # `check_timer_policy`, issue #1381a D6.) The clock is never read inside the frozen
 # `process()` policy body -- `process_policy_re` still bans both names there.
-if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(|performance\.now|Date\.now' "$main_js"; then
-  echo "forbidden browser capability found in the main-realm host" >&2
+# Issue #1332 S7: the rules and their self-test are `check_capability_policy`'s.
+check_capability_policy "$main_js" "$worklet_js" "$worker_js" || {
+  echo "forbidden browser capability in the main-realm host, the worklet or the control Worker" >&2
   exit 1
-fi
-if rg -n 'Atomics|new[[:space:]]+SharedArrayBuffer|memory\.grow|WebSocket|Worker\(' "$worklet_js"; then
-  echo "forbidden browser capability found in the worklet" >&2
-  exit 1
-fi
+}
 # Issue #1381a D6: the timers are a pinned-site rule, not a blanket ban (see `check_timer_policy`).
 check_timer_policy "$main_js" "$worklet_js" || {
   echo "a timer outside the pinned service tick, or no service tick" >&2
@@ -604,7 +674,7 @@ check_clock_policy "$worklet_js" || {
   echo "a clock is read outside the pinned renderClock() helper" >&2
   exit 1
 }
-if rg -n 'quantumFrames[[:space:]]*[:=][[:space:]]*128' "$main_js" "$worklet_js"; then
+if rg -n 'quantumFrames[[:space:]]*[:=][[:space:]]*128' "$main_js" "$worklet_js" "$worker_js"; then
   echo "hardcoded 128-frame quantum found" >&2
   exit 1
 fi

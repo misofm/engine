@@ -52,6 +52,15 @@ const MEMORY_MAXIMUM_PAGES = 8192;
 const TELEMETRY_WINDOW_BLOCKS = 128;
 
 const INIT_FIELDS = ["module", "document", "options"];
+// Issue #1332 S7 (D3): the processor options of `worker` mode. The control Worker booted the
+// session on `memory` and released its render half into `token`; `reservation` is the address of
+// the stack and TLS record `instance_reserve` wrote for this instance (four `u32` words:
+// `structSize`, `tlsBase`, `stackTop`, `stackBottom`).
+const WORKER_INIT_FIELDS = ["instanceMode", "module", "memory", "token", "reservation", "metersAttached"];
+const RESERVATION_BYTES = 16;
+// The page's requests the worklet answers in `worker` mode: the render half's leases and its
+// render-locked allocation count. Every other request goes to the control Worker.
+const WORKER_MODE_TAGS = new Set(["miso.meters.v1", "miso.telemetry.v1", "miso.renderallocations.v1"]);
 const OPTION_FIELDS = [
   "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
   "reserved3", "reserved2",
@@ -230,6 +239,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // was replaced, and never cuts a view.
     this.meterSet = null;
     this.pendingMeterSet = null;
+    // Issue #1332 S7: `worker` mode (the control Worker booted the session; this instance only
+    // renders) or `single` mode. Root ruling R-S7-meters: in `worker` mode `process()` switches
+    // meter sets only to a set the handler cut for exactly the header render reports, and counts
+    // each frame it skips instead.
+    this.workerMode = false;
+    this.controlPort = undefined;
+    this.memoryWords = null;
+    this.meterFramesSkipped = 0;
     // Issue #1294a: the watermark `(revision, first_sample)` pair last posted (or read at boot).
     this.watermarkRevision = -1n;
     this.watermarkSample = -1n;
@@ -246,6 +263,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // handler, outside `process()`. The service step follows every message, the main realm's
     // `miso.service.v1` tick included, so a displaced plan is reclaimed here and never in render.
     this.port.onmessage = (event) => {
+      if (this.workerMode) {
+        this.receiveWorkerMode(event.data);
+        return;
+      }
       try {
         this.receive(event.data);
         this.rebindMemoryViews();
@@ -272,6 +293,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   initialize(init) {
+    if (init?.instanceMode === "worker") return this.initializeWorker(init);
     const bootCommand = init?.bootCommand;
     if (!exactFields(init, bootCommand === undefined ? INIT_FIELDS : [...INIT_FIELDS, "bootCommand"])
         || !(init.document instanceof Uint8Array)
@@ -401,9 +423,162 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       resources: this.resources,
       memoryBytes: this.memoryBytes,
       sourceRingFrames,
+      instanceMode: "single",
     });
     this.ready = true;
     return RESULT_OK;
+  }
+
+  /// Issue #1332 S7 (D3): `worker` mode. Instantiate on the control Worker's memory, set this
+  /// instance's own stack and TLS from the reserved record before any other export runs (#1331
+  /// recipe rule 2), bind the reservation and adopt the render half. It never boots, disposes or
+  /// reserves; after this it calls only render-locked exports.
+  initializeWorker(init) {
+    if (!exactFields(init, WORKER_INIT_FIELDS) || typeof init.token !== "bigint" || init.token <= 0n
+        || init.token > 0xffffffffffffffffn || !u32(init.reservation) || init.reservation === 0
+        || typeof init.metersAttached !== "boolean"
+        || !(init.memory?.buffer instanceof SharedArrayBuffer)
+        || init.reservation + RESERVATION_BYTES > init.memory.buffer.byteLength) {
+      return RESULT_INVALID_ARGUMENT;
+    }
+    this.workerMode = true;
+    const record = new DataView(init.memory.buffer, init.reservation, RESERVATION_BYTES);
+    if (record.getUint32(0, true) !== RESERVATION_BYTES) return RESULT_INVALID_ARGUMENT;
+    this.instance = new WebAssembly.Instance(init.module, { env: { memory: init.memory } });
+    this.exports = this.instance.exports;
+    this.exports.__stack_pointer.value = record.getUint32(8, true);
+    this.exports.__wasm_init_tls(record.getUint32(4, true));
+    if (this.exports.miso_engine_web_v1_abi_version() !== ABI_VERSION) return 2;
+    const adopted = this.adoptRenderHalf(init);
+    if (adopted !== RESULT_OK) return adopted;
+    this.backend = "simd128";
+    this.memoryBuffer = this.exports.memory.buffer;
+    this.memoryWords = new Uint32Array(this.memoryBuffer);
+    const outputPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_OUTPUT_PCM);
+    const outputCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_OUTPUT_PCM);
+    const statusPointer = this.exports.miso_engine_web_v1_status_ptr(this.handle);
+    if (!u32(outputPointer) || outputPointer === 0 || !u32(statusPointer) || statusPointer === 0) {
+      return RESULT_INTERNAL;
+    }
+    this.bindView("statusView", DataView, statusPointer, 80);
+    const status = this.readStatus();
+    this.sampleRateHz = status.sampleRateHz;
+    this.quantumFrames = status.quantumFrames;
+    if (this.sampleRateHz !== globalThis.sampleRate
+        || this.quantumFrames !== (globalThis.renderQuantumSize ?? 128)
+        || this.quantumFrames === 0 || outputCapacity !== this.quantumFrames * 2 * 4) {
+      return RESULT_REPREPARE_REQUIRED;
+    }
+    if (status.backend !== 1 || status.state !== STATE_READY || status.lastResult !== RESULT_OK) {
+      return RESULT_INVALID_ARGUMENT;
+    }
+    this.bindView("outputLeft", Float32Array, outputPointer, this.quantumFrames);
+    this.bindView("outputRight", Float32Array,
+      outputPointer + this.quantumFrames * 4, this.quantumFrames);
+    this.metersAttached = init.metersAttached;
+    if (this.metersAttached && !this.bindMeterSet()) return RESULT_INTERNAL;
+    this.telemetryMessage = this.createTelemetryMessage();
+    this.port.postMessage({
+      tag: "miso.ready.v1",
+      requestId: 0,
+      result: RESULT_OK,
+      backend: this.backend,
+      instanceMode: "worker",
+    });
+    this.ready = true;
+    return RESULT_OK;
+  }
+
+  /// D3.1-D3.2: bind this instance to its reservation (so a release checks its stack canary) and
+  /// adopt the render half the token names. Both are render-locked and allocate nothing.
+  adoptRenderHalf(init) {
+    if (this.exports.miso_engine_web_v1_instance_bind(init.reservation) !== RESULT_OK) {
+      return RESULT_INTERNAL;
+    }
+    const result = this.exports.miso_engine_web_v1_host_adopt(init.token);
+    if (result !== RESULT_OK) return result;
+    this.handle = Number(init.token >> 32n);
+    return RESULT_OK;
+  }
+
+  /// D4.1: stop rendering and release the render half into a token for the control Worker, which
+  /// adopts it back and disposes the host. Nothing is freed here.
+  releaseRenderHalf() {
+    const token = this.handle === 0 ? 0n : this.exports.miso_engine_web_v1_host_release(this.handle);
+    this.disposed = true;
+    this.ready = false;
+    this.handle = 0;
+    this.controlPort.postMessage({ tag: "miso.released.v1", token: BigInt.asUintN(64, token) });
+  }
+
+  /// A message on the page's port in `worker` mode: the control Worker's channel port first, then
+  /// only the render half's requests (`WORKER_MODE_TAGS`).
+  receiveWorkerMode(message) {
+    if (this.controlPort === undefined) {
+      if (message?.tag === "miso.control-port.v1" && exactFields(message, ["tag", "port"])
+          && typeof message.port?.postMessage === "function") {
+        this.controlPort = message.port;
+        this.controlPort.onmessage = (event) => this.receiveControlPlane(event.data);
+        return;
+      }
+      this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0);
+      return;
+    }
+    if (!WORKER_MODE_TAGS.has(message?.tag)) {
+      this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0);
+      return;
+    }
+    this.receive(message);
+    this.rebindMemoryViews();
+    this.syncWorkerMeterViews();
+  }
+
+  /// A message from the control Worker (D7): the meter view of a committed plan (R-S7-meters 2),
+  /// a status read of the render fields, or the release of the render half (D4).
+  receiveControlPlane(message) {
+    if (message?.tag === "miso.meter-view.v1" && exactFields(message, ["tag", "header", "memoryBytes"])
+        && u32(message.header) && Number.isSafeInteger(message.memoryBytes)) {
+      if (this.disposed) return;
+      this.rebindMemoryViews();
+      const active = this.meterSet;
+      if (this.metersAttached && message.header !== 0 && active !== null
+          && message.header !== active.headerPointer) {
+        const pending = this.cutMeterSet(message.header);
+        if (pending !== null) this.pendingMeterSet = pending;
+      }
+      this.syncWorkerMeterViews();
+    } else if (message?.tag === "miso.render-status.v1"
+        && exactFields(message, ["tag", "requestId"])) {
+      this.controlPort.postMessage({
+        tag: "miso.render-status.v1",
+        requestId: message.requestId,
+        status: this.disposed ? null : {
+          ...this.readStatus(),
+          singleModeControlAllocations: this.exports.miso_engine_web_v1_control_allocation_count(),
+          staleViewQuanta: this.staleViewQuanta,
+          meterFramesSkipped: this.meterFramesSkipped,
+        },
+      });
+    } else if (message?.tag === "miso.release.v1" && exactFields(message, ["tag"])) {
+      if (!this.disposed) this.releaseRenderHalf();
+    } else {
+      this.sticky(RESULT_INTERNAL, 0);
+    }
+  }
+
+  /// R-S7-meters, in a message handler: when render reports a header other than the active set's,
+  /// cut the set for it now (the handler runs between two quanta), unless the pending set is it.
+  syncWorkerMeterViews() {
+    if (!this.metersAttached || this.disposed || !this.ready || this.stickyResult !== RESULT_OK
+        || this.handle === 0 || this.meterSet === null) return;
+    const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+    if (current === this.meterSet.headerPointer) return;
+    if (this.pendingMeterSet !== null && this.pendingMeterSet.headerPointer === current) return;
+    const set = this.cutMeterSet(current);
+    if (set !== null) {
+      this.meterSet = set;
+      this.pendingMeterSet = null;
+    }
   }
 
   /// Issue #207, #1562b: the compiled session's sources in canonical order, read from the engine's
@@ -454,6 +629,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const buffer = this.exports?.memory.buffer;
     if (buffer === undefined || buffer === this.memoryBuffer) return;
     this.memoryBuffer = buffer;
+    // The whole-memory view `process()` reads a header's words through in `worker` mode.
+    if (this.memoryWords !== null) this.memoryWords = new Uint32Array(buffer);
     for (const spec of this.viewSpecs) {
       this[spec.field] = new spec.Constructor(buffer, spec.pointer, spec.length);
     }
@@ -604,7 +781,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (sources === null) return false;
     this.sources = sources;
     this.sourceCount = sources.length;
+    this.metersAttached = init.options.liveControlMeterBlocks !== 0n;
+    if (this.metersAttached && !this.bindMeterSet()) return false;
+    this.telemetryMessage = this.createTelemetryMessage();
+    return true;
+  }
 
+  /// The meter set of the header the host publishes through now, checked against the frame
+  /// buffer the engine sized. Construction only.
+  bindMeterSet() {
     const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
       this.handle,
       BUFFER_METER_FRAME,
@@ -613,18 +798,19 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.handle,
       BUFFER_METER_FRAME,
     );
-    this.metersAttached = init.options.liveControlMeterBlocks !== 0n;
-    if (this.metersAttached) {
-      const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
-      if (!u32(headerPointer) || headerPointer === 0) return false;
-      const set = this.cutMeterSet(headerPointer);
-      // The buffer exports and the header describe one frame: the capacity check rejects a header
-      // whose counts do not match the frame the engine sized.
-      if (set === null || !u32(framePointer) || framePointer !== set.framePointer
-          || frameCapacity !== (set.trackCount + set.submixCount) * 3 * 4 + 12) return false;
-      this.meterSet = set;
-    }
-    this.telemetryMessage = {
+    const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+    if (!u32(headerPointer) || headerPointer === 0) return false;
+    const set = this.cutMeterSet(headerPointer);
+    // The buffer exports and the header describe one frame: the capacity check rejects a header
+    // whose counts do not match the frame the engine sized.
+    if (set === null || !u32(framePointer) || framePointer !== set.framePointer
+        || frameCapacity !== (set.trackCount + set.submixCount) * 3 * 4 + 12) return false;
+    this.meterSet = set;
+    return true;
+  }
+
+  createTelemetryMessage() {
+    return {
       tag: "miso.telemetry.v1",
       sequence: 0,
       blocks: TELEMETRY_WINDOW_BLOCKS,
@@ -636,11 +822,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       resolutionMs: this.clock.resolutionMs,
       belowResolution: true,
     };
-    return true;
   }
 
   failInitialization(result, requestId) {
-    if (this.handle !== 0 && !this.handleDisposed) {
+    // `worker` mode never disposes here: only the control Worker frees the host (D4). A half this
+    // instance adopted before a later check refused stays in it; returning it is S8's.
+    if (this.handle !== 0 && !this.handleDisposed && !this.workerMode) {
       this.handleDisposed = true;
       try {
         this.exports.miso_engine_web_v1_dispose(this.handle);
@@ -948,6 +1135,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         // handler re-bound the views (batch 7 CI fold). Zero when every growth is re-bound in the
         // handler that caused it.
         staleViewQuanta: this.staleViewQuanta,
+        // Issue #1332 S7 (R-S7-meters 3): the meter frames `process()` skipped in `worker` mode
+        // because render reported a header no handler had cut a matching set for. Always 0 here.
+        meterFramesSkipped: this.meterFramesSkipped,
       });
     } else {
       this.sticky(RESULT_INVALID_ARGUMENT, message?.requestId ?? 0, returnedPlanes);
@@ -1284,11 +1474,34 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     let set = this.meterSet;
     // A host booted without meters has no frame; the lease is then a no-op the host refuses.
     if (set === null) return;
-    // Issue #1290d1: a block that adopted a replacement plan published its frame and header in
-    // the plan's own, and marked the header it left. Switch to the views the handler that
-    // committed the plan cut over them: a reference assignment, no view is made here. A header
-    // that says it was replaced, without the set cut for the header it names, is a fault.
-    if (set.header.getUint32(METER_HEADER_RETIRED, true) !== 0) {
+    // Issue #1332 S7, root ruling R-S7-meters (1, 3): in `worker` mode the header that counts is
+    // the one render reports as current, never a retired header's successor (which may name freed
+    // tables). On a change, switch to the set the handler pre-cut only when its header, frame
+    // pointer and strip counts match the live header's words (compares only); otherwise check the
+    // header lies inside the whole-memory view, skip the frame and count the skip.
+    if (this.workerMode) {
+      const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+      if (current !== set.headerPointer) {
+        const next = this.pendingMeterSet;
+        const words = this.memoryWords;
+        const at = current >>> 2;
+        if (next === null || next.headerPointer !== current || current % 4 !== 0
+            || current + METER_HEADER_BYTES > words.byteLength
+            || words[at + 18] !== next.framePointer
+            || words[at + 2] !== next.trackCount || words[at + 16] !== next.submixCount) {
+          this.meterFramesSkipped += 1;
+          return;
+        }
+        this.meterSet = next;
+        this.pendingMeterSet = null;
+        set = next;
+      }
+    } else if (set.header.getUint32(METER_HEADER_RETIRED, true) !== 0) {
+      // Issue #1290d1, `single` mode: a block that adopted a replacement plan published its frame
+      // and header in the plan's own, and marked the header it left. Switch to the views the
+      // handler that committed the plan cut over them: a reference assignment, no view is made
+      // here. A header that says it was replaced, without the set cut for the header it names, is
+      // a fault.
       const next = this.pendingMeterSet;
       if (next === null
           || next.headerPointer !== set.header.getUint32(METER_HEADER_SUCCESSOR_POINTER, true)) {

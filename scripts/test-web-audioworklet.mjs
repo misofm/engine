@@ -201,6 +201,7 @@ async function testMainRealm() {
             nextAbsoluteSample: 64n, renderedQuanta: 1n, liveValuesSuperseded: 7n,
             appliedRevision: 9n, appliedSample: 64n, appliedOutcome: 1n,
             memoryBytes: 65536, singleModeControlAllocations: 3, staleViewQuanta: 0,
+            meterFramesSkipped: 0,
           };
           if (statusMutation !== null) response = statusMutation(response);
         } else if (received.tag === "miso.renderallocations.v1") {
@@ -294,6 +295,7 @@ async function testMainRealm() {
           // given and, for a zero override, 110 quanta: the engine's default ring at 48 kHz / 64.
           sourceRingFrames: options.processorOptions.options.sourceRingFrames
             || 110 * this.constructionQuantumFrames,
+          instanceMode: "single",
         };
         if (readyGate !== null) {
           const gate = readyGate;
@@ -2812,6 +2814,7 @@ async function testProcessor() {
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
         resources: processor.resources, memoryBytes: 196608, sourceRingFrames: 40 * 64,
+        instanceMode: "single",
       });
       return { processor, fake };
     };

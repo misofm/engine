@@ -212,6 +212,11 @@ export interface CreateEngineOptions<Context extends AudioContextLike = AudioCon
     /** The boot's spectrum taps as one `SPECTRUM_CONFIGURE` command frame (#2166), when it has taps. */
     readonly bootCommand?: Uint8Array;
     readonly workletModuleUrl: string;
+    /**
+     * `"single"` when the PCM feed is loaded (#1332 S7: its drain runs in the worklet, so the
+     * control plane must too until the Worker drains it); absent otherwise.
+     */
+    readonly instanceMode?: "single";
   }) => Promise<MisoAudioWorkletHost>;
   readonly policy?: BrowserBootPolicy;
   /**
@@ -257,6 +262,12 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   readonly shape: SessionShape;
   readonly context: Context;
   readonly host: MisoAudioWorkletHost;
+  /**
+   * Where the engine's control plane runs (#1332 D1): `"worker"` on a cross-origin-isolated page
+   * (a dedicated Worker boots and edits the session; the worklet only renders), `"single"`
+   * otherwise and whenever `pcmFeed` is loaded.
+   */
+  readonly instanceMode: "worker" | "single";
   /** One shared decimated meter lease for all SDK listeners. */
   subscribeMeters(listener: MeterListener): Promise<() => void>;
   /** One shared render-telemetry lease for all SDK listeners. */
@@ -825,6 +836,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       workletModuleUrl,
       ...(preparedModule === undefined ? {} : { preparedModule }),
       ...(bootCommand === undefined ? {} : { bootCommand }),
+      ...(pcmFeed === undefined || pcmFeed === false ? {} : { instanceMode: "single" as const }),
     });
     // D2 of #1596: an engine with taps must serve the spectrum frames, and its first plan must
     // carry them (#2166).
@@ -1512,6 +1524,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     };
     const engine: BrowserEngine<AudioContextLike> = Object.freeze({
       shape,
+      instanceMode: host.instanceMode === "worker" ? "worker" as const : "single" as const,
       context,
       host,
       subscribeMeters: (listener: MeterListener) => measurementFeeds.meters(listener),

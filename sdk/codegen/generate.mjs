@@ -55,6 +55,8 @@ const ARTIFACT_SET = [
   // Issue #2111: the stem identities' WebAssembly SIMD BLAKE3, which
   // `browser/stems/incremental-blake3.js` loads from `assets/`.
   "miso-engine-v1-blake3.simd128.wasm",
+  // Issue #1332 S7: the control Worker of `worker` mode, resolved beside the worklet module.
+  "miso-engine-v1-control-worker.js",
   "miso-engine-v1-parameter-metadata.json",
 ];
 
