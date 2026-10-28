@@ -720,3 +720,81 @@ render-thread table already lists (`adoptRenderHalf`, `releaseRenderHalf`,
 - **S8 note.** An orphaned render half (the Worker disposed while the half was away) must be
   disposable: `instance_bind` marks the instance render-only, and dispose on an unbound instance
   may free an adopted half.
+
+## S7 evidence (2026-10-28): the control Worker, the boot handoff and `instanceMode`
+
+Slice S7 of the #1332 build plan (#1332(b1)), branch `codex/issue-1332-worker-js` from S6
+(`c31ea5ae5`, the tree main `b0bec8ef9` merged).
+
+- **Control Worker** (new artifact `hosts/host-web/web/miso-engine-v1-control-worker.js`; the
+  set is eight files: `check-web-audioworklet.sh`, `build-web-audioworklet.sh`,
+  `sdk/codegen/generate.mjs`, `sdk/src/assets.ts` (`controlWorkerModule`), the package smoke, the
+  qualification server). It instantiates on the page's memory first, boots through the existing
+  boot exports (the #2166 boot command included), calls `instance_reserve(__tls_size,
+  __tls_align)` and `host_release`, and replies `miso.worker-ready.v1` `{handle, token,
+  reservation, metersAttached}` plus the ready fields. It then serves `miso.control.v1`, sources,
+  seeks, the session seek, seek-at, seek report, plan latency, the session map and the status's
+  control fields, and runs the service step, the watermark and the protocol events after every
+  request and on its own pinned service tick. A refused boot answers the worklet's result code.
+- **Main realm.** `mode = crossOriginIsolated ? "worker" : "single"`. Worker mode creates the
+  shared memory at the layout pages, starts the Worker beside the worklet module URL (one pinned
+  `new Worker(workerUrl)` site), and constructs the node only after the boot reply, with
+  `processorOptions {instanceMode, module, memory, token, reservation, metersAttached}`; the
+  Worker's `MessageChannel` port reaches the worklet as `miso.control-port.v1` on the node's port
+  (processor options cannot transfer a port). Requests route to the Worker except the meter and
+  telemetry leases and the render allocation count, which go to the worklet. No main-realm tick in
+  worker mode. A Worker `error`/`messageerror` before the reply rejects with
+  `{tag: "miso.worker-failed.v1", requestId: 0, result: 255, reason: "worker-failed"}`; no node is
+  built and nothing falls back. `host.instanceMode`, `engine.instanceMode`; `BrowserBootError`
+  gains `worker-failed`.
+- **Decision for root (not in the brief): an explicit `instanceMode: "single"` factory option.**
+  The SDK's PCM feed drains in the worklet's `process()` through `source_submit`, which a
+  render-only instance refuses, and the feed needs isolation, so on every page that loads it the
+  default would pick worker mode and break the feed (the isolated `pcm-feed-suspended` row and the
+  console). The SDK passes `instanceMode: "single"` whenever `pcmFeed` is set, until S11 drains the
+  feed in the Worker; the host refuses `"worker"` on a page without isolation. This is explicit, so
+  it is not a silent fallback; remove it with S11.
+- **Worklet worker branch** (`initializeWorker`): instantiates on `{env: {memory}}`, sets
+  `__stack_pointer` to the record's `stackTop`, then `__wasm_init_tls(tlsBase)`, checks the ABI,
+  `instance_bind(record)`, `host_adopt(token)`; never boots, disposes or reserves. Ready is
+  `{tag, requestId: 0, result, backend, instanceMode: "worker"}`; single mode's ready gains
+  `instanceMode: "single"`. Dispose (D4, pulled forward because it is three messages): page ->
+  Worker; Worker -> `miso.release.v1`; worklet `host_release`, posts `miso.released.v1 {token}`
+  and stops; Worker adopts back, disposes, answers; the page terminates the Worker. S8's failure
+  paths (an adoption refused after a later check, an orphaned half) are not done.
+- **Status in worker mode**: the Worker asks the worklet (`miso.render-status.v1`) for its render
+  half's status and counters and merges its own control fields (state when not ready, last result
+  when render reports none, `blockingRebuilds` 0, `memoryBytes`). `singleModeControlAllocations`
+  is the worklet instance's own counter (0); the Worker's control allocations are not reported.
+  New counter `meterFramesSkipped` in both modes (0 in single mode).
+- **R-S7-meters.** `meter_header_ptr` is wrapped in `render_locked`, held by the call-graph gate
+  (closure 1, no indirect site) and listed wrapped in `render-thread-exports.json` (callers
+  `syncMeterViews`, `postMeterFrame`). The Worker posts `miso.meter-view.v1 {header,
+  memoryBytes}` (`successor_header_ptr`) after each control call or tick when either changed; the
+  worklet's handler re-cuts its views, including one whole-memory `Uint32Array`, and cuts the set
+  for that header as pending. In worker mode `postMeterFrame` reads `meter_header_ptr` after
+  render; on a change it switches only when the pending set's header, frame pointer and track and
+  submix counts equal the live header's words (bounds-checked through the whole-memory view),
+  else it skips and counts. It never reads a retired header's successor. Single mode unchanged.
+- **Policy** (`check_capability_policy`, `--self-test-capabilities`, 10 red mutations): main realm
+  one `\bWorker\(` site, spelled `new Worker(workerUrl);`; worklet no `Worker(`/`Atomics`; Worker
+  file no `fetch(`, `WebSocket`, `memory.grow`, `Atomics.wait`, `Worker(`, `setTimeout`,
+  `importScripts`, exactly one pinned `setInterval(`.
+- **Hermetic tests** (`scripts/test-web-audioworklet.mjs`): main realm worker mode (memory pages,
+  Worker URL, processor options, routing, no main tick, dispose terminates, `worker-failed` for
+  `error` and `messageerror` with no node, a refused boot's code, explicit single, `worker`
+  refused unisolated); worklet worker mode (no boot, TLS after stack, bind, adopt, render, a
+  refused adoption fails without dispose, Worker-owned tags refused, meter switch on a full match,
+  skip and count when the counts differ or no set was cut, release posts the token); the control
+  Worker file (boot, reserve, release, control, service, meter view on change and on growth,
+  merged status, dispose adopts before freeing, refused boot). Red on mutants: worklet boots in
+  worker mode; no `instance_bind`; no `host_adopt`; meter switch without the compares (`counts
+  differ: the frame is skipped`); host mode always single; Worker error not typed; Worker error
+  resolves; Worker skips `host_release`; Worker posts no meter view; Worker disposes without
+  adopting back; Worker skips `instance_reserve`.
+- **Worker-mode smoke** (one run each, not a gate; S9 makes it a leg): the isolated qualification
+  server, an `OfflineAudioContext`, the empty session plus the `empty-boot-frame.json` structural
+  transaction, 64 fed blocks. Chromium 151.0.7922.34 and WebKit 26.5: `instanceMode` worker,
+  revision 2, peak 0.25, 64 quanta, `blockingRebuilds` 0, `singleModeControlAllocations` 0,
+  `renderAllocationCount` 0, `meterFramesSkipped` 0, meter frames carry the new plan's one track,
+  dispose clean. The same script unisolated: single, `blockingRebuilds` 1.
