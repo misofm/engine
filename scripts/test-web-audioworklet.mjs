@@ -69,11 +69,11 @@ async function settledState(promise) {
 const limits = Object.freeze({
   sourceRingFrames: 256,
   maximumMemoryBytes: 0n,
-  // Issue #137 D1/D2: the live-control meter word. `reserved1` (offset 32, issue #1565),
-  // `reserved3` (offset 48, the observation-taps word until issue #1590) and `reserved2` (offset
-  // 56, the master boot word until issue #1689) must be zero; the live-control tests below
-  // override the meter word.
-  reserved1: 0n,
+  // Issue #137 D1/D2: the live-control meter word. `maximumControlFrameBytes` (offset 32, issue
+  // #2191) is the engine's default frame at zero; `reserved3` (offset 48, the observation-taps
+  // word until issue #1590) and `reserved2` (offset 56, the master boot word until issue #1689)
+  // must be zero; the live-control tests below override the meter word.
+  maximumControlFrameBytes: 0n,
   liveControlMeterBlocks: 2n,
   reserved3: 0n,
   reserved2: 0n,
@@ -328,6 +328,8 @@ async function testMainRealm() {
           // given and, for a zero override, 110 quanta: the engine's default ring at 48 kHz / 64.
           sourceRingFrames: options.processorOptions.options.sourceRingFrames
             || 110 * this.constructionQuantumFrames,
+          // Issue #2191: the control frame the engine resolved; the fake reports 16 KiB.
+          controlFrameBytes: 16384,
           instanceMode: "single",
         };
         if (readyGate !== null) {
@@ -563,8 +565,7 @@ async function testMainRealm() {
         ["u32 bound", plainOptions({ sourceRingFrames: 0x1_0000_0000 })],
         ["u64 type", plainOptions({ maximumMemoryBytes: 0 })],
         ["u64 bound", plainOptions({ maximumMemoryBytes: 0x1_0000_0000_0000_0000n })],
-        ["reserved1 nonzero", plainOptions({ reserved1: 1n })],
-        ["reserved1 type", plainOptions({ reserved1: 0 })],
+        ["control frame type", plainOptions({ maximumControlFrameBytes: 0 })],
         // Issue #1590 gate 4: the retired observation-taps word is refused.
         ["reserved3 nonzero", plainOptions({ reserved3: 4n })],
         // Issue #1689 gate 2: the retired master word is refused at both ends of its range.
@@ -736,7 +737,7 @@ async function testMainRealm() {
         const options = {
           sourceRingFrames: 0,
           maximumMemoryBytes: 0n,
-          reserved1: 0n,
+          maximumControlFrameBytes: 0n,
           liveControlMeterBlocks: 7n,
           reserved3: 0n,
           reserved2: 0n,
@@ -2116,7 +2117,7 @@ async function testMainRealm() {
                 tag: "miso.worker-ready.v1", requestId: 0, result: 0, handle: 5,
                 token: (5n << 32n) | 1n, reservation: 70000, metersAttached: true,
                 backend: "simd128", resources: resourceReport(1, 64), memoryBytes: 1310720,
-                sourceRingFrames: 40 * 64,
+                sourceRingFrames: 40 * 64, controlFrameBytes: 16384,
               });
             }
           } else if (message.tag === "miso.control.v1") {
@@ -2765,6 +2766,7 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     },
     miso_engine_web_v1_source_count: () => sourceRows.length,
     miso_engine_web_v1_resolved_source_ring_frames: () => (calls.ringQuanta ?? 40) * quantum,
+    miso_engine_web_v1_control_frame_bytes: () => 16384,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
       if (id === undefined) return 0;
@@ -3166,25 +3168,25 @@ async function testQualificationBoot({
     assert.equal(sentinelStops, 5, "qualification boot contract: every non-attestation path must stop its sentinel");
     const plain = observed.filter(({ label }) =>
       label === "renderCorpusSegment" || label === "typedUnsupportedAttestation");
-    assert(plain.every(({ options }) => options.options.reserved1 === 0n
+    assert(plain.every(({ options }) => options.options.maximumControlFrameBytes === 0n
       && options.options.liveControlMeterBlocks === 0n
       && options.options.reserved3 === 0n
       && options.options.reserved2 === 0n),
     "qualification boot contract: plain option variant changed");
     const liveControlOptions = observed
       .find(({ label }) => label === "runLiveControlQualification").options.options;
-    assert.equal(liveControlOptions.reserved1, 0n);
+    assert.equal(liveControlOptions.maximumControlFrameBytes, 0n);
     assert.equal(liveControlOptions.liveControlMeterBlocks, 2n);
     assert.equal(liveControlOptions.reserved3, 0n);
     assert.equal(liveControlOptions.reserved2, 0n);
     const observationOptions = observed.find(({ label }) => label === "runObservationRun").options.options;
-    assert.equal(observationOptions.reserved1, 0n);
+    assert.equal(observationOptions.maximumControlFrameBytes, 0n);
     assert.equal(observationOptions.liveControlMeterBlocks, 2n);
     assert.equal(observationOptions.reserved3, 0n);
     assert.equal(observationOptions.reserved2, 0n);
     // Issue #1477 D2: the staging-read run boots the observation caller's live-control fields.
     const stagingReadOptions = observed.find(({ label }) => label === "runStagingReadRun").options.options;
-    assert.equal(stagingReadOptions.reserved1, 0n);
+    assert.equal(stagingReadOptions.maximumControlFrameBytes, 0n);
     assert.equal(stagingReadOptions.liveControlMeterBlocks, 2n);
     assert.equal(stagingReadOptions.reserved3, 0n);
     assert.equal(stagingReadOptions.reserved2, 0n);
@@ -3366,7 +3368,7 @@ async function testProcessor() {
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
         resources: processor.resources, memoryBytes: 196608, sourceRingFrames: 40 * 64,
-        instanceMode: "single",
+        controlFrameBytes: 16384, instanceMode: "single",
       });
       return { processor, fake };
     };

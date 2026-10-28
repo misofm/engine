@@ -22,7 +22,8 @@ they are the rules here:
 * the `bootOptions` block is 64 bytes and names exactly the eleven boot words, with the two
   `require_*` words and the three `liveControl*` words present under those exact spellings, because
   the SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them.
-  The word at offset 32 is `reserved1` (slice #1565A: the command-queue word is deleted);
+  The word at offset 32 is `maximumControlFrameBytes` (issue #2191; it was the command-queue word
+  until slice #1565A deleted it);
 * `resultCodes` is the eleven-value frozen ladder with no duplicate value and no duplicate name;
 * `bootResultAliases` is exactly three rows, every one of which **re-uses** a value that
   `resultCodes` already names under a *different* name -- that is what makes it an alias table
@@ -109,6 +110,7 @@ EXPORTS = [
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
+    "miso_engine_web_v1_control_frame_bytes",
     "miso_engine_web_v1_control_request_ptr",
     "miso_engine_web_v1_control_response_bytes",
     "miso_engine_web_v1_control_response_ptr",
@@ -172,7 +174,7 @@ STRUCTURES = {
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
-    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "reserved1",
+    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "maximumControlFrameBytes",
     "liveControlMeterBlocks", "reserved3", "reserved2",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and

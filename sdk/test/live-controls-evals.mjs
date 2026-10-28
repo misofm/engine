@@ -780,7 +780,7 @@ describe("#1563B -- the browser transport posts the same frames and decodes the 
       assert.equal(queue, again);
       const controls = await createBrowserLiveControls(host);
       assert.equal(controls.queue, queue);
-      assert.equal(queue.maximumFrameBytes, 16384, "the limit the core reported to the probe");
+      assert.equal(queue.maximumFrameBytes, 256 << 10, "the limit the core reported to the probe");
       assert.equal((await controls.submit(controls.edit.track("t").faderDb(-6))).ok, true);
       assert.equal((await createBrowserLiveControls(host)).queue.requestIds, queue.requestIds);
     } finally {

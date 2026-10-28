@@ -42,6 +42,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_control_allocation_count",
     "miso_engine_web_v1_control_command",
     "miso_engine_web_v1_control_event",
+    "miso_engine_web_v1_control_frame_bytes",
     "miso_engine_web_v1_control_request_ptr",
     "miso_engine_web_v1_control_response_bytes",
     "miso_engine_web_v1_control_response_ptr",
@@ -128,7 +129,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "reserved1",
+          "name": "maximumControlFrameBytes",
           "offset": 32,
           "type": "u64"
         },

@@ -102,7 +102,7 @@ const BOOT_FIELDS = [
   "tag", "module", "memory", "document", "options", "sampleRateHz", "quantumFrames", "workletPort",
 ];
 const OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
+  "sourceRingFrames", "maximumMemoryBytes", "maximumControlFrameBytes", "liveControlMeterBlocks",
   "reserved3", "reserved2",
 ];
 const SOURCE_FIELDS = [
@@ -321,17 +321,20 @@ class ControlWorker {
       resources: ready.resources,
       memoryBytes: this.buffer.byteLength,
       sourceRingFrames: ready.sourceRingFrames,
+      controlFrameBytes: ready.controlFrameBytes,
     });
     this.startServiceTick();
     return RESULT_OK;
   }
 
   writeBootOptions(pointer, options) {
-    const words = [options.reserved1, options.liveControlMeterBlocks, options.reserved3, options.reserved2];
+    const words = [
+      options.maximumControlFrameBytes, options.liveControlMeterBlocks, options.reserved3, options.reserved2,
+    ];
     if (!u32(options.sourceRingFrames) || !bounded64(options.maximumMemoryBytes, 0n)
         || options.maximumMemoryBytes > 0xffffffffn
         || words.some((value) => !bounded64(value, 0n) || value > 0xffffffffn)
-        || options.reserved1 !== 0n || options.reserved3 !== 0n || options.reserved2 !== 0n) {
+        || options.reserved3 !== 0n || options.reserved2 !== 0n) {
       return false;
     }
     const view = this.view(DataView, pointer, BOOT_OPTIONS_BYTES);
@@ -391,13 +394,16 @@ class ControlWorker {
     if (!u32(sourceRingFrames) || sourceRingFrames === 0
         || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
     this.feedHeadroom = this.feedHeadroomQuanta(sourceRingFrames / this.quantumFrames);
+    // Issue #2191: the control frame the boot resolved, which a zero word leaves to the engine.
+    const controlFrameBytes = e.miso_engine_web_v1_control_frame_bytes(this.handle);
+    if (!u32(controlFrameBytes) || controlFrameBytes === 0) return RESULT_INTERNAL;
     if (e.miso_engine_web_v1_watermark_read(this.handle) === RESULT_OK) {
       const view = this.view(DataView, e.miso_engine_web_v1_watermark_ptr(this.handle), WATERMARK_BYTES);
       this.watermarkRevision = view.getBigUint64(8, true);
       this.watermarkSample = view.getBigUint64(16, true);
       this.watermarkCounts = [32, 40, 48].map((offset) => view.getBigUint64(offset, true));
     }
-    return { resources, sourceRingFrames, metersAttached: this.metersAttached };
+    return { resources, sourceRingFrames, controlFrameBytes, metersAttached: this.metersAttached };
   }
 
   readResources(pointer) {

@@ -62,7 +62,7 @@ const RESERVATION_BYTES = 16;
 // render-locked allocation count. Every other request goes to the control Worker.
 const WORKER_MODE_TAGS = new Set(["miso.meters.v1", "miso.telemetry.v1", "miso.renderallocations.v1"]);
 const OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "reserved1", "liveControlMeterBlocks",
+  "sourceRingFrames", "maximumMemoryBytes", "maximumControlFrameBytes", "liveControlMeterBlocks",
   "reserved3", "reserved2",
 ];
 const SOURCE_FIELDS = [
@@ -420,6 +420,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const sourceRingFrames = this.exports.miso_engine_web_v1_resolved_source_ring_frames(this.handle);
     if (!u32(sourceRingFrames) || sourceRingFrames === 0
         || sourceRingFrames % this.quantumFrames !== 0) return RESULT_INTERNAL;
+    // Issue #2191: the control frame the boot resolved, which a zero word leaves to the engine.
+    const controlFrameBytes = this.exports.miso_engine_web_v1_control_frame_bytes(this.handle);
+    if (!u32(controlFrameBytes) || controlFrameBytes === 0) return RESULT_INTERNAL;
     this.memoryBytes = this.memoryBuffer.byteLength;
     this.port.postMessage({
       tag: "miso.ready.v1",
@@ -429,6 +432,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       resources: this.resources,
       memoryBytes: this.memoryBytes,
       sourceRingFrames,
+      controlFrameBytes,
       instanceMode: "single",
     });
     this.ready = true;
@@ -933,15 +937,16 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       throw new RangeError("Invalid boot option");
     }
     const liveControlWords = [
-      options.reserved1, options.liveControlMeterBlocks,
+      options.maximumControlFrameBytes, options.liveControlMeterBlocks,
       options.reserved3, options.reserved2,
     ];
     if (liveControlWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid live-control boot option");
     }
-    // Offsets 32, 48 and 56 are reserved and must be zero (issue #1565a D4, #1590 D5, #1689 D2):
-    // a writer that still sets a retired word is refused, never ignored.
-    if (options.reserved1 !== 0n || options.reserved3 !== 0n || options.reserved2 !== 0n) {
+    // Offsets 48 and 56 are reserved and must be zero (issue #1590 D5, #1689 D2): a writer that
+    // still sets a retired word is refused, never ignored. Offset 32 is the control frame word
+    // (issue #2191), which the engine bounds.
+    if (options.reserved3 !== 0n || options.reserved2 !== 0n) {
       throw new RangeError("Invalid reserved boot option");
     }
     const view = new DataView(this.exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);

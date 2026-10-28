@@ -220,7 +220,7 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
         field_offset(&document, "bootOptions", "maximumMemoryBytes"),
         24
     );
-    assert_eq!(field_offset(&document, "bootOptions", "reserved1"), 32);
+    assert_eq!(field_offset(&document, "bootOptions", "maximumControlFrameBytes"), 32);
     assert_eq!(field_offset(&document, "bootOptions", "reserved2"), 56);
     assert_eq!(field_offset(&document, "status", "sampleRateHz"), 20);
     assert_eq!(field_offset(&document, "status", "quantumFrames"), 24);

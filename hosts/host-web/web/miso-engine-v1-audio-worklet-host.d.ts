@@ -286,9 +286,11 @@ export interface MisoWebBootOptions {
   /// A budget above the module's shared-memory maximum (the ABI layout's `memory.maximumPages`
   /// pages, 512 MiB) is refused with `web.boot.memory_maximum` (issue #1380).
   maximumMemoryBytes: bigint;
-  /// Reserved (offset 32 of the boot options): must be exactly `0n`. It was the live-command queue
-  /// size until issue #1565.
-  reserved1: bigint;
+  /// The control frame in bytes, or `0n` for the engine's default, 256 KiB (offset 32 of the boot
+  /// options, issue 2191). It bounds every control frame, response and event; the engine refuses
+  /// a nonzero value below 16 KiB or above 16 MiB with `web.options.control_frame_bytes`. The host
+  /// reports the frame the engine resolved as `MisoAudioWorkletHost.controlFrameBytes`.
+  maximumControlFrameBytes: bigint;
   /// Meter window in render blocks, or `0n` for the engine's default window with no delivery
   /// (issues 137, 1581).
   liveControlMeterBlocks: bigint;
@@ -563,6 +565,9 @@ export interface MisoAudioWorkletHost {
   readonly backend: MisoWebBackend;
   readonly resources: MisoWebResourceReport;
   readonly memoryBytes: number;
+  /// The control frame the engine resolved at boot, in bytes (issue 2191): the boot option, or
+  /// the engine's default for `0n`. `control` refuses a longer frame.
+  readonly controlFrameBytes: number;
   /// Where the control plane runs (issue 1332 D1).
   readonly instanceMode: MisoInstanceMode;
   submitSource(request: MisoSourceRequest): Promise<MisoAck>;
@@ -606,7 +611,7 @@ export interface MisoAudioWorkletHost {
   /// Nothing in the frame is decoded here, and the engine decodes it in the worklet's message
   /// handler. The frame is copied. One request-ID allocator must serve every frame sent through
   /// this method, because the engine's replay cache refuses a reused ID with different bytes. A
-  /// frame that is empty or over 16384 bytes rejects with `RESULT_INVALID_ARGUMENT` (1), and more
+  /// frame that is empty or over `controlFrameBytes` rejects with `RESULT_INVALID_ARGUMENT` (1), and more
   /// than 64 frames in flight with `RESULT_BACKPRESSURE` (6), before the port. `document` (issue
   /// 1697) is the document a `SESSION_REPLACE` frame names, copied and sent beside it, up to the
   /// boot's 1 MiB document bound; an empty one rejects with `RESULT_INVALID_ARGUMENT` (1) before

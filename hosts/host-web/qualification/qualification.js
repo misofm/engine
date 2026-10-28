@@ -73,8 +73,8 @@ function bootOptions(sourceRingFrames, liveControlMeterBlocks = 0n) {
     // Zero is "no caller-imposed memory ceiling", the same word `tests/browser-v1` sends and the
     // same one the direct oracle writes at boot-options offset 24.
     maximumMemoryBytes: 0n,
-    // Issue #1565: offset 32 is reserved and must be zero.
-    reserved1: 0n,
+    // Issue #2191: offset 32 is the control frame word; zero is the engine's default frame.
+    maximumControlFrameBytes: 0n,
     liveControlMeterBlocks,
     // Issue #1590 D5: offset 48 was the observation-taps word; it is reserved and must be zero.
     // Every plan binds every declared tap.

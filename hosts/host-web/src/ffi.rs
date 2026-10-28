@@ -55,7 +55,7 @@ use crate::render_lock::{control_allocation_count, render_allocation_count, rend
 // Named by the exports' result docs only.
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM,
-    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, CONTROL_FRAME_BYTES, MAXIMUM_DOCUMENT_BYTES,
+    BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
     RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
     RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, RESULT_WRONG_STATE, RenderHost, STATE_READY,
     WebBootOptions, WebStatus,
@@ -119,7 +119,7 @@ const ZERO_BOOT_OPTIONS: WebBootOptions = WebBootOptions {
     source_ring_frames: 0,
     reserved0: 0,
     maximum_memory_bytes: 0,
-    reserved1: 0,
+    maximum_control_frame_bytes: 0,
     live_control_meter_blocks: 0,
     reserved3: 0,
     reserved2: 0,
@@ -577,7 +577,8 @@ fn stage_boot_command(len: u32) -> *mut u8 {
         };
         // Assignment frees the earlier bytes; the `ManuallyDrop` registers no destructor.
         *staging.command = Vec::new();
-        if live || len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
+        let frame = crate::resolved_control_frame_bytes(&staging.options);
+        if live || len == 0 || frame.is_none_or(|frame| len > frame) {
             return ptr::null_mut();
         }
         let count = len as usize;
@@ -1401,6 +1402,17 @@ pub extern "C" fn miso_engine_web_v1_source_frames(handle: u32, index: u32) -> u
                 .map_or(0, |shape| shape.frames)
         })
     })
+}
+
+/// Return the control frame the boot resolved, in bytes, or zero for an invalid handle (issue
+/// #2191).
+///
+/// A zero `maximumControlFrameBytes` boot option selects the engine's default frame; this is the
+/// one place a host reads the frame it got, so no host holds a copy of the default. Every control
+/// command frame, response and event frame is at most this long.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_control_frame_bytes(handle: u32) -> u32 {
+    render_locked(|| with_host(handle, 0, AudioWorkletEngineHost::control_frame_bytes))
 }
 
 /// Return the per-source ring frames the boot resolved, or zero for an invalid handle (#1406b).

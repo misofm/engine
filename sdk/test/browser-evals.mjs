@@ -186,19 +186,19 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
       assert.equal(wordAt(block, "structSize"), ABI_LAYOUT.structures.bootOptions.bytes);
       assert.equal(wordAt(block, "abiVersion"), ABI_LAYOUT.abiVersion);
       assert.equal(wordAt(block, "reserved0"), 0, "the reserved word must be zero or boot refuses");
-      assert.equal(wordAt(block, "reserved1"), 0n, "reserved1 must be zero or boot refuses web.options.reserved1");
+      assert.equal(wordAt(block, "maximumControlFrameBytes"), 0n, "an absent frame word is the engine's default");
       assert.equal(wordAt(block, "reserved3"), 0n, "reserved3 must be zero or boot refuses web.options.reserved3");
       assert.equal(wordAt(block, "reserved2"), 0n, "reserved2 must be zero or boot refuses web.options.reserved2");
     }
     assert.equal(bootOptionsAgree({}, PHYSICAL).maskedEqual, true);
   });
 
-  test("reserved1, reserved3 and reserved2 stay zero whatever live controls the caller sets", () => {
-    // Offset 32 was the live-command queue size, offset 48 the observation-taps word (#1590) and
-    // offset 56 the master boot word (#1689); the host now refuses a nonzero word. Red if the
-    // writer ever puts a policy value back into any of them.
+  test("reserved3 and reserved2 stay zero whatever live controls the caller sets", () => {
+    // Offset 48 was the observation-taps word (#1590) and offset 56 the master boot word (#1689);
+    // the host now refuses a nonzero word. Red if the writer ever puts a policy value back into
+    // either of them.
     const { scratch, worklet } = bootOptionsAgree(POLICY, PHYSICAL);
-    for (const word of ["reserved1", "reserved3", "reserved2"]) {
+    for (const word of ["reserved3", "reserved2"]) {
       assert.equal(wordAt(scratch, word), 0n, `scratch ${word}`);
       assert.equal(wordAt(worklet, word), 0n, `worklet ${word}`);
     }

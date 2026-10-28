@@ -113,6 +113,13 @@ export interface BootOptions {
   readonly sourceRingFrames?: number;
   /** Total boot memory budget. Absent selects the engine's default ceiling. */
   readonly maximumMemoryBytes?: bigint;
+  /**
+   * The control frame in bytes (issue #2191). Absent selects the engine's default (the ABI
+   * layout's `constants.defaultControlFrameBytes`, 256 KiB); the engine refuses a value below
+   * 16 KiB or above 16 MiB with `web.options.control_frame_bytes`. The frame bounds every
+   * control command, reply and event; the core reports it in `CAPABILITIES_GET`.
+   */
+  readonly maximumControlFrameBytes?: bigint;
   /** The stream hop of the boot's spectrum taps, sent in the boot's `SPECTRUM_CONFIGURE`. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
   /**
@@ -192,7 +199,7 @@ export function writeBootOptions(
   u32("requireQuantumFrames", options.requireQuantumFrames ?? 0);
   u32("sourceRingFrames", options.sourceRingFrames ?? 0);
   u64("maximumMemoryBytes", options.maximumMemoryBytes ?? 0n);
-  u64("reserved1", 0n);
+  u64("maximumControlFrameBytes", options.maximumControlFrameBytes ?? 0n);
   u64("liveControlMeterBlocks", BigInt(options.liveControls?.meterBlocks ?? 0));
   u64("reserved3", 0n);
   u64("reserved2", 0n);

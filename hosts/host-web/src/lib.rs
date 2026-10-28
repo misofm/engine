@@ -92,6 +92,20 @@ pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 /// `u32::MAX` queued chunks, and a granted read's room word is below `u32::MAX`.
 pub const SOURCE_FILL_REFUSED: u64 = u64::MAX;
 
+/// The control frame a zero `maximum_control_frame_bytes` boot word selects (issue #2191): 256
+/// KiB. The console's atomic bus add is a submix, a route to the master and one muted route per
+/// track, about `1344 + 336 * tracks` bytes, so one frame holds a bus add over about 775 tracks;
+/// every frame-scaled control buffer and the replay cache it implies cost about 2.25 MiB retained,
+/// under 0.5 % of [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
+pub const DEFAULT_CONTROL_FRAME_BYTES: u32 = 256 << 10;
+/// The smallest nonzero `maximum_control_frame_bytes` boot word (issue #2191): 16 KiB, the frame
+/// the browser qualified before the word existed. A smaller frame would refuse ordinary replies.
+pub const MINIMUM_CONTROL_FRAME_BYTES: u32 = 16 << 10;
+/// The largest `maximum_control_frame_bytes` boot word (issue #2191): 16 MiB, so every
+/// frame-scaled buffer and its doubled replay cache stay far inside the `u32` staging addresses
+/// and the 512 MiB module maximum.
+pub const MAXIMUM_CONTROL_FRAME_BYTES: u32 = 16 << 20;
+
 /// Default host memory ceiling used only when the embedding passes zero.
 ///
 /// 512 MiB matches the native runner profile and the browser app's historical quota-reserve
@@ -414,10 +428,15 @@ pub struct WebBootOptions {
     /// Total boot memory budget, or zero for [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
     /// Above [`WASM_MAXIMUM_MEMORY_PAGES`] pages boot refuses it with `web.boot.memory_maximum`.
     pub maximum_memory_bytes: u64,
-    /// Must be zero. This was the live-command queue word until #1565 deleted the browser's own
-    /// value commands; the offset keeps its place and the word is refused when nonzero
-    /// (`web.options.reserved1`).
-    pub reserved1: u64,
+    /// The control frame in bytes, or zero for [`DEFAULT_CONTROL_FRAME_BYTES`] (issue #2191).
+    ///
+    /// It bounds every control command frame the page stages, every response and event frame,
+    /// and the boot command; the control plane sizes its frame-scaled buffers and its replay cache
+    /// (`max(64 KiB, 2 * frame)`) from it, and the memory budget charges them. A nonzero value
+    /// outside [`MINIMUM_CONTROL_FRAME_BYTES`]..=[`MAXIMUM_CONTROL_FRAME_BYTES`] is refused
+    /// `web.options.control_frame_bytes`. The offset was the retired live-command queue word
+    /// (#1565); `miso_engine_web_v1_control_frame_bytes` reports the resolved value.
+    pub maximum_control_frame_bytes: u64,
     /// Meter window in render blocks, or `0` for host-core's default window with no delivery
     /// (issues #137 D2, #1581 D2).
     ///
@@ -452,7 +471,7 @@ impl WebBootOptions {
             source_ring_frames: 0,
             reserved0: 0,
             maximum_memory_bytes: 0,
-            reserved1: 0,
+            maximum_control_frame_bytes: 0,
             live_control_meter_blocks: 0,
             reserved3: 0,
             reserved2: 0,
@@ -692,8 +711,8 @@ struct ControlStaging {
     diagnostic_len: usize,
     source_id: Box<[u8]>,
     source_pcm: Box<[f32]>,
-    /// One control frame (issue #1562a D1): [`CONTROL_FRAME_BYTES`], the boot's
-    /// `maximum_control_frame_bytes`. Staged by the page, read by the control plane in place.
+    /// One control frame (issue #1562a D1): the boot's resolved `maximum_control_frame_bytes`
+    /// (issue #2191). Staged by the page, read by the control plane in place.
     control_request: Box<[u8]>,
     plane_references: Box<[MaybeUninit<&'static [f32]>]>,
 }
@@ -1212,6 +1231,9 @@ pub struct AudioWorkletEngineHost {
     /// The per-source ring the boot resolved (issue #1406b): the override, or on a zero override
     /// [`default_source_ring_frames`] at the session's rate and quantum.
     source_ring_frames: u32,
+    /// The control frame the boot resolved (issue #2191): the boot word, or on a zero word
+    /// [`DEFAULT_CONTROL_FRAME_BYTES`].
+    control_frame_bytes: u32,
     resources: WebResourceReport,
     /// The watermark `read_watermark` last copied (#1381a D5), at a stable address in the
     /// control half: all zero until the first successful read.
@@ -1277,6 +1299,8 @@ impl AudioWorkletEngineHost {
             ));
         }
         let options = validate_options(options)?;
+        let control_frame_bytes = resolved_control_frame_bytes(&options)
+            .ok_or_else(|| BootFailure::fixed(RESULT_INTERNAL, "web.internal.options"))?;
         let memory_budget = if options.maximum_memory_bytes == 0 {
             DEFAULT_MAXIMUM_MEMORY_BYTES
         } else {
@@ -1331,8 +1355,12 @@ impl AudioWorkletEngineHost {
                 "web.options.source_ring_frames",
             ));
         }
-        let projection =
-            project_buffers(document_bytes, shape.sample_rate_hz, shape.quantum_frames)?;
+        let projection = project_buffers(
+            document_bytes,
+            shape.sample_rate_hz,
+            shape.quantum_frames,
+            control_frame_bytes,
+        )?;
         let retained_projection = projected_retained_bytes(
             &session,
             source_ring_frames,
@@ -1356,6 +1384,7 @@ impl AudioWorkletEngineHost {
             &caps,
             options,
             memory_budget,
+            control_frame_bytes,
             projection.report,
             boot_command,
         )?;
@@ -1381,6 +1410,7 @@ impl AudioWorkletEngineHost {
         Ok(Self {
             options,
             source_ring_frames,
+            control_frame_bytes,
             resources,
             watermark: WebPlanWatermark {
                 struct_size: WATERMARK_BYTES,
@@ -1415,6 +1445,13 @@ impl AudioWorkletEngineHost {
             }),
             spare_shell: Some(Box::new(RenderHalf::shell(lease_supported))),
         })
+    }
+
+    /// The control frame the boot resolved (issue #2191): the boot word, or on a zero word
+    /// [`DEFAULT_CONTROL_FRAME_BYTES`]. A host bounds the frames it stages by this value.
+    #[must_use]
+    pub const fn control_frame_bytes(&self) -> u32 {
+        self.control_frame_bytes
     }
 
     /// Read the immutable boot options.
@@ -1591,11 +1628,11 @@ impl AudioWorkletEngineHost {
     }
 
     /// The staging buffer for one control command frame of `len` bytes (issue #1562a D1), or
-    /// `None` when `len` is zero or exceeds the boot's `maximum_control_frame_bytes`
-    /// (16 KiB) or the host is not ready. The page writes the frame here and
+    /// `None` when `len` is zero or exceeds the boot's resolved control frame
+    /// ([`Self::control_frame_bytes`]) or the host is not ready. The page writes the frame here and
     /// calls [`Self::control_command`].
     pub fn control_request_mut(&mut self, len: u32) -> Option<&mut [u8]> {
-        if !self.control_ready() || len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
+        if !self.control_ready() || len == 0 || len > self.control_frame_bytes {
             return None;
         }
         self.control
@@ -1648,8 +1685,8 @@ impl AudioWorkletEngineHost {
         if !self.control_ready() {
             return self.record(RESULT_WRONG_STATE);
         }
-        if len == 0 || u64::from(len) > CONTROL_FRAME_BYTES {
-            return self.record(RESULT_INVALID_ARGUMENT);
+        if len == 0 || len > self.control_frame_bytes {
+            return self.refuse_frame_length(len);
         }
         let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
@@ -1659,7 +1696,7 @@ impl AudioWorkletEngineHost {
             self.render.ready.as_mut().map(|ready| &mut ready.plan),
             len as usize,
             document,
-            CONTROL_FRAME_BYTES,
+            u64::from(self.control_frame_bytes),
         );
         self.publish_words_here();
         match result {
@@ -1704,6 +1741,21 @@ impl AudioWorkletEngineHost {
 
     /// A refused control call (#1562a D1, #1323): the core's diagnostic into the session
     /// diagnostic and the response, and the result code for `error`.
+    /// Refuse a control frame of `len` bytes, zero or over the boot's control frame (issue
+    /// #2191), with a diagnostic that names both, as the response. Control side only: the
+    /// diagnostic is formatted on the control path, never in `process()`.
+    fn refuse_frame_length(&mut self, len: u32) -> u32 {
+        let limit = self.control_frame_bytes;
+        let Some(control) = self.control.as_mut() else {
+            return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
+        };
+        let diagnostic =
+            format!("web.control.frame_bytes\t$[frame_bytes={len},limit_bytes={limit}]\n");
+        control.staging.write_diagnostic(diagnostic.as_bytes());
+        self.control_response = ControlResponse::Diagnostic;
+        self.record(RESULT_INVALID_ARGUMENT)
+    }
+
     fn refuse_control(&mut self, error: &control_plane::CommandError) -> u32 {
         let Some(control) = self.control.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
@@ -1782,7 +1834,10 @@ impl AudioWorkletEngineHost {
         let Some(control) = self.control.as_mut() else {
             return RESULT_REFUSED_LIFECYCLE;
         };
-        match control.control.dequeue_event(lane, CONTROL_FRAME_BYTES) {
+        match control
+            .control
+            .dequeue_event(lane, u64::from(self.control_frame_bytes))
+        {
             Ok(Some(length)) => {
                 self.control_response = ControlResponse::Frame(length);
                 RESULT_OK
@@ -3514,6 +3569,8 @@ impl From<Vec<u8>> for BootFailure {
 #[derive(Clone, Copy)]
 struct PreparedBufferProjection {
     source_samples: u64,
+    /// The control frame the boot resolved (issue #2191), the control request staging's length.
+    control_frame_bytes: u32,
     report: WebResourceReport,
 }
 
@@ -3530,6 +3587,7 @@ fn project_buffers(
     document_bytes: u32,
     sample_rate_hz: u32,
     quantum_frames: u32,
+    control_frame_bytes: u32,
 ) -> Result<PreparedBufferProjection, BootFailure> {
     // The staging holds what a rebuild may add, not only what the boot session declares (#1562b):
     // a source, track or submix ID of the longest length the grammar allows, and a source of the
@@ -3570,7 +3628,7 @@ fn project_buffers(
         id_staging_bytes,
         source_pcm_bytes,
         output_pcm_bytes,
-        CONTROL_FRAME_BYTES,
+        u64::from(control_frame_bytes),
         bridge_metadata,
     ];
     let retained = rows.into_iter().try_fold(0_u64, |total, row| {
@@ -3599,6 +3657,7 @@ fn project_buffers(
     report.largest_named_allocation_bytes = largest;
     Ok(PreparedBufferProjection {
         source_samples,
+        control_frame_bytes,
         report,
     })
 }
@@ -3616,7 +3675,7 @@ fn allocate_buffers(
         )
         .map_err(allocation)?,
         source_pcm: boxed_zero_f32(projection.source_samples).map_err(allocation)?,
-        control_request: boxed_zero_u8(CONTROL_FRAME_BYTES as u32).map_err(allocation)?,
+        control_request: boxed_zero_u8(projection.control_frame_bytes).map_err(allocation)?,
         plane_references: boxed_uninit_planes(
             u32::try_from(projection.source_samples / u64::from(projection.report.quantum_frames))
                 .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
@@ -3628,6 +3687,19 @@ fn allocate_buffers(
             .map_err(allocation)?,
     };
     Ok((staging, buffers))
+}
+
+/// The control frame `options` select (issue #2191): [`DEFAULT_CONTROL_FRAME_BYTES`] for a zero
+/// word, the word itself inside [`MINIMUM_CONTROL_FRAME_BYTES`]..=[`MAXIMUM_CONTROL_FRAME_BYTES`],
+/// and `None` outside it, which boot refuses `web.options.control_frame_bytes`. The boot command
+/// staging reads the staged options through it too, so both bound a frame alike.
+pub(crate) fn resolved_control_frame_bytes(options: &WebBootOptions) -> Option<u32> {
+    match options.maximum_control_frame_bytes {
+        0 => Some(DEFAULT_CONTROL_FRAME_BYTES),
+        word => u32::try_from(word)
+            .ok()
+            .filter(|frame| (MINIMUM_CONTROL_FRAME_BYTES..=MAXIMUM_CONTROL_FRAME_BYTES).contains(frame)),
+    }
 }
 
 fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootFailure> {
@@ -3653,12 +3725,12 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.reserved0",
         ));
     }
-    // #1565: the word at offset 32 was the live-command queue word. It is reserved now, and a
-    // writer that still sets it is refused rather than ignored.
-    if options.reserved1 != 0 {
+    // #2191: the control frame word. Zero is the default; a frame below the floor starves the
+    // replies, and one above the ceiling outgrows the staging addresses.
+    if resolved_control_frame_bytes(&options).is_none() {
         return Err(BootFailure::fixed(
             RESULT_REFUSED_OPTIONS,
-            "web.options.reserved1",
+            "web.options.control_frame_bytes",
         ));
     }
     // #1689: the word at offset 56 was the master boot word, reserved the same way.
@@ -3795,10 +3867,15 @@ fn prepare_caps(
 /// computed, as plain values, and the control plane's own fixed allocations.
 ///
 /// The byte ceilings are the memory budget, as the caps' are, and counts are unbounded: the
-/// boot's one physics gate is the budget. The control frame, the replay cache and the diagnostic
-/// are the control plane's fixed allocations; they are small and the same for every session, and
-/// the budget's exact check ([`exact_retained_bytes`]) charges them in the bridge rows.
-fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
+/// boot's one physics gate is the budget. The control frame (the boot word, issue #2191), the
+/// replay cache it implies and the diagnostic are the control plane's fixed allocations; they are
+/// the same for every session of one frame, and the budget's exact check
+/// ([`exact_retained_bytes`]) charges them in the bridge rows.
+fn control_limits(
+    caps: &HostPrepareCaps,
+    memory_budget: u64,
+    control_frame_bytes: u32,
+) -> ControlLimits {
     ControlLimits {
         source_ring_frames: caps.source_ring_frames,
         maximum_document_bytes: u64::from(MAXIMUM_DOCUMENT_BYTES),
@@ -3818,8 +3895,8 @@ fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
         maximum_meter_streams: caps.maximum_meter_streams,
         maximum_meter_items: caps.maximum_meter_items,
         maximum_meter_bytes: caps.maximum_meter_bytes,
-        maximum_control_frame_bytes: CONTROL_FRAME_BYTES,
-        maximum_replay_bytes: CONTROL_REPLAY_BYTES,
+        maximum_control_frame_bytes: u64::from(control_frame_bytes),
+        maximum_replay_bytes: control_replay_bytes(u64::from(control_frame_bytes)),
         maximum_replay_entries: CONTROL_REPLAY_ENTRIES,
         maximum_submixes: caps.maximum_submixes,
         maximum_vcas: caps.maximum_vcas,
@@ -3829,11 +3906,20 @@ fn control_limits(caps: &HostPrepareCaps, memory_budget: u64) -> ControlLimits {
     }
 }
 
-/// Bytes of the control plane's one control frame (#1381a): the request and response scratch the
-/// session keeps for the protocol the browser serves through the core.
-pub(crate) const CONTROL_FRAME_BYTES: u64 = 16 << 10;
-/// Bytes of the control plane's replay cache.
-const CONTROL_REPLAY_BYTES: u64 = 64 << 10;
+/// The control plane's replay cache for a control frame of `frame_bytes` (issue #2191):
+/// [`MINIMUM_CONTROL_REPLAY_BYTES`], or twice the frame when that is more. The protocol reserves a
+/// request plus its largest response before it runs a command and answers backpressure when the
+/// reservation exceeds the cache, so a cache smaller than two frames refuses every large command.
+const fn control_replay_bytes(frame_bytes: u64) -> u64 {
+    let doubled = frame_bytes * 2;
+    if doubled > MINIMUM_CONTROL_REPLAY_BYTES {
+        doubled
+    } else {
+        MINIMUM_CONTROL_REPLAY_BYTES
+    }
+}
+/// The smallest replay cache: what the browser's 16 KiB frame had before issue #2191.
+const MINIMUM_CONTROL_REPLAY_BYTES: u64 = 64 << 10;
 /// Entries of the control plane's replay cache.
 const CONTROL_REPLAY_ENTRIES: u64 = 32;
 
@@ -4763,6 +4849,7 @@ fn compile_ready(
     caps: &HostPrepareCaps,
     options: WebBootOptions,
     memory_budget: u64,
+    control_frame_bytes: u32,
     mut report: WebResourceReport,
     boot_command: Option<&[u8]>,
 ) -> Result<(ControlHalf, RenderReady, WebResourceReport), BootFailure> {
@@ -4771,7 +4858,7 @@ fn compile_ready(
     // status reads.
     let record = Arc::new(Mutex::new(BootRecord::default()));
     let preparer = WebRuntimePreparer::new(options).recording(Arc::clone(&record));
-    let limits = control_limits(caps, memory_budget);
+    let limits = control_limits(caps, memory_budget, control_frame_bytes);
     // #2166: a staged boot command (the SDK's boot spectrum taps) is applied before the first plan
     // is prepared, so the taps are that plan's and no rebuild is counted for them.
     let compiled = match boot_command {
