@@ -927,3 +927,78 @@ fn a_release_into_a_full_registry_keeps_the_half() {
         assert_eq!(host_web::miso_engine_web_v1_dispose(handle), RESULT_OK);
     });
 }
+
+/// #1332 S8: an orphaned render half is disposable. The Worker disposes its host while the half
+/// is away (a release that never came back in time); the worklet then releases the half, and the
+/// Worker adopts it into its empty slot and disposes it. A bound (render-only) instance never
+/// frees a half: its dispose refuses.
+///
+/// Test value: red if dispose refuses every render-only session (the orphan stays allocated with
+/// no export that frees it), or if it frees one on the bound worklet instance too (a free on the
+/// render thread).
+#[test]
+fn an_orphaned_render_half_is_freed_by_the_worker_that_adopts_it_back() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let step = Barrier::new(2);
+    let shared = Mutex::new((0_u32, 0_u64, None::<Reservation>));
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _guard = AbortOnPanic;
+            step.wait();
+            let (handle, token, reservation) = *shared.lock().expect("shared");
+            let reservation = reservation.expect("reserved");
+            assert_eq!(native_staging::instance_bind(reservation.record), RESULT_OK);
+            assert_eq!(host_web::miso_engine_web_v1_host_adopt(token), RESULT_OK);
+            let mut bits = Vec::new();
+            render_blocks(handle, 1, &mut bits);
+            assert_eq!(
+                host_web::miso_engine_web_v1_dispose(handle),
+                RESULT_WRONG_STATE,
+                "a bound instance never frees the half it renders"
+            );
+            assert!(
+                native_staging::render_status(handle).is_some(),
+                "the refused dispose leaves the half in place"
+            );
+            step.wait();
+            // The Worker disposed meanwhile; the half goes back late.
+            let back = host_web::miso_engine_web_v1_host_release(handle);
+            assert_ne!(back, 0, "the orphaned half is still released");
+            shared.lock().expect("shared").1 = back;
+            step.wait();
+        });
+        let _guard = AbortOnPanic;
+        let handle = boot();
+        let reservation =
+            native_staging::instance_reserve(TLS_SIZE, TLS_ALIGN).expect("a reservation");
+        let token = host_web::miso_engine_web_v1_host_release(handle);
+        *shared.lock().expect("shared") = (handle, token, Some(reservation));
+        step.wait();
+        step.wait();
+        assert_eq!(
+            host_web::miso_engine_web_v1_dispose(handle),
+            RESULT_OK,
+            "the Worker disposes its control half with the render half away"
+        );
+        assert!(native_staging::render_status(handle).is_none());
+        step.wait();
+        let back = shared.lock().expect("shared").1;
+        assert_eq!(
+            host_web::miso_engine_web_v1_host_adopt(back),
+            RESULT_OK,
+            "the late half is adopted into the empty slot"
+        );
+        assert!(native_staging::render_status(handle).is_some());
+        assert_eq!(
+            host_web::miso_engine_web_v1_dispose(handle),
+            RESULT_OK,
+            "the Worker frees the orphaned half"
+        );
+        assert!(
+            native_staging::render_status(handle).is_none(),
+            "nothing is left on the Worker"
+        );
+    });
+}

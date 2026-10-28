@@ -106,6 +106,12 @@ const SEEK_REPORT_FIELDS = [
 // Issue #1562a D1: the control frames in flight on the port at once. The worklet answers them in
 // arrival order; a flood is refused here with `RESULT_BACKPRESSURE` before any transfer.
 const MAXIMUM_CONTROL_IN_FLIGHT = 64;
+// Issue #1332 S8: how long a dispose waits for its reply before the page tears down directly and
+// rejects with `miso.teardown.v1` `dispose-timeout`. A live worklet (`single` mode) or Worker
+// answers in milliseconds; in `worker` mode the Worker itself gives up on the worklet's release
+// after 2 s and answers `release-timeout`, so 5 s leaves it room to dispose and answer first. A
+// browser may run the timer late (a throttled background tab), which only lengthens the wait.
+const DISPOSE_TIMEOUT_MS = 5000;
 // The engine's `maximum_control_frame_bytes` (`CONTROL_FRAME_BYTES` in the Rust host).
 const MAXIMUM_CONTROL_FRAME_BYTES = 16384;
 // Issue #207: one entry of the session map's source list. The names are the `.d.ts`'s and the
@@ -365,6 +371,67 @@ function isWorkerFailed(value) {
     && hasExactFields(value, ["tag", "requestId", "result", "reason"]);
 }
 
+/// Issue #1332 S8: the typed reason a dispose ended in a teardown nobody answered. `context-closed`:
+/// the context was closed, so no worklet answers; `dispose-timeout`: no dispose reply within
+/// `DISPOSE_TIMEOUT_MS`; `release-timeout` (from the control Worker, with the dispose's request
+/// ID): the worklet never released its render half, and the Worker disposed without it. The page
+/// has terminated the Worker and disconnected the node either way.
+function teardown(reason, requestId = 0) {
+  return Object.freeze({ tag: "miso.teardown.v1", requestId, result: 255, reason });
+}
+
+function isTeardown(value) {
+  return value?.tag === "miso.teardown.v1"
+    && hasExactFields(value, ["tag", "requestId", "result", "reason"]);
+}
+
+// The main realm's one timer site (#1381a D6, #1332 S8): the single-mode service tick, and the
+// dispose deadline in both modes.
+// SERVICE_TICK_BEGIN
+function startTimer(periodMs, run) {
+  return setInterval(run, periodMs);
+}
+// SERVICE_TICK_END
+
+/// A deadline that fires once, after `periodMs`, unless it is cancelled first.
+function deadline(periodMs) {
+  let timer = null;
+  const promise = new Promise((resolve) => {
+    timer = startTimer(periodMs, () => {
+      clearInterval(timer);
+      resolve(true);
+    });
+  });
+  return { promise, cancel: () => clearInterval(timer) };
+}
+
+/// Issue #1332 S8: the factory failed after the control Worker booted and the worklet was built
+/// (its construction failed, perhaps after it adopted the render half). Ask the Worker to dispose
+/// -- it takes the half back from the worklet, which released it, or from the registry -- and
+/// wait for the answer, bounded; the caller terminates the Worker next either way.
+async function disposeBootedWorker(worker) {
+  const timer = deadline(DISPOSE_TIMEOUT_MS);
+  const answered = new Promise((resolve) => {
+    worker.onmessage = (event) => { if (event.data?.requestId === 1) resolve(false); };
+    worker.onerror = (event) => {
+      event?.preventDefault?.();
+      resolve(false);
+    };
+    worker.onmessageerror = () => resolve(false);
+  });
+  try {
+    worker.postMessage({ tag: "miso.dispose.v1", requestId: 1 });
+    await Promise.race([answered, timer.promise]);
+  } catch (_) {
+    // A Worker that cannot take the message is terminated next.
+  } finally {
+    timer.cancel();
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.onmessageerror = null;
+  }
+}
+
 function isUnsupportedBrowser(value) {
   return value?.tag === "miso.unsupported.v1"
     && hasExactFields(value, ["tag", "requestId", "result", "capability"]);
@@ -423,6 +490,8 @@ class MisoAudioWorkletHost {
   #disposed = false;
   /// The one dispose in flight or done: a second `dispose()` returns the first one's promise.
   #disposePromise = null;
+  /// Issue #1332 S8: the control Worker raised `error` after its boot and was terminated.
+  #workerGone = false;
   #serviceTick = null;
   #numericBackend;
   #sampleRateHz;
@@ -462,7 +531,7 @@ class MisoAudioWorkletHost {
     if (worker !== undefined) {
       worker.onerror = (event) => {
         event?.preventDefault?.();
-        this.#fail(webError(255, this.#oldestRequestId()));
+        this.#failWorker();
       };
     }
     // A user-agent/processor crash cannot return storage already transferred out of this realm.
@@ -471,7 +540,20 @@ class MisoAudioWorkletHost {
     if (worker === undefined) this.#startServiceTick();
     // What the Worker posted, or how it failed, before this host took it over (#1332 S7).
     for (const message of early?.messages ?? []) this.#receive(message);
-    if (early?.failed === true) this.#fail(webError(255, this.#oldestRequestId()));
+    if (early?.failed === "error") this.#failWorker();
+    else if (early?.failed === "messageerror") this.#fail(webError(255, this.#oldestRequestId()));
+  }
+
+  /// Issue #1332 S8: a Worker `error` after the boot fails the host and terminates the Worker; a
+  /// later dispose then tears down at once (nobody is left to answer it).
+  #failWorker() {
+    if (this.#workerGone) return;
+    this.#workerGone = true;
+    this.#worker.onerror = null;
+    this.#worker.onmessage = null;
+    this.#worker.onmessageerror = null;
+    try { this.#worker.terminate(); } catch (_) { /* already gone */ }
+    this.#fail(webError(255, this.#oldestRequestId()));
   }
 
   // Issue #1381a D6: in `single` mode the instance's control work runs in the worklet's message
@@ -479,12 +561,10 @@ class MisoAudioWorkletHost {
   // `miso.service.v1` per quantum, from the one timer the main realm may hold. The browser may
   // clamp the period; no deadline depends on it, because deadlines are counted in render samples.
   // The loop starts when boot succeeds and stops before dispose, and on a failure.
-  // SERVICE_TICK_BEGIN
   #startServiceTick() {
     const periodMs = Math.max(1, Math.round((1000 * this.#quantumFrames) / this.#sampleRateHz));
-    this.#serviceTick = setInterval(() => this.#postServiceTick(), periodMs);
+    this.#serviceTick = startTimer(periodMs, () => this.#postServiceTick());
   }
-  // SERVICE_TICK_END
 
   #postServiceTick() {
     if (this.#disposed || this.#stickyError !== null) {
@@ -662,9 +742,29 @@ class MisoAudioWorkletHost {
       return;
     }
     const pending = this.#pending.get(message?.requestId) ?? null;
+    // Issue #1332 S8: the control Worker answers a dispose whose release timed out with the typed
+    // teardown; the dispose rejects with it (and the page tears down).
+    if (message?.tag === "miso.teardown.v1" && this.#worker !== undefined) {
+      if (pending?.response === "dispose" && isTeardown(message) && message.result === 255
+          && message.reason === "release-timeout") {
+        this.#release(pending);
+        pending.reject(Object.freeze(message));
+      } else {
+        this.#fail(webError(255, pending?.requestId ?? this.#oldestRequestId()));
+      }
+      return;
+    }
     const errorFields = message?.planes === undefined
       ? ["tag", "requestId", "result"]
       : ["tag", "requestId", "result", "planes"];
+    // Issue #1332 S8: in `worker` mode the worklet posts a sticky render failure, which belongs to
+    // no request, as request ID 0: the host fails with it, typed.
+    if (message?.tag === "miso.error.v1" && this.#worker !== undefined && message.requestId === 0
+        && hasExactFields(message, ["tag", "requestId", "result"])
+        && validResult(message.result) && message.result !== RESULT_OK) {
+      this.#fail(Object.freeze(message));
+      return;
+    }
     if (message?.tag === "miso.error.v1" && hasExactFields(message, errorFields)) {
       const validPlanes = pending?.response === "source"
         ? validReturnedPlanes(message.planes, pending.planeShape)
@@ -1196,15 +1296,22 @@ class MisoAudioWorkletHost {
   /// typed error otherwise, and either way the page terminates the Worker and disconnects the node,
   /// exactly once. A failed worker-mode host is unusable, so there is no retry. In `single` mode a
   /// failed dispose may be retried: the promise is dropped and the service tick it stopped runs
-  /// again.
+  /// again, unless it ended in a teardown.
+  ///
+  /// #1332 S8: a dispose ends in teardown even when nobody answers. A closed context, or no reply
+  /// within `DISPOSE_TIMEOUT_MS`, tears down directly and rejects with `miso.teardown.v1`. In
+  /// `worker` mode a closed context still asks the Worker to dispose its control half (with no
+  /// release: the render half stays with the dead worklet and goes with the memory), bounded.
   dispose() {
     if (this.#worker !== undefined) {
       this.#disposePromise ??= this.#disposeWorkerMode();
       return this.#disposePromise;
     }
     this.#disposePromise ??= this.#disposeSingleMode().catch((error) => {
-      this.#disposePromise = null;
-      if (!this.#disposed && this.#serviceTick === null) this.#startServiceTick();
+      if (!this.#disposed) {
+        this.#disposePromise = null;
+        if (this.#serviceTick === null) this.#startServiceTick();
+      }
       throw error;
     });
     return this.#disposePromise;
@@ -1212,7 +1319,13 @@ class MisoAudioWorkletHost {
 
   async #disposeWorkerMode() {
     try {
-      await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
+      // A Worker that failed after its boot was terminated: nobody is left to answer.
+      if (this.#workerGone) throw this.#stickyError;
+      const renderGone = this.node.context?.state === "closed";
+      await this.#awaitDispose(renderGone
+        ? { tag: "miso.dispose.v1", renderGone: true }
+        : { tag: "miso.dispose.v1" });
+      if (renderGone) throw teardown("context-closed");
     } finally {
       this.#teardown();
     }
@@ -1221,8 +1334,32 @@ class MisoAudioWorkletHost {
   async #disposeSingleMode() {
     if (this.#disposed) return;
     this.#stopServiceTick();
-    await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
+    // A closed context's worklet answers nothing: tear down directly.
+    if (this.node.context?.state === "closed") {
+      this.#teardown();
+      throw teardown("context-closed");
+    }
+    try {
+      await this.#awaitDispose({ tag: "miso.dispose.v1" });
+    } catch (error) {
+      if (isTeardown(error)) this.#teardown();
+      throw error;
+    }
     this.#teardown();
+  }
+
+  /// Send the dispose and wait for its reply, at most `DISPOSE_TIMEOUT_MS`: past it, the dispose
+  /// rejects with `dispose-timeout` (the reply, should it come, is dropped by the teardown).
+  async #awaitDispose(message) {
+    const reply = this.#request(message, [], "dispose", true);
+    reply.catch(() => undefined);
+    const timer = deadline(DISPOSE_TIMEOUT_MS);
+    try {
+      const timedOut = await Promise.race([reply.then(() => false), timer.promise]);
+      if (timedOut) throw teardown("dispose-timeout");
+    } finally {
+      timer.cancel();
+    }
   }
 
   /// Runs once, after the dispose reply (or, in worker mode, its failure).
@@ -1276,7 +1413,7 @@ function bootControlWorker(workerUrl, boot) {
     // Between the boot reply and the host's construction (the worklet's adoption), the Worker
     // may already post (its tick's watermark or events) or fail: the messages are kept in order
     // and a failure is remembered, and the host replays both when it takes the Worker over.
-    const early = { messages: [], failed: false };
+    const early = { messages: [], failed: null };
     const finish = (operation, value) => {
       if (settled) return;
       settled = true;
@@ -1289,9 +1426,9 @@ function bootControlWorker(workerUrl, boot) {
         worker.onmessage = (event) => { early.messages.push(event.data); };
         worker.onerror = (event) => {
           event?.preventDefault?.();
-          early.failed = true;
+          early.failed = "error";
         };
-        worker.onmessageerror = () => { early.failed = true; };
+        worker.onmessageerror = () => { early.failed ??= "messageerror"; };
       }
       operation(value);
     };
@@ -1518,10 +1655,13 @@ export async function createMisoAudioWorkletHost(options) {
       booted?.early,
     );
   } catch (error) {
-    cleanupNode(node);
     if (booted !== undefined) {
+      // #1332 S8: a worklet was built, so it may have adopted the render half: the Worker takes
+      // it back and disposes before it is terminated.
+      if (node !== undefined) await disposeBootedWorker(booted.worker);
       try { booted.worker.terminate(); } catch (_) { /* already gone */ }
     }
+    cleanupNode(node);
     if (isUnsupportedBrowser(error) || isWorkerFailed(error)) throw error;
     if (error?.tag === "miso.error.v1" && hasExactFields(error, ["tag", "requestId", "result"])
         && error.requestId === 0 && validResult(error.result)) throw error;

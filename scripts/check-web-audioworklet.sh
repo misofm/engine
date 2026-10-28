@@ -66,11 +66,12 @@ check_clock_policy() {
 }
 
 # Issue #1381a D6: the timers. The worklet never holds a timer, and the main-realm host holds exactly
-# one `setInterval(` site, the single-mode service tick, between the markers
-# `SERVICE_TICK_BEGIN` and `SERVICE_TICK_END`. `setTimeout` stays banned in both files. Control
-# work of the `single` mode runs in the worklet's message handler, so the worklet needs a message
-# to run on; the tick is that message, posted once per quantum, and nothing else in the main realm
-# may run on a timer. A second site, a site outside the markers or a timer in the worklet is red.
+# one `setInterval(` site, between the markers `SERVICE_TICK_BEGIN` and `SERVICE_TICK_END`.
+# `setTimeout` stays banned in both files. Control work of the `single` mode runs in the worklet's
+# message handler, so the worklet needs a message to run on; the single-mode service tick is that
+# message, posted once per quantum. The same site runs the one other main-realm timer, the dispose
+# deadline of both modes (#1332 S8), which fires once and is cleared. A second site, a site
+# outside the markers or a timer in the worklet is red.
 check_timer_policy() {
   local main=$1 worklet=$2
   local sites pinned

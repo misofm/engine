@@ -309,6 +309,12 @@ pub(crate) fn bind(record: usize) -> bool {
     true
 }
 
+/// Whether this instance bound a reservation: a render-only instance (the worklet), which never
+/// frees a render half (#1332 S8). The instance that booted the host (the Worker) binds none.
+pub(crate) fn instance_bound() -> bool {
+    BOUND_CANARY.try_with(core::cell::Cell::get).unwrap_or(0) != 0
+}
+
 /// Whether the canary of the reservation this instance is bound to is intact; `true` for an
 /// instance bound to none. Eight word loads and compares: the render export checks it before
 /// every block of a bound render-only session, and the release once more.

@@ -245,6 +245,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // each frame it skips instead.
     this.workerMode = false;
     this.controlPort = undefined;
+    // #1332 S8: the token of a half this instance released because its construction failed after
+    // the adoption (`0n`: none), answered on the Worker's release; whether that release was
+    // answered; and whether the page already holds this instance's sticky error.
+    this.releasedToken = 0n;
+    this.releaseAnswered = false;
+    this.stickyPosted = false;
     this.memoryWords = null;
     this.meterFramesSkipped = 0;
     // Issue #1294a: the watermark `(revision, first_sample)` pair last posted (or read at boot).
@@ -434,6 +440,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// recipe rule 2), bind the reservation and adopt the render half. It never boots, disposes or
   /// reserves; after this it calls only render-locked exports.
   initializeWorker(init) {
+    // Set first: even a refused construction takes the Worker's channel port and answers its
+    // release (#1332 S8), so the Worker never waits on a worklet that never rendered.
+    this.workerMode = true;
     if (!exactFields(init, WORKER_INIT_FIELDS) || typeof init.token !== "bigint" || init.token <= 0n
         || init.token > 0xffffffffffffffffn || !u32(init.reservation) || init.reservation === 0
         || typeof init.metersAttached !== "boolean"
@@ -441,7 +450,6 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         || init.reservation + RESERVATION_BYTES > init.memory.buffer.byteLength) {
       return RESULT_INVALID_ARGUMENT;
     }
-    this.workerMode = true;
     const record = new DataView(init.memory.buffer, init.reservation, RESERVATION_BYTES);
     if (record.getUint32(0, true) !== RESERVATION_BYTES) return RESULT_INVALID_ARGUMENT;
     this.instance = new WebAssembly.Instance(init.module, { env: { memory: init.memory } });
@@ -505,10 +513,16 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   /// adopts it back and disposes the host. Nothing is freed here.
   /// A release that throws (an instance a render trap killed) still answers, with no token (`0n`):
   /// the Worker then disposes without the half, and the page's dispose never waits forever.
+  /// #1332 S8: answered once; after a construction that failed past the adoption, the answer is
+  /// the token that failure released.
   releaseRenderHalf() {
-    let token = 0n;
+    if (this.releaseAnswered) return;
+    this.releaseAnswered = true;
+    let token = this.releasedToken;
     try {
-      if (this.handle !== 0) token = BigInt.asUintN(64, this.exports.miso_engine_web_v1_host_release(this.handle));
+      if (token === 0n && this.handle !== 0) {
+        token = BigInt.asUintN(64, this.exports.miso_engine_web_v1_host_release(this.handle));
+      }
     } catch (_) {
       token = 0n;
     }
@@ -575,10 +589,21 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         },
       });
     } else if (message?.tag === "miso.release.v1" && exactFields(message, ["tag"])) {
-      if (!this.disposed) this.releaseRenderHalf();
+      this.releaseRenderHalf();
+    } else if (message?.tag === "miso.render-check.v1" && exactFields(message, ["tag"])) {
+      this.reportRenderFailure();
     } else {
       this.sticky(RESULT_INTERNAL, 0);
     }
+  }
+
+  /// #1332 S8: a render failure is sticky in `process()`, which posts no fatal. On the control
+  /// Worker's render check, a failure the page has not heard of yet is posted to it once, as the
+  /// typed `miso.error.v1` with request ID 0; the page fails sticky with it.
+  reportRenderFailure() {
+    if (this.disposed || this.stickyPosted || this.stickyResult === RESULT_OK) return;
+    this.stickyPosted = true;
+    this.port.postMessage({ tag: "miso.error.v1", requestId: 0, result: this.stickyResult });
   }
 
   /// R-S7-meters, in a message handler: when render reports a header other than the active set's,
@@ -857,7 +882,15 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
 
   failInitialization(result, requestId) {
     // `worker` mode never disposes here: only the control Worker frees the host (D4). A half this
-    // instance adopted before a later check refused stays in it; returning it is S8's.
+    // instance adopted before a later check refused leaves it now (#1332 S8): it is released into
+    // the registry, and the token answers the Worker's release, which the page asks for.
+    if (this.workerMode && this.handle !== 0) {
+      try {
+        this.releasedToken = BigInt.asUintN(64, this.exports.miso_engine_web_v1_host_release(this.handle));
+      } catch (_) {
+        this.releasedToken = 0n;
+      }
+    }
     if (this.handle !== 0 && !this.handleDisposed && !this.workerMode) {
       this.handleDisposed = true;
       try {
@@ -870,6 +903,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.ready = false;
     this.disposed = true;
     this.stickyResult = result;
+    this.stickyPosted = true;
     if (!this.initializationErrorPosted) {
       this.initializationErrorPosted = true;
       try {
@@ -977,6 +1011,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   sticky(result, requestId, planes) {
     this.ready = false;
     this.stickyResult = result;
+    this.stickyPosted = true;
     const message = { tag: "miso.error.v1", requestId, result };
     if (planes !== undefined) message.planes = planes;
     this.port.postMessage(message, this.transferList(planes));
