@@ -42,6 +42,16 @@ const PLAN_LATENCY_WORDS = [["samples", 8], ["tailKind", 16], ["tailSamples", 24
 // little-endian `u32` words, `structSize`, `tlsBase`, `stackTop`, `stackBottom`.
 const RESERVATION_BYTES = 16;
 const CONTROL_EVENT_LANES = [0, 1];
+// #1332 S8: how long a dispose waits for the worklet's `miso.released.v1` before it disposes the
+// host with no token and answers the page `release-timeout`. The worklet answers a release from
+// its message handler between two quanta, so a live worklet answers in milliseconds; 2 s is
+// about 750 quanta at 48 kHz / 128 and stays well inside the page's own 5 s dispose bound, so the
+// page hears this Worker's typed reason before it gives up on the Worker itself.
+const RELEASE_TIMEOUT_MS = 2000;
+// #1332 S8: how often the service tick asks the worklet whether render failed (it has no timer
+// of its own and `process()` posts no fatal), so a sticky render failure reaches the page within
+// about this long.
+const RENDER_CHECK_MS = 50;
 const MAXIMUM_CONTROL_EVENTS_PER_LANE = 16;
 
 const BOOT_FIELDS = [
@@ -69,6 +79,12 @@ const RESOURCE_NAMES = [
   "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes", "graphMetadataBytes",
   "graphDelayBytes", "largestNamedAllocationBytes", "observationRetainedBytes",
 ];
+
+/// The Worker's clock, for the release deadline and the render check only (no deadline of the
+/// engine depends on it; those are counted in render samples).
+function clock() {
+  return globalThis.performance.now();
+}
 
 function exactFields(value, fields) {
   if (value === null || typeof value !== "object") return false;
@@ -120,6 +136,13 @@ class ControlWorker {
     // The result of the finished dispose (undefined until then); a later dispose request gets it.
     this.disposeOutcome = undefined;
     // Set once a dispose began: every later control call is refused `WRONG_STATE`.
+    // #1332 S8: the reason a dispose ended without the half (`release-timeout`), the clock time
+    // it gives up on the release, the token the boot released (taken back when the worklet never
+    // adopted it) and the last render check.
+    this.disposeReason = undefined;
+    this.releaseDeadline = 0;
+    this.bootToken = 0n;
+    this.lastRenderCheck = 0;
     this.disposing = false;
     scope.onmessage = (event) => this.onPageMessage(event.data);
     scope.onmessageerror = () => this.fatal(RESULT_INTERNAL, this.lastRequestId);
@@ -137,7 +160,7 @@ class ControlWorker {
     if (this.disposed) {
       // Only a dispose is answered once the host is gone: with the finished dispose's outcome.
       if (message?.tag === "miso.dispose.v1" && Number.isSafeInteger(message.requestId)) {
-        this.acknowledge(message.requestId, this.disposeOutcome ?? RESULT_INTERNAL);
+        this.answerDispose(message.requestId);
       }
       return;
     }
@@ -226,6 +249,8 @@ class ControlWorker {
       return this.disposeAfterFailedBoot(RESULT_INTERNAL);
     }
     this.ready = true;
+    this.bootToken = unsigned;
+    this.lastRenderCheck = clock();
     this.postedMemoryBytes = this.buffer.byteLength;
     this.scope.postMessage({
       tag: "miso.worker-ready.v1",
@@ -403,11 +428,30 @@ class ControlWorker {
   // SERVICE_TICK_END
 
   tick() {
-    if (this.disposed || !this.ready) {
+    if (this.disposed) {
+      this.stopServiceTick();
+      return;
+    }
+    // #1332 S8: while a dispose waits for the worklet's release, the tick only keeps its deadline.
+    if (this.disposing) {
+      if (clock() >= this.releaseDeadline) this.finishDispose(0n, "release-timeout");
+      return;
+    }
+    if (!this.ready) {
       this.stopServiceTick();
       return;
     }
     this.afterControl(0);
+    this.checkRender();
+  }
+
+  /// #1332 S8: ask the worklet, at most every `RENDER_CHECK_MS`, whether render failed; a failed
+  /// worklet posts its typed fatal to the page. Nothing is posted back when render is well.
+  checkRender() {
+    const now = clock();
+    if (now - this.lastRenderCheck < RENDER_CHECK_MS) return;
+    this.lastRenderCheck = now;
+    this.workletPort.postMessage({ tag: "miso.render-check.v1" });
   }
 
   stopServiceTick() {
@@ -756,7 +800,8 @@ class ControlWorker {
   /// memory, name the newest committed replacement's meter header and the memory's length to the
   /// worklet, whose message handler cuts the views before render adopts that plan.
   postMeterView() {
-    if (this.disposed || this.handle === 0 || this.workletPort === undefined) return;
+    // Nothing is named once a dispose asked for the release: the worklet renders no more.
+    if (this.disposed || this.disposing || this.handle === 0 || this.workletPort === undefined) return;
     // An `i32` result: normalised to its `u32` address (the memory is capped at 512 MiB, 8192
     // pages, so no address reaches 2 GiB; the normalisation is belt and braces).
     const header = this.exports.miso_engine_web_v1_successor_header_ptr(this.handle) >>> 0;
@@ -772,22 +817,32 @@ class ControlWorker {
   /// A dispose request that arrives once a dispose finished (the host freed, or the attempt
   /// failed: `disposed` is set either way) is answered at once with that outcome in
   /// `onPageMessage`: it never joins a dispose that will not complete.
+  ///
+  /// #1332 S8: the release is bounded: when no release arrives within `RELEASE_TIMEOUT_MS`, the
+  /// host is disposed with no token and the page is answered `release-timeout`.
   beginDispose(requestId) {
     this.disposeRequestIds.push(requestId);
     if (this.disposing) return;
-    this.stopServiceTick();
     this.disposing = true;
+    this.releaseDeadline = clock() + RELEASE_TIMEOUT_MS;
     this.workletPort.postMessage({ tag: "miso.release.v1" });
+    // The deadline runs on the service tick (this Worker's one timer).
+    if (this.serviceTick === null) this.startServiceTick();
   }
 
-  finishDispose(token) {
+  finishDispose(token, reason = undefined) {
     if (this.disposeRequestIds.length === 0 || this.disposeOutcome !== undefined) return;
+    this.stopServiceTick();
     const e = this.exports;
     let result;
     try {
       // A half that never came back (a zero token) is left where it is: dispose then marks the
       // lifecycle disposed, so that half silences, and frees the control half (#1332 S6).
+      // #1332 S8: with no token, the boot's token is tried: a half the worklet never adopted (its
+      // construction failed first) is still in the registry under it and comes back here. A
+      // token the worklet consumed matches no entry, and nothing changes.
       if (token !== 0n) e.miso_engine_web_v1_host_adopt(token);
+      else if (this.bootToken !== 0n) e.miso_engine_web_v1_host_adopt(this.bootToken);
       // Every status read still in flight is answered before the host is freed.
       while (this.statusReads.length > 0) this.answerStatus(this.statusReads.shift(), null);
       result = e.miso_engine_web_v1_dispose(this.handle);
@@ -798,14 +853,41 @@ class ControlWorker {
     this.disposed = true;
     this.handle = 0;
     this.disposeOutcome = result;
-    for (const requestId of this.disposeRequestIds) this.acknowledge(requestId, result);
+    this.disposeReason = reason;
+    for (const requestId of this.disposeRequestIds) this.answerDispose(requestId);
     this.disposeRequestIds = [];
+  }
+
+  /// The answer to a dispose once it finished: the typed teardown when the release timed out,
+  /// the dispose's result otherwise (255 for a boot that never finished).
+  answerDispose(requestId) {
+    if (this.disposeReason !== undefined) {
+      this.post({ tag: "miso.teardown.v1", requestId, result: RESULT_INTERNAL, reason: this.disposeReason });
+    } else {
+      this.acknowledge(requestId, this.disposeOutcome ?? RESULT_INTERNAL);
+    }
+  }
+
+  /// #1332 S8: a half released after this Worker disposed its host (the release came late) is an
+  /// orphan: adopted into the empty slot, it is a render-only session here, which this instance's
+  /// dispose frees (it bound no reservation).
+  reclaimOrphan(token) {
+    if (token === 0n) return;
+    try {
+      if (this.exports.miso_engine_web_v1_host_adopt(token) === RESULT_OK) {
+        this.exports.miso_engine_web_v1_dispose(Number(token >> 32n));
+      }
+    } catch (_) {
+      // A trapped instance frees nothing more; the memory goes with the page.
+    }
   }
 
   onWorkletMessage(message) {
     if (message?.tag === "miso.released.v1" && exactFields(message, ["tag", "token"])
         && typeof message.token === "bigint") {
-      this.finishDispose(BigInt.asUintN(64, message.token));
+      const token = BigInt.asUintN(64, message.token);
+      if (this.disposeOutcome !== undefined) this.reclaimOrphan(token);
+      else this.finishDispose(token);
       return;
     }
     if (message?.tag === "miso.render-status.v1" && exactFields(message, ["tag", "requestId", "status"])

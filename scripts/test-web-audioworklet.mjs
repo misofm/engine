@@ -52,6 +52,18 @@ const qualificationUrl = qualificationModuleIndex === -1
   ? new URL("hosts/host-web/qualification/qualification.js", root)
   : pathToFileURL(commandArguments[qualificationModuleIndex + 1]);
 
+// Issue #1332 S8: the page's dispose bound and the control Worker's release bound, in milliseconds.
+const DISPOSE_TIMEOUT_MS = 5000;
+const RELEASE_TIMEOUT_MS = 2000;
+
+/// Whether `promise` settled after the queued tasks ran: "pending", "resolved" or "rejected".
+async function settledState(promise) {
+  let state = "pending";
+  promise.then(() => { state = "resolved"; }, () => { state = "rejected"; });
+  for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  return state;
+}
+
 const limits = Object.freeze({
   sourceRingFrames: 256,
   maximumMemoryBytes: 0n,
@@ -278,6 +290,7 @@ async function testMainRealm() {
       this.options = options;
       this.constructionQuantumFrames = context.renderQuantumSize ?? 128;
       this.constructionContext = context;
+      this.context = context;
       this.constructionModule = options.processorOptions.module;
       if (bootDataTestMode !== null) {
         const constructorDocument = options.processorOptions.document;
@@ -1992,19 +2005,74 @@ async function testMainRealm() {
       assert.equal((await read).requestId, (await tickHost.status()).requestId - 1,
         "a tick consumes no request ID");
       // A failed single-mode dispose may be retried, so it leaves exactly one live service tick.
-      const timersBefore = intervals.length;
+      // (The dispose's own deadline, #1332 S8, is the other timer of the site; it is cleared.)
+      const ticks = () => intervals.filter((entry) => entry.delay !== DISPOSE_TIMEOUT_MS);
+      const timersBefore = ticks().length;
       disposeResult = 3;
       await errorResult(tickHost.dispose(), 3);
       disposeResult = 0;
       const live = intervals.filter((entry) => !entry.cleared);
       assert.equal(live.length, 1, "a failed dispose leaves exactly one live service tick");
-      assert.equal(intervals.length, timersBefore + 1, "the tick is restarted, once");
+      assert.equal(ticks().length, timersBefore + 1, "the tick is restarted, once");
       await tickHost.dispose();
       assert.equal(live[0].cleared, true, "the retried dispose stops the restarted tick");
       assert.equal(timer.cleared, true, "dispose stops the tick");
       const afterDispose = events.length;
       timer.callback();
       assert.equal(events.length, afterDispose, "a tick after dispose posts nothing");
+    }
+
+    // Issue #1332 S8, single mode: a dispose nobody answers ends in teardown with a typed reason.
+    // A closed context alone is no failure (an `OfflineAudioContext` that rendered is closed and
+    // its worklet answers); a reply that does not come within the bound is given up on, named
+    // `context-closed` on a closed context. The node is disconnected, the tick stays stopped and
+    // a later dispose returns the same rejection (no retry after a teardown).
+    {
+      const create = () => createMisoAudioWorkletHost({
+        context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const offlineHost = await create();
+      context.state = "closed";
+      await offlineHost.dispose();
+      context.state = "suspended";
+
+      const closedHost = await create();
+      const closedNode = FakeNode.latest;
+      const tick = intervals.at(-1);
+      context.state = "closed";
+      holdAll = true;
+      const first = closedHost.dispose();
+      holdAll = false;
+      intervals.at(-1).callback();
+      await assert.rejects(first, (error) => {
+        assert.deepEqual(error, { tag: "miso.teardown.v1", requestId: 0, result: 255, reason: "context-closed" });
+        return true;
+      }, "no reply on a closed context tears down with its reason").finally(() => { context.state = "suspended"; });
+      assert.equal(closedNode.disconnectCount, 1, "the node is disconnected");
+      assert.equal(tick.cleared, true, "the tick is stopped");
+      assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "and not restarted");
+      assert.equal(closedHost.dispose(), first, "a later dispose returns the same rejection");
+      for (const respond of heldAll.splice(0)) respond();
+
+      const silentHost = await create();
+      const silentNode = FakeNode.latest;
+      holdAll = true;
+      const pending = silentHost.dispose();
+      holdAll = false;
+      assert.equal(await settledState(pending), "pending", "the dispose waits for its reply");
+      const bound = intervals.at(-1);
+      assert.equal(bound.delay, DISPOSE_TIMEOUT_MS, "within the dispose bound");
+      bound.callback();
+      await assert.rejects(pending, (error) => {
+        assert.deepEqual(error, { tag: "miso.teardown.v1", requestId: 0, result: 255, reason: "dispose-timeout" });
+        return true;
+      }, "no reply within the bound tears down with its reason");
+      assert.equal(silentNode.disconnectCount, 1, "the node is disconnected");
+      assert.equal(bound.cleared, true);
+      assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "no tick is restarted");
+      for (const respond of heldAll.splice(0)) respond();
+      await new Promise((resolve) => setImmediate(resolve));
     }
 
     // Issue #1332 S7 (D1, D2, D6, D7): `worker` mode on an isolated page. A fake control Worker
@@ -2051,6 +2119,10 @@ async function testMainRealm() {
           } else if (message.tag === "miso.dispose.v1") {
             // `disposeTrap`: the Worker's dispose traps, which reaches the page as `error`.
             if (workerBehaviour === "disposeTrap") queueMicrotask(() => this.onerror?.({ preventDefault() {} }));
+            else if (workerBehaviour === "silent") { /* #1332 S8: nobody answers */ }
+            else if (workerBehaviour === "releaseTimeout") reply({
+              tag: "miso.teardown.v1", requestId: message.requestId, result: 255, reason: "release-timeout",
+            });
             else reply({
               tag: "miso.ack.v1", requestId: message.requestId,
               result: workerBehaviour === "dispose255" ? 255 : 0,
@@ -2151,6 +2223,112 @@ async function testMainRealm() {
           workerBehaviour = "ready";
           assert.equal(refusingWorker.terminated, true, "a refused dispose terminates the Worker");
           assert.equal(refusingNode.disconnectCount, 1, "and disconnects the node once");
+        }
+
+        // #1332 S8: a worker-mode dispose nobody answers ends in teardown with a typed reason:
+        // no reply within the bound (`context-closed` on a closed context), and the Worker's own
+        // release timeout. The Worker is terminated and the node disconnected once in each case.
+        {
+          const create = () => createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          const silent = await create();
+          const silentWorker = workers.at(-1);
+          const silentNode = FakeNode.latest;
+          workerBehaviour = "silent";
+          const pending = silent.dispose();
+          workerBehaviour = "ready";
+          assert.equal(await settledState(pending), "pending", "the dispose waits for the Worker");
+          const bound = intervals.at(-1);
+          assert.equal(bound.delay, DISPOSE_TIMEOUT_MS);
+          bound.callback();
+          await assert.rejects(pending, (error) => {
+            assert.deepEqual(error, { tag: "miso.teardown.v1", requestId: 0, result: 255, reason: "dispose-timeout" });
+            return true;
+          }, "a Worker that never answers is given up on");
+          assert.equal(silentWorker.terminated, true, "the Worker is terminated");
+          assert.equal(silentNode.disconnectCount, 1, "and the node disconnected");
+
+          const late = await create();
+          const lateWorker = workers.at(-1);
+          const lateNode = FakeNode.latest;
+          workerBehaviour = "releaseTimeout";
+          const rejected = late.dispose();
+          workerBehaviour = "ready";
+          await assert.rejects(rejected, (error) => {
+            assert.deepEqual(error, {
+              tag: "miso.teardown.v1", requestId: lateWorker.posts.at(-1).requestId, result: 255,
+              reason: "release-timeout",
+            });
+            return true;
+          }, "the Worker's release timeout is the dispose's reason");
+          assert.equal(lateWorker.terminated, true);
+          assert.equal(lateNode.disconnectCount, 1);
+          assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "the bound is cleared");
+
+          const closed = await create();
+          const closedWorker = workers.at(-1);
+          const closedNode = FakeNode.latest;
+          context.state = "closed";
+          workerBehaviour = "silent";
+          const closing = closed.dispose();
+          workerBehaviour = "ready";
+          intervals.at(-1).callback();
+          await assert.rejects(closing, (error) => {
+            assert.deepEqual(error, { tag: "miso.teardown.v1", requestId: 0, result: 255, reason: "context-closed" });
+            return true;
+          }, "no reply on a closed context tears down with its reason").finally(() => { context.state = "suspended"; });
+          assert.equal(closedWorker.terminated, true);
+          assert.equal(closedNode.disconnectCount, 1);
+        }
+
+        // #1332 S8: a Worker `error` after the boot fails the host and terminates the Worker; the
+        // dispose then tears down at once with the host's error and sends nothing.
+        {
+          const broken = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          const brokenWorker = workers.at(-1);
+          const brokenNode = FakeNode.latest;
+          brokenWorker.onerror({ preventDefault() {} });
+          assert.equal(brokenWorker.terminated, true, "a Worker error after boot terminates it");
+          await errorResult(broken.control(new Uint8Array([1])), 255);
+          const posted = brokenWorker.posts.length;
+          const disposing = broken.dispose();
+          assert.equal(await settledState(disposing), "rejected", "the dispose tears down at once");
+          await errorResult(disposing, 255);
+          assert.equal(brokenWorker.posts.length, posted, "nothing is sent to the terminated Worker");
+          assert.equal(brokenNode.disconnectCount, 1, "the node is disconnected");
+        }
+
+        // #1332 S8: the worklet's sticky render failure (request ID 0, posted on the Worker's
+        // render check) fails the host with its own result.
+        {
+          const failing = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          FakeNode.latest.port.onmessage({ data: { tag: "miso.error.v1", requestId: 0, result: 9 } });
+          await errorResult(failing.control(new Uint8Array([1])), 9);
+          await failing.dispose();
+        }
+
+        // #1332 S8: a worklet whose construction failed (perhaps after it adopted the half): the
+        // Worker is asked to dispose, and answers, before it is terminated.
+        {
+          readyMutation = () => ({ tag: "miso.error.v1", requestId: 0, result: 9 });
+          await assert.rejects(createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          }), (error) => error.tag === "miso.error.v1" && error.result === 9);
+          readyMutation = null;
+          const failedWorker = workers.at(-1);
+          assert.deepEqual(failedWorker.posts.at(-1), { tag: "miso.dispose.v1", requestId: 1 },
+            "the Worker takes the half back and disposes");
+          assert.equal(failedWorker.terminated, true, "then it is terminated");
+          assert.equal(intervals.filter((entry) => !entry.cleared).length, 0, "the bound is cleared");
         }
 
         // S7 verify attempt 3: a request sent behind a dispose is refused locally (it cannot fail
@@ -2281,7 +2459,7 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
   // report's four reserved words, so offset 192 is a real row and 200..216 stay required zero.
   for (let index = 0; index < 21; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
   const calls = {
-    render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
+    render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0, disposeHandles: [],
     sessionSeek: [], sessionSeekResult: 0,
     sourceResult: 0, bootResult: 0, boot: [],
     // Issue #1381a: the service step's handles and result, and the control counter's value.
@@ -2589,8 +2767,9 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     },
     miso_engine_web_v1_control_response_bytes: () => (currentEvent ?? calls.controlResponse).length,
     miso_engine_web_v1_control_revision: () => calls.controlRevision,
-    miso_engine_web_v1_dispose: () => {
+    miso_engine_web_v1_dispose: (handle) => {
       calls.dispose += 1;
+      calls.disposeHandles.push(handle);
       return 0;
     },
     // Issue #1332 S7: the exports of the two-instance handoff. The globals are objects with a
@@ -4417,6 +4596,46 @@ async function testProcessor() {
       fromWorker({ tag: "miso.release.v1" });
       assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: 0n });
     }
+    // #1332 S8: a sticky render failure reaches the page on the Worker's render check, once, as
+    // the typed `miso.error.v1` with request ID 0; a well worklet answers the check with nothing.
+    {
+      const fake = createFakeExports(64);
+      const { processor, fromWorker } = constructWorkerMode(fake);
+      const posts = processor.port.posts.length;
+      fromWorker({ tag: "miso.render-check.v1" });
+      assert.equal(processor.port.posts.length, posts, "a well worklet posts nothing");
+      fake.exports.miso_engine_web_v1_render = () => 4;
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      fromWorker({ tag: "miso.render-check.v1" });
+      assert.deepEqual(processor.port.posts.at(-1).message, { tag: "miso.error.v1", requestId: 0, result: 4 },
+        "the render failure is posted to the page");
+      fromWorker({ tag: "miso.render-check.v1" });
+      assert.equal(processor.port.posts.length, posts + 1, "once");
+    }
+    // #1332 S8: a construction that fails after the adoption releases the half at once (no half
+    // stays in a worklet that never renders) and answers the Worker's release with its token,
+    // once; a construction that failed before the adoption answers with no token.
+    {
+      const fake = createFakeExports(64);
+      fake.exports.miso_engine_web_v1_buffer_capacity = () => 0;
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      assert.equal(processor.port.posts[0].message.tag, "miso.error.v1", "construction failed");
+      assert.deepEqual(fake.calls.adopt, [workerToken], "after the adoption");
+      assert.deepEqual(fake.calls.release, [1], "the half is released at the failure");
+      assert.equal(fake.calls.dispose, 0, "and nothing is freed here");
+      fromWorker({ tag: "miso.release.v1" });
+      assert.deepEqual(controlPosts, [{ tag: "miso.released.v1", token: (1n << 32n) | 1n }],
+        "the Worker's release gets that token");
+      fromWorker({ tag: "miso.release.v1" });
+      assert.equal(controlPosts.length, 1, "once");
+      assert.deepEqual(fake.calls.release, [1]);
+      const early = createFakeExports(64);
+      early.calls.adoptResult = 3;
+      const { controlPosts: earlyPosts, fromWorker: earlyWorker } = constructWorkerMode(early);
+      earlyWorker({ tag: "miso.release.v1" });
+      assert.deepEqual(earlyPosts, [{ tag: "miso.released.v1", token: 0n }],
+        "a refused adoption answers with no token");
+    }
     workerModeMemory = null;
 
     await testQualificationBoot({
@@ -4473,7 +4692,11 @@ async function testControlWorker() {
   let fake;
   let posts;
   const intervals = [];
+  // #1332 S8: the Worker's clock (the release deadline and the render check), driven by hand.
+  let now = 0;
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
   try {
+    Object.defineProperty(globalThis, "performance", { value: { now: () => now }, configurable: true });
     globalThis.setInterval = (callback, delay) => {
       intervals.push({ callback, delay, cleared: false });
       return intervals.length;
@@ -4589,6 +4812,56 @@ async function testControlWorker() {
       send({ tag: "miso.dispose.v1", requestId: 2 });
       assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 2, result: 255 });
     }
+    // #1332 S8: the release is bounded. With no release within `RELEASE_TIMEOUT_MS` the Worker
+    // tries the boot's token (a half the worklet never adopted), disposes and answers the typed
+    // `release-timeout`; a half released after that is an orphan the Worker adopts and frees.
+    {
+      const { workletPosts, send, fromWorklet } = await boot();
+      const tick = intervals.at(-1);
+      const bootToken = (1n << 32n) | 1n;
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      assert.deepEqual(workletPosts.at(-1), { tag: "miso.release.v1" });
+      now += RELEASE_TIMEOUT_MS - 1;
+      tick.callback();
+      assert.equal(fake.calls.dispose, 0, "the Worker waits for the release within the bound");
+      now += 1;
+      tick.callback();
+      assert.deepEqual(fake.calls.adopt, [bootToken], "with no token the boot's token is tried");
+      assert.deepEqual(fake.calls.disposeHandles, [1], "the host is disposed");
+      assert.deepEqual(posts.at(-1),
+        { tag: "miso.teardown.v1", requestId: 1, result: 255, reason: "release-timeout" });
+      assert.equal(tick.cleared, true, "the tick ends with the dispose");
+      send({ tag: "miso.dispose.v1", requestId: 2 });
+      assert.deepEqual(posts.at(-1),
+        { tag: "miso.teardown.v1", requestId: 2, result: 255, reason: "release-timeout" },
+        "a later dispose gets the same reason");
+      const lateToken = (1n << 32n) | 2n;
+      fromWorklet({ tag: "miso.released.v1", token: lateToken });
+      assert.deepEqual(fake.calls.adopt, [bootToken, lateToken], "the late half is adopted");
+      assert.deepEqual(fake.calls.disposeHandles, [1, 1], "and freed");
+    }
+    // #1332 S8: a release with no token (the worklet's construction failed before it adopted)
+    // takes the boot's token back from the registry.
+    {
+      const { send, fromWorklet } = await boot();
+      send({ tag: "miso.dispose.v1", requestId: 1 });
+      fromWorklet({ tag: "miso.released.v1", token: 0n });
+      assert.deepEqual(fake.calls.adopt, [(1n << 32n) | 1n], "the boot's token comes back");
+      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 1, result: 0 });
+    }
+    // #1332 S8: the service tick asks the worklet whether render failed, at most every 50 ms.
+    {
+      const { workletPosts } = await boot();
+      const tick = intervals.at(-1);
+      tick.callback();
+      assert.equal(workletPosts.some((message) => message.tag === "miso.render-check.v1"), false,
+        "not before 50 ms");
+      now += 50;
+      tick.callback();
+      tick.callback();
+      assert.deepEqual(workletPosts.filter((message) => message.tag === "miso.render-check.v1"),
+        [{ tag: "miso.render-check.v1" }], "once per 50 ms");
+    }
     // D6: a refused boot answers with the engine's result code and releases nothing.
     {
       await boot({ sampleRateHz: 44100 });
@@ -4601,6 +4874,8 @@ async function testControlWorker() {
     globalThis.onmessage = original.onmessage;
     globalThis.setInterval = original.setInterval;
     globalThis.clearInterval = original.clearInterval;
+    if (originalPerformance === undefined) delete globalThis.performance;
+    else Object.defineProperty(globalThis, "performance", originalPerformance);
   }
 }
 

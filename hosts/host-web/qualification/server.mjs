@@ -82,6 +82,12 @@ export async function startQualificationServer({ artifacts, sdkBundle, port = 0,
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://127.0.0.1");
+      // The browser asks for a page icon on its own; an empty answer keeps a 404 out of the
+      // console that the legs read for errors.
+      if (request.method === "GET" && url.pathname === "/favicon.ico") {
+        response.writeHead(204).end();
+        return;
+      }
       const file = routePath(decodeURIComponent(url.pathname), artifactDirectory, sdkBundle);
       if (request.method !== "GET" || file === null) {
         response.writeHead(404).end();
