@@ -406,3 +406,68 @@ quanta) in the other: its sink's bursts (above) can outrun the 19 chunks a seek 
 render pops it. Render allocations 0 in every run. For comparison, single mode's live seek on
 Chromium underran 896 frames in the same smoke. The suspended-seek smoke (attempt 1's): Chromium 0;
 WebKit 0 in earlier runs, 640 frames in one run.
+
+## Attempt 3 (verify FAIL on one MAJOR, 2026-10-28)
+
+**MAJOR: seek admission ends on evidence, never on room.** In attempt 2, a plain seek's admission
+ended only once the room rose above `H`. A seek into a short engine ring filled the free room, render
+dropped only a few stale chunks, and every later pass kept `allowed = room`, so the headroom was
+lost for good. Now a consumed seek records its generation (`consumeSharedSeek`,
+`miso-engine-v1-control-worker.js:1217`). `accountBlocks` (:1149) ends the admission when the
+source's seek report shows that generation in effect (render popped the seek and dropped the stale
+chunks), and otherwise keeps it. Room plays no part. Test (`scripts/test-web-audioworklet.mjs:5128`,
+in the headroom rig :5041): a plain seek with 4 chunks queued fills the headroom (68 of 80). After
+render reports the seek in effect, the steady fill returns to `C - H` (room 36), and the next seek
+is admitted again (36 new chunks). Red on `befd51fbd` ("the headroom is kept again", 0 !== 36). Red
+on an admission that ends on room ("the seek's pass fills the headroom"), and on one that never
+ends ("pass 0: the headroom stays free through the hold").
+
+**MINOR 1** (the shared table): a new case, "prepare-seek applies the captured tuple when the writer
+seeks again between check and apply" (`sdk/test/msb1-consumer-cases.mjs:217`). It uses an `onApply`
+hook that both adapters fire inside the apply. The case asserts the captured `(2, 12)`, no mixed
+tuple, and DRAIN_BLOCKS 0 after the preparation. The Worker drains after each message, so it may
+apply the newer seek at once; the case allows that. The Worker adapter reaches the instance through a
+test-only rename of the file's last line. Red on both consumers when the apply reads the live words,
+and on the Worker when a preparation counts a block.
+
+**MINOR 2:** `STALE_GENERATION_CODE` is exported once from the table (:42), and both adapters'
+fake engines write it. The restored real-Wasm test ("actual Wasm: a ring seek is consumed only when
+...", `browser-pcm-evals.mjs`) also asserts that the built engine's refusal of a seek at the session
+seek's generation writes exactly that code (:537). Red when the engine, the prelude or the Worker
+renames its code.
+
+**MINOR 3: underruns, decided on evidence.** I first built the prelude's per-chunk model on the
+producer's real counts (the quanta render took minus the chunks consumed, minus held quanta). In the
+Chromium smoke it counted 17 underrun blocks where the engine counted 4: the consumer's prefetched
+block and render bursts skew the per-pass difference one way. So the Worker counts the engine's own
+missing in-region frames (the seek report). Held frames are not counted, and frames are counted only
+while a live writer feeds and the region has not ended. The quanta come from the cumulative counted
+frames, never rounded per pass (`accountBlocks`). The table gains "underruns are counted per block
+that found no chunk, and none once the region ended" (:192) and "a ring whose writer is not live
+counts no underrun" (:206). Both consumers count the same there: 2 dry blocks, none after the end,
+6 drain blocks. The Worker adapter's fake engine now models the ring: one chunk a block, a seek's
+stale chunks dropped at its pop, and underrun quanta on an empty in-region block. Its pass is drain,
+render, drain, because the prelude drains and accounts a block in one `process()`. Equivalent mutants
+(recorded): per-pass rounding, and the region-end gate. The engine counts no frames past a region's
+end and no partial frames inside one, so neither changes a count.
+
+**Gates (attempt 3).** Hermetic suite; the shared table on the prelude (`browser-pcm-evals` 47 pass)
+and on the Worker; `check-web-audioworklet.sh` with the capability and timer self-tests;
+`check-browser-expected-resources.py --artifacts`; the SDK job (generated, deletions, types,
+headless 697 pass, package check); workspace policy. No Rust changed since attempt 2 (its Rust gates
+stand). `qualify --leg all --check-matrix --self-test-mutations`: all four legs (single, worker x
+Chromium 151, WebKit 26.5) pass. One earlier WebKit worker run failed `sdk-protocol-lossy` (one
+lossy-lane event, sample 384, missing: the lossy lane drops by design); two reruns of that leg and
+the final run passed. It is not a feed row.
+
+**Smoke (attempt 3).** Suspended seek (`prepareSeek`, then refill and resume), worker mode, default
+ring: 0 underrun frames at the seek on Chromium (2 of 2 runs) and on WebKit (2 of 2). Live seek
+after an anchored start (the writer seeks while the shared ring is full of the old generation, so
+the new PCM arrives only on the main-thread pump's next turn): Chromium 0, 512 or 512 frames at the
+seek across 3 runs; WebKit 0, 256 or 384. Single mode on the same live seek: Chromium 896 frames,
+WebKit 0 (it underran 640 frames during play). A live seek can be gapless only if new-generation PCM
+reaches the shared ring before render pops the seek. With a full shared ring the writer cannot
+publish until the consumer frees the stale slots, and the drain applies the seek in the same pass.
+**Option for root:** defer a live plain seek's apply until its first new-generation chunk is
+published (free the stale slots at once, keep the old generation playing from the engine ring), with
+a bound for a writer that publishes nothing. Not built here.

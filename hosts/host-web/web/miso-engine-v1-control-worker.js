@@ -979,11 +979,18 @@ class ControlWorker {
       anchoredGeneration: 0n,
       anchoredFrame: 0n,
       anchoredSample: NO_ANCHOR,
-      // The engine's cumulative underrun frames for this source at the last pass (null until
-      // read), and whether a seek's new generation may fill the headroom (2: the seek's pass, 1:
-      // until render dropped the stale chunks).
-      underrunFrames: null,
-      seekAdmit: 0,
+      // The block accounting: the engine's cumulative underrun frames at the last read (null
+      // until read), the frames counted and excluded since (a finished region, an idle writer),
+      // the quanta counted, and the rendered quanta not yet accounted.
+      reportUnderrun: null,
+      countedFrames: 0n,
+      excludedFrames: 0n,
+      countedQuanta: 0,
+      pendingElapsed: 0,
+      // A consumed seek render has not shown in effect yet: its generation (u64), or null, and
+      // whether its new generation may fill the headroom (a plain seek's).
+      seekGeneration: null,
+      seekAdmit: false,
       finished: false,
       // The render clock this ring's accounting has reached; null until the clock is known.
       renderedSeen: this.renderedQuanta(),
@@ -1006,13 +1013,15 @@ class ControlWorker {
     return Math.min(perTick + Math.ceil(RENDER_BURST_FRAMES / this.quantumFrames) + 1, Math.floor(ringQuanta / 2));
   }
 
-  /// The engine's cumulative underrun frames for the ring's source (its seek report), or null
-  /// when the read is refused or lands inside render's publication.
-  readUnderrunFrames(ring) {
+  /// The ring's source as render last published it (its seek report): the generation in effect
+  /// and the cumulative underrun frames, or null when the read is refused or lands
+  /// inside render's publication.
+  readSourceReport(ring) {
     this.stageRingId(ring);
     if (this.exports.miso_engine_web_v1_source_seek_report(this.handle, ring.idLength) !== RESULT_OK) return null;
     const view = this.view(DataView, this.exports.miso_engine_web_v1_source_seek_report_ptr(this.handle), SEEK_REPORT_BYTES);
-    return view.getUint32(0, true) === SEEK_REPORT_BYTES ? view.getBigUint64(32, true) : null;
+    if (view.getUint32(0, true) !== SEEK_REPORT_BYTES) return null;
+    return { generation: view.getBigUint64(8, true), underrun: view.getBigUint64(32, true) };
   }
 
   /// The source's ring occupancy, `{ queued, room }` in chunks, or null when the engine refuses
@@ -1058,25 +1067,17 @@ class ControlWorker {
     if (rendered !== null) ring.renderedSeen = rendered;
     // As in the prelude, a ring waiting for its seek (an anchored start before `seek-at`)
     // counts no drain block and no underrun: the quanta pass uncounted.
-    if (this.applySharedSeek(ring) !== RESULT_OK) return;
-    // The blocks that underran, from the engine's own count of missing in-region frames (its seek
-    // report), while a live writer feeds the ring: the prelude's rule, on the engine's truth. Held
-    // frames (an anchored seek waiting for its anchor) are not underruns.
-    const underrunFrames = this.readUnderrunFrames(ring);
-    if (underrunFrames !== null) {
-      if (ring.underrunFrames !== null && underrunFrames > ring.underrunFrames && !ring.finished
-          && Atomics.load(control, RING.WRITER_STATE) === 1) {
-        control[RING.UNDERRUNS] += Math.ceil(Number(underrunFrames - ring.underrunFrames) / this.quantumFrames);
-      }
-      ring.underrunFrames = underrunFrames;
+    if (this.applySharedSeek(ring) !== RESULT_OK) {
+      ring.pendingElapsed = 0;
+      return;
     }
+    const report = this.readSourceReport(ring);
     const before = this.readFill(ring);
-    // A seek's admission ends once render dropped the stale chunks (the room is back).
-    if (before !== null && ring.seekAdmit === 1 && before.room > this.feedHeadroom) ring.seekAdmit = 0;
-    control[RING.DRAIN_BLOCKS] += elapsed;
-    // Root ruling 1: the headroom stays free, except for the chunks of a seek's new generation.
+    this.accountBlocks(ring, elapsed, report, before);
+    // Root ruling 1: the headroom stays free, except for the chunks of a plain seek's new
+    // generation, admitted until render shows that seek in effect.
     let allowed = before === null ? ring.capacity
-      : ring.seekAdmit !== 0 ? before.room : before.room - this.feedHeadroom;
+      : ring.seekAdmit ? before.room : before.room - this.feedHeadroom;
     let queued = before === null ? 0 : before.queued;
     const generationTag = Atomics.load(control, RING.GENERATION_TAG);
     const write = Atomics.load(control, RING.WRITE_INDEX);
@@ -1136,8 +1137,40 @@ class ControlWorker {
     }
     Atomics.store(control, RING.READ_INDEX, read);
     control[RING.DEPTH] = queued;
-    if (ring.seekAdmit === 2) ring.seekAdmit = 1;
   }
+
+  /// The prelude's block accounting on the engine's counts (#1387 attempt 3): every rendered
+  /// quantum is a drain block, and the underruns are the engine's own missing in-region frames for
+  /// this source (its seek report; held frames, an anchored seek before its anchor, are not
+  /// missing) while a live writer feeds the ring and its region has not ended, in quanta. The
+  /// quanta come from the cumulative counted frames, never rounded per pass, so a region's end
+  /// counts as the prelude counts it. A pass whose reads are refused carries its quanta to the
+  /// next. It also ends a consumed seek's transition: render reports that seek's generation.
+  accountBlocks(ring, elapsed, report, before) {
+    const control = ring.control;
+    if (report === null || before === null) {
+      ring.pendingElapsed += elapsed;
+      return;
+    }
+    const quanta = ring.pendingElapsed + elapsed;
+    ring.pendingElapsed = 0;
+    if (ring.seekGeneration !== null && report.generation >= ring.seekGeneration) {
+      // Evidence that the seek took effect: render reports its generation. Never room alone.
+      ring.seekGeneration = null;
+      ring.seekAdmit = false;
+    }
+    if (ring.reportUnderrun !== null) {
+      const missing = report.underrun - ring.reportUnderrun;
+      if (ring.finished || Atomics.load(control, RING.WRITER_STATE) !== 1) ring.excludedFrames += missing;
+      else ring.countedFrames += missing;
+      const counted = Number((ring.countedFrames + BigInt(this.quantumFrames) - 1n) / BigInt(this.quantumFrames));
+      control[RING.UNDERRUNS] += counted - ring.countedQuanta;
+      ring.countedQuanta = counted;
+    }
+    ring.reportUnderrun = report.underrun;
+    control[RING.DRAIN_BLOCKS] += quanta;
+  }
+
 
   /// The prelude's seek rule: a published plain seek is applied through `source_seek` before any
   /// slot is read; an anchored one only once `source_seek_at` answered OK for the same tuple.
@@ -1153,7 +1186,7 @@ class ControlWorker {
         return RESULT_BACKPRESSURE;
       }
       ring.anchoredSample = NO_ANCHOR;
-      return this.consumeSharedSeek(ring, epoch);
+      return this.consumeSharedSeek(ring, epoch, requested, false);
     }
     this.stageRingId(ring);
     let result = this.exports.miso_engine_web_v1_source_seek(this.handle, ring.idLength, requested, requestedFrame);
@@ -1169,18 +1202,20 @@ class ControlWorker {
       control[RING.LAST_RESULT] = result;
       return result;
     }
-    return this.consumeSharedSeek(ring, epoch, true);
+    return this.consumeSharedSeek(ring, epoch, requested, true);
   }
 
   /// `plain`: a plain seek, whose stale chunks render drops at its next block, so its new
   /// generation may fill the headroom; an anchored seek's old generation keeps playing until its
   /// anchor, so its new chunks queue behind it within the headroom rule.
-  consumeSharedSeek(ring, epoch, plain = false) {
+  consumeSharedSeek(ring, epoch, generation, plain) {
     const control = ring.control;
     ring.seenEpoch = epoch;
     control[RING.SEEKS_APPLIED] += 1;
-    // Root ruling 1: this seek's new generation may fill the headroom (see `drainSharedRing`).
-    ring.seekAdmit = plain ? 2 : 0;
+    // Root ruling 1: a plain seek's new generation may fill the headroom until render reports
+    // this generation in effect (`accountBlocks`).
+    ring.seekGeneration = BigInt.asUintN(64, generation);
+    ring.seekAdmit = plain;
     ring.finished = false;
     control[RING.FINISHED] = 0;
     return RESULT_OK;

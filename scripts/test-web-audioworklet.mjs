@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { MSB1_CONTROL, MSB1_CONTROL_BYTES, createMsb1Ring, Msb1RingWriter } from "../sdk/src/browser/pcm-ring.ts";
-import { MSB1_CONSUMER_CASES } from "../sdk/test/msb1-consumer-cases.mjs";
+import { MSB1_CONSUMER_CASES, STALE_GENERATION_CODE } from "../sdk/test/msb1-consumer-cases.mjs";
 const root = new URL("../", import.meta.url);
 const commandArguments = process.argv.slice(2);
 const bootDataModeFlags = [
@@ -4797,7 +4797,9 @@ async function testControlWorker() {
       posts = [];
       // The file is a classic script with no module syntax (Node would load it once, as CommonJS),
       // so each case evaluates it afresh: one Worker per boot, as in the browser.
-      new Function(workerSource)();
+      // Issue #1387: the case table's race hook reaches the instance (a test-only rename).
+      new Function(workerSource.replace("new ControlWorker(globalThis);",
+        "globalThis.__controlWorker = new ControlWorker(globalThis);"))();
       const workletPosts = [];
       const workletPort = { onmessage: null, postMessage: (message) => workletPosts.push(message) };
       const send = (data) => globalThis.onmessage({ data });
@@ -5036,21 +5038,24 @@ async function testControlWorker() {
       assert.equal(control[MSB1_CONTROL.ATTACHED], 0);
       assert.equal(port.onmessage, null);
     }
-    // Issue #1387 (root ruling 1, attempt 2): the headroom rule on the producer's real fill
+    // Issue #1387 (root ruling 1, attempts 2-3): the headroom rule on the producer's real fill
     // (`source_fill`). The fake engine ring holds 80 chunks; render takes one a block unless the
-    // source holds (an anchored seek before its anchor), and drops a plain seek's stale chunks at
-    // the block that pops it. 48 kHz and 64 frames: a 4 ms tick is 3 quanta and a 2048-frame burst
-    // 32, so H = 36. Red on a drain that fills the ring to capacity (a plain seek then finds no
-    // room), and on the attempt-1 drain that capped a guessed depth (during a hold the guess falls
-    // below the real fill, the ring fills, and the next plain seek finds no room).
-    {
+    // source holds (an anchored seek before its anchor), drops a seek's stale chunks at the block
+    // that pops it and then reports the seek's generation in effect. 48 kHz and 64 frames: a 4 ms
+    // tick is 3 quanta and a 2048-frame burst 32, so H = 36. Red on a drain that fills the ring to
+    // capacity, on the attempt-1 drain that capped a guessed depth (during a hold the guess falls
+    // below the real fill), and on attempt 2's (`befd51fbd`) admission that ended on room alone (a
+    // seek into a short ring keeps the headroom filled for good, and the next seek finds none).
+    const headroomRig = async (sharedCapacity) => {
       const { send, fromWorklet } = await boot({}, 64, (engine) => { engine.calls.ringQuanta = 80; });
       const tick = intervals.at(-1);
       const port = { onmessage: null, postMessage: () => {}, close() {} };
       send({ tag: "miso.feed-port.v1", port });
       fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
-      const engine = { queued: [], seek: null, hold: 0, quanta: 0n };
+      const engine = { queued: [], seek: null, generation: 1n, hold: 0, quanta: 0n };
       const room = () => 80 - engine.queued.length;
+      const report = () => { fake.calls.seekReportWords = [engine.generation, 0n, 0n, 0n, 0n]; };
+      report();
       fake.exports.miso_engine_web_v1_source_fill = () => (BigInt(engine.queued.length) << 32n) | BigInt(room());
       fake.exports.miso_engine_web_v1_source_submit = (_handle, _id, generation) => {
         if (room() === 0) return 6;
@@ -5065,34 +5070,42 @@ async function testControlWorker() {
         for (let block = 0; block < blocks; block += 1) {
           if (engine.seek !== null) {
             engine.queued = engine.queued.filter((generation) => generation >= engine.seek);
+            engine.generation = engine.seek;
             engine.seek = null;
           }
           if (engine.hold > 0) engine.hold -= 1;
           else engine.queued.shift();
           engine.quanta += 1n;
         }
+        report();
         new DataView(fake.memory.buffer, 16384, 80).setBigUint64(40, engine.quanta, true);
       };
-      const ring = createMsb1Ring({ sourceId: "drums", channels: 2, frameCapacity: 64, capacity: 128 });
+      const ring = createMsb1Ring({ sourceId: "drums", channels: 2, frameCapacity: 64, capacity: sharedCapacity });
       const writer = new Msb1RingWriter(ring);
       writer.engage(1n);
-      let next = 0n;
-      let generation = 1n;
-      const fill = () => {
-        while (writer.occupancy < writer.capacity) {
+      const feed = { generation: 1n, next: 0n };
+      const fill = (limit = writer.capacity) => {
+        while (writer.occupancy < Math.min(writer.capacity, limit)) {
           writer.reserve(64);
-          writer.commit({ generation, startFrame: next, frames: 64, endOfRegion: false });
-          next += 64n;
+          writer.commit({ generation: feed.generation, startFrame: feed.next, frames: 64, endOfRegion: false });
+          feed.next += 64n;
         }
       };
+      const seek = (generation, frame) => {
+        feed.generation = generation;
+        feed.next = frame;
+        writer.seek(generation, frame);
+      };
       port.onmessage({ data: structuredClone({ op: "attach", rings: [ring] }) });
+      return { send, tick, engine, room, render, fill, seek, writer };
+    };
+    {
+      const { send, tick, engine, room, render, fill, seek } = await headroomRig(128);
       fill();
       tick.callback();
       assert.equal(engine.queued.length, 44, "the drain keeps H = 36 of the 80 free");
       // An anchored start that holds 60 blocks: render takes nothing meanwhile.
-      generation = 2n;
-      writer.seek(2n, 0n, 640n);
-      next = 0n;
+      seek(2n, 0n);
       send({ tag: "miso.seek-at.v1", requestId: 1, sourceId: "drums", generation: 2n, sourceFrame: 0n, anchorSample: 640n });
       engine.hold = 60;
       for (let pass = 0; pass < 40; pass += 1) {
@@ -5102,9 +5115,7 @@ async function testControlWorker() {
         assert.ok(room() >= 36, `pass ${pass}: the headroom stays free through the hold (room ${room()})`);
       }
       // A plain ring seek now: its new generation is admitted before the next block.
-      generation = 3n;
-      writer.seek(3n, 9600n);
-      next = 9600n;
+      seek(3n, 9600n);
       tick.callback(); // the seek, and the old generation's slots freed from the shared ring
       fill();
       tick.callback();
@@ -5112,6 +5123,30 @@ async function testControlWorker() {
         "the plain seek's new generation fills the headroom before the next block renders");
       render(1);
       assert.equal(engine.queued[0], 3n, "the next block plays the new position");
+    }
+    {
+      // A plain seek while the engine ring is short: its pass may fill the free room, render then
+      // drops only a few stale chunks, and the admission ends because render reports the seek's
+      // generation, so the headroom comes back and the next seek is admitted again.
+      const { tick, engine, room, render, fill, seek } = await headroomRig(64);
+      fill(4);
+      tick.callback();
+      assert.equal(engine.queued.length, 4, "a short engine ring");
+      seek(2n, 4800n);
+      fill();
+      tick.callback();
+      assert.equal(engine.queued.length, 68, "the seek's pass fills the headroom (4 stale + 64 new)");
+      for (let pass = 0; pass < 20; pass += 1) {
+        render(3);
+        fill();
+        tick.callback();
+      }
+      assert.equal(room(), 36, "once render reports the seek in effect, the headroom is kept again");
+      seek(3n, 9600n);
+      tick.callback();
+      fill();
+      tick.callback();
+      assert.equal(engine.queued.filter((value) => value === 3n).length, 36, "the next seek is admitted");
     }
     // Issue #1387 (root ruling 2): a default ring request boots worker mode at 65 536 frames; an
     // explicit one is kept, however short (MINOR 3: the headroom then halves the ring instead).
@@ -5131,24 +5166,58 @@ async function testControlWorker() {
       const port = { onmessage: null, postMessage: (data) => replies.push(structuredClone(data)), close() {} };
       send({ tag: "miso.feed-port.v1", port });
       fromWorklet({ tag: "miso.render-clock.v1", status: 16384 });
-      const adapter = { submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null };
-      const stale = new TextEncoder().encode("source.generation.stale");
+      const adapter = { submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null };
+      const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
       const memory = () => fake.memory.buffer;
-      fake.exports.miso_engine_web_v1_source_fill = () => 0xfffffn;
+      // The fake engine ring: render takes one chunk a block, drops a seek's stale chunks at the
+      // block that pops it and then reports the seek's generation; an empty in-region block
+      // underruns a quantum.
+      const engine = { queue: [], pending: null, generation: 1n, underrun: 0n, ended: false };
+      const report = () => { fake.calls.seekReportWords = [engine.generation, 0n, 0n, engine.underrun, 0n]; };
+      report();
+      fake.exports.miso_engine_web_v1_source_fill = () => (BigInt(engine.queue.length) << 32n) | 4096n;
       fake.exports.miso_engine_web_v1_source_seek = (_handle, _id, generation, frame) => {
         adapter.seeks.push([generation, frame]);
         adapter.onSeek?.(generation, frame);
         const diagnostic = new Uint8Array(memory(), 150000, 256);
         diagnostic.fill(0);
         if (adapter.seekResult !== 0 && adapter.seekStale) diagnostic.set(stale);
+        if (adapter.seekResult === 0) engine.pending = generation;
         return adapter.seekResult;
+      };
+      fake.exports.miso_engine_web_v1_source_seek_at = (_handle, _id, generation) => {
+        if (adapter.seekAtResult === 0) engine.pending = generation;
+        return adapter.seekAtResult;
+      };
+      fake.exports.miso_engine_web_v1_session_seek = (_handle, generation) => {
+        engine.pending = generation;
+        return 0;
       };
       fake.exports.miso_engine_web_v1_source_submit = (_handle, idLength, generation, start, channels, frames, end) => {
         adapter.submissions.push({
           id: new TextDecoder().decode(new Uint8Array(memory(), 4096, idLength).slice()), generation, start, channels,
           frames, end, pcm: [...new Float32Array(memory(), 5000, 8)],
         });
+        if (adapter.submitResult === 0) engine.queue.push({ generation, end: end === 1 });
         return adapter.submitResult;
+      };
+      const worker = globalThis.__controlWorker;
+      const apply = worker.applySharedSeek.bind(worker);
+      worker.applySharedSeek = (ring, ...identity) => {
+        if (identity.length !== 0) adapter.onApply?.();
+        return apply(ring, ...identity);
+      };
+      const renderBlock = () => {
+        if (engine.pending !== null) {
+          engine.queue = engine.queue.filter((chunk) => chunk.generation >= engine.pending);
+          engine.generation = engine.pending;
+          engine.pending = null;
+          engine.ended = false;
+        }
+        const chunk = engine.queue.shift();
+        if (chunk === undefined && !engine.ended) engine.underrun += 4n;
+        if (chunk?.end) engine.ended = true;
+        report();
       };
       let quanta = 0n;
       let requestId = 0;
@@ -5158,7 +5227,11 @@ async function testControlWorker() {
       };
       Object.assign(adapter, {
         attach: async (rings) => { feed({ op: "attach", rings }); },
+        // One pass: the drain, then one rendered block, then the drain that accounts it (the
+        // prelude drains and accounts its block in one `process()`).
         pass: async () => {
+          tick.callback();
+          renderBlock();
           quanta += 1n;
           new DataView(memory(), 16384, 80).setBigUint64(40, quanta, true);
           tick.callback();

@@ -31,7 +31,7 @@ import { WasmBoundary } from "../src/core/boundary.ts";
 import { constantValue } from "../src/core/abi.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { moduleBytes, sessionDocument } from "./support.mjs";
-import { MSB1_CONSUMER_CASES } from "./msb1-consumer-cases.mjs";
+import { MSB1_CONSUMER_CASES, STALE_GENERATION_CODE } from "./msb1-consumer-cases.mjs";
 
 const context = { audioWorklet: { addModule: async () => {} } };
 
@@ -479,6 +479,79 @@ test("prepareSeek bounds requests and rejects supersession, refusal, close and t
   assert.equal(timed.state, "closed");
 });
 
+test("actual Wasm: a ring seek is consumed only when the engine refuses it as already at the session seek's generation", async () => {
+  // Issue #1644 gate 1 (R4 amended). After a session seek at 2 a moved source refuses its own seek
+  // at 2 as stale, and without the rule that ring never drains again. A source the session seek
+  // did not move (one a later plan added, still at 1) must still be seeked, or every chunk at 2 is
+  // refused for good; any other refusal at that generation is counted as before.
+  const source = await readFile(new URL("../src/browser-assets/miso-engine-v1-pcm-feed-worklet.js", import.meta.url), "utf8");
+  const asset = await MisoEngineAsset.load(await moduleBytes());
+  const document = new TextEncoder().encode(sessionDocument({ frames: 4_800 }));
+  const feedOver = async ({ sessionSeek }) => {
+    const instance = await asset.instantiate();
+    let handle;
+    const exports = { ...instance.exports, miso_engine_web_v1_boot(...args) { handle = instance.exports.miso_engine_web_v1_boot(...args); return handle; } };
+    const boundary = await WasmBoundary.boot({ instantiate: async () => ({ exports }) }, document, { sourceRingFrames: 512 });
+    if (sessionSeek) assert.equal(boundary.sessionSeek({ generation: 2n, frame: 256n }).ok, true);
+    const { sandbox, registrations } = preludeHarness(source);
+    class Engine {
+      constructor() {
+        this.quantumFrames = 128; this.maximumSourceChannels = 2;
+        this.exports = recordFeedCalls(exports); this.handle = handle; this.memoryBuffer = exports.memory.buffer;
+        this.sourceIdPointer = exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourceId"));
+        this.sourceIdCapacity = exports.miso_engine_web_v1_buffer_capacity(handle, constantValue("bufferKinds", "sourceId"));
+        this.sourcePcm = new Float32Array(this.memoryBuffer, exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "sourcePcm")), 256);
+        // The engine worklet's boot binds this view (the hermetic suite pins it).
+        this.diagnosticView = new Uint8Array(this.memoryBuffer, exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", "diagnostic")), exports.miso_engine_web_v1_buffer_capacity(handle, constantValue("bufferKinds", "diagnostic")));
+        this.ready = true; this.disposed = false; this.stickyResult = 0;
+        this.lastSessionSeekGeneration = 2n; // what the engine handler records after an OK
+      }
+      rebindMemoryViews() { this.memoryBuffer = this.exports.memory.buffer; }
+      process() { return true; }
+    }
+    sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
+    const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
+    const attach = new (registrations.get("miso-sab-feed-attach"))();
+    const ring = createMsb1Ring({ sourceId: "s", channels: 2, frameCapacity: 128, capacity: 4 });
+    attach.port.onmessage({ data: { op: "attach", rings: [ring] } });
+    const writer = new Msb1RingWriter(ring); writer.engage(1n);
+    const seekAndWrite = (frame) => {
+      writer.seek(2n, frame);
+      writer.reserve(128);
+      writer.commit({ generation: 2n, startFrame: frame, frames: 128, endOfRegion: false });
+      engine.process([], []);
+      return controls(ring);
+    };
+    return { boundary, seekAndWrite, exports, handle };
+  };
+  const counts = (c) => [c[MSB1_CONTROL.SEEKS_APPLIED], c[MSB1_CONTROL.REFUSED], c[MSB1_CONTROL.SUBMITTED]];
+
+  // Issue #1387 (MINOR 2): the code both consumers' fakes write is the one the built engine writes.
+  const probe = await feedOver({ sessionSeek: true });
+  try {
+    const { exports, handle } = probe;
+    const staged = (kind) => exports.miso_engine_web_v1_buffer_ptr(handle, constantValue("bufferKinds", kind));
+    new Uint8Array(exports.memory.buffer, staged("sourceId"), 1).set([0x73]); // "s"
+    assert.equal(exports.miso_engine_web_v1_source_seek(handle, 1, 2n, 0n), 1, "a seek at the session seek's generation is refused");
+    const code = new TextDecoder().decode(new Uint8Array(exports.memory.buffer, staged("diagnostic"), STALE_GENERATION_CODE.length).slice());
+    assert.equal(code, STALE_GENERATION_CODE, "the engine's refusal code is the consumers'");
+  } finally { probe.boundary.dispose(); }
+  const moved = await feedOver({ sessionSeek: true });
+  try {
+    assert.deepEqual(counts(moved.seekAndWrite(256n)), [1, 0, 1], "the moved source's stale refusal is the seek applied, not a refusal");
+  } finally { moved.boundary.dispose(); }
+  const fresh = await feedOver({ sessionSeek: false });
+  try {
+    assert.deepEqual(counts(fresh.seekAndWrite(0n)), [1, 0, 1], "a source the session seek did not move is seeked, so its PCM at 2 is accepted");
+  } finally { fresh.boundary.dispose(); }
+  const outside = await feedOver({ sessionSeek: false });
+  try {
+    const c = outside.seekAndWrite(1_000_000n);
+    assert.deepEqual(counts(c), [0, 1, 0], "another refusal at the session generation is counted, and the epoch stays unseen");
+    assert.equal(c[MSB1_CONTROL.LAST_RESULT], 1);
+  } finally { outside.boundary.dispose(); }
+});
+
 test("the pump seeks every ring under the session's generation and refuses one not above its own", async () => {
   // Issue #1644 gate 4: a pump that writes its own next generation after a session seek feeds a
   // generation the engine never applied.
@@ -581,9 +654,9 @@ function anchoredPrelude(source) {
 function preludeConsumer(source) {
   const { sandbox, registrations } = preludeHarness(source);
   const adapter = {
-    submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null,
+    submissions: [], seeks: [], submitResult: 0, seekResult: 0, seekAtResult: 0, seekStale: false, onSeek: null, onApply: null,
   };
-  const stale = new TextEncoder().encode("source.generation.stale");
+  const stale = new TextEncoder().encode(STALE_GENERATION_CODE);
   class Engine {
     constructor() {
       this.quantumFrames = 4; this.maximumSourceChannels = 2; this.memoryBuffer = new ArrayBuffer(65_536);
@@ -612,6 +685,11 @@ function preludeConsumer(source) {
   }
   sandbox.registerProcessor("miso-engine-v1-audio-worklet", Engine);
   const engine = new (registrations.get("miso-engine-v1-audio-worklet"))();
+  const apply = engine.applySharedSeek.bind(engine);
+  engine.applySharedSeek = (ring, ...identity) => {
+    if (identity.length !== 0) adapter.onApply?.();
+    return apply(ring, ...identity);
+  };
   const attach = new (registrations.get("miso-sab-feed-attach"))();
   const replies = [];
   attach.port.postMessage = (data) => replies.push(structuredClone(data));

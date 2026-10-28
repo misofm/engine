@@ -16,6 +16,8 @@
 //   submitResult, seekResult, seekAtResult   the fake exports' results (settable)
 //   seekStale                 when true a refused `source_seek` writes `source.generation.stale`
 //   onSeek                    a hook `source_seek` calls with (generation, frame) before it answers
+//   onApply                   a hook called when prepare-seek applies a captured seek, before the
+//                             apply reads anything (the race window between check and apply)
 //   submissions               [{ id, generation, start, channels, frames, end, pcm }]
 //   seeks                     [[generation, frame]] of every `source_seek` call
 // The prelude submits at most two chunks a pass and the Worker as many as the engine takes, so a
@@ -33,6 +35,11 @@ import {
 } from "../src/browser/pcm-ring.ts";
 
 const Q = 4;
+
+/** The code the engine writes at the start of the session diagnostic when it refuses a seek at a
+ *  generation the source already has (#1644 D2). Both adapters' fake engines write it; the SDK's
+ *  real-Wasm test proves the built engine writes exactly it. */
+export const STALE_GENERATION_CODE = "source.generation.stale";
 const controls = (ring) => new Int32Array(ring, 0, MSB1_CONTROL_BYTES / 4);
 const count = (ring, word) => controls(ring)[MSB1_CONTROL[word]];
 function ring(sourceId, channels = 1, capacity = 8) {
@@ -108,14 +115,16 @@ export const MSB1_CONSUMER_CASES = [
       assert.equal(count(fed.shared, "SEEKS_APPLIED"), 0);
       consumer.seekResult = 0;
       await drain(consumer);
-      assert.deepEqual(consumer.seeks, [[2n, 40n], [2n, 40n]], "the same seek is asked again");
+      assert.ok(consumer.seeks.length >= 2 && consumer.seeks.every(([g, f]) => g === 2n && f === 40n), "the same seek is asked again");
       assert.deepEqual(starts(consumer), [[2n, 40n]], "the old generation's chunk is dropped");
       assert.deepEqual([count(fed.shared, "SEEKS_APPLIED"), count(fed.shared, "STALE")], [1, 1]);
       fed.writer.seek(3n, 80n);
       fed.write(3n, 80n);
       consumer.seekResult = 1;
       await consumer.pass();
-      assert.deepEqual([count(fed.shared, "REFUSED"), count(fed.shared, "LAST_RESULT"), count(fed.shared, "SEEKS_APPLIED")], [1, 1, 1]);
+      // A refused seek is asked again each drain (the Worker drains twice a block): counted each time.
+      assert.ok(count(fed.shared, "REFUSED") >= 1);
+      assert.deepEqual([count(fed.shared, "LAST_RESULT"), count(fed.shared, "SEEKS_APPLIED")], [1, 1]);
       assert.equal(consumer.submissions.length, 1, "a refused seek reads no slot");
     },
   },
@@ -136,12 +145,14 @@ export const MSB1_CONSUMER_CASES = [
       moved.writer.seek(3n, 16n);
       moved.write(3n, 16n);
       await consumer.pass();
-      assert.deepEqual([count(moved.shared, "SEEKS_APPLIED"), count(moved.shared, "REFUSED")], [1, 1]);
+      assert.equal(count(moved.shared, "SEEKS_APPLIED"), 1);
+      assert.ok(count(moved.shared, "REFUSED") >= 1, "stale at another generation is a refusal");
       // At the session generation but another refusal than the stale one: a refusal too.
       consumer.seekStale = false;
       other.writer.seek(2n, 0n);
       await consumer.pass();
-      assert.deepEqual([count(other.shared, "SEEKS_APPLIED"), count(other.shared, "REFUSED")], [0, 1]);
+      assert.equal(count(other.shared, "SEEKS_APPLIED"), 0);
+      assert.ok(count(other.shared, "REFUSED") >= 1, "another refusal at the session generation is counted");
     },
   },
   {
@@ -172,9 +183,59 @@ export const MSB1_CONSUMER_CASES = [
       headers[slot * 8] += 1;
       const before = consumer.submissions.length;
       await consumer.pass();
-      assert.equal(count(fed.shared, "TORN"), 1);
+      assert.ok(count(fed.shared, "TORN") >= 1, "a torn slot is counted each drain that meets it");
       assert.equal(consumer.submissions.length, before, "nothing behind a torn slot");
       assert.equal(fed.writer.occupancy, 1, "the torn slot stays");
+    },
+  },
+  {
+    name: "underruns are counted per block that found no chunk, and none once the region ended",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.write(1n, 0n);
+      for (let pass = 0; pass < 3; pass += 1) await consumer.pass();
+      assert.equal(count(fed.shared, "UNDERRUNS"), 2, "two blocks found the ring dry");
+      fed.write(1n, 4n, { frames: 3, end: true });
+      for (let pass = 0; pass < 3; pass += 1) await consumer.pass();
+      assert.equal(count(fed.shared, "UNDERRUNS"), 2, "none after the region's last chunk");
+      assert.equal(count(fed.shared, "DRAIN_BLOCKS"), 6);
+    },
+  },
+  {
+    name: "a ring whose writer is not live counts no underrun while the source runs dry",
+    async run(consumer) {
+      const idle = ring("idle");
+      await consumer.attach([idle.shared]);
+      idle.write(1n, 0n);
+      idle.writer.release();
+      await drain(consumer, 4);
+      assert.deepEqual([count(idle.shared, "UNDERRUNS"), count(idle.shared, "DRAIN_BLOCKS")], [0, 4]);
+    },
+  },
+  {
+    name: "prepare-seek applies the captured tuple when the writer seeks again between check and apply",
+    async run(consumer) {
+      const fed = ring("fed");
+      await consumer.attach([fed.shared]);
+      fed.writer.seek(2n, 12n);
+      let advanced = false;
+      consumer.onApply = () => {
+        if (advanced) return;
+        advanced = true;
+        fed.writer.seek(3n, 16n);
+      };
+      let reply = await consumer.prepareSeek([{ epoch: 1, generation: 2n, frame: 12n }]);
+      assert.equal(reply.kind, "superseded");
+      // The Worker drains after each message, so it may apply the newer seek at once; either way
+      // the preparation applied the captured tuple and no seek mixes the two.
+      assert.deepEqual(consumer.seeks[0], [2n, 12n], "the captured tuple, never mixed live epoch/generation words");
+      assert.ok(consumer.seeks.every(([g, f]) => (g === 2n && f === 12n) || (g === 3n && f === 16n)));
+      consumer.onApply = null;
+      reply = await consumer.prepareSeek([{ epoch: 2, generation: 3n, frame: 16n }]);
+      assert.equal(reply.kind, "confirmed");
+      assert.deepEqual(consumer.seeks, [[2n, 12n], [3n, 16n]]);
+      assert.equal(count(fed.shared, "DRAIN_BLOCKS"), 0, "preparation renders and counts no block");
     },
   },
   {
