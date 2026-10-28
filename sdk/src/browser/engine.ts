@@ -542,6 +542,23 @@ function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<Ar
   return new TextEncoder().encode(document.toJson());
 }
 
+/**
+ * A host rejection as the SDK raises it (#2190): a raw `miso.error.v1` record, which is not an
+ * `Error`, becomes `MisoEngineError` with the record's result; anything else passes unchanged.
+ */
+function hostRecordFailure(error: unknown): unknown {
+  if (typeof error !== "object" || error === null) return error;
+  const { tag, result } = error as { readonly tag?: unknown; readonly result?: unknown };
+  if (tag !== "miso.error.v1" || typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) {
+    return error;
+  }
+  return new MisoEngineError("the browser host refused a control frame", {
+    phase: "lifecycle",
+    code: resultName(result, "call"),
+    result,
+  });
+}
+
 /** Capability flag bit 16 of `CAPABILITIES_GET` (#1594 D10): the core serves the spectrum frames. */
 const CAPABILITY_SPECTRUM = 1n << 16n;
 
@@ -1509,7 +1526,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           // `revision_conflict`, and the queue takes the new revision from that refusal's reply
           // (no lock, no retry: #1389 R3).
           send: async (frame, document) => {
-            const reply = await host.control(frame, document);
+            let reply: Awaited<ReturnType<typeof host.control>>;
+            try {
+              reply = await host.control(frame, document);
+            } catch (error) {
+              // The host rejects a frame it refuses locally (one over its frame limit, a disposed
+              // host) with its numeric `miso.error.v1` record, which is not an `Error`; keep the
+              // result in the SDK's vocabulary, as the seek path does (#2190).
+              throw hostRecordFailure(error);
+            }
             queue.noteCommit(reply.revision);
             if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
             return reply.response;
