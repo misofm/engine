@@ -50,11 +50,17 @@ exactly this way for good: it is D15-10's `single` mode. A Worker joining the sa
 
 ## Decisions frozen for this slice
 
-- **D1. Build.** Rust target features `+simd128,+atomics,+bulk-memory`. Link arguments:
+- **D1. Build.** Rust target features `+simd128,+atomics,+bulk-memory,+mutable-globals` (amended
+  2026-10-27: `+mutable-globals` is required with `--shared-memory`, since each instance's
+  `__stack_pointer` and `__tls_base` are mutable globals and a second instance must be able to set
+  them; #1331a's recipe built with it). Link arguments:
   `--shared-memory --import-memory --export-memory --initial-memory=<I> --max-memory=<M>`.
   - `M` is the maximum that *Prove two Wasm instances on one shared memory in three browser
     engines and on iOS* (#1331) recorded as reservable on the real iOS device.
-  - `I` is the smallest initial size that boots every qualification fixture.
+  - `I` is the smallest initial size that boots every qualification fixture. Recorded (2026-10-27):
+    `I` = 20 pages, the link minimum, leaving about 28 KB of static-data headroom over the 1 MiB
+    stack, data and TLS; growth past it fails the link loudly, and the fix is to raise the
+    constant (and the build script's copy).
   - Both are named constants in `hosts/host-web/src/lib.rs`, `WASM_INITIAL_MEMORY_PAGES` and
     `WASM_MAXIMUM_MEMORY_PAGES`. The ABI layout generator emits them into
     `miso-engine-v1-abi-layout.json` as `memory.initialPages` and `memory.maximumPages`.

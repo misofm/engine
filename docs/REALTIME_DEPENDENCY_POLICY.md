@@ -449,10 +449,12 @@ cross-target equality is `to_bits` identity, not a tolerance (D5).
 Issue 003 concurrent queues use only pointer-width atomic loads/stores. Rust guarantees every
 available standard atomic type is lock-free, and the supported native/mobile targets expose
 `target_has_atomic="ptr"`. Counters are endpoint-local plain integers, so render performs no atomic
-read-modify-write retry. Browser launch uses `LocalRing` on its single render agent; the shipped
-`simd128` module contains no atomic opcode, no import and no shared memory
-(`scripts/check-web-audioworklet.sh`, which took over the scalar object inspection #1062 retired),
-and makes no cross-agent shared-memory claim.
+read-modify-write retry. Browser launch uses `LocalRing` on its single render agent. Since #1380
+the shipped `simd128` module is built with atomics and imports one shared memory, `env.memory`,
+with one instance per memory; `scripts/check-web-audioworklet.sh` (which took over the scalar
+object inspection #1062 retired) holds that shape, atomics are allowed, and the call-graph gate
+keeps every render-thread closure at `atomic_waits=0`. The module makes no cross-agent
+shared-memory claim yet: two instances on one memory are #1332's.
 
 The revision gate and the latest-target cells (#1432) give render one `fetch_or` per plan per
 block and one `swap` per pending dirty word; on AArch64 without LSE (ARMv8.0) a read-modify-write

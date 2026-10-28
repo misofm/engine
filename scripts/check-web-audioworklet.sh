@@ -129,7 +129,8 @@ if (($# == 1)) && [[ $1 == --self-test-module-shape ]]; then
   mutate "an unshared memory" "${valid/ shared <- / <- }"
   mutate "limits other than the layout's" "${valid/max=8192/max=16384}"
   mutate "an initial size other than the layout's" "${valid/initial=20/initial=17}"
-  mutate "a memory defined, not imported" "${valid/Import\[1\]:$'\n' - memory\[0\] pages: initial=20 max=8192 shared <- env.memory/Memory[1]:$'\n' - memory[0] pages: initial=20 max=8192 shared}"
+  # The import stays exactly as valid: only the "defines no memory of its own" rule can see this.
+  mutate "a memory defined beside the import" "${valid/$'\n'Function\[1\]:/$'\n'Memory[1]:$'\n' - memory[1] pages: initial=1$'\n'Function[1]:}"
   mutate "the memory no longer exported" "${valid/ - memory\[0\] -> \"memory\"/ - func[0] -> \"start\"}"
   echo "web AudioWorklet module-shape mutations passed"
   exit 0

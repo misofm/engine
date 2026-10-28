@@ -397,9 +397,9 @@ jobs:
           python3 -B scripts/strip-wasm-names.py --self-test
           python3 -B scripts/strip-wasm-names.py check target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
-      # check-web-audioworklet.sh asserts the frozen export set, no imports, no shared memory, no
-      # atomics or relaxed SIMD, the render export's allocation-free/trap-free closure, and the
-      # vector-kernel ratchet. check-browser-expected-resources.py --artifacts runs the same
+      # check-web-audioworklet.sh asserts the frozen export set, exactly one import (a shared
+      # env.memory at the ABI layout's pages, #1380), no relaxed SIMD, the render export's
+      # allocation-free/trap-free closure with atomic_waits=0, and the vector-kernel ratchet. check-browser-expected-resources.py --artifacts runs the same
       # direct-oracle.mjs digest parity and unconditionally self-tests before returning (design
       # §6.3: subsumes the retired web-audioworklet-browser-correctness.py --check and its own
       # --self-test step). #1044: `--without-metadata-regeneration` leaves out only the gate's

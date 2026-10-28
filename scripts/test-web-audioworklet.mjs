@@ -2757,6 +2757,8 @@ async function testProcessor() {
   // descriptor (no real 512 MiB reservation per case); a violation is collected rather than thrown,
   // since the worklet turns a throw at instantiation into a typed failure, and checked at the end.
   const memoryDescriptors = new WeakMap();
+  // A memory one instance already imported: a second instance on it would share it (#1380 D3).
+  const importedMemories = new WeakSet();
   const importViolations = [];
   let importsChecked = 0;
   WebAssembly.Memory = class {
@@ -2778,6 +2780,8 @@ async function testProcessor() {
         assert.deepEqual(Object.keys(imports), ["env"]);
         assert.deepEqual(Object.keys(imports.env), ["memory"]);
         assert.deepEqual(memoryDescriptors.get(imports.env.memory), expectedMemory);
+        assert.ok(!importedMemories.has(imports.env.memory), "the memory is fresh for this instance");
+        importedMemories.add(imports.env.memory);
       } catch (error) {
         importViolations.push(error.message);
       }
