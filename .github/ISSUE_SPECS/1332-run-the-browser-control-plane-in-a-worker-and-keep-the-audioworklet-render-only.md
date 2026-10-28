@@ -521,3 +521,39 @@ in-place `SPECTRUM_CONFIGURE` adoption from the Worker (with the render half awa
 without a lent plan, as on the C ABI, so the plan's readers are not reached); `seek_source`
 without the render plan (routing only); the lease export on the worklet side; per-instance
 `RENDER_ALLOCATIONS`.
+
+## S3 evidence (2026-10-28): a shared-memory growth is not a fault
+
+Slice S3 of the #1332 build plan (#1332(c)), branch `codex/issue-1332-growth` from #1380
+(`d0c5b81b5` merged). No Rust, export or ABI change.
+
+- **Worklet.** The `process()` check that silenced a quantum when `memory.buffer` was a new
+  object is deleted. The memory is shared (#1380), so a growth gives `memory.buffer` a new
+  `SharedArrayBuffer` object while every view over the older one stays valid for its bytes;
+  `process()` renders over the views it holds. The message handlers still re-cut every view
+  (`rebindMemoryViews`) for their own reads of grown bytes. `staleViewQuanta` stays in the
+  status and is always 0 (owner decision O5: no API break); the `.d.ts` says so.
+- **Policy.** `memory\.buffer` joins `process_policy_re` (`scripts/check-web-audioworklet.sh`):
+  the render-callback body may not read it. Red mutation in `scripts/test-web-audioworklet.sh`:
+  the old check put back in the body fails the policy, and passes with the regex before S3.
+- **Hermetic test.** The fake module's memory in `scripts/test-web-audioworklet.mjs` is now a
+  real shared `WebAssembly.Memory`, grown by `memory.grow`. The root-ruling-A case is rewritten:
+  after a growth with no handler since, the next quantum renders through the views over the
+  older buffer, `process()` does not re-bind and the next handler does. Red on the old worklet:
+  `the quantum after a growth renders` (`[]` rendered). No test asserts `staleViewQuanta === 0`:
+  it is a constant now.
+- **Browser row.** The 1 MiB `SESSION_REPLACE` row (single mode, the growth happens in the
+  handler: about 1.9 MiB to 20.7 MiB) now renders 80 quanta (16 + 64) over a feed submitted
+  after the commit, with the meter stream leased. Gate `structural-replace-grown` (run.mjs):
+  precondition, the memory grew; the capture digest equals the module's render of the same
+  replace and feed under Node (`structural-edit-reference.mjs`, new `sourceAfterReplace`) and
+  the 64 quanta after the sixteen are not silent; at least one meter frame after the growth
+  carries the 192 strips with finite peaks. Red mutation `structural-replace-grown-output`.
+  Both legs green locally (Chromium 151.0.7922.34, WebKit 26.5); digest `383be91c…` on both.
+  (Verify fold: the `staleViewQuanta` leg and the observation-read leg were dropped; S9 adds the
+  real two-thread stale check.)
+- **Limit, stated.** The extended row stays green on the old worklet in single mode (run on
+  Chromium: `staleViewQuanta` 0). The handler that grows the memory re-binds before the next
+  quantum, so the old check could not fire on one thread. The row discriminates once the Worker
+  grows the memory with no worklet handler between (S9's isolated leg runs the same row); until
+  then the red evidence is the hermetic test and the policy mutation.

@@ -736,6 +736,30 @@ const STRUCTURAL_EDIT_FRAMES = STRUCTURAL_EDIT_BLOCKS * QUANTUM_FRAMES;
 /// replaces the track's source, so the old track ramps out before the swap: the module under Node
 /// adopts it at sample 640 (block 5). Sixteen leaves room and gates nothing on the block.
 const STRUCTURAL_REPLACE_LARGE_BLOCKS = 16;
+/// Issue #1332 S3: the quanta the same capture renders after those sixteen. The replacement grew
+/// the module's shared memory in a message handler, so `memory.buffer` is a new object; render
+/// must go on over the views it holds, with no quantum silenced for it.
+const STRUCTURAL_REPLACE_GROWN_BLOCKS = 64;
+const STRUCTURAL_REPLACE_CAPTURE_BLOCKS = STRUCTURAL_REPLACE_LARGE_BLOCKS + STRUCTURAL_REPLACE_GROWN_BLOCKS;
+const STRUCTURAL_REPLACE_CAPTURE_FRAMES = STRUCTURAL_REPLACE_CAPTURE_BLOCKS * QUANTUM_FRAMES;
+
+/// Issue #1332 S3: the 1 MiB document's `fixture-source` blocks, fed after its commit, so the
+/// tracks it adopts play a signal (a quantum silenced after the growth is then audible in the
+/// digest). The page and `run.mjs`'s Node reference both read them here.
+export function largeReplaceSource() {
+  return {
+    sourceId: "fixture-source",
+    blocks: Array.from({ length: STRUCTURAL_REPLACE_CAPTURE_BLOCKS }, (_, block) => ({
+      startFrame: block * QUANTUM_FRAMES,
+      frames: QUANTUM_FRAMES,
+      // No block ends the region: the module refuses an end of region short of the 48,000 frames
+      // the source declares.
+      final: false,
+      leftBase: ((block % 8) - 4) / 1024,
+      leftStep: 1 / 65536,
+    })),
+  };
+}
 
 /// Issue #1295: a structural edit by `SESSION_REPLACE` in a real browser, on this page (no
 /// cross-origin isolation, so the module runs in `single` mode and every control call runs in the
@@ -753,12 +777,12 @@ const STRUCTURAL_REPLACE_LARGE_BLOCKS = 16;
 /// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` and does not pin.
 async function runStructuralReplaceQualification(createHost, documentA, documentB, source, largeDocument) {
   const { replaceSessionThroughSdk, sourceUnderrunBlocksThroughSdk } = await import("/sdk/sdk-response-client.js");
-  const boot = async (frames) => {
+  const boot = async (frames, options = bootOptions(STRUCTURAL_EDIT_FRAMES)) => {
     const context = new OfflineAudioContext(2, frames, SAMPLE_RATE);
     const host = await createHost({
       context,
       document: documentA,
-      options: bootOptions(STRUCTURAL_EDIT_FRAMES),
+      options,
       simd128ModuleUrl: ARTIFACT_URL,
       workletModuleUrl: WORKLET_URL,
     });
@@ -800,15 +824,37 @@ async function runStructuralReplaceQualification(createHost, documentA, document
   await edit.host.dispose();
   const capture = [rendered.getChannelData(0), rendered.getChannelData(1)];
 
-  // The 1 MiB boot-ceiling document.
-  const large = await boot(STRUCTURAL_REPLACE_LARGE_BLOCKS * QUANTUM_FRAMES);
+  // The 1 MiB boot-ceiling document. Issue #1332 S3: its commit grows the module's shared memory
+  // in the message handler; the capture then renders on for 64 quanta over the source fed after
+  // the commit, with the meter stream leased.
+  const large = await boot(STRUCTURAL_REPLACE_CAPTURE_FRAMES,
+    bootOptions(STRUCTURAL_REPLACE_CAPTURE_FRAMES, LIVE_CONTROL_METER_BLOCKS));
+  const largeMeterFrames = [];
+  const largeLease = await large.host.meters({
+    enabled: true,
+    onFrame: (frame) => largeMeterFrames.push({
+      trackCount: frame.trackCount,
+      endSample: frame.endSample.toString(),
+      finite: Array.from(frame.peaks).every(Number.isFinite),
+    }),
+  });
   const largeBefore = counters(await large.host.status());
   const largeReply = await replaceSessionThroughSdk(large.host, largeDocument);
   const largeCommitted = counters(await large.host.status());
-  await large.context.startRendering();
+  for (const description of largeReplaceSource().blocks) {
+    const acknowledgement = await large.host.submitSource(corpusRequest(description));
+    if (acknowledgement.result !== RESULT_OK) throw new Error("structural-replace-large feed rejected");
+  }
+  const largeRendered = await large.context.startRendering();
+  for (let spin = 0; spin < 8 && largeMeterFrames.length === 0; spin += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
   const largeAfter = counters(await large.host.status());
+  const largeUnderruns = await sourceUnderrunBlocksThroughSdk(large.host);
   const largeAllocations = await renderAllocationCount(large.host);
   await large.host.dispose();
+  const largeCapture = [largeRendered.getChannelData(0), largeRendered.getChannelData(1)];
+  const largeGrownStart = STRUCTURAL_REPLACE_LARGE_BLOCKS * QUANTUM_FRAMES;
 
   return {
     edit: {
@@ -840,6 +886,19 @@ async function runStructuralReplaceQualification(createHost, documentA, document
       committed: largeCommitted,
       after: largeAfter,
       renderAllocations: largeAllocations,
+      frameHex: largeReply.frameHex,
+      sourceRingFrames: STRUCTURAL_REPLACE_CAPTURE_FRAMES,
+      blocks: STRUCTURAL_REPLACE_CAPTURE_BLOCKS,
+      grownBlocks: STRUCTURAL_REPLACE_GROWN_BLOCKS,
+      renderedDigest: await pcmDigest(largeCapture, STRUCTURAL_REPLACE_CAPTURE_FRAMES),
+      grownHeard: largeCapture.some((channel) => channel.subarray(largeGrownStart).some((sample) => sample !== 0)),
+      underrunBlocks: largeUnderruns,
+      meterLeaseResult: largeLease.result,
+      meterFrames: largeMeterFrames.length,
+      meterTrackCounts: [...new Set(largeMeterFrames.map((frame) => frame.trackCount))],
+      meterFramesAfterGrowth: largeMeterFrames
+        .filter((frame) => BigInt(frame.endSample) > BigInt(largeGrownStart)).length,
+      meterFinite: largeMeterFrames.every((frame) => frame.finite),
     },
   };
 }

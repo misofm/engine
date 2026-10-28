@@ -1994,12 +1994,16 @@ async function testMainRealm() {
   }
 }
 
+// The real constructor: `testProcessor` stubs `WebAssembly.Memory` while its cases run.
+const SharedMemory = WebAssembly.Memory;
+
 // `submixIds` (#1209 MINOR-2, #1210 MINOR-1): the session's submix IDs in canonical order; the
 // meter header's `submix_count` and the frame layout follow it, so a caller can run the worklet
 // with no submix (the production case before K2) or with several (their order is observable).
 function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
-  // Three pages, so the staged document at 150,000 lies beyond the first two.
-  const memory = { buffer: new ArrayBuffer(196608) };
+  // Three pages, so the staged document at 150,000 lies beyond the first two. The module's memory
+  // is shared (#1380), so the fake's is a real shared memory too (#1332 S3).
+  const memory = new SharedMemory({ initial: 3, maximum: 48, shared: true });
   const statusPointer = 16384;
   const resourcePointer = 17000;
   let status = new DataView(memory.buffer, statusPointer, 80);
@@ -2130,13 +2134,12 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     calls.bootResult = 0;
     return 1;
   };
-  // A real linear-memory growth: the old buffer is detached in a browser, the new one holds the
-  // same bytes at the same addresses, and the fake's own views follow it.
+  // A real shared linear-memory growth (doubling): `memory.buffer` becomes a new object over the
+  // grown length, every view over the older one stays valid for its bytes, and the fake's own
+  // views follow the new object.
   const growMemory = () => {
-    const grown = new ArrayBuffer(memory.buffer.byteLength * 2);
-    new Uint8Array(grown).set(new Uint8Array(memory.buffer));
-    memory.buffer = grown;
-    status = new DataView(grown, statusPointer, 80);
+    memory.grow(memory.buffer.byteLength / 65536);
+    status = new DataView(memory.buffer, statusPointer, 80);
     calls.growths += 1;
   };
   const exports = {
@@ -3202,8 +3205,8 @@ async function testProcessor() {
       }
     }
     {
-      // Root ruling A (#1332 D5, "growth is not a fault"): the module's memory moving under a
-      // command detaches every cached view, and the handler re-cuts them all before it ends. The
+      // Root ruling A (#1332 D5, "growth is not a fault"): the module's memory growing under a
+      // command gives it a new buffer object, and the handler re-cuts every view before it ends. The
       // reply is posted whole, the worklet stays ready, a later request is served, and the next
       // `process()` renders the engine's output through the new views.
       const { processor, fake } = makeProcessor();
@@ -3261,7 +3264,6 @@ async function testProcessor() {
       assert.equal(status.result, 0);
       assert.equal(status.memoryBytes, 196608 * 4, "the status reports the grown memory");
       assert.equal(status.renderedQuanta, 1n, "the status reads the grown memory");
-      assert.equal(status.staleViewQuanta, 0, "no quantum ran on a detached view");
       assert.equal(processor.process([], [[left.fill(1), right.fill(1)]]), true);
       assert(left.every((sample) => sample === 0.25));
       assert.deepEqual(fake.calls.render, [64, 64]);
@@ -3431,37 +3433,27 @@ async function testProcessor() {
     }
 
     {
-      // Root ruling A: `process()` never re-binds. A memory that moved with no handler since
-      // renders silence for the quantum, counts it, and is no fault; the next message handler
-      // re-binds and the quantum after renders again.
+      // Issue #1332 S3: a growth is no fault for `process()` either. On the shared memory a view
+      // over the older buffer object stays valid for its bytes, so a quantum after a growth with
+      // no handler since renders over the views the instance holds; `process()` never re-binds,
+      // and the next handler re-cuts the views.
       const { processor, fake } = makeProcessor();
+      const before = processor.outputLeft.buffer;
       fake.growMemory();
+      assert.notEqual(fake.exports.memory.buffer, before, "the fake really grew its memory");
       const left = new Float32Array(64).fill(1);
       const right = new Float32Array(64).fill(1);
       assert.equal(processor.process([], [[left, right]]), true);
-      assert.deepEqual(fake.calls.render, [], "no render on a detached view");
-      assert(left.every((sample) => sample === 0 && !Object.is(sample, -0)));
-      assert(right.every((sample) => sample === 0 && !Object.is(sample, -0)));
-      assert.equal(processor.stickyResult, 0, "a moved memory is not sticky");
-      assert.equal(processor.ready, true);
-      assert.equal(processor.staleViewQuanta, 1);
-      assert.equal(processor.process([], [[left, right]]), true);
-      assert.equal(processor.staleViewQuanta, 2, "every silenced quantum is counted");
-      assert.equal(
-        processor.outputLeft.buffer === fake.exports.memory.buffer,
-        false,
-        "process() did not re-bind",
-      );
+      assert.deepEqual(fake.calls.render, [64], "the quantum after a growth renders");
+      assert(left.every((sample) => sample === 0.25), "through the views over the older buffer");
+      assert(right.every((sample) => sample === -0.25));
+      assert.equal(processor.stickyResult, 0);
+      assert.equal(processor.outputLeft.buffer, before, "process() did not re-bind");
       processor.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
       const status = processor.port.posts.map((post) => post.message)
         .filter((message) => message.tag === "miso.status.v1").at(-1);
-      assert.equal(status.staleViewQuanta, 2, "the status reports the silenced quanta");
       assert.equal(status.memoryBytes, 393216);
-      left.fill(1);
-      right.fill(1);
-      assert.equal(processor.process([], [[left, right]]), true);
-      assert.deepEqual(fake.calls.render, [64], "the handler re-bound and render resumed");
-      assert(left.every((sample) => sample === 0.25));
+      assert.equal(processor.outputLeft.buffer, fake.exports.memory.buffer, "the handler re-cut the views");
     }
 
     {
