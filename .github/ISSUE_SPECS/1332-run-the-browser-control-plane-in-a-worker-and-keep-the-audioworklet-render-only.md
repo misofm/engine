@@ -938,3 +938,67 @@ Slice S7 of the #1332 build plan (#1332(b1)), branch `codex/issue-1332-worker-js
   the release or the dispose reply does not arrive within a bounded time, the page tears down
   directly (terminates the Worker, disconnects the node) and rejects with a typed reason; the
   Worker then disposes with no token.
+
+## S9 evidence (2026-10-28): the isolated (worker-mode) qualification leg
+
+Slice S9 of the #1332 build plan, branch `codex/issue-1332-isolated-leg` from S7 (`28bb9f849`). No
+host, Worker, Rust or SDK source change; the S8-owned files are untouched.
+
+- **Two legs.** `npm run qualify -- --leg single|worker|all` (default `all`). `single` is the page
+  without cross-origin isolation (unchanged, and it also runs the BLAKE3 Worker and suspended PCM
+  feed rows); `worker` runs the same `qualifyBrowser` on the isolated origin, where the host picks
+  `worker` mode by default. Gate messages and reports are prefixed `<browser> <leg>`.
+- **Feed rows (choice).** The SDK forces `instanceMode: "single"` whenever `pcmFeed` is set (until
+  S11), so the PCM feed row stays one explicit `single` row on the isolated origin, run in the
+  single leg's job. The worker leg's raw rows feed through `submitSource`, which the host sends to
+  the Worker; none of the SDK rows sets `pcmFeed`, so they run in worker mode.
+- **Worker-leg assertions** (one gate each; the single leg keeps its own form):
+  - `instance-mode`: the page's `crossOriginIsolated` is the leg's, and all 16 raw hosts and every
+    SDK engine report the leg's `instanceMode`.
+  - `structural-edit-blocking`, `structural-edit-control-allocations`, `structural-replace-large`,
+    `sdk-spectrum-control-allocations`: `blockingRebuilds` 0 and `singleModeControlAllocations` 0
+    before and after (the single leg still requires 1 and a growth).
+  - Unchanged on both legs: every structural-edit row's digest (`structural-edit-output`,
+    `structural-apply-*`, `empty-boot-*`: the meter stream follows the strip count),
+    `render-allocations` 0 over all 16 instances including the structural rows, the offline
+    1 MiB growth row (`structural-replace-grown`: digest `383be91c…` equals the Node reference, the
+    192-strip meter frames after the growth), the #1530 realtime observation wait
+    (`sdk-observation-wait`), and `staging-reads`' `OBSERVATION_READ` on the observation document's
+    compressor tap, which the Worker now serves (S6b).
+  - New row `growth-while-rendering` (both legs): the 1 MiB `SESSION_REPLACE` sent while a real
+    `AudioContext` renders (one more trusted click; the click plan is 2, or 5 with the SDK). The
+    memory grew, the revision was applied, 64 quanta rendered past the commit with `lastResult` 0,
+    and the successor's 192 strips reached the page in a meter frame after the reply. No digest (a
+    real context is not deterministic; the offline row holds the bits). This is the S3 note's
+    two-thread case: the Worker grows the memory while `process()` renders over its old views.
+  - `growth-while-rendering-concurrent` (worker leg): meter frames that reached the page while the
+    reply was pending cover at least a quarter of the quanta its wall time spans (and at least 4).
+    Measured: Chromium worker 24 frames in 129 ms, single 0 in 131 ms; WebKit worker 107 frames in
+    611 ms, single 5 (already in flight) in 834 ms.
+  - `meter-frames-skipped`: the offline and realtime growth rows' `meterFramesSkipped` is reported,
+    0 on the single leg and at most 4 on the worker leg (measured 0 on every run).
+  - `observation-unsubscribe-rule`. Found by the leg: in worker mode the unsubscribe acknowledgement
+    comes from the Worker and the meter frames from the worklet, so one frame rendered before the
+    disarm arrived after the acknowledgement (Chromium: 17.6 dB). The #1535 row's "every frame after
+    the acknowledgement" rests on single mode's one FIFO port. The row now records `disarmRule`:
+    `port-order` (single, unchanged) or `render-position` (worker: frames whose window ends past
+    the `boundary` status read from the worklet after the acknowledgement, which D15-2 guarantees
+    the disarm reached). The gate holds each leg to its rule.
+- **Gate 4 note.** The brief's qualification-only grow message is not built: the Worker file's
+  policy forbids `memory.grow`. The 1 MiB replacement grows the memory in the Worker instead
+  (about 3.9 MiB to 22.7 MiB).
+- **Mutations** (`--self-test-mutations`, leg-filtered by `onLeg`): `instance-mode`,
+  `sdk-instance-mode`, `structural-edit-blocking-counted` and
+  `structural-edit-control-allocations-counted` (worker), `sdk-spectrum-control-allocations-counted`
+  (worker), `growth-while-rendering-meter`, `growth-while-rendering-stopped`,
+  `growth-while-rendering-concurrent` (worker), `meter-frames-skipped`,
+  `observation-unsubscribe-rule` (single). The single-only `-uncounted` mutations and the existing
+  `sdk-spectrum-control-allocations` run on the single leg only.
+- **Matrix.** `results.json` is not re-recorded (docs/RELEASE.md). Rows gain an optional `leg`; the
+  generator renders a `Leg` column (`unsplit` for a row with none) and the prose names both legs.
+  `--check-matrix` holds each leg to the row for its browser and leg, or to the legless row of the
+  last release for its floor and outcome. `--record-matrix` needs `--browser all --leg all` and
+  records four rows.
+- **CI.** The `browser` job is a `browser x leg` matrix (`[chromium, webkit] x [single, worker]`,
+  O4), each job 10 minutes and named `<browser> <leg> — browser qualification gates`. The job id is
+  unchanged, so the verdict's expectation table and the routing checks are unchanged.
