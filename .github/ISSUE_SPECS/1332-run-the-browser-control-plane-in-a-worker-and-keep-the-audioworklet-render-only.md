@@ -760,6 +760,10 @@ digest, status snapshot and timeline equal; `bridgeMetadataBytes`/`bridgeRetaine
 identity fixture declares no tap, so no table row moves. Against main (`2daf4fb3…`) the same, plus
 S6's 2312 B.
 
+C ABI delta (no wire or API change): `ObservationIndex::retained_bytes` now charges the view and
+start tables, so a C ABI plan with taps reports more retained bytes, and its admission charge rises
+by 8 B per tap plus 4 B per handle and one more (64-bit). Its carried-tap record is unchanged.
+
 Tests (one per claim):
 1. `hosts/host-web/tests/worker_handoff.rs`,
    `the_worker_reads_an_observation_tap_while_the_worklet_renders`: the Worker arms `comp0`'s
@@ -768,12 +772,16 @@ Tests (one per claim):
    configure), the worklet renders across the swap that carries the tap, and the Worker's read is
    Ready and equal to the single instance's. Red on S6 (`Err("observation.unbound")`), and with
    `ObservationIndex::pair_carried` removed (`Pending` for `Ready`).
-2. `hosts/host-web/src/tests.rs`, `the_render_half_meter_fold_acknowledges_the_window_it_folds`:
-   with the lease and polls, the plan reader's `consumed` word equals the newest window's sequence.
-   Red with the fold's `acknowledge` removed (`0` for `4`). That a read moves no word is the
-   existing `selected_observation_reads_keep_same_track_owner_windows_and_sequences`; the control
-   side cannot write it by type.
+The view type has no `acknowledge`, so the control side cannot write the `consumed` word; a
+read moving no word stays `selected_observation_reads_keep_same_track_owner_windows_and_sequences`'s.
+(A fold-acknowledges test was written and deleted at verify: the word has no production reader.)
 Single mode is unchanged: every existing host-web observation test passes through the new path.
+
+Verify fold (S6b verify PASS): the control plane never replaces a preparer's host attachment
+with its own carried-tap attachment; a preparer that returns the record for a plan that already
+carries an attachment is refused (`host.observation.attachment`), and the hook's documentation
+says it goes with `kept_observations`. No unit test: no preparer in the tree reaches the
+refusal, and building one needs a tap fixture and an attachment type for one branch.
 
 Gates, all green: the lint job's steps (fmt, workspace clippy `-D warnings`, `cargo doc -D
 warnings`, every policy script); `cargo test -p host-core -p control-plane -p capi -p host-web -p

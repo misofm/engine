@@ -1805,6 +1805,12 @@ pub trait RuntimePreparer: Send {
     /// a preparer that sets an attachment of its own (the browser's, which keeps its readers
     /// there) stores `record` and returns `None`. The default returns it, and the control plane
     /// sets its own attachment on the plan. Control thread, before publication.
+    ///
+    /// This hook and [`Self::kept_observations`] go together: a preparer that keeps its readers
+    /// in its own attachment must keep the record there too. The control plane never replaces an
+    /// attachment: a record returned for a plan that already carries one refuses the preparation
+    /// (`host.observation.attachment`), since the replaced attachment's hooks would stop running
+    /// and the carried taps would stop pairing.
     fn keep_carried_taps(
         &self,
         plan: &mut engine::realtime::PreparedRenderPlan,
@@ -2010,10 +2016,18 @@ pub(crate) fn prepare_runtime<A: ControlAdapter>(
         Some(record) => preparer
             .keep_carried_taps(&mut prepared.plan, std::sync::Arc::clone(record))
             .map(|record| {
+                if prepared.plan.has_host_attachment() {
+                    return Err(prepare_failure(PrepareDiagnostics::fixed(
+                        host_core::PrepareRejection::Platform,
+                        "host.observation.attachment",
+                    )));
+                }
                 prepared
                     .plan
                     .set_host_attachment(Box::new(crate::control::CarriedTapsAttachment(record)));
+                Ok(())
             })
+            .transpose()?
             .is_some(),
         None => false,
     };
