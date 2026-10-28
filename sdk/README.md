@@ -861,11 +861,11 @@ grows no longer meets a fixed cap: the memory budget is the limit.
 - Added: the boot options `maximumControlFrameBytes` and `maximumDocumentBytes` (`bigint`, in
   `BootOptions`, `OfflineEngineOptions` and the browser `policy`, and on the shipped host's
   `MisoWebBootOptions`, where they replace `reserved1` and `reserved3`). Absent or `0n`, the
-  control frame is 256 KiB (`constants.defaultControlFrameBytes`; 16 KiB to 16 MiB is accepted,
+  control frame is 128 KiB (`constants.defaultControlFrameBytes`; 16 KiB to 16 MiB is accepted,
   anything else is refused with `web.options.control_frame_bytes`) and the document limit is the
   budget's. A `maximumDocumentBytes` is a tighter cap, for documents from other people.
-- Changed: the default control frame is 256 KiB, up from 16 KiB, so one transaction holds a bus
-  add over about 775 tracks. The frame is charged to the budget, about 4 MB of retained memory at
+- Changed: the default control frame is 128 KiB, up from 16 KiB, so one transaction holds a bus
+  add over about 385 tracks. The frame is charged to the budget, about 0.6 MB of retained memory at
   the default. `CAPABILITIES_GET` (and the transaction queue's `maximumFrameBytes`) report it.
 - Added: `host.controlFrameBytes`, the frame the engine resolved at boot; `host.control()`
   refuses a longer frame.

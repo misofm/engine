@@ -286,7 +286,7 @@ export interface MisoWebBootOptions {
   /// A budget above the module's shared-memory maximum (the ABI layout's `memory.maximumPages`
   /// pages, 512 MiB) is refused with `web.boot.memory_maximum` (issue #1380).
   maximumMemoryBytes: bigint;
-  /// The control frame in bytes, or `0n` for the engine's default, 256 KiB (offset 32 of the boot
+  /// The control frame in bytes, or `0n` for the engine's default, 128 KiB (offset 32 of the boot
   /// options, issue 2191). It bounds every control frame, response and event; the engine refuses
   /// a nonzero value below 16 KiB or above 16 MiB with `web.options.control_frame_bytes`. The host
   /// reports the frame the engine resolved as `MisoAudioWorkletHost.controlFrameBytes`.

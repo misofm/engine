@@ -301,3 +301,38 @@ fn pinned_multiplier_bounds_the_worst_accepted_parse_and_model_build_peak() {
         "pre-parse refusal allocated {refused_peak} bytes; the parser must not have run"
     );
 }
+
+/// Issue #2191: a 1 MiB control frame under a budget below its control-plane rows (about 4.3 MB)
+/// but far above the document's parse projection is refused before the parser or the control
+/// plane allocates anything, with a diagnostic that names the frame and its rows.
+///
+/// Test value: red if the boot's pre-allocation admission leaves out the frame-scaled rows: the
+/// boot then compiles, allocates those rows, and only the exact check refuses it, after the memory
+/// (permanently, on wasm) grew past the budget.
+#[test]
+fn a_frame_the_budget_cannot_hold_is_refused_before_anything_is_allocated() {
+    let document = include_bytes!("../../../fixtures/session/v1/canonical-minimal.json");
+    let (failure, peak) = measured_peak(|| {
+        AudioWorkletEngineHost::boot(
+            document,
+            WebBootOptions {
+                maximum_memory_bytes: 4 << 20,
+                maximum_control_frame_bytes: 1 << 20,
+                ..WebBootOptions::default()
+            },
+        )
+        .err()
+        .expect("a frame over the budget refuses")
+    });
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+    let diagnostic = String::from_utf8_lossy(failure.diagnostic()).into_owned();
+    assert!(
+        diagnostic.starts_with("host.budget.parse_projection\t")
+            && diagnostic.contains(",control_frame_bytes=1048576,control_frame_rows_bytes="),
+        "{diagnostic}"
+    );
+    assert!(
+        peak < document.len() + 4096,
+        "the refusal allocated {peak} bytes; nothing past the diagnostic may be allocated"
+    );
+}

@@ -112,17 +112,19 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
     } else {
         options.source_ring_frames
     };
+    let frame = crate::resolved_control_frame_bytes(&options).expect("a valid frame word");
     let projection = project_buffers(
         u32::try_from(document.len()).expect("bounded fixture document"),
         shape.sample_rate_hz,
         shape.quantum_frames,
-        crate::resolved_control_frame_bytes(&options).expect("a valid frame word"),
+        frame,
     )
     .expect("bridge projection");
     projected_retained_bytes(
         &compiled,
         source_ring_frames,
         projection.report.bridge_retained_bytes,
+        control_frame_rows(frame).expect("frame rows"),
     )
     .expect("retained projection")
 }
@@ -353,7 +355,15 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     // allocates the document, with a diagnostic that names the bytes and the limit: the budget's
     // parse projection (`len * 20 > budget`) and, tighter, the document word.
     let budget = 1_u64 << 20;
-    let derived = (budget / PARSE_TRANSIENT_MULTIPLIER) as u32;
+    let rows = control_frame_rows(DEFAULT_CONTROL_FRAME_BYTES).expect("frame rows");
+    let derived = ((budget - rows) / PARSE_TRANSIENT_MULTIPLIER) as u32;
+    assert_eq!(
+        maximum_document_bytes(&WebBootOptions {
+            maximum_memory_bytes: budget,
+            ..boot_options(128)
+        }),
+        derived
+    );
     for (options, admitted, result, diagnostic) in [
         (
             WebBootOptions {
@@ -363,8 +373,9 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
             derived,
             RESULT_REFUSED_BUDGET,
             format!(
-                "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget}]\n",
-                u64::from(derived + 1) * PARSE_TRANSIENT_MULTIPLIER
+                "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={},budget_bytes={budget},document_bytes={},control_frame_bytes={DEFAULT_CONTROL_FRAME_BYTES},control_frame_rows_bytes={rows}]\n",
+                u64::from(derived + 1) * PARSE_TRANSIENT_MULTIPLIER + rows,
+                derived + 1
             ),
         ),
         (
@@ -735,11 +746,11 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     // Keep this a parser-projection boundary above the fixed live-response staging allocation:
     // insignificant trailing whitespace raises only parser input.
     document.extend(core::iter::repeat_n(' ', 131_072));
-    let parse_projection = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
-    // The 16 KiB frame floor keeps the retained rows under this parse projection (#2191).
+    // #2191: the parse projection carries the default control frame's rows.
+    let rows = control_frame_rows(DEFAULT_CONTROL_FRAME_BYTES).expect("frame rows");
+    let parse_projection = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER + rows;
     let accepted = WebBootOptions {
         maximum_memory_bytes: parse_projection,
-        maximum_control_frame_bytes: u64::from(MINIMUM_CONTROL_FRAME_BYTES),
         ..boot_options(128)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), accepted).expect("inclusive budget");
@@ -754,8 +765,9 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     assert_eq!(
         failure.diagnostic(),
         format!(
-            "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={parse_projection},budget_bytes={}]\n",
-            parse_projection - 1
+            "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={parse_projection},budget_bytes={},document_bytes={},control_frame_bytes={DEFAULT_CONTROL_FRAME_BYTES},control_frame_rows_bytes={rows}]\n",
+            parse_projection - 1,
+            document.len()
         )
         .as_bytes()
     );
@@ -1160,14 +1172,13 @@ fn bridge_resource_rows_are_exact() {
 }
 
 /// The exact retained aggregate is one budget: it boots at exactly its value and is refused one
-/// byte below, at the 16 KiB frame floor and at the 256 KiB default frame alike. Issue #2191 gate
-/// 2: between the two frames the aggregate grows by at least the rows the frame scales (the
-/// page's staging, the core's request and response scratch, the prepared token's two frames and
-/// the replay cache of `max(64 KiB, 2 * frame)`), and the bridge and control rows carry all of it.
+/// byte below, at the 16 KiB frame floor and at the 128 KiB default frame alike. Issue #2191 gate
+/// 2: between the two frames the aggregate grows by exactly the page's staging plus the control
+/// plane's frame rows the boot projects before it allocates (`control_frame_rows`).
 ///
-/// Test value: red if the budget charges independent caps instead of one aggregate, if a
-/// frame-scaled buffer is allocated at the booted frame but charged at a compiled one (the
-/// aggregate grows by less than the rows), or if the replay cache does not follow the frame.
+/// Test value: red if the budget charges independent caps instead of one aggregate, if the
+/// page's staging is charged at a compiled frame, or if the control plane charges a frame-scaled
+/// row the pre-allocation projection leaves out.
 #[test]
 fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     let document = one_track_session(128);
@@ -1235,18 +1246,18 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
         panic!("two frames")
     };
     let growth = u64::from(large - small);
-    let replay_growth =
-        control_replay_bytes(u64::from(large)) - control_replay_bytes(u64::from(small));
     // The page's staging is the bridge's row; everything else the frame scales is the control
-    // plane's, and nothing else in the session moves.
+    // plane's, nothing else in the session moves, and the control plane's growth is exactly the
+    // frame rows the boot projects before it allocates (`control_frame_rows`).
     assert_eq!(
         large_exact - small_exact,
         growth + (large_control - small_control),
         "the staging and the control rows carry the whole growth"
     );
-    assert!(
-        large_control - small_control >= 4 * growth + replay_growth,
-        "the control rows grow by the scratch, the token and the replay cache"
+    assert_eq!(
+        large_control - small_control,
+        control_frame_rows(large).expect("rows") - control_frame_rows(small).expect("rows"),
+        "the projected frame rows are the control plane's whole frame-scaled charge"
     );
 }
 
@@ -1290,42 +1301,39 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
     // projection and the exact row alike (the gaps did not move, the ratios rose):
     // identity 628,275 / 57,268 = 10.97, nine-track 954,987 / 86,248 = 11.07, console
     // 3,846,216 / 640,894 = 6.00 (its bound did not rise: the shared multiplier was 7).
-    // Issue #2191: the pins are at the 16 KiB frame they were measured at. The control plane's
-    // frame-scaled rows (about 15 bytes per frame byte) are charged by the exact check, not the
-    // pre-prepare projection, so at the 256 KiB default they would dominate the gap (14.9, 14.6
-    // and 8.8 times the projection) and hide a dropped row; the frame's own charge is
-    // `exact_retained_total_is_checked_as_one_budget_not_independent_caps`.
-    let floor = WebBootOptions {
-        maximum_control_frame_bytes: u64::from(MINIMUM_CONTROL_FRAME_BYTES),
-        ..boot_options(128)
-    };
+    // Issue #2191: at the 128 KiB default frame; the projection carries the control plane's frame
+    // rows (`control_frame_rows`), so the frame moves the projection and the exact row alike.
+    // Re-pinned by #2191, whose counter tables shrank from half a frame of IDs to 256: identity
+    // 359,883 / 758,284 = 0.475, nine-track 686,763 / 787,264 = 0.872, console 3,604,132 /
+    // 1,341,910 = 2.686, each plus about 8%.
+    let defaults = boot_options(128);
     let representatives = [
         (
             "identity-one-track",
-            11_850_u64,
+            513_u64,
             one_track_session(128),
             WebBootOptions {
                 source_ring_frames: 128,
-                ..floor
+                ..defaults
             },
         ),
         (
             "parametric-eq-nine-track",
-            11_960_u64,
+            942_u64,
             include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
-                ..floor
+                ..defaults
             },
         ),
         (
             "console-sixty-four-track",
-            6_480_u64,
+            2_901_u64,
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
                 live_control_meter_blocks: u64::from(DEFAULT_METER_BLOCKS),
-                ..floor
+                ..defaults
             },
         ),
     ];
@@ -9910,7 +9918,7 @@ mod configured_frame {
 
     /// Issue #2191 gate 1: a boot reports and enforces the frame its word selects. `CAPABILITIES_GET`
     /// names the frame and a replay cache of at least two frames; a bus add over 64 tracks (more
-    /// than 16 KiB) commits at a 32 KiB word and at the 256 KiB default, and is refused at the 16
+    /// than 16 KiB) commits at a 32 KiB word and at the 128 KiB default, and is refused at the 16
     /// KiB floor; a frame one byte over the boot's frame is refused with a diagnostic that names
     /// its length and the frame.
     ///

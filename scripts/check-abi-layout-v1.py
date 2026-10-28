@@ -380,7 +380,7 @@ def validate(document: object) -> None:
 
     for name, expected in (
         ("parseTransientMultiplier", 20),
-        ("defaultControlFrameBytes", 256 << 10),
+        ("defaultControlFrameBytes", 128 << 10),
         ("minimumControlFrameBytes", 16 << 10),
         ("maximumControlFrameBytes", 16 << 20),
         ("maximumSourceChannels", 2),

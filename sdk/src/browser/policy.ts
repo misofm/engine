@@ -36,7 +36,7 @@ import type { SourceSpec } from "../core/types.ts";
 export interface BrowserBootPolicy {
   readonly sourceRingFrames?: number;
   readonly maximumMemoryBytes?: bigint;
-  /** The control frame in bytes (issue #2191); absent selects the engine's 256 KiB default. */
+  /** The control frame in bytes (issue #2191); absent selects the engine's 128 KiB default. */
   readonly maximumControlFrameBytes?: bigint;
   /** The longest session document in bytes (issue #2191); absent leaves it to the budget. */
   readonly maximumDocumentBytes?: bigint;

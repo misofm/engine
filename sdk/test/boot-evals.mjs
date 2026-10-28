@@ -163,7 +163,8 @@ describe("eval 3 -- refusal time and admission without staging growth", () => {
     //
     // Red mutation: restore input-sized staging -- the growth assertion goes red immediately.
     //
-    // Issue #2191: the default limit is the default budget's parse projection.
+    // Issue #2191: the default limit is under the default budget's parse projection (which also
+    // carries the control frame's rows), so this length is over it.
     const maximum = Math.floor(
       ABI_LAYOUT.constants.defaultMaximumMemoryBytes / ABI_LAYOUT.constants.parseTransientMultiplier,
     );
@@ -220,7 +221,7 @@ describe("eval 3 -- refusal time and admission without staging growth", () => {
         assert.equal(error.phase, "boot");
         assert.equal(error.code, "refusedBudget");
         assert.equal(error.diagnostics[0].code, "host.budget.parse_projection");
-        assert.match(error.diagnostics[0].path, new RegExp(`projected_bytes=${(maximum + 1) * 20},`));
+        assert.match(error.diagnostics[0].path, new RegExp(`document_bytes=${maximum + 1},control_frame_bytes=`));
         return true;
       },
     );

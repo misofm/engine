@@ -93,12 +93,16 @@ pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
 /// `u32::MAX` queued chunks, and a granted read's room word is below `u32::MAX`.
 pub const SOURCE_FILL_REFUSED: u64 = u64::MAX;
 
-/// The control frame a zero `maximum_control_frame_bytes` boot word selects (issue #2191): 256
-/// KiB. The console's atomic bus add is a submix, a route to the master and one muted route per
-/// track, about `1344 + 336 * tracks` bytes, so one frame holds a bus add over about 775 tracks;
-/// every frame-scaled control buffer and the replay cache it implies cost about 2.25 MiB retained,
-/// under 0.5 % of [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
-pub const DEFAULT_CONTROL_FRAME_BYTES: u32 = 256 << 10;
+/// The control frame a zero `maximum_control_frame_bytes` boot word selects (issue #2191): 128
+/// KiB (root ruling). The console's atomic bus add is a submix, a route to the master and one
+/// muted route per track, about `1344 + 336 * tracks` bytes, so one frame holds a bus add over
+/// about 385 tracks; a host that needs more sets the word. Measured cost: the control plane's
+/// frame rows ([`control_plane::frame_scaled_retained_bytes`]: two frames of scratch and the
+/// replay cache of two frames, plus about 55 KB of fixed tables) are 580,096 bytes at 128 KiB and
+/// 154,112 at 16 KiB, and with the page's one-frame staging a one-track session retains 1,179,991
+/// bytes at 128 KiB against 639,319 at 16 KiB: about 4.7 bytes per frame byte, 0.1 % of
+/// [`DEFAULT_MAXIMUM_MEMORY_BYTES`] at the default.
+pub const DEFAULT_CONTROL_FRAME_BYTES: u32 = 128 << 10;
 /// The smallest nonzero `maximum_control_frame_bytes` boot word (issue #2191): 16 KiB, the frame
 /// the browser qualified before the word existed. A smaller frame would refuse ordinary replies.
 pub const MINIMUM_CONTROL_FRAME_BYTES: u32 = 16 << 10;
@@ -1307,6 +1311,7 @@ impl AudioWorkletEngineHost {
         if let Some(refusal) = document_length_refusal(&options, document_bytes) {
             return Err(refusal);
         }
+        let frame_rows = control_frame_rows(control_frame_bytes)?;
         let document = core::str::from_utf8(document)
             .map_err(|_| BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.utf8"))?;
         let model = parse_host_session(document)
@@ -1356,6 +1361,7 @@ impl AudioWorkletEngineHost {
             &session,
             source_ring_frames,
             projection.report.bridge_retained_bytes,
+            frame_rows,
         )?;
         if retained_projection > memory_budget {
             return Err(BootFailure::projected_budget(
@@ -3702,7 +3708,8 @@ pub(crate) const fn memory_budget(options: &WebBootOptions) -> u64 {
 /// or the `maximum_document_bytes` word when that is smaller. The boot, both document stagings
 /// and the control plane's `SESSION_REPLACE` share it.
 pub(crate) fn maximum_document_bytes(options: &WebBootOptions) -> u32 {
-    let derived = memory_budget(options) / PARSE_TRANSIENT_MULTIPLIER;
+    let rows = control_frame_rows(staged_control_frame_bytes(options)).unwrap_or(u64::MAX);
+    let derived = memory_budget(options).saturating_sub(rows) / PARSE_TRANSIENT_MULTIPLIER;
     let limit = match options.maximum_document_bytes {
         0 => derived,
         word => word.min(derived),
@@ -3729,9 +3736,44 @@ pub(crate) fn document_length_refusal(
         });
     }
     let budget = memory_budget(options);
-    let projection = u64::from(document_bytes) * PARSE_TRANSIENT_MULTIPLIER;
-    (projection > budget)
-        .then(|| BootFailure::projected_budget("host.budget.parse_projection", projection, budget))
+    let frame = staged_control_frame_bytes(options);
+    let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
+    let rows = match control_frame_rows(frame) {
+        Ok(rows) => rows,
+        Err(failure) => return Some(failure),
+    };
+    let Some(projection) =
+        (u64::from(document_bytes) * PARSE_TRANSIENT_MULTIPLIER).checked_add(rows)
+    else {
+        return Some(arithmetic());
+    };
+    (projection > budget).then(|| BootFailure {
+        result: RESULT_REFUSED_BUDGET,
+        diagnostic: format!(
+            "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={projection},budget_bytes={budget},document_bytes={document_bytes},control_frame_bytes={frame},control_frame_rows_bytes={rows}]\n"
+        )
+        .into_bytes(),
+    })
+}
+
+/// The control frame staged options select for a projection (#2191): the resolved frame, or the
+/// default for a word boot will refuse (`web.options.control_frame_bytes`) anyway.
+fn staged_control_frame_bytes(options: &WebBootOptions) -> u32 {
+    resolved_control_frame_bytes(options).unwrap_or(DEFAULT_CONTROL_FRAME_BYTES)
+}
+
+/// The control plane's retained rows a control frame of `control_frame_bytes` sizes (#2191):
+/// [`control_plane::frame_scaled_retained_bytes`] at the limits the boot gives the control plane,
+/// the same rows its compile charges. Boot adds them to the parse projection and to the retained
+/// projection, so a frame the budget cannot hold is refused before any memory grows.
+pub(crate) fn control_frame_rows(control_frame_bytes: u32) -> Result<u64, BootFailure> {
+    control_plane::frame_scaled_retained_bytes::<WebAdapter>(control_frame_limits(
+        control_frame_bytes,
+    ))
+    .map_err(|failure| BootFailure {
+        result: RESULT_REFUSED_BUDGET,
+        diagnostic: failure.diagnostic().into_owned(),
+    })
 }
 
 /// The control frame `options` select (issue #2191): [`DEFAULT_CONTROL_FRAME_BYTES`] for a zero
@@ -3814,6 +3856,7 @@ fn projected_retained_bytes(
     compiled: &CompiledSession,
     source_ring_frames: u32,
     bridge_retained_bytes: u64,
+    control_frame_rows: u64,
 ) -> Result<u64, BootFailure> {
     let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
     let source_ring_bytes = compiled
@@ -3833,6 +3876,8 @@ fn projected_retained_bytes(
         estimate.compiled_model_bytes,
         estimate.queue_bytes,
         source_ring_bytes,
+        // #2191: the control plane's frame-scaled rows, which the exact check charges again.
+        control_frame_rows,
     ]
     .into_iter()
     .try_fold(0_u64, |total, row| {
@@ -3918,7 +3963,6 @@ fn control_limits(
     ControlLimits {
         source_ring_frames: caps.source_ring_frames,
         maximum_document_bytes: u64::from(maximum_document_bytes),
-        maximum_diagnostic_bytes: u64::from(DIAGNOSTIC_BYTES),
         maximum_tracks: caps.maximum_tracks,
         maximum_sources: caps.maximum_sources,
         maximum_routes: caps.maximum_routes,
@@ -3934,14 +3978,46 @@ fn control_limits(
         maximum_meter_streams: caps.maximum_meter_streams,
         maximum_meter_items: caps.maximum_meter_items,
         maximum_meter_bytes: caps.maximum_meter_bytes,
-        maximum_control_frame_bytes: u64::from(control_frame_bytes),
-        maximum_replay_bytes: control_replay_bytes(u64::from(control_frame_bytes)),
-        maximum_replay_entries: CONTROL_REPLAY_ENTRIES,
         maximum_submixes: caps.maximum_submixes,
         maximum_vcas: caps.maximum_vcas,
         maximum_vca_reach_pairs: caps.maximum_vca_reach_pairs,
         // The boot sets the real figure once its bridge rows are exact (`compile_ready`).
         maximum_replacement_peak_bytes: memory_budget,
+        ..control_frame_limits(control_frame_bytes)
+    }
+}
+
+/// The control plane's limits that the control frame decides (#2191): the frame, the replay
+/// cache of `max(64 KiB, 2 * frame)` and its entries, and the diagnostic. [`control_limits`]
+/// takes them from here and [`control_frame_rows`] projects from here, so the boot projects the
+/// frame rows the control plane charges. The session fields are zero: no frame row reads them.
+const fn control_frame_limits(control_frame_bytes: u32) -> ControlLimits {
+    ControlLimits {
+        source_ring_frames: 0,
+        maximum_document_bytes: 0,
+        maximum_diagnostic_bytes: DIAGNOSTIC_BYTES as u64,
+        maximum_tracks: 0,
+        maximum_sources: 0,
+        maximum_routes: 0,
+        maximum_effects: 0,
+        maximum_graph_session_plus_plan_bytes: 0,
+        maximum_source_total_bytes: 0,
+        maximum_source_overhead_bytes: 0,
+        maximum_effect_state_bytes: 0,
+        maximum_effect_scratch_bytes: 0,
+        maximum_builtin_retained_bytes: 0,
+        maximum_control_retained_bytes: 0,
+        maximum_named_allocation_bytes: 0,
+        maximum_meter_streams: 0,
+        maximum_meter_items: 0,
+        maximum_meter_bytes: 0,
+        maximum_control_frame_bytes: control_frame_bytes as u64,
+        maximum_replay_bytes: control_replay_bytes(control_frame_bytes as u64),
+        maximum_replay_entries: CONTROL_REPLAY_ENTRIES,
+        maximum_submixes: 0,
+        maximum_vcas: 0,
+        maximum_vca_reach_pairs: 0,
+        maximum_replacement_peak_bytes: 0,
     }
 }
 

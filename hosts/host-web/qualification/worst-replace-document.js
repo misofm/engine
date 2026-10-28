@@ -1,11 +1,12 @@
-// Issue #1295 (the #1697 gate 3 measurement): the 1 MiB boot-ceiling document, built here so the
+// Issue #1295 (the #1697 gate 3 measurement): the 1 MiB worst document (the boot ceiling until
+// #2191 made the memory budget the document's limit), built here so the
 // browser job, which has no Rust toolchain, can send it. It is the document
 // `hosts/host-web/examples/worst_boot_document.rs` prints -- 192 tracks with four parametric-EQ
 // inserts each and one route per track, in the session's canonical pretty form, padded with
-// spaces to `MAXIMUM_DOCUMENT_BYTES` -- byte for byte (compared once against `cargo run -p host-web
+// spaces to `WORST_DOCUMENT_BYTES` -- byte for byte (compared once against `cargo run -p host-web
 // --example worst_boot_document`; the spec's decision record holds that comparison).
 
-export const MAXIMUM_DOCUMENT_BYTES = 1 << 20;
+export const WORST_DOCUMENT_BYTES = 1 << 20;
 const TRACKS = 192;
 const EFFECTS_PER_TRACK = 4;
 
@@ -84,7 +85,7 @@ function route(index) {
   };
 }
 
-/// The document's bytes, exactly `MAXIMUM_DOCUMENT_BYTES` long.
+/// The document's bytes, exactly `WORST_DOCUMENT_BYTES` long.
 export function worstReplaceDocument() {
   const model = {
     schema_version: 1,
@@ -111,8 +112,8 @@ export function worstReplaceDocument() {
     automation: [],
   };
   const text = new TextEncoder().encode(`${pretty(model, 0)}\n`);
-  if (text.byteLength + 2 > MAXIMUM_DOCUMENT_BYTES) throw new Error("the worst document outgrew the bound");
-  const document = new Uint8Array(MAXIMUM_DOCUMENT_BYTES).fill(0x20);
+  if (text.byteLength + 2 > WORST_DOCUMENT_BYTES) throw new Error("the worst document outgrew its length");
+  const document = new Uint8Array(WORST_DOCUMENT_BYTES).fill(0x20);
   document.set(text, 0);
   return document;
 }

@@ -533,7 +533,7 @@ function validate(browserName, result, leg) {
   const limits = result.consoleLimits;
   gate(browserName, "console-limits", limits?.documentBytes > 1 << 20
     && limits?.frameBytes > 16 << 10 && limits?.frameBytes <= limits?.controlFrameBytes
-    && limits?.controlFrameBytes === 256 << 10
+    && limits?.controlFrameBytes === 128 << 10
     && limits?.replyStatus === "ok" && limits?.commandPath === "rebuild"
     && BigInt(limits?.committedRevision ?? "0") > BigInt(limits?.initialRevision ?? "0")
     && limits?.finalRevision === limits?.committedRevision,

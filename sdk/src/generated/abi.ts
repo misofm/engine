@@ -733,7 +733,7 @@ export const ABI_LAYOUT = deepFreeze(
       }
     ],
     "parseTransientMultiplier": 20,
-    "defaultControlFrameBytes": 262144,
+    "defaultControlFrameBytes": 131072,
     "minimumControlFrameBytes": 16384,
     "maximumControlFrameBytes": 16777216,
     "maximumSourceChannels": 2,

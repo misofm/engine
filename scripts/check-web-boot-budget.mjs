@@ -40,16 +40,43 @@ function stage(instance, maximumMemoryBytes, admitted = true) {
   options.setUint32(0, BOOT_OPTIONS_BYTES, true);
   options.setUint32(4, ABI_VERSION, true);
   options.setBigUint64(24, maximumMemoryBytes, true);
-  // Issue #2191: the 16 KiB frame floor. The pin is the document's parse transient; the control
-  // plane's frame-scaled rows (about 15 bytes per frame byte, 4 MB at the 256 KiB default) are a
-  // fixed boot cost the exact retained check charges, not a function of the document.
-  options.setBigUint64(32, 16n << 10n, true);
   const before = exports.memory.buffer.byteLength;
   const pointer = exports.miso_engine_web_v1_document_ptr(document.byteLength);
   if (!admitted) return { exports, pointer, before };
   assert.notEqual(pointer, 0);
   new Uint8Array(exports.memory.buffer, pointer, document.byteLength).set(document);
   return { exports, pointer };
+}
+
+/// A refused staging's diagnostic, read at `boot_diagnostic_ptr` (#2191).
+function stagingRefusal(exports) {
+  assert.equal(exports.miso_engine_web_v1_boot_result(), 5);
+  const diagnosticBytes = exports.miso_engine_web_v1_boot_diagnostic_bytes();
+  const diagnosticPointer = exports.miso_engine_web_v1_boot_diagnostic_ptr();
+  assert.ok(diagnosticBytes > 0 && diagnosticPointer !== 0);
+  return new TextDecoder().decode(
+    new Uint8Array(exports.memory.buffer, diagnosticPointer, diagnosticBytes),
+  );
+}
+
+// Issue #2191: the boot's pre-allocation projection is the document's parse transient plus the
+// control plane's rows for the default control frame. The engine names both in its refusal, and
+// the pin below is that projection: `20 * document + rows(frame)`, plus one page.
+let pin;
+{
+  const instance = await WebAssembly.instantiate(compiledModule, sharedMemoryImports());
+  const { exports, pointer } = stage(instance, 1n, false);
+  assert.equal(pointer, 0);
+  const diagnostic = stagingRefusal(exports);
+  const fields = /projected_bytes=(\d+),budget_bytes=1,document_bytes=(\d+),control_frame_bytes=(\d+),control_frame_rows_bytes=(\d+)\]/
+    .exec(diagnostic);
+  assert.ok(fields, diagnostic);
+  const [projected, documentBytes, frame, rows] = fields.slice(1).map(BigInt);
+  assert.equal(documentBytes, BigInt(document.byteLength));
+  assert.equal(frame, 128n << 10n, "the default control frame");
+  assert.ok(rows > 2n * frame, `the frame's rows (${rows}) hold its scratch and replay cache`);
+  assert.equal(projected, documentBytes * PARSE_TRANSIENT_MULTIPLIER + rows);
+  pin = projected;
 }
 
 {
@@ -67,31 +94,26 @@ function stage(instance, maximumMemoryBytes, admitted = true) {
     `accepted boot result ${exports.miso_engine_web_v1_boot_result()}: ${diagnostic}`,
   );
   const growth = exports.memory.buffer.byteLength - initialBytes;
-  const pin = BigInt(document.byteLength) * PARSE_TRANSIENT_MULTIPLIER;
   assert.ok(
     BigInt(growth) <= pin + BigInt(WASM_PAGE_BYTES),
     `wasm high-water growth ${growth} exceeds ${pin} plus one page`,
   );
+  console.log(`web boot budget: growth ${growth} of projection ${pin}`);
   assert.equal(exports.miso_engine_web_v1_dispose(handle), 0);
 }
 
-// Issue #2191: one byte under the projection, the staging itself refuses the document, before it
-// allocates it, and its diagnostic names the projection and the budget.
+// One byte under the projection, the staging itself refuses the document, before it allocates
+// it, and its diagnostic names the projection and the budget.
 {
   const instance = await WebAssembly.instantiate(compiledModule, sharedMemoryImports());
-  const pin = BigInt(document.byteLength) * PARSE_TRANSIENT_MULTIPLIER;
   const { exports, pointer, before } = stage(instance, pin - 1n, false);
   assert.equal(pointer, 0);
-  assert.equal(exports.miso_engine_web_v1_boot_result(), 5);
-  const diagnosticBytes = exports.miso_engine_web_v1_boot_diagnostic_bytes();
-  const diagnosticPointer = exports.miso_engine_web_v1_boot_diagnostic_ptr();
-  assert.ok(diagnosticBytes > 0 && diagnosticPointer !== 0);
-  const diagnostic = new TextDecoder().decode(
-    new Uint8Array(exports.memory.buffer, diagnosticPointer, diagnosticBytes),
-  );
-  assert.equal(
+  const diagnostic = stagingRefusal(exports);
+  assert.ok(
+    diagnostic.startsWith(
+      `host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes=${pin},budget_bytes=${pin - 1n},`,
+    ),
     diagnostic,
-    `host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes=${pin},budget_bytes=${pin - 1n}]\n`,
   );
   assert.ok(
     exports.memory.buffer.byteLength <= before + WASM_PAGE_BYTES,

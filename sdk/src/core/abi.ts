@@ -115,7 +115,7 @@ export interface BootOptions {
   readonly maximumMemoryBytes?: bigint;
   /**
    * The control frame in bytes (issue #2191). Absent selects the engine's default (the ABI
-   * layout's `constants.defaultControlFrameBytes`, 256 KiB); the engine refuses a value below
+   * layout's `constants.defaultControlFrameBytes`, 128 KiB); the engine refuses a value below
    * 16 KiB or above 16 MiB with `web.options.control_frame_bytes`. The frame bounds every
    * control command, reply and event; the core reports it in `CAPABILITIES_GET`.
    */

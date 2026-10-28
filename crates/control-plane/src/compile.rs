@@ -341,22 +341,10 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     let queue_config = protocol_queue_config::<A>(limits)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
         .map_err(|_| failure(ResourceFault::Arithmetic))?;
-    let replay_config = ReplayCacheConfig {
-        entries: NonZeroUsize::new(
-            usize::try_from(limits.maximum_replay_entries)
-                .map_err(|_| failure(ResourceFault::Platform))?,
-        )
-        .ok_or_else(|| failure(ResourceFault::Limit))?,
-        bytes: NonZeroUsize::new(
-            usize::try_from(limits.maximum_replay_bytes)
-                .map_err(|_| failure(ResourceFault::Platform))?,
-        )
-        .ok_or_else(|| failure(ResourceFault::Limit))?,
-        max_response_bytes: usize::try_from(limits.maximum_control_frame_bytes)
-            .map_err(|_| failure(ResourceFault::Platform))?,
-    };
-    let replay = ReplayCache::resource_report_for_config(replay_config)
-        .map_err(|_| failure(ResourceFault::Arithmetic))?;
+    // #2191: the rows the control frame sizes, from the one function a host's pre-allocation
+    // projection reads too ([`frame_scaled_retained_bytes`]).
+    let frame = frame_rows::<A>(limits)?;
+    let replay = frame.replay;
     let output_meter = output_meter_rows()?;
     let loudness = loudness_rows()?;
     let exchange = plan_exchange_resource_report(PlanExchangeConfig {
@@ -435,14 +423,10 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         limits.maximum_control_frame_bytes,
         observation.reserve_slots,
     )?;
-    let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
-        .map_err(|_| failure(ResourceFault::Platform))?
-        / size_of::<u16>();
-    let maximum_meter_entries = protocol::MAXIMUM_METER_ENTRIES.min(maximum_configuration_items);
     let fixed_allocation_rows = [
         checked_byte_layout(limits.maximum_diagnostic_bytes)?,
-        checked_byte_layout(limits.maximum_control_frame_bytes)?,
-        checked_byte_layout(limits.maximum_control_frame_bytes)?,
+        frame.scratch,
+        frame.scratch,
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
         // #1312 D2: the session's `live_values_superseded` count, one `Arc<AtomicU64>`.
         checked_layout::<SharedArcAllocation<AtomicU64>>(1)?,
@@ -503,16 +487,17 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
         checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
         // ProtocolController and SessionControlProvider each retain their own telemetry config:
-        // a meter table of at most 256 entries (#1583 D2) and the counter IDs.
-        checked_layout::<protocol::MeterEntry>(maximum_meter_entries)?,
-        checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
+        // a meter table of at most 256 entries (#1583 D2) and a counter table of at most 256 IDs
+        // (#2191).
+        frame.meter_table,
+        frame.counter_table,
         provider.fixed_retained_bytes,
-        checked_layout::<protocol::MeterEntry>(maximum_meter_entries)?,
-        checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
+        frame.meter_table,
+        frame.counter_table,
         // #1587a: an adapter whose control plane serves the meter batches resolves each table
         // entry to a strip and folds its peaks, in two vectors reserved at boot for the most
         // entries a table holds.
-        meter_resolution_bytes::<A>(limits.maximum_control_frame_bytes)?,
+        frame.meter_resolution,
         // #1398 D1: the pending and retired provider lists, and the report table.
         checked_layout::<ProviderEpoch>(PENDING_PROVIDERS)?,
         checked_layout::<ProviderEpoch>(RETIRED_PROVIDERS)?,
@@ -547,7 +532,7 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     // `STABLE_ID_MAXIMUM_BYTES` per entry (an accepted entry names a strip of the committed
     // model), is control-side heap that outlives the configure. One allocation per entry, so it
     // is no allocation row.
-    let meter_text = meter_text_reserve::<A>(limits.maximum_control_frame_bytes)?;
+    let meter_text = frame.meter_text;
     let epoch_retained = checked_sum(&epoch_rows)?;
     let fixed_allocations = checked_sum(&fixed_allocation_rows)?
         .checked_add(checked_sum(adapter_allocation_rows)?)
@@ -1268,8 +1253,87 @@ pub(crate) fn controller_retained_capacity(
         // #1583 D2: a meter table holds at most 256 entries, whatever the frame could carry; the
         // allocation rows charge the same count.
         meters: protocol::MAXIMUM_METER_ENTRIES.min(maximum_tlvs),
-        counter_ids: maximum_tlvs,
+        // #2191: a counter list is strictly ascending and at most 256 IDs on the wire, so a
+        // retained table needs no more, whatever the frame could carry.
+        counter_ids: protocol::MAXIMUM_COUNTER_ENTRIES.min(maximum_tlvs),
     })
+}
+
+/// The control plane's retained rows a control frame sizes (#2191): the session's request and
+/// response scratch (one frame each), the replay cache, the controller's and the provider's
+/// meter and counter tables (at most 256 entries each), the meter delivery's resolution vectors
+/// and the meter tables' ID text. [`capi_resources`] charges exactly these rows, and a host reads
+/// their sum through [`frame_scaled_retained_bytes`] before it allocates anything.
+#[derive(Clone, Copy)]
+pub(crate) struct FrameRows {
+    /// One frame of scratch; the session keeps two.
+    pub(crate) scratch: u64,
+    /// One meter table; the controller and the provider keep one each.
+    pub(crate) meter_table: u64,
+    /// One counter table; the controller and the provider keep one each.
+    pub(crate) counter_table: u64,
+    pub(crate) meter_resolution: u64,
+    pub(crate) meter_text: u64,
+    pub(crate) replay: protocol::ReplayCacheResourceReport,
+}
+
+impl FrameRows {
+    fn retained(&self) -> Result<u64, CompileFailure> {
+        checked_sum(&[
+            self.scratch,
+            self.scratch,
+            self.meter_table,
+            self.meter_table,
+            self.counter_table,
+            self.counter_table,
+            self.meter_resolution,
+            self.meter_text,
+            self.replay.retained_payload_bytes,
+        ])
+    }
+}
+
+pub(crate) fn frame_rows<A: ControlAdapter>(
+    limits: ControlLimits,
+) -> Result<FrameRows, CompileFailure> {
+    let platform = || failure(ResourceFault::Platform);
+    let capacity = controller_retained_capacity(limits)?;
+    let replay = ReplayCache::resource_report_for_config(ReplayCacheConfig {
+        entries: NonZeroUsize::new(
+            usize::try_from(limits.maximum_replay_entries).map_err(|_| platform())?,
+        )
+        .ok_or_else(|| failure(ResourceFault::Limit))?,
+        bytes: NonZeroUsize::new(
+            usize::try_from(limits.maximum_replay_bytes).map_err(|_| platform())?,
+        )
+        .ok_or_else(|| failure(ResourceFault::Limit))?,
+        max_response_bytes: usize::try_from(limits.maximum_control_frame_bytes)
+            .map_err(|_| platform())?,
+    })
+    .map_err(|_| failure(ResourceFault::Arithmetic))?;
+    Ok(FrameRows {
+        scratch: checked_byte_layout(limits.maximum_control_frame_bytes)?,
+        meter_table: checked_layout::<protocol::MeterEntry>(capacity.meters)?,
+        counter_table: checked_layout::<protocol::CounterId>(capacity.counter_ids)?,
+        meter_resolution: meter_resolution_bytes::<A>(limits.maximum_control_frame_bytes)?,
+        meter_text: meter_text_reserve::<A>(limits.maximum_control_frame_bytes)?,
+        replay,
+    })
+}
+
+/// The control plane's retained bytes that `limits`' control frame sizes (#2191): two frames of
+/// scratch, the replay cache, the controller's and the provider's meter and counter tables, the
+/// meter delivery's resolution vectors and the meter tables' ID text. They are the very rows the
+/// compile charges, so a host that adds this to its pre-allocation projection refuses a frame its
+/// budget cannot hold before any of it is allocated.
+///
+/// # Errors
+///
+/// [`ResourceFault::Limit`] for a zero replay cache, an arithmetic or platform fault otherwise.
+pub fn frame_scaled_retained_bytes<A: ControlAdapter>(
+    limits: ControlLimits,
+) -> Result<u64, CompileFailure> {
+    frame_rows::<A>(limits)?.retained()
 }
 
 /// The candidate a structural command prepared, as the replacement admission reads it.
