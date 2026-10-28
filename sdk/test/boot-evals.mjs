@@ -297,7 +297,7 @@ describe("eval 7 -- skew", () => {
     assert.equal(asset.provenance.abiVersion, ABI_LAYOUT.abiVersion);
     assert.equal(asset.provenance.abiVersion, 0x0001_0000);
     assert.deepEqual(asset.provenance.stagingSequence, ABI_LAYOUT.stagingSequence);
-    assert.equal(asset.provenance.artifacts.length, 7);
+    assert.equal(asset.provenance.artifacts.length, 8);
   });
 });
 
