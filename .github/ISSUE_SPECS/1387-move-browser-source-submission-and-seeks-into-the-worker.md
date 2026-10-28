@@ -247,6 +247,11 @@ red when `pcmFeed` forces single. The isolated `pcm-feed-suspended` row
 **Browser rows.** `--pcm-feed-suspended-only`: Chromium 151.0.7922.34 and WebKit 26.5, worker mode,
 attached, drainBlocks 0, underruns 0, render allocations 0.
 
+**Single-mode legs (the full workload).** \`npm run qualify -- --artifacts ... --sdk-root sdk --browser <b>
+--check-matrix --self-test-mutations\`: all gates passed on Chromium 151.0.7922.34 and WebKit 26.5
+(the non-isolated workload in \`single\` mode; its isolated SDK rows, \`pcm-feed-suspended\` among
+them, in \`worker\` mode).
+
 **Smoke (one run each, not a gate).** Isolated server, real `AudioContext`, `createEngine` with
 `pcmFeed`, a 480 000-frame stereo source fed through `Msb1RingWriter` from a 5 ms main-thread pump,
 warm-up 100 quanta, play 375, then suspend, ring seek to generation 2 at 240 000,
