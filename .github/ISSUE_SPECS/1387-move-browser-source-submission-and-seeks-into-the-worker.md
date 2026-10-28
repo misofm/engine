@@ -182,3 +182,93 @@ Dependents: #1381 (it moves this slice's set into `SessionState`), #1293 and #12
 **Single instance first.** #1381a already routes every source export through `SessionState` in
 the one instance. This slice moves that routing, unchanged, to the Worker in `worker` mode. It
 depends on #1332 and #1381a.
+
+## Re-anchor and evidence (S10 + S11 of the #1332 plan, 2026-10-28)
+
+Branch `codex/issue-1387-worker-feed` from main `59c0e3320` (#1332 S1-S8 merged); implementation
+commit `8e8132f2f`. Anchors below are at that commit.
+
+**What is moot (the #1332 plan).** D1-D3 and deliverables 3-4 (`host_release` moving a
+`SourceControlSet`, `boot_split_for_test`, `worker_source_producer.rs`) do not apply: since
+#1381a the producers live in the control half's `SessionState`, which stays in the Worker when
+`host_release` hands the render half to the worklet (#1332 S4-S6). Gates 1-3 are therefore #1332's
+(`hosts/host-web/tests/worker_handoff.rs`), not this slice's.
+
+**S10 (D2, D4): routing.** Already done by #1332 S7: in `worker` mode the page's host sends
+`miso.source.v1`, `miso.seek.v1`, `miso.seek-at.v1`, `miso.seek-report.v1` and
+`miso.session-seek.v1` to the Worker (`hosts/host-web/web/miso-engine-v1-control-worker.js:558-566`),
+which calls `source_submit` / `source_seek` (`hosts/host-web/src/ffi.rs:777`, `:855`) on its
+control half; the worklet's own dispatch (`hosts/host-web/web/miso-engine-v1-audio-worklet.js:1138-1140`)
+is single mode only. No SDK path posts a source or seek to the worklet's port. Left for S10: nothing.
+
+**S11 (D5): the Worker drain.**
+- **D5 amended (the module is not loaded).** The control Worker loads no code: its capability
+  policy (`scripts/check-web-audioworklet.sh`, `check_capability_policy`) bans `importScripts` and
+  `fetch(`, and a dynamic import would be the same thing. So the MSB1 consumer of `worker` mode is
+  written in the Worker file (`miso-engine-v1-control-worker.js:58-86` constants, `:863-1186`
+  methods), by the prelude's rules (`sdk/src/browser-assets/miso-engine-v1-pcm-feed-worklet.js`):
+  a published plain seek through `source_seek` before any slot is read, an anchored one only once
+  the Worker's own `source_seek_at` answered OK for the same tuple (`recordAnchoredSeek`, :1129),
+  the #1644 stale-generation rule, stale generation tags dropped, stop at `RESULT_BACKPRESSURE`
+  with the chunk left in the ring, the same staging copy and the same export. `prepare-seek` and
+  `detach-source` are the prelude's protocol (:872-905, :1141).
+- **Two deliberate differences**, both because the drain is off the audio thread: a pass submits
+  until the engine's ring pushes back (bounded by the MSB1 capacity), not two chunks a block, so
+  timer jitter never starves render; and depth, underruns and drain blocks count the quanta the
+  render half reports since the last pass (`drainSharedRing`, :1000), read from the render half's
+  status record, whose address the worklet posts once on the control port
+  (`miso.render-clock.v1`, worklet `:546`, Worker `:1282`). A suspended context counts nothing.
+- **Timer.** The drain runs at the head of `afterControl` (:217): on the Worker's one pinned service
+  tick and after every page and feed message. No second timer site; the timer policy is unchanged.
+- **Rings by port.** The host's new `openFeedPort()` (`miso-engine-v1-audio-worklet-host.js:1172`,
+  `.d.ts` and `sdk/src/browser/shipped-host.d.ts`) makes a `MessageChannel` and posts one end to
+  the Worker (`miso.feed-port.v1`, Worker `:199`); `null` in single mode and once failed or
+  disposing. The feed speaks its attach protocol on it; the Worker closes its end on `detach`.
+- **Single mode unchanged.** In `worker` mode the prelude binds no ring and answers
+  `attach-refused` (prelude `:323`, `:711`), so `process()` never calls a source export on the
+  render-only instance; a feed without `engine` then rejects `attachRefused` at once.
+  `pcm-feed.ts` routes by `host.instanceMode` (`:455`, `workerFeedNode` `:795`).
+- **`instanceMode` (S7 interim removed).** `createEngine` no longer forces `"single"` with
+  `pcmFeed`; it gains an explicit `instanceMode` override passed to the host
+  (`sdk/src/browser/engine.ts:750`, `:847`), which still refuses `"worker"` unisolated.
+
+**Tests, red on named mutants.** `scripts/test-web-audioworklet.mjs:4877` (control Worker, fake
+module, real MSB1 rings): red on no drain on the tick; accounting counted per tick (a suspended
+context would count drain blocks); a pass that stops at two chunks; a backpressured chunk consumed;
+a stale-generation chunk submitted; the ring seek skipped; the anchored tuple not recorded (the
+ring stalls). `:4458`: the worklet names its render status (red without the post). `:2187`, single
+`openFeedPort() === null`. `sdk/test/browser-pcm-evals.mjs:680`: red when the prelude binds in
+worker mode (process() submits), when it posts no `attach-refused`, when the feed ignores it.
+`:705`: red when the feed ignores the mode in either direction. `sdk/test/browser-evals.mjs:440`:
+red when `pcmFeed` forces single. The isolated `pcm-feed-suspended` row
+(`hosts/host-web/qualification/pcm-feed-suspended-entry.ts`) now requires `instanceMode`
+`"worker"` and zero MSB1 underruns.
+
+**Browser rows.** `--pcm-feed-suspended-only`: Chromium 151.0.7922.34 and WebKit 26.5, worker mode,
+attached, drainBlocks 0, underruns 0, render allocations 0.
+
+**Smoke (one run each, not a gate).** Isolated server, real `AudioContext`, `createEngine` with
+`pcmFeed`, a 480 000-frame stereo source fed through `Msb1RingWriter` from a 5 ms main-thread pump,
+warm-up 100 quanta, play 375, then suspend, ring seek to generation 2 at 240 000,
+`prepareSeek()`, refill, resume, warm-up 100, play 375.
+- Chromium worker: 0 underruns over the 375 played quanta before the seek, 4 quanta (512 frames,
+  the seek report agrees) at the seek, then 0; seek report generation 2; render allocations 0.
+- Chromium single (`instanceMode: "single"` on the isolated page): 0 throughout, the seek included.
+- WebKit single: 0 throughout. WebKit worker, default ring (~100 ms): underruns in steady play
+  (headless WebKit's audio sink stalls ~600 ms and then renders ~220 quanta at once; the Worker's
+  timer ticks every 4 ms throughout (measured), so the engine ring alone must cover a burst, which
+  the single-mode drain inside `process()` covers from the MSB1 ring). With
+  `policy.sourceRingFrames` 65 536: 0 in steady play, 3 quanta at the seek, then 0.
+
+**Findings for root.**
+1. **A seek gap in worker mode.** With the engine's source ring full, a seek's new generation is
+   refused `BACKPRESSURE` until the render half pops the seek (the SPSC slots belong to the
+   consumer), so the first quanta after the seek underrun until the next Worker tick (3-4 quanta
+   measured on both engines). Single mode admits the target PCM before the next quantum (one
+   instance; `browser-pcm-evals` "actual Wasm paused seek ..."). Options: a host-core change so a
+   seek frees the producer's slots across threads, or the drain keeps a headroom of a few quanta in
+   the engine ring. Not done here (a Rust change, or a policy choice).
+2. **Burst tolerance.** Worker mode's feed tolerance is the engine ring's depth, not the MSB1 ring's.
+   A render burst longer than the engine ring (headless WebKit's sink) underruns; real-device
+   callbacks are far shorter. Root may want a larger default ring for worker mode, or a browser
+   leg on a real device.
