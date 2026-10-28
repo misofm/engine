@@ -421,6 +421,8 @@ class MisoAudioWorkletHost {
   #lastRequestId = 0;
   #stickyError = null;
   #disposed = false;
+  /// The one dispose in flight or done: a second `dispose()` returns the first one's promise.
+  #disposePromise = null;
   #serviceTick = null;
   #numericBackend;
   #sampleRateHz;
@@ -857,6 +859,9 @@ class MisoAudioWorkletHost {
     sourceId = undefined,
   ) {
     if (this.#disposed) return Promise.reject(webError(3));
+    // Once `dispose()` was sent, every other request is refused locally (result 3), as
+    // `status()` is: nothing sent behind the dispose can fail the host and reject the dispose.
+    if (response !== "dispose" && this.#disposePromise !== null) return Promise.reject(webError(3));
     if (this.#stickyError !== null && !allowSticky) return Promise.reject(this.#stickyError);
     if (this.#saturated(response, sourceId)) {
       return Promise.reject(webError(RESULT_BACKPRESSURE));
@@ -1186,11 +1191,29 @@ class MisoAudioWorkletHost {
     return this.#discardedControlEvents;
   }
 
-  async dispose() {
+  dispose() {
+    // A dispose that failed may be retried.
+    this.#disposePromise ??= this.#dispose().catch((error) => {
+      this.#disposePromise = null;
+      throw error;
+    });
+    return this.#disposePromise;
+  }
+
+  async #dispose() {
     if (this.#disposed) return;
     this.#stopServiceTick();
     await this.#request({ tag: "miso.dispose.v1" }, [], "dispose", true);
     this.#disposed = true;
+    // No request promise outlives the host: whatever is still unsettled (a reply the dispose
+    // overtook) rejects with the typed disposed error.
+    const unsettled = [...this.#pending.values()];
+    this.#pending.clear();
+    for (const pending of unsettled) pending.reject(webError(3));
+    const follow = this.#statusFollow;
+    this.#statusFollow = null;
+    this.#statusRead = null;
+    follow?.reject(webError(3));
     this.#onMeterFrame = null;
     this.#onTelemetryFrame = null;
     this.#controlEventListeners.clear();

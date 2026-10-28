@@ -114,7 +114,9 @@ class ControlWorker {
     this.postedMemoryBytes = -1;
     // Status reads waiting for the worklet's render fields, in request order.
     this.statusReads = [];
-    this.disposeRequestId = 0;
+    // The page's dispose requests, answered together once the host is freed (a second dispose
+    // while one runs joins it; it posts no second release).
+    this.disposeRequestIds = [];
     // Set once a dispose began: every later control call is refused `WRONG_STATE`.
     this.disposing = false;
     scope.onmessage = (event) => this.onPageMessage(event.data);
@@ -514,8 +516,15 @@ class ControlWorker {
       }, [response.buffer]);
     } else if (tag === "miso.status.v1") {
       this.answerStatus(requestId, null);
+    } else if (tag === "miso.sessionmap.v1") {
+      // The handle is valid until `finishDispose`: the map is read as before.
+      const sources = this.readSourceRows();
+      this.post(sources === null
+        ? { tag, requestId, result: RESULT_WRONG_STATE }
+        : { tag, requestId, result: RESULT_OK, sources, metersAttached: this.metersAttached === true });
     } else {
-      this.sticky(RESULT_INVALID_ARGUMENT, requestId);
+      // No refusal during a dispose is sticky: a sticky error would reject the dispose itself.
+      this.acknowledge(requestId, RESULT_WRONG_STATE);
     }
   }
 
@@ -740,7 +749,9 @@ class ControlWorker {
   /// worklet, whose message handler cuts the views before render adopts that plan.
   postMeterView() {
     if (this.disposed || this.handle === 0 || this.workletPort === undefined) return;
-    const header = this.exports.miso_engine_web_v1_successor_header_ptr(this.handle);
+    // An `i32` result: normalised to its `u32` address (the memory is capped at 512 MiB, 8192
+    // pages, so no address reaches 2 GiB; the normalisation is belt and braces).
+    const header = this.exports.miso_engine_web_v1_successor_header_ptr(this.handle) >>> 0;
     const memoryBytes = this.buffer.byteLength;
     if (header === this.postedHeader && memoryBytes === this.postedMemoryBytes) return;
     this.postedHeader = header;
@@ -751,14 +762,15 @@ class ControlWorker {
   /// D4: the worklet releases the render half and posts its token; this Worker adopts it back,
   /// disposes the host (the only place that frees it) and answers the page's dispose.
   beginDispose(requestId) {
+    this.disposeRequestIds.push(requestId);
+    if (this.disposing) return;
     this.stopServiceTick();
     this.disposing = true;
-    this.disposeRequestId = requestId;
     this.workletPort.postMessage({ tag: "miso.release.v1" });
   }
 
   finishDispose(token) {
-    if (this.disposeRequestId === 0 || this.disposed) return;
+    if (this.disposeRequestIds.length === 0 || this.disposed) return;
     const e = this.exports;
     // A half that never came back (a zero token) is left where it is: dispose then marks the
     // lifecycle disposed, so that half silences, and frees the control half (#1332 S6).
@@ -770,8 +782,8 @@ class ControlWorker {
       this.disposed = true;
       this.handle = 0;
     }
-    this.acknowledge(this.disposeRequestId, result);
-    this.disposeRequestId = 0;
+    for (const requestId of this.disposeRequestIds) this.acknowledge(requestId, result);
+    this.disposeRequestIds = [];
   }
 
   onWorkletMessage(message) {

@@ -548,9 +548,14 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       if (this.disposed) return;
       this.rebindMemoryViews();
       // A set's identity is its four-part key (header, frame, track and submix counts): a freed
-      // header address may be reused by a later plan, so a pointer alone names nothing.
+      // header address may be reused by a later plan, so a pointer alone names nothing. The cut
+      // is skipped only when the posted header is the pending set's, or the header render
+      // reports now with the active set's key; a later plan that reuses the active set's address
+      // and words while render reports another header is cut as pending.
+      const live = this.metersAttached && this.handle !== 0
+        ? this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0 : 0;
       if (this.metersAttached && message.header !== 0 && this.meterSet !== null
-          && !this.meterSetMatches(this.meterSet, message.header)
+          && !(message.header === live && this.meterSetMatches(this.meterSet, message.header))
           && (this.pendingMeterSet === null
             || !this.meterSetMatches(this.pendingMeterSet, message.header))) {
         const pending = this.cutMeterSet(message.header);
@@ -583,7 +588,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   syncWorkerMeterViews() {
     if (!this.metersAttached || this.disposed || !this.ready || this.stickyResult !== RESULT_OK
         || this.handle === 0 || this.meterSet === null) return;
-    const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+    const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
     if (this.meterSetMatches(this.meterSet, current)) return;
     if (this.pendingMeterSet !== null && this.meterSetMatches(this.pendingMeterSet, current)) {
       this.meterSet = this.pendingMeterSet;
@@ -763,7 +768,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (!this.metersAttached || this.disposed || !this.ready || this.stickyResult !== RESULT_OK
         || this.handle === 0) return;
     this.rebindMemoryViews();
-    const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+    const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
     let active = this.meterSet;
     if (active === null || active.headerPointer !== current) {
       active = this.cutMeterSet(current);
@@ -824,7 +829,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       this.handle,
       BUFFER_METER_FRAME,
     );
-    const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+    const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
     if (!u32(headerPointer) || headerPointer === 0) return false;
     const set = this.cutMeterSet(headerPointer);
     // The buffer exports and the header describe one frame: the capacity check rejects a header
@@ -1506,7 +1511,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     // to the set the handler pre-cut only when its key matches (compares only); otherwise skip
     // the frame and count the skip.
     if (this.workerMode) {
-      const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+      const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle) >>> 0;
       // The four-part key is compared on every block, even when the pointer is unchanged: a
       // freed header address may be reused by a later plan with another frame and counts.
       if (!this.meterSetMatches(set, current)) {

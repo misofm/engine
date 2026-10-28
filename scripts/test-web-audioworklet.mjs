@@ -2096,6 +2096,27 @@ async function testMainRealm() {
         assert.equal(worker.posts.at(-1).tag, "miso.dispose.v1", "dispose goes to the Worker");
         assert.equal(worker.terminated, true, "the Worker ends after its dispose reply");
 
+        // S7 verify attempt 3: a request sent behind a dispose is refused locally (it cannot fail
+        // the host and reject the dispose); a second dispose is the first one's promise (one
+        // dispose request); a request the dispose overtook settles with the typed disposed error.
+        {
+          const second = await createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          });
+          const secondWorker = workers.at(-1);
+          const overtaken = second.planLatency();
+          const first = second.dispose();
+          assert.equal(second.dispose(), first, "a second dispose is the first one's promise");
+          await errorResult(second.sessionMap(), 3);
+          await errorResult(second.control(new Uint8Array([1])), 3);
+          await first;
+          assert.deepEqual(secondWorker.posts.map((message) => message.tag).filter((tag) => tag !== "miso.worker-boot.v1"),
+            ["miso.plan-latency.v1", "miso.dispose.v1"], "nothing is posted behind the dispose, once");
+          assert.equal(secondWorker.terminated, true);
+          await errorResult(overtaken, 3);
+        }
+
         // S7 verify MINOR 1: a Worker error between its boot reply and the worklet's ready is not
         // lost: the host the factory returns is failed, so a request rejects instead of hanging.
         {
@@ -4312,6 +4333,25 @@ async function testProcessor() {
       assert.equal(frame.trackCount, 1);
       assert.equal(renderStatus(processor, fromWorker, controlPosts).meterFramesSkipped, 1);
     }
+    // S7 verify attempt 3, MINOR 1: a plan C that reuses the active set A's address and words
+    // while render reports B (uncut) is cut as pending, so the meters converge when C is adopted.
+    {
+      const fake = createFakeExports(64);
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
+      const headerA = fake.meterHeader.byteOffset;
+      const headerB = fake.successorHeader.byteOffset;
+      let current = headerB;
+      fake.exports.miso_engine_web_v1_meter_header_ptr = () => current;
+      fromWorker({ tag: "miso.meter-view.v1", header: headerA, memoryBytes: fake.memory.buffer.byteLength });
+      current = headerA;
+      fake.calls.meterWindows = 1;
+      processor.process([], [[new Float32Array(64), new Float32Array(64)]]);
+      const frame = processor.port.posts.at(-1).message;
+      assert.equal(frame.tag, "miso.meter.v1", "C at A's address with A's words is cut and adopted");
+      assert.equal(frame.trackCount, 2);
+      assert.equal(renderStatus(processor, fromWorker, controlPosts).meterFramesSkipped, 0);
+    }
     // A release that throws (a trapped instance) still answers the Worker, with no token.
     {
       const fake = createFakeExports(64);
@@ -4457,13 +4497,24 @@ async function testControlWorker() {
       assert.deepEqual([posts.at(-1).tag, posts.at(-1).requestId, posts.at(-1).result],
         ["miso.control.v1", 6, 3], "a control call after the dispose began is refused");
       assert.equal(fake.calls.control.length, controlsBefore, "and runs nothing");
+      const releases = workletPosts.length;
+      send({ tag: "miso.dispose.v1", requestId: 7 });
+      assert.equal(workletPosts.length, releases, "a second dispose posts no second release");
+      send({ tag: "miso.sessionmap.v1", requestId: 8 });
+      assert.deepEqual([posts.at(-1).tag, posts.at(-1).result, posts.at(-1).sources.length],
+        ["miso.sessionmap.v1", 0, 2], "the session map is answered while the dispose runs");
       assert.equal(fake.calls.dispose, 0, "nothing is freed before the half is back");
       fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
       assert.deepEqual(fake.calls.adopt, [(1n << 32n) | 2n], "the Worker adopts the half back");
       assert.equal(fake.calls.dispose, 1, "and disposes the host");
       const statusReply = posts.find((message) => message.tag === "miso.status.v1" && message.requestId === 4);
       assert.equal(statusReply?.result, 0, "the status read in flight across the dispose is answered");
-      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 5, result: 0 });
+      assert.deepEqual(posts.slice(-2), [
+        { tag: "miso.ack.v1", requestId: 5, result: 0 },
+        { tag: "miso.ack.v1", requestId: 7, result: 0 },
+      ], "both disposes are answered together");
+      assert.equal(posts.some((message) => message.tag === "miso.error.v1"), false,
+        "no refusal during the dispose is sticky");
       assert.equal(intervals[0].cleared, true, "dispose stops the tick");
     }
     // D6: a refused boot answers with the engine's result code and releases nothing.

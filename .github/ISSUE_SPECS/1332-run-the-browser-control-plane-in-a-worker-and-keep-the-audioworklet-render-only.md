@@ -892,3 +892,21 @@ Slice S7 of the #1332 build plan (#1332(b1)), branch `codex/issue-1332-worker-js
   shape, answers status reads from its own record then, and answers every in-flight status read
   before it frees the host (red: "a control call after the dispose began is refused", "the status
   read in flight across the dispose is answered"). Policy: an `importScripts` mutation.
+
+### S7 attempt 3 (verify FAIL folds, 2026-10-28)
+
+- **No request can fail a dispose.** Page side, once `dispose()` was sent every other request is
+  refused locally with result 3 (as `status()` was), and a second `dispose()` returns the first
+  one's promise (a failed dispose may be retried). When the dispose completes, every request it
+  overtook rejects with result 3. Worker side, a session map is answered normally until the host
+  is freed, any other request after the dispose began is refused `WRONG_STATE` in its own reply
+  shape and never sticky, and a second dispose joins the first: one release, both answered.
+  Tests red on attempt 2: "a second dispose is the first one's promise", "nothing is posted
+  behind the dispose, once", "a second dispose posts no second release"; without the settle, the
+  overtaken request hangs.
+- **Meter view cut rule.** The handler skips the cut only when the posted header is the pending
+  set's, or is the header render reports now with the active set's key. A later plan that reuses
+  the active set's address and words while render reports another header is cut as pending (red
+  on attempt 2: "C at A's address with A's words is cut and adopted").
+- Header addresses from the `i32` exports are normalised with `>>> 0`. The memory is capped at
+  512 MiB (8192 pages), so no address reaches 2 GiB.
