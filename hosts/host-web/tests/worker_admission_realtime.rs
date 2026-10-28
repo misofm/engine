@@ -20,8 +20,8 @@
 
 use std::alloc::System;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 
 use controls::{ControlAddress, Owner, Section};
 use host_web::{
@@ -475,6 +475,82 @@ fn control_on_one_thread_and_render_on_another_never_allocate_in_render_and_matc
             "block {index}: the two-thread run's bits differ from the single-thread run's"
         );
     }
+}
+
+/// #1332 S5: the race the free-running test can only meet by chance, made deterministic. Render
+/// stops in the block that adopts plan B, just before it takes B's tables; the control thread
+/// commits plan C to the end of its call; then render goes on.
+///
+/// Test value: red if a plan adopted after a later commit shows any words but its own (the S4
+/// form, which applied the master and structure words only while the newest epoch was the
+/// rendering plan's, leaves B with no master and structure epoch `0`), and red if render never
+/// reads the successor record (B's header would not name C's while C waits).
+#[test]
+fn a_plan_adopted_after_a_later_commit_shows_its_own_words_and_names_the_waiting_successor() {
+    let _turn = TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut control = Control::boot();
+    let mut render = control.host.release_render().expect("the render half");
+    // #1332 S5: the shell the release leaves refuses a render and fails nothing.
+    assert_eq!(control.host.render_next(), host_web::RESULT_WRONG_STATE);
+    assert_eq!(
+        control.host.service(),
+        RESULT_OK,
+        "the session is still ready"
+    );
+    for block in 0..8 {
+        assert!(control.feed(block));
+    }
+    control.act(Action::AddMutedTrack(0));
+    let b = control.host.newest_plan_words().expect("a control half").0;
+    let barrier = Arc::new(Barrier::new(2));
+    render.pause_before_adoption(Arc::clone(&barrier));
+    let (blocks, render) = std::thread::scope(|scope| {
+        let renderer = scope.spawn(move || {
+            let mut blocks = Vec::new();
+            for _ in 0..3 {
+                assert_eq!(render_locked_for_test(|| render.render_next()), RESULT_OK);
+                let header = *render.meter_header();
+                blocks.push((
+                    render.plan_epoch(),
+                    header,
+                    core::ptr::from_ref(render.meter_header()).addr(),
+                    render.meter_successor_address(),
+                ));
+            }
+            (blocks, render)
+        });
+        // Render has reached B's adoption block and waits there.
+        barrier.wait();
+        control.act(Action::AddMutedTrack(1));
+        barrier.wait();
+        renderer.join().expect("the render thread completes")
+    });
+    let c = control.host.newest_plan_words().expect("a control half").0;
+    assert!(c > b);
+    let (epoch, header, _, successor) = blocks[0];
+    assert_eq!(epoch, b, "the first block adopted B");
+    let (structure, tracks) = control.expected[&b];
+    assert_eq!(
+        (
+            header.track_count,
+            header.master_track_plus_one,
+            header.structure_epoch
+        ),
+        (tracks, tracks, structure),
+        "B shows its own words, though C was committed before B's tables were taken"
+    );
+    let (epoch, _, c_header, c_successor) = blocks[1];
+    assert_eq!(epoch, c, "the next block adopted C");
+    assert_ne!(successor, 0, "while C waited, B's header named a successor");
+    assert_eq!(successor, c_header, "B's header named C's");
+    assert_eq!(c_successor, 0, "nothing waits after C");
+    assert!(
+        control.host.adopt_render(render).is_ok(),
+        "the host takes its render half back"
+    );
+    assert_eq!(control.host.dispose(), RESULT_OK);
 }
 
 /// One live edit of each owner kind, by `kind % 5`: a strip fader, an insert parameter, a console

@@ -488,6 +488,32 @@ No bit moved (PR evidence): `direct-oracle.mjs` print mode over main `02630e950`
 `98634c73…`) and S5 (`e35bf9e0…`): every PCM digest, status snapshot and timeline equal; only
 `bridgeMetadataBytes` and `bridgeRetainedBytes` grew, by 368 B, within their ceilings.
 
+Verify folds (S5 verify PASS, folded in one commit):
+- A deterministic form of the race: `a_plan_adopted_after_a_later_commit_shows_its_own_words_and_names_the_waiting_successor`.
+  A test-support-only hook (`RenderHost::pause_before_adoption`, absent from the shipped module)
+  stops render in B's adoption block just before it takes B's tables, with a two-step `Barrier`.
+  The control thread commits C to the end of its call, then releases render. Asserts: B's
+  adoption block shows B's own words, B's header names C's while C waits, and nothing waits after
+  C. Red: the S4 form (master and structure words applied only while the newest epoch is the
+  rendering plan's) shows `(10, 0, 0)` for `(10, 10, 3)`; a render half that never reads the
+  successor record names no successor. The same test asserts that the status shell
+  `release_render` leaves refuses a render (`RESULT_WRONG_STATE`) and fails nothing (red when
+  the shell's render records a failure: `255` for `3`). `RenderHalf::render_next` on the shell
+  now refuses, so the shell's status and the shared lifecycle word cannot disagree.
+- `seqlock.rs` now says a reader may be on the render thread: bounded at 64 attempts, then
+  `Busy`, and the browser render half keeps its words for one more block.
+
+**S6/S7 requirement (verifier MAJOR).** On two threads the successor record gives no advance
+notice: the control half publishes it after the commit, and the render half reads it at a
+block's start, so a replacement is usually adopted in the same block in which render first names
+its header. The single instance's guarantee (the page cuts its meter views in the message
+handler that commits the plan, #1290d1) does not carry over. S6/S7 need a protocol so the
+worklet never cuts meter views inside `process()`, for example: adoption deferred until the
+worklet acknowledges the header the Worker names in a `postMessage`. Also, the successor pointer
+is advisory: after a supersession it may name freed tables for up to one block, so the page must
+never dereference it on two threads without that protocol. The header and `SuccessorWords` docs
+in `hosts/host-web/src/lib.rs` now say so.
+
 S6 still has to do: the exports (`host_release`, `host_adopt`, `instance_reserve`) over
 `release_render`/`adopt_render`; the Worker's status export (the released host keeps a status
 shell) and the worklet's diagnostic export (`RenderHost::diagnostic`); `OBSERVATION_READ` and the

@@ -277,16 +277,23 @@ pub struct WebMeterHeader {
     /// (issue #1290d1). The plan's meter frame travels with its header, so the worklet's views
     /// over the frame are the plan's: a header that reads `1` is the page's signal to switch to
     /// the views it cut over [`Self::successor_pointer`]'s header and frame, in the block that
-    /// adopted the plan. The retired header stays alive until the service step after that block.
+    /// adopted the plan. The retired header stays alive until the service step after the block
+    /// that follows that block (#1332 S5).
     pub retired: u32,
     /// Linear-memory address of the `3(T + S) + 3` word `f32` frame this header describes, or `0`
     /// for a handle with no compiled session (issue #1290d1).
     pub frame_pointer: u32,
     /// Linear-memory address of the header that replaces this one: the newest committed
     /// replacement plan's, from its commit until its adoption block, and the adopted plan's once
-    /// [`Self::retired`] is set. `0` when no replacement waits. A page cuts the views over that
-    /// header and its frame in the message handler that commits the plan, so the render path
-    /// switches views by reference and never cuts one (issue #1290d1).
+    /// [`Self::retired`] is set. `0` when no replacement waits. On the single instance a page
+    /// cuts the views over that header and its frame in the message handler that commits the
+    /// plan, so the render path switches views by reference and never cuts one (issue #1290d1).
+    /// With the halves on two threads that advance notice does not hold (#1332 S5): the word is
+    /// published after the commit and read at a block's start, so the plan is usually adopted
+    /// in the block that first names it, and after a supersession the word may name freed
+    /// tables for up to one block. There it is advisory, and the page must not dereference it
+    /// until the S7 protocol (adoption deferred until the worklet acknowledges the header the
+    /// Worker posts) makes it safe.
     pub successor_pointer: u32,
     /// The structure epoch of the control list this plan's strip order belongs to (issue #1562b):
     /// the `structure_epoch` that `CONTROL_LIST_GET` pages carry, as the commit that prepared the
@@ -722,9 +729,11 @@ struct EffectInstance {
 ///
 /// The published meter frame and its header are here too (#1290d1): the frame is `3(T + S) + 3`
 /// words for this plan's strips, so a plan with another strip count publishes a frame of its own
-/// size. They travel with the tables, in the same pointer exchange, and the page cuts its views
-/// over the successor's frame in the message handler that commits it ([`WebMeterHeader::retired`]
-/// and [`WebMeterHeader::successor_pointer`] tell the render path which views to use).
+/// size. They travel with the tables, in the same pointer exchange. On the single instance the
+/// page cuts its views over the successor's frame in the message handler that commits it
+/// ([`WebMeterHeader::retired`] and [`WebMeterHeader::successor_pointer`] tell the render path
+/// which views to use); on two threads that advance cut is an S7 protocol, not a property of the
+/// words (see [`WebMeterHeader::successor_pointer`]).
 struct PlanShape {
     /// Canonical normalized track order: the leading segment of the strip order that
     /// `track_index` addresses (issue #1213 D1).
@@ -819,9 +828,12 @@ const RETIRED_SHAPES: usize = 4;
 /// The words of the successor record (#1332 S5), which the control half publishes after every
 /// control call that succeeded and the render half reads before every block: `[newest epoch,
 /// successor header address]`. They are the only global words: while a newer plan waits, the
-/// rendering plan's header names the newest committed replacement's header, so the page cuts its
-/// views over the replacement's frame in advance (#1290d1). Everything that describes one plan
-/// is that plan's own ([`PlanShape::words`]).
+/// rendering plan's header names the newest committed replacement's header, so on the single
+/// instance the page cuts its views over the replacement's frame in advance (#1290d1). On two
+/// threads the record gives no advance notice and may name freed tables for up to one block
+/// after a supersession: it is advisory until the S7 protocol (see
+/// [`WebMeterHeader::successor_pointer`]). Everything that describes one plan is that plan's own
+/// ([`PlanShape::words`]).
 type SuccessorWords = [u64; 2];
 
 /// The words of one plan ([`PlanShape::words`]): its master strip, as `index + 1` in its own
@@ -1088,6 +1100,10 @@ struct RenderHalf {
     failure: Option<&'static [u8]>,
     /// What renders the session, from boot until [`AudioWorkletEngineHost::dispose`].
     ready: Option<RenderReady>,
+    /// Whether this is the status shell [`AudioWorkletEngineHost::release_render`] leaves
+    /// (#1332 S5): a render call on it is refused and changes nothing, since the session renders
+    /// elsewhere.
+    released: bool,
 }
 
 /// Everything the render half owns of one prepared session (#1332 S4).
@@ -1111,6 +1127,11 @@ struct RenderReady {
     successor: PublishedWordsReader<2>,
     /// The session's lifecycle word, shared with the control half (#1332 S5).
     lifecycle: Lifecycle,
+    /// Test support (#1332 S5): a two-step barrier the next adopting block waits on twice, just
+    /// before it takes the adopted plan's tables, so a test can commit on the control thread
+    /// inside that window. Absent from the shipped module.
+    #[cfg(feature = "test-support")]
+    adoption_pause: Option<Arc<std::sync::Barrier>>,
     /// A handle on the session's `live_values_superseded` count (#1312 D2): the one count the
     /// control plane made, which every cell reader of every plan the session prepares adds to,
     /// and which the status reports (#1399).
@@ -1344,6 +1365,7 @@ impl AudioWorkletEngineHost {
                 buffers: Some(buffers),
                 failure: None,
                 ready: Some(ready),
+                released: false,
             },
         })
     }
@@ -2468,6 +2490,7 @@ impl AudioWorkletEngineHost {
             buffers: None,
             failure: None,
             ready: None,
+            released: true,
         };
         Some(RenderHost {
             half: Box::new(core::mem::replace(&mut self.render, shell)),
@@ -2756,6 +2779,18 @@ impl RenderReady {
     // REALTIME_POLICY_END
 }
 
+#[cfg(feature = "test-support")]
+impl RenderReady {
+    /// Wait twice on the adoption barrier a test set, once: render has reached the adoption
+    /// block, then the test releases it (#1332 S5). Test support only.
+    fn pause_before_adoption(&mut self) {
+        if let Some(barrier) = self.adoption_pause.take() {
+            barrier.wait();
+            barrier.wait();
+        }
+    }
+}
+
 impl RenderHalf {
     // REALTIME_POLICY_BEGIN
     /// [`AudioWorkletEngineHost::render_next`]: render exactly one prepared quantum at the next
@@ -2768,6 +2803,11 @@ impl RenderHalf {
         // leave an `expect_failed` trap owner in the render export's call graph.
         let quantum = self.status.quantum_frames as usize;
         let Some(ready) = self.ready.as_mut() else {
+            // #1332 S5: the shell a release leaves renders nothing and records no failure, so
+            // the shared lifecycle word and this status cannot disagree.
+            if self.released {
+                return self.record(RESULT_WRONG_STATE);
+            }
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
         // #1332 S5: a sticky failure the control half recorded, on whatever thread it runs, is
@@ -2828,6 +2868,8 @@ impl RenderHalf {
                     );
                     // #1381b: what the swap block's hook paired travels with the tables, which the
                     // adopted plan's companions carry (#1332 S4).
+                    #[cfg(feature = "test-support")]
+                    ready.pause_before_adoption();
                     ready.adopt_shape(epoch, render_first_sample);
                 }
                 self.status.next_absolute_sample = next_absolute_sample;
@@ -2984,6 +3026,26 @@ impl RenderHost {
     #[must_use]
     pub fn diagnostic(&self) -> &[u8] {
         self.half.failure.unwrap_or(&[])
+    }
+
+    /// Make the next adopting block wait twice on `barrier` just before it takes the adopted
+    /// plan's tables (#1332 S5): once when it gets there, once to be released. Test support.
+    #[cfg(feature = "test-support")]
+    pub fn pause_before_adoption(&mut self, barrier: Arc<std::sync::Barrier>) {
+        if let Some(ready) = self.half.ready.as_mut() {
+            ready.adoption_pause = Some(barrier);
+        }
+    }
+
+    /// The full-width address the rendering plan's header names as its successor, or `0`
+    /// (see [`AudioWorkletEngineHost::meter_successor_address`]). Test support (#1332 S5).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn meter_successor_address(&self) -> usize {
+        self.half
+            .ready
+            .as_ref()
+            .map_or(0, |ready| ready.shape.successor_address)
     }
 
     /// The epoch of the plan whose tables the render half holds: the plan that rendered the last
@@ -4700,6 +4762,8 @@ fn compile_ready(
         retired_shapes: retired_producer,
         successor: successor_reader,
         lifecycle,
+        #[cfg(feature = "test-support")]
+        adoption_pause: None,
         live_values_superseded,
         meters: MeterDelivery::new(
             output_reader,
