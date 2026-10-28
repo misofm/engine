@@ -49,6 +49,10 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_declare_discontinuity",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
+    "miso_engine_web_v1_host_adopt",
+    "miso_engine_web_v1_host_release",
+    "miso_engine_web_v1_instance_bind",
+    "miso_engine_web_v1_instance_reserve",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -56,6 +60,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
+    "miso_engine_web_v1_render_diagnostic_bytes",
+    "miso_engine_web_v1_render_diagnostic_ptr",
     "miso_engine_web_v1_replace_document_ptr",
     "miso_engine_web_v1_resolved_source_ring_frames",
     "miso_engine_web_v1_resource_ptr",
@@ -77,6 +83,7 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_status_ptr",
+    "miso_engine_web_v1_successor_header_ptr",
     "miso_engine_web_v1_watermark_ptr",
     "miso_engine_web_v1_watermark_read"
   ],
@@ -568,6 +575,31 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "reserved",
           "offset": 48,
           "type": "u64[2]"
+        }
+      ]
+    },
+    "instanceReservation": {
+      "bytes": 16,
+      "fields": [
+        {
+          "name": "structSize",
+          "offset": 0,
+          "type": "u32"
+        },
+        {
+          "name": "tlsBase",
+          "offset": 4,
+          "type": "u32"
+        },
+        {
+          "name": "stackTop",
+          "offset": 8,
+          "type": "u32"
+        },
+        {
+          "name": "stackBottom",
+          "offset": 12,
+          "type": "u32"
         }
       ]
     }

@@ -59,16 +59,17 @@ use host_core::{LAUNCH_SAMPLE_RATES, RESPONSE_MAXIMUM_POINTS};
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_DIAGNOSTIC,
     BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
-    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES, MAXIMUM_DOCUMENT_BYTES,
-    METER_HEADER_BYTES, PLAN_LATENCY_BYTES, RACK_CONSOLE, RACK_INSERTS, RACK_NOT_APPLICABLE,
-    RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL,
-    RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
-    RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE,
-    RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
-    RESULT_WRONG_STATE, SEEK_REPORT_BYTES, SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED,
-    STATE_READY, STATUS_BYTES, WASM_INITIAL_MEMORY_PAGES, WASM_MAXIMUM_MEMORY_PAGES,
-    WATERMARK_BYTES, WebBootOptions, WebMeterHeader, WebPlanLatency, WebPlanWatermark,
-    WebResourceReport, WebSeekReport, WebStatus,
+    DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS, DIAGNOSTIC_BYTES,
+    INSTANCE_RESERVATION_BYTES, MAXIMUM_DOCUMENT_BYTES, METER_HEADER_BYTES, PLAN_LATENCY_BYTES,
+    RACK_CONSOLE, RACK_INSERTS, RACK_NOT_APPLICABLE, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH,
+    RESULT_BACKPRESSURE, RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL,
+    RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET, RESULT_REFUSED_DOCUMENT,
+    RESULT_REFUSED_LIFECYCLE, RESULT_REFUSED_OPTIONS, RESULT_RENDER_REJECTED,
+    RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED, RESULT_WRONG_STATE, SEEK_REPORT_BYTES,
+    SOURCE_STALL_TOLERANCE_MS, STATE_DISPOSED, STATE_FAILED, STATE_READY, STATUS_BYTES,
+    WASM_INITIAL_MEMORY_PAGES, WASM_MAXIMUM_MEMORY_PAGES, WATERMARK_BYTES, WebBootOptions,
+    WebInstanceReservation, WebMeterHeader, WebPlanLatency, WebPlanWatermark, WebResourceReport,
+    WebSeekReport, WebStatus,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
@@ -119,7 +120,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 48] = [
+pub const EXPORTS: [&str; 55] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_command_ptr",
@@ -138,6 +139,10 @@ pub const EXPORTS: [&str; 48] = [
     "miso_engine_web_v1_declare_discontinuity",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
+    "miso_engine_web_v1_host_adopt",
+    "miso_engine_web_v1_host_release",
+    "miso_engine_web_v1_instance_bind",
+    "miso_engine_web_v1_instance_reserve",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -145,6 +150,8 @@ pub const EXPORTS: [&str; 48] = [
     "miso_engine_web_v1_plan_latency_read",
     "miso_engine_web_v1_render",
     "miso_engine_web_v1_render_allocation_count",
+    "miso_engine_web_v1_render_diagnostic_bytes",
+    "miso_engine_web_v1_render_diagnostic_ptr",
     "miso_engine_web_v1_replace_document_ptr",
     "miso_engine_web_v1_resolved_source_ring_frames",
     "miso_engine_web_v1_resource_ptr",
@@ -166,6 +173,7 @@ pub const EXPORTS: [&str; 48] = [
     "miso_engine_web_v1_source_seek_report_ptr",
     "miso_engine_web_v1_source_submit",
     "miso_engine_web_v1_status_ptr",
+    "miso_engine_web_v1_successor_header_ptr",
     "miso_engine_web_v1_watermark_ptr",
     "miso_engine_web_v1_watermark_read",
 ];
@@ -515,6 +523,33 @@ fn plan_latency_fields() -> [Field; 6] {
     ]
 }
 
+/// The instance reservation record (issue #1332 S6): the stack and TLS block
+/// `miso_engine_web_v1_instance_reserve` made for a second instance on the shared memory.
+fn instance_reservation_fields() -> [Field; 4] {
+    [
+        (
+            "structSize",
+            offset_of!(WebInstanceReservation, struct_size),
+            "u32",
+        ),
+        (
+            "tlsBase",
+            offset_of!(WebInstanceReservation, tls_base),
+            "u32",
+        ),
+        (
+            "stackTop",
+            offset_of!(WebInstanceReservation, stack_top),
+            "u32",
+        ),
+        (
+            "stackBottom",
+            offset_of!(WebInstanceReservation, stack_bottom),
+            "u32",
+        ),
+    ]
+}
+
 /// The source seek report record (issue #1293 D6): the C ABI seek report's layout.
 fn seek_report_fields() -> [Field; 8] {
     [
@@ -625,6 +660,10 @@ pub fn render() -> String {
                 (
                     "seekReport",
                     structure(SEEK_REPORT_BYTES, &seek_report_fields()),
+                ),
+                (
+                    "instanceReservation",
+                    structure(INSTANCE_RESERVATION_BYTES, &instance_reservation_fields()),
                 ),
             ]
             .into_iter()

@@ -304,6 +304,11 @@ python3 -B "$(dirname "${BASH_SOURCE[0]}")/strip-wasm-names.py" check "$named" "
 
 expected_exports=$(printf '%s\n' \
   memory \
+  __stack_pointer \
+  __tls_align \
+  __tls_base \
+  __tls_size \
+  __wasm_init_tls \
   miso_engine_web_v1_abi_version \
   miso_engine_web_v1_boot \
   miso_engine_web_v1_boot_command_ptr \
@@ -322,6 +327,10 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_declare_discontinuity \
   miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
+  miso_engine_web_v1_host_adopt \
+  miso_engine_web_v1_host_release \
+  miso_engine_web_v1_instance_bind \
+  miso_engine_web_v1_instance_reserve \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
@@ -329,6 +338,8 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_plan_latency_read \
   miso_engine_web_v1_render \
   miso_engine_web_v1_render_allocation_count \
+  miso_engine_web_v1_render_diagnostic_bytes \
+  miso_engine_web_v1_render_diagnostic_ptr \
   miso_engine_web_v1_replace_document_ptr \
   miso_engine_web_v1_resolved_source_ring_frames \
   miso_engine_web_v1_response_frame_close \
@@ -350,6 +361,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_seek_report_ptr \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr \
+  miso_engine_web_v1_successor_header_ptr \
   miso_engine_web_v1_watermark_ptr \
   miso_engine_web_v1_watermark_read | sort)
 
@@ -367,7 +379,10 @@ print("\n".join(exports))
   echo "cannot read the published export list from $layout_json" >&2
   exit 1
 }
-expected_functions=$(grep -vx memory <<<"$expected_exports")
+# #1332 S6: the linker's TLS and stack symbols (`__wasm_init_tls`, `__tls_size`, `__tls_align`,
+# `__tls_base`, `__stack_pointer`) are exported for a second instance's start (#1331 recipe rule 2),
+# and are no more the ABI's calls than `memory` is.
+expected_functions=$(grep -vxE 'memory|__wasm_init_tls|__tls_size|__tls_align|__tls_base|__stack_pointer' <<<"$expected_exports")
 [[ "$layout_exports" == "$expected_functions" ]] || {
   echo "the ABI layout document's published exports are not the frozen export set" >&2
   diff -u <(printf '%s\n' "$expected_functions") <(printf '%s\n' "$layout_exports") >&2 || true
@@ -546,6 +561,19 @@ printf '%s
 ' "$named_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
     --render-thread || exit 1
+
+# Issue #1332 S6: the worklet in `worker` mode adopts the render half at its start and releases it
+# at teardown, and the Worker calls the same two exports to hand it out and take it back. Neither
+# may reach an allocator, a deallocator or drop glue: the release and the adoption exchange
+# preallocated boxes, and every refusal path forgets or redeposits what it holds. The worklet's
+# bind and its render-diagnostic reads are held to the same rule.
+for export in miso_engine_web_v1_host_adopt miso_engine_web_v1_host_release \
+  miso_engine_web_v1_instance_bind miso_engine_web_v1_render_diagnostic_ptr \
+  miso_engine_web_v1_render_diagnostic_bytes; do
+  printf '%s
+' "$named_disassembly" |
+    python3 -B "$callgraph" --callgraph "$export" --render-thread || exit 1
+done
 
 # #137 D3 amends the browser-capability ban deliberately.
 #
