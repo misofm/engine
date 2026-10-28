@@ -1275,4 +1275,25 @@ describe("browser session edits", () => {
       await engine.close();
     }
   });
+
+  test("#2190: a host's raw miso.error.v1 rejection of a protocol frame is a MisoEngineError", async () => {
+    // Red if the transport passes the host's local refusal record (not an Error) through to the app.
+    const { engine, host } = await boot(base());
+    const forward = host.control;
+    let refuse = false;
+    host.control = async (frame, replacement) => {
+      if (refuse) throw Object.freeze({ tag: "miso.error.v1", requestId: 0, result: 1 });
+      return forward.call(host, frame, replacement);
+    };
+    try {
+      // The queue's probes and the capabilities read go through; the next frame, COUNTERS_GET, the
+      // host refuses locally.
+      await engine.capabilities();
+      refuse = true;
+      await assert.rejects(engine.counters(), (error) =>
+        error instanceof MisoEngineError && error.code === "invalidArgument" && error.result === 1);
+    } finally {
+      await engine.close();
+    }
+  });
 });

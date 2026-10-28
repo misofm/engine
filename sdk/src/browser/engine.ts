@@ -29,7 +29,7 @@ import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders } from "./live-controls.ts";
+import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders, hostRecordFailure } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
 import { ProtocolClient, decodeCapabilitiesReply, decodeProtocolEvent } from "../core/protocol-messages.ts";
@@ -1509,7 +1509,15 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           // `revision_conflict`, and the queue takes the new revision from that refusal's reply
           // (no lock, no retry: #1389 R3).
           send: async (frame, document) => {
-            const reply = await host.control(frame, document);
+            let reply: Awaited<ReturnType<typeof host.control>>;
+            try {
+              reply = await host.control(frame, document);
+            } catch (error) {
+              // The host rejects a frame it refuses locally (one over its frame limit, a disposed
+              // host) with its numeric `miso.error.v1` record, which is not an `Error`; keep the
+              // result in the SDK's vocabulary, as the seek path does (#2190).
+              throw hostRecordFailure(error);
+            }
             queue.noteCommit(reply.revision);
             if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
             return reply.response;

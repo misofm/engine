@@ -219,6 +219,13 @@ committed session to make one transaction. Each call resolves with `{ revision, 
 - `unchanged` (`replaceSession` only): the document is the committed session. Nothing is
   committed, and the revision stays the same.
 
+A transaction frame larger than the core's frame limit (`capabilities().maximumFrameBytes`,
+16,384 bytes today) is not sent. It rejects with `MisoControlRefusal`, `status` and `code`
+`limit_exceeded`, and its message and its diagnostic's `detail`
+(`frame_bytes=<n>,maximum_frame_bytes=<m>`) give the frame's size and the limit. Nothing is
+committed. Split the edits into smaller transactions, each one built on the session the last one
+committed. Issue #2191 makes the limit a boot setting.
+
 A refusal rejects, and nothing is committed. `engine.revision` is the committed revision.
 `engine.applied(revision)` resolves with the watermark `{ revision, sample, outcome }` when that
 revision is audible. `sample` is the first sample of the block where the revision took effect. The
@@ -445,6 +452,15 @@ compares it with the committed session to make one transaction. Each call resolv
 - `rebuild`: a new plan replaces the running plan at a later block boundary.
 - `unchanged` (`replaceSession` only): the document is the committed session. Nothing is
   committed, and the revision stays the same.
+
+A transaction frame larger than the core's frame limit (`capabilities().maximumFrameBytes`,
+16,384 bytes today) is not sent. It rejects with `MisoControlRefusal`, `status` and `code`
+`limit_exceeded`, and its message and its diagnostic's `detail`
+(`frame_bytes=<n>,maximum_frame_bytes=<m>`) give the frame's size and the limit. Nothing is
+committed. Split the edits into smaller transactions, each one built on the session the last one
+committed, for example one bus and its routes at a time. Issue #2191 makes the limit a boot
+setting. A refusal that the browser host makes before the frame reaches the core rejects with
+`MisoEngineError`, never with the host's raw record.
 
 A refusal rejects, and nothing is committed. The SDK does not send a refused edit again: if
 another commit came first, the core refuses the edit with `revision_conflict`, and you build the

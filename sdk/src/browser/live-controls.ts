@@ -1,4 +1,5 @@
 import type { SessionMap } from "../core/boundary.ts";
+import { MisoEngineError, resultName } from "../core/errors.ts";
 import { controlCallFailure, decodeControlLimits, encodeRevisionProbe } from "../core/control-frame.ts";
 import { ControlRequestIds, ControlTransactionQueue } from "../core/control-queue.ts";
 import { readControlStripOrder } from "../core/control-list.ts";
@@ -6,6 +7,25 @@ import type { ControlListTransport, ControlStripOrder } from "../core/control-li
 import { EngineLiveControls } from "../core/live-controls.ts";
 import type { SessionLike } from "../core/session.ts";
 import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
+
+/**
+ * A host rejection as the SDK raises it (#2190): a raw `miso.error.v1` record, which is not an
+ * `Error`, becomes `MisoEngineError` with the record's result; anything else passes unchanged.
+ * `wrongState` (a disposed or failed host) and `internal` are the host failing, not a refusal of the
+ * frame, and the message says so.
+ */
+export function hostRecordFailure(error: unknown): unknown {
+  if (typeof error !== "object" || error === null) return error;
+  const { tag, result } = error as { readonly tag?: unknown; readonly result?: unknown };
+  if (tag !== "miso.error.v1" || typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) {
+    return error;
+  }
+  const code = resultName(result, "call");
+  const message = code === "wrongState" || code === "internal"
+    ? `the browser host failed a control call (${code})`
+    : "the browser host refused a control frame";
+  return new MisoEngineError(message, { phase: "lifecycle", code, result });
+}
 
 /** Post one command frame to the host's `control` message; a call that failed throws. */
 function hostControlSend(host: MisoAudioWorkletHost): (frame: Uint8Array) => Promise<Uint8Array> {
@@ -132,7 +152,12 @@ export function createBrowserControlQueue(
 async function openBrowserControlQueue(host: MisoAudioWorkletHost): Promise<ControlTransactionQueue> {
   const requestIds = new ControlRequestIds();
   const probe = async () => {
-    const reply = await host.control(encodeRevisionProbe(requestIds.next()));
+    let reply: Awaited<ReturnType<MisoAudioWorkletHost["control"]>>;
+    try {
+      reply = await host.control(encodeRevisionProbe(requestIds.next()));
+    } catch (error) {
+      throw hostRecordFailure(error);
+    }
     if (reply.result !== 0) throw controlCallFailure(reply.result, reply.response);
     return reply;
   };
