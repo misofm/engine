@@ -142,7 +142,7 @@ if (($# == 1)) && [[ $1 == --self-test-capabilities ]]; then
   with_line "$worklet_ok" 'const worker = new Worker("x.js");' "$capability_dir/l2.js"
   mutate "a Worker in the worklet" "$main_ok" "$capability_dir/l2.js" "$worker_ok"
   for line in 'fetch("/x");' 'new WebSocket("ws://x");' 'memory.grow(1);' 'Atomics.wait(word, 0, 0);' \
-    'setTimeout(() => {}, 1);' 'setInterval(() => {}, 9);'; do
+    'setTimeout(() => {}, 1);' 'setInterval(() => {}, 9);' 'importScripts("x.js");'; do
     with_line "$worker_ok" "$line" "$capability_dir/w.js"
     mutate "control Worker: $line" "$main_ok" "$worklet_ok" "$capability_dir/w.js"
   done

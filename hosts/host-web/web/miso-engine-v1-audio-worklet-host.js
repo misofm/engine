@@ -436,6 +436,7 @@ class MisoAudioWorkletHost {
     ringBlocks,
     instanceMode = "single",
     worker = undefined,
+    early = undefined,
   ) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
@@ -456,11 +457,19 @@ class MisoAudioWorkletHost {
       port.onmessage = (event) => this.#receive(event.data);
       port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
     }
-    if (worker !== undefined) worker.onerror = () => this.#fail(webError(255, this.#oldestRequestId()));
+    if (worker !== undefined) {
+      worker.onerror = (event) => {
+        event?.preventDefault?.();
+        this.#fail(webError(255, this.#oldestRequestId()));
+      };
+    }
     // A user-agent/processor crash cannot return storage already transferred out of this realm.
     this.node.onprocessorerror = () => this.#fail(webError(255, this.#oldestRequestId()));
     // In `worker` mode the control Worker runs its own service tick (#1332 S7).
     if (worker === undefined) this.#startServiceTick();
+    // What the Worker posted, or how it failed, before this host took it over (#1332 S7).
+    for (const message of early?.messages ?? []) this.#receive(message);
+    if (early?.failed === true) this.#fail(webError(255, this.#oldestRequestId()));
   }
 
   // Issue #1381a D6: in `single` mode the instance's control work runs in the worklet's message
@@ -1216,14 +1225,25 @@ function bootControlWorker(workerUrl, boot) {
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    // Between the boot reply and the host's construction (the worklet's adoption), the Worker
+    // may already post (its tick's watermark or events) or fail: the messages are kept in order
+    // and a failure is remembered, and the host replays both when it takes the Worker over.
+    const early = { messages: [], failed: false };
     const finish = (operation, value) => {
       if (settled) return;
       settled = true;
-      worker.onmessage = null;
-      worker.onerror = null;
-      worker.onmessageerror = null;
       if (operation === reject) {
+        worker.onmessage = null;
+        worker.onerror = null;
+        worker.onmessageerror = null;
         try { worker.terminate(); } catch (_) { /* already gone */ }
+      } else {
+        worker.onmessage = (event) => { early.messages.push(event.data); };
+        worker.onerror = (event) => {
+          event?.preventDefault?.();
+          early.failed = true;
+        };
+        worker.onmessageerror = () => { early.failed = true; };
       }
       operation(value);
     };
@@ -1236,7 +1256,7 @@ function bootControlWorker(workerUrl, boot) {
           && validU64(message.token, true) && Number(message.token >> 32n) === message.handle
           && validU32(message.reservation) && message.reservation !== 0
           && typeof message.metersAttached === "boolean") {
-        finish(resolve, { worker, workletPort: channel.port2, ready: message });
+        finish(resolve, { worker, workletPort: channel.port2, ready: message, early });
       } else if (hasExactFields(message, ["tag", "requestId", "result"])
           && message.tag === "miso.error.v1" && message.requestId === 0
           && validResult(message.result)) {
@@ -1447,6 +1467,7 @@ export async function createMisoAudioWorkletHost(options) {
       ready.sourceRingFrames / quantumFrames,
       instanceMode,
       booted?.worker,
+      booted?.early,
     );
   } catch (error) {
     cleanupNode(node);

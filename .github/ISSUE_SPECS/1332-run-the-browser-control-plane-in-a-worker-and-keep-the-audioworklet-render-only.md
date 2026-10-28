@@ -798,3 +798,25 @@ Slice S7 of the #1332 build plan (#1332(b1)), branch `codex/issue-1332-worker-js
   revision 2, peak 0.25, 64 quanta, `blockingRebuilds` 0, `singleModeControlAllocations` 0,
   `renderAllocationCount` 0, `meterFramesSkipped` 0, meter frames carry the new plan's one track,
   dispose clean. The same script unisolated: single, `blockingRebuilds` 1.
+
+### S7 attempt 2 (verify FAIL folds, 2026-10-28)
+
+- **R-S7-meters amended (root).** A meter set's identity is the four-part key: header pointer,
+  frame pointer, track count, submix count. `process()` compares the active set's key with the
+  live header's words on every block, even when the pointer is unchanged (a freed header address
+  may be reused by a later plan); on a mismatch it switches to the pending set only if its key
+  matches, else skips and counts. The meter-view handler and `syncWorkerMeterViews` decide whether
+  to cut by the same key (`meterSetMatches`, compares only). Test: a header reused at the active
+  address with another frame and counts is skipped and counted, then converges on the next view
+  (red on attempt 1: "a reused header address is not the active set").
+- **Pending set kept.** `syncWorkerMeterViews` makes the current header's set active and keeps a
+  newer pending set unless it is the one made active. Test: B and C committed back to back,
+  render adopts B uncut, then C: one skip, then C's frame (red on attempt 1's rule: "the pending C
+  survives B's adoption").
+- **Folds.** The host keeps the Worker's handlers attached between its boot reply and the
+  worklet's ready (messages kept in order and replayed, an error fails the host; red: "expected
+  rejection"). `releaseRenderHalf` posts `miso.released.v1 {token: 0n}` when the release throws.
+  The Worker refuses control calls after a dispose began with `WRONG_STATE` in each reply's own
+  shape, answers status reads from its own record then, and answers every in-flight status read
+  before it frees the host (red: "a control call after the dispose began is refused", "the status
+  read in flight across the dispose is answered"). Policy: an `importScripts` mutation.

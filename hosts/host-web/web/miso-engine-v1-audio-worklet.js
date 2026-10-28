@@ -503,12 +503,19 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
 
   /// D4.1: stop rendering and release the render half into a token for the control Worker, which
   /// adopts it back and disposes the host. Nothing is freed here.
+  /// A release that throws (an instance a render trap killed) still answers, with no token (`0n`):
+  /// the Worker then disposes without the half, and the page's dispose never waits forever.
   releaseRenderHalf() {
-    const token = this.handle === 0 ? 0n : this.exports.miso_engine_web_v1_host_release(this.handle);
+    let token = 0n;
+    try {
+      if (this.handle !== 0) token = BigInt.asUintN(64, this.exports.miso_engine_web_v1_host_release(this.handle));
+    } catch (_) {
+      token = 0n;
+    }
     this.disposed = true;
     this.ready = false;
     this.handle = 0;
-    this.controlPort.postMessage({ tag: "miso.released.v1", token: BigInt.asUintN(64, token) });
+    this.controlPort.postMessage({ tag: "miso.released.v1", token });
   }
 
   /// A message on the page's port in `worker` mode: the control Worker's channel port first, then
@@ -540,9 +547,12 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         && u32(message.header) && Number.isSafeInteger(message.memoryBytes)) {
       if (this.disposed) return;
       this.rebindMemoryViews();
-      const active = this.meterSet;
-      if (this.metersAttached && message.header !== 0 && active !== null
-          && message.header !== active.headerPointer) {
+      // A set's identity is its four-part key (header, frame, track and submix counts): a freed
+      // header address may be reused by a later plan, so a pointer alone names nothing.
+      if (this.metersAttached && message.header !== 0 && this.meterSet !== null
+          && !this.meterSetMatches(this.meterSet, message.header)
+          && (this.pendingMeterSet === null
+            || !this.meterSetMatches(this.pendingMeterSet, message.header))) {
         const pending = this.cutMeterSet(message.header);
         if (pending !== null) this.pendingMeterSet = pending;
       }
@@ -568,17 +578,33 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
 
   /// R-S7-meters, in a message handler: when render reports a header other than the active set's,
   /// cut the set for it now (the handler runs between two quanta), unless the pending set is it.
+  /// The key is compared on the four words, so a reused header address is a new set. A newer
+  /// pending set is kept: only the set made active here leaves the pending slot.
   syncWorkerMeterViews() {
     if (!this.metersAttached || this.disposed || !this.ready || this.stickyResult !== RESULT_OK
         || this.handle === 0 || this.meterSet === null) return;
     const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
-    if (current === this.meterSet.headerPointer) return;
-    if (this.pendingMeterSet !== null && this.pendingMeterSet.headerPointer === current) return;
-    const set = this.cutMeterSet(current);
-    if (set !== null) {
-      this.meterSet = set;
+    if (this.meterSetMatches(this.meterSet, current)) return;
+    if (this.pendingMeterSet !== null && this.meterSetMatches(this.pendingMeterSet, current)) {
+      this.meterSet = this.pendingMeterSet;
       this.pendingMeterSet = null;
+      return;
     }
+    const set = this.cutMeterSet(current);
+    if (set !== null) this.meterSet = set;
+  }
+
+  /// R-S7-meters (amended): whether `set` is the set of the header at `pointer` now, by the
+  /// four-part key: the header pointer, and the header's frame pointer, track count and submix
+  /// count read through the whole-memory view. A header outside the view matches nothing.
+  /// Compares only: `process()` calls it on every block.
+  meterSetMatches(set, pointer) {
+    const words = this.memoryWords;
+    if (set.headerPointer !== pointer || pointer === 0 || pointer % 4 !== 0
+        || pointer + METER_HEADER_BYTES > words.byteLength) return false;
+    const at = pointer >>> 2;
+    return words[at + 18] === set.framePointer && words[at + 2] === set.trackCount
+      && words[at + 16] === set.submixCount;
   }
 
   /// Issue #207, #1562b: the compiled session's sources in canonical order, read from the engine's
@@ -1476,19 +1502,16 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (set === null) return;
     // Issue #1332 S7, root ruling R-S7-meters (1, 3): in `worker` mode the header that counts is
     // the one render reports as current, never a retired header's successor (which may name freed
-    // tables). On a change, switch to the set the handler pre-cut only when its header, frame
-    // pointer and strip counts match the live header's words (compares only); otherwise check the
-    // header lies inside the whole-memory view, skip the frame and count the skip.
+    // tables). When the active set's four-part key does not match the live header's words, switch
+    // to the set the handler pre-cut only when its key matches (compares only); otherwise skip
+    // the frame and count the skip.
     if (this.workerMode) {
       const current = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
-      if (current !== set.headerPointer) {
+      // The four-part key is compared on every block, even when the pointer is unchanged: a
+      // freed header address may be reused by a later plan with another frame and counts.
+      if (!this.meterSetMatches(set, current)) {
         const next = this.pendingMeterSet;
-        const words = this.memoryWords;
-        const at = current >>> 2;
-        if (next === null || next.headerPointer !== current || current % 4 !== 0
-            || current + METER_HEADER_BYTES > words.byteLength
-            || words[at + 18] !== next.framePointer
-            || words[at + 2] !== next.trackCount || words[at + 16] !== next.submixCount) {
+        if (next === null || !this.meterSetMatches(next, current)) {
           this.meterFramesSkipped += 1;
           return;
         }

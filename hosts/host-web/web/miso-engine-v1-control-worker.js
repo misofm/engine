@@ -20,6 +20,7 @@ const ABI_VERSION = 0x00010000;
 const BOOT_OPTIONS_BYTES = 64;
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
+const RESULT_WRONG_STATE = 3;
 const RESULT_BACKPRESSURE = 6;
 const RESULT_REPREPARE_REQUIRED = 9;
 const RESULT_INTERNAL = 255;
@@ -114,6 +115,8 @@ class ControlWorker {
     // Status reads waiting for the worklet's render fields, in request order.
     this.statusReads = [];
     this.disposeRequestId = 0;
+    // Set once a dispose began: every later control call is refused `WRONG_STATE`.
+    this.disposing = false;
     scope.onmessage = (event) => this.onPageMessage(event.data);
     scope.onmessageerror = () => this.fatal(RESULT_INTERNAL, this.lastRequestId);
   }
@@ -336,6 +339,10 @@ class ControlWorker {
       blockingRebuilds: view.getUint32(28, true),
       nextAbsoluteSample: view.getBigUint64(32, true),
       renderedQuanta: view.getBigUint64(40, true),
+      liveValuesSuperseded: view.getBigUint64(48, true),
+      appliedRevision: view.getBigUint64(56, true),
+      appliedSample: view.getBigUint64(64, true),
+      appliedOutcome: view.getBigUint64(72, true),
     };
   }
 
@@ -445,6 +452,10 @@ class ControlWorker {
       this.sticky(this.stickyResult, message.requestId, returnedPlanes);
       return;
     }
+    if (this.disposing) {
+      this.refuseDisposing(message);
+      return;
+    }
     if (message.tag === "miso.source.v1" && exactFields(message, SOURCE_FIELDS)) {
       this.receiveSource(message);
     } else if (message.tag === "miso.seek.v1" && exactFields(message, SEEK_FIELDS)) {
@@ -479,6 +490,32 @@ class ControlWorker {
       this.workletPort.postMessage({ tag: "miso.render-status.v1", requestId: message.requestId });
     } else {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId, returnedPlanes);
+    }
+  }
+
+  /// A request that arrives after a dispose began: a control call is refused `WRONG_STATE` in its
+  /// own reply shape (never the sticky error, which would fail the dispose too); a status read is
+  /// answered from this Worker's status, since the worklet has released its half.
+  refuseDisposing(message) {
+    const { tag, requestId } = message;
+    if (tag === "miso.source.v1" || tag === "miso.seek.v1" || tag === "miso.seek-at.v1") {
+      this.acknowledge(requestId, RESULT_WRONG_STATE, tag === "miso.source.v1" ? message.planes : undefined);
+    } else if (tag === "miso.session-seek.v1") {
+      this.post({ tag, requestId, result: RESULT_WRONG_STATE, generation: message.generation });
+    } else if (tag === "miso.seek-report.v1") {
+      this.post({ tag, requestId, result: RESULT_WRONG_STATE, report: null });
+    } else if (tag === "miso.plan-latency.v1") {
+      this.post({ tag, requestId, result: RESULT_WRONG_STATE, latency: null });
+    } else if (tag === "miso.control.v1") {
+      const response = new Uint8Array(0);
+      this.post({
+        tag, requestId, result: RESULT_WRONG_STATE, response,
+        revision: this.exports.miso_engine_web_v1_control_revision(this.handle),
+      }, [response.buffer]);
+    } else if (tag === "miso.status.v1") {
+      this.answerStatus(requestId, null);
+    } else {
+      this.sticky(RESULT_INVALID_ARGUMENT, requestId);
     }
   }
 
@@ -715,6 +752,7 @@ class ControlWorker {
   /// disposes the host (the only place that frees it) and answers the page's dispose.
   beginDispose(requestId) {
     this.stopServiceTick();
+    this.disposing = true;
     this.disposeRequestId = requestId;
     this.workletPort.postMessage({ tag: "miso.release.v1" });
   }
@@ -725,6 +763,8 @@ class ControlWorker {
     // A half that never came back (a zero token) is left where it is: dispose then marks the
     // lifecycle disposed, so that half silences, and frees the control half (#1332 S6).
     if (token !== 0n) e.miso_engine_web_v1_host_adopt(token);
+    // Every status read still in flight is answered before the host is freed.
+    while (this.statusReads.length > 0) this.answerStatus(this.statusReads.shift(), null);
     const result = e.miso_engine_web_v1_dispose(this.handle);
     if (result === RESULT_OK) {
       this.disposed = true;
@@ -753,8 +793,10 @@ class ControlWorker {
   /// status, its own counters), the control fields are this Worker's: the lifecycle state when it
   /// is not ready, the last result when the render half reports none, the blocking rebuilds (0 in
   /// this mode: the rebuilds run here, never on the audio thread) and the memory's length.
-  answerStatus(requestId, render) {
-    if (this.disposed) return;
+  ///
+  /// With no render fields (`null`: the worklet released its half for a dispose), the answer is
+  /// this Worker's own status record, whose render clock is the one at the last release.
+  answerStatus(requestId, rendered) {
     let control;
     try {
       control = this.readStatus();
@@ -762,10 +804,13 @@ class ControlWorker {
       this.fatal(RESULT_INTERNAL, requestId);
       return;
     }
-    if (render === null || typeof render !== "object") {
+    if (rendered !== null && typeof rendered !== "object") {
       this.fatal(RESULT_INTERNAL, requestId);
       return;
     }
+    const render = rendered ?? {
+      ...control, singleModeControlAllocations: 0, staleViewQuanta: 0, meterFramesSkipped: 0,
+    };
     this.post({
       tag: "miso.status.v1",
       requestId,
