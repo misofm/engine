@@ -186,15 +186,21 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
     "miso_engine_web_v1_render": {
         # Issue #1381b: the block that adopted a plan hands the plan's tables over together with
         # what the swap block's attachment hook paired, which it reads from the active plan's
-        # companions.
-        "_RNvMs0_Cs_8host_webNtB5_22AudioWorkletEngineHost11render_next": (
-            4,
+        # companions. #1332 S5 moved the same four sites, by inlining only: the host's
+        # `render_next` now copies a render failure's diagnostic after the render half's call, so
+        # `RenderHalf::render_next` and `RenderReady::adopt_shape` are no longer inlined into it;
+        # the sites and their count are unchanged (4 before, 2 + 2 after).
+        "_RNvMs2_Cs_8host_webNtB5_11RenderReady11adopt_shape": (
+            2,
             "`PlanState::active_attachment_mut::<RenderCompanions>()` at the adoption block "
             "(#1381b): the active plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the "
             "downcast asks its `type_id`, one `call_indirect` each, neither of which allocates or "
-            "drops; and the same pair in the meter fold that runs after the block while the "
-            "protocol's meter table is on without the lease (#1588b, `poll_meter_delivery`, "
-            "inlined)",
+            "drops",
+        ),
+        "_RNvMs3_Cs_8host_webNtB5_10RenderHalf11render_next": (
+            2,
+            "the same pair in the meter fold that runs after the block while the protocol's meter "
+            "table is on without the lease (#1588b, `poll_meter_delivery`, inlined)",
         ),
         # Issue #1381a D4: the browser renders through the plan owner, so the block boundary's
         # swap decision is in the closure. The plan's own `render` entry is not: the owner calls
@@ -225,7 +231,9 @@ INDIRECT_SITES: dict[str, dict[str, tuple[int, str]]] = {
         ),
     },
     "miso_engine_web_v1_meter_poll": {
-        "_RNvMs0_Cs_8host_webNtB5_22AudioWorkletEngineHost11poll_meters": (
+        # #1332 S5: `RenderHalf::poll_meters` has a second caller (`RenderHost::poll_meters`), so
+        # it is no longer inlined into the host's; the same two sites, by inlining only.
+        "_RNvMs3_Cs_8host_webNtB5_10RenderHalf11poll_meters": (
             2,
             "`PlanState::active_attachment_mut::<RenderCompanions>()` (#1381a D3): the active "
             "plan's `Box<dyn HostAttachment>` answers `as_any_mut` and the downcast asks its "

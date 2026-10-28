@@ -6610,6 +6610,15 @@ where
                     .map(PlanReplacementReservation::adoption),
             );
         });
+        // #1332 S5: B carries the master and the structure epoch this commit leaves, stamped
+        // before it is published, so a render half on another thread that adopts B reads them
+        // from B whatever a later commit has done since.
+        self.preparer.stamp_before_publication(
+            reservation.plan_mut(),
+            self.controller.session().compiled(),
+            self.monitor.master(),
+            self.controller.provider().structure_epoch(),
+        );
         // #1310 D5 step 4: B is published only now, owning every donated ring and record. Its
         // payload carries the revision its gate carries, for the watermark's claim settle (#1482
         // R1).

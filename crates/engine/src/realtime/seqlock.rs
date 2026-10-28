@@ -45,8 +45,11 @@ use super::spsc::sync::{Arc, AtomicU64, Ordering, fence};
 /// that publishes continuously in a tight loop, and at four attempts that measured a 50% give-up
 /// rate, because four reads of a record are comparable in length to the store they race.
 /// Sixty-four took the measured give-up rate to zero there while keeping the loop provably
-/// finite, which is what the bound is for. A reader is never on the render thread, so a retry
-/// costs a render block nothing.
+/// finite, which is what the bound is for. A reader may be on the render thread (the browser's
+/// render half reads its plan's words and the successor record before each block, #1332 S5):
+/// there the read is bounded by this count and then returns [`PublishedWordsBusy`], and the
+/// caller keeps the words it had for one more block. A production writer's single store per
+/// call makes that retry rare.
 pub const MAXIMUM_READ_ATTEMPTS: usize = 64;
 
 /// The attempts one read takes. Under `--cfg loom` it is two, so `seqlock_loom` can explore every
