@@ -29,7 +29,7 @@ import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders } from "./live-controls.ts";
+import { createBrowserControlListTransport, createBrowserControlQueue, createBrowserLiveControls, createBrowserStripOrders, hostRecordFailure } from "./live-controls.ts";
 import { readControlList, readControlState } from "../core/control-list.ts";
 import type { ControlList, ControlListFilter, ControlState } from "../core/control-list.ts";
 import { ProtocolClient, decodeCapabilitiesReply, decodeProtocolEvent } from "../core/protocol-messages.ts";
@@ -540,23 +540,6 @@ function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<Ar
     return new Uint8Array(document);
   }
   return new TextEncoder().encode(document.toJson());
-}
-
-/**
- * A host rejection as the SDK raises it (#2190): a raw `miso.error.v1` record, which is not an
- * `Error`, becomes `MisoEngineError` with the record's result; anything else passes unchanged.
- */
-function hostRecordFailure(error: unknown): unknown {
-  if (typeof error !== "object" || error === null) return error;
-  const { tag, result } = error as { readonly tag?: unknown; readonly result?: unknown };
-  if (tag !== "miso.error.v1" || typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) {
-    return error;
-  }
-  return new MisoEngineError("the browser host refused a control frame", {
-    phase: "lifecycle",
-    code: resultName(result, "call"),
-    result,
-  });
 }
 
 /** Capability flag bit 16 of `CAPABILITIES_GET` (#1594 D10): the core serves the spectrum frames. */

@@ -1043,6 +1043,9 @@ export class ProtocolClient {
     if ("position" in request) {
       throw new MisoUsageError("the transport has no stored position (#1635): seek moves the playhead");
     }
+    // The limit first: a first call's CAPABILITIES_GET must not fall between the revision read and
+    // the send, where it would widen the `revision_conflict` window.
+    await this.#frameLimit();
     const expectedRevision = await this.#transport.committedRevision();
     return this.#value(
       (requestId) => encodeTransportSetRequest({ requestId, expectedRevision, state: request.state }),
@@ -1052,6 +1055,7 @@ export class ProtocolClient {
 
   /** Replace the endpoint's telemetry configuration (`TELEMETRY_CONFIGURE`); resolves to what the core applied. */
   async configureTelemetry(configuration: TelemetryConfiguration): Promise<TelemetryConfiguration> {
+    await this.#frameLimit();
     const expectedRevision = await this.#transport.committedRevision();
     return this.#value(
       (requestId) => encodeTelemetryConfigureRequest({ requestId, expectedRevision, configuration }),
