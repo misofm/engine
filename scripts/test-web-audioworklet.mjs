@@ -177,6 +177,11 @@ async function testMainRealm() {
 
     postMessage(message, transfer = []) {
       const received = structuredClone(message, { transfer });
+      if (received.tag === "miso.control-port.v1") {
+        // Issue #1332 S7: the control Worker's channel port reaches the worklet; no reply.
+        events.push(["control-port"]);
+        return;
+      }
       if (received.tag === "miso.service.v1") {
         // The service tick is no request: it carries no request ID and gets no reply.
         events.push(["service"]);
@@ -286,7 +291,9 @@ async function testMainRealm() {
       this.disconnectCount = 0;
       FakeNode.latest = this;
       queueMicrotask(async () => {
-        let data = {
+        let data = options.processorOptions.instanceMode === "worker" ? {
+          tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128", instanceMode: "worker",
+        } : {
           tag: "miso.ready.v1", requestId: 0, result: 0,
           backend: "simd128",
           resources: resourceReport(1, this.constructionQuantumFrames),
@@ -1985,6 +1992,162 @@ async function testMainRealm() {
       timer.callback();
       assert.equal(events.length, afterDispose, "a tick after dispose posts nothing");
     }
+
+    // Issue #1332 S7 (D1, D2, D6, D7): `worker` mode on an isolated page. A fake control Worker
+    // answers the boot with the token and the reservation, then serves the routed requests.
+    {
+      const originalWorker = globalThis.Worker;
+      const originalIsolated = Object.getOwnPropertyDescriptor(globalThis, "crossOriginIsolated");
+      const originalMemory = WebAssembly.Memory;
+      const workers = [];
+      let workerBehaviour = "ready";
+      class FakeWorker {
+        onmessage = null;
+        onerror = null;
+        onmessageerror = null;
+        terminated = false;
+        constructor(url) {
+          this.url = String(url);
+          this.posts = [];
+          workers.push(this);
+        }
+        postMessage(message) {
+          this.posts.push(message);
+          const reply = (data) => queueMicrotask(() => this.onmessage?.({ data }));
+          if (message.tag === "miso.worker-boot.v1") {
+            if (workerBehaviour === "error") {
+              queueMicrotask(() => this.onerror?.({ preventDefault() {} }));
+            } else if (workerBehaviour === "messageerror") {
+              queueMicrotask(() => this.onmessageerror?.({}));
+            } else if (workerBehaviour === "refuse") {
+              reply({ tag: "miso.error.v1", requestId: 0, result: 3 });
+            } else {
+              reply({
+                tag: "miso.worker-ready.v1", requestId: 0, result: 0, handle: 5,
+                token: (5n << 32n) | 1n, reservation: 70000, metersAttached: true,
+                backend: "simd128", resources: resourceReport(1, 64), memoryBytes: 1310720,
+                sourceRingFrames: 40 * 64,
+              });
+            }
+          } else if (message.tag === "miso.control.v1") {
+            reply({
+              tag: "miso.control.v1", requestId: message.requestId, result: 0,
+              response: new Uint8Array([1]), revision: 3n,
+            });
+          } else if (message.tag === "miso.dispose.v1") {
+            reply({ tag: "miso.ack.v1", requestId: message.requestId, result: 0 });
+          }
+        }
+        terminate() {
+          this.terminated = true;
+        }
+      }
+      const memories = [];
+      try {
+        globalThis.Worker = FakeWorker;
+        Object.defineProperty(globalThis, "crossOriginIsolated", { value: true, configurable: true });
+        WebAssembly.Memory = class {
+          constructor(descriptor) {
+            this.descriptor = { ...descriptor };
+            this.buffer = new SharedArrayBuffer(65536);
+            memories.push(this);
+          }
+        };
+        const nodesBefore = FakeNode.count;
+        const host = await createMisoAudioWorkletHost({
+          context,
+          document: new Uint8Array([1, 2]),
+          options: limits,
+          simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "https://example.test/assets/miso-engine-v1-audio-worklet.js",
+        });
+        assert.equal(host.instanceMode, "worker", "an isolated page runs worker mode");
+        assert.equal(FakeNode.count, nodesBefore + 1);
+        const worker = workers.at(-1);
+        assert.equal(worker.url, "https://example.test/assets/miso-engine-v1-control-worker.js",
+          "the Worker is resolved beside the worklet module");
+        assert.deepEqual(memories.at(-1).descriptor, {
+          initial: abiLayout.memory.initialPages, maximum: abiLayout.memory.maximumPages, shared: true,
+        }, "the main realm creates the one shared memory at the layout's pages");
+        const boot = worker.posts[0];
+        assert.equal(boot.tag, "miso.worker-boot.v1");
+        assert.equal(boot.memory, memories.at(-1), "the Worker boots on that memory");
+        assert.deepEqual([...boot.document], [1, 2]);
+        const node = FakeNode.latest;
+        const processorOptions = node.options.processorOptions;
+        assert.deepEqual(Object.keys(processorOptions).sort(),
+          ["instanceMode", "memory", "metersAttached", "module", "reservation", "token"]);
+        assert.equal(processorOptions.instanceMode, "worker");
+        assert.equal(processorOptions.memory, memories.at(-1), "the worklet joins the same memory");
+        assert.equal(processorOptions.token, (5n << 32n) | 1n, "the worklet gets the Worker's token");
+        assert.equal(processorOptions.reservation, 70000, "and the reservation record");
+        assert.equal(host.memoryBytes, 1310720, "the ready fields are the Worker's");
+        assert.equal(intervals.filter((timer) => !timer.cleared).length, 0,
+          "worker mode holds no main-realm service tick");
+        // D7: a control frame goes to the Worker; a meter lease to the worklet.
+        const reply = await host.control(new Uint8Array([7]));
+        assert.equal(reply.revision, 3n);
+        assert.equal(worker.posts.at(-1).tag, "miso.control.v1", "control goes to the Worker");
+        const eventsBefore = events.length;
+        await host.meters({ enabled: true, onFrame: () => undefined });
+        assert.deepEqual(events.slice(eventsBefore).map((event) => event[1]), ["miso.meters.v1"],
+          "the meter lease goes to the worklet");
+        await host.dispose();
+        assert.equal(worker.posts.at(-1).tag, "miso.dispose.v1", "dispose goes to the Worker");
+        assert.equal(worker.terminated, true, "the Worker ends after its dispose reply");
+
+        // D6: a Worker `error` or `messageerror` before the boot reply rejects with `worker-failed`,
+        // no worklet starts and nothing falls back to `single` mode. A refused boot rejects with
+        // the engine's result code.
+        for (const behaviour of ["error", "messageerror"]) {
+          workerBehaviour = behaviour;
+          const before = FakeNode.count;
+          await assert.rejects(createMisoAudioWorkletHost({
+            context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+            workletModuleUrl: "https://example.test/w.js",
+          }), (error) => {
+            assert.deepEqual(error, {
+              tag: "miso.worker-failed.v1", requestId: 0, result: 255, reason: "worker-failed",
+            });
+            return true;
+          }, `a Worker ${behaviour} is worker-failed`);
+          assert.equal(FakeNode.count, before, `no worklet starts after a Worker ${behaviour}`);
+          assert.equal(workers.at(-1).terminated, true);
+        }
+        workerBehaviour = "refuse";
+        await assert.rejects(createMisoAudioWorkletHost({
+          context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "https://example.test/w.js",
+        }), (error) => error.tag === "miso.error.v1" && error.result === 3);
+        workerBehaviour = "ready";
+        // An explicit `single` runs one instance on an isolated page; `worker` on a page without
+        // isolation is refused.
+        const workersBefore = workers.length;
+        const single = await createMisoAudioWorkletHost({
+          context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "processor.js", instanceMode: "single",
+        });
+        assert.equal(single.instanceMode, "single");
+        assert.equal(workers.length, workersBefore, "an explicit single mode starts no Worker");
+        await single.dispose();
+        Object.defineProperty(globalThis, "crossOriginIsolated", { value: false, configurable: true });
+        await errorResult(createMisoAudioWorkletHost({
+          context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "processor.js", instanceMode: "worker",
+        }), 1);
+        const plain = await createMisoAudioWorkletHost({
+          context, document: new Uint8Array(), options: limits, simd128ModuleUrl: "simd.wasm",
+          workletModuleUrl: "processor.js",
+        });
+        assert.equal(plain.instanceMode, "single", "a page without isolation runs single mode");
+        await plain.dispose();
+      } finally {
+        globalThis.Worker = originalWorker;
+        WebAssembly.Memory = originalMemory;
+        if (originalIsolated === undefined) delete globalThis.crossOriginIsolated;
+        else Object.defineProperty(globalThis, "crossOriginIsolated", originalIsolated);
+      }
+    }
     await runPlainDataMatrix();
   } finally {
     globalThis.fetch = original.fetch;
@@ -2052,6 +2215,10 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
     seekAt: [], seekAtResult: 0, seekReport: [], seekReportResult: 0, seekReportBytes: 64,
     seekReportGrowsMemory: false,
     seekReportWords: [5n, 1024n, 48000n, 7n, 9n],
+    // Issue #1332 S7: the handoff calls in order, the adoption's result, the stack pointer global
+    // and the successor header the control half names.
+    initTls: [], reserve: [], bind: [], release: [], adopt: [], adoptResult: 0,
+    stackPointer: { value: 1048576 }, successorHeader: 0,
   };
   const watermarkPointer = 66000;
   const seekReportPointer = 66200;
@@ -2333,6 +2500,36 @@ function createFakeExports(quantum, backend = 1, submixIds = ["drums-bus"]) {
       calls.dispose += 1;
       return 0;
     },
+    // Issue #1332 S7: the exports of the two-instance handoff. The globals are objects with a
+    // `value`, as the module's exported globals are.
+    __stack_pointer: calls.stackPointer,
+    __tls_size: { value: 64 },
+    __tls_align: { value: 16 },
+    __wasm_init_tls: (base) => {
+      calls.initTls.push([base, calls.stackPointer.value]);
+    },
+    miso_engine_web_v1_instance_reserve: (size, align) => {
+      calls.reserve.push([size, align]);
+      const record = new DataView(memory.buffer, 70000, 16);
+      record.setUint32(0, 16, true);
+      record.setUint32(4, 71000, true);
+      record.setUint32(8, 180000, true);
+      record.setUint32(12, 170000, true);
+      return 70000;
+    },
+    miso_engine_web_v1_instance_bind: (record) => {
+      calls.bind.push(record);
+      return 0;
+    },
+    miso_engine_web_v1_host_release: (handle) => {
+      calls.release.push(handle);
+      return (BigInt(handle) << 32n) | 1n;
+    },
+    miso_engine_web_v1_host_adopt: (token) => {
+      calls.adopt.push(token);
+      return calls.adoptResult;
+    },
+    miso_engine_web_v1_successor_header_ptr: () => calls.successorHeader,
   };
   return {
     exports, calls, trackIds, submixIds, sourceRows, meterFrameFloats, meterHeader, growMemory,
@@ -2777,9 +2974,16 @@ async function testProcessor() {
     maximum: abiLayout.memory.maximumPages,
     shared: true,
   };
+  // Issue #1332 S7: in `worker` mode the worklet joins the memory its options carry.
+  let workerModeMemory = null;
   WebAssembly.Instance = class {
     constructor(_module, imports) {
       instanceCount += 1;
+      if (workerModeMemory !== null) {
+        assert.equal(imports.env.memory, workerModeMemory, "worker mode joins the Worker's memory");
+        this.exports = recordingExports(nextFake.exports, latestPort);
+        return;
+      }
       importsChecked += 1;
       try {
         assert.deepEqual(Object.keys(imports), ["env"]);
@@ -3938,6 +4142,110 @@ async function testProcessor() {
       }
     }
 
+    // Issue #1332 S7 (D3): the worklet's `worker` mode. The control Worker booted the session on
+    // the memory it passes; the worklet sets its own stack and TLS from the reservation, binds it,
+    // adopts the token and only renders. Red if the worklet boots, skips the bind or the adoption.
+    const workerToken = (1n << 32n) | 5n;
+    const constructWorkerMode = (fake, overrides = {}) => {
+      nextFake = fake;
+      workerModeMemory = fake.memory;
+      const record = new DataView(fake.memory.buffer, 70000, 16);
+      record.setUint32(0, 16, true);
+      record.setUint32(4, 71000, true);
+      record.setUint32(8, 180000, true);
+      const processor = new registered({
+        processorOptions: {
+          instanceMode: "worker", module: {}, memory: fake.memory, token: workerToken,
+          reservation: 70000, metersAttached: true, ...overrides,
+        },
+      });
+      const controlPosts = [];
+      const controlPort = { onmessage: null, postMessage: (message) => controlPosts.push(message) };
+      processor.port.onmessage({ data: { tag: "miso.control-port.v1", port: controlPort } });
+      const fromWorker = (data) => controlPort.onmessage({ data });
+      return { processor, controlPosts, fromWorker };
+    };
+    const renderStatus = (processor, fromWorker, controlPosts) => {
+      fromWorker({ tag: "miso.render-status.v1", requestId: 9 });
+      const reply = controlPosts.at(-1);
+      assert.equal(reply.tag, "miso.render-status.v1");
+      return reply.status;
+    };
+    {
+      const fake = createFakeExports(64);
+      const { processor } = constructWorkerMode(fake);
+      assert.deepEqual(processor.port.posts[0].message, {
+        tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128", instanceMode: "worker",
+      }, "worker mode is ready without a boot");
+      assert.deepEqual(fake.calls.boot, [], "worker mode never calls boot on the worklet");
+      assert.deepEqual(fake.calls.initTls, [[71000, 180000]],
+        "the TLS block is initialised once, after the stack pointer is the reservation's top");
+      assert.deepEqual(fake.calls.bind, [70000], "the worklet binds the reservation");
+      assert.deepEqual(fake.calls.adopt, [workerToken], "the worklet adopts the Worker's token");
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      assert.equal(processor.process([], [[left, right]]), true);
+      assert.equal(left[0], 0.25, "the adopted half renders");
+      // A refused adoption fails construction; nothing is booted or disposed.
+      const refused = createFakeExports(64);
+      refused.calls.adoptResult = 3;
+      const { processor: failed } = constructWorkerMode(refused);
+      assert.deepEqual(failed.port.posts[0].message, { tag: "miso.error.v1", requestId: 0, result: 3 });
+      assert.equal(refused.calls.dispose, 0, "worker mode never disposes in the worklet");
+      // Requests the control Worker owns are refused on the worklet's port.
+      const { processor: strict } = constructWorkerMode(createFakeExports(64));
+      strict.port.onmessage({ data: { tag: "miso.status.v1", requestId: 1 } });
+      assert.equal(strict.port.posts.at(-1).message.tag, "miso.error.v1");
+    }
+    // R-S7-meters (3): `process()` switches to the pre-cut set only when the header render reports,
+    // its frame pointer and its strip counts all match; otherwise it skips the frame and counts it.
+    {
+      const fake = createFakeExports(64);
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
+      assert.equal(processor.port.posts.at(-1).message.result, 0);
+      const successor = fake.successorHeader.byteOffset;
+      fromWorker({ tag: "miso.meter-view.v1", header: successor, memoryBytes: fake.memory.buffer.byteLength });
+      fake.calls.adoptOnNextRender = true;
+      fake.calls.meterWindows = 1;
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      assert.equal(processor.process([], [[left, right]]), true);
+      const frame = processor.port.posts.at(-1).message;
+      assert.equal(frame.tag, "miso.meter.v1", "a full match switches and posts");
+      assert.equal(frame.trackCount, 3, "the frame is the successor plan's");
+      assert.equal(renderStatus(processor, fromWorker, controlPosts).meterFramesSkipped, 0);
+    }
+    for (const variant of ["counts differ", "no pre-cut set"]) {
+      const fake = createFakeExports(64);
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      processor.port.onmessage({ data: { tag: "miso.meters.v1", requestId: 1, enabled: true } });
+      const successor = fake.successorHeader.byteOffset;
+      if (variant === "counts differ") {
+        fromWorker({ tag: "miso.meter-view.v1", header: successor, memoryBytes: fake.memory.buffer.byteLength });
+        // The header was reused for a plan of another strip count after the handler cut its set.
+        fake.successorHeader.setUint32(8, 7, true);
+      }
+      fake.calls.adoptOnNextRender = true;
+      fake.calls.meterWindows = 1;
+      const posts = processor.port.posts.length;
+      assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), true);
+      assert.equal(processor.port.posts.length, posts, `${variant}: the frame is skipped`);
+      assert.equal(renderStatus(processor, fromWorker, controlPosts).meterFramesSkipped, 1,
+        `${variant}: the skip is counted`);
+    }
+    // D4.1: a release stops rendering and hands the token to the Worker; nothing is disposed here.
+    {
+      const fake = createFakeExports(64);
+      const { processor, controlPosts, fromWorker } = constructWorkerMode(fake);
+      fromWorker({ tag: "miso.release.v1" });
+      assert.deepEqual(controlPosts.at(-1), { tag: "miso.released.v1", token: (1n << 32n) | 1n });
+      assert.deepEqual(fake.calls.release, [1]);
+      assert.equal(fake.calls.dispose, 0);
+      assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
+    }
+    workerModeMemory = null;
+
     await testQualificationBoot({
       registered,
       makeFake: createFakeExports,
@@ -3973,6 +4281,122 @@ async function testProcessor() {
   }
 }
 
+// Issue #1332 S7 (D2, D4, D7, R-S7-meters 2): the control Worker file, driven on the fake module.
+// Red if it boots without reserving the worklet's stack and TLS or releasing the render half, if
+// a control call does not name a changed successor header or memory length to the worklet, or if
+// its dispose frees without taking the half back first.
+async function testControlWorker() {
+  const workerUrl = process.env.MISO_ENGINE_WEB_CONTROL_WORKER_TEST_MODULE === undefined
+    ? new URL("hosts/host-web/web/miso-engine-v1-control-worker.js", root)
+    : pathToFileURL(process.env.MISO_ENGINE_WEB_CONTROL_WORKER_TEST_MODULE);
+  const original = {
+    Instance: WebAssembly.Instance,
+    postMessage: globalThis.postMessage,
+    onmessage: globalThis.onmessage,
+    setInterval: globalThis.setInterval,
+    clearInterval: globalThis.clearInterval,
+  };
+  const module = await WebAssembly.compile(unsupportedPreparationModuleBytes);
+  let fake;
+  let posts;
+  const intervals = [];
+  try {
+    globalThis.setInterval = (callback, delay) => {
+      intervals.push({ callback, delay, cleared: false });
+      return intervals.length;
+    };
+    globalThis.clearInterval = (id) => { intervals[id - 1].cleared = true; };
+    globalThis.postMessage = (message, transfer = []) => {
+      posts.push(structuredClone(message, { transfer }));
+    };
+    WebAssembly.Instance = class {
+      constructor(_module, imports) {
+        assert.equal(imports.env.memory, fake.memory, "the Worker instantiates on the page's memory");
+        this.exports = fake.exports;
+      }
+    };
+    const workerSource = await readFile(workerUrl, "utf8");
+    const boot = async (overrides = {}) => {
+      fake = createFakeExports(64);
+      posts = [];
+      // The file is a classic script with no module syntax (Node would load it once, as CommonJS),
+      // so each case evaluates it afresh: one Worker per boot, as in the browser.
+      new Function(workerSource)();
+      const workletPosts = [];
+      const workletPort = { onmessage: null, postMessage: (message) => workletPosts.push(message) };
+      const send = (data) => globalThis.onmessage({ data });
+      send({
+        tag: "miso.worker-boot.v1", module, memory: fake.memory, document: new Uint8Array([1, 2, 3]),
+        options: limits, sampleRateHz: 48000, quantumFrames: 64, workletPort, ...overrides,
+      });
+      return { workletPosts, send, fromWorklet: (data) => workletPort.onmessage({ data }) };
+    };
+
+    {
+      const { workletPosts, send, fromWorklet } = await boot();
+      const ready = posts[0];
+      assert.equal(ready.tag, "miso.worker-ready.v1", JSON.stringify(ready, (_, v) => (typeof v === "bigint" ? `${v}` : v)));
+      assert.deepEqual(
+        [ready.handle, ready.token, ready.reservation, ready.metersAttached, ready.sourceRingFrames],
+        [1, (1n << 32n) | 1n, 70000, true, 40 * 64],
+        "the boot reply carries the handle, the token, the reservation and the ready fields",
+      );
+      assert.deepEqual(fake.calls.boot, [[3]], "the Worker boots the document");
+      assert.deepEqual(fake.calls.reserve, [[64, 16]], "it reserves the worklet's stack and TLS");
+      assert.deepEqual(fake.calls.release, [1], "it releases the render half");
+      assert.equal(intervals.length, 1, "the Worker holds the service tick");
+      // A control call runs here and is followed by the service step and the meter view.
+      fake.calls.successorHeader = 41300;
+      send({ tag: "miso.control.v1", requestId: 1, frame: new Uint8Array([5, 6]) });
+      const reply = posts.find((message) => message.tag === "miso.control.v1");
+      assert.deepEqual([reply.requestId, reply.result, [...reply.response], reply.revision],
+        [1, 0, [9, 8, 7], 4n]);
+      assert.deepEqual([...fake.calls.control[0].frame], [5, 6]);
+      assert.deepEqual(fake.calls.service, [1], "the service step follows the request");
+      assert.deepEqual(workletPosts, [{ tag: "miso.meter-view.v1", header: 41300, memoryBytes: 196608 }],
+        "the committed successor's header is named to the worklet");
+      intervals[0].callback();
+      assert.equal(workletPosts.length, 1, "an unchanged view is not posted again");
+      fake.calls.controlGrowsMemory = true;
+      send({ tag: "miso.control.v1", requestId: 2, frame: new Uint8Array([5]) });
+      assert.deepEqual(workletPosts.at(-1), { tag: "miso.meter-view.v1", header: 41300, memoryBytes: 393216 },
+        "a growth is named to the worklet");
+      // A status read takes the worklet's render fields and the Worker's control fields.
+      send({ tag: "miso.status.v1", requestId: 3 });
+      assert.deepEqual(workletPosts.at(-1), { tag: "miso.render-status.v1", requestId: 3 });
+      fromWorklet({
+        tag: "miso.render-status.v1", requestId: 3,
+        status: { state: 2, lastResult: 0, renderedQuanta: 9n, blockingRebuilds: 7, meterFramesSkipped: 0 },
+      });
+      const status = posts.at(-1);
+      assert.deepEqual([status.tag, status.requestId, status.renderedQuanta, status.blockingRebuilds, status.memoryBytes],
+        ["miso.status.v1", 3, 9n, 0, 393216], "render fields from the worklet, control fields from the Worker");
+      // D4: dispose takes the half back from the worklet, then frees it here.
+      send({ tag: "miso.dispose.v1", requestId: 4 });
+      assert.deepEqual(workletPosts.at(-1), { tag: "miso.release.v1" });
+      assert.equal(fake.calls.dispose, 0, "nothing is freed before the half is back");
+      fromWorklet({ tag: "miso.released.v1", token: (1n << 32n) | 2n });
+      assert.deepEqual(fake.calls.adopt, [(1n << 32n) | 2n], "the Worker adopts the half back");
+      assert.equal(fake.calls.dispose, 1, "and disposes the host");
+      assert.deepEqual(posts.at(-1), { tag: "miso.ack.v1", requestId: 4, result: 0 });
+      assert.equal(intervals[0].cleared, true, "dispose stops the tick");
+    }
+    // D6: a refused boot answers with the engine's result code and releases nothing.
+    {
+      await boot({ sampleRateHz: 44100 });
+      assert.deepEqual(posts, [{ tag: "miso.error.v1", requestId: 0, result: 9 }]);
+      assert.deepEqual(fake.calls.release, []);
+    }
+  } finally {
+    WebAssembly.Instance = original.Instance;
+    globalThis.postMessage = original.postMessage;
+    globalThis.onmessage = original.onmessage;
+    globalThis.setInterval = original.setInterval;
+    globalThis.clearInterval = original.clearInterval;
+  }
+}
+
 await testMainRealm();
 await testProcessor();
+await testControlWorker();
 console.log("web AudioWorklet hermetic tests passed");
